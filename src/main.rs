@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if directive.name == "http3" {
                 if let Some(children) = directive.children {
                     gateway = parse_gateway(children)?;
+                    println!("{:#?}", gateway);
                 }
             }
         }
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 for (version, servers) in record {
                     match version {
-                        HttpVersion::HTTP1 => {}
+                        HttpVersion::HTTP1 => http::serve(addr, servers).await,
                         HttpVersion::HTTP2 => {
                             // TODO
                         }

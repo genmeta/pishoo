@@ -38,7 +38,7 @@ misc-conf = "0.1"
 futures = "0.3"
 
 regex = "1"
-axum = "0.8.1"
+axum = { version = "0.8.1", features = ["macros"] }
 
 
 [patch.crates-io]

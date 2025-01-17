@@ -1,21 +1,21 @@
 use std::{net::SocketAddr, str::FromStr};
 
 use misc_conf::{ast::Directive, nginx::Nginx};
-use regex::Regex;
 use tracing::info;
 
 use crate::error::{CustomError, Result};
 
 use super::{
     location::parse_location,
-    pattern::Pattern,
     router::Router,
-    rule::Rule,
     version::{HttpVersion, parse_http_version},
 };
 
 #[derive(Debug, Clone)]
 pub struct Server {
+    pub addr: SocketAddr,
+    pub server_name: String,
+    pub version: HttpVersion,
     pub ssl_config: Option<SslConfig>,
     pub router: Router,
 }
@@ -26,83 +26,7 @@ pub struct SslConfig {
     pub key_path: String,
 }
 
-impl Server {
-    pub fn route(&self, path: &str) -> Result<(String, Vec<Rule>)> {
-        let mut pattern = String::new();
-        let mut rules = Vec::new();
-
-        for location in self.router.locations() {
-            match &location.pattern {
-                Pattern::Exact(p) => {
-                    if path == p {
-                        pattern = p.to_string();
-                        rules = location.rules.clone();
-                        break;
-                    }
-                }
-                Pattern::Prefix(p) => {
-                    // TODO 提前检测正则是否合法
-
-                    let p = format!(r"^{}", p);
-                    let re = Regex::new(&p)?;
-                    if let Some(captures) = re.captures(path) {
-                        // 获取匹配的部分
-                        if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
-                        }
-                        rules = location.rules.clone();
-                        break;
-                    }
-                }
-                Pattern::Regex(p) => {
-                    // TODO 提前检测正则是否合法
-
-                    let re = Regex::new(p)?;
-                    if let Some(captures) = re.captures(path) {
-                        // 获取匹配的部分
-                        if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
-                        }
-                        rules = location.rules.clone();
-                        break;
-                    }
-                }
-                Pattern::CRegex(p) => {
-                    // TODO 提前检测正则是否合法
-
-                    let p = format!(r"(?i){}", p);
-                    let re = Regex::new(&p)?;
-                    if let Some(captures) = re.captures(path) {
-                        // 获取匹配的部分
-                        if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
-                        }
-                        rules = location.rules.clone();
-                        break;
-                    }
-                }
-                Pattern::NormalPrefix(p) => {
-                    if path.starts_with(p) {
-                        pattern = p.to_string();
-                        rules = location.rules.clone();
-                        break;
-                    }
-                }
-                Pattern::Common => {
-                    pattern = path.to_string();
-                    rules = location.rules.clone();
-                    break;
-                }
-            }
-        }
-
-        Ok((pattern, rules))
-    }
-}
-
-pub fn parse_server(
-    children: Vec<Directive<Nginx>>,
-) -> Result<(SocketAddr, String, HttpVersion, Server)> {
+pub fn parse_server(children: Vec<Directive<Nginx>>) -> Result<Server> {
     let mut addr = None;
     let mut server_name = None;
     let mut version = HttpVersion::HTTP1;
@@ -158,9 +82,13 @@ pub fn parse_server(
     let server_name = server_name
         .ok_or_else(|| CustomError::MissingConfig(format!("{addr}.{}", "server_name")))?;
 
-    let server = Server { ssl_config, router };
-
-    Ok((addr, server_name, version, server))
+    Ok(Server {
+        addr,
+        server_name,
+        version,
+        ssl_config,
+        router,
+    })
 }
 
 pub fn parse_listen(listen: Directive<Nginx>) -> Result<(Option<SocketAddr>, bool, HttpVersion)> {
@@ -193,11 +121,7 @@ fn parse_listen_args(args: &[String]) -> Result<(bool, HttpVersion)> {
                 ));
             }
         }
-        _ => {
-            return Err(CustomError::UnsupportedConfig(
-                "invalid listen args".to_string(),
-            ));
-        }
+        _ => {}
     }
 
     Ok((is_ssl, http_version))

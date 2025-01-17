@@ -20,16 +20,10 @@ impl Gateway {
         }
     }
 
-    pub fn insert(
-        &mut self,
-        addr: SocketAddr,
-        server_name: String,
-        version: HttpVersion,
-        server: Server,
-    ) {
-        let record = self.records.entry(addr).or_default();
-        let servers = record.entry(version).or_default();
-        servers.insert(server_name, server);
+    pub fn insert(&mut self, server: Server) {
+        let record = self.records.entry(server.addr).or_default();
+        let servers = record.entry(server.version).or_default();
+        servers.insert(server.server_name.clone(), server);
     }
 }
 
@@ -39,8 +33,8 @@ pub fn parse_gateway(children: Vec<Directive<Nginx>>) -> Result<Gateway> {
         match child.name.as_str() {
             "server" => {
                 if let Some(children) = child.children {
-                    let (addr, server_name, version, server) = parse_server(children)?;
-                    gateway.insert(addr, server_name, version, server);
+                    let server = parse_server(children)?;
+                    gateway.insert(server);
                 }
             }
             "allow" => {}

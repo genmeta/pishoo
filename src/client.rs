@@ -1,11 +1,21 @@
 use reqwest::Client;
-use rustls::RootCertStore;
+use rustls::{ClientConfig, RootCertStore};
 use std::{
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
 };
 use tracing::error;
 use webpki::types::{CertificateDer, pem::PemObject};
+
+pub(crate) fn client(local: IpAddr, dns: Option<(&str, SocketAddr)>) -> Client {
+    let mut builder = reqwest::Client::builder()
+        .local_address(local)
+        .use_preconfigured_tls(client_config());
+    if let Some((domain, addr)) = dns {
+        builder = builder.resolve(domain, addr)
+    };
+    builder.build().unwrap()
+}
 
 fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
@@ -31,19 +41,14 @@ fn root_cert() -> Arc<RootCertStore> {
         .clone()
 }
 
-pub(crate) fn launch_h3_client(addr: IpAddr) -> Client {
+fn client_config() -> ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls_config = rustls::ClientConfig::builder_with_provider(provider)
+    let mut client_config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_root_certificates(root_cert())
         .with_no_client_auth();
 
-    tls_config.alpn_protocols.push(b"h3".into());
-
-    reqwest::Client::builder()
-        .local_address(addr)
-        .use_preconfigured_tls(tls_config)
-        .build()
-        .unwrap()
+    client_config.alpn_protocols.push(b"h3".into());
+    client_config
 }

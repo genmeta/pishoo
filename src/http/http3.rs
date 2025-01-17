@@ -1,6 +1,10 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use crate::{error::Result, handle, parse::server::Server};
+use crate::{
+    error::Result,
+    handle,
+    parse::{router::Router, server::Server},
+};
 use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicConnection, QuicServer};
@@ -14,13 +18,11 @@ static ALPN: &[u8] = b"h3";
 #[derive(Clone)]
 pub struct H3Server {
     quic_server: Arc<QuicServer>,
-    servers: HashMap<String, Server>,
+    routers: HashMap<String, Router>,
 }
 
 impl H3Server {
     pub fn new(bind: SocketAddr, servers: HashMap<String, Server>) -> Result<Self> {
-        // TODO 传入的 servers 应该是全部筛选过 version =  HTTP3 的
-
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let mut builder = QuicServer::builder()
@@ -44,9 +46,14 @@ impl H3Server {
 
         let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(bind)?;
 
+        let routers = servers
+            .into_iter()
+            .map(|(name, server)| (name, server.router))
+            .collect();
+
         Ok(Self {
             quic_server,
-            servers,
+            routers,
         })
     }
 
@@ -57,7 +64,7 @@ impl H3Server {
     }
 
     pub async fn handle(&self, req: Request<()>, stream: RequestStream<BidiStream<Bytes>, Bytes>) {
-        if let Err(e) = handle::handler(&self.servers, req, stream).await {
+        if let Err(e) = handle::handler_http3(&self.routers, req, stream).await {
             match e {
                 // TODO 这里应该有个统一的错误处理
                 CustomError::Unknown => {
