@@ -1,0 +1,10 @@
+server {
+        listen [::]:5379;
+        server_name     test3.genmeta.net;
+
+        location / {
+            allow           all;
+            deny            all;
+            proxy_pass      http3://127.0.0.1:6000;
+        }
+}
