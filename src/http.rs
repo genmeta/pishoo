@@ -1,14 +1,11 @@
 use std::{collections::HashMap, net::SocketAddr};
 
-use axum::{
-    body::Body,
-    extract::{Request, State},
-    response::Response,
-    routing::any,
-};
 use http::StatusCode;
+use hyper::service::service_fn;
+use tokio::net::TcpListener;
 use tracing::error;
 
+use crate::error::Result;
 use crate::{
     handle::handle_http,
     parse::{router::Router, server::Server},
@@ -16,18 +13,33 @@ use crate::{
 
 pub mod http3;
 
-pub async fn serve(bind: SocketAddr, servers: HashMap<String, Server>) {
+pub async fn serve(addr: SocketAddr, servers: HashMap<String, Server>) -> Result<()> {
     let routers = servers
         .into_iter()
         .map(|(name, server)| (name, server.router))
         .collect();
 
-    let app = axum::Router::new()
-        .route("/", any(handle_request))
-        .with_state(routers);
+    let listener = TcpListener::bind(addr).await?;
+    println!("Listening on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(io, service_fn(proxy))
+                .with_upgrades()
+                .await
+            {
+                println!("Failed to serve connection: {:?}", err);
+            }
+        });
+    }
+
+    Ok(())
 }
 
 #[axum::debug_handler]

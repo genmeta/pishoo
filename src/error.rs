@@ -24,8 +24,6 @@ pub enum CustomError {
     HttpError(#[from] http::Error),
     #[error("regex error: `{0}`")]
     RegexError(#[from] regex::Error),
-    #[error("serde error: `{0}`")]
-    AxumError(#[from] axum::Error),
     #[error("http error: `{0}`")]
     ToStrError(#[from] http::header::ToStrError),
     #[error("uri parse error: `{0}`")]

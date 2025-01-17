@@ -30,6 +30,8 @@ pub(super) async fn handler(
         None
     };
 
+    // TODO 修改为 TCPStream 连接
+
     // 构建请求
     let mut req =
         crate::client::client("127.0.0.1".parse().unwrap(), dns).request(method.clone(), &uri);

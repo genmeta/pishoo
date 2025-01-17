@@ -2,6 +2,8 @@
 pub async fn init() {
     // 初始化日志
     tracing();
+    // 初始化TLS
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// 初始化日志

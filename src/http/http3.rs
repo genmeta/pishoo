@@ -23,8 +23,6 @@ pub struct H3Server {
 
 impl H3Server {
     pub fn new(bind: SocketAddr, servers: HashMap<String, Server>) -> Result<Self> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let mut builder = QuicServer::builder()
             .with_supported_versions([1u32])
             .without_cert_verifier()
