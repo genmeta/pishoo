@@ -3,13 +3,12 @@ use std::{net::SocketAddr, str::FromStr};
 use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
-use crate::error::{CustomError, Result};
-
 use super::{
     location::parse_location,
     router::Router,
     version::{HttpVersion, parse_http_version},
 };
+use crate::error::{CustomError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Server {

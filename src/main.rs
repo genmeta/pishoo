@@ -1,28 +1,26 @@
 #![feature(slice_pattern)]
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use futures::future::join_all;
-use http::http3::H3Server;
+use http::{HttpServer, http3::H3Server};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
 use parse::{
     gateway::{Gateway, parse_gateway},
+    server::Server,
     version::HttpVersion,
 };
 use tracing::info;
 
-mod client;
 mod common;
 mod config;
 mod error;
-mod handle;
 mod http;
 mod parse;
-mod proxy;
-mod tokiort;
+mod support;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 server 上
+    // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
     let mut handlers = Vec::new();
     for (addr, record) in gateway.records {
@@ -53,18 +51,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             async move {
                 info!("Launching server on {}, servers: {:#?}", addr, record);
 
-                for (version, servers) in record {
+                let grouped: HashMap<HttpVersion, Vec<Server>> =
+                    record
+                        .into_iter()
+                        .fold(HashMap::new(), |mut acc, (_key, server)| {
+                            acc.entry(server.version).or_default().push(server);
+                            acc
+                        });
+
+                for (version, servers) in grouped {
                     match version {
-                        HttpVersion::HTTP1 => http::serve(addr, servers).await,
-                        HttpVersion::HTTP2 => {
-                            // TODO
+                        HttpVersion::HTTP1 => {
+                            HttpServer::serve(addr, servers).await;
                         }
                         HttpVersion::HTTP3 => {
-                            let mut server = H3Server::new(addr, servers).unwrap();
-                            server.launch().await.unwrap();
+                            H3Server::serve(addr, servers).await?;
                         }
+                        _ => {}
                     }
                 }
+                Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())
             }
         });
         handlers.push(handle);

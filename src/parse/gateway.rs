@@ -1,16 +1,17 @@
-use misc_conf::{ast::Directive, nginx::Nginx};
 use std::{collections::HashMap, net::SocketAddr};
+
+use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
-use crate::error::{CustomError, Result};
-use crate::parse::server::Server;
-
 use super::server::parse_server;
-use super::version::HttpVersion;
+use crate::{
+    error::{CustomError, Result},
+    parse::server::Server,
+};
 
 #[derive(Debug)]
 pub struct Gateway {
-    pub records: HashMap<SocketAddr, HashMap<HttpVersion, HashMap<String, Server>>>,
+    pub records: HashMap<SocketAddr, HashMap<String, Server>>,
 }
 
 impl Gateway {
@@ -22,8 +23,7 @@ impl Gateway {
 
     pub fn insert(&mut self, server: Server) {
         let record = self.records.entry(server.addr).or_default();
-        let servers = record.entry(server.version).or_default();
-        servers.insert(server.server_name.clone(), server);
+        record.insert(server.server_name.clone(), server);
     }
 }
 

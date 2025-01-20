@@ -18,8 +18,6 @@ pub enum CustomError {
     IoError(#[from] std::io::Error),
     #[error("h3 error: `{0}`")]
     H3Error(#[from] h3::Error),
-    #[error("reqwest error: `{0}`")]
-    ReqwestError(#[from] reqwest::Error),
     #[error("http error: `{0}`")]
     HttpError(#[from] http::Error),
     #[error("regex error: `{0}`")]
@@ -28,6 +26,12 @@ pub enum CustomError {
     ToStrError(#[from] http::header::ToStrError),
     #[error("uri parse error: `{0}`")]
     InvalidUri(#[from] http::uri::InvalidUri),
+    #[error("hyper error: `{0}`")]
+    HyperError(#[from] hyper::Error),
+    #[error("missing host")]
+    MissingHost,
+    #[error("router not found: `{0}`")]
+    RouterNotFound(String),
     #[error("unknown data store error")]
     Unknown,
 }

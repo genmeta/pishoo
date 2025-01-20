@@ -1,11 +1,10 @@
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use crate::error::Result;
-
 use super::{
     pattern::{Pattern, parse_pattern},
     rule::{Rule, parse_rule},
 };
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct Location {

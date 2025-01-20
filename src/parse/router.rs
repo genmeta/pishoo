@@ -1,8 +1,7 @@
 use regex::Regex;
 
-use crate::error::Result;
-
 use super::{location::Location, pattern::Pattern, rule::Rule};
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct Router {
