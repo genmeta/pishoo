@@ -6,7 +6,7 @@ use std::{
 use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
-use super::server::{ForwardServer, ReverseServer, parse_server};
+use super::server::{ForwardConfig, ReverseConfig, parse_server};
 use crate::{
     error::{CustomError, Result},
     parse::server::Server,
@@ -19,8 +19,8 @@ pub struct Gateway {
 
 #[derive(Debug)]
 pub enum Record {
-    Forward(Vec<ForwardServer>),
-    Reverse(ReverseServer),
+    Forward(Vec<ForwardConfig>),
+    Reverse(ReverseConfig),
 }
 
 impl Gateway {
@@ -37,7 +37,7 @@ impl Gateway {
         }
     }
 
-    fn insert_forward(&mut self, forward: ForwardServer) -> Result<()> {
+    fn insert_forward(&mut self, forward: ForwardConfig) -> Result<()> {
         match self.records.entry(forward.addr) {
             Entry::Occupied(mut entry) => match entry.get_mut() {
                 Record::Forward(servers) => {
@@ -54,7 +54,7 @@ impl Gateway {
         Ok(())
     }
 
-    fn insert_reverse(&mut self, reverse: ReverseServer) -> Result<()> {
+    fn insert_reverse(&mut self, reverse: ReverseConfig) -> Result<()> {
         match self.records.entry(reverse.addr) {
             Entry::Occupied(_) => Err(CustomError::DuplicateServer(reverse.addr)),
             Entry::Vacant(entry) => {

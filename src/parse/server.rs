@@ -3,21 +3,24 @@ use std::{net::SocketAddr, str::FromStr};
 use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
-use super::{
-    location::parse_location,
-    router::Router,
-    version::{ServerType, parse_server_type},
-};
+use super::{location::parse_location, router::Router};
 use crate::error::{CustomError, Result};
 
 #[derive(Debug, Clone)]
 pub enum Server {
-    Forward(ForwardServer),
-    Reverse(ReverseServer),
+    Forward(ForwardConfig),
+    Reverse(ReverseConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum ServerType {
+    Forward,
+    #[default]
+    Reverse,
 }
 
 #[derive(Debug, Clone)]
-pub struct ForwardServer {
+pub struct ForwardConfig {
     pub addr: SocketAddr,
     pub server_name: Vec<String>,
     pub reuse_port: bool,
@@ -28,7 +31,7 @@ pub struct ForwardServer {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReverseServer {
+pub struct ReverseConfig {
     pub addr: SocketAddr,
     pub router: Router,
 }
@@ -151,7 +154,7 @@ fn build_server(config: ServerConfig) -> Result<Server> {
 
     match config.typ {
         ServerType::Reverse => {
-            let reverse_server = ReverseServer {
+            let reverse_server = ReverseConfig {
                 addr,
                 router: config.router,
             };
@@ -163,7 +166,7 @@ fn build_server(config: ServerConfig) -> Result<Server> {
                 key_path: config.key_path.unwrap(),
             };
 
-            let forward_server = ForwardServer {
+            let forward_server = ForwardConfig {
                 addr,
                 server_name: config.server_name,
                 reuse_port: config.reuse_port,
@@ -191,25 +194,11 @@ pub fn parse_listen(listen: Directive<Nginx>) -> Result<(Option<SocketAddr>, boo
 }
 
 fn parse_listen_args(args: &[String]) -> Result<(bool, ServerType)> {
-    let mut is_ssl = false;
-    let mut server_type = ServerType::default();
-
     match args {
-        [ssl, version] if ssl == "ssl" => {
-            is_ssl = true;
-            server_type = parse_server_type(version);
-        }
-        [version] => {
-            server_type = parse_server_type(version);
-            // HTTP3 必须与 SSL 一起使用
-            if server_type == ServerType::Forward {
-                return Err(CustomError::UnsupportedConfig(
-                    "http3 must be used with ssl".to_string(),
-                ));
-            }
-        }
-        _ => {}
+        [] => Ok((false, ServerType::Reverse)),
+        [ssl, version] if ssl == "ssl" && version == "http3" => Ok((true, ServerType::Forward)),
+        _ => Err(CustomError::UnsupportedConfig(
+            "unsupported listen args".to_string(),
+        )),
     }
-
-    Ok((is_ssl, server_type))
 }

@@ -2,14 +2,14 @@
 
 use std::path::PathBuf;
 
-use forward::H3Server;
+use forward::ForwardServer;
 use futures::future::join_all;
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
 use parse::gateway::{Gateway, Record, parse_gateway};
-use reverse::HttpServer;
+use reverse::ReverseServer;
 use tracing::info;
 
 mod common;
@@ -50,10 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Launching server on {}, servers: {:#?}", addr, record);
                 match record {
                     Record::Forward(servers) => {
-                        H3Server::serve(addr, servers).await?;
+                        ForwardServer::serve(addr, servers).await?;
                     }
                     Record::Reverse(server) => {
-                        HttpServer::serve(addr, server).await;
+                        ReverseServer::serve(addr, server).await;
                     }
                 }
 

@@ -9,17 +9,17 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
-    parse::{router::Router, server::ReverseServer},
+    parse::{router::Router, server::ReverseConfig},
     support::TokioIo,
 };
 
 #[derive(Clone)]
-pub struct HttpServer;
+pub struct ReverseServer;
 
 static ALPN: &[u8] = b"h3";
 
-impl HttpServer {
-    pub async fn serve(addr: SocketAddr, server: ReverseServer) {
+impl ReverseServer {
+    pub async fn serve(addr: SocketAddr, server: ReverseConfig) {
         let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
         info!("Listening on http://{}", addr);
 

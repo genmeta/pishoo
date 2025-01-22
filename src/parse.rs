@@ -4,4 +4,3 @@ pub mod pattern;
 pub mod router;
 pub mod rule;
 pub mod server;
-pub mod version;

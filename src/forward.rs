@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
-use http::{Request, Response, StatusCode, Uri, Version};
+use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
 use tokio::net::TcpStream;
@@ -11,11 +11,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::{
-        router::Router,
-        rule::{ForwardType, Rule},
-        server::ForwardServer,
-    },
+    parse::{router::Router, rule::Rule, server::ForwardConfig},
     reverse::full,
     support::TokioIo,
 };
@@ -23,10 +19,10 @@ use crate::{
 static ALPN: &[u8] = b"h3";
 
 #[derive(Clone)]
-pub struct H3Server;
+pub struct ForwardServer;
 
-impl H3Server {
-    pub async fn serve(bind: SocketAddr, servers: Vec<ForwardServer>) -> Result<()> {
+impl ForwardServer {
+    pub async fn serve(addr: SocketAddr, servers: Vec<ForwardConfig>) -> Result<()> {
         let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
 
         let mut builder = QuicServer::builder()
@@ -50,7 +46,7 @@ impl H3Server {
 
         let routers = Arc::new(routers);
 
-        let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(bind)?;
+        let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(addr)?;
 
         while let Ok((conn, _pathway)) = quic_server.accept().await {
             debug!(src_addr = %_pathway.local_addr(), dst_addr = %_pathway.dst_addr(), "accepted connection");
@@ -94,7 +90,7 @@ pub async fn handle(
 pub async fn handler_http3(
     routers: Arc<HashMap<String, Arc<Router>>>,
     req: Request<()>,
-    stream: RequestStream<BidiStream<Bytes>, Bytes>,
+    mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
     // 提取主机名
     let host = req
@@ -107,41 +103,46 @@ pub async fn handler_http3(
     let router = routers
         .get(host)
         .ok_or(CustomError::RouterNotFound(host.to_string()))?;
-    let (pattern, rule) = router.route(path)?;
+    let (pattern, rules) = router.route(path)?;
 
-    match rule {
-        Rule::Forward(forward) => match forward.typ {
-            ForwardType::Proxy(target) => {
-                handle_proxy(&routers, &target, req, stream).await?;
-            }
-            ForwardType::Static(root) => {
-                handle_static_file(&routers, root, pattern, req, stream).await?;
-            }
-        },
-        Rule::Reverse(_reverse) => {
-            // TODO: 不可能出现
+    let (parts, body) = if let Some(Rule::ProxyPass(target)) = rules.get("proxy_pass") {
+        let (parts, ()) = req.into_parts();
+
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.recv_data().await? {
+            body.extend_from_slice(chunk.chunk());
         }
+        // TODO 添加请求头
+
+        handle_proxy(rules, target, parts, body).await?
+    } else if let Some(Rule::Root(root)) = rules.get("root") {
+        let path = req.uri().path();
+        handle_static_file(rules, root, &pattern, path).await?
+    } else {
+        return Err(CustomError::MissingConfig("proxy_pass or root".to_string()));
+    };
+
+    // TODO 添加响应头
+
+    let response = Response::from_parts(parts, ());
+    stream.send_response(response).await?;
+    if !body.is_empty() {
+        stream.send_data(body).await?;
     }
+    stream.finish().await?;
 
     Ok(())
 }
 
 pub(super) async fn handle_proxy(
-    _router: &Arc<HashMap<String, Arc<Router>>>,
+    _rules: &HashMap<String, Rule>,
     target: &str,
-    req: http::Request<()>,
-    mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
-) -> Result<()> {
+    mut parts: http::request::Parts,
+    body: Vec<u8>,
+) -> Result<(Parts, Bytes)> {
     info!("proxy to {}", target);
 
-    // 读取请求体
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.recv_data().await? {
-        body.extend_from_slice(chunk.chunk());
-    }
-
     // 处理代理请求
-    let (mut parts, _body) = req.into_parts();
     parts.uri = Uri::from_str(&format!(
         "{}{}",
         target,
@@ -154,8 +155,6 @@ pub(super) async fn handle_proxy(
 
     let uri = parts.uri.clone();
     parts.version = Version::HTTP_11;
-
-    // TODO 修改请求头
 
     let req = Request::from_parts(parts, full(body));
     debug!("req: {:#?}", req);
@@ -184,44 +183,25 @@ pub(super) async fn handle_proxy(
     // 发送请求并接收响应
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
-    let bytes = body.collect().await?.to_bytes();
-
-    // TODO 修改响应头
-
-    // 发送响应
-    let response = Response::from_parts(parts, ());
-    stream.send_response(response).await?;
-
-    if !bytes.is_empty() {
-        stream.send_data(bytes).await?;
-    }
-    stream.finish().await?;
-
-    Ok(())
+    let body = body.collect().await?.to_bytes();
+    Ok((parts, body))
 }
 
 async fn handle_static_file(
-    _router: &Arc<HashMap<String, Arc<Router>>>,
-    root: String,
-    pattern: String,
-    req: Request<()>,
-    mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
-) -> Result<()> {
-    let path = req.uri().path().replacen(&pattern, &root, 1);
+    _rules: &HashMap<String, Rule>,
+    root: &str,
+    pattern: &str,
+    path: &str,
+) -> Result<(Parts, Bytes)> {
+    let path = path.replacen(pattern, root, 1);
     info!("Serving static file: {}", path);
 
-    match std::fs::read(&path) {
-        Ok(body) => {
-            let response = Response::builder().status(StatusCode::OK).body(())?;
-            stream.send_response(response).await?;
-            stream.send_data(body.into()).await?;
-        }
-        Err(_) => {
-            let response = Response::builder().status(StatusCode::NOT_FOUND).body(())?;
-            stream.send_response(response).await?;
-        }
-    }
+    let (status, body) = match std::fs::read(&path) {
+        Ok(body) => (StatusCode::OK, Bytes::from(body)),
+        Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),
+    };
 
-    stream.finish().await?;
-    Ok(())
+    let (parts, ()) = Response::builder().status(status).body(())?.into_parts();
+
+    Ok((parts, body))
 }

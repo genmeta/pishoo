@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use regex::Regex;
 
 use super::{location::Location, pattern::Pattern, rule::Rule};
@@ -20,12 +22,12 @@ impl Router {
         Ok(())
     }
 
-    pub fn route(&self, path: &str) -> Result<(String, Rule)> {
+    pub fn route(&self, path: &str) -> Result<(String, &HashMap<String, Rule>)> {
         for location in &self.locations {
             match &location.pattern {
                 Pattern::Exact(p) => {
                     if path == p {
-                        return Ok((p.to_string(), location.rule.clone()));
+                        return Ok((p.to_string(), &location.rules));
                     }
                 }
                 Pattern::Prefix(p) => {
@@ -36,7 +38,7 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            return Ok((matched.as_str().to_string(), location.rule.clone()));
+                            return Ok((matched.as_str().to_string(), &location.rules));
                         }
                     }
                 }
@@ -47,7 +49,7 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            return Ok((matched.as_str().to_string(), location.rule.clone()));
+                            return Ok((matched.as_str().to_string(), &location.rules));
                         }
                     }
                 }
@@ -59,17 +61,17 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            return Ok((matched.as_str().to_string(), location.rule.clone()));
+                            return Ok((matched.as_str().to_string(), &location.rules));
                         }
                     }
                 }
                 Pattern::NormalPrefix(p) => {
                     if path.starts_with(p) {
-                        return Ok((p.to_string(), location.rule.clone()));
+                        return Ok((p.to_string(), &location.rules));
                     }
                 }
                 Pattern::Common => {
-                    return Ok((path.to_string(), location.rule.clone()));
+                    return Ok((path.to_string(), &location.rules));
                 }
             }
         }
