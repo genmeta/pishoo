@@ -1,20 +1,14 @@
 use regex::Regex;
 
 use super::{location::Location, pattern::Pattern, rule::Rule};
-use crate::error::Result;
+use crate::error::{CustomError, Result};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Router {
     locations: Vec<Location>,
 }
 
 impl Router {
-    pub fn new() -> Router {
-        Router {
-            locations: Vec::new(),
-        }
-    }
-
     pub fn insert(&mut self, location: Location) -> Result<()> {
         let priority = location.pattern.priority();
         let pos = self
@@ -26,17 +20,12 @@ impl Router {
         Ok(())
     }
 
-    pub fn route(&self, path: &str) -> Result<(String, Vec<Rule>)> {
-        let mut pattern = String::new();
-        let mut rules = Vec::new();
-
+    pub fn route(&self, path: &str) -> Result<(String, Rule)> {
         for location in &self.locations {
             match &location.pattern {
                 Pattern::Exact(p) => {
                     if path == p {
-                        pattern = p.to_string();
-                        rules = location.rules.clone();
-                        break;
+                        return Ok((p.to_string(), location.rule.clone()));
                     }
                 }
                 Pattern::Prefix(p) => {
@@ -47,10 +36,8 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
+                            return Ok((matched.as_str().to_string(), location.rule.clone()));
                         }
-                        rules = location.rules.clone();
-                        break;
                     }
                 }
                 Pattern::Regex(p) => {
@@ -60,10 +47,8 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
+                            return Ok((matched.as_str().to_string(), location.rule.clone()));
                         }
-                        rules = location.rules.clone();
-                        break;
                     }
                 }
                 Pattern::CRegex(p) => {
@@ -74,27 +59,20 @@ impl Router {
                     if let Some(captures) = re.captures(path) {
                         // 获取匹配的部分
                         if let Some(matched) = captures.get(0) {
-                            pattern = matched.as_str().to_string();
+                            return Ok((matched.as_str().to_string(), location.rule.clone()));
                         }
-                        rules = location.rules.clone();
-                        break;
                     }
                 }
                 Pattern::NormalPrefix(p) => {
                     if path.starts_with(p) {
-                        pattern = p.to_string();
-                        rules = location.rules.clone();
-                        break;
+                        return Ok((p.to_string(), location.rule.clone()));
                     }
                 }
                 Pattern::Common => {
-                    pattern = path.to_string();
-                    rules = location.rules.clone();
-                    break;
+                    return Ok((path.to_string(), location.rule.clone()));
                 }
             }
         }
-
-        Ok((pattern, rules))
+        Err(CustomError::RouterNotFound("Not found".to_string()))
     }
 }

@@ -3,34 +3,66 @@ use tracing::info;
 
 use crate::error::{CustomError, Result};
 
-// TODO 除了 转发, 以及静态文件 之外, 还有什么其他的规则?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleType {
+    ProxyPass(String),
+    Root(String),
+    ProxySetHeader(String, String),
+    AddHeader(String, String),
+    Resolver(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardRule {
+    pub typ: ForwardType,
+    pub rules: Vec<RuleType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardType {
+    Proxy(String),
+    Static(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseRule {
+    pub rules: Vec<RuleType>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
-    Allow(Vec<String>),
-    Deny(Vec<String>),
-    Root(String),
-    ProxyPass(String),
+    Forward(ForwardRule),
+    Reverse(ReverseRule),
 }
 
-// TODO # 路径重写
-// TODO # 带状态码的返回配置
-// TODO # 响应内容替换
+// proxy_pass $scheme://$http_host$request_uri;
 
-pub fn parse_rule(rule: Directive<Nginx>) -> Result<Rule> {
+pub fn parse_rule(rule: Directive<Nginx>) -> Result<RuleType> {
     match rule.name.as_str() {
-        "allow" => Ok(Rule::Allow(rule.args)),
-        "deny" => Ok(Rule::Deny(rule.args)),
-        "root" => rule
-            .args
-            .first()
-            .map(|root| Rule::Root(root.clone()))
-            .ok_or_else(|| CustomError::MissingArg("root".to_string())),
+        "resolver" => Ok(RuleType::Resolver(
+            rule.args.into_iter().map(|s| s.to_string()).collect(),
+        )),
         "proxy_pass" => rule
             .args
             .first()
-            .map(|target| Rule::ProxyPass(target.clone()))
+            .map(|target| RuleType::ProxyPass(target.clone()))
             .ok_or_else(|| CustomError::MissingArg("proxy_pass".to_string())),
+        "root" => rule
+            .args
+            .first()
+            .map(|root| RuleType::Root(root.clone()))
+            .ok_or_else(|| CustomError::MissingArg("root".to_string())),
+        "proxy_set_header" => match &rule.args[..] {
+            [name, value] => Ok(RuleType::ProxySetHeader(
+                name.to_string(),
+                value.to_string(),
+            )),
+            _ => Err(CustomError::InvalidArgs("proxy_set_header".to_string())),
+        },
+        "add_header" => match &rule.args[..] {
+            [name, value] => Ok(RuleType::AddHeader(name.to_string(), value.to_string())),
+            _ => Err(CustomError::InvalidArgs("add_header".to_string())),
+        },
         _ => {
             info!("unknown directive: {}", rule.name);
             Err(CustomError::UnknownDirective(rule.name))

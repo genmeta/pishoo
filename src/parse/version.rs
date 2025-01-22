@@ -1,23 +1,13 @@
-use tracing::info;
-
-use crate::error::{CustomError, Result};
-
-#[derive(Debug, Clone, Copy, PartialEq, Default, Eq, Hash)]
-pub enum HttpVersion {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum ServerType {
+    Forward,
     #[default]
-    HTTP1,
-    HTTP2,
-    HTTP3,
+    Reverse,
 }
 
-pub fn parse_http_version(version: &str) -> Result<HttpVersion> {
+pub fn parse_server_type(version: &str) -> ServerType {
     match version {
-        "http1" => Ok(HttpVersion::HTTP1),
-        "http2" => Ok(HttpVersion::HTTP2),
-        "http3" => Ok(HttpVersion::HTTP3),
-        _ => {
-            info!("unknown directive: {}", version);
-            Err(CustomError::UnknownDirective(version.to_string()))
-        }
+        "http3" => ServerType::Forward,
+        _ => ServerType::Reverse,
     }
 }

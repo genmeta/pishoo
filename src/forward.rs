@@ -11,8 +11,12 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    http::full,
-    parse::{router::Router, rule::Rule, server::Server},
+    parse::{
+        router::Router,
+        rule::{ForwardType, Rule},
+        server::ForwardServer,
+    },
+    reverse::full,
     support::TokioIo,
 };
 
@@ -22,30 +26,28 @@ static ALPN: &[u8] = b"h3";
 pub struct H3Server;
 
 impl H3Server {
-    pub async fn serve(bind: SocketAddr, servers: Vec<Server>) -> Result<()> {
+    pub async fn serve(bind: SocketAddr, servers: Vec<ForwardServer>) -> Result<()> {
+        let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
+
         let mut builder = QuicServer::builder()
             .with_supported_versions([1u32])
             .without_cert_verifier()
             .enable_sni();
 
         for server in servers.iter() {
-            let ssl_config = if let Some(ssl_config) = &server.ssl_config {
-                ssl_config
-            } else {
-                return Err(CustomError::Unknown);
-            };
-
-            builder = builder.add_host_with_cert_files(
-                &server.server_name,
-                &ssl_config.cert_path,
-                &ssl_config.key_path,
-            )?;
+            let router = Arc::new(server.router.clone());
+            for server_name in server.server_name.iter() {
+                builder = builder.add_host_with_cert_files(
+                    server_name,
+                    &server.ssl_config.cert_path,
+                    &server.ssl_config.key_path,
+                )?;
+                routers.insert(server_name.clone(), router.clone());
+            }
         }
 
-        let routers: HashMap<String, Router> = servers
-            .into_iter()
-            .map(|s| (s.server_name, s.router))
-            .collect();
+        // TODO 支持范域名路由
+
         let routers = Arc::new(routers);
 
         let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(bind)?;
@@ -73,13 +75,12 @@ impl H3Server {
 }
 
 pub async fn handle(
-    routers: Arc<HashMap<String, Router>>,
+    routers: Arc<HashMap<String, Arc<Router>>>,
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) {
     if let Err(e) = handler_http3(routers, req, stream).await {
         match e {
-            // TODO 这里应该有个统一的错误处理
             CustomError::Unknown => {
                 debug!("unknown error");
             }
@@ -91,7 +92,7 @@ pub async fn handle(
 }
 
 pub async fn handler_http3(
-    routers: Arc<HashMap<String, Router>>,
+    routers: Arc<HashMap<String, Arc<Router>>>,
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
@@ -106,37 +107,27 @@ pub async fn handler_http3(
     let router = routers
         .get(host)
         .ok_or(CustomError::RouterNotFound(host.to_string()))?;
-    let (pattern, rules) = router.route(path)?;
+    let (pattern, rule) = router.route(path)?;
 
-    let mut proxy_target = None;
-    let mut static_root = None;
-
-    for rule in rules {
-        match rule {
-            Rule::Allow(_) => {
-                // TODO: 实现鉴权逻辑
+    match rule {
+        Rule::Forward(forward) => match forward.typ {
+            ForwardType::Proxy(target) => {
+                handle_proxy(&routers, &target, req, stream).await?;
             }
-            Rule::Deny(_) => {
-                // TODO: 实现鉴权逻辑
+            ForwardType::Static(root) => {
+                handle_static_file(&routers, root, pattern, req, stream).await?;
             }
-            Rule::ProxyPass(target) => proxy_target = Some(target),
-            Rule::Root(path) => static_root = Some(path),
+        },
+        Rule::Reverse(_reverse) => {
+            // TODO: 不可能出现
         }
-    }
-
-    // 根据规则处理请求
-    if let Some(target) = proxy_target {
-        handle_proxy(&target, req, stream).await?;
-    } else if let Some(root) = static_root {
-        handle_static_file(root, pattern, req, stream).await?;
-    } else {
-        return Err(CustomError::Unknown);
     }
 
     Ok(())
 }
 
 pub(super) async fn handle_proxy(
+    _router: &Arc<HashMap<String, Arc<Router>>>,
     target: &str,
     req: http::Request<()>,
     mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
@@ -195,6 +186,8 @@ pub(super) async fn handle_proxy(
     let (parts, body) = resp.into_parts();
     let bytes = body.collect().await?.to_bytes();
 
+    // TODO 修改响应头
+
     // 发送响应
     let response = Response::from_parts(parts, ());
     stream.send_response(response).await?;
@@ -208,6 +201,7 @@ pub(super) async fn handle_proxy(
 }
 
 async fn handle_static_file(
+    _router: &Arc<HashMap<String, Arc<Router>>>,
     root: String,
     pattern: String,
     req: Request<()>,

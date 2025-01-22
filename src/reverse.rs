@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::future;
@@ -9,11 +9,9 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
-    parse::{router::Router, server::Server},
+    parse::{router::Router, server::ReverseServer},
     support::TokioIo,
 };
-
-pub mod http3;
 
 #[derive(Clone)]
 pub struct HttpServer;
@@ -21,25 +19,21 @@ pub struct HttpServer;
 static ALPN: &[u8] = b"h3";
 
 impl HttpServer {
-    pub async fn serve(addr: SocketAddr, servers: Vec<Server>) {
+    pub async fn serve(addr: SocketAddr, server: ReverseServer) {
         let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
         info!("Listening on http://{}", addr);
 
-        let routers: HashMap<String, Router> = servers
-            .into_iter()
-            .map(|s| (s.server_name, s.router))
-            .collect();
-        let routers = Arc::new(routers);
+        let router = Arc::new(server.router);
 
         while let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             tokio::task::spawn({
-                let routers = routers.clone();
+                let router = router.clone();
                 async move {
                     if let Err(err) = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
-                        .serve_connection(io, service_fn(|req| handler(routers.clone(), req)))
+                        .serve_connection(io, service_fn(|req| handler(router.clone(), req)))
                         .with_upgrades()
                         .await
                     {
@@ -53,21 +47,24 @@ impl HttpServer {
 }
 
 async fn handler(
-    _routers: Arc<HashMap<String, Router>>,
+    _router: Arc<Router>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     debug!("req: {:?}", req);
 
-    // // TODO: DNS 解析
-    let addr = "127.0.0.1:6001";
+    // TODO 根据 router location 匹配请求
 
     let host = req
         .uri()
         .authority()
         .map(|auth| auth.host().to_string())
-        .expect("uri must have a host");
+        .expect("host not found in request uri");
 
     debug!("proxy uri host: {}", host);
+
+    // TODO DNS 解析
+    let addr = "127.0.0.1:6001";
+    info!("dns resolved: {} -> {}", req.uri(), addr);
 
     // 创建 QUIC 客户端
     let quic_client = create_quic_client().await;
@@ -161,12 +158,9 @@ async fn handle_request(
     while let Some(chunk) = stream.recv_data().await? {
         body.extend_from_slice(chunk.chunk());
     }
-    let bytes = Bytes::from(body);
-
-    debug!("response body: {:?}", bytes);
-
     parts.version = http::Version::HTTP_11;
-    Ok(Response::from_parts(parts, full(bytes)))
+
+    Ok(Response::from_parts(parts, full(Bytes::from(body))))
 }
 
 pub fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {

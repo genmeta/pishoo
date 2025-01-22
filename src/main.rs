@@ -1,25 +1,23 @@
 #![feature(slice_pattern)]
 
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
+use forward::H3Server;
 use futures::future::join_all;
-use http::{HttpServer, http3::H3Server};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
-use parse::{
-    gateway::{Gateway, parse_gateway},
-    server::Server,
-    version::HttpVersion,
-};
+use parse::gateway::{Gateway, Record, parse_gateway};
+use reverse::HttpServer;
 use tracing::info;
 
 mod common;
 mod config;
 mod error;
-mod http;
+mod forward;
 mod parse;
+mod reverse;
 mod support;
 
 #[tokio::main]
@@ -50,26 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", addr, record);
-
-                let grouped: HashMap<HttpVersion, Vec<Server>> =
-                    record
-                        .into_iter()
-                        .fold(HashMap::new(), |mut acc, (_key, server)| {
-                            acc.entry(server.version).or_default().push(server);
-                            acc
-                        });
-
-                for (version, servers) in grouped {
-                    match version {
-                        HttpVersion::HTTP1 => {
-                            HttpServer::serve(addr, servers).await;
-                        }
-                        HttpVersion::HTTP3 => {
-                            H3Server::serve(addr, servers).await?;
-                        }
-                        _ => {}
+                match record {
+                    Record::Forward(servers) => {
+                        H3Server::serve(addr, servers).await?;
+                    }
+                    Record::Reverse(server) => {
+                        HttpServer::serve(addr, server).await;
                     }
                 }
+
                 Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())
             }
         });

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CustomError>;
@@ -10,6 +12,8 @@ pub enum CustomError {
     AddrParseError(#[from] std::net::AddrParseError),
     #[error("missing config: `{0}`")]
     MissingConfig(String),
+    #[error("file not found: `{0}`")]
+    FileNotFound(String),
     #[error("missing arg: `{0}`")]
     MissingArg(String),
     #[error("unsupported config: `{0}`")]
@@ -32,6 +36,12 @@ pub enum CustomError {
     MissingHost,
     #[error("router not found: `{0}`")]
     RouterNotFound(String),
+    #[error("duplicate server addr: `{0:?}`")]
+    DuplicateServer(SocketAddr),
+    #[error("invalid arg: `{0}`")]
+    InvalidArgs(String),
+    #[error("invalid config: `{0}`")]
+    InvalidConfig(String),
     #[error("unknown data store error")]
     Unknown,
 }
