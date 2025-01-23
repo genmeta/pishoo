@@ -3,53 +3,84 @@ use tracing::info;
 
 use crate::error::{CustomError, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Rule {
+    Forward(ForwardRule),
+    Reverse(ReverseRule),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ForwardRule {
+    pub proxy_pass: Option<String>,
+    pub root: Option<String>,
+    pub proxy_set_header: Vec<(String, String)>,
+    pub add_header: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReverseRule {
+    pub proxy_pass: Option<String>,
+    pub resolver: Option<Vec<String>>,
+    pub proxy_set_header: Vec<(String, String)>,
+    pub add_header: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleType {
     ProxyPass(String),
     Root(String),
-    // TODO 应该是 Vec<(String, String)>
     ProxySetHeader(String, String),
-    // TODO 应该是 Vec<(String, String)>
     AddHeader(String, String),
     Resolver(Vec<String>),
 }
 
-// proxy_pass $scheme://$http_host$request_uri;
+fn take_single_arg(args: Vec<String>, name: &str) -> Result<String> {
+    match args.len() {
+        0 => Err(CustomError::MissingArg(name.to_string())),
+        1 => Ok(args.into_iter().next().unwrap()),
+        _ => Err(CustomError::InvalidArgs(name.to_string())),
+    }
+}
 
-pub fn parse_rule(rule: Directive<Nginx>) -> Result<Rule> {
-    let rule = match rule.name.as_str() {
+fn take_two_args(args: Vec<String>, name: &str) -> Result<(String, String)> {
+    match args.len() {
+        2 => {
+            let mut args = args.into_iter();
+            let first = args.next().unwrap();
+            let second = args.next().unwrap();
+            Ok((first, second))
+        }
+        _ => Err(CustomError::InvalidArgs(name.to_string())),
+    }
+}
+
+pub fn parse_rule(rule: Directive<Nginx>) -> Result<RuleType> {
+    Ok(match rule.name.as_str() {
         "resolver" => {
-            let rule = rule.args.into_iter().collect();
-            Rule::Resolver(rule)
+            if rule.args.is_empty() {
+                return Err(CustomError::MissingArg("resolver".into()));
+            }
+            RuleType::Resolver(rule.args)
         }
         "proxy_pass" => {
-            let target = rule
-                .args
-                .first()
-                .map(String::from)
-                .ok_or_else(|| CustomError::MissingArg("proxy_pass".to_string()))?;
-            Rule::ProxyPass(target)
+            let target = take_single_arg(rule.args, "proxy_pass")?;
+            RuleType::ProxyPass(target)
         }
         "root" => {
-            let root = rule
-                .args
-                .first()
-                .map(String::from)
-                .ok_or_else(|| CustomError::MissingArg("root".to_string()))?;
-            Rule::Root(root)
+            let root = take_single_arg(rule.args, "root")?;
+            RuleType::Root(root)
         }
-        "proxy_set_header" => match &rule.args[..] {
-            [name, value] => Rule::ProxySetHeader(name.to_string(), value.to_string()),
-            _ => return Err(CustomError::InvalidArgs("proxy_set_header".to_string())),
-        },
-        "add_header" => match &rule.args[..] {
-            [name, value] => Rule::AddHeader(name.to_string(), value.to_string()),
-            _ => return Err(CustomError::InvalidArgs("add_header".to_string())),
-        },
-        _ => {
-            info!("unknown directive: {}", rule.name);
-            return Err(CustomError::UnknownDirective(rule.name));
+        "proxy_set_header" => {
+            let (name, value) = take_two_args(rule.args, "proxy_set_header")?;
+            RuleType::ProxySetHeader(name, value)
         }
-    };
-    Ok(rule)
+        "add_header" => {
+            let (name, value) = take_two_args(rule.args, "add_header")?;
+            RuleType::AddHeader(name, value)
+        }
+        unknown => {
+            info!("unknown directive: {}", unknown);
+            return Err(CustomError::UnknownDirective(unknown.to_string()));
+        }
+    })
 }

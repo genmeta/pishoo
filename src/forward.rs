@@ -11,7 +11,11 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::{router::Router, rule::Rule, server::ForwardConfig},
+    parse::{
+        router::Router,
+        rule::{ForwardRule, Rule},
+        server::ForwardConfig,
+    },
     reverse::full,
     support::TokioIo,
 };
@@ -105,7 +109,15 @@ pub async fn handler_http3(
         .ok_or(CustomError::RouterNotFound(host.to_string()))?;
     let (pattern, rules) = router.route(path)?;
 
-    let (parts, body) = if let Some(Rule::ProxyPass(target)) = rules.get("proxy_pass") {
+    // TODO 解析 rules
+
+    let rule = if let Rule::Forward(rule) = rules {
+        rule
+    } else {
+        return Err(CustomError::RouterNotFound(path.to_string()));
+    };
+
+    let (parts, body) = if let Some(target) = &rule.proxy_pass {
         let (parts, ()) = req.into_parts();
 
         let mut body = Vec::new();
@@ -114,10 +126,10 @@ pub async fn handler_http3(
         }
         // TODO 添加请求头
 
-        handle_proxy(rules, target, parts, body).await?
-    } else if let Some(Rule::Root(root)) = rules.get("root") {
+        handle_proxy(rule, target, parts, body).await?
+    } else if let Some(root) = &rule.root {
         let path = req.uri().path();
-        handle_static_file(rules, root, &pattern, path).await?
+        handle_static_file(rule, root, &pattern, path).await?
     } else {
         return Err(CustomError::MissingConfig("proxy_pass or root".to_string()));
     };
@@ -135,7 +147,7 @@ pub async fn handler_http3(
 }
 
 pub(super) async fn handle_proxy(
-    _rules: &HashMap<String, Rule>,
+    _rule: &ForwardRule,
     target: &str,
     mut parts: http::request::Parts,
     body: Vec<u8>,
@@ -188,7 +200,7 @@ pub(super) async fn handle_proxy(
 }
 
 async fn handle_static_file(
-    _rules: &HashMap<String, Rule>,
+    _rule: &ForwardRule,
     root: &str,
     pattern: &str,
     path: &str,

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use regex::Regex;
 
 use super::{location::Location, pattern::Pattern, rule::Rule};
@@ -22,7 +20,7 @@ impl Router {
         Ok(())
     }
 
-    pub fn route(&self, path: &str) -> Result<(String, &HashMap<String, Rule>)> {
+    pub fn route(&self, path: &str) -> Result<(String, &Rule)> {
         for location in &self.locations {
             match &location.pattern {
                 Pattern::Exact(p) => {

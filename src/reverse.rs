@@ -3,13 +3,14 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::{Buf, Bytes};
 use futures::future;
 use h3_shim::{QuicClient, qbase::param::ClientParameters};
+use http::StatusCode;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
-    parse::{router::Router, server::ReverseConfig},
+    parse::{router::Router, rule::Rule, server::ReverseConfig},
     support::TokioIo,
 };
 
@@ -34,7 +35,7 @@ impl ReverseServer {
                         .preserve_header_case(true)
                         .title_case_headers(true)
                         .serve_connection(io, service_fn(|req| handler(router.clone(), req)))
-                        .with_upgrades()
+                        // .with_upgrades()
                         .await
                     {
                         println!("Failed to serve connection: {:?}", err);
@@ -45,50 +46,91 @@ impl ReverseServer {
         error!("server error address: {addr}");
     }
 }
-
 async fn handler(
-    _router: Arc<Router>,
+    router: Arc<Router>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    // 预构建 NOT_FOUND 响应
+    let not_found = Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(full(Bytes::new()))
+        .expect("static response should be valid");
+
     debug!("req: {:?}", req);
 
-    // TODO 根据 router location 匹配请求
+    // 路由匹配
+    let path = req.uri().path();
+    let (_pattern, rules) = match router.route(path) {
+        Ok((pattern, rules)) => (pattern, rules),
+        Err(_) => return Ok(not_found),
+    };
 
-    let host = req
-        .uri()
-        .authority()
-        .map(|auth| auth.host().to_string())
-        .expect("host not found in request uri");
+    let rule = if let Rule::Reverse(rule) = rules {
+        rule
+    } else {
+        return Ok(not_found);
+    };
 
-    debug!("proxy uri host: {}", host);
+    if let Some(_target) = &rule.proxy_pass {
+        debug!("path: {}", path);
 
-    // TODO DNS 解析
-    let addr = "127.0.0.1:6001";
-    info!("dns resolved: {} -> {}", req.uri(), addr);
+        // 分解请求
+        let (parts, body) = req.into_parts();
+        let body = body.collect().await?.to_bytes();
 
-    // 创建 QUIC 客户端
-    let quic_client = create_quic_client().await;
+        // 获取请求主机头
+        let host = match parts.uri.authority().map(|auth| auth.host()) {
+            Some(host) => host.to_owned(),
+            None => return Ok(not_found),
+        };
 
-    // 连接到远程服务器
-    let conn = quic_client
-        .connect(host, addr.parse().unwrap())
-        .expect("connect quic client");
+        debug!("proxy uri host: {}", host);
 
-    // 创建 H3 客户端
-    let (conn, send_request) = create_h3_client(conn).await;
+        // DNS 解析
+        let addr = resolve_dns(&host, &rule.resolver).await?;
+        info!("dns resolved: {} -> {}", host, addr);
 
-    // 并发执行驱动和请求
-    let (derive, request) = tokio::join!(
-        tokio::spawn(run_quic_driver(conn)),
-        tokio::spawn(handle_request(send_request, req))
-    );
+        // 创建并配置 QUIC 客户端
+        let quic_client = create_quic_client().await;
+        let addr = addr.parse().unwrap();
 
-    // 处理结果
-    derive.expect("run quic driver").expect("quic driver");
-    let response = request.expect("handle request").expect("response");
+        // 建立 QUIC 连接
+        let conn = quic_client
+            .connect(host.clone(), addr)
+            .expect("connect quic client");
 
-    debug!("response: {:#?}", response);
-    Ok(response)
+        // 创建 HTTP/3 客户端
+        let (conn, send_request) = create_h3_client(conn).await;
+
+        // 并发执行连接驱动和请求处理
+        let (driver, request) = tokio::join!(
+            tokio::spawn(run_quic_driver(conn)),
+            tokio::spawn(handle_request(send_request, parts, body))
+        );
+
+        // 处理异步任务结果
+        driver.expect("driver error").expect("driver result"); // 等待驱动任务完成
+        let response = request.expect("request error").expect("request result"); // 获取请求结果
+
+        debug!("response: {:#?}", response);
+        Ok(response)
+    } else {
+        Ok(not_found)
+    }
+}
+
+// DNS 解析示例函数（待实现）
+async fn resolve_dns(_host: &str, resolvers: &Option<Vec<String>>) -> Result<String, hyper::Error> {
+    // TODO: 实现实际的 DNS 解析逻辑
+    // 处理 DNS 解析器
+    if let Some(resolvers) = resolvers {
+        debug!("using custom resolvers: {:?}", resolvers);
+        // TODO 实现自定义 DNS 解析
+    } else {
+        debug!("using system DNS resolver");
+        // TODO 实现系统 DNS 解析
+    };
+    Ok("127.0.0.1:6001".to_string())
 }
 
 /// 创建 QUIC 客户端
@@ -136,17 +178,15 @@ async fn run_quic_driver(
 
 /// 处理 HTTP 请求
 async fn handle_request(
-    mut send_request: h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
-    req: Request<hyper::body::Incoming>,
+    mut sender: h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
+    parts: http::request::Parts,
+    body: Bytes,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Box<dyn std::error::Error + Send + Sync>> {
     info!("sending request ...");
 
-    let (parts, body) = req.into_parts();
-    let bytes = body.collect().await?.to_bytes();
-
     let req = http::Request::from_parts(parts, ());
-    let mut stream = send_request.send_request(req).await?;
-    stream.send_data(bytes).await?;
+    let mut stream = sender.send_request(req).await?;
+    stream.send_data(body).await?;
     stream.finish().await?;
 
     info!("receiving response ...");
