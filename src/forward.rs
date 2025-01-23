@@ -39,8 +39,8 @@ impl ForwardServer {
             for server_name in server.server_name.iter() {
                 builder = builder.add_host_with_cert_files(
                     server_name,
-                    &server.ssl_config.cert_path,
-                    &server.ssl_config.key_path,
+                    &server.ssl.cert,
+                    &server.ssl.key,
                 )?;
                 routers.insert(server_name.clone(), router.clone());
             }

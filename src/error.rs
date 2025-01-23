@@ -42,6 +42,8 @@ pub enum CustomError {
     InvalidArgs(String),
     #[error("invalid config: `{0}`")]
     InvalidConfig(String),
+    #[error("missing field: `{0}`")]
+    MissingField(String),
     #[error("unknown data store error")]
     Unknown,
 }

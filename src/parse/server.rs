@@ -1,22 +1,22 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::{net::SocketAddr, path::Path};
 
 use misc_conf::{ast::Directive, nginx::Nginx};
-use tracing::info;
 
 use super::{location::parse_location, router::Router};
 use crate::error::{CustomError, Result};
 
+// 统一配置类型
 #[derive(Debug, Clone)]
 pub enum Server {
     Forward(ForwardConfig),
     Reverse(ReverseConfig),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerType {
-    Forward,
     #[default]
     Reverse,
+    Forward,
 }
 
 #[derive(Debug, Clone)]
@@ -24,8 +24,13 @@ pub struct ForwardConfig {
     pub addr: SocketAddr,
     pub server_name: Vec<String>,
     pub reuse_port: bool,
-    pub ssl_config: SslConfig,
+    pub ssl: SslConfig,
     pub router: Router,
+    pub access: AccessControl,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AccessControl {
     pub allow: Vec<String>,
     pub deny: Vec<String>,
 }
@@ -36,169 +41,133 @@ pub struct ReverseConfig {
     pub router: Router,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SslConfig {
-    pub cert_path: String,
-    pub key_path: String,
+    pub cert: String,
+    pub key: String,
 }
 
-pub fn parse_server(children: Vec<Directive<Nginx>>) -> Result<Server> {
-    let mut config = ServerConfig::default();
-    let mut locations = Vec::new();
-
-    for child in children {
-        match child.name.as_str() {
-            "listen" => (config.addr, config.is_ssl, config.typ) = parse_listen(child)?,
-            "server_name" => {
-                config.server_name = child.args.into_iter().map(|s| s.to_string()).collect()
-            }
-            "ssl_certificate" => config.cert_path = child.args.first().map(|s| s.to_string()),
-            "ssl_certificate_key" => config.key_path = child.args.first().map(|s| s.to_string()),
-            "allow" => config.allow = child.args.into_iter().map(|s| s.to_string()).collect(),
-            "deny" => config.deny = child.args.into_iter().map(|s| s.to_string()).collect(),
-            "reuse_port" => config.reuse_port = child.args.first().is_some_and(|arg| arg == "on"),
-            "location" => locations.push(child),
-            _ => {
-                info!("unknown directive: {}", child.name);
-                return Err(CustomError::UnknownDirective(child.name));
-            }
-        }
-    }
-
-    for location in locations {
-        config
-            .router
-            .insert(parse_location(location, config.typ)?)?;
-    }
-
-    validate_config(&config)?;
-    build_server(config)
-}
-
+// 配置构建器模式
 #[derive(Default)]
-struct ServerConfig {
+struct ServerBuilder {
     typ: ServerType,
     addr: Option<SocketAddr>,
     server_name: Vec<String>,
-    is_ssl: bool,
-    cert_path: Option<String>,
-    key_path: Option<String>,
     reuse_port: bool,
+    ssl: Option<SslConfig>,
     router: Router,
-    allow: Vec<String>,
-    deny: Vec<String>,
+    access: AccessControl,
 }
 
-fn validate_config(config: &ServerConfig) -> Result<()> {
-    let addr = config
-        .addr
-        .as_ref()
-        .ok_or_else(|| CustomError::MissingConfig("addr".to_string()))?;
-
-    if config.typ == ServerType::Forward {
-        if config.server_name.is_empty() {
-            return Err(CustomError::MissingConfig(format!(
-                "{addr}.{}",
-                "server_name"
-            )));
+impl ServerBuilder {
+    fn parse_directive(&mut self, directive: Directive<Nginx>) -> Result<()> {
+        match directive.name.as_str() {
+            "listen" => self.parse_listen(directive)?,
+            "server_name" => self.server_name = directive.args.into_iter().collect(),
+            "ssl_certificate" => {
+                self.ssl.get_or_insert_with(SslConfig::default).cert =
+                    directive.args.first().cloned().unwrap_or_default()
+            }
+            "ssl_certificate_key" => {
+                self.ssl.get_or_insert_with(SslConfig::default).key =
+                    directive.args.first().cloned().unwrap_or_default()
+            }
+            "allow" => self.access.allow = directive.args,
+            "deny" => self.access.deny = directive.args,
+            "reuse_port" => {
+                self.reuse_port = directive
+                    .args
+                    .first()
+                    .map(|s| s == "on")
+                    .unwrap_or_default()
+            }
+            "location" => self.router.insert(parse_location(directive, self.typ)?)?,
+            _ => return Err(CustomError::UnknownDirective(directive.name)),
         }
-
-        if !config.is_ssl {
-            return Err(CustomError::MissingConfig(format!("{addr}.{}", "ssl")));
-        }
-
-        validate_ssl_config(addr, &config.cert_path, &config.key_path)?;
+        Ok(())
     }
 
-    Ok(())
-}
+    fn parse_listen(&mut self, directive: Directive<Nginx>) -> Result<()> {
+        let addr_str = directive
+            .args
+            .first()
+            .ok_or_else(|| CustomError::MissingField("listen address".to_string()))?;
 
-fn validate_ssl_config(
-    addr: &SocketAddr,
-    cert_path: &Option<String>,
-    key_path: &Option<String>,
-) -> Result<()> {
-    if let Some(cert_path) = cert_path {
-        if !std::path::Path::new(cert_path).exists() {
-            return Err(CustomError::FileNotFound(format!(
-                "{}.{}: {}",
-                addr, "ssl_certificate", cert_path
-            )));
+        self.addr = Some(
+            addr_str
+                .parse()
+                .map_err(|e| CustomError::InvalidArgs(format!("{}: {}", addr_str, e)))?,
+        );
+
+        let (is_ssl, typ) = match &directive.args[1..] {
+            [] => (false, ServerType::Reverse),
+            [ssl, version] if ssl == "ssl" && version == "http3" => (true, ServerType::Forward),
+            _ => return Err(CustomError::InvalidArgs("listen".to_string())),
+        };
+
+        if is_ssl && self.ssl.is_none() {
+            self.ssl = Some(SslConfig::default());
         }
-    } else {
-        return Err(CustomError::MissingConfig(format!(
-            "{}.{}",
-            addr, "ssl_certificate"
-        )));
+        self.typ = typ;
+
+        Ok(())
     }
 
-    if let Some(key_path) = key_path {
-        if !std::path::Path::new(key_path).exists() {
-            return Err(CustomError::FileNotFound(format!(
-                "{}.{}: {}",
-                addr, "ssl_certificate_key", key_path
-            )));
-        }
-    } else {
-        return Err(CustomError::MissingConfig(format!(
-            "{}.{}",
-            addr, "ssl_certificate_key"
-        )));
-    }
+    fn build(self) -> Result<Server> {
+        let addr = self
+            .addr
+            .ok_or(CustomError::MissingField("address".to_string()))?;
 
-    Ok(())
-}
-
-fn build_server(config: ServerConfig) -> Result<Server> {
-    let addr = config.addr.unwrap();
-
-    match config.typ {
-        ServerType::Reverse => {
-            let reverse_server = ReverseConfig {
+        match self.typ {
+            ServerType::Reverse => Ok(Server::Reverse(ReverseConfig {
                 addr,
-                router: config.router,
-            };
-            Ok(Server::Reverse(reverse_server))
-        }
-        ServerType::Forward => {
-            let ssl_config = SslConfig {
-                cert_path: config.cert_path.unwrap(),
-                key_path: config.key_path.unwrap(),
-            };
+                router: self.router,
+            })),
+            ServerType::Forward => {
+                let ssl = self
+                    .ssl
+                    .ok_or(CustomError::MissingField("SSL config".to_string()))?;
+                ssl.validate()?;
 
-            let forward_server = ForwardConfig {
-                addr,
-                server_name: config.server_name,
-                reuse_port: config.reuse_port,
-                ssl_config,
-                router: config.router,
-                allow: config.allow,
-                deny: config.deny,
-            };
+                if self.server_name.is_empty() {
+                    return Err(CustomError::MissingField("server_name".to_string()));
+                }
 
-            Ok(Server::Forward(forward_server))
+                Ok(Server::Forward(ForwardConfig {
+                    addr,
+                    server_name: self.server_name,
+                    reuse_port: self.reuse_port,
+                    ssl,
+                    router: self.router,
+                    access: self.access,
+                }))
+            }
         }
     }
 }
 
-pub fn parse_listen(listen: Directive<Nginx>) -> Result<(Option<SocketAddr>, bool, ServerType)> {
-    let addr = listen
-        .args
-        .first()
-        .ok_or_else(|| CustomError::MissingConfig(format!("{}.{}", listen.name, "addr")))
-        .and_then(|addr| SocketAddr::from_str(addr).map_err(CustomError::AddrParseError))?;
+impl SslConfig {
+    fn validate(&self) -> Result<()> {
+        let check_file = |path: &str| {
+            if !Path::new(path).exists() {
+                Err(CustomError::FileNotFound(path.into()))
+            } else {
+                Ok(())
+            }
+        };
 
-    let (is_ssl, server_type) = parse_listen_args(&listen.args[1..])?;
-
-    Ok((Some(addr), is_ssl, server_type))
+        check_file(&self.cert)?;
+        check_file(&self.key)?;
+        Ok(())
+    }
 }
 
-fn parse_listen_args(args: &[String]) -> Result<(bool, ServerType)> {
-    match args {
-        [] => Ok((false, ServerType::Reverse)),
-        [ssl, version] if ssl == "ssl" && version == "http3" => Ok((true, ServerType::Forward)),
-        _ => Err(CustomError::UnsupportedConfig(
-            "unsupported listen args".to_string(),
-        )),
+pub fn parse_server(directives: Vec<Directive<Nginx>>) -> Result<Server> {
+    let mut builder = ServerBuilder::default();
+
+    for directive in directives {
+        builder.parse_directive(directive)?;
     }
+
+    builder.build()
 }
