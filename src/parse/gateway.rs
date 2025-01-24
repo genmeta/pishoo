@@ -1,18 +1,11 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    net::SocketAddr,
-};
+use std::{collections::HashMap, net::SocketAddr};
 
 use misc_conf::{ast::Directive, nginx::Nginx};
-use tracing::info;
 
-use super::server::{ForwardConfig, ReverseConfig, parse_server};
-use crate::{
-    error::{CustomError, Result},
-    parse::server::Server,
-};
+use super::server::{ForwardConfig, ReverseConfig, Server, parse_server};
+use crate::error::{CustomError, Result};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Gateway {
     pub records: HashMap<SocketAddr, Record>,
 }
@@ -24,63 +17,62 @@ pub enum Record {
 }
 
 impl Gateway {
-    pub fn new() -> Gateway {
-        Gateway {
-            records: HashMap::new(),
-        }
-    }
-
     pub fn insert(&mut self, server: Server) -> Result<()> {
         match server {
-            Server::Forward(forward) => self.insert_forward(forward),
-            Server::Reverse(reverse) => self.insert_reverse(reverse),
+            Server::Forward(fwd) => self.update_record(fwd.addr, |existing| match existing {
+                Record::Forward(v) => {
+                    v.push(fwd);
+                    Ok(())
+                }
+                Record::Reverse(_) => Err(CustomError::DuplicateServer(fwd.addr)),
+            }),
+            Server::Reverse(rev) => self.insert_unique(rev.addr, Record::Reverse(rev)),
         }
     }
 
-    fn insert_forward(&mut self, forward: ForwardConfig) -> Result<()> {
-        match self.records.entry(forward.addr) {
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                Record::Forward(servers) => {
-                    servers.push(forward);
-                }
-                Record::Reverse(_) => {
-                    return Err(CustomError::DuplicateServer(forward.addr));
-                }
-            },
-            Entry::Vacant(entry) => {
-                entry.insert(Record::Forward(vec![forward]));
+    fn update_record<F>(&mut self, addr: SocketAddr, action: F) -> Result<()>
+    where
+        F: FnOnce(&mut Record) -> Result<()>,
+    {
+        match self.records.entry(addr) {
+            std::collections::hash_map::Entry::Occupied(mut e) => action(e.get_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let mut new = Record::Forward(Vec::new());
+                action(&mut new)?;
+                e.insert(new);
+                Ok(())
             }
         }
-        Ok(())
     }
 
-    fn insert_reverse(&mut self, reverse: ReverseConfig) -> Result<()> {
-        match self.records.entry(reverse.addr) {
-            Entry::Occupied(_) => Err(CustomError::DuplicateServer(reverse.addr)),
-            Entry::Vacant(entry) => {
-                entry.insert(Record::Reverse(reverse));
+    fn insert_unique(&mut self, addr: SocketAddr, record: Record) -> Result<()> {
+        match self.records.entry(addr) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(CustomError::DuplicateServer(addr))
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(record);
                 Ok(())
             }
         }
     }
 }
 
-pub fn parse_gateway(children: Vec<Directive<Nginx>>) -> Result<Gateway> {
-    let mut gateway = Gateway::new();
-    for child in children {
-        match child.name.as_str() {
+pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
+    let mut gateway = Gateway::default();
+
+    for directive in directives {
+        match directive.name.as_str() {
             "allow" => {}
             "deny" => {}
             "server" => {
-                if let Some(children) = child.children {
+                if let Some(children) = directive.children {
                     gateway.insert(parse_server(children)?)?;
                 }
             }
-            _ => {
-                info!("unknown directive: {}", child.name);
-                return Err(CustomError::UnknownDirective(child.name));
-            }
+            unknown => return Err(CustomError::UnknownDirective(unknown.into())),
         }
     }
+
     Ok(gateway)
 }

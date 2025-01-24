@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data = std::fs::read("config/test.conf")?;
 
-    let mut gateway = Gateway::new();
+    let mut gateway = Gateway::default();
 
     if let Ok(res) = Directive::<Nginx>::parse(&data) {
         for mut directive in res {
@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(children) = directive.children {
                     gateway = parse_gateway(children)?;
                     println!("{:#?}", gateway);
+                    break;
                 }
             }
         }
@@ -44,16 +45,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
     let mut handlers = Vec::new();
-    for (addr, record) in gateway.records {
+    for (bind, record) in gateway.records {
         let handle = tokio::spawn({
             async move {
-                info!("Launching server on {}, servers: {:#?}", addr, record);
+                info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
                     Record::Forward(servers) => {
-                        ForwardServer::serve(addr, servers).await?;
+                        ForwardServer::serve(bind, servers).await?;
                     }
                     Record::Reverse(server) => {
-                        ReverseServer::serve(addr, server).await;
+                        ReverseServer::serve(bind, server).await;
                     }
                 }
 

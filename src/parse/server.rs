@@ -47,7 +47,6 @@ pub struct SslConfig {
     pub key: String,
 }
 
-// 配置构建器模式
 #[derive(Default)]
 struct ServerBuilder {
     typ: ServerType,

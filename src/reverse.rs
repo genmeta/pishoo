@@ -2,14 +2,17 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::future;
-use h3_shim::{QuicClient, qbase::param::ClientParameters};
+use gm_quic::{ClientParameters, Pathway, QuicInterface, prelude::Endpoint};
+use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use qinterface::handy::Usc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
+    forward::detect_nat,
     parse::{router::Router, rule::Rule, server::ReverseConfig},
     support::TokioIo,
 };
@@ -87,17 +90,26 @@ async fn handler(
         debug!("proxy uri host: {}", host);
 
         // DNS 解析
-        let addr = resolve_dns(&host, &rule.resolver).await?;
-        info!("dns resolved: {} -> {}", host, addr);
+        let remote = resolve_dns(&host, &rule.resolver).await?;
+        info!("dns resolved: {} -> {:?}", host, remote);
+
+        // TODO bind 地址和 agent 地址 需要设置
+        let bind = "127.0.0.1:54321".parse().unwrap();
+        let agent = "111.19.145.47:20002".parse().unwrap();
+
+        let (outer, agent, nat_type, usc) = detect_nat(bind, agent).await.unwrap();
 
         // 创建并配置 QUIC 客户端
-        let quic_client = create_quic_client().await;
-        let addr = addr.parse().unwrap();
+        let quic_client = create_quic_client(bind, usc).await;
+
+        let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
 
         // 建立 QUIC 连接
         let conn = quic_client
-            .connect(host.clone(), addr)
+            .connect(host.clone(), pathway)
             .expect("connect quic client");
+
+        let _ = conn.add_address(bind, outer, 1, nat_type);
 
         // 创建 HTTP/3 客户端
         let (conn, send_request) = create_h3_client(conn).await;
@@ -120,7 +132,11 @@ async fn handler(
 }
 
 // DNS 解析示例函数（待实现）
-async fn resolve_dns(_host: &str, resolvers: &Option<Vec<String>>) -> Result<String, hyper::Error> {
+async fn resolve_dns(
+    _host: &str,
+    resolvers: &Option<Vec<String>>,
+) -> Result<Endpoint, hyper::Error> {
+    // TODO host decode base64 -> pathway
     // TODO: 实现实际的 DNS 解析逻辑
     // 处理 DNS 解析器
     if let Some(resolvers) = resolvers {
@@ -130,11 +146,16 @@ async fn resolve_dns(_host: &str, resolvers: &Option<Vec<String>>) -> Result<Str
         debug!("using system DNS resolver");
         // TODO 实现系统 DNS 解析
     };
-    Ok("127.0.0.1:6001".to_string())
+    let endpoint = Endpoint::Relay {
+        agent: SocketAddr::from(([127, 0, 0, 1], 6001)),
+        outer: SocketAddr::from(([127, 0, 0, 1], 6001)),
+    };
+
+    Ok(endpoint)
 }
 
 /// 创建 QUIC 客户端
-async fn create_quic_client() -> QuicClient {
+async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
     let mut params = ClientParameters::default();
     params.set_initial_max_streams_bidi(100u32.into());
     params.set_initial_max_streams_uni(100u32.into());
@@ -146,16 +167,24 @@ async fn create_quic_client() -> QuicClient {
     QuicClient::builder()
         .with_root_certificates(crate::common::root_cert())
         .without_cert()
+        .with_keylog(true)
         .with_alpns([ALPN.into()])
         .with_parameters(params)
-        .bind("127.0.0.1:0")
+        .with_iface_binder(move |addr| {
+            if addr == usc.local_addr()? {
+                Ok(usc.clone())
+            } else {
+                Ok(Arc::new(Usc::bind(addr)?))
+            }
+        })
+        .bind(bind)
         .expect("bind quic client")
         .build()
 }
 
 /// 创建 H3 客户端
 async fn create_h3_client(
-    conn: Arc<gm_quic::QuicConnection>,
+    conn: Arc<gm_quic::Connection>,
 ) -> (
     h3::client::Connection<h3_shim::QuicConnection, Bytes>,
     h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
