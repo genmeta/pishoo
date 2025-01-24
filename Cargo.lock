@@ -482,6 +482,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "gm-quic",
+ "h3",
+ "h3-shim",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-tls",
+ "misc-conf",
+ "pin-project-lite",
+ "qconnection",
+ "qinterface",
+ "qtraversal",
+ "regex",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -884,37 +915,6 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "nginx"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "gm-quic",
- "h3",
- "h3-shim",
- "http",
- "http-body-util",
- "hyper",
- "hyper-tls",
- "misc-conf",
- "pin-project-lite",
- "qconnection",
- "qinterface",
- "qtraversal",
- "regex",
- "rustls",
- "rustls-native-certs",
- "rustls-webpki",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
