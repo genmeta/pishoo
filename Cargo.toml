@@ -44,11 +44,11 @@ http-body-util = "0.1"
 pin-project-lite = "0.2"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "test/nat" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "test/nat" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "test/nat" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "test/nat" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "test/nat" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { path = "../mnet/nat" }
