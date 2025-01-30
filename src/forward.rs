@@ -1,15 +1,13 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
-use gm_quic::{Interfaces, prelude::handy::Usc};
+use gm_quic::{QuicInterface, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
 use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
-use qconnection::traversal::NatType;
-use qinterface::forward::ForwardInterface;
-use qtraversal::{detect_nat_type, detect_outer};
+use qtraversal::AddressRegisty;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
@@ -32,25 +30,36 @@ pub struct ForwardServer;
 impl ForwardServer {
     pub async fn serve(bind: SocketAddr, servers: Vec<ForwardConfig>) -> Result<()> {
         // TODO 需要设置 agent
-        let agent = "119.28.45.191:20002".parse().unwrap();
+        let agent = "1.12.74.4:20002".parse().unwrap();
         debug!("bind: {}, agent: {}", bind, agent);
-        let (outer, _agent, nat_type, usc) = detect_nat(bind, agent).await.unwrap();
+        let mut addr_registry = AddressRegisty::new(bind, agent)?;
+        let outer = addr_registry.outer_addr().await?;
+        let nat_type = addr_registry.nat_type().await?;
+        let iface = addr_registry.iface();
+        let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
+        debug!("outer: {}, nat_type: {:?}", outer, nat_type);
 
-        // 挂载到 quic, 创建连接是重用 iface
-        let _ = Interfaces::add(usc);
-        debug!("add usc");
-
+        let usc = Arc::new(Usc::new(iface)?);
         let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
 
         let mut builder = QuicServer::builder()
             .with_supported_versions([1u32])
             .without_cert_verifier()
+            .with_iface_binder(move |addr| {
+                if addr == usc.local_addr()? {
+                    Ok(usc.clone())
+                } else {
+                    Ok(Arc::new(Usc::bind(addr)?))
+                }
+            })
             .enable_sni();
 
         for server in servers.iter() {
             let router = Arc::new(server.router.clone());
             for server_name in server.server_name.iter() {
-                builder = builder.add_host(server_name, &server.ssl.cert, &server.ssl.key);
+                let cert = std::fs::read(&server.ssl.cert).expect("cannot read cert file");
+                let key = std::fs::read(&server.ssl.key).expect("cannot read key file");
+                builder = builder.add_host(server_name, &*cert, &*key);
                 routers.insert(server_name.clone(), router.clone());
             }
         }
@@ -82,25 +91,6 @@ impl ForwardServer {
 
         Ok(())
     }
-}
-// TODO server 端的 NAT 探测
-pub async fn detect_nat(
-    bind: SocketAddr,
-    _agent: SocketAddr,
-) -> Result<(SocketAddr, SocketAddr, NatType, Arc<Usc>)> {
-    let iface = ForwardInterface::bind(bind)?;
-    let mut nat_bind = bind;
-    nat_bind.set_port(0);
-    debug!("NAT bind: {}", nat_bind);
-    // debug!("NAT agent: {}", _agent);
-    let nat_type = detect_nat_type(nat_bind, "111.19.145.47:20002".parse().unwrap()).await?;
-    debug!("NAT type: {:?}", nat_type);
-    let (outter, agent) =
-        detect_outer(iface.clone(), "119.28.45.191:20002".parse().unwrap()).await?;
-    debug!("outter: {}, agent: {}", outter, agent);
-    let usc = Arc::new(Usc::new(iface)?);
-
-    Ok((outter, agent, nat_type, usc))
 }
 
 pub async fn handle(

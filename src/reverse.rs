@@ -1,18 +1,18 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
 use futures::future;
-use gm_quic::{ClientParameters, Pathway, QuicInterface, prelude::Endpoint};
+use gm_quic::{ClientParameters, Pathway, QuicInterface, Socket, prelude::Endpoint};
 use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use qinterface::handy::Usc;
+use qtraversal::AddressRegisty;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
-    forward::detect_nat,
     parse::{router::Router, rule::Rule, server::ReverseConfig},
     support::TokioIo,
 };
@@ -94,19 +94,23 @@ async fn handler(
         info!("dns resolved: {} -> {:?}", host, remote);
 
         // TODO bind 地址和 agent 地址 需要设置
-        let bind = "127.0.0.1:54321".parse().unwrap();
+        let bind: SocketAddr = "127.0.0.1:54321".parse().unwrap();
         let agent = "111.19.145.47:20002".parse().unwrap();
+        let mut addr_registry = AddressRegisty::new(bind, agent).unwrap();
+        let outer = addr_registry.outer_addr().await.unwrap();
+        let nat_type = addr_registry.nat_type().await.unwrap();
+        let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
 
-        let (outer, agent, nat_type, usc) = detect_nat(bind, agent).await.unwrap();
-
+        let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
         // 创建并配置 QUIC 客户端
         let quic_client = create_quic_client(bind, usc).await;
 
         let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
+        let socket = Socket::new(bind, agent);
 
         // 建立 QUIC 连接
         let conn = quic_client
-            .connect(host.clone(), pathway)
+            .connect(host.clone(), socket, pathway)
             .expect("connect quic client");
 
         let _ = conn.add_address(bind, outer, 1, nat_type);
