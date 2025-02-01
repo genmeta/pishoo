@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::{
+    AGENT,
     error::{CustomError, Result},
     parse::{
         router::Router,
@@ -28,15 +29,15 @@ static ALPN: &[u8] = b"h3";
 pub struct ForwardServer;
 
 impl ForwardServer {
-    pub async fn serve(bind: SocketAddr, servers: Vec<ForwardConfig>) -> Result<()> {
-        // TODO 需要设置 agent
-        let agent = "1.12.74.4:20002".parse().unwrap();
-        debug!("bind: {}, agent: {}", bind, agent);
-        let mut addr_registry = AddressRegisty::new(bind, agent)?;
+    pub async fn serve(
+        bind: SocketAddr,
+        servers: Vec<ForwardConfig>,
+        addr_registry: AddressRegisty,
+    ) -> Result<()> {
+        debug!("bind: {}, agent: {}", bind, AGENT);
         let outer = addr_registry.outer_addr().await?;
         let nat_type = addr_registry.nat_type().await?;
         let iface = addr_registry.iface();
-        let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
         debug!("outer: {}, nat_type: {:?}", outer, nat_type);
 
         let usc = Arc::new(Usc::new(iface)?);

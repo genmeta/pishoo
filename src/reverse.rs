@@ -23,7 +23,7 @@ pub struct ReverseServer;
 static ALPN: &[u8] = b"h3";
 
 impl ReverseServer {
-    pub async fn serve(addr: SocketAddr, server: ReverseConfig) {
+    pub async fn serve(addr: SocketAddr, server: ReverseConfig, addr_registry: AddressRegisty) {
         let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
         info!("Listening on http://{}", addr);
 
@@ -33,11 +33,15 @@ impl ReverseServer {
             let io = TokioIo::new(stream);
             tokio::task::spawn({
                 let router = router.clone();
+                let addr_registry = addr_registry.clone();
                 async move {
                     if let Err(err) = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
-                        .serve_connection(io, service_fn(|req| handler(router.clone(), req)))
+                        .serve_connection(
+                            io,
+                            service_fn(|req| handler(router.clone(), req, addr_registry.clone())),
+                        )
                         // .with_upgrades()
                         .await
                     {
@@ -49,9 +53,11 @@ impl ReverseServer {
         error!("server error address: {addr}");
     }
 }
+
 async fn handler(
     router: Arc<Router>,
     req: Request<hyper::body::Incoming>,
+    addr_registry: AddressRegisty,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     // 预构建 NOT_FOUND 响应
     let not_found = Response::builder()
@@ -62,8 +68,8 @@ async fn handler(
     debug!("req: {:?}", req);
 
     // 路由匹配
-    let path = req.uri().path();
-    let (_pattern, rules) = match router.route(path) {
+    let path = req.uri().path().to_owned();
+    let (_pattern, rules) = match router.route(path.as_str()) {
         Ok((pattern, rules)) => (pattern, rules),
         Err(_) => return Ok(not_found),
     };
@@ -81,36 +87,45 @@ async fn handler(
         let (parts, body) = req.into_parts();
         let body = body.collect().await?.to_bytes();
 
+        debug!(
+            "parts: {:#?} uri.authority: {:#?}",
+            parts,
+            parts.uri.authority()
+        );
+
         // 获取请求主机头
-        let host = match parts.uri.authority().map(|auth| auth.host()) {
-            Some(host) => host.to_owned(),
-            None => return Ok(not_found),
-        };
+        // let host = match parts.uri.authority().map(|auth| auth.host()) {
+        //     Some(host) => host.to_owned(),
+        //     None => return Ok(not_found),
+        // };
+        let host = path
+            .split('/') // 按 '/' 分割字符串
+            .nth(1)
+            .unwrap();
 
         debug!("proxy uri host: {}", host);
 
         // DNS 解析
-        let remote = resolve_dns(&host, &rule.resolver).await?;
+        let remote = resolve_dns(host, &rule.resolver).await?;
         info!("dns resolved: {} -> {:?}", host, remote);
 
-        // TODO bind 地址和 agent 地址 需要设置
-        let bind: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        let agent = "111.19.145.47:20002".parse().unwrap();
-        let mut addr_registry = AddressRegisty::new(bind, agent).unwrap();
         let outer = addr_registry.outer_addr().await.unwrap();
         let nat_type = addr_registry.nat_type().await.unwrap();
-        let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
+        // let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
 
         let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
         // 创建并配置 QUIC 客户端
+        let bind = addr_registry.bind_addr();
+
         let quic_client = create_quic_client(bind, usc).await;
 
+        let agent: SocketAddr = *remote;
         let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
         let socket = Socket::new(bind, agent);
 
         // 建立 QUIC 连接
         let conn = quic_client
-            .connect(host.clone(), socket, pathway)
+            .connect(host, socket, pathway)
             .expect("connect quic client");
 
         let _ = conn.add_address(bind, outer, 1, nat_type);
@@ -151,8 +166,8 @@ async fn resolve_dns(
         // TODO 实现系统 DNS 解析
     };
     let endpoint = Endpoint::Relay {
-        agent: SocketAddr::from(([127, 0, 0, 1], 6001)),
-        outer: SocketAddr::from(([127, 0, 0, 1], 6001)),
+        agent: SocketAddr::from(([1, 12, 74, 4], 20002)),
+        outer: SocketAddr::from(([183, 184, 233, 47], 11111)),
     };
 
     Ok(endpoint)
