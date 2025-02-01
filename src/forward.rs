@@ -43,6 +43,15 @@ impl ForwardServer {
         let usc = Arc::new(Usc::new(iface)?);
         let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
 
+        let mut params = gm_quic::ServerParameters::default();
+
+        params.set_initial_max_streams_bidi(100);
+        params.set_initial_max_streams_uni(100);
+        params.set_initial_max_data((1u32 << 20).into());
+        params.set_initial_max_stream_data_uni((1u32 << 20).into());
+        params.set_initial_max_stream_data_bidi_local((1u32 << 20).into());
+        params.set_initial_max_stream_data_bidi_remote((1u32 << 20).into());
+
         let mut builder = QuicServer::builder()
             .with_supported_versions([1u32])
             .without_cert_verifier()
@@ -53,6 +62,7 @@ impl ForwardServer {
                     Ok(Arc::new(Usc::bind(addr)?))
                 }
             })
+            .with_parameters(params)
             .enable_sni();
 
         for server in servers.iter() {

@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
+    AGENT,
     parse::{router::Router, rule::Rule, server::ReverseConfig},
     support::TokioIo,
 };
@@ -94,19 +95,15 @@ async fn handler(
         );
 
         // 获取请求主机头
-        // let host = match parts.uri.authority().map(|auth| auth.host()) {
-        //     Some(host) => host.to_owned(),
-        //     None => return Ok(not_found),
-        // };
-        let host = path
-            .split('/') // 按 '/' 分割字符串
-            .nth(1)
-            .unwrap();
+        let host = match parts.uri.authority().map(|auth| auth.host()) {
+            Some(host) => host.to_owned(),
+            None => return Ok(not_found),
+        };
 
         debug!("proxy uri host: {}", host);
 
         // DNS 解析
-        let remote = resolve_dns(host, &rule.resolver).await?;
+        let remote = resolve_dns(&host, &rule.resolver).await?;
         info!("dns resolved: {} -> {:?}", host, remote);
 
         let outer = addr_registry.outer_addr().await.unwrap();
@@ -119,7 +116,7 @@ async fn handler(
 
         let quic_client = create_quic_client(bind, usc).await;
 
-        let agent: SocketAddr = *remote;
+        let agent: SocketAddr = AGENT;
         let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
         let socket = Socket::new(bind, agent);
 
@@ -167,7 +164,7 @@ async fn resolve_dns(
     };
     let endpoint = Endpoint::Relay {
         agent: SocketAddr::from(([1, 12, 74, 4], 20002)),
-        outer: SocketAddr::from(([183, 184, 233, 47], 11111)),
+        outer: SocketAddr::from(([183, 184, 233, 47], 123)),
     };
 
     Ok(endpoint)
