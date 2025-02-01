@@ -1,7 +1,12 @@
 #![feature(slice_pattern)]
 
-use std::path::PathBuf;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 
+use dashmap::DashMap;
 use forward::ForwardServer;
 use futures::future::join_all;
 use misc_conf::{
@@ -9,8 +14,12 @@ use misc_conf::{
     nginx::Nginx,
 };
 use parse::gateway::{Gateway, Record, parse_gateway};
+use qtraversal::AddressRegisty;
 use reverse::ReverseServer;
 use tracing::info;
+
+static ADDRESSES: LazyLock<DashMap<SocketAddr, AddressRegisty>> = LazyLock::new(DashMap::new);
+static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4)), 20002);
 
 mod common;
 mod config;
@@ -35,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if directive.name == "http3" {
                 if let Some(children) = directive.children {
                     gateway = parse_gateway(children)?;
-                    println!("{:#?}", gateway);
+                    // println!("{:#?}", gateway);
                     break;
                 }
             }
@@ -46,15 +55,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut handlers = Vec::new();
     for (bind, record) in gateway.records {
+        let addr_registry = match ADDRESSES.entry(bind) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let registry = AddressRegisty::new(bind, AGENT)?;
+                entry.insert(registry.clone());
+                registry
+            }
+        };
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
                     Record::Forward(servers) => {
-                        ForwardServer::serve(bind, servers).await?;
+                        ForwardServer::serve(bind, servers, addr_registry).await?;
                     }
                     Record::Reverse(server) => {
-                        ReverseServer::serve(bind, server).await;
+                        ReverseServer::serve(bind, server, addr_registry).await;
                     }
                 }
 

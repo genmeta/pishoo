@@ -27,6 +27,7 @@ rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+dashmap = "4"
 
 gm-quic = "0.0.1"
 h3-shim = "0.0.1"
