@@ -24,6 +24,7 @@ static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4
 
 mod common;
 mod config;
+mod dns;
 mod error;
 mod forward;
 mod parse;
@@ -75,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 registry
             }
         };
+
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
