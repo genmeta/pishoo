@@ -1,9 +1,10 @@
 #![feature(slice_pattern)]
 
 use std::{
+    env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
 };
 
 use dashmap::DashMap;
@@ -16,7 +17,7 @@ use misc_conf::{
 use parse::gateway::{Gateway, Record, parse_gateway};
 use qtraversal::AddressRegisty;
 use reverse::ReverseServer;
-use tracing::info;
+use tracing::{error, info};
 
 static ADDRESSES: LazyLock<DashMap<SocketAddr, AddressRegisty>> = LazyLock::new(DashMap::new);
 static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4)), 20002);
@@ -33,14 +34,25 @@ mod support;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     common::init().await;
 
-    let data = std::fs::read("config/test.conf")?;
+    let config_path = if let Some(config_path) = env::args().nth(1) {
+        info!("config_path: {}", config_path);
+        config_path
+    } else {
+        error!("config_path not provided");
+        return Ok(());
+    };
+    let config_path = PathBuf::from(config_path);
+
+    let data = std::fs::read(&config_path)?;
 
     let mut gateway = Gateway::default();
 
     if let Ok(res) = Directive::<Nginx>::parse(&data) {
         for mut directive in res {
-            let path = PathBuf::from("config");
-            directive.resolve_include(&path)?;
+            let path = config_path
+                .parent()
+                .expect("config path should have a parent");
+            directive.resolve_include(path)?;
             if directive.name == "http3" {
                 if let Some(children) = directive.children {
                     gateway = parse_gateway(children)?;

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::future;
@@ -152,7 +152,6 @@ async fn resolve_dns(
     _host: &str,
     resolvers: &Option<Vec<String>>,
 ) -> Result<Endpoint, hyper::Error> {
-    // TODO host decode base64 -> pathway
     // TODO: 实现实际的 DNS 解析逻辑
     // 处理 DNS 解析器
     if let Some(resolvers) = resolvers {
@@ -164,7 +163,7 @@ async fn resolve_dns(
     };
     let endpoint = Endpoint::Relay {
         agent: SocketAddr::from(([1, 12, 74, 4], 20002)),
-        outer: SocketAddr::from(([183, 184, 233, 47], 123)),
+        outer: SocketAddr::from(([192, 168, 31, 86], 5378)),
     };
 
     Ok(endpoint)
