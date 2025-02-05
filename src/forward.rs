@@ -7,12 +7,14 @@ use h3_shim::{BidiStream, QuicServer};
 use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
+use qinterface::path::Endpoint;
 use qtraversal::AddressRegisty;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::{
     AGENT,
+    dns::{DNS_SERVER, spwan_report_host_task},
     error::{CustomError, Result},
     parse::{
         router::Router,
@@ -40,6 +42,10 @@ impl ForwardServer {
         let iface = addr_registry.iface();
         debug!("outer: {}, nat_type: {:?}", outer, nat_type);
 
+        let ep = Endpoint::Relay {
+            agent: AGENT,
+            outer,
+        };
         let usc = Arc::new(Usc::new(iface)?);
         let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
 
@@ -67,6 +73,7 @@ impl ForwardServer {
 
         for server in servers.iter() {
             let router = Arc::new(server.router.clone());
+            spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse().unwrap())?;
             for server_name in server.server_name.iter() {
                 let cert = std::fs::read(&server.ssl.cert).expect("cannot read cert file");
                 let key = std::fs::read(&server.ssl.key).expect("cannot read key file");

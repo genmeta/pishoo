@@ -14,6 +14,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     AGENT,
+    dns::{DNS_SERVER, resolve_dns},
     parse::{router::Router, rule::Rule, server::ReverseConfig},
     support::TokioIo,
 };
@@ -103,7 +104,9 @@ async fn handler(
         debug!("proxy uri host: {}", host);
 
         // DNS 解析
-        let remote = resolve_dns(&host, &rule.resolver).await?;
+        let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
+            .await
+            .unwrap();
         info!("dns resolved: {} -> {:?}", host, remote);
 
         let outer = addr_registry.outer_addr().await.unwrap();
@@ -145,28 +148,6 @@ async fn handler(
     } else {
         Ok(not_found)
     }
-}
-
-// DNS 解析示例函数（待实现）
-async fn resolve_dns(
-    _host: &str,
-    resolvers: &Option<Vec<String>>,
-) -> Result<Endpoint, hyper::Error> {
-    // TODO: 实现实际的 DNS 解析逻辑
-    // 处理 DNS 解析器
-    if let Some(resolvers) = resolvers {
-        debug!("using custom resolvers: {:?}", resolvers);
-        // TODO 实现自定义 DNS 解析
-    } else {
-        debug!("using system DNS resolver");
-        // TODO 实现系统 DNS 解析
-    };
-    let endpoint = Endpoint::Relay {
-        agent: SocketAddr::from(([1, 12, 74, 4], 20002)),
-        outer: SocketAddr::from(([192, 168, 31, 86], 5378)),
-    };
-
-    Ok(endpoint)
 }
 
 /// 创建 QUIC 客户端
