@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use gm_quic::{QuicInterface, prelude::handy::Usc};
