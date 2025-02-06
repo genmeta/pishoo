@@ -15,6 +15,14 @@ jobs:
         steps:
             - uses: actions/checkout@v3
 
+            - name: Checkout private repo
+              uses: actions/checkout@v3
+              with:
+                  repository: genmeta/mnet
+
+            - name: List mnet contents
+              run: ls -l mnet
+
             # 安装 Rust
             - name: Install toolchain
               uses: actions-rs/toolchain@v1

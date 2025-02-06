@@ -584,7 +584,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "dashmap 6.1.0",
@@ -619,7 +619,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "futures",
@@ -1213,7 +1213,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1231,7 +1231,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "log",
  "qbase",
@@ -1243,7 +1243,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "dashmap 6.1.0",
@@ -1264,7 +1264,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "dashmap 6.1.0",
@@ -1279,7 +1279,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1296,7 +1296,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1322,7 +1322,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1336,7 +1336,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
+source = "git+https://github.com/genmeta/gm-quic-traversal?branch=fix%2Fack#b8dd9d5a7997e390ea96db4324c46ca94ef9c4f8"
 dependencies = [
  "bytes",
  "futures",
