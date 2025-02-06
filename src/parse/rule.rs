@@ -5,12 +5,12 @@ use crate::error::{CustomError, Result};
 
 #[derive(Debug, Clone)]
 pub enum Rule {
-    Forward(ForwardRule),
     Reverse(ReverseRule),
+    Forward(ForwardRule),
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ForwardRule {
+pub struct ReverseRule {
     pub proxy_pass: Option<String>,
     pub root: Option<String>,
     pub proxy_set_header: Vec<(String, String)>,
@@ -18,7 +18,7 @@ pub struct ForwardRule {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ReverseRule {
+pub struct ForwardRule {
     pub proxy_pass: Option<String>,
     pub resolver: Option<Vec<String>>,
     pub proxy_set_header: Vec<(String, String)>,

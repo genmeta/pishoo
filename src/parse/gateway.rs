@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use super::server::{ForwardConfig, ReverseConfig, Server, parse_server};
+use super::server::{ReverseConfig, ForwardConfig, Server, parse_server};
 use crate::error::{CustomError, Result};
 
 #[derive(Debug, Default)]
@@ -12,21 +12,21 @@ pub struct Gateway {
 
 #[derive(Debug)]
 pub enum Record {
-    Forward(Vec<ForwardConfig>),
-    Reverse(ReverseConfig),
+    Reverse(Vec<ReverseConfig>),
+    Forward(ForwardConfig),
 }
 
 impl Gateway {
     pub fn insert(&mut self, server: Server) -> Result<()> {
         match server {
-            Server::Forward(fwd) => self.update_record(fwd.addr, |existing| match existing {
-                Record::Forward(v) => {
+            Server::Reverse(fwd) => self.update_record(fwd.addr, |existing| match existing {
+                Record::Reverse(v) => {
                     v.push(fwd);
                     Ok(())
                 }
-                Record::Reverse(_) => Err(CustomError::DuplicateServer(fwd.addr)),
+                Record::Forward(_) => Err(CustomError::DuplicateServer(fwd.addr)),
             }),
-            Server::Reverse(rev) => self.insert_unique(rev.addr, Record::Reverse(rev)),
+            Server::Forward(rev) => self.insert_unique(rev.addr, Record::Forward(rev)),
         }
     }
 
@@ -37,7 +37,7 @@ impl Gateway {
         match self.records.entry(addr) {
             std::collections::hash_map::Entry::Occupied(mut e) => action(e.get_mut()),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let mut new = Record::Forward(Vec::new());
+                let mut new = Record::Reverse(Vec::new());
                 action(&mut new)?;
                 e.insert(new);
                 Ok(())
