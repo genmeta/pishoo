@@ -20,10 +20,11 @@ jobs:
               with:
                   repository: genmeta/mnet
                   ref: main
+                  path: mnet
                   token: ${{ secrets.PAT }}
 
             - name: List mnet contents
-              run: ls -l
+              run: ls -l mnet
 
             # 安装 Rust
             - name: Install toolchain
