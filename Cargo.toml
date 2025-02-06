@@ -52,7 +52,7 @@ qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", bran
 qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
-nat = { path = "../mnet/nat" }
+nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
 
 
 [profile.release]

@@ -20,12 +20,6 @@ jobs:
               with:
                   ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
 
-            - name: Checkout private repo
-              run: |
-                  cd ..
-                  git clone git@github.com:genmeta/mnet.git
-                  ls -l mnet
-
             # 安装 Rust
             - name: Install toolchain
               uses: actions-rs/toolchain@v1

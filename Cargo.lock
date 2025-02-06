@@ -901,6 +901,7 @@ dependencies = [
 [[package]]
 name = "nat"
 version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/mnet.git#e9b5ef6e63d9d68b1fd63c77e599e716d82596ed"
 dependencies = [
  "async-trait",
  "bytes",
