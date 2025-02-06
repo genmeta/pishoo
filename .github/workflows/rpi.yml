@@ -1,0 +1,53 @@
+name: Rust Cross-Compile for Raspberry Pi 4B
+
+on:
+    workflow_dispatch:
+
+env:
+    CARGO_TERM_COLOR: always
+    # 为树莓派 4B 设置目标三元组（使用 ARMv8 64位架构）
+    TARGET: aarch64-unknown-linux-gnu
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v3
+
+            # 安装 Rust
+            - name: Install toolchain
+              uses: actions-rs/toolchain@v1
+              with:
+                  toolchain: nightly
+                  target: ${{ env.TARGET }}
+                  override: true
+
+            # 安装交叉编译工具链
+            - name: Install Cross-Compilation Toolchain
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y gcc-aarch64-linux-gnu
+
+            # 安装 cargo-cross 以简化交叉编译
+            - name: Install cargo-cross
+              run: |
+                  cargo install cross
+
+            # 使用 cross 编译项目
+            - name: Build for Raspberry Pi
+              run: |
+                  cross build --target ${{ env.TARGET }} --release
+
+            # 准备部署工件
+            - name: Prepare Artifact
+              run: |
+                  mkdir -p deploy
+                  cp target/${{ env.TARGET }}/release/gateway deploy/
+
+            # 上传编译产物
+            - name: Upload Artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: gateway
+                  path: deploy/gateway
