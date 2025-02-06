@@ -16,14 +16,9 @@ jobs:
             - uses: actions/checkout@v3
 
             # 设置 SSH 环境
-            - name: Setup SSH
-              run: |
-                  mkdir -p ~/.ssh
-                  echo "${{ secrets.SSH_PRIVATE_KEY_CARGO }}" > ~/.ssh/id_rsa
-                  chmod 600 ~/.ssh/id_rsa
-                  ssh-keyscan github.com >> ~/.ssh/known_hosts
-                  eval "$(ssh-agent -s)"
-                  ssh-add ~/.ssh/id_rsa
+            - uses: actions/ssh-agent@v0
+              with:
+                  ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
 
             - name: Checkout private repo
               run: |
