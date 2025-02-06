@@ -8,19 +8,19 @@ use crate::error::{CustomError, Result};
 // 统一配置类型
 #[derive(Debug, Clone)]
 pub enum Server {
-    Forward(ForwardConfig),
     Reverse(ReverseConfig),
+    Forward(ForwardConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerType {
     #[default]
-    Reverse,
     Forward,
+    Reverse,
 }
 
 #[derive(Debug, Clone)]
-pub struct ForwardConfig {
+pub struct ReverseConfig {
     pub addr: SocketAddr,
     pub server_name: Vec<String>,
     pub reuse_port: bool,
@@ -36,7 +36,7 @@ pub struct AccessControl {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReverseConfig {
+pub struct ForwardConfig {
     pub addr: SocketAddr,
     pub router: Router,
 }
@@ -99,8 +99,8 @@ impl ServerBuilder {
         );
 
         let (is_ssl, typ) = match &directive.args[1..] {
-            [] => (false, ServerType::Reverse),
-            [ssl, version] if ssl == "ssl" && version == "http3" => (true, ServerType::Forward),
+            [] => (false, ServerType::Forward),
+            [ssl, version] if ssl == "ssl" && version == "http3" => (true, ServerType::Reverse),
             _ => return Err(CustomError::InvalidArgs("listen".to_string())),
         };
 
@@ -118,11 +118,11 @@ impl ServerBuilder {
             .ok_or(CustomError::MissingField("address".to_string()))?;
 
         match self.typ {
-            ServerType::Reverse => Ok(Server::Reverse(ReverseConfig {
+            ServerType::Forward => Ok(Server::Forward(ForwardConfig {
                 addr,
                 router: self.router,
             })),
-            ServerType::Forward => {
+            ServerType::Reverse => {
                 let ssl = self
                     .ssl
                     .ok_or(CustomError::MissingField("SSL config".to_string()))?;
@@ -132,7 +132,7 @@ impl ServerBuilder {
                     return Err(CustomError::MissingField("server_name".to_string()));
                 }
 
-                Ok(Server::Forward(ForwardConfig {
+                Ok(Server::Reverse(ReverseConfig {
                     addr,
                     server_name: self.server_name,
                     reuse_port: self.reuse_port,

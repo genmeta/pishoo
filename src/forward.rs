@@ -1,256 +1,235 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
-use gm_quic::{QuicInterface, prelude::handy::Usc};
-use h3::server::RequestStream;
-use h3_shim::{BidiStream, QuicServer};
-use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
-use http_body_util::BodyExt;
-use hyper::client::conn::http1::Builder;
-use qinterface::path::Endpoint;
+use futures::future;
+use gm_quic::{ClientParameters, Pathway, QuicInterface, Socket, prelude::Endpoint};
+use h3_shim::QuicClient;
+use http::StatusCode;
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use qinterface::handy::Usc;
 use qtraversal::AddressRegisty;
-use tokio::net::TcpStream;
+use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
     AGENT,
-    dns::{DNS_SERVER, spwan_report_host_task},
-    error::{CustomError, Result},
-    parse::{
-        router::Router,
-        rule::{ForwardRule, Rule},
-        server::ForwardConfig,
-    },
-    reverse::full,
+    dns::{DNS_SERVER, resolve_dns},
+    parse::{router::Router, rule::Rule, server::ForwardConfig},
     support::TokioIo,
 };
-
-static ALPN: &[u8] = b"h3";
 
 #[derive(Clone)]
 pub struct ForwardServer;
 
+static ALPN: &[u8] = b"h3";
+
 impl ForwardServer {
-    pub async fn serve(
-        bind: SocketAddr,
-        servers: Vec<ForwardConfig>,
-        addr_registry: AddressRegisty,
-    ) -> Result<()> {
-        debug!("bind: {}, agent: {}", bind, AGENT);
-        let outer = addr_registry.outer_addr().await?;
-        let nat_type = addr_registry.nat_type().await?;
-        let iface = addr_registry.iface();
-        debug!("outer: {}, nat_type: {:?}", outer, nat_type);
+    pub async fn serve(addr: SocketAddr, server: ForwardConfig, addr_registry: AddressRegisty) {
+        let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
+        info!("Listening on http://{}", addr);
 
-        let ep = Endpoint::Relay {
-            agent: AGENT,
-            outer,
-        };
-        let usc = Arc::new(Usc::new(iface)?);
-        let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
+        let router = Arc::new(server.router);
 
-        let mut params = gm_quic::ServerParameters::default();
-
-        params.set_initial_max_streams_bidi(100);
-        params.set_initial_max_streams_uni(100);
-        params.set_initial_max_data((1u32 << 20).into());
-        params.set_initial_max_stream_data_uni((1u32 << 20).into());
-        params.set_initial_max_stream_data_bidi_local((1u32 << 20).into());
-        params.set_initial_max_stream_data_bidi_remote((1u32 << 20).into());
-
-        let mut builder = QuicServer::builder()
-            .with_supported_versions([1u32])
-            .without_cert_verifier()
-            .with_iface_binder(move |addr| {
-                if addr == usc.local_addr()? {
-                    Ok(usc.clone())
-                } else {
-                    Ok(Arc::new(Usc::bind(addr)?))
-                }
-            })
-            .with_parameters(params)
-            .enable_sni();
-
-        for server in servers.iter() {
-            let router = Arc::new(server.router.clone());
-            spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse().unwrap())?;
-            for server_name in server.server_name.iter() {
-                let cert = std::fs::read(&server.ssl.cert).expect("cannot read cert file");
-                let key = std::fs::read(&server.ssl.key).expect("cannot read key file");
-                builder = builder.add_host(server_name, &*cert, &*key);
-                routers.insert(server_name.clone(), router.clone());
-            }
-        }
-
-        // TODO 支持范域名路由
-
-        let routers = Arc::new(routers);
-
-        let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(bind)?;
-
-        while let Ok((conn, _pathway)) = quic_server.accept().await {
-            debug!(src_addr = ?_pathway.local(), dst_addr = ?_pathway.remote(), "accepted connection");
-            let _ = conn.add_address(bind, outer, 1, nat_type);
-
-            let mut conn =
-                h3::server::Connection::new(h3_shim::QuicConnection::new(conn).await).await?;
-            let routers = routers.clone();
-            tokio::spawn({
+        while let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            tokio::task::spawn({
+                let router = router.clone();
+                let addr_registry = addr_registry.clone();
                 async move {
-                    while let Ok(Some((req, stream))) = conn.accept().await {
-                        tokio::spawn({
-                            let routers = routers.clone();
-                            async move { handle(routers.clone(), req, stream).await }
-                        });
+                    if let Err(err) = http1::Builder::new()
+                        .preserve_header_case(true)
+                        .title_case_headers(true)
+                        .serve_connection(
+                            io,
+                            service_fn(|req| handler(router.clone(), req, addr_registry.clone())),
+                        )
+                        // .with_upgrades()
+                        .await
+                    {
+                        println!("Failed to serve connection: {:?}", err);
                     }
                 }
             });
         }
-
-        Ok(())
+        error!("server error address: {addr}");
     }
 }
 
-pub async fn handle(
-    routers: Arc<HashMap<String, Arc<Router>>>,
-    req: Request<()>,
-    stream: RequestStream<BidiStream<Bytes>, Bytes>,
-) {
-    if let Err(e) = handler_http3(routers, req, stream).await {
-        match e {
-            CustomError::Unknown => {
-                debug!("unknown error");
-            }
-            _ => {
-                debug!("error: {}", e);
-            }
-        }
-    }
-}
+async fn handler(
+    router: Arc<Router>,
+    req: Request<hyper::body::Incoming>,
+    addr_registry: AddressRegisty,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    // 预构建 NOT_FOUND 响应
+    let not_found = Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(full(Bytes::new()))
+        .expect("static response should be valid");
 
-pub async fn handler_http3(
-    routers: Arc<HashMap<String, Arc<Router>>>,
-    req: Request<()>,
-    mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
-) -> Result<()> {
-    // 提取主机名
-    let host = req
-        .uri()
-        .authority()
-        .ok_or(CustomError::MissingHost)?
-        .host();
-    let path = req.uri().path();
+    debug!("req: {:?}", req);
 
-    let router = routers
-        .get(host)
-        .ok_or(CustomError::RouterNotFound(host.to_string()))?;
-    let (pattern, rules) = router.route(path)?;
-
-    // TODO 解析 rules
+    // 路由匹配
+    let path = req.uri().path().to_owned();
+    let (_pattern, rules) = match router.route(path.as_str()) {
+        Ok((pattern, rules)) => (pattern, rules),
+        Err(_) => return Ok(not_found),
+    };
 
     let rule = if let Rule::Forward(rule) = rules {
         rule
     } else {
-        return Err(CustomError::RouterNotFound(path.to_string()));
+        return Ok(not_found);
     };
 
-    let (parts, body) = if let Some(target) = &rule.proxy_pass {
-        let (parts, ()) = req.into_parts();
+    if let Some(_target) = &rule.proxy_pass {
+        debug!("path: {}", path);
 
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await? {
-            body.extend_from_slice(chunk.chunk());
-        }
-        // TODO 添加请求头
+        // 分解请求
+        let (parts, body) = req.into_parts();
+        let body = body.collect().await?.to_bytes();
 
-        handle_proxy(rule, target, parts, body).await?
-    } else if let Some(root) = &rule.root {
-        let path = req.uri().path();
-        handle_static_file(rule, root, &pattern, path).await?
+        debug!(
+            "parts: {:#?} uri.authority: {:#?}",
+            parts,
+            parts.uri.authority()
+        );
+
+        // 获取请求主机头
+        let host = match parts.uri.authority().map(|auth| auth.host()) {
+            Some(host) => host.to_owned(),
+            None => return Ok(not_found),
+        };
+
+        debug!("proxy uri host: {}", host);
+
+        // DNS 解析
+        let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
+            .await
+            .unwrap();
+        info!("dns resolved: {} -> {:?}", host, remote);
+
+        let outer = addr_registry.outer_addr().await.unwrap();
+        let nat_type = addr_registry.nat_type().await.unwrap();
+        // let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
+
+        let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
+        // 创建并配置 QUIC 客户端
+        let bind = addr_registry.bind_addr();
+
+        let quic_client = create_quic_client(bind, usc).await;
+
+        let agent: SocketAddr = AGENT;
+        let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
+        let socket = Socket::new(bind, agent);
+
+        // 建立 QUIC 连接
+        let conn = quic_client
+            .connect(host, socket, pathway)
+            .expect("connect quic client");
+
+        let _ = conn.add_address(bind, outer, 1, nat_type);
+
+        // 创建 HTTP/3 客户端
+        let (conn, send_request) = create_h3_client(conn).await;
+
+        // 并发执行连接驱动和请求处理
+        let (driver, request) = tokio::join!(
+            tokio::spawn(run_quic_driver(conn)),
+            tokio::spawn(handle_request(send_request, parts, body))
+        );
+
+        // 处理异步任务结果
+        driver.expect("driver error").expect("driver result"); // 等待驱动任务完成
+        let response = request.expect("request error").expect("request result"); // 获取请求结果
+
+        debug!("response: {:#?}", response);
+        Ok(response)
     } else {
-        return Err(CustomError::MissingConfig("proxy_pass or root".to_string()));
-    };
-
-    // TODO 添加响应头
-
-    let response = Response::from_parts(parts, ());
-    stream.send_response(response).await?;
-    if !body.is_empty() {
-        stream.send_data(body).await?;
+        Ok(not_found)
     }
-    stream.finish().await?;
+}
 
+/// 创建 QUIC 客户端
+async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
+    let mut params = ClientParameters::default();
+    params.set_initial_max_streams_bidi(100u32.into());
+    params.set_initial_max_streams_uni(100u32.into());
+    params.set_initial_max_data((1u32 << 20).into());
+    params.set_initial_max_stream_data_uni((1u32 << 20).into());
+    params.set_initial_max_stream_data_bidi_local((1u32 << 20).into());
+    params.set_initial_max_stream_data_bidi_remote((1u32 << 20).into());
+
+    QuicClient::builder()
+        .with_root_certificates(crate::common::root_cert())
+        .without_cert()
+        .with_keylog(true)
+        .with_alpns([ALPN.into()])
+        .with_parameters(params)
+        .with_iface_binder(move |addr| {
+            if addr == usc.local_addr()? {
+                Ok(usc.clone())
+            } else {
+                Ok(Arc::new(Usc::bind(addr)?))
+            }
+        })
+        .bind(bind)
+        .expect("bind quic client")
+        .build()
+}
+
+/// 创建 H3 客户端
+async fn create_h3_client(
+    conn: Arc<gm_quic::Connection>,
+) -> (
+    h3::client::Connection<h3_shim::QuicConnection, Bytes>,
+    h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
+) {
+    let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
+    let (conn, send_request) = h3::client::new(gm_quic_conn)
+        .await
+        .expect("create h3 client");
+
+    (conn, send_request)
+}
+
+/// 运行 QUIC 驱动
+async fn run_quic_driver(
+    mut conn: h3::client::Connection<h3_shim::QuicConnection, Bytes>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    future::poll_fn(|cx| conn.poll_close(cx)).await?;
     Ok(())
 }
 
-pub(super) async fn handle_proxy(
-    _rule: &ForwardRule,
-    target: &str,
-    mut parts: http::request::Parts,
-    body: Vec<u8>,
-) -> Result<(Parts, Bytes)> {
-    info!("proxy to {}", target);
+/// 处理 HTTP 请求
+async fn handle_request(
+    mut sender: h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
+    parts: http::request::Parts,
+    body: Bytes,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Box<dyn std::error::Error + Send + Sync>> {
+    info!("sending request ...");
 
-    // 处理代理请求
-    parts.uri = Uri::from_str(&format!(
-        "{}{}",
-        target,
-        parts
-            .uri
-            .path_and_query()
-            .map(|p| p.to_string())
-            .unwrap_or_default()
-    ))?;
+    let req = http::Request::from_parts(parts, ());
+    let mut stream = sender.send_request(req).await?;
+    stream.send_data(body).await?;
+    stream.finish().await?;
 
-    let uri = parts.uri.clone();
-    parts.version = Version::HTTP_11;
+    info!("receiving response ...");
+    let (mut parts, _) = stream.recv_response().await?.into_parts();
+    info!("response: {:?} {}", parts.version, parts.status);
+    info!("headers: {:#?}", parts.headers);
 
-    let req = Request::from_parts(parts, full(body));
-    debug!("req: {:#?}", req);
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.recv_data().await? {
+        body.extend_from_slice(chunk.chunk());
+    }
+    parts.version = http::Version::HTTP_11;
 
-    // 建立 TCP 连接
-    let host = uri.host().ok_or(CustomError::MissingHost)?;
-    let port = uri.port().map(|p| p.as_u16()).unwrap_or(80); // 默认端口 80
-
-    let tcp_stream = TcpStream::connect((host, port)).await?;
-    let io = TokioIo::new(tcp_stream);
-
-    // 创建 HTTP 连接
-    let (mut sender, conn) = Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(io)
-        .await?;
-
-    // 异步处理连接
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            error!("Connection failed: {:?}", err);
-        }
-    });
-
-    // 发送请求并接收响应
-    let resp = sender.send_request(req).await?;
-    let (parts, body) = resp.into_parts();
-    let body = body.collect().await?.to_bytes();
-    Ok((parts, body))
+    Ok(Response::from_parts(parts, full(Bytes::from(body))))
 }
 
-async fn handle_static_file(
-    _rule: &ForwardRule,
-    root: &str,
-    pattern: &str,
-    path: &str,
-) -> Result<(Parts, Bytes)> {
-    let path = path.replacen(pattern, root, 1);
-    info!("Serving static file: {}", path);
-
-    let (status, body) = match std::fs::read(&path) {
-        Ok(body) => (StatusCode::OK, Bytes::from(body)),
-        Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),
-    };
-
-    let (parts, ()) = Response::builder().status(status).body(())?.into_parts();
-
-    Ok((parts, body))
+pub fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
+    Full::new(chunk.into())
+        .map_err(|never| match never {})
+        .boxed()
 }

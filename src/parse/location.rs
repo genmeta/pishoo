@@ -2,7 +2,7 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
     pattern::{Pattern, parse_pattern},
-    rule::{ForwardRule, ReverseRule, Rule, RuleType, parse_rule},
+    rule::{ForwardRule, Rule, RuleType, ReverseRule, parse_rule},
     server::ServerType,
 };
 use crate::error::{CustomError, Result};
@@ -24,8 +24,8 @@ pub fn parse_location(location: Directive<Nginx>, typ: ServerType) -> Result<Loc
     }
 
     let rules = match typ {
-        ServerType::Forward => {
-            let mut forward_rules = ForwardRule::default();
+        ServerType::Reverse => {
+            let mut forward_rules = ReverseRule::default();
 
             for rule in rules {
                 match rule {
@@ -65,10 +65,10 @@ pub fn parse_location(location: Directive<Nginx>, typ: ServerType) -> Result<Loc
                 }
                 _ => {}
             };
-            Rule::Forward(forward_rules)
+            Rule::Reverse(forward_rules)
         }
-        ServerType::Reverse => {
-            let mut reverse_rules = ReverseRule::default();
+        ServerType::Forward => {
+            let mut reverse_rules = ForwardRule::default();
 
             for rule in rules {
                 match rule {
@@ -99,7 +99,7 @@ pub fn parse_location(location: Directive<Nginx>, typ: ServerType) -> Result<Loc
                     "reverse location must have proxy_pass".to_string(),
                 ));
             }
-            Rule::Reverse(reverse_rules)
+            Rule::Forward(reverse_rules)
         }
     };
 

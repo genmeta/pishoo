@@ -79,7 +79,7 @@ mod tests {
     use crate::parse::{
         location::Location,
         router::Router,
-        rule::{ForwardRule, Rule},
+        rule::{ReverseRule, Rule},
     };
 
     #[test]
@@ -90,19 +90,19 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::Common,
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
         router
             .insert(Location {
                 pattern: Pattern::Exact("/api".into()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
         router
             .insert(Location {
                 pattern: Pattern::Prefix("/v1".into()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
@@ -120,7 +120,7 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::Regex(Regex::new(r"\.jpg$").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
@@ -128,7 +128,7 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::CRegex(Regex::new(r"(?i)\.png$").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
@@ -149,14 +149,14 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::NormalPrefix("/static".into()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
         router
             .insert(Location {
                 pattern: Pattern::Regex(Regex::new(r"\.css$").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
@@ -178,7 +178,7 @@ mod tests {
         let mut router = Router::default();
         let result = router.insert(Location {
             pattern: Pattern::Regex(invalid_re.unwrap()),
-            rules: Rule::Forward(ForwardRule::default()),
+            rules: Rule::Reverse(ReverseRule::default()),
         });
         assert!(result.is_err());
     }
@@ -191,14 +191,14 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::Regex(Regex::new(r"a").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
         router
             .insert(Location {
                 pattern: Pattern::Regex(Regex::new(r"ab").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
 
@@ -214,7 +214,7 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::Exact("".into()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
         assert!(router.route("").is_ok());
@@ -223,7 +223,7 @@ mod tests {
         router
             .insert(Location {
                 pattern: Pattern::Regex(Regex::new(r"\d+").unwrap()),
-                rules: Rule::Forward(ForwardRule::default()),
+                rules: Rule::Reverse(ReverseRule::default()),
             })
             .unwrap();
         assert!(router.route("/123").is_ok());

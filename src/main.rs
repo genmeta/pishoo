@@ -81,11 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
-                    Record::Forward(servers) => {
-                        ForwardServer::serve(bind, servers, addr_registry).await?;
+                    Record::Reverse(servers) => {
+                        ReverseServer::serve(bind, servers, addr_registry).await?;
                     }
-                    Record::Reverse(server) => {
-                        ReverseServer::serve(bind, server, addr_registry).await;
+                    Record::Forward(server) => {
+                        ForwardServer::serve(bind, server, addr_registry).await;
                     }
                 }
 
