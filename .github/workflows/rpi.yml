@@ -20,6 +20,7 @@ jobs:
               with:
                   repository: genmeta/mnet
                   ref: main
+                  token: ${{ secrets.PAT }}
 
             - name: List mnet contents
               run: ls -l mnet
