@@ -5,6 +5,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::LazyLock,
+    time::Duration,
 };
 
 use dashmap::DashMap;
@@ -71,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr_registry = match ADDRESSES.entry(bind) {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let registry = AddressRegisty::new(bind, AGENT)?;
+                let mut registry = AddressRegisty::new(bind, AGENT)?;
+                let _ = registry.keep_alive(Duration::from_secs(30));
                 entry.insert(registry.clone());
                 registry
             }
