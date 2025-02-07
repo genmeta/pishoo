@@ -2,6 +2,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::LazyLock,
     time::Duration,
+    vec,
 };
 
 use dashmap::DashMap;
@@ -23,11 +24,11 @@ pub async fn resolve_dns(host: &str, dns_server_addr: SocketAddr) -> std::io::Re
 
     socket.send_to(query.as_bytes(), dns_server_addr).await?;
 
-    let mut buffer = [0; 1024];
+    let mut buffer = vec![0u8; 1024];
     match timeout(Duration::from_secs(1), socket.recv_from(&mut buffer)).await? {
-        Ok(_) => {
+        Ok((len, _src)) => {
+            buffer.truncate(len);
             let response = std::str::from_utf8(&buffer).unwrap();
-
             parse_endpoint(response)
         }
         Err(_) => Err(std::io::Error::new(
@@ -39,31 +40,25 @@ pub async fn resolve_dns(host: &str, dns_server_addr: SocketAddr) -> std::io::Re
 
 fn parse_endpoint(response: &str) -> std::io::Result<Endpoint> {
     debug!("Received DNS response: {}", response);
-    let parts: Vec<&str> = response.split_whitespace().collect();
+    let mut parts = response.split_whitespace();
 
-    let [endpoint, _] = parts.as_slice() else {
-        return Err(std::io::Error::new(
+    let invalid_response = |response| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Invalid DNS response",
-        ));
+            format!("invalid response: {}", response),
+        )
     };
 
+    let endpoint = parts.next().ok_or_else(|| invalid_response(response))?;
     let addr: Vec<&str> = endpoint.split('-').collect();
-    if addr.len() == 2 {
-        Ok(Endpoint::Relay {
-            agent: addr[0].parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid agent address")
-            })?,
-            outer: addr[1].parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid outer address")
-            })?,
-        })
-    } else {
-        Ok(Endpoint::Direct {
-            addr: endpoint.parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid direct address")
-            })?,
-        })
+    match addr.as_slice() {
+        [agent, outer] => Ok(Endpoint::Relay {
+            agent: agent.parse().map_err(|_| invalid_response(response))?,
+            outer: outer.parse().map_err(|_| invalid_response(response))?,
+        }),
+        _ => Ok(Endpoint::Direct {
+            addr: endpoint.parse().map_err(|_| invalid_response(response))?,
+        }),
     }
 }
 
@@ -107,7 +102,11 @@ pub fn get_or_create_addr_rigistery(bind: SocketAddr) -> std::io::Result<Address
         dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
         dashmap::mapref::entry::Entry::Vacant(entry) => {
             let registry = AddressRegisty::new(bind, AGENT)?;
-            let _ = registry.keep_alive(Duration::from_secs(30));
+            let mut rx = registry.keep_alive(Duration::from_secs(30)).unwrap();
+            tokio::spawn(async move {
+                let addr = rx.recv().await.unwrap();
+                info!("maaped address{}", addr);
+            });
             entry.insert(registry.clone());
             registry
         }

@@ -1,10 +1,8 @@
 #![feature(slice_pattern)]
 
-use std::{
-    env,
-    path::PathBuf,
-};
+use std::{env, path::PathBuf};
 
+use dns::get_or_create_addr_rigistery;
 use forward::ForwardServer;
 use futures::future::join_all;
 use misc_conf::{
@@ -64,6 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
+                let addr_registry = get_or_create_addr_rigistery(bind).unwrap();
+                // 提前探测 nat 类型, 不用等到连接时
+                let _outer = addr_registry.outer_addr().await.unwrap();
+                let _nat_type = addr_registry.nat_type().await.unwrap();
                 match record {
                     Record::Reverse(servers) => {
                         ReverseServer::serve(bind, servers).await?;
