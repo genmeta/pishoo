@@ -165,7 +165,6 @@ pub async fn handler_http3(
 
         handle_proxy(rule, target, parts, body).await?
     } else if let Some(root) = &rule.root {
-        let path = req.uri().path();
         handle_static_file(rule, root, &pattern, path).await?
     } else {
         return Err(CustomError::MissingConfig("proxy_pass or root".to_string()));

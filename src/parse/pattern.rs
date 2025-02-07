@@ -42,7 +42,7 @@ impl Pattern {
             Self::Regex(re) => Ok(re.find(path).map(|m| m.as_str().to_string())),
             Self::CRegex(re) => Ok(re.find(path).map(|m| m.as_str().to_string())),
             Self::NormalPrefix(p) => Ok(path.starts_with(p).then(|| p.clone())),
-            Self::Common => Ok(Some(path.to_string())),
+            Self::Common => Ok(Some("/".to_string())),
         }
     }
 }
