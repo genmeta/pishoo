@@ -13,5 +13,5 @@ cargo run config/forward.conf
 ## 测试请求
 
 ```sh
-curl -x http://192.168.31.86:5379 http://test1.genmeta.net/static/TODO.md
+curl -x http://192.168.2.142:5379 http://test1.genmeta.net/static/TODO.md
 ```

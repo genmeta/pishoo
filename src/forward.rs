@@ -17,7 +17,6 @@ use crate::{
     support::TokioIo,
 };
 
-#[derive(Clone)]
 pub struct ForwardServer;
 
 static ALPN: &[u8] = b"h3";
@@ -98,19 +97,21 @@ async fn handler(
         debug!("proxy uri host: {}", host);
 
         // DNS 解析
-        let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
-            .await
-            .unwrap();
+        let Ok(remote) = resolve_dns(&host, DNS_SERVER.parse().unwrap()).await else {
+            return Ok(not_found);
+        };
 
         info!("dns resolved: {} -> {:?}", host, remote);
         let addr_registry = get_or_create_addr_rigistery(bind).unwrap();
         let outer = addr_registry.outer_addr().await.unwrap();
         let nat_type = addr_registry.nat_type().await.unwrap();
-        // let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));
 
+        info!("outer addr {}", outer);
+        info!("nat type {:?}", nat_type);
         let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
         // 创建并配置 QUIC 客户端
         let bind = addr_registry.bind_addr();
+        info!("bind addr: {}", bind);
 
         let quic_client = create_quic_client(bind, usc).await;
 
@@ -126,11 +127,11 @@ async fn handler(
         let _ = conn.add_address(bind, outer, 1, nat_type);
 
         // 创建 HTTP/3 客户端
-        let (conn, send_request) = create_h3_client(conn).await;
+        let (h3_conn, send_request) = create_h3_client(conn.clone()).await;
 
         // 并发执行连接驱动和请求处理
         let (driver, request) = tokio::join!(
-            tokio::spawn(run_quic_driver(conn)),
+            tokio::spawn(run_quic_driver(h3_conn)),
             tokio::spawn(handle_request(send_request, parts, body))
         );
 
@@ -139,6 +140,8 @@ async fn handler(
         let response = request.expect("request error").expect("request result"); // 获取请求结果
 
         debug!("response: {:#?}", response);
+
+        conn.close(std::borrow::Cow::Borrowed("client done"), 1);
         Ok(response)
     } else {
         Ok(not_found)
@@ -146,6 +149,7 @@ async fn handler(
 }
 
 /// 创建 QUIC 客户端
+/// 多个 forward 实例共享一个 QUIC 客户端
 async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
     let mut params = ClientParameters::default();
     params.set_initial_max_streams_bidi(100u32.into());
@@ -161,6 +165,7 @@ async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
         .with_keylog(true)
         .with_alpns([ALPN.into()])
         .with_parameters(params)
+        .reuse_interfaces()
         .with_iface_binder(move |addr| {
             if addr == usc.local_addr()? {
                 Ok(usc.clone())
