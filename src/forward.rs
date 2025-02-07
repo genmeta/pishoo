@@ -8,13 +8,11 @@ use http::StatusCode;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use qinterface::handy::Usc;
-use qtraversal::AddressRegisty;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use crate::{
-    AGENT,
-    dns::{DNS_SERVER, resolve_dns},
+    dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
     parse::{router::Router, rule::Rule, server::ForwardConfig},
     support::TokioIo,
 };
@@ -25,7 +23,7 @@ pub struct ForwardServer;
 static ALPN: &[u8] = b"h3";
 
 impl ForwardServer {
-    pub async fn serve(addr: SocketAddr, server: ForwardConfig, addr_registry: AddressRegisty) {
+    pub async fn serve(addr: SocketAddr, server: ForwardConfig) {
         let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
         info!("Listening on http://{}", addr);
 
@@ -35,15 +33,11 @@ impl ForwardServer {
             let io = TokioIo::new(stream);
             tokio::task::spawn({
                 let router = router.clone();
-                let addr_registry = addr_registry.clone();
                 async move {
                     if let Err(err) = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
-                        .serve_connection(
-                            io,
-                            service_fn(|req| handler(router.clone(), req, addr_registry.clone())),
-                        )
+                        .serve_connection(io, service_fn(|req| handler(addr, router.clone(), req)))
                         // .with_upgrades()
                         .await
                     {
@@ -57,9 +51,9 @@ impl ForwardServer {
 }
 
 async fn handler(
+    bind: SocketAddr,
     router: Arc<Router>,
     req: Request<hyper::body::Incoming>,
-    addr_registry: AddressRegisty,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     // 预构建 NOT_FOUND 响应
     let not_found = Response::builder()
@@ -107,8 +101,9 @@ async fn handler(
         let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        info!("dns resolved: {} -> {:?}", host, remote);
 
+        info!("dns resolved: {} -> {:?}", host, remote);
+        let addr_registry = get_or_create_addr_rigistery(bind).unwrap();
         let outer = addr_registry.outer_addr().await.unwrap();
         let nat_type = addr_registry.nat_type().await.unwrap();
         // let _addr_changed = addr_registry.keep_alive(Duration::from_secs(30));

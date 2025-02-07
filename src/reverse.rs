@@ -8,13 +8,11 @@ use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
 use qinterface::path::Endpoint;
-use qtraversal::AddressRegisty;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::{
-    AGENT,
-    dns::{DNS_SERVER, spwan_report_host_task},
+    dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, spwan_report_host_task},
     error::{CustomError, Result},
     forward::full,
     parse::{
@@ -31,12 +29,9 @@ static ALPN: &[u8] = b"h3";
 pub struct ReverseServer;
 
 impl ReverseServer {
-    pub async fn serve(
-        bind: SocketAddr,
-        servers: Vec<ReverseConfig>,
-        addr_registry: AddressRegisty,
-    ) -> Result<()> {
+    pub async fn serve(bind: SocketAddr, servers: Vec<ReverseConfig>) -> Result<()> {
         debug!("bind: {}, agent: {}", bind, AGENT);
+        let addr_registry = get_or_create_addr_rigistery(bind)?;
         let outer = addr_registry.outer_addr().await?;
         let nat_type = addr_registry.nat_type().await?;
         let iface = addr_registry.iface();

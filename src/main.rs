@@ -2,13 +2,9 @@
 
 use std::{
     env,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::LazyLock,
-    time::Duration,
 };
 
-use dashmap::DashMap;
 use forward::ForwardServer;
 use futures::future::join_all;
 use misc_conf::{
@@ -16,12 +12,8 @@ use misc_conf::{
     nginx::Nginx,
 };
 use parse::gateway::{Gateway, Record, parse_gateway};
-use qtraversal::AddressRegisty;
 use reverse::ReverseServer;
 use tracing::{error, info};
-
-static ADDRESSES: LazyLock<DashMap<SocketAddr, AddressRegisty>> = LazyLock::new(DashMap::new);
-static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4)), 20002);
 
 mod common;
 mod config;
@@ -69,25 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut handlers = Vec::new();
     for (bind, record) in gateway.records {
-        let addr_registry = match ADDRESSES.entry(bind) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let mut registry = AddressRegisty::new(bind, AGENT)?;
-                let _ = registry.keep_alive(Duration::from_secs(30));
-                entry.insert(registry.clone());
-                registry
-            }
-        };
-
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
                     Record::Reverse(servers) => {
-                        ReverseServer::serve(bind, servers, addr_registry).await?;
+                        ReverseServer::serve(bind, servers).await?;
                     }
                     Record::Forward(server) => {
-                        ForwardServer::serve(bind, server, addr_registry).await;
+                        ForwardServer::serve(bind, server).await;
                     }
                 }
 

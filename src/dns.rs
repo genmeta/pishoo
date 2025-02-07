@@ -1,8 +1,17 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::LazyLock,
+    time::Duration,
+};
 
+use dashmap::DashMap;
 use qinterface::path::Endpoint;
+use qtraversal::AddressRegisty;
 use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, info};
+
+static ADDRESSES: LazyLock<DashMap<SocketAddr, AddressRegisty>> = LazyLock::new(DashMap::new);
+pub static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4)), 20002);
 
 // TODO: 使用配置的 DNS 服务器地址
 pub const DNS_SERVER: &str = "1.12.74.4:5300";
@@ -91,6 +100,19 @@ fn ep_to_string(ep: &Endpoint) -> String {
         Endpoint::Relay { agent, outer } => format!("{}-{}", agent, outer),
         Endpoint::Direct { addr } => addr.to_string(),
     }
+}
+
+pub fn get_or_create_addr_rigistery(bind: SocketAddr) -> std::io::Result<AddressRegisty> {
+    let addr_registry = match ADDRESSES.entry(bind) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let registry = AddressRegisty::new(bind, AGENT)?;
+            let _ = registry.keep_alive(Duration::from_secs(30));
+            entry.insert(registry.clone());
+            registry
+        }
+    };
+    Ok(addr_registry)
 }
 
 #[cfg(test)]
