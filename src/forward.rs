@@ -1,11 +1,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
-use futures::future;
+use futures::{FutureExt, future};
 use gm_quic::{ClientParameters, Pathway, QuicInterface, Socket, prelude::Endpoint};
 use h3_shim::QuicClient;
 use http::StatusCode;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use qinterface::handy::Usc;
 use tokio::net::TcpListener;
@@ -36,8 +36,17 @@ impl ForwardServer {
                     if let Err(err) = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
-                        .serve_connection(io, service_fn(|req| handler(addr, router.clone(), req)))
-                        // .with_upgrades()
+                        .serve_connection(
+                            io,
+                            service_fn(|req| {
+                                if req.method() == "CONNECT" {
+                                    handler_connect(server.addr, router.clone(), req).boxed()
+                                } else {
+                                    handler(addr, router.clone(), req).boxed()
+                                }
+                            }),
+                        )
+                        .with_upgrades()
                         .await
                     {
                         println!("Failed to serve connection: {:?}", err);
@@ -49,11 +58,52 @@ impl ForwardServer {
     }
 }
 
+async fn handler_connect(
+    bind: SocketAddr,
+    router: Arc<Router>,
+    req: Request<hyper::body::Incoming>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    info!("CONNECT request");
+    if let Some(_addr) = host_addr(req.uri()) {
+        tokio::task::spawn(async move {
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    let upgraded = TokioIo::new(upgraded);
+
+                    tokio::task::spawn(async move {
+                        http1::Builder::new()
+                            .preserve_header_case(true)
+                            .title_case_headers(true)
+                            .serve_connection(
+                                upgraded.inner(),
+                                service_fn(|req| handler(bind, router.clone(), req)),
+                            )
+                            .await
+                            .expect("tunnel server error");
+                    });
+                }
+                Err(e) => eprintln!("upgrade error: {}", e),
+            }
+        });
+
+        Ok(Response::new(empty()))
+    } else {
+        eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+        let mut resp = Response::new(full("CONNECT must be to a socket address"));
+        *resp.status_mut() = http::StatusCode::BAD_REQUEST;
+
+        Ok(resp)
+    }
+}
+
 async fn handler(
     bind: SocketAddr,
     router: Arc<Router>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    let uri = req.uri().to_string();
+    info!("request uri: {:?}", uri);
+
     // 预构建 NOT_FOUND 响应
     let not_found = Response::builder()
         .status(StatusCode::NOT_FOUND)
@@ -76,22 +126,17 @@ async fn handler(
     };
 
     if let Some(_target) = &rule.proxy_pass {
-        debug!("path: {}", path);
-
         // 分解请求
         let (parts, body) = req.into_parts();
         let body = body.collect().await?.to_bytes();
 
-        debug!(
-            "parts: {:#?} uri.authority: {:#?}",
-            parts,
-            parts.uri.authority()
-        );
-
         // 获取请求主机头
         let host = match parts.uri.authority().map(|auth| auth.host()) {
-            Some(host) => host.to_owned(),
-            None => return Ok(not_found),
+            Some(host) => host.to_string(),
+            None => match parts.headers.get("host") {
+                Some(host) => host.to_str().unwrap().to_string(),
+                None => return Ok(not_found),
+            },
         };
 
         debug!("proxy uri host: {}", host);
@@ -137,11 +182,13 @@ async fn handler(
 
         // 处理异步任务结果
         driver.expect("driver error").expect("driver result"); // 等待驱动任务完成
-        let response = request.expect("request error").expect("request result"); // 获取请求结果
-
-        debug!("response: {:#?}", response);
+        let response = request
+            .expect("quic request error")
+            .expect("quic request result"); // 获取请求结果
 
         conn.close(std::borrow::Cow::Borrowed("client done"), 1);
+
+        info!("response uri: {:?}", uri);
         Ok(response)
     } else {
         Ok(not_found)
@@ -207,29 +254,38 @@ async fn handle_request(
     parts: http::request::Parts,
     body: Bytes,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Box<dyn std::error::Error + Send + Sync>> {
-    info!("sending request ...");
+    let uri = parts.uri.to_string();
+    info!("sending request: {}", uri);
 
     let req = http::Request::from_parts(parts, ());
     let mut stream = sender.send_request(req).await?;
     stream.send_data(body).await?;
     stream.finish().await?;
 
-    info!("receiving response ...");
     let (mut parts, _) = stream.recv_response().await?.into_parts();
-    info!("response: {:?} {}", parts.version, parts.status);
-    info!("headers: {:#?}", parts.headers);
 
     let mut body = Vec::new();
+    info!("receiving response body: {}", uri);
     while let Some(chunk) = stream.recv_data().await? {
         body.extend_from_slice(chunk.chunk());
     }
+    info!("received response body: {}", uri);
     parts.version = http::Version::HTTP_11;
-
     Ok(Response::from_parts(parts, full(Bytes::from(body))))
 }
 
 pub fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
     Full::new(chunk.into())
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+fn host_addr(uri: &http::Uri) -> Option<String> {
+    uri.authority().map(|auth| auth.to_string())
+}
+
+fn empty() -> BoxBody<Bytes, hyper::Error> {
+    Empty::<Bytes>::new()
         .map_err(|never| match never {})
         .boxed()
 }

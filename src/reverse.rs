@@ -128,6 +128,7 @@ pub async fn handler_http3(
     req: Request<()>,
     mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    info!("quic req: {:#?}", req);
     // 提取主机名
     let host = req
         .uri()
@@ -236,8 +237,14 @@ async fn handle_static_file(
     pattern: &str,
     path: &str,
 ) -> Result<(Parts, Bytes)> {
-    let path = path.replacen(pattern, root, 1);
+    info!("Serving static path: {} {}", pattern, root);
+    let mut path = path.replacen(pattern, root, 1);
     info!("Serving static file: {}", path);
+
+    if path == root {
+        path.push_str("index.html");
+        info!("Serving index.html: {}", path);
+    }
 
     let (status, body) = match std::fs::read(&path) {
         Ok(body) => (StatusCode::OK, Bytes::from(body)),

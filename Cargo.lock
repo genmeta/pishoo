@@ -147,7 +147,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
 dependencies = [
- "nom",
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -510,6 +510,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "getrandom"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a49c392881ce6d5c3b8cb70f98717b7c07aabbdff06687b9030dbfbe2725f8"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi 0.13.3+wasi-0.2.2",
+ "windows-targets",
+]
+
+[[package]]
 name = "getset"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -536,7 +548,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "dashmap",
@@ -571,14 +583,14 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "futures",
  "gm-quic",
  "h3",
- "log",
  "qbase",
+ "qconnection",
  "tokio",
 ]
 
@@ -821,7 +833,7 @@ dependencies = [
  "anyhow",
  "glob",
  "luaparse",
- "nom",
+ "nom 7.1.3",
  "regex",
 ]
 
@@ -835,7 +847,7 @@ dependencies = [
  "dashmap",
  "flagset",
  "futures",
- "nom",
+ "nom 7.1.3",
  "rand 0.8.5",
  "tokio",
  "tracing",
@@ -850,6 +862,15 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -1001,7 +1022,7 @@ version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77957b295656769bb8ad2b6a6b09d897d94f05c41b069aede1fcdaa675eaea04"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -1054,7 +1075,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1062,8 +1083,8 @@ dependencies = [
  "enum_dispatch",
  "futures",
  "getset",
- "nom",
- "rand 0.8.5",
+ "nom 8.0.0",
+ "rand 0.9.0",
  "rustls",
  "thiserror",
  "tracing",
@@ -1072,11 +1093,11 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "qbase",
  "qrecovery",
- "rand 0.8.5",
+ "rand 0.9.0",
  "tokio",
  "tracing",
 ]
@@ -1084,7 +1105,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1096,7 +1117,7 @@ dependencies = [
  "qinterface",
  "qrecovery",
  "qunreliable",
- "rand 0.8.5",
+ "rand 0.9.0",
  "rustls",
  "tokio",
  "tracing",
@@ -1105,11 +1126,12 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "dashmap",
- "nom",
+ "futures",
+ "nom 8.0.0",
  "qbase",
  "qudp",
  "thiserror",
@@ -1120,14 +1142,14 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "deref-derive",
  "enum_dispatch",
  "futures",
  "qbase",
- "rand 0.8.5",
+ "rand 0.9.0",
  "rustls",
  "thiserror",
  "tokio",
@@ -1137,7 +1159,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1147,7 +1169,7 @@ dependencies = [
  "gm-quic",
  "log",
  "nat",
- "nom",
+ "nom 8.0.0",
  "qbase",
  "qcongestion",
  "qconnection",
@@ -1163,7 +1185,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1177,7 +1199,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#fb43bb54809d4cda58e7114dace49a0e4fcccf86"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#541e5f647489610078cba1a14dcaab9a8ff4a54b"
 dependencies = [
  "bytes",
  "futures",
@@ -1220,6 +1242,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3779b94aeb87e8bd4e834cee3650289ee9e0d5677f976ecdb6d219e5f4f6cd94"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.0",
+ "zerocopy 0.8.17",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1240,6 +1273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.0",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,6 +1298,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.15",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b08f3c9802962f7e1b25113931d94f43ed9725bebc59db9d0c3e9a23b67e15ff"
+dependencies = [
+ "getrandom 0.3.1",
+ "zerocopy 0.8.17",
 ]
 
 [[package]]
@@ -1791,6 +1844,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 
 [[package]]
+name = "wasi"
+version = "0.13.3+wasi-0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26816d2e1a4a36a2940b96c5296ce403917633dff8f3440e9b236ed6f6bacad2"
+dependencies = [
+ "wit-bindgen-rt",
+]
+
+[[package]]
 name = "which"
 version = "4.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1907,13 +1969,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
+name = "wit-bindgen-rt"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3268f3d866458b787f390cf61f4bbb563b922d091359f9608842999eaee3943c"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
  "byteorder",
- "zerocopy-derive",
+ "zerocopy-derive 0.7.35",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa91407dacce3a68c56de03abe2760159582b846c6a4acd2f456618087f12713"
+dependencies = [
+ "zerocopy-derive 0.8.17",
 ]
 
 [[package]]
@@ -1921,6 +2001,17 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06718a168365cad3d5ff0bb133aad346959a2074bd4a85c121255a11304a8626"
 dependencies = [
  "proc-macro2",
  "quote",

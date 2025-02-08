@@ -104,8 +104,8 @@ pub fn get_or_create_addr_rigistery(bind: SocketAddr) -> std::io::Result<Address
             let registry = AddressRegisty::new(bind, AGENT)?;
             let mut rx = registry.keep_alive(Duration::from_secs(30)).unwrap();
             tokio::spawn(async move {
-                let addr = rx.recv().await.unwrap();
-                info!("maaped address{}", addr);
+                let addr = rx.recv().await;
+                info!("maaped address{:?}", addr);
             });
             entry.insert(registry.clone());
             registry
