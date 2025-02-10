@@ -9,7 +9,7 @@ use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use qinterface::handy::Usc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
@@ -39,6 +39,8 @@ impl ForwardServer {
                         .serve_connection(
                             io,
                             service_fn(|req| {
+                                // TODO 在此处创建 QUIC 客户端
+
                                 if req.method() == "CONNECT" {
                                     handler_connect(server.addr, router.clone(), req).boxed()
                                 } else {
@@ -88,7 +90,7 @@ async fn handler_connect(
 
         Ok(Response::new(empty()))
     } else {
-        eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+        warn!("CONNECT host is not socket addr: {:?}", req.uri());
         let mut resp = Response::new(full("CONNECT must be to a socket address"));
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
 
@@ -96,6 +98,7 @@ async fn handler_connect(
     }
 }
 
+// TODO 传入 quic connection
 async fn handler(
     bind: SocketAddr,
     router: Arc<Router>,
@@ -125,78 +128,81 @@ async fn handler(
         return Ok(not_found);
     };
 
-    if let Some(_target) = &rule.proxy_pass {
-        // 分解请求
-        let (parts, body) = req.into_parts();
-        let body = body.collect().await?.to_bytes();
-
-        // 获取请求主机头
-        let host = match parts.uri.authority().map(|auth| auth.host()) {
-            Some(host) => host.to_string(),
-            None => match parts.headers.get("host") {
-                Some(host) => host.to_str().unwrap().to_string(),
-                None => return Ok(not_found),
-            },
-        };
-
-        debug!("proxy uri host: {}", host);
-
-        // DNS 解析
-        let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
-            .await
-            .unwrap();
-
-        info!("dns resolved: {} -> {:?}", host, remote);
-        let addr_registry = get_or_create_addr_rigistery(bind).unwrap();
-        let outer = addr_registry.outer_addr().await.unwrap();
-        let nat_type = addr_registry.nat_type().await.unwrap();
-
-        info!("outer addr {}", outer);
-        info!("nat type {:?}", nat_type);
-        let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
-        // 创建并配置 QUIC 客户端
-        let bind = addr_registry.bind_addr();
-        info!("bind addr: {}", bind);
-
-        let quic_client = create_quic_client(bind, usc).await;
-
-        let agent: SocketAddr = AGENT;
-        let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
-        let socket = Socket::new(bind, agent);
-
-        // 建立 QUIC 连接
-        let conn = quic_client
-            .connect(host, socket, pathway)
-            .expect("connect quic client");
-
-        let _ = conn.add_address(bind, outer, 1, nat_type);
-
-        // 创建 HTTP/3 客户端
-        let (h3_conn, send_request) = create_h3_client(conn.clone()).await;
-
-        // 并发执行连接驱动和请求处理
-        let (driver, request) = tokio::join!(
-            tokio::spawn(run_quic_driver(h3_conn)),
-            tokio::spawn(handle_request(send_request, parts, body))
-        );
-
-        // 处理异步任务结果
-        driver.expect("driver error").expect("driver result"); // 等待驱动任务完成
-        let response = request
-            .expect("quic request error")
-            .expect("quic request result"); // 获取请求结果
-
-        conn.close(std::borrow::Cow::Borrowed("client done"), 1);
-
-        info!("response uri: {:?}", uri);
-        Ok(response)
+    let _target = if let Some(target) = &rule.proxy_pass {
+        target
     } else {
-        Ok(not_found)
-    }
+        return Ok(not_found);
+    };
+
+    // 分解请求
+    let (parts, body) = req.into_parts();
+    let body = body.collect().await?.to_bytes();
+
+    // 获取请求主机头
+    let host = match parts.uri.authority().map(|auth| auth.host()) {
+        Some(host) => host.to_string(),
+        None => match parts.headers.get("host") {
+            Some(host) => host.to_str().unwrap().to_string(),
+            None => return Ok(not_found),
+        },
+    };
+
+    debug!("proxy uri host: {}", host);
+
+    // DNS 解析
+    let remote = resolve_dns(&host, DNS_SERVER.parse().unwrap())
+        .await
+        .unwrap();
+
+    info!("dns resolved: {} -> {:?}", host, remote);
+    let addr_registry = get_or_create_addr_rigistery(bind).unwrap();
+    let outer = addr_registry.outer_addr().await.unwrap();
+    let nat_type = addr_registry.nat_type().await.unwrap();
+
+    info!("outer addr {}", outer);
+    info!("nat type {:?}", nat_type);
+    let usc = Arc::new(Usc::new(addr_registry.iface()).unwrap());
+    // 创建并配置 QUIC 客户端
+    let bind = addr_registry.bind_addr();
+    info!("bind addr: {}", bind);
+
+    let agent: SocketAddr = AGENT;
+    let socket = Socket::new(bind, agent);
+
+    let pathway = Pathway::new(Endpoint::Relay { agent, outer }, remote);
+
+    let quic_client = create_quic_client(bind, usc).await;
+    // 建立 QUIC 连接
+    let conn = quic_client
+        .connect(host, socket, pathway)
+        .expect("connect quic client");
+
+    let _ = conn.add_address(bind, outer, 1, nat_type);
+
+    // 创建 HTTP/3 客户端
+    let (h3_conn, send_request) = create_h3_client(conn.clone()).await;
+
+    // 并发执行连接驱动和请求处理
+    let (driver, request) = tokio::join!(
+        tokio::spawn(run_quic_driver(h3_conn)),
+        tokio::spawn(handle_request(send_request, parts, body))
+    );
+
+    // 处理异步任务结果
+    driver.expect("driver error").expect("driver result"); // 等待驱动任务完成
+    let response = request
+        .expect("quic request error")
+        .expect("quic request result"); // 获取请求结果
+
+    conn.close(std::borrow::Cow::Borrowed("client done"), 1);
+
+    info!("response uri: {:?}", uri);
+    Ok(response)
 }
 
+// TODO 多个 forward 实例共享一个 QUIC 客户端
+
 /// 创建 QUIC 客户端
-/// 多个 forward 实例共享一个 QUIC 客户端
 async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
     let mut params = ClientParameters::default();
     params.set_initial_max_streams_bidi(100u32.into());
