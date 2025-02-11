@@ -129,6 +129,7 @@ pub async fn handler_http3(
     mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
     info!("quic req: {:#?}", req);
+    let uri = req.uri().clone();
     // 提取主机名
     let host = req
         .uri()
@@ -171,7 +172,12 @@ pub async fn handler_http3(
     let response = Response::from_parts(parts, ());
     stream.send_response(response).await?;
     if !body.is_empty() {
-        stream.send_data(body).await?;
+        info!("[{}]: sending response body, len: {}", uri, body.len());
+        stream
+            .send_data(body)
+            .await
+            .inspect_err(|e| error!("[{}]: error sending response body: {}", uri, e))?;
+        info!("[{}]: response body sent", uri);
     }
     stream.finish().await?;
 
@@ -246,6 +252,7 @@ async fn handle_static_file(
         info!("Serving index.html: {}", path);
     }
 
+    // TODO 部分读取文件
     let (status, body) = match std::fs::read(&path) {
         Ok(body) => (StatusCode::OK, Bytes::from(body)),
         Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),

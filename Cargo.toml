@@ -53,6 +53,8 @@ qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branc
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
 
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 opt-level = "z"

@@ -15,9 +15,11 @@ pub async fn init() {
 /// 初始化日志
 fn tracing() {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .with_file(true)
         .with_line_number(true)
+        .with_ansi(false)
+        // .with_writer(std::io::stderr)
         .init();
     tracing::info!("Tracing initialized.");
 }
