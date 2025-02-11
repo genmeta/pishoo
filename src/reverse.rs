@@ -234,6 +234,7 @@ pub(super) async fn handle_proxy(
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
     let body = body.collect().await?.to_bytes();
+    info!("[{}]: response prepared, len", uri);
     Ok((parts, body))
 }
 
