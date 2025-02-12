@@ -144,11 +144,11 @@ async fn create_quic_conn(
     h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
 ) {
     // TODO 解析失败场景
-    
+
     // DNS 解析
-    let remote = resolve_dns(host, DNS_SERVER.parse().unwrap())
+    let remote = resolve_dns(host, DNS_SERVER.parse().expect("parse dns server"))
         .await
-        .unwrap();
+        .expect("resolve dns");
 
     info!("dns resolved: {} -> {:?}", host, remote);
 
@@ -189,6 +189,7 @@ async fn handler(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     info!("request: {:?}", req);
+    let uri = req.uri().to_string();
 
     let not_found = Response::builder()
         .status(StatusCode::NOT_FOUND)
@@ -204,7 +205,9 @@ async fn handler(
         },
     };
 
+    info!("[fff][{}]: prepare to create quic conn", uri);
     let (_h3_conn, h3_request) = create_quic_conn(quic_client, local_host, &host).await;
+    info!("[fff][{}]: created quic conn", uri);
     let response = proxy_request(h3_request, req)
         .await
         .expect("proxy request error");
