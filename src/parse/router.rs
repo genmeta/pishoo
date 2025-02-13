@@ -21,7 +21,7 @@ impl Router {
     pub fn route(&self, path: &str) -> Result<(String, &Rule)> {
         for location in &self.locations {
             if let Some(matched) = location.pattern.try_match(path)? {
-                return Ok((matched, &location.rules));
+                return Ok((matched, &location.rule));
             }
         }
         Err(CustomError::RouterNotFound(path.to_string()))

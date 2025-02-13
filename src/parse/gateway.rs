@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use super::server::{ReverseConfig, ForwardConfig, Server, parse_server};
+use super::server::{ServerConfig, ServerKind};
 use crate::error::{CustomError, Result};
 
 #[derive(Debug, Default)]
@@ -12,21 +12,21 @@ pub struct Gateway {
 
 #[derive(Debug)]
 pub enum Record {
-    Reverse(Vec<ReverseConfig>),
-    Forward(ForwardConfig),
+    Reverse(Vec<ServerConfig>),
+    Forward(ServerConfig),
 }
 
 impl Gateway {
-    pub fn insert(&mut self, server: Server) -> Result<()> {
-        match server {
-            Server::Reverse(fwd) => self.update_record(fwd.addr, |existing| match existing {
+    pub fn insert(&mut self, config: ServerConfig) -> Result<()> {
+        match config.kind {
+            ServerKind::Reverse => self.update_record(config.listen, |existing| match existing {
                 Record::Reverse(v) => {
-                    v.push(fwd);
+                    v.push(config);
                     Ok(())
                 }
-                Record::Forward(_) => Err(CustomError::DuplicateServer(fwd.addr)),
+                Record::Forward(_) => Err(CustomError::DuplicateServer(config.listen)),
             }),
-            Server::Forward(rev) => self.insert_unique(rev.addr, Record::Forward(rev)),
+            ServerKind::Forward => self.insert_unique(config.listen, Record::Forward(config)),
         }
     }
 
@@ -63,11 +63,10 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
 
     for directive in directives {
         match directive.name.as_str() {
-            "allow" => {}
-            "deny" => {}
+            "allow" | "deny" => {}
             "server" => {
-                if let Some(children) = directive.children {
-                    gateway.insert(parse_server(children)?)?;
+                if let Some(directives) = directive.children {
+                    gateway.insert(ServerConfig::parse(directives)?)?;
                 }
             }
             unknown => return Err(CustomError::UnknownDirective(unknown.into())),

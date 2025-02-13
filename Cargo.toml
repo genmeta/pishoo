@@ -42,6 +42,7 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 regex = "1"
 http-body-util = "0.1"
 pin-project-lite = "0.2"
+derive_builder = "0.20"
 
 [patch.crates-io]
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }

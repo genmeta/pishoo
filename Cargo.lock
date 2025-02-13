@@ -356,6 +356,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "dashmap",
+ "derive_builder",
  "futures",
  "gm-quic",
  "h3",
