@@ -30,12 +30,12 @@ pub struct ReverseServer;
 
 impl ReverseServer {
     pub async fn serve(bind: SocketAddr, servers: Vec<ReverseConfig>) -> Result<()> {
-        debug!("bind: {}, agent: {}", bind, AGENT);
+        info!("bind: {}, agent: {}", bind, AGENT);
         let addr_registry = get_or_create_addr_rigistery(bind)?;
         let outer = addr_registry.outer_addr().await?;
         let nat_type = addr_registry.nat_type().await?;
         let iface = addr_registry.iface();
-        debug!("outer: {}, nat_type: {:?}", outer, nat_type);
+        info!("outer: {}, nat_type: {:?}", outer, nat_type);
 
         let ep = Endpoint::Relay {
             agent: AGENT,
@@ -111,7 +111,7 @@ pub async fn handle(
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) {
-    if let Err(e) = handler_http3(routers, req, stream).await {
+    if let Err(e) = handler(routers, req, stream).await {
         match e {
             CustomError::Unknown => {
                 debug!("unknown error");
@@ -123,7 +123,7 @@ pub async fn handle(
     }
 }
 
-pub async fn handler_http3(
+pub async fn handler(
     routers: Arc<HashMap<String, Arc<Router>>>,
     req: Request<()>,
     mut stream: RequestStream<BidiStream<Bytes>, Bytes>,

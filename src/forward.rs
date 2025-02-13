@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
@@ -13,7 +10,7 @@ use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use qconnection::traversal::NatType;
 use qinterface::handy::Usc;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
@@ -60,7 +57,7 @@ impl ForwardServer {
                         .with_upgrades()
                         .await;
                     if let Err(err) = result {
-                        println!("Failed to serve connection: {:?}", err);
+                        error!("Failed to serve connection: {:?}", err);
                     }
                 }
             });
@@ -74,8 +71,17 @@ async fn handler_connect(
     local_host: LocalHost,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    // 仅代理 genmeta.net 域名
+    let host = req.uri().host().unwrap().to_string();
+    if !host.ends_with("genmeta.net") {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(full(Bytes::new()))
+            .expect("static response should be valid"));
+    }
+
     let uri = req.uri().to_string();
-    info!("CONNECT request to {}", uri);
+    info!("[CONNECT] request to {}", uri);
 
     tokio::task::spawn({
         async move {
@@ -85,17 +91,18 @@ async fn handler_connect(
                 error!("Failed to upgrade connection {uri}");
                 return;
             };
-            http1::Builder::new()
+            info!("[CONNECT]: tunnel established to {}", uri);
+            let result = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
                 .serve_connection(
                     upgraded.inner(),
                     service_fn(|req| handler(quic_client.clone(), local_host, req)),
                 )
-                .await
-                .inspect_err(|err| error!("Failed to serve connection: {err}"))
-                .expect("serve connection");
-            info!("CONNECT tunnel established to {}", uri);
+                .await;
+            if let Err(err) = result {
+                error!("[CONNECT][{uri}]: Failed to serve connection: {:?}", err);
+            }
         }
     });
 
@@ -108,16 +115,24 @@ async fn bind_registry(bind: SocketAddr) -> (Arc<QuicClient>, LocalHost) {
         .outer_addr()
         .await
         .expect("fail to get outer addr");
+    info!("[REGISTRY]: outer addr {}", outer);
+
     let nat_type = addr_registry
         .nat_type()
         .await
         .expect("fail to get nat type");
+    info!("[REGISTRY]: nat type: {:?}", nat_type);
 
-    info!("outer addr {}", outer);
-    info!("nat type {:?}", nat_type);
     let registry_bind = addr_registry.bind_addr();
-    let usc = Arc::new(Usc::new(addr_registry.iface()).expect("create usc"));
-    info!("bind addr: {}", registry_bind);
+    let usc = match Usc::new(addr_registry.iface()) {
+        Ok(usc) => Arc::new(usc),
+        Err(err) => {
+            error!("[REGISTRY]: create usc error: {}", err);
+            panic!("create usc error");
+        }
+    };
+
+    info!("[REGISTRY]: bind addr: {}", registry_bind);
 
     let quic_client = create_quic_client(registry_bind, usc).await;
     let agent: SocketAddr = AGENT;
@@ -139,32 +154,47 @@ async fn create_quic_conn(
     quic_client: Arc<QuicClient>,
     local_host: LocalHost,
     host: &str,
-) -> (
-    h3::client::Connection<h3_shim::QuicConnection, Bytes>,
-    h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
-) {
+) -> Result<
+    (
+        h3::client::Connection<h3_shim::QuicConnection, Bytes>,
+        h3::client::SendRequest<h3_shim::OpenStreams, Bytes>,
+    ),
+    Response<BoxBody<Bytes, hyper::Error>>,
+> {
     // TODO 解析失败场景
 
     // DNS 解析
-    let remote = resolve_dns(host, DNS_SERVER.parse().expect("parse dns server"))
-        .await
-        .expect("resolve dns");
+    let remote = match resolve_dns(host, DNS_SERVER.parse().expect("parse dns server")).await {
+        Ok(remote) => remote,
+        Err(err) => {
+            let reason = format!("[DNS]: dns resolve error: {}", err);
+            warn!(reason);
+            return Err(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(full(reason))
+                .expect("static response should be valid"));
+        }
+    };
 
-    info!("dns resolved: {} -> {:?}", host, remote);
+    info!("[DNS]: dns resolved: {} -> {:?}", host, remote);
 
     let pathway = Pathway::new(local_host.endpoint, remote);
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
 
     // 建立 QUIC 连接
-    let conn = tracing::trace_span!(
-        "quic",
-        seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    )
-    .in_scope(|| {
-        quic_client
-            .connect(host, local_host.socket, pathway)
-            .expect("connect quic client")
-    });
+    let conn = match quic_client.connect(host, local_host.socket, pathway) {
+        Ok(conn) => conn,
+        Err(err) => {
+            let reason = format!(
+                "[QUIC]: connect quic: host: {}, local_host: {:?}, pathway: {:?}, err: {:?},",
+                host, local_host, pathway, err
+            );
+            error!(reason);
+            return Err(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(full(reason))
+                .expect("static response should be valid"));
+        }
+    };
 
     let _ = conn.add_address(
         local_host.registry_bind,
@@ -175,20 +205,27 @@ async fn create_quic_conn(
 
     // 创建 HTTP/3 客户端
     let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
-    let (h3_conn, h3_sender) = h3::client::new(gm_quic_conn)
-        .await
-        .expect("create h3 client");
+    let (h3_conn, h3_sender) = match h3::client::new(gm_quic_conn).await {
+        Ok((h3_conn, h3_sender)) => (h3_conn, h3_sender),
+        Err(err) => {
+            let reason = format!("[HTTP/3]: create http/3 client error: {}", err);
+            error!(reason);
+            return Err(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(full(reason))
+                .expect("static response should be valid"));
+        }
+    };
 
-    (h3_conn, h3_sender)
+    Ok((h3_conn, h3_sender))
 }
 
-// TODO:  serve connection: hyper::Error(IncompleteMessage)
 async fn handler(
     quic_client: Arc<QuicClient>,
     local_host: LocalHost,
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    info!("request: {:?}", req);
+    info!("[Forward]: request: {:?}", req);
     let uri = req.uri().to_string();
 
     let not_found = Response::builder()
@@ -196,21 +233,37 @@ async fn handler(
         .body(full(Bytes::new()))
         .expect("static response should be valid");
 
-    // 获取请求主机头
-    let host = match req.uri().authority().map(|auth| auth.host()) {
-        Some(host) => host.to_string(),
-        None => match req.headers().get("host") {
+    // 仅代理 genmeta.net 域名
+    let host = match req.uri().host() {
+        Some(host) if host.ends_with("genmeta.net") => host.to_string(),
+        _ => match req.headers().get("host") {
             Some(host) => host.to_str().unwrap().to_string(),
-            None => return Ok(not_found),
+            None => {
+                warn!("[Forward][{}]: this host is no support ", uri);
+                return Ok(not_found);
+            }
         },
     };
 
-    info!("[fff][{}]: prepare to create quic conn", uri);
-    let (_h3_conn, h3_request) = create_quic_conn(quic_client, local_host, &host).await;
-    info!("[fff][{}]: created quic conn", uri);
-    let response = proxy_request(h3_request, req)
-        .await
-        .expect("proxy request error");
+    info!("[Forward][{}]: prepare to create quic conn", uri);
+    let (_h3_conn, h3_request) = match create_quic_conn(quic_client, local_host, &host).await {
+        Ok((h3_conn, h3_request)) => (h3_conn, h3_request),
+        Err(err) => {
+            return Ok(err);
+        }
+    };
+    info!("[Forward][{}]: created quic conn", uri);
+    let response = match proxy_request(h3_request, req).await {
+        Ok(response) => response,
+        Err(err) => {
+            let reason = format!("[Forward][{}]: proxy request error: {}", uri, err);
+            error!(reason);
+            return Ok(Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(full(reason))
+                .expect("static response should be valid"));
+        }
+    };
     Ok(response)
 }
 
@@ -269,19 +322,19 @@ async fn proxy_request(
     let (mut parts, _) = stream.recv_response().await?.into_parts();
 
     let mut body = Vec::new();
-    info!("[{}]: receiving response body", uri);
+    info!("[PROXY][{}]: receiving response body", uri);
     let mut sum_bytes = 0;
     while let Some(chunk) = stream.recv_data().await? {
         sum_bytes += chunk.chunk().len();
         info!(
-            "[{}]: received response chunk: {} , sum_bytes: {}",
+            "[PROXY][{}]: received response chunk: {} , sum_bytes: {}",
             uri,
             chunk.chunk().len(),
             sum_bytes,
         );
         body.extend_from_slice(chunk.chunk());
     }
-    info!("[{}]: received response body", uri);
+    info!("[PROXY][{}]: received response body", uri);
     parts.version = http::Version::HTTP_11;
     Ok(Response::from_parts(parts, full(Bytes::from(body))))
 }
