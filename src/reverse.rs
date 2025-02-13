@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 use gm_quic::{QuicInterface, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
-use http::{Request, Response, StatusCode, Uri, Version, response::Parts};
+use http::{Request, Response, Uri, Version, response::Parts};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
 use qinterface::path::Endpoint;
@@ -15,11 +15,7 @@ use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, spwan_report_host_task},
     error::{CustomError, Result},
     forward::full,
-    parse::{
-        router::Router,
-        rule::{ReverseRule, Rule},
-        server::ReverseConfig,
-    },
+    parse::{router::Router, rule::Rule, server::ServerConfig},
     support::TokioIo,
 };
 
@@ -29,7 +25,7 @@ static ALPN: &[u8] = b"h3";
 pub struct ReverseServer;
 
 impl ReverseServer {
-    pub async fn serve(bind: SocketAddr, servers: Vec<ReverseConfig>) -> Result<()> {
+    pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
         info!("bind: {}, agent: {}", bind, AGENT);
         let addr_registry = get_or_create_addr_rigistery(bind)?;
         let outer = addr_registry.outer_addr().await?;
@@ -70,8 +66,8 @@ impl ReverseServer {
             let router = Arc::new(server.router.clone());
             spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse().unwrap())?;
             for server_name in server.server_name.iter() {
-                let cert = std::fs::read(&server.ssl.cert).expect("cannot read cert file");
-                let key = std::fs::read(&server.ssl.key).expect("cannot read key file");
+                let cert = std::fs::read(&server.cert).expect("cannot read cert file");
+                let key = std::fs::read(&server.key).expect("cannot read key file");
                 builder = builder.add_host(server_name, &*cert, &*key);
                 routers.insert(server_name.clone(), router.clone());
             }
@@ -141,17 +137,11 @@ pub async fn handler(
     let router = routers
         .get(host)
         .ok_or(CustomError::RouterNotFound(host.to_string()))?;
-    let (pattern, rules) = router.route(path)?;
+    let (_pattern, rule) = router.route(path)?;
 
     // TODO 解析 rules
 
-    let rule = if let Rule::Reverse(rule) = rules {
-        rule
-    } else {
-        return Err(CustomError::RouterNotFound(path.to_string()));
-    };
-
-    let (parts, body) = if let Some(target) = &rule.proxy_pass {
+    let (parts, body) = {
         let (parts, ()) = req.into_parts();
 
         let mut body = Vec::new();
@@ -160,11 +150,7 @@ pub async fn handler(
         }
         // TODO 添加请求头
 
-        handle_proxy(rule, target, parts, body).await?
-    } else if let Some(root) = &rule.root {
-        handle_static_file(rule, root, &pattern, path).await?
-    } else {
-        return Err(CustomError::MissingConfig("proxy_pass or root".to_string()));
+        handle_proxy(rule, &rule.proxy_pass, parts, body).await?
     };
 
     // TODO 添加响应头
@@ -185,7 +171,7 @@ pub async fn handler(
 }
 
 pub(super) async fn handle_proxy(
-    _rule: &ReverseRule,
+    _rule: &Rule,
     target: &str,
     mut parts: http::request::Parts,
     body: Vec<u8>,
@@ -238,28 +224,28 @@ pub(super) async fn handle_proxy(
     Ok((parts, body))
 }
 
-async fn handle_static_file(
-    _rule: &ReverseRule,
-    root: &str,
-    pattern: &str,
-    path: &str,
-) -> Result<(Parts, Bytes)> {
-    info!("Serving static path: {} {}", pattern, root);
-    let mut path = path.replacen(pattern, root, 1);
-    info!("Serving static file: {}", path);
+// async fn handle_static_file(
+//     _rule: &Rule,
+//     root: &str,
+//     pattern: &str,
+//     path: &str,
+// ) -> Result<(Parts, Bytes)> {
+//     info!("Serving static path: {} {}", pattern, root);
+//     let mut path = path.replacen(pattern, root, 1);
+//     info!("Serving static file: {}", path);
 
-    if path == root {
-        path.push_str("index.html");
-        info!("Serving index.html: {}", path);
-    }
+//     if path == root {
+//         path.push_str("index.html");
+//         info!("Serving index.html: {}", path);
+//     }
 
-    // TODO 部分读取文件
-    let (status, body) = match std::fs::read(&path) {
-        Ok(body) => (StatusCode::OK, Bytes::from(body)),
-        Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),
-    };
+//     // TODO 部分读取文件
+//     let (status, body) = match std::fs::read(&path) {
+//         Ok(body) => (StatusCode::OK, Bytes::from(body)),
+//         Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),
+//     };
 
-    let (parts, ()) = Response::builder().status(status).body(())?.into_parts();
+//     let (parts, ()) = Response::builder().status(status).body(())?.into_parts();
 
-    Ok((parts, body))
-}
+//     Ok((parts, body))
+// }
