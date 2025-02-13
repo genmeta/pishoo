@@ -21,7 +21,7 @@ bytes = "1.8"
 
 h3 = "0.0.6"
 http = "1"
-rustls = { version = "0.23.15", features = ["ring"] }
+rustls = { version = "0.23.15", default-features = false, features = ["ring"] }
 rustls-webpki = "0.102.8"
 rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
