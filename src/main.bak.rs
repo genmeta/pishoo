@@ -70,8 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Record::Reverse(servers) => {
                         ReverseServer::serve(bind, servers).await?;
                     }
-                    Record::Forward(server) => {
-                        ForwardServer::serve(bind, server).await;
+                    Record::Forward(_server) => {
+                        ForwardServer::serve(bind).await;
                     }
                 }
 

@@ -4,25 +4,6 @@ use rustls::RootCertStore;
 use tracing::error;
 use webpki::types::{CertificateDer, pem::PemObject};
 
-/// 初始化服务
-pub async fn init() {
-    // 初始化日志
-    tracing();
-    // 初始化TLS
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
-/// 初始化日志
-fn tracing() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_file(true)
-        .with_line_number(true)
-        .with_ansi(false)
-        .init();
-    tracing::info!("Tracing initialized.");
-}
-
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
     let root_cert = include_bytes!("../root.crt");

@@ -14,7 +14,6 @@ use tracing::{error, info, warn};
 
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
-    parse::server::ForwardConfig,
     support::TokioIo,
 };
 
@@ -32,7 +31,7 @@ pub struct ForwardServer;
 static ALPN: &[u8] = b"h3";
 
 impl ForwardServer {
-    pub async fn serve(addr: SocketAddr, _server: ForwardConfig) {
+    pub async fn serve(addr: SocketAddr) {
         let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
         info!("Listening on http://{}", addr);
 
