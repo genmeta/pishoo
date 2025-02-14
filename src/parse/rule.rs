@@ -19,19 +19,11 @@ pub enum RuleType {
     Resolver(Vec<String>),
 }
 
-fn take_single_arg(rule: Directive<Nginx>) -> Result<String> {
-    match &*rule.args {
-        [] => Err(CustomError::MissingArg(rule.name.to_string())),
-        [arg] => Ok(arg.clone()),
-        _ => Err(CustomError::InvalidArgs(rule.name.to_string())),
-    }
-}
-
-fn take_two_args(rule: Directive<Nginx>) -> Result<(String, String)> {
-    match &*rule.args {
-        [arg1, arg2] => Ok((arg1.clone(), arg2.clone())),
-        _ => Err(CustomError::InvalidArgs(rule.name.to_string())),
-    }
+fn take_args<T, F>(rule: &Directive<Nginx>, extractor: F) -> Result<T>
+where
+    F: FnOnce(&[String]) -> Option<T>,
+{
+    extractor(&rule.args).ok_or_else(|| CustomError::InvalidArgs(rule.name.clone()))
 }
 
 pub fn parse_rule_type(rule: Directive<Nginx>) -> Result<RuleType> {
@@ -42,15 +34,18 @@ pub fn parse_rule_type(rule: Directive<Nginx>) -> Result<RuleType> {
             }
             RuleType::Resolver(rule.args)
         }
-        "proxy_pass" => RuleType::ProxyPass(take_single_arg(rule)?),
-        "proxy_set_header" => {
-            let (name, value) = take_two_args(rule)?;
-            RuleType::ProxySetHeader(name, value)
-        }
-        "add_header" => {
-            let (name, value) = take_two_args(rule)?;
-            RuleType::AddHeader(name, value)
-        }
+        "proxy_pass" => take_args(&rule, |args| match args {
+            [arg] => Some(RuleType::ProxyPass(arg.clone())),
+            _ => None,
+        })?,
+        "proxy_set_header" => take_args(&rule, |args| match args {
+            [name, value] => Some(RuleType::ProxySetHeader(name.clone(), value.clone())),
+            _ => None,
+        })?,
+        "add_header" => take_args(&rule, |args| match args {
+            [name, value] => Some(RuleType::AddHeader(name.clone(), value.clone())),
+            _ => None,
+        })?,
         unknown => {
             info!("unknown directive: {}", unknown);
             return Err(CustomError::UnknownDirective(unknown.to_string()));

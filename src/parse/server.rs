@@ -17,11 +17,15 @@ pub struct ServerConfig {
     pub kind: ServerKind,
     pub listen: SocketAddr,
     pub server_name: Vec<String>,
+    #[builder(default = "false")]
     pub reuse_port: bool,
     pub cert: String,
     pub key: String,
+    #[builder(default)]
     pub router: Router,
+    #[builder(default = "Vec::new()")]
     pub allow: Vec<String>,
+    #[builder(default = "Vec::new()")]
     pub deny: Vec<String>,
 }
 
@@ -61,23 +65,33 @@ impl ServerConfig {
             match directive.name.as_str() {
                 "listen" => {
                     let (listen, kind) = parse_listen(directive)?;
-                    _ = builder.listen(listen).kind(kind)
+                    builder.listen(listen).kind(kind)
                 }
-                "server_name" => _ = builder.server_name(directive.args),
-                "ssl_certificate" => _ = builder.cert(parse_path(directive)?),
-                "ssl_certificate_key" => _ = builder.key(parse_path(directive)?),
-                "allow" => _ = builder.allow(directive.args),
-                "deny" => _ = builder.deny(directive.args),
+                "server_name" => builder.server_name(directive.args),
+                "ssl_certificate" => builder.cert(parse_path(directive)?),
+                "ssl_certificate_key" => builder.key(parse_path(directive)?),
+                "allow" => builder.allow(directive.args),
+                "deny" => builder.deny(directive.args),
                 "reuse_port" => {
-                    _ = builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"))
+                    builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"))
                 }
                 "location" => {
-                    let mut router = builder.router.unwrap_or_default();
-                    router.insert(Location::parse(directive)?)?;
-                    builder.router = Some(router);
+                    let mut router = builder.router.take().unwrap_or_default();
+                    router.insert(Location::parse(directive)?);
+                    builder.router(router)
                 }
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
             };
+        }
+
+        // 验证 SSL 证书配置
+        if let Some(ServerKind::Forward) = builder.kind.as_ref() {
+            if builder.cert.is_none() {
+                return Err(CustomError::MissingField("ssl_certificate".to_string()));
+            }
+            if builder.key.is_none() {
+                return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
+            }
         }
 
         builder

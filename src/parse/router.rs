@@ -7,7 +7,7 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn insert(&mut self, location: Location) -> Result<()> {
+    pub fn insert(&mut self, location: Location) {
         let priority = location.pattern.priority();
         let pos = self
             .locations
@@ -15,15 +15,19 @@ impl Router {
             .position(|location| location.pattern.priority() > priority)
             .unwrap_or(self.locations.len());
         self.locations.insert(pos, location);
-        Ok(())
     }
 
     pub fn route(&self, path: &str) -> Result<(String, &Rule)> {
-        for location in &self.locations {
-            if let Some(matched) = location.pattern.try_match(path)? {
-                return Ok((matched, &location.rule));
-            }
-        }
-        Err(CustomError::RouterNotFound(path.to_string()))
+        self.locations
+            .iter()
+            .find_map(|location| {
+                location
+                    .pattern
+                    .try_match(path)
+                    .ok()
+                    .flatten()
+                    .map(|matched| (matched, &location.rule))
+            })
+            .ok_or_else(|| CustomError::RouterNotFound(path.to_string()))
     }
 }
