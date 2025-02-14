@@ -38,10 +38,10 @@ impl ReverseServer {
         };
 
         // 初始化路由器
-        let routers = Self::init_routers(&servers, ep).await?;
+        let routers = Self::init_routers(&servers, ep)?;
 
         // 创建并配置 QUIC 服务器
-        let quic_server = Self::create_quic_server(bind, usc, &servers).await?;
+        let quic_server = Self::create_quic_server(bind, usc, &servers)?;
 
         // 处理连接
         Self::handle_connections(quic_server, bind, outer, nat_type, routers).await
@@ -59,7 +59,7 @@ impl ReverseServer {
         Ok((outer, nat_type, usc))
     }
 
-    async fn init_routers(
+    fn init_routers(
         servers: &[ServerConfig],
         ep: Endpoint,
     ) -> Result<Arc<HashMap<String, Arc<Router>>>> {
@@ -77,7 +77,7 @@ impl ReverseServer {
         Ok(Arc::new(routers))
     }
 
-    async fn create_quic_server(
+    fn create_quic_server(
         bind: SocketAddr,
         usc: Arc<Usc>,
         servers: &[ServerConfig],
