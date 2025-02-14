@@ -18,40 +18,24 @@ pub enum Record {
 
 impl Gateway {
     pub fn insert(&mut self, config: ServerConfig) -> Result<()> {
+        let addr = config.listen;
         match config.kind {
-            ServerKind::Reverse => self.update_record(config.listen, |existing| match existing {
-                Record::Reverse(v) => {
-                    v.push(config);
-                    Ok(())
-                }
-                Record::Forward(_) => Err(CustomError::DuplicateServer(config.listen)),
-            }),
-            ServerKind::Forward => self.insert_unique(config.listen, Record::Forward(config)),
-        }
-    }
-
-    fn update_record<F>(&mut self, addr: SocketAddr, action: F) -> Result<()>
-    where
-        F: FnOnce(&mut Record) -> Result<()>,
-    {
-        match self.records.entry(addr) {
-            std::collections::hash_map::Entry::Occupied(mut e) => action(e.get_mut()),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let mut new = Record::Reverse(Vec::new());
-                action(&mut new)?;
-                e.insert(new);
+            ServerKind::Reverse => {
+                self.records
+                    .entry(addr)
+                    .and_modify(|record| {
+                        if let Record::Reverse(servers) = record {
+                            servers.push(config.clone());
+                        }
+                    })
+                    .or_insert_with(|| Record::Reverse(vec![config]));
                 Ok(())
             }
-        }
-    }
-
-    fn insert_unique(&mut self, addr: SocketAddr, record: Record) -> Result<()> {
-        match self.records.entry(addr) {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                Err(CustomError::DuplicateServer(addr))
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(record);
+            ServerKind::Forward => {
+                if self.records.contains_key(&addr) {
+                    return Err(CustomError::DuplicateServer(addr));
+                }
+                self.records.insert(addr, Record::Forward(config));
                 Ok(())
             }
         }

@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 use gm_quic::{QuicInterface, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
-use http::{Request, Response, Uri, Version, response::Parts};
+use http::{Request, Response, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
 use qinterface::path::Endpoint;
@@ -19,7 +19,9 @@ use crate::{
     support::TokioIo,
 };
 
-static ALPN: &[u8] = b"h3";
+const ALPN: &[u8] = b"h3";
+const MAX_STREAMS: u64 = 100;
+const MAX_DATA: u32 = 1 << 20;
 
 #[derive(Clone)]
 pub struct ReverseServer;
@@ -27,28 +29,60 @@ pub struct ReverseServer;
 impl ReverseServer {
     pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
         info!("bind: {}, agent: {}", bind, AGENT);
-        let addr_registry = get_or_create_addr_rigistery(bind)?;
-        let outer = addr_registry.outer_addr().await?;
-        let nat_type = addr_registry.nat_type().await?;
-        let iface = addr_registry.iface();
-        info!("outer: {}, nat_type: {:?}", outer, nat_type);
 
+        // 初始化网络配置
+        let (outer, nat_type, usc) = Self::init_network(bind).await?;
         let ep = Endpoint::Relay {
             agent: AGENT,
             outer,
         };
-        let usc = Arc::new(Usc::new(iface)?);
-        let mut routers: HashMap<String, Arc<Router>> = HashMap::new();
 
-        let mut params = gm_quic::ServerParameters::default();
+        // 初始化路由器
+        let routers = Self::init_routers(&servers, ep).await?;
 
-        params.set_initial_max_streams_bidi(100);
-        params.set_initial_max_streams_uni(100);
-        params.set_initial_max_data((1u32 << 20).into());
-        params.set_initial_max_stream_data_uni((1u32 << 20).into());
-        params.set_initial_max_stream_data_bidi_local((1u32 << 20).into());
-        params.set_initial_max_stream_data_bidi_remote((1u32 << 20).into());
+        // 创建并配置 QUIC 服务器
+        let quic_server = Self::create_quic_server(bind, usc, &servers).await?;
 
+        // 处理连接
+        Self::handle_connections(quic_server, bind, outer, nat_type, routers).await
+    }
+
+    async fn init_network(
+        bind: SocketAddr,
+    ) -> Result<(SocketAddr, qconnection::traversal::NatType, Arc<Usc>)> {
+        let registry = get_or_create_addr_rigistery(bind)?;
+        let outer = registry.outer_addr().await?;
+        let nat_type = registry.nat_type().await?;
+        let usc = Arc::new(Usc::new(registry.iface())?);
+
+        info!("outer: {}, nat_type: {:?}", outer, nat_type);
+        Ok((outer, nat_type, usc))
+    }
+
+    async fn init_routers(
+        servers: &[ServerConfig],
+        ep: Endpoint,
+    ) -> Result<Arc<HashMap<String, Arc<Router>>>> {
+        let mut routers = HashMap::new();
+
+        for server in servers {
+            let router = Arc::new(server.router.clone());
+            spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse()?)?;
+
+            for name in &server.server_name {
+                routers.insert(name.clone(), router.clone());
+            }
+        }
+
+        Ok(Arc::new(routers))
+    }
+
+    async fn create_quic_server(
+        bind: SocketAddr,
+        usc: Arc<Usc>,
+        servers: &[ServerConfig],
+    ) -> Result<Arc<QuicServer>> {
+        let params = Self::create_server_params();
         let mut builder = QuicServer::builder()
             .with_supported_versions([1u32])
             .without_cert_verifier()
@@ -62,123 +96,112 @@ impl ReverseServer {
             .with_parameters(params)
             .enable_sni();
 
-        for server in servers.iter() {
-            let router = Arc::new(server.router.clone());
-            spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse().unwrap())?;
-            for server_name in server.server_name.iter() {
-                let cert = std::fs::read(&server.cert).expect("cannot read cert file");
-                let key = std::fs::read(&server.key).expect("cannot read key file");
-                builder = builder.add_host(server_name, &*cert, &*key);
-                routers.insert(server_name.clone(), router.clone());
+        // 添加服务器证书
+        for server in servers {
+            let cert = std::fs::read(&server.cert)?;
+            let key = std::fs::read(&server.key)?;
+            for name in &server.server_name {
+                builder = builder.add_host(name, &*cert, &*key);
             }
         }
 
-        // TODO 支持范域名路由
+        Ok(builder.with_alpns([ALPN.to_vec()]).listen(bind)?)
+    }
 
-        let routers = Arc::new(routers);
+    fn create_server_params() -> gm_quic::ServerParameters {
+        let mut params = gm_quic::ServerParameters::default();
+        params.set_initial_max_streams_bidi(MAX_STREAMS);
+        params.set_initial_max_streams_uni(MAX_STREAMS);
+        params.set_initial_max_data(MAX_DATA.into());
+        params.set_initial_max_stream_data_uni(MAX_DATA.into());
+        params.set_initial_max_stream_data_bidi_local(MAX_DATA.into());
+        params.set_initial_max_stream_data_bidi_remote(MAX_DATA.into());
+        params
+    }
 
-        let quic_server = builder.with_alpns([ALPN.to_vec()]).listen(bind)?;
-
-        while let Ok((conn, _pathway)) = quic_server.accept().await {
-            debug!(src_addr = ?_pathway.local(), dst_addr = ?_pathway.remote(), "accepted connection");
+    async fn handle_connections(
+        quic_server: Arc<QuicServer>,
+        bind: SocketAddr,
+        outer: SocketAddr,
+        nat_type: qconnection::traversal::NatType,
+        routers: Arc<HashMap<String, Arc<Router>>>,
+    ) -> Result<()> {
+        while let Ok((conn, pathway)) = quic_server.accept().await {
+            debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
             let _ = conn.add_address(bind, outer, 1, nat_type);
 
-            let mut conn =
+            let mut h3_conn =
                 h3::server::Connection::new(h3_shim::QuicConnection::new(conn).await).await?;
             let routers = routers.clone();
-            tokio::spawn({
-                async move {
-                    while let Ok(Some((req, stream))) = conn.accept().await {
-                        tokio::spawn({
-                            let routers = routers.clone();
-                            async move { handle(routers.clone(), req, stream).await }
-                        });
-                    }
+
+            tokio::spawn(async move {
+                while let Ok(Some((req, stream))) = h3_conn.accept().await {
+                    let routers = routers.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_request(routers, req, stream).await {
+                            debug!("Error handling request: {}", e);
+                        }
+                    });
                 }
             });
         }
-
         Ok(())
     }
 }
 
-pub async fn handle(
-    routers: Arc<HashMap<String, Arc<Router>>>,
-    req: Request<()>,
-    stream: RequestStream<BidiStream<Bytes>, Bytes>,
-) {
-    if let Err(e) = handler(routers, req, stream).await {
-        match e {
-            CustomError::Unknown => {
-                debug!("unknown error");
-            }
-            _ => {
-                debug!("error: {}", e);
-            }
-        }
-    }
-}
-
-pub async fn handler(
+async fn handle_request(
     routers: Arc<HashMap<String, Arc<Router>>>,
     req: Request<()>,
     mut stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    info!("quic req: {:#?}", req);
     let uri = req.uri().clone();
-    // 提取主机名
     let host = req
         .uri()
         .authority()
         .ok_or(CustomError::MissingHost)?
         .host();
-    let path = req.uri().path();
 
+    // 获取路由规则
     let router = routers
         .get(host)
         .ok_or(CustomError::RouterNotFound(host.to_string()))?;
-    let (_pattern, rule) = router.route(path)?;
+    let (_pattern, rule) = router.route(req.uri().path())?;
 
-    // TODO 解析 rules
+    // 处理请求体
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.recv_data().await? {
+        body.extend_from_slice(chunk.chunk());
+    }
 
-    let (parts, body) = {
-        let (parts, ()) = req.into_parts();
+    // 代理请求
+    let (parts, response_body) = proxy_request(rule, &rule.proxy_pass, req, body).await?;
 
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.recv_data().await? {
-            body.extend_from_slice(chunk.chunk());
-        }
-        // TODO 添加请求头
-
-        handle_proxy(rule, &rule.proxy_pass, parts, body).await?
-    };
-
-    // TODO 添加响应头
-
-    let response = Response::from_parts(parts, ());
-    stream.send_response(response).await?;
-    if !body.is_empty() {
-        info!("[{}]: sending response body, len: {}", uri, body.len());
-        stream
-            .send_data(body)
-            .await
-            .inspect_err(|e| error!("[{}]: error sending response body: {}", uri, e))?;
-        info!("[{}]: response body sent", uri);
+    // 发送响应
+    stream
+        .send_response(Response::from_parts(parts, ()))
+        .await?;
+    if !response_body.is_empty() {
+        info!(
+            "[{}]: sending response body: {} bytes",
+            uri,
+            response_body.len()
+        );
+        stream.send_data(response_body).await?;
     }
     stream.finish().await?;
 
     Ok(())
 }
 
-pub(super) async fn handle_proxy(
+async fn proxy_request(
     _rule: &Rule,
     target: &str,
-    mut parts: http::request::Parts,
+    req: Request<()>,
     body: Vec<u8>,
-) -> Result<(Parts, Bytes)> {
-    info!("proxy to {}", target);
+) -> Result<(http::response::Parts, Bytes)> {
+    let (mut parts, _) = req.into_parts();
 
-    // 处理代理请求
+    // 构建代理 URI
     parts.uri = Uri::from_str(&format!(
         "{}{}",
         target,
@@ -188,64 +211,31 @@ pub(super) async fn handle_proxy(
             .map(|p| p.to_string())
             .unwrap_or_default()
     ))?;
-
-    let uri = parts.uri.clone();
     parts.version = Version::HTTP_11;
 
-    let req = Request::from_parts(parts, full(body));
-    debug!("req: {:#?}", req);
+    let host = parts.uri.host().ok_or(CustomError::MissingHost)?;
+    let port = parts.uri.port().map(|p| p.as_u16()).unwrap_or(80);
 
-    // 建立 TCP 连接
-    let host = uri.host().ok_or(CustomError::MissingHost)?;
-    let port = uri.port().map(|p| p.as_u16()).unwrap_or(80); // 默认端口 80
-
-    let tcp_stream = TcpStream::connect((host, port)).await?;
-    let io = TokioIo::new(tcp_stream);
-
-    // 创建 HTTP 连接
+    // 建立连接并发送请求
+    let io = TokioIo::new(TcpStream::connect((host, port)).await?);
     let (mut sender, conn) = Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
         .handshake(io)
         .await?;
 
-    // 异步处理连接
-    tokio::task::spawn(async move {
+    tokio::spawn(async move {
         if let Err(err) = conn.await {
             error!("Connection failed: {:?}", err);
         }
     });
 
-    // 发送请求并接收响应
-    let resp = sender.send_request(req).await?;
+    let resp = sender
+        .send_request(Request::from_parts(parts, full(body)))
+        .await?;
     let (parts, body) = resp.into_parts();
     let body = body.collect().await?.to_bytes();
-    info!("[{}]: response prepared, len: {}", uri, body.len());
+
+    info!("Response prepared: {} bytes", body.len());
     Ok((parts, body))
 }
-
-// async fn handle_static_file(
-//     _rule: &Rule,
-//     root: &str,
-//     pattern: &str,
-//     path: &str,
-// ) -> Result<(Parts, Bytes)> {
-//     info!("Serving static path: {} {}", pattern, root);
-//     let mut path = path.replacen(pattern, root, 1);
-//     info!("Serving static file: {}", path);
-
-//     if path == root {
-//         path.push_str("index.html");
-//         info!("Serving index.html: {}", path);
-//     }
-
-//     // TODO 部分读取文件
-//     let (status, body) = match std::fs::read(&path) {
-//         Ok(body) => (StatusCode::OK, Bytes::from(body)),
-//         Err(_) => (StatusCode::NOT_FOUND, Bytes::new()),
-//     };
-
-//     let (parts, ()) = Response::builder().status(status).body(())?.into_parts();
-
-//     Ok((parts, body))
-// }

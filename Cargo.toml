@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = { version = "0.1", default-features = false, features = [
     "std",
@@ -24,8 +23,6 @@ http = "1"
 rustls = { version = "0.23.15", default-features = false, features = ["ring"] }
 rustls-webpki = "0.102.8"
 rustls-native-certs = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 thiserror = "2"
 dashmap = "6"
 
