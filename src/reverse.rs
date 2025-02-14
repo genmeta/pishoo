@@ -7,6 +7,7 @@ use h3_shim::{BidiStream, QuicServer};
 use http::{Request, Response, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
+use hyper_util::rt::TokioIo;
 use qinterface::path::Endpoint;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
@@ -14,9 +15,8 @@ use tracing::{debug, error, info};
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, spwan_report_host_task},
     error::{CustomError, Result},
-    forward::full,
     parse::{router::Router, rule::Rule, server::ServerConfig},
-    support::TokioIo,
+    util::full,
 };
 
 const ALPN: &[u8] = b"h3";

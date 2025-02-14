@@ -32,14 +32,17 @@ qinterface = "0.0.1"
 qconnection = "0.0.1"
 qtraversal = "0.0.1"
 
-misc-conf = "0.1"
 futures = "0.3"
+
 hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1.10", features = ["tokio"] }
 
 regex = "1"
 http-body-util = "0.1"
-pin-project-lite = "0.2"
 derive_builder = "0.20"
+
+misc-conf = "0.1"
+
 
 [patch.crates-io]
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }

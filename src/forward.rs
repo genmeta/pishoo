@@ -5,8 +5,9 @@ use futures::FutureExt;
 use gm_quic::{ClientParameters, Pathway, QuicInterface, Socket, prelude::Endpoint};
 use h3_shim::QuicClient;
 use http::StatusCode;
-use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use hyper_util::rt::tokio::TokioIo;
 use qconnection::traversal::NatType;
 use qinterface::handy::Usc;
 use tokio::net::TcpListener;
@@ -14,7 +15,7 @@ use tracing::{error, info, trace, warn};
 
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
-    support::TokioIo,
+    util::{empty, full},
 };
 
 static ALPN: &[u8] = b"h3";
@@ -68,10 +69,22 @@ pub struct ForwardServer;
 
 impl ForwardServer {
     pub async fn serve(addr: SocketAddr) {
-        let listener = TcpListener::bind(addr).await.expect("bind tcp listener");
+        let listener = match TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                error!("Failed to bind TCP listener: {:?}", e);
+                return;
+            }
+        };
         info!("Listening on http://{}", addr);
 
-        let (quic_client, local_host) = LocalHost::new(addr).await.expect("init local host");
+        let (quic_client, local_host) = match LocalHost::new(addr).await {
+            Ok((quic_client, local_host)) => (quic_client, local_host),
+            Err(e) => {
+                error!("Failed to initialize local host: {:?}", e);
+                return;
+            }
+        };
 
         while let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
@@ -102,7 +115,7 @@ impl ForwardServer {
                 }
             });
         }
-        error!("server error address: {addr}");
+        error!("Server error address: {addr}");
     }
 }
 
@@ -124,7 +137,7 @@ async fn handler_connect(
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                let io = TokioIo::new(upgraded);
+                // let io = TokioIo::new(upgraded);
                 info!("[CONNECT]: tunnel established to {}", uri);
 
                 let service = service_fn(move |req| handler(quic_client.clone(), local_host, req));
@@ -132,7 +145,7 @@ async fn handler_connect(
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
-                    .serve_connection(io.inner(), service)
+                    .serve_connection(upgraded, service)
                     .await
                 {
                     error!("[CONNECT][{uri}]: Failed to serve connection: {:?}", err);
@@ -251,6 +264,8 @@ async fn proxy_request(
     let mut response_body = Vec::new();
     let mut total_bytes = 0;
 
+    // TODO: 流式处理响应体 https://github.com/hyperium/hyper/issues/2166
+
     while let Some(chunk) = stream.recv_data().await? {
         let chunk_size = chunk.chunk().len();
         total_bytes += chunk_size;
@@ -324,16 +339,4 @@ fn check_host(
         warn!("[Forward]: this host is no support {:?} ", req);
         Err(create_error_response("Host not supported".to_string()))
     }
-}
-
-pub fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
-}
-
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
 }
