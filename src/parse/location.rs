@@ -1,3 +1,7 @@
+//! Nginx location block parser
+//!
+//! Handles parsing of location directives and their configuration rules
+
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{

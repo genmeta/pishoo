@@ -1,3 +1,10 @@
+//! Gateway configuration parser
+//!
+//! Handles parsing and management of server configurations including:
+//! - Reverse proxy server clusters
+//! - Forward proxy server instances
+//! - Configuration validation and error handling
+
 use std::{collections::HashMap, net::SocketAddr};
 
 use misc_conf::{ast::Directive, nginx::Nginx};

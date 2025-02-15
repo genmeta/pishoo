@@ -1,3 +1,7 @@
+//! Request routing module
+//!
+//! Implements priority-based routing to location blocks
+
 use super::{location::Location, rule::Rule};
 use crate::error::{CustomError, Result};
 

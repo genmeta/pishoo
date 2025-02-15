@@ -1,3 +1,10 @@
+//! Server configuration parser
+//!
+//! Handles parsing of server blocks and their components including:
+//! - Listen directives
+//! - SSL certificate configuration
+//! - Access control lists
+
 use std::{net::SocketAddr, path::Path};
 
 use derive_builder::Builder;

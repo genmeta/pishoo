@@ -1,3 +1,8 @@
+//! URI pattern matching implementation
+//!
+//! Defines different URL matching patterns and their priority rules
+//! based on nginx location matching semantics
+
 use regex::Regex;
 
 use crate::error::{CustomError, Result};

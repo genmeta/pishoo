@@ -1,3 +1,7 @@
+//! Proxy rule configuration parser
+//!
+//! Handles parsing of proxy-related directives like proxy_pass and proxy_set_header
+
 use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
