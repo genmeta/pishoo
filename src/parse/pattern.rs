@@ -7,7 +7,7 @@ pub enum Pattern {
     /// 精确匹配 (=)
     Exact(String),
     /// 前缀匹配 (^~)
-    Prefix(String),
+    Prefix(Regex),
     /// 正则表达式匹配 (~)
     Regex(Regex),
     /// 正则表达式匹配 不区分大小写 (~*)
@@ -53,7 +53,7 @@ pub fn parse_pattern(args: &[String]) -> Result<Pattern> {
         [pattern] if pattern.starts_with('/') => Pattern::NormalPrefix(pattern.clone()),
         [symbol, pattern] => match symbol.as_str() {
             "=" => Pattern::Exact(pattern.clone()),
-            "^~" => Pattern::Prefix(pattern.clone()),
+            "^~" => Pattern::Prefix(Regex::new(&format!("^{}", pattern))?),
             "~" => Pattern::Regex(Regex::new(pattern)?),
             "~*" => Pattern::CRegex(Regex::new(&format!("(?i){}", pattern))?),
             _ => {
@@ -93,7 +93,9 @@ mod tests {
         // 按随机顺序插入不同优先级的规则
         router.insert(create_location(Pattern::Common));
         router.insert(create_location(Pattern::Exact("/api".into())));
-        router.insert(create_location(Pattern::Prefix("/v1".into())));
+        router.insert(create_location(Pattern::Prefix(
+            Regex::new(r"^/v1").unwrap(),
+        )));
 
         // 验证匹配顺序（按优先级）
         let (matched, _) = router.route("/api").unwrap();
@@ -136,7 +138,9 @@ mod tests {
 
         // 按优先级顺序插入不同类型的模式
         router.insert(create_location(Pattern::Exact("/test".into())));
-        router.insert(create_location(Pattern::Prefix("/test".into())));
+        router.insert(create_location(Pattern::Prefix(
+            Regex::new(r"^/test").unwrap(),
+        )));
         router.insert(create_location(Pattern::Regex(
             Regex::new("/test.*").unwrap(),
         )));

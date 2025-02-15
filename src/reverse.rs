@@ -13,7 +13,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::{
-    dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, spwan_report_host_task},
+    dns::{AGENT, DNS_SERVER, get_or_create_addr_registry, spwan_report_host_task},
     error::{CustomError, Result},
     parse::{router::Router, rule::Rule, server::ServerConfig},
     util::full,
@@ -53,7 +53,7 @@ impl ReverseServer {
 async fn init_network(
     bind: SocketAddr,
 ) -> Result<(SocketAddr, qconnection::traversal::NatType, Arc<Usc>)> {
-    let registry = get_or_create_addr_rigistery(bind)?;
+    let registry = get_or_create_addr_registry(bind)?;
     let outer = registry.outer_addr().await?;
     let nat_type = registry.nat_type().await?;
     let usc = Arc::new(Usc::new(registry.iface())?);
@@ -74,7 +74,7 @@ fn init_routers(
         spwan_report_host_task(server.server_name.clone(), ep, DNS_SERVER.parse()?)?;
 
         for name in &server.server_name {
-            routers.insert(name.clone(), router.clone());
+            routers.insert(name.to_string(), router.clone());
         }
     }
 

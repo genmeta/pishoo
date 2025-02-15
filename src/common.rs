@@ -19,7 +19,13 @@ pub fn root_cert() -> Arc<RootCertStore> {
 
             let root_cert = match CertificateDer::from_pem_slice(root_cert) {
                 Ok(root) => vec![root],
-                Err(_) => vec![CertificateDer::from(root_cert.to_vec())],
+                Err(e) => {
+                    error!(
+                        "failed to parse PEM certificate, falling back to DER: {}",
+                        e
+                    );
+                    vec![CertificateDer::from(root_cert.to_vec())]
+                }
             };
 
             root_cert_store.add_parsable_certificates(root_cert);

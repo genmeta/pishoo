@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info, trace, warn};
 
 use crate::{
-    dns::{AGENT, DNS_SERVER, get_or_create_addr_rigistery, resolve_dns},
+    dns::{AGENT, DNS_SERVER, get_or_create_addr_registry, resolve_dns},
     util::{empty, full},
 };
 
@@ -35,7 +35,7 @@ pub struct LocalHost {
 
 impl LocalHost {
     async fn new(bind: SocketAddr) -> Result<(Arc<QuicClient>, Self), Box<dyn std::error::Error>> {
-        let addr_registry = get_or_create_addr_rigistery(bind)?;
+        let addr_registry = get_or_create_addr_registry(bind)?;
         let outer = addr_registry.outer_addr().await?;
         let registry_bind = addr_registry.bind_addr();
         let nat_type = addr_registry.nat_type().await?;
@@ -139,11 +139,8 @@ async fn handler_connect(
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                // let io = TokioIo::new(upgraded);
                 info!("[CONNECT]: tunnel established to {}", uri);
-
                 let service = service_fn(move |req| handler(quic_client.clone(), local_host, req));
-
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -334,7 +331,15 @@ fn check_host(
     let host = match req.uri().host() {
         Some(host) => host,
         _ => match req.headers().get("host") {
-            Some(host) => host.to_str().unwrap(),
+            Some(host) => match host.to_str() {
+                Ok(host) => host,
+                Err(_) => {
+                    warn!("[Forward]: invalid host header encoding");
+                    return Err(create_error_response(
+                        "Invalid host header encoding".to_string(),
+                    ));
+                }
+            },
             None => {
                 warn!("[Forward]: this host is no support {:?} ", req);
                 return Err(create_error_response("Host not found".to_string()));

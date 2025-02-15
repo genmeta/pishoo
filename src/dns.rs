@@ -82,7 +82,9 @@ pub fn spwan_report_host_task(
     let task = tokio::spawn(async move {
         loop {
             for host in hosts.iter() {
-                let _ = report_host(host, &endpoint, dns_server_addr).await;
+                if let Err(e) = report_host(host, &endpoint, dns_server_addr).await {
+                    debug!("Failed to report host {}: {}", host, e);
+                }
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -97,7 +99,7 @@ fn ep_to_string(ep: &Endpoint) -> String {
     }
 }
 
-pub fn get_or_create_addr_rigistery(bind: SocketAddr) -> std::io::Result<AddressRegisty> {
+pub fn get_or_create_addr_registry(bind: SocketAddr) -> std::io::Result<AddressRegisty> {
     let addr_registry = match ADDRESSES.entry(bind) {
         dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
         dashmap::mapref::entry::Entry::Vacant(entry) => {
@@ -105,7 +107,7 @@ pub fn get_or_create_addr_rigistery(bind: SocketAddr) -> std::io::Result<Address
             let mut rx = registry.keep_alive(Duration::from_secs(30)).unwrap();
             tokio::spawn(async move {
                 let addr = rx.recv().await;
-                info!("maaped address{:?}", addr);
+                info!("mapped address: {:?}", addr);
             });
             entry.insert(registry.clone());
             registry
