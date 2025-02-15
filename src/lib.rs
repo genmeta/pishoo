@@ -2,7 +2,10 @@ mod common;
 pub mod config;
 mod dns;
 pub mod error;
-pub mod forward;
+mod forward;
 pub mod parse;
-pub mod reverse;
+mod reverse;
 mod util;
+
+pub use forward::ForwardServer;
+pub use reverse::ReverseServer;

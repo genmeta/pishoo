@@ -2,9 +2,8 @@ use std::{env, path::PathBuf};
 
 use futures::future::join_all;
 use gateway::{
-    forward::ForwardServer,
+    ForwardServer, ReverseServer,
     parse::gateway::{Gateway, Record, parse_gateway},
-    reverse::ReverseServer,
 };
 use misc_conf::{
     ast::{Directive, DirectiveTrait},

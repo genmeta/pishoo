@@ -20,7 +20,7 @@ use crate::{
 
 static ALPN: &[u8] = b"h3";
 
-type BoxResponse = Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error>;
+type BoxResponse = Response<BoxBody<Bytes, hyper::Error>>;
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
@@ -37,8 +37,8 @@ impl LocalHost {
     async fn new(bind: SocketAddr) -> Result<(Arc<QuicClient>, Self), Box<dyn std::error::Error>> {
         let addr_registry = get_or_create_addr_rigistery(bind)?;
         let outer = addr_registry.outer_addr().await?;
-        let nat_type = addr_registry.nat_type().await?;
         let registry_bind = addr_registry.bind_addr();
+        let nat_type = addr_registry.nat_type().await?;
 
         info!(
             "[REGISTRY]: outer addr: {}, nat type: {:?}, bind addr: {}",
@@ -68,6 +68,7 @@ impl LocalHost {
 pub struct ForwardServer;
 
 impl ForwardServer {
+    /// 启动转发服务器，绑定 TCP 监听器，接受连接并处理 HTTP/1.x 请求（支持 CONNECT 隧道）
     pub async fn serve(addr: SocketAddr) {
         let listener = match TcpListener::bind(addr).await {
             Ok(listener) => listener,
@@ -111,7 +112,7 @@ impl ForwardServer {
                     .with_upgrades()
                     .await
                 {
-                    error!("Failed to serve connection: {:?}", err);
+                    error!("Failed to serve connection: {err:?}");
                 }
             });
         }
@@ -119,11 +120,12 @@ impl ForwardServer {
     }
 }
 
+/// 处理 CONNECT 请求，升级连接后建立隧道，并转发后续请求
 async fn handler_connect(
     quic_client: Arc<QuicClient>,
     local_host: LocalHost,
     req: Request<hyper::body::Incoming>,
-) -> BoxResponse {
+) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
 
     // 验证域名
@@ -148,21 +150,22 @@ async fn handler_connect(
                     .serve_connection(upgraded, service)
                     .await
                 {
-                    error!("[CONNECT][{uri}]: Failed to serve connection: {:?}", err);
+                    error!("[CONNECT][{uri}]: Failed to serve connection: {err:?}");
                 }
             }
-            Err(e) => error!("Failed to upgrade connection {}: {:?}", uri, e),
+            Err(err) => error!("Failed to upgrade connection {uri}: {err:?}"),
         }
     });
 
     Ok(Response::new(empty()))
 }
 
+/// 处理普通 HTTP 请求，通过 DNS 解析和 QUIC 连接转发请求，并汇总响应数据
 async fn handler(
     quic_client: Arc<QuicClient>,
     local_host: LocalHost,
     req: Request<hyper::body::Incoming>,
-) -> BoxResponse {
+) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
     info!("[Forward]: request: {:?}", uri);
 
@@ -191,6 +194,7 @@ async fn handler(
     }
 }
 
+/// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
 async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
     let params = create_client_parameters();
     let tls_config = create_tls_config();
@@ -210,6 +214,7 @@ async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
         .build()
 }
 
+/// 利用 DNS 解析结果和本地信息建立 QUIC 连接，并构造 HTTP/3 客户端
 async fn create_quic_conn(
     quic_client: Arc<QuicClient>,
     local_host: LocalHost,
@@ -243,6 +248,7 @@ async fn create_quic_conn(
         .map_err(|e| create_error_response(format!("H3 client error: {}", e)))
 }
 
+/// 代理 HTTP 请求，通过 QUIC 通道发送请求数据，接收并组装响应体
 async fn proxy_request(
     mut sender: H3SendRequest,
     req: Request<hyper::body::Incoming>,
@@ -286,7 +292,7 @@ async fn proxy_request(
     ))
 }
 
-// Helper functions
+/// 配置客户端 QUIC 参数，设置初始流数和数据传输窗口等限制
 fn create_client_parameters() -> ClientParameters {
     let mut params = ClientParameters::default();
     params.set_initial_max_streams_bidi(100u32.into());
@@ -298,6 +304,7 @@ fn create_client_parameters() -> ClientParameters {
     params
 }
 
+/// 创建 TLS 配置，设置 ALPN 协议、根证书以及密钥日志，不启用会话恢复
 fn create_tls_config() -> rustls::ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
@@ -312,6 +319,7 @@ fn create_tls_config() -> rustls::ClientConfig {
     config
 }
 
+/// 构建错误响应，返回 SERVICE_UNAVAILABLE 状态和错误提示消息
 fn create_error_response(message: String) -> Response<BoxBody<Bytes, hyper::Error>> {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -319,6 +327,7 @@ fn create_error_response(message: String) -> Response<BoxBody<Bytes, hyper::Erro
         .unwrap()
 }
 
+/// 校验请求中的 Host 字段，确保其符合支持的域名要求，否则返回错误响应
 fn check_host(
     req: &Request<hyper::body::Incoming>,
 ) -> Result<String, Response<BoxBody<Bytes, hyper::Error>>> {
