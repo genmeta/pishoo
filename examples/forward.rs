@@ -14,7 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化TLS
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let _registry = ForwardServer::serve("192.168.31.86:5379".parse().unwrap()).await?;
+    ForwardServer::serve("192.168.31.86:5379".parse().unwrap()).await?;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         info!("still running");
