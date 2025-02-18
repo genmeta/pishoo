@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use gm_quic::{QuicInterface, prelude::handy::Usc};
@@ -91,7 +91,6 @@ fn create_quic_server(
     let mut builder = QuicServer::builder()
         .with_supported_versions([1u32])
         .without_cert_verifier()
-        .keep_alive(Duration::from_secs(30))
         .with_iface_binder(move |addr| {
             if addr == usc.local_addr()? {
                 Ok(usc.clone())

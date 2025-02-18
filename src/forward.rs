@@ -212,7 +212,6 @@ async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
         .with_parameters(params)
         .reuse_interfaces()
         .reuse_connection()
-        .keep_alive(Duration::from_secs(30))
         .with_iface_binder(move |addr| {
             if addr == usc.local_addr()? {
                 Ok(usc.clone())
