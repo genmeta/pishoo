@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, OnceLock},
 };
 
@@ -18,7 +18,10 @@ use tracing::{error, info, trace, warn};
 
 use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_registry, resolve_dns},
-    util::{empty, full},
+    util::{
+        body::{empty, full},
+        net::pick_unused_udp_port,
+    },
 };
 
 static ALPN: &[u8] = b"h3";
@@ -38,7 +41,10 @@ pub struct LocalHost {
 }
 
 impl LocalHost {
-    async fn new(bind: SocketAddr) -> crate::error::Result<(Arc<QuicClient>, Self)> {
+    async fn new() -> crate::error::Result<(Arc<QuicClient>, Self)> {
+        // TODO 可能使用 IPv6
+        let port = pick_unused_udp_port().expect("Failed to pick unused UDP port");
+        let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
         let registry = get_or_create_addr_registry(bind)?;
         REGISTRY.get_or_init(|| registry.clone());
         let outer = registry.outer_addr().await?;
@@ -82,7 +88,7 @@ impl ForwardServer {
         };
         info!("Listening on http://{}", addr);
 
-        let (quic_client, local_host) = match LocalHost::new(addr).await {
+        let (quic_client, local_host) = match LocalHost::new().await {
             Ok((quic_client, local_host)) => (quic_client, local_host),
             Err(e) => {
                 error!("Failed to initialize local host: {:?}", e);

@@ -26,11 +26,11 @@ rustls-native-certs = "0.8"
 thiserror = "2"
 dashmap = "6"
 
-gm-quic = "0.0.1"
-h3-shim = "0.0.1"
-qinterface = "0.0.1"
-qconnection = "0.0.1"
-qtraversal = "0.0.1"
+gm-quic = "0.1.0"
+h3-shim = "0.1.0"
+qinterface = "0.1.0"
+qconnection = "0.1.0"
+qtraversal = "0.1.0"
 
 futures = "0.3"
 
@@ -43,13 +43,15 @@ derive_builder = "0.20"
 
 misc-conf = "0.1"
 
+fastrand = "2"
+
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/ack" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }

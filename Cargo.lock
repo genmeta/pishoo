@@ -356,6 +356,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "fastrand",
  "futures",
  "gm-quic",
  "h3",
@@ -438,8 +439,8 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "gm-quic"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "dashmap",
@@ -473,8 +474,8 @@ dependencies = [
 
 [[package]]
 name = "h3-shim"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "futures",
@@ -915,8 +916,8 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -933,8 +934,8 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "qbase",
  "qrecovery",
@@ -945,8 +946,8 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "dashmap",
@@ -966,8 +967,8 @@ dependencies = [
 
 [[package]]
 name = "qinterface"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "dashmap",
@@ -982,8 +983,8 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -999,8 +1000,8 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1025,8 +1026,8 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1040,8 +1041,8 @@ dependencies = [
 
 [[package]]
 name = "qunreliable"
-version = "0.0.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fack#02cf212a3872b08eac5c9a9d1bb99bbd18890e65"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fattck#2af718c6674e5790034a81f46d25a8b0d86e1bc8"
 dependencies = [
  "bytes",
  "futures",
@@ -1595,9 +1596,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.16"
+version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a210d160f08b701c8721ba1c726c11662f877ea6b7094007e1ca9a1041945034"
+checksum = "00e2473a93778eb0bad35909dff6a10d28e63f792f16ed15e404fca9d5eeedbe"
 
 [[package]]
 name = "unicode-width"

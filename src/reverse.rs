@@ -16,7 +16,7 @@ use crate::{
     dns::{AGENT, DNS_SERVER, get_or_create_addr_registry, spwan_report_host_task},
     error::{CustomError, Result},
     parse::{router::Router, rule::Rule, server::ServerConfig},
-    util::full,
+    util::body::full,
 };
 
 const ALPN: &[u8] = b"h3";
