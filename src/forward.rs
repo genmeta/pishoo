@@ -239,38 +239,68 @@ async fn create_quic_conn(
     let remote = resolve_dns(host, DNS_SERVER.parse().unwrap())
         .await
         .map_err(|e| create_error_response(format!("DNS resolve error: {}", e)))?;
-
     info!("[DNS]: resolved: {} -> {:?}", host, remote);
-    let outer_addr = local_host
-        .registry
-        .outer_addr()
-        .await
-        .map_err(|e| create_error_response(format!("Outer address resolve error: {}", e)))?;
-    let nat_type = local_host
-        .registry
-        .nat_type()
-        .await
-        .map_err(|e| create_error_response(format!("NAT type resolve error: {}", e)))?;
 
-    let endpoint = Endpoint::Relay {
-        agent: local_host.agent,
-        outer: outer_addr,
-    };
+    const RETRY: usize = 3;
 
-    let pathway = Pathway::new(endpoint, remote);
+    for i in 0..RETRY {
+        let outer_addr =
+            local_host.registry.outer_addr().await.map_err(|e| {
+                create_error_response(format!("Outer address resolve error: {}", e))
+            })?;
+        let nat_type = local_host
+            .registry
+            .nat_type()
+            .await
+            .map_err(|e| create_error_response(format!("NAT type resolve error: {}", e)))?;
 
-    // QUIC 连接
-    let conn = quic_client
-        .connect(host, local_host.socket, pathway)
-        .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
+        let endpoint = Endpoint::Relay {
+            agent: local_host.agent,
+            outer: outer_addr,
+        };
 
-    let _ = conn.add_address(local_host.registry_bind, outer_addr, 1, nat_type);
+        let pathway = Pathway::new(endpoint, remote);
 
-    // HTTP/3 客户端
-    let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
-    h3::client::new(gm_quic_conn)
-        .await
-        .map_err(|e| create_error_response(format!("H3 client error: {}", e)))
+        // QUIC 连接
+        let conn = quic_client
+            .connect(host, local_host.socket, pathway)
+            .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
+
+        let _ = conn.add_address(local_host.registry_bind, outer_addr, 1, nat_type);
+
+        // HTTP/3 客户端
+        let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
+        let result = h3::client::new(gm_quic_conn).await;
+        match result {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                error!("[Forward]: create h3 client error: {} retry: {}", e, i);
+                if i == RETRY - 1 {
+                    _ = local_host
+                        .registry
+                        .detect_outer_addr()
+                        .await
+                        .inspect_err(|e| {
+                            error!("[Forward]: detect outer address error: {}", e);
+                        });
+                    _ = local_host
+                        .registry
+                        .detect_nat_type()
+                        .await
+                        .inspect_err(|e| {
+                            error!("[Forward]: detect nat type error: {}", e);
+                        });
+                    return Err(create_error_response(format!(
+                        "Create h3 client error: {}",
+                        e
+                    )));
+                }
+            }
+        }
+    }
+    Err(create_error_response(
+        "Create h3 client error out of retry".to_string(),
+    ))
 }
 
 /// 代理 HTTP 请求，通过 QUIC 通道发送请求数据，接收并组装响应体
