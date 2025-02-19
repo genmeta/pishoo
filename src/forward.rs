@@ -5,7 +5,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
-use gm_quic::{ClientParameters, Pathway, QuicInterface, Socket, prelude::Endpoint};
+use gm_quic::{ClientParameters, Pathway};
 use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, combinators::BoxBody};
@@ -17,11 +17,9 @@ use tokio::net::TcpListener;
 use tracing::{error, info, trace, warn};
 
 use crate::{
-    dns::{AGENT, DNS_SERVER, get_or_create_addr_registry, resolve_dns},
-    util::{
-        body::{empty, full},
-        net::pick_unused_udp_port,
-    },
+    dns::{DNS_SERVER, resolve_dns},
+    localhost::ArcLocalHost,
+    util::{empty, full},
 };
 
 static ALPN: &[u8] = b"h3";
@@ -29,50 +27,6 @@ static ALPN: &[u8] = b"h3";
 type BoxResponse = Response<BoxBody<Bytes, hyper::Error>>;
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
-
-pub static REGISTRY: OnceLock<AddressRegisty> = OnceLock::new();
-
-#[derive(Clone)]
-pub struct LocalHost {
-    registry: AddressRegisty,
-    agent: SocketAddr,
-    socket: Socket,
-    registry_bind: SocketAddr,
-}
-
-impl LocalHost {
-    async fn new() -> crate::error::Result<(Arc<QuicClient>, Self)> {
-        // TODO 可能使用 IPv6
-        let port = pick_unused_udp_port().expect("Failed to pick unused UDP port");
-        let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
-        let registry = get_or_create_addr_registry(bind)?;
-        REGISTRY.get_or_init(|| registry.clone());
-        let outer = registry.outer_addr().await?;
-        let registry_bind = registry.bind_addr();
-        let nat_type = registry.nat_type().await?;
-
-        info!(
-            "[REGISTRY]: outer addr: {}, nat type: {:?}, bind addr: {}",
-            outer, nat_type, registry_bind
-        );
-
-        let usc = Arc::new(Usc::new(registry.iface())?);
-        let quic_client = create_quic_client(registry_bind, usc).await;
-
-        let agent: SocketAddr = AGENT;
-        let socket = Socket::new(registry_bind, agent);
-
-        Ok((
-            Arc::new(quic_client),
-            Self {
-                registry,
-                agent,
-                socket,
-                registry_bind,
-            },
-        ))
-    }
-}
 
 pub struct ForwardServer;
 
@@ -88,13 +42,10 @@ impl ForwardServer {
         };
         info!("Listening on http://{}", addr);
 
-        let (quic_client, local_host) = match LocalHost::new().await {
-            Ok((quic_client, local_host)) => (quic_client, local_host),
-            Err(e) => {
-                error!("Failed to initialize local host: {:?}", e);
-                return Err(e);
-            }
-        };
+        let localhost = ArcLocalHost::new(addr.port());
+        localhost.init_network().await;
+
+        let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
 
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -102,17 +53,17 @@ impl ForwardServer {
                 let quic_client = quic_client.clone();
 
                 tokio::task::spawn({
-                    let local_host = local_host.clone();
+                    let localhost = localhost.clone();
                     async move {
                         let service = service_fn(move |req| {
                             let is_connect = req.method() == "CONNECT";
                             let quic_client = quic_client.clone();
-                            let local_host = local_host.clone();
+                            let localhost = localhost.clone();
                             async move {
                                 if is_connect {
-                                    handler_connect(quic_client, local_host, req).await
+                                    handler_connect(quic_client, localhost, req).await
                                 } else {
-                                    handler(quic_client, local_host, req).await
+                                    handler(quic_client, localhost, req).await
                                 }
                             }
                             .boxed()
@@ -139,7 +90,7 @@ impl ForwardServer {
 /// 处理 CONNECT 请求，升级连接后建立隧道，并转发后续请求
 async fn handler_connect(
     quic_client: Arc<QuicClient>,
-    local_host: LocalHost,
+    localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
@@ -157,7 +108,7 @@ async fn handler_connect(
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
                 let service =
-                    service_fn(move |req| handler(quic_client.clone(), local_host.clone(), req));
+                    service_fn(move |req| handler(quic_client.clone(), localhost.clone(), req));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -177,7 +128,7 @@ async fn handler_connect(
 /// 处理普通 HTTP 请求，通过 DNS 解析和 QUIC 连接转发请求，并汇总响应数据
 async fn handler(
     quic_client: Arc<QuicClient>,
-    local_host: LocalHost,
+    localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
@@ -191,7 +142,7 @@ async fn handler(
     info!("[Forward][{}]: preparing quic connection", uri);
 
     // 创建 QUIC 连接
-    let (_h3_conn, h3_request) = match create_quic_conn(quic_client, local_host, &host).await {
+    let (_h3_conn, h3_request) = match create_quic_conn(quic_client, localhost, &host).await {
         Ok(conn) => conn,
         Err(response) => return Ok(response),
     };
@@ -209,7 +160,7 @@ async fn handler(
 }
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
-async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
+async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
     let params = create_client_parameters();
     let tls_config = create_tls_config();
 
@@ -218,21 +169,19 @@ async fn create_quic_client(bind: SocketAddr, usc: Arc<Usc>) -> QuicClient {
         .reuse_interfaces()
         // .reuse_connection()
         .with_iface_binder(move |addr| {
-            if addr == usc.local_addr()? {
-                Ok(usc.clone())
+            if let Some(iface) = localhost.iface(addr) {
+                Ok(Arc::new(Usc::new(iface)?))
             } else {
                 Ok(Arc::new(Usc::bind(addr)?))
             }
         })
-        .bind(bind)
-        .expect("bind quic client")
         .build()
 }
 
 /// 利用 DNS 解析结果和本地信息建立 QUIC 连接，并构造 HTTP/3 客户端
 async fn create_quic_conn(
     quic_client: Arc<QuicClient>,
-    local_host: LocalHost,
+    localhost: ArcLocalHost,
     host: &str,
 ) -> Result<(H3Conn, H3SendRequest), Response<BoxBody<Bytes, hyper::Error>>> {
     // DNS 解析
@@ -244,29 +193,19 @@ async fn create_quic_conn(
     const RETRY: usize = 3;
 
     for i in 0..RETRY {
-        let outer_addr =
-            local_host.registry.outer_addr().await.map_err(|e| {
-                create_error_response(format!("Outer address resolve error: {}", e))
-            })?;
-        let nat_type = local_host
-            .registry
-            .nat_type()
-            .await
-            .map_err(|e| create_error_response(format!("NAT type resolve error: {}", e)))?;
-
-        let endpoint = Endpoint::Relay {
-            agent: local_host.agent,
-            outer: outer_addr,
-        };
-
-        let pathway = Pathway::new(endpoint, remote);
+        let (pathway, socket) = localhost.match_pathway(remote).await.unwrap();
 
         // QUIC 连接
         let conn = quic_client
-            .connect(host, local_host.socket, pathway)
+            .connect(host, socket, pathway)
             .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
 
-        let _ = conn.add_address(local_host.registry_bind, outer_addr, 1, nat_type);
+        localhost.add_direct_address(conn.clone()).await;
+
+        // QUIC 连接
+        let conn = quic_client
+            .connect(host, socket, pathway)
+            .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
@@ -276,20 +215,9 @@ async fn create_quic_conn(
             Err(e) => {
                 error!("[Forward]: create h3 client error: {} retry: {}", e, i);
                 if i == RETRY - 1 {
-                    _ = local_host
-                        .registry
-                        .detect_outer_addr()
-                        .await
-                        .inspect_err(|e| {
-                            error!("[Forward]: detect outer address error: {}", e);
-                        });
-                    _ = local_host
-                        .registry
-                        .detect_nat_type()
-                        .await
-                        .inspect_err(|e| {
-                            error!("[Forward]: detect nat type error: {}", e);
-                        });
+                    let _ = localhost.resume_network().await.inspect_err(|e| {
+                        error!("[Forward]: resume network error: {}", e);
+                    });
                     return Err(create_error_response(format!(
                         "Create h3 client error: {}",
                         e
