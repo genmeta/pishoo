@@ -45,13 +45,14 @@ misc-conf = "0.1"
 
 fastrand = "2"
 
+pnet = "0.35.0"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/attck" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }

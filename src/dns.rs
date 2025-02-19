@@ -1,18 +1,8 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::LazyLock,
-    time::Duration,
-    vec,
-};
+use std::{net::SocketAddr, time::Duration, vec};
 
-use dashmap::DashMap;
 use qinterface::path::Endpoint;
-use qtraversal::AddressRegisty;
 use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, info};
-
-static ADDRESSES: LazyLock<DashMap<SocketAddr, AddressRegisty>> = LazyLock::new(DashMap::new);
-pub static AGENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 12, 74, 4)), 20002);
 
 // TODO: 使用配置的 DNS 服务器地址
 pub const DNS_SERVER: &str = "1.12.74.4:5300";
@@ -76,14 +66,16 @@ pub async fn report_host(
 
 pub fn spwan_report_host_task(
     hosts: Vec<String>,
-    endpoint: Endpoint,
+    endpoint: Vec<Endpoint>,
     dns_server_addr: SocketAddr,
 ) -> std::io::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
     let task = tokio::spawn(async move {
         loop {
             for host in hosts.iter() {
-                if let Err(e) = report_host(host, &endpoint, dns_server_addr).await {
-                    debug!("Failed to report host {}: {}", host, e);
+                for ep in endpoint.iter() {
+                    if let Err(e) = report_host(host, ep, dns_server_addr).await {
+                        debug!("Failed to report host {}: {}", host, e);
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
@@ -97,23 +89,6 @@ fn ep_to_string(ep: &Endpoint) -> String {
         Endpoint::Relay { agent, outer } => format!("{}-{}", agent, outer),
         Endpoint::Direct { addr } => addr.to_string(),
     }
-}
-
-pub fn get_or_create_addr_registry(bind: SocketAddr) -> std::io::Result<AddressRegisty> {
-    let addr_registry = match ADDRESSES.entry(bind) {
-        dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            let registry = AddressRegisty::new(bind, AGENT)?;
-            let mut rx = registry.keep_alive(Duration::from_secs(30)).unwrap();
-            tokio::spawn(async move {
-                let addr = rx.recv().await;
-                info!("mapped address: {:?}", addr);
-            });
-            entry.insert(registry.clone());
-            registry
-        }
-    };
-    Ok(addr_registry)
 }
 
 #[cfg(test)]
