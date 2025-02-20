@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -153,12 +153,24 @@ impl ArcLocalHost {
         Ok(())
     }
 
+    #[cfg(target_os = "windows")]
+    fn scan_device(&self) -> HashMap<SocketAddr, String> {
+        let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.0.port);
+        let addr6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.0.port);
+        let mut address_map = HashMap::new();
+
+        address_map.insert(addr4, "eth0".to_string());
+        address_map.insert(addr6, "eth0".to_string());
+        address_map
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn scan_device(&self) -> HashMap<SocketAddr, String> {
         let mut address_map = HashMap::new();
 
         let interfaces = pnet::datalink::interfaces();
         for iface in interfaces {
-            if iface.is_up() && iface.is_running() && !iface.is_loopback() {
+            if iface.is_up() && !iface.is_loopback() {
                 for ip in iface.ips {
                     if let IpAddr::V6(v6_ip) = ip.ip() {
                         // skip link-local addresses
