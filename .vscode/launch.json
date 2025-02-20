@@ -36,6 +36,26 @@
             },
             "args": [],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'pishoo'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=pishoo",
+                ],
+                "filter": {
+                    "name": "pishoo",
+                    "kind": "example"
+                }
+            },
+            "args": [
+                "-c",
+                "${workspaceFolder}/examples/pishoo.conf",
+            ],
+            "cwd": "${workspaceFolder}"
         }
     ]
 }

@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub server_name: Vec<String>,
     #[builder(default = "false")]
     pub reuse_port: bool,
+    pub dns_server: SocketAddr,
     pub cert: String,
     pub key: String,
     #[builder(default)]
@@ -75,6 +76,13 @@ impl ServerConfig {
                     builder.listen(listen).kind(kind)
                 }
                 "server_name" => builder.server_name(directive.args),
+                "dns_server" => builder.dns_server(
+                    directive
+                        .args
+                        .first()
+                        .ok_or(CustomError::MissingField("dns_server".to_string()))?
+                        .parse()?,
+                ),
                 "ssl_certificate" => builder.cert(parse_path(directive)?),
                 "ssl_certificate_key" => builder.key(parse_path(directive)?),
                 "allow" => builder.allow(directive.args),
@@ -92,12 +100,15 @@ impl ServerConfig {
         }
 
         // 验证 SSL 证书配置
-        if let Some(ServerKind::Forward) = builder.kind.as_ref() {
+        if let Some(ServerKind::Reverse) = builder.kind.as_ref() {
             if builder.cert.is_none() {
                 return Err(CustomError::MissingField("ssl_certificate".to_string()));
             }
             if builder.key.is_none() {
                 return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
+            }
+            if builder.dns_server.is_none() {
+                return Err(CustomError::MissingField("resolver".to_string()));
             }
         }
 

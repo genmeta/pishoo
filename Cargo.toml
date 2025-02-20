@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1.17"
+
 tracing = { version = "0.1", default-features = false, features = [
     "std",
     "attributes",
@@ -18,7 +20,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 bytes = "1.8"
 
-h3 = "0.0.6"
+h3 = { version = "0.0.6", features = ["tracing"] }
 http = "1"
 rustls = { version = "0.23.15", default-features = false, features = ["ring"] }
 rustls-webpki = "0.102.8"
@@ -33,6 +35,7 @@ qconnection = "0.1.0"
 qtraversal = "0.1.0"
 
 futures = "0.3"
+futures-util = "0.3"
 
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
@@ -46,6 +49,16 @@ misc-conf = "0.1"
 fastrand = "2"
 
 pnet = "0.35.0"
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[[example]]
+name = "forward"
+path = "examples/forward.rs"
+
+[[example]]
+name = "pishoo"
+path = "examples/pishoo.rs"
 
 [patch.crates-io]
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }

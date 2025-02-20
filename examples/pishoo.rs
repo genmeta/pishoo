@@ -1,5 +1,6 @@
-use std::{env, path::PathBuf};
+use std::path::PathBuf;
 
+use clap::{Parser, command};
 use futures::future::join_all;
 use gateway::{
     ForwardServer, ReverseServer,
@@ -11,8 +12,44 @@ use misc_conf::{
 };
 use tracing::{error, info};
 
-#[tokio::main]
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(
+        short,
+        default_value = "/etc/pishoo/pishoo.conf",
+        help = "set configuration file (default: /etc/pishoo/pishoo.conf)"
+    )]
+    config_file: PathBuf,
+    #[arg(
+        short,
+        default_value = None,
+        help = "set configuration file (default: stderr)"
+    )]
+    error_output: Option<PathBuf>,
+    #[arg(
+        short,
+        default_value = None,
+        value_parser = clap::builder::PossibleValuesParser::new(["stop", "quit", "reopen", "reload"]),
+        help = "send signal to a master process"
+    )]
+    signal: Option<String>,
+    #[arg(short, default_value_t = false, help = "test configuration and exit")]
+    test_config: bool,
+    #[arg(
+        short,
+        default_value_t = false,
+        help = "suppress non-error messages during configuration testing"
+    )]
+    quiet: bool,
+    #[arg(short = 'g', help = "set global directives out of configuration file")]
+    directives: Vec<String>,
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_file(true)
@@ -24,29 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化TLS
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config_path = if let Some(config_path) = env::args().nth(1) {
-        info!("config_path: {}", config_path);
-        config_path
-    } else {
-        error!("config_path not provided");
-        return Ok(());
-    };
-    let config_path = PathBuf::from(config_path);
-
-    let data = std::fs::read(&config_path)?;
-
+    let config_file = args.config_file;
+    let configure = std::fs::read(&config_file)?;
     let mut gateway = Gateway::default();
-
-    if let Ok(res) = Directive::<Nginx>::parse(&data) {
+    if let Ok(res) = Directive::<Nginx>::parse(&configure) {
         for mut directive in res {
-            let path = config_path
+            let path = config_file
                 .parent()
                 .expect("config path should have a parent");
             directive.resolve_include(path)?;
-            if directive.name == "http3" {
+            if directive.name == "pishoo" {
                 if let Some(children) = directive.children {
-                    gateway = parse_gateway(children)?;
-                    // println!("{:#?}", gateway);
+                    gateway = parse_gateway(children).inspect_err(|e| error!("{:?}", e))?;
                     break;
                 }
             }
