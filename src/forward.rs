@@ -1,25 +1,24 @@
 use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::{Arc, OnceLock},
+    net::SocketAddr,
+    sync::Arc,
 };
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
-use gm_quic::{ClientParameters, Pathway};
+use gm_quic::ClientParameters;
 use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
-use qtraversal::AddressRegisty;
 use tokio::net::TcpListener;
 use tracing::{error, info, trace, warn};
 
 use crate::{
     dns::{DNS_SERVER, resolve_dns},
     localhost::ArcLocalHost,
-    util::{empty, full},
+    util::body::{empty, full},
 };
 
 static ALPN: &[u8] = b"h3";
@@ -185,15 +184,17 @@ async fn create_quic_conn(
     host: &str,
 ) -> Result<(H3Conn, H3SendRequest), Response<BoxBody<Bytes, hyper::Error>>> {
     // DNS 解析
-    let remote = resolve_dns(host, DNS_SERVER.parse().unwrap())
+    let remotes = resolve_dns(host, DNS_SERVER.parse().unwrap())
         .await
         .map_err(|e| create_error_response(format!("DNS resolve error: {}", e)))?;
-    info!("[DNS]: resolved: {} -> {:?}", host, remote);
+    info!("[DNS]: resolved: {} -> {:?}", host, remotes);
 
     const RETRY: usize = 3;
 
     for i in 0..RETRY {
-        let (pathway, socket) = localhost.match_pathway(remote).await.unwrap();
+        // TODO: server 有多个地址，按照优先级选择，重试考虑换个地址
+        let index = i.min(remotes.len() - 1);
+        let (pathway, socket) = localhost.match_pathway(remotes[index]).await.unwrap();
 
         // QUIC 连接
         let conn = quic_client

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -62,11 +62,21 @@ impl ArcLocalHost {
                 let registry = registry.clone();
                 async move {
                     // 探测外网地址错误，移除
-                    if registry.detect_outer_addr().await.is_err() {
+                    if let Ok(outer) = registry.detect_outer_addr().await {
+                        info!(
+                            "init_network failed for outer addr {:?} local {} device {}",
+                            outer, addr, name
+                        );
+                    } else {
                         warn!("init_network failed for addr {:?} {}", addr, name);
                         localhost.0.registrys.remove(&addr);
+                        return;
                     }
-                    let _ = registry.detect_nat_type().await;
+                    let nat_type = registry.detect_nat_type().await;
+                    info!(
+                        "init_network found nat_type {:?} for addr {:?} local {} device {}",
+                        nat_type, addr, addr, name
+                    );
                     let _ = registry.keep_alive(Duration::from_secs(30));
                 }
             });
