@@ -8,5 +8,5 @@ pub mod parse;
 mod reverse;
 mod util;
 
-pub use forward::{ForwardServer, REGISTRY};
+pub use forward::ForwardServer;
 pub use reverse::ReverseServer;
