@@ -118,7 +118,7 @@ impl ArcLocalHost {
             let registry = item.value();
             let bind = registry.bind_addr();
             if let Ok(outer) = registry.outer_addr().await {
-                if let Ok(nat_type) = registry.detect_nat_type().await {
+                if let Ok(nat_type) = registry.nat_type().await {
                     let _ = conn.add_address(bind, outer, 1, nat_type);
                 }
             }
