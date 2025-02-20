@@ -7,7 +7,7 @@ use tracing::{debug, info};
 // TODO: 使用配置的 DNS 服务器地址
 pub const DNS_SERVER: &str = "1.12.74.4:5300";
 
-pub async fn resolve_dns(
+pub async fn dns_resolve(
     host: &str,
     dns_server_addr: SocketAddr,
 ) -> std::io::Result<Vec<EndpointAddr>> {
@@ -59,7 +59,7 @@ fn parse_endpoint_addrs(response: &str) -> std::io::Result<Vec<EndpointAddr>> {
         .collect()
 }
 
-pub async fn report_host(
+pub async fn dns_publish(
     host: &str,
     endpoint_addrs: &[EndpointAddr],
     dns_server_addr: SocketAddr,
@@ -67,7 +67,7 @@ pub async fn report_host(
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let eps = endpoint_addrs
         .iter()
-        .map(ep_to_string)
+        .map(dns_serialize)
         .collect::<Vec<String>>()
         .join(",");
     let report = format!("REPORT {} {}", host, eps);
@@ -76,7 +76,8 @@ pub async fn report_host(
     Ok(())
 }
 
-fn ep_to_string(ep: &EndpointAddr) -> String {
+
+fn dns_serialize(ep: &Endpoint) -> String {
     match ep {
         EndpointAddr::Agent { agent, outer } => format!("{}-{}", agent, outer),
         EndpointAddr::Direct { addr } => addr.to_string(),
@@ -120,11 +121,11 @@ mod tests {
             outer: "127.0.0.1:5678".parse().unwrap(),
         };
 
-        report_host("relay.example.com", &[ep], DNS_SERVER.parse().unwrap())
+        dns_publish("relay.example.com", &ep, DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
 
-        let endpoint_addr = resolve_dns("relay.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint = dns_resolve("relay.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
         assert_eq!(endpoint_addr, [ep]);
@@ -133,11 +134,11 @@ mod tests {
             addr: "127.0.0.1:9000".parse().unwrap(),
         };
 
-        report_host("direct.example.com", &[ep], DNS_SERVER.parse().unwrap())
+        dns_publish("direct.example.com", &ep, DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
 
-        let endpoint_addr = resolve_dns("direct.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint = dns_resolve("direct.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
         assert_eq!(endpoint_addr, [ep]);
