@@ -136,9 +136,19 @@ impl ArcLocalHost {
     }
 
     pub async fn resume_network(&self) -> io::Result<()> {
+        let mut to_remove = Vec::new();
+
         for item in self.0.registrys.iter() {
-            item.value().detect_outer_addr().await?;
-            item.value().detect_nat_type().await?;
+            let key = item.key();
+            let value = item.value();
+            if value.detect_outer_addr().await.is_err() || value.detect_nat_type().await.is_err() {
+                warn!("resume_network failed for addr {}", key);
+                to_remove.push(*key);
+            }
+        }
+
+        for key in to_remove {
+            self.0.registrys.remove(&key);
         }
         Ok(())
     }

@@ -158,23 +158,35 @@ async fn handle_request(
         body.extend_from_slice(chunk.chunk());
     }
 
+    info!("recive all data frome client");
     // 代理请求
-    let (parts, response_body) = proxy_request(rule, &rule.proxy_pass, req, body).await?;
-
-    // 发送响应
-    stream
-        .send_response(Response::from_parts(parts, ()))
-        .await?;
-    if !response_body.is_empty() {
-        info!(
-            "[{}]: sending response body: {} bytes",
-            uri,
-            response_body.len()
-        );
-        stream.send_data(response_body).await?;
+    match proxy_request(rule, &rule.proxy_pass, req, body).await {
+        Ok((parts, response_body)) => {
+            info!("proxy request ret {:?} {:?}", parts, response_body.len());
+            // 发送响应
+            stream
+                .send_response(Response::from_parts(parts, ()))
+                .await?;
+            if !response_body.is_empty() {
+                info!(
+                    "[{}]: sending response body: {} bytes",
+                    uri,
+                    response_body.len()
+                );
+                stream.send_data(response_body).await?;
+            }
+            stream.finish().await?;
+        }
+        Err(e) => {
+            error!("Error handling request: {}", e);
+            let response = Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .body(())
+                .unwrap();
+            stream.send_response(response).await?;
+            stream.finish().await?;
+        }
     }
-    stream.finish().await?;
-
     Ok(())
 }
 
