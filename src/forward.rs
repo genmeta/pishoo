@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
@@ -254,6 +251,7 @@ async fn proxy_request(
     let mut response_body = Vec::new();
     let mut total_bytes = 0;
 
+    info!("recv response {:?}", parts);
     // TODO: 流式处理响应体 https://github.com/hyperium/hyper/issues/2166
 
     while let Some(chunk) = stream.recv_data().await? {
@@ -266,7 +264,7 @@ async fn proxy_request(
         response_body.extend_from_slice(chunk.chunk());
     }
 
-    trace!(
+    info!(
         "[PROXY][{}]: response complete, total: {} bytes",
         uri, total_bytes
     );
