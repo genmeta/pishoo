@@ -5,7 +5,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
-use gm_quic::ClientParameters;
+use gm_quic::{ClientParameters, PROTO};
 use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, combinators::BoxBody};
@@ -165,6 +165,14 @@ async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
     let params = create_client_parameters();
     let tls_config = create_tls_config();
 
+    for bind in localhost.addresses() {
+        if let Some(iface) = localhost.iface(bind) {
+            let iface = Arc::new(Usc::new(iface).unwrap());
+            info!("insert iface {:?}", bind);
+            PROTO.add_interface(bind, iface);
+        }
+    }
+
     QuicClient::builder_with_tls(tls_config)
         .with_parameters(params)
         .reuse_interfaces()
@@ -210,12 +218,6 @@ async fn create_quic_conn(
             .map_err(|e| format!("QUIC connect error: {:?}", e))?;
 
         localhost.add_direct_address(conn.clone()).await;
-
-        // QUIC 连接
-        let conn = quic_client
-            .connect(host, socket, pathway)
-            .map_err(|e| format!("QUIC connect error: {:?}", e))?;
-
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
         let result = h3::client::new(gm_quic_conn).await;
