@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+};
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
@@ -19,6 +22,7 @@ use crate::{
 };
 
 static ALPN: &[u8] = b"h3";
+pub static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
 
 type BoxResponse = Response<BoxBody<Bytes, hyper::Error>>;
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
@@ -39,6 +43,7 @@ impl ForwardServer {
         info!("Listening on http://{}", addr);
 
         let localhost = ArcLocalHost::new(addr.port());
+        LOCALHOST.get_or_init(|| localhost.clone());
         localhost.init_network().await;
 
         let quic_client = Arc::new(create_quic_client(localhost.clone()).await);

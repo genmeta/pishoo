@@ -8,5 +8,5 @@ pub mod parse;
 mod reverse;
 mod util;
 
-pub use forward::ForwardServer;
+pub use forward::{ForwardServer, LOCALHOST};
 pub use reverse::ReverseServer;
