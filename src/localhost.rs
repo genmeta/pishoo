@@ -49,8 +49,11 @@ impl ArcLocalHost {
                 false => AGENT_V6.parse().unwrap(),
             };
             let registry = AddressRegisty::new(addr, agent);
-            if registry.is_err() {
-                warn!("init_network failed for addr {:?} {}", addr, name);
+            if let Err(e) = registry {
+                warn!(
+                    "init_network failed for addr {:?} {}  error {:?}",
+                    addr, name, e
+                );
                 continue;
             }
             let registry = registry.unwrap();
