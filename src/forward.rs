@@ -140,7 +140,7 @@ async fn handler(
     // 创建 QUIC 连接
     let (_h3_conn, h3_request) = match create_quic_conn(quic_client, localhost, &host).await {
         Ok(conn) => conn,
-        Err(response) => return Ok(response),
+        Err(msg) => return Ok(create_error_response(msg)),
     };
     info!("[Forward][{}]: quic connection established", uri);
 
@@ -179,11 +179,11 @@ async fn create_quic_conn(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     host: &str,
-) -> Result<(H3Conn, H3SendRequest), Response<BoxBody<Bytes, hyper::Error>>> {
+) -> Result<(H3Conn, H3SendRequest), String> {
     // DNS 解析
     let remotes = resolve_dns(host, DNS_SERVER.parse().unwrap())
         .await
-        .map_err(|e| create_error_response(format!("DNS resolve error: {}", e)))?;
+        .map_err(|e| format!("DNS resolve error: {}", e))?;
     info!("[DNS]: resolved: {} -> {:?}", host, remotes);
 
     const RETRY: usize = 3;
@@ -196,14 +196,14 @@ async fn create_quic_conn(
         // QUIC 连接
         let conn = quic_client
             .connect(host, socket, pathway)
-            .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
+            .map_err(|e| format!("QUIC connect error: {:?}", e))?;
 
         localhost.add_direct_address(conn.clone()).await;
 
         // QUIC 连接
         let conn = quic_client
             .connect(host, socket, pathway)
-            .map_err(|e| create_error_response(format!("QUIC connect error: {:?}", e)))?;
+            .map_err(|e| format!("QUIC connect error: {:?}", e))?;
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
@@ -216,17 +216,12 @@ async fn create_quic_conn(
                     let _ = localhost.resume_network().await.inspect_err(|e| {
                         error!("[Forward]: resume network error: {}", e);
                     });
-                    return Err(create_error_response(format!(
-                        "Create h3 client error: {}",
-                        e
-                    )));
+                    return Err(format!("Create h3 client error: {}", e));
                 }
             }
         }
     }
-    Err(create_error_response(
-        "Create h3 client error out of retry".to_string(),
-    ))
+    Err("Create h3 client error out of retry".to_string())
 }
 
 /// 代理 HTTP 请求，通过 QUIC 通道发送请求数据，接收并组装响应体

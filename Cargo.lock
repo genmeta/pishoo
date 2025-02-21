@@ -441,7 +441,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "dashmap",
@@ -476,7 +476,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "futures",
@@ -636,9 +636,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.25"
+version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04cbf5b083de1c7e0222a7a51dbfdba1cbe1c6ab0b15e29fff3f6c077fd9cd9f"
+checksum = "30bde2b3dc3671ae49d8e2e9f044c7c005836e7a023ee57cffa25ab82764bb9e"
 
 [[package]]
 name = "luaparse"
@@ -1024,7 +1024,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1042,7 +1042,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "qbase",
  "qrecovery",
@@ -1054,7 +1054,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1075,7 +1075,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1091,7 +1091,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1108,7 +1108,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1129,12 +1129,13 @@ dependencies = [
  "rustls",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "qudp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1149,7 +1150,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0925b9b21b087f45b00f19af075545733ba223ff"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fbind_device#0ca5cd213b84b16563850760cb177f1ead584233"
 dependencies = [
  "bytes",
  "futures",
