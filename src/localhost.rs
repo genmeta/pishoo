@@ -42,6 +42,7 @@ impl ArcLocalHost {
 
     pub async fn init_network(&self) {
         let addr_map = self.scan_device();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         for (addr, name) in addr_map {
             let agent: SocketAddr = match addr.is_ipv4() {
                 true => AGENT.parse().unwrap(),
@@ -58,20 +59,20 @@ impl ArcLocalHost {
                 warn!("init_network failed for device {}", name);
             }
 
-            self.0.registrys.insert(addr, registry.clone());
             tokio::spawn({
+                let tx = tx.clone();
                 let localhost = self.clone();
                 let registry = registry.clone();
                 async move {
-                    // 探测外网地址错误，移除
                     if let Ok(outer) = registry.detect_outer_addr().await {
                         info!(
                             "init_network success for outer addr {:?} local {} device {}",
                             outer, addr, name
                         );
+                        localhost.0.registrys.insert(addr, registry.clone());
+                        let _ = tx.send(true).await;
                     } else {
                         warn!("init_network failed for addr {:?} {}", addr, name);
-                        localhost.0.registrys.remove(&addr);
                         return;
                     }
                     let nat_type = registry.detect_nat_type().await;
@@ -83,6 +84,7 @@ impl ArcLocalHost {
                 }
             });
         }
+        rx.recv().await;
         info!("LocalHost init network done.");
     }
 
