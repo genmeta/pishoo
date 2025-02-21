@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
-use gm_quic::{Endpoint, prelude::handy::Usc};
+use gm_quic::prelude::handy::Usc;
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
 use http::{Request, Response, Uri, Version};
@@ -12,7 +12,6 @@ use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::{
-    dns::{DNS_SERVER, spwan_report_host_task},
     error::{CustomError, Result},
     localhost::ArcLocalHost,
     parse::{router::Router, rule::Rule, server::ServerConfig},
@@ -31,9 +30,8 @@ impl ReverseServer {
     pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
         let localhost = ArcLocalHost::new(bind.port());
         localhost.init_network().await;
-        let eps = localhost.relay_ep().await;
         // 初始化路由器
-        let routers = init_routers(&servers, eps)?;
+        let routers = init_routers(&servers, localhost.clone())?;
 
         // 创建并配置 QUIC 服务器
         let quic_server = create_quic_server(localhost.clone(), &servers)?;
@@ -46,13 +44,12 @@ impl ReverseServer {
 /// 初始化路由器，根据服务器配置创建路由表
 fn init_routers(
     servers: &[ServerConfig],
-    eps: Vec<Endpoint>,
+    localhost: ArcLocalHost,
 ) -> Result<Arc<HashMap<String, Arc<Router>>>> {
     let mut routers = HashMap::new();
     for server in servers {
         let router = Arc::new(server.router.clone());
-        spwan_report_host_task(server.server_name.clone(), eps.clone(), DNS_SERVER.parse()?)?;
-
+        localhost.report_dns(server.server_name.clone());
         for name in &server.server_name {
             routers.insert(name.to_string(), router.clone());
         }

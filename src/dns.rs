@@ -76,24 +76,6 @@ pub async fn report_host(
     Ok(())
 }
 
-pub fn spwan_report_host_task(
-    hosts: Vec<String>,
-    endpoints: Vec<Endpoint>,
-    dns_server_addr: SocketAddr,
-) -> std::io::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
-    let task = tokio::spawn(async move {
-        loop {
-            for host in hosts.iter() {
-                if let Err(e) = report_host(host, &endpoints, dns_server_addr).await {
-                    debug!("Failed to report host {}: {}", host, e);
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
-    });
-    Ok(task)
-}
-
 fn ep_to_string(ep: &Endpoint) -> String {
     match ep {
         Endpoint::Relay { agent, outer } => format!("{}-{}", agent, outer),
@@ -109,20 +91,23 @@ mod tests {
     fn test_ep_to_string() {
         let reponse = "127.0.0.1:1234-127.0.0.1:5678,127.0.0.1:9000-127.0.0.1:10000,127.0.0.1:1235-127.0.0.1:5679 10";
         let eps = parse_endpoints(reponse).unwrap();
-        assert_eq!(eps, [
-            Endpoint::Relay {
-                agent: "127.0.0.1:1234".parse().unwrap(),
-                outer: "127.0.0.1:5678".parse().unwrap(),
-            },
-            Endpoint::Relay {
-                agent: "127.0.0.1:9000".parse().unwrap(),
-                outer: "127.0.0.1:10000".parse().unwrap(),
-            },
-            Endpoint::Relay {
-                agent: "127.0.0.1:1235".parse().unwrap(),
-                outer: "127.0.0.1:5679".parse().unwrap(),
-            }
-        ]);
+        assert_eq!(
+            eps,
+            [
+                Endpoint::Relay {
+                    agent: "127.0.0.1:1234".parse().unwrap(),
+                    outer: "127.0.0.1:5678".parse().unwrap(),
+                },
+                Endpoint::Relay {
+                    agent: "127.0.0.1:9000".parse().unwrap(),
+                    outer: "127.0.0.1:10000".parse().unwrap(),
+                },
+                Endpoint::Relay {
+                    agent: "127.0.0.1:1235".parse().unwrap(),
+                    outer: "127.0.0.1:5679".parse().unwrap(),
+                }
+            ]
+        );
 
         let response = "Not a valid response";
         assert!(parse_endpoints(response).is_err());
