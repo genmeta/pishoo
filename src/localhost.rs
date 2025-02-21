@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -11,6 +11,8 @@ use gm_quic::{Connection, Endpoint, Pathway, Socket};
 use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
+
+use crate::dns::{DNS_SERVER, report_host};
 
 pub const AGENT: &str = "1.12.74.4:20002";
 // todo: agent_v6
@@ -64,7 +66,7 @@ impl ArcLocalHost {
                     // 探测外网地址错误，移除
                     if let Ok(outer) = registry.detect_outer_addr().await {
                         info!(
-                            "init_network failed for outer addr {:?} local {} device {}",
+                            "init_network success for outer addr {:?} local {} device {}",
                             outer, addr, name
                         );
                     } else {
@@ -107,8 +109,11 @@ impl ArcLocalHost {
         for item in self.0.registrys.iter() {
             let registry = item.value();
             let agent = registry.agent();
-            let outer = registry.outer_addr().await.unwrap();
-            eps.push(Endpoint::Relay { agent, outer });
+            if let Ok(outer) = registry.outer_addr().await {
+                eps.push(Endpoint::Relay { agent, outer });
+            } else {
+                warn!("get outer error, bind {} ", registry.bind_addr());
+            }
         }
         eps
     }
@@ -119,6 +124,7 @@ impl ArcLocalHost {
             let bind = registry.bind_addr();
             if let Ok(outer) = registry.outer_addr().await {
                 if let Ok(nat_type) = registry.nat_type().await {
+                    info!("add direct addr {} {} {:?}", bind, outer, nat_type);
                     let _ = conn.add_address(bind, outer, 1, nat_type);
                 }
             }
@@ -133,6 +139,26 @@ impl ArcLocalHost {
 
     pub fn addresses(&self) -> Vec<SocketAddr> {
         self.0.registrys.iter().map(|item| *item.key()).collect()
+    }
+
+    pub fn report_dns(&self, hosts: Vec<String>) {
+        let dns_server = DNS_SERVER.parse().unwrap();
+        tokio::spawn({
+            let localhost = self.clone();
+            async move {
+                loop {
+                    let eps = localhost.relay_ep().await;
+                    if !eps.is_empty() {
+                        for host in &hosts {
+                            if let Err(e) = report_host(host, &eps, dns_server).await {
+                                warn!("Failed to report host {}: {}", host, e);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            }
+        });
     }
 
     pub async fn resume_network(&self) -> io::Result<()> {
@@ -155,6 +181,7 @@ impl ArcLocalHost {
 
     #[cfg(target_os = "windows")]
     fn scan_device(&self) -> HashMap<SocketAddr, String> {
+        use std::net::{Ipv4Addr, Ipv6Addr};
         let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.0.port);
         let addr6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.0.port);
         let mut address_map = HashMap::new();
@@ -169,12 +196,13 @@ impl ArcLocalHost {
         let mut address_map = HashMap::new();
 
         let interfaces = pnet::datalink::interfaces();
+        tracing::trace!("all interfaces {:?}", interfaces);
         for iface in interfaces {
             if iface.is_up() && !iface.is_loopback() {
                 for ip in iface.ips {
                     if let IpAddr::V6(v6_ip) = ip.ip() {
                         // skip link-local addresses
-                        if !v6_ip.segments()[0] & 0xffc0 == 0xfe80 {
+                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 {
                             let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
                             info!(
                                 "scan_device found address {} for interface {}",
