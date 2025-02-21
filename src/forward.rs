@@ -196,7 +196,13 @@ async fn create_quic_conn(
     for i in 0..RETRY {
         // TODO: server 有多个地址，按照优先级选择，重试考虑换个地址
         let index = i.min(remotes.len() - 1);
-        let (pathway, socket) = localhost.match_pathway(remotes[index]).await.unwrap();
+        let Some((pathway, socket)) = localhost.match_pathway(remotes[index]).await else {
+            warn!(
+                "[Forward]: no pathway found for {:?} retry: {}",
+                remotes[index], i
+            );
+            continue;
+        };
 
         // QUIC 连接
         let conn = quic_client
