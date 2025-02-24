@@ -48,11 +48,11 @@ fastrand = "2"
 pnet = "0.35.0"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/bind_device" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
