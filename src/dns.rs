@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration, vec};
 
-use qinterface::path::Endpoint;
+use gm_quic::EndpointAddr;
 use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, info};
 
@@ -10,7 +10,7 @@ pub const DNS_SERVER: &str = "1.12.74.4:5300";
 pub async fn resolve_dns(
     host: &str,
     dns_server_addr: SocketAddr,
-) -> std::io::Result<Vec<Endpoint>> {
+) -> std::io::Result<Vec<EndpointAddr>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
     let query = format!("QUERY {}", host);
@@ -22,7 +22,7 @@ pub async fn resolve_dns(
         Ok((len, _src)) => {
             buffer.truncate(len);
             let response = std::str::from_utf8(&buffer).unwrap();
-            parse_endpoints(response)
+            parse_endpoint_addrs(response)
         }
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
@@ -31,7 +31,7 @@ pub async fn resolve_dns(
     }
 }
 
-fn parse_endpoints(response: &str) -> std::io::Result<Vec<Endpoint>> {
+fn parse_endpoint_addrs(response: &str) -> std::io::Result<Vec<EndpointAddr>> {
     debug!("Received DNS response: {}", response);
 
     let invalid = || {
@@ -41,17 +41,17 @@ fn parse_endpoints(response: &str) -> std::io::Result<Vec<Endpoint>> {
         )
     };
 
-    let endpoints_str = response.split_whitespace().next().ok_or_else(invalid)?;
+    let endpoint_addrs_str = response.split_whitespace().next().ok_or_else(invalid)?;
 
-    endpoints_str
+    endpoint_addrs_str
         .split(',')
         .map(|ep| {
             Ok(match ep.split_once('-') {
-                Some((agent, outer)) => Endpoint::Relay {
+                Some((agent, outer)) => EndpointAddr::Agent {
                     agent: agent.parse().map_err(|_| invalid())?,
                     outer: outer.parse().map_err(|_| invalid())?,
                 },
-                None => Endpoint::Direct {
+                None => EndpointAddr::Direct {
                     addr: ep.parse().map_err(|_| invalid())?,
                 },
             })
@@ -61,11 +61,11 @@ fn parse_endpoints(response: &str) -> std::io::Result<Vec<Endpoint>> {
 
 pub async fn report_host(
     host: &str,
-    endpoints: &[Endpoint],
+    endpoint_addrs: &[EndpointAddr],
     dns_server_addr: SocketAddr,
 ) -> std::io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let eps = endpoints
+    let eps = endpoint_addrs
         .iter()
         .map(ep_to_string)
         .collect::<Vec<String>>()
@@ -76,10 +76,10 @@ pub async fn report_host(
     Ok(())
 }
 
-fn ep_to_string(ep: &Endpoint) -> String {
+fn ep_to_string(ep: &EndpointAddr) -> String {
     match ep {
-        Endpoint::Relay { agent, outer } => format!("{}-{}", agent, outer),
-        Endpoint::Direct { addr } => addr.to_string(),
+        EndpointAddr::Agent { agent, outer } => format!("{}-{}", agent, outer),
+        EndpointAddr::Direct { addr } => addr.to_string(),
     }
 }
 
@@ -90,19 +90,19 @@ mod tests {
     #[test]
     fn test_ep_to_string() {
         let reponse = "127.0.0.1:1234-127.0.0.1:5678,127.0.0.1:9000-127.0.0.1:10000,127.0.0.1:1235-127.0.0.1:5679 10";
-        let eps = parse_endpoints(reponse).unwrap();
+        let eps = parse_endpoint_addrs(reponse).unwrap();
         assert_eq!(
             eps,
             [
-                Endpoint::Relay {
+                EndpointAddr::Agent {
                     agent: "127.0.0.1:1234".parse().unwrap(),
                     outer: "127.0.0.1:5678".parse().unwrap(),
                 },
-                Endpoint::Relay {
+                EndpointAddr::Agent {
                     agent: "127.0.0.1:9000".parse().unwrap(),
                     outer: "127.0.0.1:10000".parse().unwrap(),
                 },
-                Endpoint::Relay {
+                EndpointAddr::Agent {
                     agent: "127.0.0.1:1235".parse().unwrap(),
                     outer: "127.0.0.1:5679".parse().unwrap(),
                 }
@@ -110,13 +110,12 @@ mod tests {
         );
 
         let response = "Not a valid response";
-        assert!(parse_endpoints(response).is_err());
+        assert!(parse_endpoint_addrs(response).is_err());
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_resolve_dns() {
-        let ep = Endpoint::Relay {
+        let ep = EndpointAddr::Agent {
             agent: "127.0.0.1:1234".parse().unwrap(),
             outer: "127.0.0.1:5678".parse().unwrap(),
         };
@@ -125,12 +124,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoint = resolve_dns("relay.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint_addr = resolve_dns("relay.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        assert_eq!(endpoint, [ep]);
+        assert_eq!(endpoint_addr, [ep]);
 
-        let ep = Endpoint::Direct {
+        let ep = EndpointAddr::Direct {
             addr: "127.0.0.1:9000".parse().unwrap(),
         };
 
@@ -138,12 +137,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoint = resolve_dns("direct.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint_addr = resolve_dns("direct.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        assert_eq!(endpoint, [ep]);
+        assert_eq!(endpoint_addr, [ep]);
 
-        let ep2 = Endpoint::Relay {
+        let ep2 = EndpointAddr::Agent {
             agent: "127.0.0.1:1235".parse().unwrap(),
             outer: "127.0.0.1:5679".parse().unwrap(),
         };
@@ -151,9 +150,9 @@ mod tests {
         report_host("vec.example.com", &[ep, ep2], DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        let endpoint = resolve_dns("vec.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint_addr = resolve_dns("vec.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        assert_eq!(endpoint, [ep, ep2]);
+        assert_eq!(endpoint_addr, [ep, ep2]);
     }
 }

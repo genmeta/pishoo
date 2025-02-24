@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
-use gm_quic::prelude::handy::Usc;
+use gm_quic::{HeartbeatConfig, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer};
 use http::{Request, Response, Uri, Version};
@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     error::{CustomError, Result},
@@ -20,7 +20,7 @@ use crate::{
 
 const ALPN: &[u8] = b"h3";
 const MAX_STREAMS: u64 = 100;
-const MAX_DATA: u32 = 1 << 20;
+const MAX_DATA: u32 = 1 << 30;
 
 #[derive(Clone)]
 pub struct ReverseServer;
@@ -31,6 +31,7 @@ impl ReverseServer {
         let localhost = ArcLocalHost::new(bind.port());
         localhost.init_network().await;
         // 初始化路由器
+        tokio::time::sleep(Duration::from_secs(3)).await;
         let routers = init_routers(&servers, localhost.clone())?;
 
         // 创建并配置 QUIC 服务器
@@ -64,6 +65,7 @@ fn create_quic_server(
     servers: &[ServerConfig],
 ) -> Result<Arc<QuicServer>> {
     let params = create_server_params();
+    let disabled_keep_alive = HeartbeatConfig::disabled();
     let local_host = localhost.clone();
     let mut builder = QuicServer::builder()
         .with_supported_versions([1u32])
@@ -76,6 +78,7 @@ fn create_quic_server(
             }
         })
         .with_parameters(params)
+        .defer_idle_timeout(disabled_keep_alive)
         .enable_sni();
 
     // 添加服务器证书
@@ -170,9 +173,15 @@ async fn handle_request(
                     uri,
                     response_body.len()
                 );
-                stream.send_data(response_body).await?;
+                if let Err(e) = stream.send_data(response_body).await {
+                    warn!("send data error {:?}", e);
+                }
             }
-            stream.finish().await?;
+            info!("Reponse send data successfully.");
+            if let Err(e) = stream.finish().await {
+                warn!("finish error {:?}", e);
+            }
+            info!("Reponse finished successfully.");
         }
         Err(e) => {
             error!("Error handling request: {}", e);

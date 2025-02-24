@@ -5,7 +5,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
-use gm_quic::{ClientParameters, PROTO};
+use gm_quic::{ClientParameters, HeartbeatConfig};
 use h3_shim::QuicClient;
 use http::StatusCode;
 use http_body_util::{BodyExt, combinators::BoxBody};
@@ -164,18 +164,12 @@ async fn handler(
 async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
     let params = create_client_parameters();
     let tls_config = create_tls_config();
-
-    for bind in localhost.addresses() {
-        if let Some(iface) = localhost.iface(bind) {
-            let iface = Arc::new(Usc::new(iface).unwrap());
-            info!("insert iface {:?}", bind);
-            PROTO.add_interface(bind, iface);
-        }
-    }
-
+    let disable = HeartbeatConfig::disabled();
+    let binds = localhost.addresses();
     QuicClient::builder_with_tls(tls_config)
         .with_parameters(params)
         .reuse_interfaces()
+        .with_keylog(true)
         // .reuse_connection()
         .with_iface_binder(move |addr| {
             if let Some(iface) = localhost.iface(addr) {
@@ -184,6 +178,9 @@ async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
                 Ok(Arc::new(Usc::bind(addr)?))
             }
         })
+        .defer_idle_timeout(disable)
+        .bind(&binds[..])
+        .unwrap()
         .build()
 }
 
@@ -216,10 +213,10 @@ async fn create_quic_conn(
         let conn = quic_client
             .connect(host, socket, pathway)
             .map_err(|e| format!("QUIC connect error: {:?}", e))?;
-
         localhost.add_direct_address(conn.clone()).await;
+
         // HTTP/3 客户端
-        let gm_quic_conn = h3_shim::QuicConnection::new(conn).await;
+        let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
         let result = h3::client::new(gm_quic_conn).await;
         match result {
             Ok(r) => return Ok(r),
@@ -287,10 +284,10 @@ fn create_client_parameters() -> ClientParameters {
     let mut params = ClientParameters::default();
     params.set_initial_max_streams_bidi(100u32.into());
     params.set_initial_max_streams_uni(100u32.into());
-    params.set_initial_max_data((1u32 << 20).into());
-    params.set_initial_max_stream_data_uni((1u32 << 20).into());
-    params.set_initial_max_stream_data_bidi_local((1u32 << 20).into());
-    params.set_initial_max_stream_data_bidi_remote((1u32 << 20).into());
+    params.set_initial_max_data((1u32 << 30).into());
+    params.set_initial_max_stream_data_uni((1u32 << 30).into());
+    params.set_initial_max_stream_data_bidi_local((1u32 << 30).into());
+    params.set_initial_max_stream_data_bidi_remote((1u32 << 30).into());
     params
 }
 

@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use gm_quic::{Connection, Endpoint, Pathway, Socket};
+use gm_quic::{Connection, EndpointAddr, Link, Pathway};
 use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
@@ -92,7 +92,7 @@ impl ArcLocalHost {
     }
 
     // TODO: remote 可能是直连
-    pub async fn match_pathway(&self, remote: Endpoint) -> Option<(Pathway, Socket)> {
+    pub async fn match_pathway(&self, remote: EndpointAddr) -> Option<(Pathway, Link)> {
         let is_v4 = remote.is_ipv4();
         let ret = self
             .0
@@ -100,22 +100,22 @@ impl ArcLocalHost {
             .iter()
             .find(|item| item.key().is_ipv4() == is_v4)?;
         let registry = ret.value();
-        let local = Endpoint::Relay {
+        let local = EndpointAddr::Agent {
             agent: registry.agent(),
             outer: registry.outer_addr().await.unwrap(),
         };
         let pathway = Pathway::new(local, remote);
-        let socket = Socket::new(*ret.key(), *remote);
+        let socket = Link::new(*ret.key(), *remote);
         Some((pathway, socket))
     }
 
-    pub async fn relay_ep(&self) -> Vec<Endpoint> {
+    pub async fn relay_ep(&self) -> Vec<EndpointAddr> {
         let mut eps = Vec::new();
         for item in self.0.registrys.iter() {
             let registry = item.value();
             let agent = registry.agent();
             if let Ok(outer) = registry.outer_addr().await {
-                eps.push(Endpoint::Relay { agent, outer });
+                eps.push(EndpointAddr::Agent { agent, outer });
             } else {
                 warn!("get outer error, bind {} ", registry.bind_addr());
             }
@@ -202,18 +202,21 @@ impl ArcLocalHost {
 
         let interfaces = pnet::datalink::interfaces();
         tracing::trace!("all interfaces {:?}", interfaces);
+        let mut has_v6 = false;
         for iface in interfaces {
             if iface.is_up() && !iface.is_loopback() {
                 for ip in iface.ips {
                     if let IpAddr::V6(v6_ip) = ip.ip() {
                         // skip link-local addresses
-                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 {
+                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 && !has_v6{
                             let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
                             info!(
                                 "scan_device found address {} for interface {}",
                                 socket_addr, iface.name
                             );
                             address_map.insert(socket_addr, iface.name.clone());
+                            // TODO: 多个 v6 地址直连可能会有问题？
+                            has_v6 = true;
                         }
                     } else {
                         let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
