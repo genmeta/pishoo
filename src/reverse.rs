@@ -17,7 +17,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::{
-    dns::{AGENT, DNS_SERVER},
     error::{CustomError, Result},
     localhost::ArcLocalHost,
     parse::{router::Router, rule::Rule, server::ServerConfig},
@@ -26,7 +25,7 @@ use crate::{
 // 协议配置常量
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
-const MAX_DATA: u32 = 1 << 20; // 最大数据限制 (1MB)
+const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 
 /// 反向代理服务器主体结构
 #[derive(Clone)]
@@ -122,9 +121,6 @@ async fn handle_connections(
     while let Ok((conn, pathway)) = quic_server.accept().await {
         debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
         localhost.add_direct_address(conn.clone()).await;
-        let mut h3_conn =
-            h3::server::Connection::new(h3_shim::QuicConnection::new(conn).await).await?;
-        let routers = routers.clone();
 
         // 将QUIC连接包装为H3 QUIC连接
         let h3_quic_conn = h3_shim::QuicConnection::new(conn).await;

@@ -77,7 +77,7 @@ pub async fn dns_publish(
 }
 
 
-fn dns_serialize(ep: &Endpoint) -> String {
+fn dns_serialize(ep: &EndpointAddr) -> String {
     match ep {
         EndpointAddr::Agent { agent, outer } => format!("{}-{}", agent, outer),
         EndpointAddr::Direct { addr } => addr.to_string(),
@@ -121,37 +121,37 @@ mod tests {
             outer: "127.0.0.1:5678".parse().unwrap(),
         };
 
-        dns_publish("relay.example.com", &ep, DNS_SERVER.parse().unwrap())
+        dns_publish("relay.example.com", &[ep], DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
 
         let endpoint = dns_resolve("relay.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        assert_eq!(endpoint_addr, [ep]);
+        assert_eq!(endpoint, [ep]);
 
         let ep = EndpointAddr::Direct {
             addr: "127.0.0.1:9000".parse().unwrap(),
         };
 
-        dns_publish("direct.example.com", &ep, DNS_SERVER.parse().unwrap())
+        dns_publish("direct.example.com", &[ep], DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
 
         let endpoint = dns_resolve("direct.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        assert_eq!(endpoint_addr, [ep]);
+        assert_eq!(endpoint, [ep]);
 
         let ep2 = EndpointAddr::Agent {
             agent: "127.0.0.1:1235".parse().unwrap(),
             outer: "127.0.0.1:5679".parse().unwrap(),
         };
 
-        report_host("vec.example.com", &[ep, ep2], DNS_SERVER.parse().unwrap())
+        dns_publish("vec.example.com", &[ep, ep2], DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
-        let endpoint_addr = resolve_dns("vec.example.com", DNS_SERVER.parse().unwrap())
+        let endpoint_addr = dns_resolve("vec.example.com", DNS_SERVER.parse().unwrap())
             .await
             .unwrap();
         assert_eq!(endpoint_addr, [ep, ep2]);

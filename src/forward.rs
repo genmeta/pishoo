@@ -14,17 +14,19 @@ use hyper::{
 };
 use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
-use tokio::net::TcpListener;
-use tracing::{error, info, trace, warn};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tracing::{error, info, warn};
 
 use crate::{
-    dns::{DNS_SERVER, resolve_dns},
+    dns::{dns_resolve, DNS_SERVER},
     localhost::ArcLocalHost,
-    util::body::{empty, full},
 };
 
 static ALPN: &[u8] = b"h3";
 pub static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
+const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
+const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
 
 // 类型别名简化
 type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper::Error>>>>;
@@ -68,9 +70,9 @@ impl ForwardServer {
                             let localhost = localhost.clone();
                             async move {
                                 if is_connect {
-                                    handler_connect(quic_client, localhost, req).await
+                                    handle_connect(quic_client, localhost, req).await
                                 } else {
-                                    handler(quic_client, localhost, req).await
+                                    handle_http(quic_client, localhost, req).await
                                 }
                             }
                             .boxed()
@@ -117,7 +119,7 @@ async fn handle_connect(
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
                 let service =
-                    service_fn(move |req| handler(quic_client.clone(), localhost.clone(), req));
+                    service_fn(move |req| handle_http(quic_client.clone(), localhost.clone(), req));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -150,7 +152,7 @@ async fn handle_http(
     };
 
     // 创建 QUIC 连接
-    let (_h3_conn, h3_request) = match create_quic_conn(quic_client, localhost, &host).await {
+    let (mut h3_conn, h3_request) = match create_quic_connection(quic_client, localhost, &host).await {
         Ok(conn) => conn,
         Err(msg) => return Ok(create_error_response(msg)),
     };
@@ -188,8 +190,8 @@ async fn handle_http(
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
 async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
-    let params = create_client_parameters();
-    let tls_config = create_tls_config();
+    let params = configure_quic_parameters();
+    let tls_config = configure_tls();
     let disable = HeartbeatConfig::disabled();
     let binds = localhost.addresses();
     QuicClient::builder_with_tls(tls_config)
@@ -217,20 +219,18 @@ async fn create_quic_connection(
     host: &str,
 ) -> Result<(H3Conn, H3SendRequest), String> {
     // DNS 解析
-    let remotes = resolve_dns(host, DNS_SERVER.parse().unwrap())
+    let remotes = dns_resolve(host, DNS_SERVER.parse().unwrap())
         .await
         .map_err(|e| format!("DNS resolve error: {}", e))?;
     info!("[DNS]: resolved: {} -> {:?}", host, remotes);
 
-    const RETRY: usize = 3;
-
-    for i in 0..RETRY {
+    for retry in 0..MAX_RETRY_COUNT {
         // TODO: server 有多个地址，按照优先级选择，重试考虑换个地址
-        let index = i.min(remotes.len() - 1);
+        let index = retry.min(remotes.len() - 1);
         let Some((pathway, socket)) = localhost.match_pathway(remotes[index]).await else {
             warn!(
                 "[Forward]: no pathway found for {:?} retry: {}",
-                remotes[index], i
+                remotes[index], retry
             );
             continue;
         };
@@ -253,8 +253,7 @@ async fn create_quic_connection(
                 );
                 if retry == MAX_RETRY_COUNT - 1 {
                     // 最终失败时尝试刷新网络信息
-                    let _ = local_host.registry.detect_outer_addr().await;
-                    let _ = local_host.registry.detect_nat_type().await;
+                    let _ =localhost.resume_network().await;
                     return Err(format!("H3 client creation failed: {}", e));
                 }
             }
@@ -341,7 +340,7 @@ async fn proxy_http_request(
 /// 配置 QUIC 协议参数
 fn configure_quic_parameters() -> ClientParameters {
     let mut params = ClientParameters::default();
-    let window_size = (1u32 << 20).into(); // 1MB 窗口大小
+    let window_size = (1u32 << 30).into(); // 1MB 窗口大小
 
     // 流控制参数
     params.set_initial_max_streams_bidi(100u32.into());
