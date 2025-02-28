@@ -12,7 +12,7 @@ use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
 
-use crate::dns::{DNS_SERVER, report_host};
+use crate::dns::{DNS_SERVER, dns_publish};
 
 pub const AGENT: &str = "1.12.74.4:20002";
 // todo: agent_v6
@@ -155,7 +155,7 @@ impl ArcLocalHost {
                     let eps = localhost.relay_ep().await;
                     if !eps.is_empty() {
                         for host in &hosts {
-                            if let Err(e) = report_host(host, &eps, dns_server).await {
+                            if let Err(e) = dns_publish(host, &eps, dns_server).await {
                                 warn!("Failed to report host {}: {}", host, e);
                             }
                         }
