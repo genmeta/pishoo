@@ -18,3 +18,4 @@ tarpaulin-report.html
 .vscode/*
 .idea/
 *.log
+Cargo.lock
