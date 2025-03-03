@@ -349,7 +349,7 @@ fn configure_quic_parameters() -> ClientParameters {
     params.set_initial_max_stream_data_uni(window_size);
     params.set_initial_max_stream_data_bidi_local(window_size);
     params.set_initial_max_stream_data_bidi_remote(window_size);
-
+    params.set_active_connection_id_limit(10);
     params
 }
 

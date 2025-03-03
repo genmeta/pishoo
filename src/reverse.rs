@@ -108,6 +108,7 @@ fn create_server_params() -> gm_quic::ServerParameters {
     params.set_initial_max_stream_data_uni(MAX_DATA.into());
     params.set_initial_max_stream_data_bidi_local(MAX_DATA.into());
     params.set_initial_max_stream_data_bidi_remote(MAX_DATA.into());
+    params.set_active_connection_id_limit(10); // 允许多路径同时打洞
     params
 }
 

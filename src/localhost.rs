@@ -8,6 +8,7 @@ use std::{
 
 use dashmap::DashMap;
 use gm_quic::{Connection, EndpointAddr, Link, Pathway};
+use qconnection::traversal::NatType;
 use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
@@ -124,12 +125,16 @@ impl ArcLocalHost {
     }
 
     pub async fn add_direct_address(&self, conn: Arc<Connection>) {
+        for addr in self.addresses() {
+            let _ = conn.add_address(addr, addr, 0, NatType::RestrictedCone);
+            info!("add direct loacl addr {}", addr)
+        }
         for item in self.0.registrys.iter() {
             let registry = item.value();
             let bind = registry.bind_addr();
             if let Ok(outer) = registry.outer_addr().await {
                 if let Ok(nat_type) = registry.nat_type().await {
-                    info!("add direct addr {} {} {:?}", bind, outer, nat_type);
+                    info!("add direct addr {} outer {} {:?}", bind, outer, nat_type);
                     let _ = conn.add_address(bind, outer, 1, nat_type);
                 }
             }
@@ -202,21 +207,18 @@ impl ArcLocalHost {
 
         let interfaces = pnet::datalink::interfaces();
         tracing::trace!("all interfaces {:?}", interfaces);
-        let mut has_v6 = false;
         for iface in interfaces {
             if iface.is_up() && !iface.is_loopback() {
                 for ip in iface.ips {
                     if let IpAddr::V6(v6_ip) = ip.ip() {
                         // skip link-local addresses
-                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 && !has_v6{
+                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80{
                             let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
                             info!(
                                 "scan_device found address {} for interface {}",
                                 socket_addr, iface.name
                             );
                             address_map.insert(socket_addr, iface.name.clone());
-                            // TODO: 多个 v6 地址直连可能会有问题？
-                            has_v6 = true;
                         }
                     } else {
                         let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
