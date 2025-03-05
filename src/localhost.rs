@@ -16,7 +16,6 @@ use tracing::{info, warn};
 use crate::dns::{DNS_SERVER, dns_publish};
 
 pub const AGENT: &str = "1.12.74.4:20002";
-// todo: agent_v6
 pub const AGENT_V6: &str = "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20002";
 
 struct LocalHost {
@@ -124,21 +123,24 @@ impl ArcLocalHost {
         eps
     }
 
-    pub async fn add_direct_address(&self, conn: Arc<Connection>) {
-        for addr in self.addresses() {
-            let _ = conn.add_address(addr, addr, 0, NatType::RestrictedCone);
-            info!("add direct loacl addr {}", addr)
-        }
-        for item in self.0.registrys.iter() {
-            let registry = item.value();
-            let bind = registry.bind_addr();
-            if let Ok(outer) = registry.outer_addr().await {
-                if let Ok(nat_type) = registry.nat_type().await {
-                    info!("add direct addr {} outer {} {:?}", bind, outer, nat_type);
-                    let _ = conn.add_address(bind, outer, 1, nat_type);
+    pub fn add_direct_address(&self, conn: Arc<Connection>) {
+        let localhost = self.clone();
+        tokio::spawn(async move {
+            for addr in localhost.addresses() {
+                let _ = conn.add_address(addr, addr, 0, NatType::RestrictedCone);
+                info!("add direct loacl addr {}", addr)
+            }
+            for item in localhost.0.registrys.iter() {
+                let registry = item.value();
+                let bind = registry.bind_addr();
+                if let Ok(outer) = registry.outer_addr().await {
+                    if let Ok(nat_type) = registry.nat_type().await {
+                        info!("add direct addr {} outer {} {:?}", bind, outer, nat_type);
+                        let _ = conn.add_address(bind, outer, 1, nat_type);
+                    }
                 }
             }
-        }
+        });
     }
 
     pub fn iface(&self, bind: SocketAddr) -> Option<ForwardInterface> {
@@ -212,7 +214,7 @@ impl ArcLocalHost {
                 for ip in iface.ips {
                     if let IpAddr::V6(v6_ip) = ip.ip() {
                         // skip link-local addresses
-                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80{
+                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 {
                             let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
                             info!(
                                 "scan_device found address {} for interface {}",
