@@ -1,8 +1,8 @@
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
-use gm_quic::{HeartbeatConfig, prelude::handy::Usc};
 use futures::StreamExt;
+use gm_quic::{HeartbeatConfig, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, QuicServer, RecvStream};
 use http::{Request, Response, StatusCode, Uri, Version};
@@ -121,7 +121,7 @@ async fn handle_connections(
     // 持续接受新连接
     while let Ok((conn, pathway)) = quic_server.accept().await {
         debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
-        localhost.add_direct_address(conn.clone()).await;
+        localhost.add_direct_address(conn.clone());
 
         // 将QUIC连接包装为H3 QUIC连接
         let h3_quic_conn = h3_shim::QuicConnection::new(conn).await;
@@ -202,6 +202,7 @@ async fn handle_request(
             while let Some(Ok(chunk)) = body_stream.next().await {
                 sender.send_data(chunk).await?;
             }
+            info!("sent response body completely");
         }
         Err(e) => {
             error!("[Response handling] Proxy error | detail: {}", e);

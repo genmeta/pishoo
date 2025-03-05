@@ -15,11 +15,11 @@ use hyper::{
 use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tracing::{error, info, warn};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tracing::{error, info, trace, warn};
 
 use crate::{
-    dns::{dns_resolve, DNS_SERVER},
+    dns::{DNS_SERVER, dns_resolve},
     localhost::ArcLocalHost,
 };
 
@@ -152,10 +152,11 @@ async fn handle_http(
     };
 
     // 创建 QUIC 连接
-    let (mut h3_conn, h3_request) = match create_quic_connection(quic_client, localhost, &host).await {
-        Ok(conn) => conn,
-        Err(msg) => return Ok(create_error_response(msg)),
-    };
+    let (mut h3_conn, h3_request) =
+        match create_quic_connection(quic_client, localhost, &host).await {
+            Ok(conn) => conn,
+            Err(msg) => return Ok(create_error_response(msg)),
+        };
     info!("[Forward][{}]: quic connection established", uri);
 
     tokio::spawn({
@@ -239,7 +240,7 @@ async fn create_quic_connection(
         let conn = quic_client
             .connect(host, socket, pathway)
             .map_err(|e| format!("QUIC connect error: {:?}", e))?;
-        localhost.add_direct_address(conn.clone()).await;
+        localhost.add_direct_address(conn.clone());
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
@@ -253,7 +254,7 @@ async fn create_quic_connection(
                 );
                 if retry == MAX_RETRY_COUNT - 1 {
                     // 最终失败时尝试刷新网络信息
-                    let _ =localhost.resume_network().await;
+                    let _ = localhost.resume_network().await;
                     return Err(format!("H3 client creation failed: {}", e));
                 }
             }
@@ -312,7 +313,7 @@ async fn proxy_http_request(
                     let bytes = buf.copy_to_bytes(buf.remaining());
                     match tx.send(Ok(Frame::data(bytes))).await {
                         Ok(()) => {
-                            info!("[Forward][{}] Sending response data frame", uri);
+                            trace!("[Forward][{}] Sending response data frame", uri);
                         }
                         Err(_) => {
                             error!("[Proxy][{}] Failed to send response", uri);

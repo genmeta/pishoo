@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration, vec};
 
 use gm_quic::EndpointAddr;
 use tokio::{net::UdpSocket, time::timeout};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // TODO: 使用配置的 DNS 服务器地址
 pub const DNS_SERVER: &str = "1.12.74.4:5300";
@@ -18,17 +18,26 @@ pub async fn dns_resolve(
     socket.send_to(query.as_bytes(), dns_server_addr).await?;
 
     let mut buffer = vec![0u8; 1024];
-    match timeout(Duration::from_secs(1), socket.recv_from(&mut buffer)).await? {
-        Ok((len, _src)) => {
-            buffer.truncate(len);
-            let response = std::str::from_utf8(&buffer).unwrap();
-            parse_endpoint_addrs(response)
+    const RETRY: i32 = 3;
+
+    for i in 0..RETRY {
+        match timeout(Duration::from_secs(1), socket.recv_from(&mut buffer)).await? {
+            Ok((len, _src)) => {
+                buffer.truncate(len);
+                let response = std::str::from_utf8(&buffer).unwrap();
+                return parse_endpoint_addrs(response);
+            }
+            Err(_) => {
+                warn!("DNS query timeout, retry {}/{}", i + 1, RETRY);
+                continue;
+            }
         }
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "DNS query timed out",
-        )),
     }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "DNS query failed after 3 retries",
+    ))
 }
 
 fn parse_endpoint_addrs(response: &str) -> std::io::Result<Vec<EndpointAddr>> {
@@ -75,7 +84,6 @@ pub async fn dns_publish(
     socket.send_to(report.as_bytes(), dns_server_addr).await?;
     Ok(())
 }
-
 
 fn dns_serialize(ep: &EndpointAddr) -> String {
     match ep {
