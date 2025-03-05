@@ -61,11 +61,11 @@ name = "pishoo"
 path = "examples/pishoo.rs"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/padding" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/padding" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/padding" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/padding" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/padding" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/upstream" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
