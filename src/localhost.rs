@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -13,14 +12,13 @@ use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
 
-use crate::dns::dns_publish;
-
 pub const AGENT: &str = "1.12.74.4:20002";
 pub const AGENT_V6: &str = "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20002";
 
 struct LocalHost {
     port: u16,
     registrys: DashMap<SocketAddr, AddressRegisty>,
+    bind_address: DashMap<SocketAddr, String>,
 }
 
 impl LocalHost {
@@ -28,6 +26,7 @@ impl LocalHost {
         Self {
             port,
             registrys: DashMap::new(),
+            bind_address: DashMap::new(),
         }
     }
 }
@@ -41,9 +40,10 @@ impl ArcLocalHost {
     }
 
     pub async fn init_network(&self) {
-        let addr_map = self.scan_device();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        for (addr, name) in addr_map {
+        self.scan_device();
+        for item in self.0.bind_address.iter() {
+            let addr = *item.key();
+            let name = item.value().clone();
             let agent: SocketAddr = match addr.is_ipv4() {
                 true => AGENT.parse().unwrap(),
                 false => AGENT_V6.parse().unwrap(),
@@ -62,20 +62,18 @@ impl ArcLocalHost {
                 warn!("init_network failed for device {}", name);
             }
 
+            self.0.registrys.insert(addr, registry.clone());
             tokio::spawn({
-                let tx = tx.clone();
                 let localhost = self.clone();
-                let registry = registry.clone();
                 async move {
                     if let Ok(outer) = registry.detect_outer_addr().await {
                         info!(
                             "init_network success for outer addr {:?} local {} device {}",
                             outer, addr, name
                         );
-                        localhost.0.registrys.insert(addr, registry.clone());
-                        let _ = tx.send(true).await;
                     } else {
                         warn!("init_network failed for addr {:?} {}", addr, name);
+                        localhost.0.registrys.remove(&addr);
                         return;
                     }
                     let nat_type = registry.detect_nat_type().await;
@@ -87,7 +85,6 @@ impl ArcLocalHost {
                 }
             });
         }
-        rx.recv().await;
         info!("LocalHost init network done.");
     }
 
@@ -109,8 +106,8 @@ impl ArcLocalHost {
         Some((pathway, socket))
     }
 
-    pub async fn relay_ep(&self) -> Vec<EndpointAddr> {
-        let mut eps = Vec::new();
+    pub async fn relay_addr(&self) -> Vec<EndpointAddr> {
+        let mut eps: Vec<EndpointAddr> = Vec::new();
         for item in self.0.registrys.iter() {
             let registry = item.value();
             let agent = registry.agent();
@@ -150,26 +147,7 @@ impl ArcLocalHost {
     }
 
     pub fn addresses(&self) -> Vec<SocketAddr> {
-        self.0.registrys.iter().map(|item| *item.key()).collect()
-    }
-
-    pub fn report_dns(&self, hosts: Vec<String>, dns_server: SocketAddr) {
-        tokio::spawn({
-            let localhost = self.clone();
-            async move {
-                loop {
-                    let eps = localhost.relay_ep().await;
-                    if !eps.is_empty() {
-                        for host in &hosts {
-                            if let Err(e) = dns_publish(host, &eps, dns_server).await {
-                                warn!("Failed to report host {}: {}", host, e);
-                            }
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                }
-            }
-        });
+        self.0.bind_address.iter().map(|item| *item.key()).collect()
     }
 
     pub async fn resume_network(&self) -> io::Result<()> {
@@ -191,23 +169,17 @@ impl ArcLocalHost {
     }
 
     #[cfg(target_os = "windows")]
-    fn scan_device(&self) -> HashMap<SocketAddr, String> {
+    fn scan_device(&self) {
         use std::net::{Ipv4Addr, Ipv6Addr};
         let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.0.port);
         let addr6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.0.port);
-        let mut address_map = HashMap::new();
-
-        address_map.insert(addr4, "eth0".to_string());
-        address_map.insert(addr6, "eth0".to_string());
-        address_map
+        self.0.bind_address.insert(addr4, "eth0".to_string());
+        self.0.bind_address.insert(addr6, "eth0".to_string());
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn scan_device(&self) -> HashMap<SocketAddr, String> {
-        let mut address_map = HashMap::new();
-
+    fn scan_device(&self) {
         let interfaces = pnet::datalink::interfaces();
-        tracing::trace!("all interfaces {:?}", interfaces);
         for iface in interfaces {
             if iface.is_up() && !iface.is_loopback() {
                 if let Some(ip) = iface.ips.iter().filter(|ip| ip.is_ipv4()).next_back() {
@@ -216,7 +188,7 @@ impl ArcLocalHost {
                         "scan_device found address {} for interface {}",
                         socket_addr, iface.name
                     );
-                    address_map.insert(socket_addr, iface.name.clone());
+                    self.0.bind_address.insert(socket_addr, iface.name.clone());
                 }
 
                 if let Some(ip) = iface
@@ -238,10 +210,9 @@ impl ArcLocalHost {
                         "scan_device found address {} for interface {}",
                         socket_addr, iface.name
                     );
-                    address_map.insert(socket_addr, iface.name.clone());
+                    self.0.bind_address.insert(socket_addr, iface.name.clone());
                 }
             }
         }
-        address_map
     }
 }
