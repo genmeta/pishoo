@@ -27,6 +27,7 @@ rustls-webpki = "0.102.8"
 rustls-native-certs = "0.8"
 thiserror = "2"
 dashmap = "6"
+async-trait = "0.1.83"
 
 gm-quic = "0.1.0"
 h3-shim = "0.1.0"

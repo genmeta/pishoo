@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::StreamExt;
@@ -14,9 +14,10 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
+    dns::Dns,
     error::{CustomError, Result},
     localhost::ArcLocalHost,
     parse::{router::Router, rule::Rule, server::ServerConfig},
@@ -30,8 +31,6 @@ const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
     let localhost = ArcLocalHost::new(bind.port());
     localhost.init_network().await;
-    // 初始化路由器
-    tokio::time::sleep(Duration::from_secs(3)).await;
     let routers = init_routers(&servers, localhost.clone())?;
 
     // 创建并配置 QUIC 服务器
@@ -49,10 +48,8 @@ fn init_routers(
     let mut routers = HashMap::new();
     for server in servers {
         let router = Arc::new(server.router.clone());
-        localhost.report_dns(
-            server.server_name.clone(),
-            server.dns_server.expect("DNS server not set"),
-        );
+        let dns = Dns::new(server.dns_server.expect("DNS server not set"));
+        dns.spwan_publish(server.server_name.clone(), localhost.clone());
         for name in &server.server_name {
             routers.insert(name.to_string(), router.clone());
         }
@@ -74,8 +71,10 @@ fn create_quic_server(
         .without_cert_verifier() // 禁用证书验证
         .with_iface_binder(move |addr| {
             if let Some(iface) = local_host.iface(addr) {
+                warn!("bind addr {}", addr);
                 Ok(Arc::new(Usc::new(iface)?))
             } else {
+                warn!("bind addr error");
                 Ok(Arc::new(Usc::bind(addr)?))
             }
         })
@@ -93,7 +92,13 @@ fn create_quic_server(
     }
 
     let binds = localhost.addresses();
-    Ok(builder.with_alpns([ALPN.to_vec()]).listen(&*binds)?)
+    info!("binds {:?}", binds);
+    Ok(builder
+        .with_alpns([ALPN.to_vec()])
+        .listen(&*binds)
+        .inspect_err(|e| {
+            error!("listen err {:?}", e);
+        })?)
 }
 
 /// 创建QUIC服务器参数配置
@@ -106,6 +111,7 @@ fn create_server_params() -> gm_quic::ServerParameters {
     params.set_initial_max_stream_data_bidi_local(MAX_DATA.into());
     params.set_initial_max_stream_data_bidi_remote(MAX_DATA.into());
     params.set_active_connection_id_limit(10); // 允许多路径同时打洞
+    params.set_max_ack_delay(100);
     params
 }
 

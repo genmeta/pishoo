@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{error, info, trace, warn};
 
-use crate::{dns::dns_resolve, error::CustomError, localhost::ArcLocalHost};
+use crate::{Resolver, dns::Dns, error::CustomError, localhost::ArcLocalHost};
 
 static ALPN: &[u8] = b"h3";
 
@@ -228,7 +228,9 @@ async fn create_quic_connection(
     dns_server: SocketAddr,
 ) -> Result<(H3Conn, H3SendRequest), String> {
     // DNS 解析
-    let remotes = dns_resolve(host, dns_server)
+    let dns = Dns::new(dns_server);
+    let remotes = dns
+        .look_up(host)
         .await
         .map_err(|e| format!("DNS resolve error: {}", e))?;
     info!("[DNS]: resolved: {} -> {:?}", host, remotes);
@@ -359,6 +361,8 @@ fn configure_quic_parameters() -> ClientParameters {
     params.set_initial_max_stream_data_bidi_local(window_size);
     params.set_initial_max_stream_data_bidi_remote(window_size);
     params.set_active_connection_id_limit(10);
+    params.set_max_ack_delay(100);
+
     params
 }
 
