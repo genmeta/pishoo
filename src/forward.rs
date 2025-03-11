@@ -18,13 +18,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{error, info, trace, warn};
 
-use crate::{
-    dns::{DNS_SERVER, dns_resolve},
-    localhost::ArcLocalHost,
-};
+use crate::{dns::dns_resolve, error::CustomError, localhost::ArcLocalHost};
 
 static ALPN: &[u8] = b"h3";
-pub static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
+
+static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
+
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
 
@@ -33,68 +32,73 @@ type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
-pub struct ForwardServer;
+/// 启动 TCP 监听并处理传入连接
+pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Result<()> {
+    let listener = TcpListener::bind(addr).await.map_err(|e| {
+        error!("TCP listener binding failed: {:?}", e);
+        e
+    })?;
+    info!("Listening on: http://{}", addr);
 
-impl ForwardServer {
-    /// 启动 TCP 监听并处理传入连接
-    pub async fn serve(addr: SocketAddr) -> crate::error::Result<()> {
-        let listener = TcpListener::bind(addr).await.map_err(|e| {
-            error!("TCP listener binding failed: {:?}", e);
-            e
-        })?;
-        info!("Listening on: http://{}", addr);
+    let localhost = ArcLocalHost::new(addr.port());
+    LOCALHOST.get_or_init(|| localhost.clone());
+    localhost.init_network().await;
 
-        let localhost = ArcLocalHost::new(addr.port());
-        LOCALHOST.get_or_init(|| localhost.clone());
-        localhost.init_network().await;
+    let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
 
-        let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let io = TokioIo::new(stream);
+            let quic_client = quic_client.clone();
 
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let io = TokioIo::new(stream);
-                let quic_client = quic_client.clone();
-
-                tokio::task::spawn({
-                    let localhost = localhost.clone();
-                    async move {
-                        // 为每个连接创建服务处理器
-                        let service = service_fn(move |req| {
-                            let (_host, normal) = validate_host(&req).unwrap();
-                            if normal {
-                                return normal_proxy(req).boxed();
-                            }
-
-                            let is_connect = req.method() == "CONNECT";
-                            let quic_client = quic_client.clone();
-                            let localhost = localhost.clone();
-                            async move {
-                                if is_connect {
-                                    handle_connect(quic_client, localhost, req).await
-                                } else {
-                                    handle_http(quic_client, localhost, req).await
-                                }
-                            }
-                            .boxed()
-                        });
-
-                        // 启动 HTTP/1.1 服务
-                        if let Err(err) = http1::Builder::new()
-                            .preserve_header_case(true)
-                            .title_case_headers(true)
-                            .serve_connection(io, service)
-                            .with_upgrades()
-                            .await
-                        {
-                            error!("Connection handling failed: {err:?}");
+            tokio::task::spawn({
+                let localhost = localhost.clone();
+                async move {
+                    // 为每个连接创建服务处理器
+                    let service = service_fn(move |req| {
+                        let (_host, normal) = validate_host(&req).unwrap();
+                        if normal {
+                            return normal_proxy(req).boxed();
                         }
-                    }
-                });
-            }
-        });
 
-        Ok(())
-    }
+                        let is_connect = req.method() == "CONNECT";
+                        let quic_client = quic_client.clone();
+                        let localhost = localhost.clone();
+                        async move {
+                            if is_connect {
+                                handle_connect(quic_client, localhost, req, dns_server).await
+                            } else {
+                                handle_http(quic_client, localhost, req, dns_server).await
+                            }
+                        }
+                        .boxed()
+                    });
+
+                    // 启动 HTTP/1.1 服务
+                    if let Err(err) = http1::Builder::new()
+                        .preserve_header_case(true)
+                        .title_case_headers(true)
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await
+                    {
+                        error!("Connection handling failed: {err:?}");
+                    }
+                }
+            });
+        }
+    });
+
+    Ok(())
+}
+
+pub async fn resume() -> crate::error::Result<()> {
+    info!("Resuming network");
+    let localhost = LOCALHOST
+        .get()
+        .ok_or(CustomError::LocalhostNotInitialized)?;
+    localhost.resume_network().await?;
+    Ok(())
 }
 
 /// 处理 CONNECT 隧道请求
@@ -102,6 +106,7 @@ async fn handle_connect(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
+    dns_server: SocketAddr,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
 
@@ -118,8 +123,9 @@ async fn handle_connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
-                let service =
-                    service_fn(move |req| handle_http(quic_client.clone(), localhost.clone(), req));
+                let service = service_fn(move |req| {
+                    handle_http(quic_client.clone(), localhost.clone(), req, dns_server)
+                });
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -141,6 +147,7 @@ async fn handle_http(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
+    dns_server: SocketAddr,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
     info!("[Forward] Request: {}", uri);
@@ -153,7 +160,7 @@ async fn handle_http(
 
     // 创建 QUIC 连接
     let (mut h3_conn, h3_request) =
-        match create_quic_connection(quic_client, localhost, &host).await {
+        match create_quic_connection(quic_client, localhost, &host, dns_server).await {
             Ok(conn) => conn,
             Err(msg) => return Ok(create_error_response(msg)),
         };
@@ -218,9 +225,10 @@ async fn create_quic_connection(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     host: &str,
+    dns_server: SocketAddr,
 ) -> Result<(H3Conn, H3SendRequest), String> {
     // DNS 解析
-    let remotes = dns_resolve(host, DNS_SERVER.parse().unwrap())
+    let remotes = dns_resolve(host, dns_server)
         .await
         .map_err(|e| format!("DNS resolve error: {}", e))?;
     info!("[DNS]: resolved: {} -> {:?}", host, remotes);

@@ -1,4 +1,4 @@
-use gateway::ForwardServer;
+use gateway::forward;
 use tracing::info;
 
 #[tokio::main]
@@ -14,7 +14,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化TLS
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    ForwardServer::serve("127.0.0.1:5379".parse().unwrap()).await?;
+    forward::serve(
+        "127.0.0.1:5379".parse().unwrap(),
+        "1.12.74.4:5300".parse().unwrap(),
+    )
+    .await?;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

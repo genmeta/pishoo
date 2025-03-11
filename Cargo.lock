@@ -155,9 +155,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.10.0"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f61dac84819c6588b558454b194026eb1f09c293b9036ae9b159e74e73ab6cf9"
+checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
@@ -521,9 +521,7 @@ dependencies = [
  "clap",
  "dashmap",
  "derive_builder",
- "fastrand",
  "futures",
- "futures-util",
  "gm-quic",
  "h3",
  "h3-shim",
@@ -608,7 +606,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "dashmap",
@@ -645,7 +643,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "futures",
@@ -1287,7 +1285,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1306,7 +1304,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "qbase",
  "qlog",
@@ -1319,7 +1317,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1340,7 +1338,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1358,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "qlog"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1376,7 +1374,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1394,7 +1392,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1420,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1435,7 +1433,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fpadding#3091bf6b8bcf00b947f86f708eb7d4433e003e0b"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fupstream#da39673a5d21a2247f1976f790900e280b7c9d5a"
 dependencies = [
  "bytes",
  "futures",

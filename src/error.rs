@@ -44,6 +44,8 @@ pub enum CustomError {
     InvalidConfig(String),
     #[error("missing field: `{0}`")]
     MissingField(String),
+    #[error("Localhost not initialized")]
+    LocalhostNotInitialized,
     #[error("unknown data store error")]
     Unknown,
 }

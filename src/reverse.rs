@@ -27,24 +27,18 @@ const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
 const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 
-/// 反向代理服务器主体结构
-#[derive(Clone)]
-pub struct ReverseServer;
+pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
+    let localhost = ArcLocalHost::new(bind.port());
+    localhost.init_network().await;
+    // 初始化路由器
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let routers = init_routers(&servers, localhost.clone())?;
 
-impl ReverseServer {
-    pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
-        let localhost = ArcLocalHost::new(bind.port());
-        localhost.init_network().await;
-        // 初始化路由器
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let routers = init_routers(&servers, localhost.clone())?;
+    // 创建并配置 QUIC 服务器
+    let quic_server = create_quic_server(localhost.clone(), &servers)?;
 
-        // 创建并配置 QUIC 服务器
-        let quic_server = create_quic_server(localhost.clone(), &servers)?;
-
-        // 处理连接
-        handle_connections(quic_server, localhost, routers).await
-    }
+    // 处理连接
+    handle_connections(quic_server, localhost, routers).await
 }
 
 /// 初始化路由器，根据服务器配置创建路由表

@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, command};
 use futures::future::join_all;
 use gateway::{
-    ForwardServer, ReverseServer,
+    forward,
     parse::gateway::{Gateway, Record, parse_gateway},
+    reverse,
 };
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
@@ -88,10 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
                     Record::Reverse(servers) => {
-                        ReverseServer::serve(bind, servers).await?;
+                        reverse::serve(bind, servers).await?;
                     }
                     Record::Forward(_server) => {
-                        ForwardServer::serve(bind).await?;
+                        forward::serve(bind, "1.12.74.4:5300".parse().unwrap()).await?;
                     }
                 }
 
