@@ -49,7 +49,10 @@ fn init_routers(
     let mut routers = HashMap::new();
     for server in servers {
         let router = Arc::new(server.router.clone());
-        localhost.report_dns(server.server_name.clone());
+        localhost.report_dns(
+            server.server_name.clone(),
+            server.dns_server.expect("DNS server not set"),
+        );
         for name in &server.server_name {
             routers.insert(name.to_string(), router.clone());
         }

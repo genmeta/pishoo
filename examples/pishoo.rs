@@ -91,8 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Record::Reverse(servers) => {
                         reverse::serve(bind, servers).await?;
                     }
-                    Record::Forward(_server) => {
-                        forward::serve(bind, "1.12.74.4:5300".parse().unwrap()).await?;
+                    Record::Forward(server) => {
+                        forward::serve(server).await?;
                     }
                 }
 

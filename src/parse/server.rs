@@ -23,11 +23,15 @@ pub enum ServerKind {
 pub struct ServerConfig {
     pub kind: ServerKind,
     pub listen: SocketAddr,
+    #[builder(default = "Vec::new()")]
     pub server_name: Vec<String>,
     #[builder(default = "false")]
     pub reuse_port: bool,
-    pub dns_server: SocketAddr,
+    #[builder(default = "None")]
+    pub dns_server: Option<SocketAddr>,
+    #[builder(default)]
     pub cert: String,
+    #[builder(default)]
     pub key: String,
     #[builder(default)]
     pub router: Router,
@@ -76,13 +80,13 @@ impl ServerConfig {
                     builder.listen(listen).kind(kind)
                 }
                 "server_name" => builder.server_name(directive.args),
-                "dns_server" => builder.dns_server(
+                "dns_server" => builder.dns_server(Some(
                     directive
                         .args
                         .first()
                         .ok_or(CustomError::MissingField("dns_server".to_string()))?
                         .parse()?,
-                ),
+                )),
                 "ssl_certificate" => builder.cert(parse_path(directive)?),
                 "ssl_certificate_key" => builder.key(parse_path(directive)?),
                 "allow" => builder.allow(directive.args),
@@ -108,7 +112,7 @@ impl ServerConfig {
                 return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
             }
             if builder.dns_server.is_none() {
-                return Err(CustomError::MissingField("resolver".to_string()));
+                return Err(CustomError::MissingField("dns server".to_string()));
             }
         }
 

@@ -18,7 +18,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{error, info, trace, warn};
 
-use crate::{dns::dns_resolve, error::CustomError, localhost::ArcLocalHost};
+use crate::{
+    dns::dns_resolve,
+    error::CustomError,
+    localhost::ArcLocalHost,
+    parse::{router::Router, server::ServerConfig},
+};
 
 static ALPN: &[u8] = b"h3";
 
@@ -33,18 +38,20 @@ type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 /// 启动 TCP 监听并处理传入连接
-pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Result<()> {
-    let listener = TcpListener::bind(addr).await.map_err(|e| {
+pub async fn serve(server: ServerConfig) -> crate::error::Result<()> {
+    let listener = TcpListener::bind(server.listen).await.map_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
         e
     })?;
-    info!("Listening on: http://{}", addr);
+    info!("Listening on: http://{}", server.listen);
 
-    let localhost = ArcLocalHost::new(addr.port());
+    let localhost = ArcLocalHost::new(server.listen.port());
     LOCALHOST.get_or_init(|| localhost.clone());
     localhost.init_network().await;
 
     let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
+    let router = server.router;
+    let router = Arc::new(router);
 
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
@@ -53,6 +60,7 @@ pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Re
 
             tokio::task::spawn({
                 let localhost = localhost.clone();
+                let router = router.clone();
                 async move {
                     // 为每个连接创建服务处理器
                     let service = service_fn(move |req| {
@@ -64,11 +72,12 @@ pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Re
                         let is_connect = req.method() == "CONNECT";
                         let quic_client = quic_client.clone();
                         let localhost = localhost.clone();
+                        let router = router.clone();
                         async move {
                             if is_connect {
-                                handle_connect(quic_client, localhost, req, dns_server).await
+                                handle_connect(quic_client, localhost, req, router).await
                             } else {
-                                handle_http(quic_client, localhost, req, dns_server).await
+                                handle_http(quic_client, localhost, req, router).await
                             }
                         }
                         .boxed()
@@ -106,7 +115,7 @@ async fn handle_connect(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
-    dns_server: SocketAddr,
+    router: Arc<Router>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
 
@@ -124,7 +133,7 @@ async fn handle_connect(
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
                 let service = service_fn(move |req| {
-                    handle_http(quic_client.clone(), localhost.clone(), req, dns_server)
+                    handle_http(quic_client.clone(), localhost.clone(), req, router.clone())
                 });
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
@@ -147,7 +156,7 @@ async fn handle_http(
     quic_client: Arc<QuicClient>,
     localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
-    dns_server: SocketAddr,
+    router: Arc<Router>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
     info!("[Forward] Request: {}", uri);
@@ -157,6 +166,18 @@ async fn handle_http(
         Ok(host) => host,
         Err(reason) => return Ok(create_error_response(reason)),
     };
+
+    // 路由匹配
+    let (_pattern, rule) = match router.route(&host) {
+        Ok(rule) => rule,
+        Err(e) => {
+            warn!("[Forward] No rule matched for {}: {}", host, e);
+            return Ok(create_error_response("No rule matched".to_string()));
+        }
+    };
+
+    // 解析 DNS 服务器地址
+    let dns_server = rule.resolver.first().unwrap().parse().unwrap();
 
     // 创建 QUIC 连接
     let (mut h3_conn, h3_request) =
