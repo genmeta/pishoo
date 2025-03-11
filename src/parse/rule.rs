@@ -10,7 +10,6 @@ use crate::error::{CustomError, Result};
 #[derive(Default, Debug, Clone)]
 pub struct Rule {
     pub proxy_pass: String,
-    pub resolver: Vec<String>,
     pub proxy_set_header: Vec<(String, String)>,
     pub add_header: Vec<(String, String)>,
 }
@@ -20,7 +19,6 @@ pub enum RuleType {
     ProxyPass(String),
     ProxySetHeader(String, String),
     AddHeader(String, String),
-    Resolver(Vec<String>),
 }
 
 fn take_args<T, F>(rule: &Directive<Nginx>, extractor: F) -> Result<T>
@@ -32,12 +30,6 @@ where
 
 pub fn parse_rule_type(rule: Directive<Nginx>) -> Result<RuleType> {
     Ok(match rule.name.as_str() {
-        "resolver" => {
-            if rule.args.is_empty() {
-                return Err(CustomError::MissingArg("resolver".into()));
-            }
-            RuleType::Resolver(rule.args)
-        }
         "proxy_pass" => take_args(&rule, |args| match args {
             [arg] => Some(RuleType::ProxyPass(arg.clone())),
             _ => None,

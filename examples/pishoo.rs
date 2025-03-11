@@ -92,7 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         reverse::serve(bind, servers).await?;
                     }
                     Record::Forward(server) => {
-                        forward::serve(server).await?;
+                        forward::serve(
+                            server.listen,
+                            server.dns_server.expect("DNS server not set"),
+                        )
+                        .await?;
                     }
                 }
 

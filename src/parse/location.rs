@@ -28,9 +28,6 @@ impl Location {
                 RuleType::AddHeader(key, value) => {
                     rule.add_header.push((key, value));
                 }
-                RuleType::Resolver(resolver) => {
-                    rule.resolver = resolver;
-                }
             };
         }
 
