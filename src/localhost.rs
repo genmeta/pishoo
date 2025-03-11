@@ -13,7 +13,7 @@ use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
 use tracing::{info, warn};
 
-use crate::dns::{DNS_SERVER, dns_publish};
+use crate::dns::dns_publish;
 
 pub const AGENT: &str = "1.12.74.4:20002";
 pub const AGENT_V6: &str = "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20002";
@@ -153,8 +153,7 @@ impl ArcLocalHost {
         self.0.registrys.iter().map(|item| *item.key()).collect()
     }
 
-    pub fn report_dns(&self, hosts: Vec<String>) {
-        let dns_server = DNS_SERVER.parse().unwrap();
+    pub fn report_dns(&self, hosts: Vec<String>, dns_server: SocketAddr) {
         tokio::spawn({
             let localhost = self.clone();
             async move {

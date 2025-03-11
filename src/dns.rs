@@ -4,9 +4,6 @@ use gm_quic::EndpointAddr;
 use tokio::{net::UdpSocket, time::timeout};
 use tracing::{debug, info, warn};
 
-// TODO: 使用配置的 DNS 服务器地址
-pub const DNS_SERVER: &str = "1.12.74.4:5300";
-
 pub async fn dns_resolve(
     host: &str,
     dns_server_addr: SocketAddr,
@@ -128,6 +125,8 @@ mod tests {
             agent: "127.0.0.1:1234".parse().unwrap(),
             outer: "127.0.0.1:5678".parse().unwrap(),
         };
+
+        const DNS_SERVER: &str = "1.12.74.4:5300";
 
         dns_publish("relay.example.com", &[ep], DNS_SERVER.parse().unwrap())
             .await
