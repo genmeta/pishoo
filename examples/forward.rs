@@ -59,7 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 if let Record::Forward(server) = record {
-                    forward::serve(server).await?;
+                    forward::serve(
+                        server.listen,
+                        server.dns_server.expect("DNS server not set"),
+                    )
+                    .await?;
                 }
 
                 Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())

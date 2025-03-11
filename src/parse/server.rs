@@ -111,9 +111,10 @@ impl ServerConfig {
             if builder.key.is_none() {
                 return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
             }
-            if builder.dns_server.is_none() {
-                return Err(CustomError::MissingField("dns server".to_string()));
-            }
+        }
+
+        if builder.dns_server.is_none() {
+            return Err(CustomError::MissingField("dns server".to_string()));
         }
 
         builder
