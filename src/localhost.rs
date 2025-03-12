@@ -210,25 +210,35 @@ impl ArcLocalHost {
         tracing::trace!("all interfaces {:?}", interfaces);
         for iface in interfaces {
             if iface.is_up() && !iface.is_loopback() {
-                for ip in iface.ips {
-                    if let IpAddr::V6(v6_ip) = ip.ip() {
-                        // skip link-local addresses
-                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 {
-                            let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                            info!(
-                                "scan_device found address {} for interface {}",
-                                socket_addr, iface.name
-                            );
-                            address_map.insert(socket_addr, iface.name.clone());
+                if let Some(ip) = iface.ips.iter().filter(|ip| ip.is_ipv4()).next_back() {
+                    let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
+                    info!(
+                        "scan_device found address {} for interface {}",
+                        socket_addr, iface.name
+                    );
+                    address_map.insert(socket_addr, iface.name.clone());
+                }
+
+                if let Some(ip) = iface
+                    .ips
+                    .iter()
+                    .filter(|ip| {
+                        ip.is_ipv6() && {
+                            if let IpAddr::V6(v6_ip) = ip.ip() {
+                                (v6_ip.segments()[0] & 0xffc0) != 0xfe80
+                            } else {
+                                false
+                            }
                         }
-                    } else {
-                        let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                        info!(
-                            "scan_device found address {} for interface {}",
-                            socket_addr, iface.name
-                        );
-                        address_map.insert(socket_addr, iface.name.clone());
-                    }
+                    })
+                    .next_back()
+                {
+                    let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
+                    info!(
+                        "scan_device found address {} for interface {}",
+                        socket_addr, iface.name
+                    );
+                    address_map.insert(socket_addr, iface.name.clone());
                 }
             }
         }
