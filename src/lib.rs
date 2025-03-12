@@ -1,3 +1,5 @@
+#![feature(ip)]
+
 mod common;
 pub mod config;
 mod dns;

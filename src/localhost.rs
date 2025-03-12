@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, SocketAddr},
+    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     sync::Arc,
     time::Duration,
 };
@@ -11,7 +11,7 @@ use gm_quic::{Connection, EndpointAddr, Link, Pathway};
 use qconnection::traversal::NatType;
 use qinterface::forward::ForwardInterface;
 use qtraversal::AddressRegisty;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::dns::dns_publish;
 
@@ -190,45 +190,36 @@ impl ArcLocalHost {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
-    fn scan_device(&self) -> HashMap<SocketAddr, String> {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.0.port);
-        let addr6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.0.port);
-        let mut address_map = HashMap::new();
-
-        address_map.insert(addr4, "eth0".to_string());
-        address_map.insert(addr6, "eth0".to_string());
-        address_map
-    }
-
-    #[cfg(not(target_os = "windows"))]
     fn scan_device(&self) -> HashMap<SocketAddr, String> {
         let mut address_map = HashMap::new();
 
-        let interfaces = pnet::datalink::interfaces();
-        tracing::trace!("all interfaces {:?}", interfaces);
-        for iface in interfaces {
-            if iface.is_up() && !iface.is_loopback() {
-                for ip in iface.ips {
-                    if let IpAddr::V6(v6_ip) = ip.ip() {
-                        // skip link-local addresses
-                        if (v6_ip.segments()[0] & 0xffc0) != 0xfe80 {
-                            let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                            info!(
-                                "scan_device found address {} for interface {}",
-                                socket_addr, iface.name
-                            );
-                            address_map.insert(socket_addr, iface.name.clone());
-                        }
-                    } else {
-                        let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                        info!(
-                            "scan_device found address {} for interface {}",
-                            socket_addr, iface.name
-                        );
-                        address_map.insert(socket_addr, iface.name.clone());
-                    }
+        let ift = getifs::interfaces()
+            .inspect_err(|e| {
+                error!("Failed to get network interfaces: {:?}", e);
+            })
+            .expect("Failed to get network interfaces");
+        tracing::trace!("all interfaces {:?}", ift);
+        for ifi in ift {
+            if let Ok(addrs) =
+                ifi.ipv4_addrs_by_filter(|addr| addr.is_global() || addr.is_private())
+            {
+                if let Some(addr) = addrs.last() {
+                    let addr = addr.addr();
+                    let name = ifi.name().to_string();
+                    info!("scan_device found address {} for interface {}", addr, name);
+                    address_map.insert(SocketAddr::V4(SocketAddrV4::new(addr, self.0.port)), name);
+                }
+            }
+
+            if let Ok(addrs) = ifi.ipv6_addrs_by_filter(|addr| addr.is_global()) {
+                if let Some(addr) = addrs.last() {
+                    let addr = addr.addr();
+                    let name = ifi.name().to_string();
+                    info!("scan_device found address {} for interface {}", addr, name);
+                    address_map.insert(
+                        SocketAddr::V6(SocketAddrV6::new(addr, self.0.port, 0, 0)),
+                        name,
+                    );
                 }
             }
         }
