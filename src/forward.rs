@@ -16,7 +16,7 @@ use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, warn};
 
 use crate::{Resolver, dns::Dns, error::CustomError, localhost::ArcLocalHost};
 
@@ -323,7 +323,7 @@ async fn proxy_http_request(
                     let bytes = buf.copy_to_bytes(buf.remaining());
                     match tx.send(Ok(Frame::data(bytes))).await {
                         Ok(()) => {
-                            trace!("[Forward][{}] Sending response data frame", uri);
+                            // trace!("[Forward][{}] Sending response data frame", uri);
                         }
                         Err(_) => {
                             error!("[Proxy][{}] Failed to send response", uri);
