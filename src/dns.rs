@@ -28,8 +28,11 @@ impl Dns {
                                 warn!("Failed to report host {}: {}", name, e);
                             }
                         }
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    } else {
+                        // if there is no endpoint address, wait for 1 second and try again
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             }
         });
