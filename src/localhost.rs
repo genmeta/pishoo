@@ -90,20 +90,24 @@ impl ArcLocalHost {
 
     // TODO: remote 可能是直连
     pub async fn match_pathway(&self, remote: EndpointAddr) -> Option<(Pathway, Link)> {
-        let is_v4 = remote.is_ipv4();
-        let ret = self
-            .0
-            .registrys
-            .iter()
-            .find(|item| item.key().is_ipv4() == is_v4)?;
-        let registry = ret.value();
-        let local = EndpointAddr::Agent {
-            agent: registry.agent(),
-            outer: registry.outer_addr().await.unwrap(),
-        };
-        let pathway = Pathway::new(local, remote);
-        let socket = Link::new(*ret.key(), *remote);
-        Some((pathway, socket))
+        for item in self.0.registrys.iter() {
+            if item.key().is_ipv4() == remote.is_ipv4() {
+                let outer = item.value().outer_addr().await;
+                if outer.is_err() {
+                    warn!("local addr {:?} outer error", item.key());
+                    continue;
+                }
+                let outer = outer.unwrap();
+                let local = EndpointAddr::Agent {
+                    agent: item.value().agent(),
+                    outer,
+                };
+                let pathway = Pathway::new(local, remote);
+                let socket = Link::new(*item.key(), *remote);
+                return Some((pathway, socket));
+            }
+        }
+        None
     }
 
     pub async fn relay_addr(&self) -> Vec<EndpointAddr> {
