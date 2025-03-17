@@ -48,8 +48,8 @@ fn init_routers(
     let mut routers = HashMap::new();
     for server in servers {
         let router = Arc::new(server.router.clone());
-        let dns = Dns::new(server.dns_server.expect("DNS server not set"));
-        dns.spwan_publish(server.server_name.clone(), localhost.clone());
+        let resolver = Dns::new(server.resolver);
+        resolver.spwan_publish(server.server_name.clone(), localhost.clone());
         for name in &server.server_name {
             routers.insert(name.to_string(), router.clone());
         }
