@@ -13,22 +13,14 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 use super::{location::Location, router::Router};
 use crate::error::{CustomError, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerKind {
-    Forward,
-    Reverse,
-}
-
 #[derive(Builder, Debug, Clone)]
 pub struct ServerConfig {
-    pub kind: ServerKind,
     pub listen: SocketAddr,
     #[builder(default = "Vec::new()")]
     pub server_name: Vec<String>,
     #[builder(default = "false")]
     pub reuse_port: bool,
-    #[builder(default = "None")]
-    pub dns_server: Option<SocketAddr>,
+    pub resolver: SocketAddr,
     #[builder(default)]
     pub cert: String,
     #[builder(default)]
@@ -41,80 +33,83 @@ pub struct ServerConfig {
     pub deny: Vec<String>,
 }
 
-fn parse_path(directive: Directive<Nginx>) -> Result<String> {
-    let [path]: &[String] = directive.args.as_ref() else {
-        return Err(CustomError::InvalidArgs(directive.name));
-    };
-
-    if !Path::new(path).exists() {
-        return Err(CustomError::FileNotFound(path.into()));
-    }
-
-    Ok(path.clone())
-}
-
-fn parse_listen(directive: Directive<Nginx>) -> Result<(SocketAddr, ServerKind)> {
-    let addr: SocketAddr = directive
-        .args
-        .first()
-        .ok_or_else(|| CustomError::MissingField("listen address".to_string()))
-        .and_then(|addr| {
-            addr.parse()
-                .map_err(|e| CustomError::InvalidArgs(format!("{}: {}", addr, e)))
-        })?;
-
-    match &directive.args[1..] {
-        [] => Ok((addr, ServerKind::Forward)),
-        [ssl, version] if ssl == "ssl" && version == "http3" => Ok((addr, ServerKind::Reverse)),
-        _ => Err(CustomError::InvalidArgs("listen".to_string())),
-    }
-}
-
 impl ServerConfig {
+    /// Parse a file path directive and validate file existence
+    fn parse_path(directive: &Directive<Nginx>) -> Result<String> {
+        let path = directive
+            .args
+            .first()
+            .ok_or_else(|| CustomError::InvalidArgs(directive.name.clone()))?;
+
+        if !Path::new(path).exists() {
+            return Err(CustomError::FileNotFound(path.clone()));
+        }
+
+        Ok(path.clone())
+    }
+
+    /// Parse the first argument of a directive as a SocketAddr
+    fn parse_socket_addr(directive: &Directive<Nginx>, field_name: &str) -> Result<SocketAddr> {
+        directive
+            .args
+            .first()
+            .ok_or_else(|| CustomError::MissingField(field_name.to_string()))
+            .and_then(|addr| {
+                addr.parse()
+                    .map_err(|e| CustomError::InvalidArgs(format!("{}: {}", addr, e)))
+            })
+    }
+
     pub fn parse(directives: Vec<Directive<Nginx>>) -> Result<Self> {
         let mut builder = ServerConfigBuilder::default();
+        let mut router = Router::default();
+
         for directive in directives {
             match directive.name.as_str() {
                 "listen" => {
-                    let (listen, kind) = parse_listen(directive)?;
-                    builder.listen(listen).kind(kind)
+                    builder.listen(Self::parse_socket_addr(&directive, "listen")?);
                 }
-                "server_name" => builder.server_name(directive.args),
-                "dns_server" => builder.dns_server(Some(
-                    directive
-                        .args
-                        .first()
-                        .ok_or(CustomError::MissingField("dns_server".to_string()))?
-                        .parse()?,
-                )),
-                "ssl_certificate" => builder.cert(parse_path(directive)?),
-                "ssl_certificate_key" => builder.key(parse_path(directive)?),
-                "allow" => builder.allow(directive.args),
-                "deny" => builder.deny(directive.args),
+                "server_name" => {
+                    builder.server_name(directive.args);
+                }
+                "resolver" => {
+                    builder.resolver(Self::parse_socket_addr(&directive, "resolver")?);
+                }
+                "ssl_certificate" => {
+                    builder.cert(Self::parse_path(&directive)?);
+                }
+                "ssl_certificate_key" => {
+                    builder.key(Self::parse_path(&directive)?);
+                }
+                "allow" => {
+                    builder.allow(directive.args);
+                }
+                "deny" => {
+                    builder.deny(directive.args);
+                }
                 "reuse_port" => {
-                    builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"))
+                    builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"));
                 }
                 "location" => {
-                    let mut router = builder.router.take().unwrap_or_default();
                     router.insert(Location::parse(directive)?);
-                    builder.router(router)
                 }
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
-            };
+            }
         }
+
+        // Set accumulated values
+        builder.router(router);
 
         // 验证 SSL 证书配置
-        if let Some(ServerKind::Reverse) = builder.kind.as_ref() {
-            if builder.cert.is_none() {
-                return Err(CustomError::MissingField("ssl_certificate".to_string()));
-            }
-            if builder.key.is_none() {
-                return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
-            }
+        if builder.cert.is_none() || builder.cert.as_ref().unwrap().is_empty() {
+            return Err(CustomError::MissingField("ssl_certificate".to_string()));
+        }
+        if builder.key.is_none() || builder.key.as_ref().unwrap().is_empty() {
+            return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
         }
 
-        if builder.dns_server.is_none() {
-            return Err(CustomError::MissingField("dns server".to_string()));
+        if builder.resolver.is_none() {
+            return Err(CustomError::MissingField("resolver".to_string()));
         }
 
         builder

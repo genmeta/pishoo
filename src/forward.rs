@@ -33,7 +33,7 @@ type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 /// 启动 TCP 监听并处理传入连接
-pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Result<()> {
+pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Result<()> {
     let listener = TcpListener::bind(addr).await.map_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
         e
@@ -66,9 +66,9 @@ pub async fn serve(addr: SocketAddr, dns_server: SocketAddr) -> crate::error::Re
                         let localhost = localhost.clone();
                         async move {
                             if is_connect {
-                                handle_connect(quic_client, localhost, req, dns_server).await
+                                handle_connect(quic_client, localhost, req, resolver).await
                             } else {
-                                handle_http(quic_client, localhost, req, dns_server).await
+                                handle_http(quic_client, localhost, req, resolver).await
                             }
                         }
                         .boxed()
@@ -462,10 +462,24 @@ async fn normal_proxy(req: Request<hyper::body::Incoming>) -> Result<BoxResponse
             Ok(resp)
         }
     } else {
-        let host = req.uri().host().expect("uri has no host");
+        let host = match req.uri().host() {
+            Some(host) => host,
+            None => {
+                error!("no host in uri: {:?}", req.uri());
+                return Ok(create_error_response("no host in uri".to_string()));
+            }
+        };
+
         let port = req.uri().port_u16().unwrap_or(80);
 
-        let stream = TcpStream::connect((host, port)).await.unwrap();
+        let stream = match TcpStream::connect((host, port)).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("connect error: {}", e);
+                return Ok(create_error_response(e.to_string()));
+            }
+        };
+
         let io = TokioIo::new(stream);
 
         let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
