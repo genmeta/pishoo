@@ -13,7 +13,7 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
 
             # 设置 SSH 环境
             - uses: webfactory/ssh-agent@v0.9.0
@@ -42,17 +42,22 @@ jobs:
             # 使用 cross 编译项目
             - name: Build for Raspberry Pi
               run: |
-                  cross build --target ${{ env.TARGET }} --release
+                  cross build --example pishoo --target ${{ env.TARGET }}  --release
 
             # 准备部署工件
             - name: Prepare Artifact
               run: |
+                  ls -la target
+                  ls -la target/${{ env.TARGET }}/release
+                  ls -la target/${{ env.TARGET }}/release/examples
+                  ls -la target/release
+                  ls -la target/release/examples
                   mkdir -p deploy
-                  cp target/${{ env.TARGET }}/release/gateway deploy/
+                  cp target/${{ env.TARGET }}/release/examples/pishoo deploy/
 
             # 上传编译产物
             - name: Upload Artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: gateway
-                  path: deploy/gateway
+                  name: pishoo
+                  path: deploy/pishoo
