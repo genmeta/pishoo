@@ -1,8 +1,10 @@
 use std::sync::{Arc, OnceLock};
 
-use rustls::RootCertStore;
+use rustls::{
+    RootCertStore,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use tracing::error;
-use webpki::types::{CertificateDer, pem::PemObject};
 
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
