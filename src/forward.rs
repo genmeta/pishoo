@@ -1,6 +1,7 @@
 use std::{
     net::SocketAddr,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 
 use bytes::{Buf, Bytes};
@@ -14,7 +15,10 @@ use hyper::{
 };
 use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::timeout,
+};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{error, info, warn};
 
@@ -33,14 +37,17 @@ type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 /// 启动 TCP 监听并处理传入连接
-pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Result<()> {
+pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Result<String> {
     let listener = TcpListener::bind(addr).await.map_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
         e
     })?;
-    info!("Listening on: http://{}", addr);
+    let local_addr = listener.local_addr().inspect_err(|e| {
+        error!("TCP listener inspect failed: {:?}", e);
+    })?;
+    info!("Listening on: http://{}", local_addr);
 
-    let localhost = ArcLocalHost::new(addr.port());
+    let localhost = ArcLocalHost::new(local_addr.port());
     LOCALHOST.get_or_init(|| localhost.clone());
     localhost.init_network().await;
 
@@ -89,7 +96,7 @@ pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Resu
         }
     });
 
-    Ok(())
+    Ok(local_addr.to_string())
 }
 
 pub async fn resume() -> crate::error::Result<()> {
@@ -254,9 +261,10 @@ async fn create_quic_connection(
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
-        let result = h3::client::new(gm_quic_conn).await;
-        match result {
-            Ok(r) => return Ok(r),
+
+        // TODO h3::client::new 未知超时设置, 此处暂设置 300ms 超时
+        match timeout(Duration::from_millis(300), h3::client::new(gm_quic_conn)).await {
+            Ok(r) => return r.map_err(|e| format!("h3 client creation failed: {}", e)),
             Err(e) => {
                 error!(
                     "[Forward] H3 client creation failed: {} Retries: {}",
