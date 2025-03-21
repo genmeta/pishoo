@@ -1,16 +1,25 @@
-name: Rust Cross-Compile for Raspberry Pi 4B
+name: Release
 
 on:
     workflow_dispatch:
 
 env:
     CARGO_TERM_COLOR: always
-    # 为树莓派 4B 设置目标三元组（使用 ARMv8 64位架构）
-    TARGET: aarch64-unknown-linux-gnu
 
 jobs:
     build:
-        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: "ubuntu-22.04"
+                      target: "aarch64-unknown-linux-musl"
+                    - platform: "ubuntu-22.04"
+                      target: "mipsel-unknown-linux-musl"
+
+        runs-on: ${{ matrix.platform }}
 
         steps:
             - uses: actions/checkout@v4
@@ -21,38 +30,47 @@ jobs:
                   ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
 
             # 安装 Rust
-            - name: Install toolchain
-              uses: actions-rs/toolchain@v1
+            - name: install Rust
+              if: matrix.target == 'aarch64-unknown-linux-musl'
+              uses: dtolnay/rust-toolchain@nightly
+              id: rust_toolchain
               with:
-                  toolchain: nightly
-                  target: ${{ env.TARGET }}
-                  override: true
+                  target: ${{ matrix.target }}
 
             # 安装交叉编译工具链
             - name: Install Cross-Compilation Toolchain
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y gcc-aarch64-linux-gnu
+                  sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu gcc-mipsel-linux-gnu
 
             # 安装 cargo-cross 以简化交叉编译
             - name: Install cargo-cross
               run: |
-                  cargo install cross
+                  cargo install cross --git https://github.com/cross-rs/cross
+
+            - name: Setup Cross.toml for mipsel
+              if: matrix.target == 'mipsel-unknown-linux-musl'
+              run: |
+                  cat > Cross.toml << 'EOF'
+                  [target.mipsel-unknown-linux-musl]
+                  build-std = ["std", "alloc", "core", "proc_macro", "panic_abort"]
+                  image = "docker.io/rustembedded/cross:mipsel-unknown-linux-musl"
+                  EOF
 
             # 使用 cross 编译项目
-            - name: Build for Raspberry Pi
+            - name: Build release
               run: |
-                  cross build --example pishoo --target ${{ env.TARGET }}  --release
+                  cross +nightly build --example pishoo --target ${{ matrix.target }}  --release
 
             # 准备部署工件
             - name: Prepare Artifact
               run: |
                   mkdir -p deploy
-                  cp target/${{ env.TARGET }}/release/examples/pishoo deploy/
+                  cp target/${{ matrix.target }}/release/examples/pishoo deploy/pishoo-${{ matrix.target }}
 
             # 上传编译产物
             - name: Upload Artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: pishoo
-                  path: deploy/pishoo
+                  name: pishoo-${{ matrix.target }}
+                  path: deploy/pishoo-${{ matrix.target }}
