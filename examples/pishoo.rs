@@ -4,14 +4,10 @@ use clap::{Parser, command};
 use futures::future::join_all;
 use gateway::{
     forward,
-    parse::gateway::{Gateway, Record, parse_gateway},
+    parse::{gateway::Record, parse_conf},
     reverse,
 };
-use misc_conf::{
-    ast::{Directive, DirectiveTrait},
-    nginx::Nginx,
-};
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -64,21 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_file = args.config_file;
     let configure = std::fs::read(&config_file)?;
-    let mut gateway = Gateway::default();
-    if let Ok(res) = Directive::<Nginx>::parse(&configure) {
-        for mut directive in res {
-            let path = config_file
-                .parent()
-                .expect("config path should have a parent");
-            directive.resolve_include(path)?;
-            if directive.name == "pishoo" {
-                if let Some(children) = directive.children {
-                    gateway = parse_gateway(children).inspect_err(|e| error!("{:?}", e))?;
-                    break;
-                }
-            }
-        }
-    }
+    let gateway = parse_conf(&configure, config_file.parent().unwrap())?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
