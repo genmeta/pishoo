@@ -47,11 +47,6 @@ jobs:
             # 准备部署工件
             - name: Prepare Artifact
               run: |
-                  ls -la target
-                  ls -la target/${{ env.TARGET }}/release
-                  ls -la target/${{ env.TARGET }}/release/examples
-                  ls -la target/release
-                  ls -la target/release/examples
                   mkdir -p deploy
                   cp target/${{ env.TARGET }}/release/examples/pishoo deploy/
 

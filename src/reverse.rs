@@ -2,9 +2,9 @@ use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::StreamExt;
-use gm_quic::{HeartbeatConfig, prelude::handy::Usc};
+use gm_quic::{HeartbeatConfig, QuicServer, prelude::handy::Usc};
 use h3::server::RequestStream;
-use h3_shim::{BidiStream, QuicServer, RecvStream};
+use h3_shim::{BidiStream, RecvStream};
 use http::{Request, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{

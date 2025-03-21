@@ -169,6 +169,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
 name = "chrono"
 version = "0.4.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -601,7 +607,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "dashmap",
@@ -638,7 +644,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "futures",
@@ -914,6 +920,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +982,19 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -1280,7 +1308,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1301,7 +1329,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "dashmap",
  "qbase",
@@ -1315,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1336,7 +1364,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1354,7 +1382,7 @@ dependencies = [
 [[package]]
 name = "qlog"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1372,7 +1400,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "deref-derive",
@@ -1390,7 +1418,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1417,12 +1445,12 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "cfg-if",
  "libc",
- "log",
+ "nix",
  "socket2",
  "tokio",
  "tracing",
@@ -1432,7 +1460,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fsync_upstream#174bf813b3554e0f9510073a2a09c7cca8252822"
 dependencies = [
  "bytes",
  "futures",
@@ -1948,9 +1976,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.43.0"
+version = "1.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d61fa4ffa3de412bfea335c6ecff681de2b609ba3c77ef3e00e521813a9ed9e"
+checksum = "f382da615b842244d4b8738c82ed1275e6c5dd90c459a30941cd07080b06c91a"
 dependencies = [
  "backtrace",
  "bytes",

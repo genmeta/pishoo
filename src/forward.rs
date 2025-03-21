@@ -6,8 +6,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures::FutureExt;
-use gm_quic::{ClientParameters, HeartbeatConfig};
-use h3_shim::QuicClient;
+use gm_quic::{ClientParameters, QuicClient};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{
@@ -162,14 +161,23 @@ async fn handle_http(
     // 验证主机合法性
     let (host, _) = match validate_host(&req) {
         Ok(host) => host,
-        Err(reason) => return Ok(create_error_response(reason)),
+        Err(reason) => {
+            error!("[Forward][{}] Invalid host: {}", uri, reason);
+            return Ok(create_error_response(reason));
+        }
     };
 
     // 创建 QUIC 连接
     let (mut h3_conn, h3_request) =
         match create_quic_connection(quic_client, localhost, &host, dns_server).await {
             Ok(conn) => conn,
-            Err(msg) => return Ok(create_error_response(msg)),
+            Err(msg) => {
+                error!(
+                    "[Forward][{}] Failed to create QUIC connection: {}",
+                    uri, msg
+                );
+                return Ok(create_error_response(msg));
+            }
         };
     info!("[Forward][{}]: quic connection established", uri);
 
@@ -207,7 +215,6 @@ async fn handle_http(
 async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
     let params = configure_quic_parameters();
     let tls_config = configure_tls();
-    let disable = HeartbeatConfig::disabled();
     let binds = localhost.addresses();
     QuicClient::builder_with_tls(tls_config)
         .with_parameters(params)
@@ -221,7 +228,6 @@ async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
                 Ok(Arc::new(Usc::bind(addr)?))
             }
         })
-        .defer_idle_timeout(disable)
         .bind(&binds[..])
         .unwrap()
         .build()
@@ -234,15 +240,21 @@ async fn create_quic_connection(
     host: &str,
     dns_server: SocketAddr,
 ) -> Result<(H3Conn, H3SendRequest), String> {
-    // DNS 解析
-    let dns = Dns::new(dns_server);
-    let remotes = dns
-        .look_up(host)
-        .await
-        .map_err(|e| format!("DNS resolve error: {}", e))?;
-    info!("[DNS]: resolved: {} -> {:?}", host, remotes);
-
     for retry in 0..MAX_RETRY_COUNT {
+        // DNS 解析
+        let dns = Dns::new(dns_server);
+        let remotes = dns.look_up(host).await;
+
+        let remotes = match remotes {
+            Ok(remotes) => remotes,
+            Err(err) => {
+                error!("DNS lookup failed: {}", err);
+                continue;
+            }
+        };
+
+        info!("[DNS]: resolved: {} -> {:?}", host, remotes);
+
         // TODO: server 有多个地址，按照优先级选择，重试考虑换个地址
         let index = retry.min(remotes.len() - 1);
         let Some((pathway, socket)) = localhost.match_pathway(remotes[index]).await else {
