@@ -47,6 +47,7 @@ derive_builder = "0.20"
 misc-conf = "0.1"
 
 pnet = "0.35.0"
+getrandom = "=0.3.1"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -60,11 +61,11 @@ name = "pishoo"
 path = "examples/pishoo.rs"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/sync_upstream" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/sync_upstream" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/sync_upstream" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/sync_upstream" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/sync_upstream" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
 
 [patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
 nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
