@@ -1,36 +1,31 @@
 use std::{
     net::SocketAddr,
     sync::{Arc, OnceLock},
-    time::Duration,
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use futures::FutureExt;
 use gm_quic::{ClientParameters, QuicClient};
-use http::{Method, StatusCode};
-use http_body_util::{BodyExt, StreamBody};
-use hyper::{
-    Request, Response, body::Frame, server::conn::http1, service::service_fn, upgrade::Upgraded,
-};
+use http::StatusCode;
+use http_body_util::StreamBody;
+use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qinterface::handy::Usc;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio::net::TcpListener;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
-use crate::{Resolver, dns::Dns, error::CustomError, localhost::ArcLocalHost};
+use crate::{error::CustomError, forward, localhost::ArcLocalHost};
+
+mod normal;
+mod quic;
 
 static ALPN: &[u8] = b"h3";
 
 static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
 
-const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
 
-// 类型别名简化
 type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper::Error>>>>;
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
@@ -64,7 +59,7 @@ pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Resu
                     let service = service_fn(move |req| {
                         let (_host, normal) = validate_host(&req).unwrap();
                         if normal {
-                            return normal_proxy(req).boxed();
+                            return forward::normal::proxy(req).boxed();
                         }
 
                         let is_connect = req.method() == "CONNECT";
@@ -72,9 +67,9 @@ pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Resu
                         let localhost = localhost.clone();
                         async move {
                             if is_connect {
-                                handle_connect(quic_client, localhost, req, resolver).await
+                                forward::quic::connect(quic_client, localhost, req, resolver).await
                             } else {
-                                handle_http(quic_client, localhost, req, resolver).await
+                                forward::quic::proxy(quic_client, localhost, req, resolver).await
                             }
                         }
                         .boxed()
@@ -98,122 +93,22 @@ pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Resu
     Ok(local_addr.to_string())
 }
 
+/// 从暂停中恢复网络连接
 pub async fn resume() -> crate::error::Result<()> {
     info!("Resuming network");
     let localhost = LOCALHOST
         .get()
         .ok_or(CustomError::LocalhostNotInitialized)?;
-    localhost.resume_network().await?;
+    localhost.resume_network().await.inspect_err(|e| {
+        error!("Network resume failed: {:?}", e);
+    })?;
+    info!("Network resumed");
     Ok(())
-}
-
-/// 处理 CONNECT 隧道请求
-async fn handle_connect(
-    quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
-    req: Request<hyper::body::Incoming>,
-    dns_server: SocketAddr,
-) -> Result<BoxResponse, hyper::Error> {
-    let uri = req.uri().to_string();
-
-    // 验证主机合法性
-    let _host = match validate_host(&req) {
-        Ok(host) => host,
-        Err(reason) => return Ok(create_error_response(reason)),
-    };
-
-    info!("[CONNECT] Establishing tunnel to {}", uri);
-
-    // 升级连接并处理后续请求
-    tokio::task::spawn(async move {
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                info!("[CONNECT]: tunnel established to {}", uri);
-                let service = service_fn(move |req| {
-                    handle_http(quic_client.clone(), localhost.clone(), req, dns_server)
-                });
-                if let Err(err) = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(upgraded, service)
-                    .await
-                {
-                    error!("[CONNECT][{uri}] Connection handling failed: {err:?}");
-                }
-            }
-            Err(err) => error!("Connection upgrade failed {uri}: {err:?}"),
-        }
-    });
-
-    Ok(create_empty_response())
-}
-
-/// 处理普通 HTTP 请求
-async fn handle_http(
-    quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
-    req: Request<hyper::body::Incoming>,
-    dns_server: SocketAddr,
-) -> Result<BoxResponse, hyper::Error> {
-    let uri = req.uri().to_string();
-    info!("[Forward] Request: {}", uri);
-
-    // 验证主机合法性
-    let (host, _) = match validate_host(&req) {
-        Ok(host) => host,
-        Err(reason) => {
-            error!("[Forward][{}] Invalid host: {}", uri, reason);
-            return Ok(create_error_response(reason));
-        }
-    };
-
-    // 创建 QUIC 连接
-    let (mut h3_conn, h3_request) =
-        match create_quic_connection(quic_client, localhost, &host, dns_server).await {
-            Ok(conn) => conn,
-            Err(msg) => {
-                error!(
-                    "[Forward][{}] Failed to create QUIC connection: {}",
-                    uri, msg
-                );
-                return Ok(create_error_response(msg));
-            }
-        };
-    info!("[Forward][{}]: quic connection established", uri);
-
-    tokio::spawn({
-        let uri = uri.clone();
-        async move {
-            match h3_conn.wait_idle().await {
-                Ok(_) => info!("[Forward][{}] QUIC connection idle", uri),
-                Err(err) => error!(
-                    "[Forward][{}] QUIC connection idle check failed: {}",
-                    uri, err
-                ),
-            };
-        }
-    });
-
-    // 代理请求并返回响应
-    match proxy_http_request(h3_request, req).await {
-        Ok(response) => {
-            info!(
-                "[Forward][{}] Request proxied successfully: {:?}",
-                uri, response
-            );
-            Ok(response)
-        }
-        Err(err) => {
-            let reason = format!("[Forward][{}] Request proxy failed: {}", uri, err);
-            error!("{}", reason);
-            Ok(create_error_response(reason))
-        }
-    }
 }
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
 async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
-    let params = configure_quic_parameters();
+    let params = create_client_params();
     let tls_config = configure_tls();
     let binds = localhost.addresses();
     QuicClient::builder_with_tls(tls_config)
@@ -233,143 +128,8 @@ async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
         .build()
 }
 
-/// 创建 QUIC 连接并进行地址注册
-async fn create_quic_connection(
-    quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
-    host: &str,
-    dns_server: SocketAddr,
-) -> Result<(H3Conn, H3SendRequest), String> {
-    for retry in 0..MAX_RETRY_COUNT {
-        // DNS 解析
-        let dns = Dns::new(dns_server);
-        let remotes = dns.look_up(host).await;
-
-        let remotes = match remotes {
-            Ok(remotes) => remotes,
-            Err(err) => {
-                error!("DNS lookup failed: {}", err);
-                continue;
-            }
-        };
-
-        info!("[DNS]: resolved: {} -> {:?}", host, remotes);
-
-        // TODO: server 有多个地址，按照优先级选择，重试考虑换个地址
-        let index = retry.min(remotes.len() - 1);
-        let Some((pathway, socket)) = localhost.match_pathway(remotes[index]).await else {
-            warn!(
-                "[Forward]: no pathway found for {:?} retry: {}",
-                remotes[index], retry
-            );
-            continue;
-        };
-
-        // 建立 QUIC 连接
-        let conn = quic_client
-            .connect(host, socket, pathway)
-            .map_err(|e| format!("QUIC connect error: {:?}", e))?;
-        localhost.add_direct_address(conn.clone());
-
-        // HTTP/3 客户端
-        let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
-
-        // TODO h3::client::new 未知超时设置, 此处暂设置 300ms 超时
-        match timeout(Duration::from_millis(300), h3::client::new(gm_quic_conn)).await {
-            Ok(r) => return r.map_err(|e| format!("h3 client creation failed: {}", e)),
-            Err(e) => {
-                error!(
-                    "[Forward] H3 client creation failed: {} Retries: {}",
-                    e, retry
-                );
-                if retry == MAX_RETRY_COUNT - 1 {
-                    // 最终失败时尝试刷新网络信息
-                    let _ = localhost.resume_network().await;
-                    return Err(format!("H3 client creation failed: {}", e));
-                }
-            }
-        }
-    }
-    error!("[Forward] Maximum retry attempts exceeded");
-    Err("Maximum retry attempts exceeded".to_string())
-}
-
-/// 代理 HTTP 请求的核心逻辑
-async fn proxy_http_request(
-    mut send_request: H3SendRequest,
-    req: Request<hyper::body::Incoming>,
-) -> Result<BoxResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let uri = req.uri().to_string();
-    let (parts, body) = req.into_parts();
-
-    info!("[Proxy][{}] Sending request", uri);
-
-    // 发送请求头
-    let req = http::Request::from_parts(parts, ());
-    let stream = send_request.send_request(req).await?;
-    let (mut sender, mut recver) = stream.split();
-
-    // 发送请求体
-    tokio::spawn(async move {
-        let mut body_stream = body.into_data_stream();
-        while let Some(Ok(chunk)) = body_stream.next().await {
-            if let Err(e) = sender.send_data(chunk).await {
-                error!("Error sending request data: {}", e);
-                break;
-            }
-        }
-        if let Err(e) = sender.finish().await {
-            error!("Error finishing stream: {}", e);
-        };
-    });
-
-    info!("[Forward][{}] Request body sent", uri);
-
-    // 接收响应头
-    let (mut parts, _) = recver.recv_response().await?.into_parts();
-    info!("[Forward] Received response headers: {:?}", parts);
-    parts.version = http::Version::HTTP_11;
-
-    // 准备响应体通道
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 异步接收响应体数据
-    tokio::spawn(async move {
-        let _send_request = send_request.clone();
-        loop {
-            match recver.recv_data().await {
-                Ok(Some(mut buf)) => {
-                    let bytes = buf.copy_to_bytes(buf.remaining());
-                    match tx.send(Ok(Frame::data(bytes))).await {
-                        Ok(()) => {
-                            // trace!("[Forward][{}] Sending response data frame", uri);
-                        }
-                        Err(_) => {
-                            error!("[Proxy][{}] Failed to send response", uri);
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    info!("[Proxy][{}] Response received completely", uri);
-                    break;
-                }
-                Err(err) => {
-                    error!("[Proxy][{}] Data receiving error: {}", uri, err);
-                    break;
-                }
-            }
-        }
-    });
-
-    info!("[Forward] Response body receiver started");
-
-    Ok(Response::from_parts(parts, body))
-}
-
 /// 配置 QUIC 协议参数
-fn configure_quic_parameters() -> ClientParameters {
+fn create_client_params() -> ClientParameters {
     let mut params = ClientParameters::default();
     let window_size = (1u32 << 30).into(); // 1MB 窗口大小
 
@@ -403,39 +163,6 @@ fn configure_tls() -> rustls::ClientConfig {
     config
 }
 
-/// 创建空响应
-fn create_empty_response() -> BoxResponse {
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 发送空数据帧
-    tokio::spawn(async move {
-        let _ = tx.send(Ok(Frame::data(Bytes::new()))).await;
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(body)
-        .unwrap()
-}
-
-/// 创建错误响应
-fn create_error_response(message: String) -> BoxResponse {
-    error!("[Forward] Error response: {}", message);
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 发送错误信息
-    tokio::spawn(async move {
-        let _ = tx.send(Ok(Frame::data(Bytes::from(message)))).await;
-    });
-
-    Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .body(body)
-        .unwrap()
-}
-
 /// 验证请求中的 Host 头合法性
 fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<(String, bool), String> {
     // 从 URI 或 Header 获取 Host
@@ -458,101 +185,35 @@ fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<(String, bool),
     }
 }
 
-async fn normal_proxy(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
-    info!("[normal_proxy] req: {:?}", req);
+/// 创建空响应
+fn build_empty_response() -> BoxResponse {
+    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+    let body = StreamBody::new(ReceiverStream::new(rx));
 
-    if Method::CONNECT == req.method() {
-        if let Some(addr) = host_addr(req.uri()) {
-            tokio::task::spawn(async move {
-                match hyper::upgrade::on(req).await {
-                    Ok(upgraded) => {
-                        if let Err(e) = tunnel(upgraded, addr).await {
-                            error!("server io error: {}", e);
-                        };
-                    }
-                    Err(e) => error!("upgrade error: {}", e),
-                }
-            });
+    // 发送空数据帧
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(Frame::data(Bytes::new()))).await;
+    });
 
-            Ok(create_empty_response())
-        } else {
-            error!("CONNECT host is not socket addr: {:?}", req.uri());
-            let mut resp = create_error_response("CONNECT must be to a socket address".to_string());
-            *resp.status_mut() = http::StatusCode::BAD_REQUEST;
-            Ok(resp)
-        }
-    } else {
-        let host = match req.uri().host() {
-            Some(host) => host,
-            None => {
-                error!("no host in uri: {:?}", req.uri());
-                return Ok(create_error_response("no host in uri".to_string()));
-            }
-        };
-
-        let port = req.uri().port_u16().unwrap_or(80);
-
-        let stream = match TcpStream::connect((host, port)).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                error!("connect error: {}", e);
-                return Ok(create_error_response(e.to_string()));
-            }
-        };
-
-        let io = TokioIo::new(stream);
-
-        let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
-            .preserve_header_case(true)
-            .title_case_headers(true)
-            .handshake(io)
-            .await?;
-        tokio::task::spawn(async move {
-            if let Err(err) = conn.await {
-                info!("Connection failed: {:?}", err);
-            }
-        });
-
-        let resp = sender.send_request(req).await?;
-        let (parts, body) = resp.into_parts();
-        let mut data_stream = body.into_data_stream();
-
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<std::result::Result<Frame<Bytes>, hyper::Error>>(128);
-        let body_stream = StreamBody::new(ReceiverStream::new(rx));
-
-        tokio::spawn(async move {
-            while let Some(Ok(chunk)) = data_stream.next().await {
-                _ = tx.send(Ok(Frame::data(chunk))).await.inspect_err(|e| {
-                    error!("Error sending data frame: {:?}", e);
-                });
-            }
-        });
-
-        let resp = Response::from_parts(parts, body_stream);
-        Ok(resp)
-    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .unwrap()
 }
 
-fn host_addr(uri: &http::Uri) -> Option<String> {
-    uri.authority().map(|auth| auth.to_string())
-}
+/// 创建错误响应
+fn build_error_response(message: String) -> BoxResponse {
+    error!("[Forward] Error response: {}", message);
+    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
+    let body = StreamBody::new(ReceiverStream::new(rx));
 
-// the upgraded connection
-async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
-    // Connect to remote server
-    let mut server = TcpStream::connect(addr).await?;
-    let mut upgraded = TokioIo::new(upgraded);
+    // 发送错误信息
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(Frame::data(Bytes::from(message)))).await;
+    });
 
-    // Proxying data
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-
-    // Print message when done
-    info!(
-        "client wrote {} bytes and received {} bytes",
-        from_client, from_server
-    );
-
-    Ok(())
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(body)
+        .unwrap()
 }
