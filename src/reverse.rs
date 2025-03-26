@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use futures::StreamExt;
-use gm_quic::{HeartbeatConfig, QuicServer, prelude::handy::Usc};
+use gm_quic::{QuicServer, prelude::handy::Usc};
 use h3::server::RequestStream;
 use h3_shim::{BidiStream, RecvStream};
 use http::{Request, Response, StatusCode, Uri, Version};
@@ -23,11 +23,11 @@ use crate::{
     parse::{router::Router, rule::Rule, server::ServerConfig},
 };
 
-// 协议配置常量
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
 const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 
+/// 启动反向代理服务器
 pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
     let localhost = ArcLocalHost::new(bind.port());
     localhost.init_network().await;
@@ -64,22 +64,20 @@ fn create_quic_server(
     servers: &[ServerConfig],
 ) -> Result<Arc<QuicServer>> {
     let params = create_server_params();
-    let disabled_keep_alive = HeartbeatConfig::disabled();
     let local_host = localhost.clone();
     let mut builder = QuicServer::builder()
         .with_supported_versions([1u32]) // 支持QUIC版本1
         .without_cert_verifier() // 禁用证书验证
         .with_iface_binder(move |addr| {
             if let Some(iface) = local_host.iface(addr) {
-                warn!("bind addr {}", addr);
+                debug!("bind iface {}", addr);
                 Ok(Arc::new(Usc::new(iface)?))
             } else {
-                warn!("bind addr error");
+                warn!("bind iface error");
                 Ok(Arc::new(Usc::bind(addr)?))
             }
         })
         .with_parameters(params)
-        .defer_idle_timeout(disabled_keep_alive)
         .enable_sni();
 
     // 为每个服务器添加TLS证书
@@ -136,10 +134,7 @@ async fn handle_connections(
                 conn
             }
             Err(e) => {
-                error!(
-                    "[Handle Conn] Failed to establish H3 connection | detail: {}",
-                    e
-                );
+                error!("[Handle Conn] Failed to establish H3 connection: {}", e);
                 continue;
             }
         };
@@ -209,14 +204,9 @@ async fn handle_request(
         }
         Err(e) => {
             error!("[Response handling] Proxy error | detail: {}", e);
-            // 构造错误响应
-            let resp = Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(())
-                .unwrap();
-
+            let resp = build_error_response()?;
             sender.send_response(resp).await?;
-            sender.send_data(e.to_string().into()).await?;
+            sender.send_data(e.to_string().into_bytes().into()).await?;
         }
     };
 
@@ -225,6 +215,14 @@ async fn handle_request(
     sender.finish().await?;
     info!("[Response handling][{}] Processing completed", uri);
     Ok(())
+}
+
+/// 构造错误响应
+fn build_error_response() -> Result<Response<()>> {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(())
+        .map_err(CustomError::HttpError)
 }
 
 /// 执行实际代理请求

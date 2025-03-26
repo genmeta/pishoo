@@ -60,10 +60,11 @@ impl Resolver for Dns {
                 Ok((len, _src)) => {
                     buffer.truncate(len);
                     let response = std::str::from_utf8(&buffer).unwrap();
+                    debug!("[DNS] Received DNS response: {}", response);
                     return dns_deserialize(response);
                 }
                 Err(_) => {
-                    warn!("dns timeout retry {}", i + 1)
+                    warn!("[DNS] timeout retry {}", i + 1)
                 }
             }
         }

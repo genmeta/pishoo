@@ -15,9 +15,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     tracing::info!("Tracing initialized.");
 
-    // 初始化TLS
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let args: Vec<String> = std::env::args().collect();
 
     // 检查是否至少有一个参数传入
