@@ -5,7 +5,6 @@ use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
-use tracing::error;
 
 use crate::error::{CustomError, Result};
 
@@ -18,21 +17,32 @@ pub mod rule;
 pub mod server;
 
 pub fn parse_conf(configure: &[u8], root: &Path) -> Result<Gateway> {
-    let mut gateway = Gateway::default();
-    if let Ok(res) = Directive::<Nginx>::parse(configure) {
-        for mut directive in res {
+    let directives = Directive::<Nginx>::parse(configure)
+        .map_err(|e| CustomError::InvalidDirective(format!("Initial parse error: {}", e)))?;
+
+    let processed_directives = directives
+        .into_iter()
+        .map(|mut directive| {
             directive
                 .resolve_include(root)
-                .map_err(|e| CustomError::UnknownDirective(format!("include error: {}", e)))?;
-            if directive.name == "pishoo" {
-                if let Some(children) = directive.children {
-                    println!("children: {:#?}", children);
-                    gateway =
-                        parse_gateway(children).inspect_err(|e| error!("parse error: {}", e))?;
-                    break;
-                }
-            }
+                .map(|_| directive) // 如果 resolve_include 成功，返回 directive
+                .map_err(|e| CustomError::ConfigError(format!("Include resolution error: {}", e)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let gateway_result = processed_directives.into_iter().find_map(|directive| {
+        if directive.name == "pishoo" {
+            directive.children.map(|children| {
+                parse_gateway(children).map_err(|e| {
+                    CustomError::ConfigError(format!("Failed to parse 'pishoo' block: {}", e))
+                })
+            })
+        } else {
+            None
         }
-    }
-    Ok(gateway)
+    });
+
+    gateway_result
+        .ok_or_else(|| CustomError::MissingConfig("pishoo".to_string()))
+        .and_then(|inner_result| inner_result)
 }

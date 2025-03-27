@@ -96,7 +96,8 @@ impl ServerConfig {
                     builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"));
                 }
                 "location" => {
-                    router.insert(Location::parse(directive)?);
+                    let (pattern, location) = Location::parse(directive)?;
+                    router.insert(pattern, location);
                 }
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
             }
@@ -117,6 +118,8 @@ impl ServerConfig {
         if builder.resolver.is_none() {
             return Err(CustomError::MissingField("resolver".to_string()));
         }
+
+        // TODO 将 pishoo 的 mime types 配置项移植到这里
 
         builder
             .build()

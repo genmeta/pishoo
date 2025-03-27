@@ -16,10 +16,6 @@ use crate::error::{CustomError, Result};
 pub struct ProxyConfig {
     pub listen: SocketAddr,
     pub resolver: SocketAddr,
-    #[builder(default = "Vec::new()")]
-    pub allow: Vec<String>,
-    #[builder(default = "Vec::new()")]
-    pub deny: Vec<String>,
 }
 
 impl ProxyConfig {
@@ -37,8 +33,6 @@ impl ProxyConfig {
 
     pub fn parse(directives: Vec<Directive<Nginx>>) -> Result<Self> {
         let mut builder = ProxyConfigBuilder::default();
-        let mut allow_list = Vec::new();
-        let mut deny_list = Vec::new();
 
         for directive in directives {
             match directive.name.as_str() {
@@ -48,14 +42,9 @@ impl ProxyConfig {
                 "resolver" => {
                     builder.resolver(Self::parse_socket_addr(&directive, "resolver")?);
                 }
-                "allow" => allow_list.extend(directive.args),
-                "deny" => deny_list.extend(directive.args),
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
             }
         }
-
-        builder.allow(allow_list);
-        builder.deny(deny_list);
 
         // Ensure dns_server is set
         if builder.resolver.is_none() {

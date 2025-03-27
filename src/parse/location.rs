@@ -6,37 +6,51 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
     pattern::{Pattern, parse_pattern},
-    rule::{Rule, RuleType, parse_rule_type},
+    rule::{Rule, parse_rule},
 };
 use crate::error::{CustomError, Result};
 
 #[derive(Debug, Clone)]
-pub struct Location {
-    pub pattern: Pattern,
-    pub rule: Rule,
+pub enum Location {
+    Proxy(String, Vec<Rule>),
+    Root(String, Vec<Rule>),
+    Alias(String, Vec<Rule>),
 }
 
 impl Location {
-    pub fn parse(location: Directive<Nginx>) -> Result<Self> {
+    pub fn parse(location: Directive<Nginx>) -> Result<(Pattern, Self)> {
         let pattern = parse_pattern(&location.args)?;
 
-        let mut rule = Rule::default();
-        for rule_type in location.children.into_iter().flatten().map(parse_rule_type) {
-            match rule_type? {
-                RuleType::ProxyPass(proxy_pass) => rule.proxy_pass = proxy_pass,
-                RuleType::ProxySetHeader(key, value) => rule.proxy_set_header.push((key, value)),
-                RuleType::AddHeader(key, value) => {
-                    rule.add_header.push((key, value));
+        let mut type_rule = None;
+        let mut nomal_rule = vec![];
+
+        for rule in location.children.into_iter().flatten().flat_map(parse_rule) {
+            match rule {
+                Rule::ProxyPass(_) | Rule::Root(_) | Rule::Alias(_) => {
+                    if type_rule.is_none() {
+                        type_rule = Some(rule);
+                    }
                 }
-            };
+                _ => {
+                    nomal_rule.push(rule);
+                }
+            }
         }
 
-        if rule.proxy_pass.is_empty() {
-            return Err(CustomError::MissingConfig(
-                "location must have proxy_pass".to_string(),
-            ));
+        match type_rule {
+            Some(rule) => match rule {
+                Rule::ProxyPass(proxy_pass) => {
+                    Ok((pattern, Location::Proxy(proxy_pass, nomal_rule)))
+                }
+                Rule::Root(root) => Ok((pattern, Location::Root(root, nomal_rule))),
+                Rule::Alias(alias) => Ok((pattern, Location::Alias(alias, nomal_rule))),
+                _ => Err(CustomError::InvalidConfig(
+                    "location must have proxy_pass root or alias".to_string(),
+                )),
+            },
+            None => Err(CustomError::MissingConfig(
+                "location must have proxy_pass root or alias".to_string(),
+            )),
         }
-
-        Ok(Self { pattern, rule })
     }
 }
