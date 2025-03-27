@@ -14,11 +14,12 @@ use crate::error::{CustomError, Result};
 
 #[derive(Debug, Default)]
 pub struct Gateway {
-    pub records: HashMap<SocketAddr, Record>,
+    // TODO 新增 mime types 配置项, hashmap 类型, key 为文件后缀, value 为 mime 类型
+    pub servers: HashMap<SocketAddr, Server>,
 }
 
 #[derive(Debug)]
-pub enum Record {
+pub enum Server {
     Reverse(Vec<ServerConfig>),
     Forward(ProxyConfig),
 }
@@ -26,23 +27,23 @@ pub enum Record {
 impl Gateway {
     pub fn insert_server(&mut self, server: ServerConfig) -> Result<()> {
         let addr = server.listen;
-        self.records
+        self.servers
             .entry(addr)
             .and_modify(|record| {
-                if let Record::Reverse(servers) = record {
+                if let Server::Reverse(servers) = record {
                     servers.push(server.clone());
                 }
             })
-            .or_insert_with(|| Record::Reverse(vec![server]));
+            .or_insert_with(|| Server::Reverse(vec![server]));
         Ok(())
     }
 
     pub fn insert_proxy(&mut self, proxy: ProxyConfig) -> Result<()> {
         let addr = proxy.listen;
-        if self.records.contains_key(&addr) {
+        if self.servers.contains_key(&addr) {
             return Err(CustomError::DuplicateServer(addr));
         }
-        self.records.insert(addr, Record::Forward(proxy));
+        self.servers.insert(addr, Server::Forward(proxy));
         Ok(())
     }
 }

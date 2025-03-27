@@ -1,0 +1,7 @@
+types {
+    text/html   html htm shtml;  # 将 .html, .htm, .shtml 映射到 text/html
+    text/css    css;             # 将 .css 映射到 text/css
+    image/jpeg  jpeg jpg;        # 将 .jpeg, .jpg 映射到 image/jpeg
+    application/javascript js;   # 将 .js 映射到 application/javascript
+    # ... 更多映射
+}

@@ -27,10 +27,15 @@ pub struct ServerConfig {
     pub key: String,
     #[builder(default)]
     pub router: Router,
+    // TODO allow deny 变更为 ACL 列表,
+    // 首先检测是否有黑名单, 如果当前域名在黑名单中则拒绝访问
+    // 然后检测是否有白名单, 如果当前域名在白名单中则允许访问
+    // 应该不允许同时启动黑白名单
     #[builder(default = "Vec::new()")]
     pub allow: Vec<String>,
     #[builder(default = "Vec::new()")]
     pub deny: Vec<String>,
+    // TODO 新增 mime types 配置项, hashmap 类型, key 为文件后缀, value 为 mime 类型
 }
 
 impl ServerConfig {
@@ -104,6 +109,7 @@ impl ServerConfig {
         if builder.cert.is_none() || builder.cert.as_ref().unwrap().is_empty() {
             return Err(CustomError::MissingField("ssl_certificate".to_string()));
         }
+
         if builder.key.is_none() || builder.key.as_ref().unwrap().is_empty() {
             return Err(CustomError::MissingField("ssl_certificate_key".to_string()));
         }
