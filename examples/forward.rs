@@ -1,7 +1,7 @@
 use futures::future::join_all;
 use gateway::{
     forward,
-    parse::{gateway::Record, parse_conf},
+    parse::{gateway::Server, parse_conf},
 };
 use tracing::info;
 
@@ -32,11 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
     let mut handlers = Vec::new();
-    for (bind, record) in gateway.records {
+    for (bind, record) in gateway.servers {
         let handle = tokio::spawn({
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
-                if let Record::Forward(server) = record {
+                if let Server::Forward(server) = record {
                     forward::serve(server.listen, server.resolver).await?;
                 }
 

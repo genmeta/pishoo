@@ -26,6 +26,7 @@ pub fn parse_conf(configure: &[u8], root: &Path) -> Result<Gateway> {
                 .map_err(|e| CustomError::UnknownDirective(format!("include error: {}", e)))?;
             if directive.name == "pishoo" {
                 if let Some(children) = directive.children {
+                    println!("children: {:#?}", children);
                     gateway =
                         parse_gateway(children).inspect_err(|e| error!("parse error: {}", e))?;
                     break;
