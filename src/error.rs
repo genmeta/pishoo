@@ -6,6 +6,10 @@ pub type Result<T> = std::result::Result<T, CustomError>;
 
 #[derive(Error, Debug)]
 pub enum CustomError {
+    #[error("invalid directive: `{0}`")]
+    InvalidDirective(String),
+    #[error("invalid config: `{0}`")]
+    ConfigError(String),
     #[error("unknown directive: `{0}`")]
     UnknownDirective(String),
     #[error("invalid address: `{0}`")]

@@ -1,27 +1,21 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use bytes::{Buf, Bytes};
-use futures::StreamExt;
+use bytes::Bytes;
 use gm_quic::{QuicServer, prelude::handy::Usc};
 use h3::server::RequestStream;
-use h3_shim::{BidiStream, RecvStream};
-use http::{Request, Response, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, StreamBody};
-use hyper::{
-    body::{Frame, Incoming},
-    client::conn::http1::Builder,
-};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
-use tokio_stream::wrappers::ReceiverStream;
+use h3_shim::BidiStream;
+use http::{Request, Response, StatusCode};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     dns::Dns,
     error::{CustomError, Result},
     localhost::ArcLocalHost,
-    parse::{router::Router, rule::Rule, server::ServerConfig},
+    parse::{location::Location, router::Router, server::ServerConfig},
+    reverse,
 };
+
+mod proxy;
 
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
@@ -31,12 +25,10 @@ const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
     let localhost = ArcLocalHost::new(bind.port());
     localhost.init_network().await;
-    let routers = init_routers(&servers, localhost.clone())?;
 
-    // 创建并配置 QUIC 服务器
+    let routers = init_routers(&servers, localhost.clone())?;
     let quic_server = create_quic_server(localhost.clone(), &servers)?;
 
-    // 处理连接
     handle_connections(quic_server, localhost, routers).await
 }
 
@@ -146,12 +138,12 @@ async fn handle_connections(
                 while let Ok(Some((req, stream))) = h3_conn
                     .accept()
                     .await
-                    .inspect_err(|e| error!("Connection acceptance error | detail: {:?}", e))
+                    .inspect_err(|e| error!("Connection acceptance error: {:?}", e))
                 {
                     let routers = routers_clone.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_request(routers, req, stream).await {
-                            error!("Request processing error | detail: {}", e);
+                            error!("Request processing error: {}", e);
                         }
                     });
                 }
@@ -178,42 +170,26 @@ async fn handle_request(
     let router = routers
         .get(host)
         .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
-    let (_pattern, rule) = router.route(req.uri().path())?;
+    let (_pattern, location) = router.route(req.uri().path())?;
 
     let (mut sender, receiver) = stream.split();
 
-    // 代理请求并获取响应
-    match proxy_request(rule, req, receiver).await {
-        Ok(resp) => {
-            info!("[Response handling][{}] Sending response", uri);
-            let (parts, body) = resp.into_parts();
-
-            // 发送响应头
-            sender
-                .send_response(Response::from_parts(parts, ()))
-                .await?;
-
-            info!("[Response handling][{}] Sending response headers", uri);
-
-            // 流式发送响应体
-            let mut body_stream = body.into_data_stream();
-            while let Some(Ok(chunk)) = body_stream.next().await {
-                sender.send_data(chunk).await?;
-            }
-            info!("sent response body completely");
+    match location {
+        Location::Proxy(proxy_pass, rules) => {
+            reverse::proxy::handle(proxy_pass, rules, req, receiver, &mut sender).await?;
         }
-        Err(e) => {
-            error!("[Response handling] Proxy error | detail: {}", e);
-            let resp = build_error_response()?;
-            sender.send_response(resp).await?;
-            sender.send_data(e.to_string().into_bytes().into()).await?;
+        Location::Root(_root, _rules) => {
+            // TODO: 处理静态文件请求
         }
-    };
+        Location::Alias(_alias, _rules) => {
+            // TODO: 处理别名求静态文件请求
+        }
+    }
 
     // 结束流
-    info!("[Response handling][{}] Closing stream", uri);
+    debug!("[Response handling][{}] Closing stream", uri);
     sender.finish().await?;
-    info!("[Response handling][{}] Processing completed", uri);
+    debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
 }
 
@@ -223,96 +199,4 @@ fn build_error_response() -> Result<Response<()>> {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(())
         .map_err(CustomError::HttpError)
-}
-
-/// 执行实际代理请求
-async fn proxy_request(
-    rule: &Rule,
-    req: Request<()>,
-    mut receiver: RequestStream<RecvStream, Bytes>,
-) -> Result<Response<Incoming>> {
-    // 构造目标URI
-    let (parts, _) = req.into_parts();
-    let target_uri = Uri::from_str(&format!(
-        "{}{}",
-        rule.proxy_pass,
-        parts
-            .uri
-            .path_and_query()
-            .map(|p| p.to_string())
-            .unwrap_or_default()
-    ))?;
-
-    // 准备请求参数
-    let mut new_parts = parts;
-    new_parts.uri = target_uri.clone();
-    new_parts.version = Version::HTTP_11;
-
-    // 解析目标地址
-    let host = new_parts.uri.host().ok_or(CustomError::MissingHost)?;
-    let port = new_parts.uri.port().map(|p| p.as_u16()).unwrap_or(80);
-
-    // 建立TCP连接
-    let io =
-        TokioIo::new(TcpStream::connect((host, port)).await.inspect_err(|e| {
-            error!("TCP connection error: {}:{} | detail: {:?}", host, port, e)
-        })?);
-
-    // 创建HTTP客户端连接
-    let (mut sender, conn) = Builder::new()
-        .preserve_header_case(true) // 保持首字母大小写
-        .title_case_headers(true) // 标题首字母大写
-        .handshake(io)
-        .await?;
-
-    info!(
-        "[Request processing] HTTP client connection established | target: {:?}",
-        target_uri
-    );
-
-    // 启动连接维护任务
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            error!("[Proxy connection] Maintenance failed | detail: {:?}", e);
-        }
-    });
-
-    // 创建请求体通道
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<std::result::Result<Frame<Bytes>, hyper::Error>>(128);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 异步转发请求体数据
-    tokio::spawn(async move {
-        while let Ok(Some(chunk)) = receiver.recv_data().await.inspect_err(|e| {
-            error!(
-                "[Request processing] Request body reception error | detail: {:?}",
-                e
-            );
-        }) {
-            let mut data = chunk.chunk();
-            debug!(
-                "[Request processing] Sending request body | data_length: {}",
-                data.len()
-            );
-            let _ = tx
-                .send(Ok(Frame::data(data.copy_to_bytes(data.len()))))
-                .await
-                .inspect_err(|e| {
-                    error!(
-                        "[Request processing] Request body send error | detail: {:?}",
-                        e
-                    )
-                });
-        }
-    });
-
-    // 发送代理请求
-    let response = sender
-        .send_request(Request::from_parts(new_parts, body))
-        .await?;
-
-    info!("[Request processing] Finished sending request body");
-
-    Ok(response)
 }

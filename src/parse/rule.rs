@@ -2,23 +2,24 @@
 //!
 //! Handles parsing of proxy-related directives like proxy_pass and proxy_set_header
 
+use std::collections::HashMap;
+
 use misc_conf::{ast::Directive, nginx::Nginx};
 use tracing::info;
 
 use crate::error::{CustomError, Result};
 
-#[derive(Default, Debug, Clone)]
-pub struct Rule {
-    pub proxy_pass: String,
-    pub proxy_set_header: Vec<(String, String)>,
-    pub add_header: Vec<(String, String)>,
-}
-
+/// Location 块的配置规则
+///
+/// 如果同时存在 proxy_pass root alias, 则只会解析第一个
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuleType {
+pub enum Rule {
     ProxyPass(String),
+    Root(String),
+    Alias(String),
     ProxySetHeader(String, String),
     AddHeader(String, String),
+    MimeTypes(HashMap<String, String>),
 }
 
 fn take_args<T, F>(rule: &Directive<Nginx>, extractor: F) -> Result<T>
@@ -28,18 +29,18 @@ where
     extractor(&rule.args).ok_or_else(|| CustomError::InvalidArgs(rule.name.clone()))
 }
 
-pub fn parse_rule_type(rule: Directive<Nginx>) -> Result<RuleType> {
+pub fn parse_rule(rule: Directive<Nginx>) -> Result<Rule> {
     Ok(match rule.name.as_str() {
         "proxy_pass" => take_args(&rule, |args| match args {
-            [arg] => Some(RuleType::ProxyPass(arg.clone())),
+            [arg] => Some(Rule::ProxyPass(arg.clone())),
             _ => None,
         })?,
         "proxy_set_header" => take_args(&rule, |args| match args {
-            [name, value] => Some(RuleType::ProxySetHeader(name.clone(), value.clone())),
+            [name, value] => Some(Rule::ProxySetHeader(name.clone(), value.clone())),
             _ => None,
         })?,
         "add_header" => take_args(&rule, |args| match args {
-            [name, value] => Some(RuleType::AddHeader(name.clone(), value.clone())),
+            [name, value] => Some(Rule::AddHeader(name.clone(), value.clone())),
             _ => None,
         })?,
         unknown => {

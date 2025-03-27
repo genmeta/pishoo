@@ -14,7 +14,10 @@ use crate::error::{CustomError, Result};
 
 #[derive(Debug, Default)]
 pub struct Gateway {
-    // TODO 新增 mime types 配置项, hashmap 类型, key 为文件后缀, value 为 mime 类型
+    /// MIME types configuration
+    pub types: HashMap<String, String>,
+    /// Default MIME type
+    pub default_type: Option<String>,
     pub servers: HashMap<SocketAddr, Server>,
 }
 
@@ -54,6 +57,20 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
     for directive in directives {
         match directive.name.as_str() {
             "allow" | "deny" => {}
+            "types" => {
+                if let Some(directives) = directive.children {
+                    for directive in directives {
+                        for arg in directive.args {
+                            gateway.types.insert(arg, directive.name.clone());
+                        }
+                    }
+                }
+            }
+            "default_type" => {
+                if let Some(arg) = directive.args.first() {
+                    gateway.default_type = Some(arg.clone());
+                }
+            }
             "server" => {
                 if let Some(directives) = directive.children {
                     gateway.insert_server(ServerConfig::parse(directives)?)?;

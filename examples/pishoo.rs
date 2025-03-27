@@ -7,7 +7,6 @@ use gateway::{
     parse::{gateway::Server, parse_conf},
     reverse,
 };
-use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -68,7 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (bind, record) in gateway.servers {
         let handle = tokio::spawn({
             async move {
-                info!("Launching server on {}, servers: {:#?}", bind, record);
                 match record {
                     Server::Reverse(servers) => {
                         reverse::serve(bind, servers).await?;
