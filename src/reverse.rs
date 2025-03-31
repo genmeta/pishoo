@@ -15,6 +15,7 @@ use crate::{
     reverse,
 };
 
+mod file;
 mod proxy;
 
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
@@ -170,19 +171,19 @@ async fn handle_request(
     let router = routers
         .get(host)
         .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
-    let (_pattern, location) = router.route(req.uri().path())?;
+    let (pattern, location) = router.route(req.uri().path())?;
 
     let (mut sender, receiver) = stream.split();
 
     match location {
-        Location::Proxy(proxy_pass, rules) => {
-            reverse::proxy::handle(proxy_pass, rules, req, receiver, &mut sender).await?;
+        Location::Proxy(location) => {
+            reverse::proxy::handle(location, req, receiver, &mut sender).await?;
         }
-        Location::Root(_root, _rules) => {
-            // TODO: 处理静态文件请求
+        Location::Root(location) => {
+            reverse::file::root(location, req, &mut sender).await?;
         }
-        Location::Alias(_alias, _rules) => {
-            // TODO: 处理别名求静态文件请求
+        Location::Alias(location) => {
+            reverse::file::alias(location, pattern, req, &mut sender).await?;
         }
     }
 

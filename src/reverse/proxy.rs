@@ -16,19 +16,18 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::rule::Rule,
+    parse::location::ProxyLocation,
     reverse::build_error_response,
 };
 
 pub async fn handle(
-    proxy_pass: &str,
-    rules: &[Rule],
+    location: &ProxyLocation,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let uri = req.uri().to_string();
-    match pass(proxy_pass, rules, req, receiver).await {
+    match pass(location, req, receiver).await {
         Ok(resp) => {
             debug!("[Response handling][{}] Sending response", uri);
             let (parts, body) = resp.into_parts();
@@ -39,7 +38,6 @@ pub async fn handle(
                 .await?;
 
             debug!("[Response handling][{}] Sending response headers", uri);
-
             // 流式发送响应体
             let mut body_stream = body.into_data_stream();
             while let Some(Ok(chunk)) = body_stream.next().await {
@@ -57,8 +55,7 @@ pub async fn handle(
 
 /// 代理请求
 pub async fn pass(
-    proxy_pass: &str,
-    _rules: &[Rule],
+    location: &ProxyLocation,
     req: Request<()>,
     mut receiver: RequestStream<RecvStream, Bytes>,
 ) -> Result<Response<Incoming>> {
@@ -66,7 +63,7 @@ pub async fn pass(
     let (parts, _) = req.into_parts();
     let target_uri = Uri::from_str(&format!(
         "{}{}",
-        proxy_pass,
+        location.proxy_pass,
         parts
             .uri
             .path_and_query()

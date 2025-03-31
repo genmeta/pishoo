@@ -7,7 +7,7 @@ use crate::error::{CustomError, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct Router {
-    locations: Vec<(Pattern, Location)>,
+    pub locations: Vec<(Pattern, Location)>,
 }
 
 impl Router {
