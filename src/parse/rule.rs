@@ -20,6 +20,7 @@ pub enum Rule {
     ProxySetHeader(String, String),
     AddHeader(String, String),
     MimeTypes(HashMap<String, String>),
+    DefaultType(String),
 }
 
 fn take_args<T, F>(rule: &Directive<Nginx>, extractor: F) -> Result<T>
@@ -33,6 +34,14 @@ pub fn parse_rule(rule: Directive<Nginx>) -> Result<Rule> {
     Ok(match rule.name.as_str() {
         "proxy_pass" => take_args(&rule, |args| match args {
             [arg] => Some(Rule::ProxyPass(arg.clone())),
+            _ => None,
+        })?,
+        "root" => take_args(&rule, |args| match args {
+            [arg] => Some(Rule::Root(arg.clone())),
+            _ => None,
+        })?,
+        "alias" => take_args(&rule, |args| match args {
+            [arg] => Some(Rule::Alias(arg.clone())),
             _ => None,
         })?,
         "proxy_set_header" => take_args(&rule, |args| match args {

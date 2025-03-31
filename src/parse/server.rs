@@ -5,7 +5,7 @@
 //! - SSL certificate configuration
 //! - Access control lists
 
-use std::{net::SocketAddr, path::Path};
+use std::{collections::HashMap, net::SocketAddr, path::Path};
 
 use derive_builder::Builder;
 use misc_conf::{ast::Directive, nginx::Nginx};
@@ -35,7 +35,13 @@ pub struct ServerConfig {
     pub allow: Vec<String>,
     #[builder(default = "Vec::new()")]
     pub deny: Vec<String>,
-    // TODO 新增 mime types 配置项, hashmap 类型, key 为文件后缀, value 为 mime 类型
+
+    /// MIME types configuration
+    #[builder(default)]
+    pub types: HashMap<String, String>,
+    /// Default MIME type
+    #[builder(default)]
+    pub default_type: Option<String>,
 }
 
 impl ServerConfig {
@@ -101,6 +107,12 @@ impl ServerConfig {
                 }
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
             }
+        }
+
+        if router.locations.is_empty() {
+            return Err(CustomError::ConfigError(
+                "no location block found".to_string(),
+            ));
         }
 
         // Set accumulated values

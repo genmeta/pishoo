@@ -19,3 +19,5 @@ tarpaulin-report.html
 .idea/
 *.log
 Cargo.lock
+
+.DS_Store
