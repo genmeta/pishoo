@@ -72,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         reverse::serve(bind, servers).await?;
                     }
                     Server::Forward(server) => {
-                        forward::serve(server.listen, server.resolver).await?;
+                        forward::serve(server.listen, server.resolver, server.allow, server.deny)
+                            .await?;
                     }
                 }
 

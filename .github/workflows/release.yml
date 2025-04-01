@@ -1,76 +1,78 @@
 name: Release
 
 on:
-    workflow_dispatch:
+  workflow_dispatch:
 
 env:
-    CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: always
 
 jobs:
-    build:
-        permissions:
-            contents: write
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - platform: "ubuntu-22.04"
-                      target: "aarch64-unknown-linux-musl"
-                    - platform: "ubuntu-22.04"
-                      target: "mipsel-unknown-linux-musl"
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "ubuntu-22.04"
+            target: "x86_64-unknown-linux-musl"
+          - platform: "ubuntu-22.04"
+            target: "aarch64-unknown-linux-musl"
+          - platform: "ubuntu-22.04"
+            target: "mipsel-unknown-linux-musl"
 
-        runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform }}
 
-        steps:
-            - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-            # 设置 SSH 环境
-            - uses: webfactory/ssh-agent@v0.9.0
-              with:
-                  ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
+      # 设置 SSH 环境
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
 
-            # 安装 Rust
-            - name: install Rust
-              if: matrix.target == 'aarch64-unknown-linux-musl'
-              uses: dtolnay/rust-toolchain@nightly
-              id: rust_toolchain
-              with:
-                  target: ${{ matrix.target }}
+      # 安装 Rust
+      - name: install Rust
+        if: matrix.target != 'mipsel-unknown-linux-musl'
+        uses: dtolnay/rust-toolchain@nightly
+        id: rust_toolchain
+        with:
+          target: ${{ matrix.target }}
 
-            # 安装交叉编译工具链
-            - name: Install Cross-Compilation Toolchain
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu gcc-mipsel-linux-gnu
+      # 安装交叉编译工具链
+      - name: Install Cross-Compilation Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu gcc-mipsel-linux-gnu
 
-            # 安装 cargo-cross 以简化交叉编译
-            - name: Install cargo-cross
-              run: |
-                  cargo install cross --git https://github.com/cross-rs/cross
+      # 安装 cargo-cross 以简化交叉编译
+      - name: Install cargo-cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
 
-            - name: Setup Cross.toml for mipsel
-              if: matrix.target == 'mipsel-unknown-linux-musl'
-              run: |
-                  cat > Cross.toml << 'EOF'
-                  [target.mipsel-unknown-linux-musl]
-                  build-std = ["std", "alloc", "core", "proc_macro", "panic_abort"]
-                  image = "docker.io/rustembedded/cross:mipsel-unknown-linux-musl"
-                  EOF
+      - name: Setup Cross.toml for mipsel
+        if: matrix.target == 'mipsel-unknown-linux-musl'
+        run: |
+          cat > Cross.toml << 'EOF'
+          [target.mipsel-unknown-linux-musl]
+          build-std = ["std", "alloc", "core", "proc_macro", "panic_abort"]
+          image = "docker.io/rustembedded/cross:mipsel-unknown-linux-musl"
+          EOF
 
-            # 使用 cross 编译项目
-            - name: Build release
-              run: |
-                  cross +nightly build --example pishoo --target ${{ matrix.target }}  --release
+      # 使用 cross 编译项目
+      - name: Build release
+        run: |
+          cross +nightly build --example pishoo --target ${{ matrix.target }}  --release
 
-            # 准备部署工件
-            - name: Prepare Artifact
-              run: |
-                  mkdir -p deploy
-                  cp target/${{ matrix.target }}/release/examples/pishoo deploy/pishoo-${{ matrix.target }}
+      # 准备部署工件
+      - name: Prepare Artifact
+        run: |
+          mkdir -p deploy
+          cp target/${{ matrix.target }}/release/examples/pishoo deploy/pishoo-${{ matrix.target }}
 
-            # 上传编译产物
-            - name: Upload Artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: pishoo-${{ matrix.target }}
-                  path: deploy/pishoo-${{ matrix.target }}
+      # 上传编译产物
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pishoo-${{ matrix.target }}
+          path: deploy/pishoo-${{ matrix.target }}

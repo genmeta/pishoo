@@ -16,7 +16,7 @@ use crate::error::{CustomError, Result};
 #[derive(Builder, Debug, Clone)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
-    #[builder(default = "Vec::new()")]
+    #[builder(default)]
     pub server_name: Vec<String>,
     #[builder(default = "false")]
     pub reuse_port: bool,
@@ -27,15 +27,12 @@ pub struct ServerConfig {
     pub key: String,
     #[builder(default)]
     pub router: Router,
-    // TODO allow deny 变更为 ACL 列表,
-    // 首先检测是否有黑名单, 如果当前域名在黑名单中则拒绝访问
-    // 然后检测是否有白名单, 如果当前域名在白名单中则允许访问
-    // 应该不允许同时启动黑白名单
-    #[builder(default = "Vec::new()")]
+    // 白名单模糊匹配
+    #[builder(default)]
     pub allow: Vec<String>,
-    #[builder(default = "Vec::new()")]
+    // 黑名单精准匹配
+    #[builder(default)]
     pub deny: Vec<String>,
-
     /// MIME types configuration
     #[builder(default)]
     pub types: HashMap<String, String>,

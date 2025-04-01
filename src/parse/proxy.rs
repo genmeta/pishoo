@@ -16,6 +16,12 @@ use crate::error::{CustomError, Result};
 pub struct ProxyConfig {
     pub listen: SocketAddr,
     pub resolver: SocketAddr,
+    // 白名单模糊匹配
+    #[builder(default)]
+    pub allow: Vec<String>,
+    // 黑名单精准匹配
+    #[builder(default)]
+    pub deny: Vec<String>,
 }
 
 impl ProxyConfig {
@@ -41,6 +47,12 @@ impl ProxyConfig {
                 }
                 "resolver" => {
                     builder.resolver(Self::parse_socket_addr(&directive, "resolver")?);
+                }
+                "allow" => {
+                    builder.allow(directive.args);
+                }
+                "deny" => {
+                    builder.deny(directive.args);
                 }
                 _ => return Err(CustomError::UnknownDirective(directive.name)),
             }
