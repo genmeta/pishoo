@@ -88,37 +88,32 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
         }
     }
 
-    // 继承 gateway 和 server 层级的 MIME types 配置到 location
+    // Process MIME types inheritance with override logic
     for server in gateway.servers.values_mut() {
-        let mime_type = gateway.types.clone();
-        let default_type = gateway.default_type.clone();
+        let parent_mime_types = gateway.types.clone();
+        let parent_default_type = gateway.default_type.clone();
         if let Server::Reverse(servers) = server {
-            for server in servers {
-                let mut mime_type = mime_type.clone();
-                let mut default_type = default_type.clone();
+            for server_config in servers {
+                let effective_server_mime_types = if !server_config.types.is_empty() {
+                    &server_config.types
+                } else {
+                    &parent_mime_types
+                };
+                let effective_server_default_type = if server_config.default_type.is_some() {
+                    &server_config.default_type
+                } else {
+                    &parent_default_type
+                };
 
-                for (key, value) in server.types.clone() {
-                    mime_type.insert(key, value);
-                }
-
-                if let Some(value) = server.default_type.clone() {
-                    default_type = Some(value);
-                }
-
-                for (_, location) in server.router.locations.iter_mut() {
+                for (_, location) in server_config.router.locations.iter_mut() {
                     match location {
                         Location::Root(file_location) | Location::Alias(file_location) => {
-                            let mut mime_type = mime_type.clone();
-                            let mut default_type = default_type.clone();
-                            for (key, value) in file_location.mime_types.clone() {
-                                mime_type.insert(key, value);
+                            if file_location.mime_types.is_empty() {
+                                file_location.mime_types = effective_server_mime_types.clone();
                             }
-
-                            if let Some(value) = file_location.default_type.clone() {
-                                default_type = Some(value);
+                            if file_location.default_type.is_none() {
+                                file_location.default_type = effective_server_default_type.clone();
                             }
-                            file_location.mime_types = mime_type;
-                            file_location.default_type = default_type;
                         }
                         _ => {}
                     }

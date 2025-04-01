@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use acl::{Acl, parse_host_matches};
 use bytes::Bytes;
 use futures::FutureExt;
 use gm_quic::{ClientParameters, QuicClient};
@@ -17,6 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::{error::CustomError, forward, localhost::ArcLocalHost};
 
+mod acl;
 mod normal;
 mod quic;
 
@@ -31,19 +33,42 @@ type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 /// 启动 TCP 监听并处理传入连接
-pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Result<String> {
+pub async fn serve(
+    addr: SocketAddr,
+    resolver: SocketAddr,
+    allow: Vec<String>,
+    deny: Vec<String>,
+) -> crate::error::Result<String> {
     let listener = TcpListener::bind(addr).await.map_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
         e
     })?;
+
     let local_addr = listener.local_addr().inspect_err(|e| {
         error!("TCP listener inspect failed: {:?}", e);
     })?;
+
     info!("Listening on: http://{}", local_addr);
 
     let localhost = ArcLocalHost::new(local_addr.port());
     LOCALHOST.get_or_init(|| localhost.clone());
     localhost.init_network().await;
+
+    // Acl 规则解析
+    let allow = Acl::new(parse_host_matches(allow));
+    let deny = Acl::new(parse_host_matches(deny));
+    let check_host = move |host: &str| {
+        // Rule 1: Must match at least one allow pattern
+        if !allow.check_host(host) {
+            return false;
+        }
+        // Rule 2: If allowed, must not match any deny pattern
+        if deny.check_host(host) {
+            return false;
+        }
+        true
+    };
+    let check_host = Arc::new(check_host);
 
     let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
 
@@ -51,14 +76,16 @@ pub async fn serve(addr: SocketAddr, resolver: SocketAddr) -> crate::error::Resu
         while let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let quic_client = quic_client.clone();
+            let check_host = check_host.clone();
 
             tokio::task::spawn({
                 let localhost = localhost.clone();
                 async move {
                     // 为每个连接创建服务处理器
                     let service = service_fn(move |req| {
-                        let (_host, normal) = validate_host(&req).unwrap();
-                        if normal {
+                        let host = validate_host(&req).unwrap();
+
+                        if !check_host(host) {
                             return forward::normal::proxy(req).boxed();
                         }
 
@@ -164,25 +191,16 @@ fn configure_tls() -> rustls::ClientConfig {
 }
 
 /// 验证请求中的 Host 头合法性
-fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<(String, bool), String> {
+fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<&str, String> {
     // 从 URI 或 Header 获取 Host
-    let host = req
-        .uri()
+    req.uri()
         .host()
         .or_else(|| req.headers().get("host").and_then(|h| h.to_str().ok()))
         .ok_or_else(|| {
             let reason = format!("Invalid Host header: {:?}", req);
             warn!("{}", reason);
             reason
-        })?;
-
-    // TODO 支持配置域名白名单
-    // 检查域名白名单
-    if host.ends_with("genmeta.net") {
-        Ok((host.to_string(), false))
-    } else {
-        Ok((host.to_string(), true))
-    }
+        })
 }
 
 /// 创建空响应

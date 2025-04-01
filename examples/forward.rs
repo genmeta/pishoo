@@ -37,7 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             async move {
                 info!("Launching server on {}, servers: {:#?}", bind, record);
                 if let Server::Forward(server) = record {
-                    forward::serve(server.listen, server.resolver).await?;
+                    forward::serve(server.listen, server.resolver, server.allow, server.deny)
+                        .await?;
                 }
 
                 Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())

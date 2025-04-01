@@ -30,7 +30,7 @@ pub async fn proxy(
     info!("[Forward] Request: {}", uri);
 
     // 验证主机合法性
-    let (host, _) = match validate_host(&req) {
+    let host = match validate_host(&req) {
         Ok(host) => host,
         Err(reason) => {
             error!("[Forward][{}] Invalid host: {}", uri, reason);
@@ -40,7 +40,7 @@ pub async fn proxy(
 
     // 创建 QUIC 连接
     let (mut h3_conn, send_request) =
-        match create_quic_connection(quic_client, localhost, &host, resolver).await {
+        match create_quic_connection(quic_client, localhost, host, resolver).await {
             Ok(conn) => conn,
             Err(msg) => {
                 error!(
