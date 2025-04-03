@@ -32,7 +32,16 @@ type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
-/// 启动 TCP 监听并处理传入连接
+/// Start the QUIC proxy server
+///
+/// # Arguments
+/// * `addr` - The listening address of the server
+/// * `resolver` - The address of the DNS resolver
+/// * `allow` - The list of allowed hosts
+/// * `deny` - The list of denied hosts
+///
+/// # Returns
+/// * `Result<String>` - The address the server is listening on
 pub async fn serve(
     addr: SocketAddr,
     resolver: SocketAddr,
@@ -120,7 +129,10 @@ pub async fn serve(
     Ok(local_addr.to_string())
 }
 
-/// 从暂停中恢复网络连接
+/// Resume the network
+///
+/// # Returns
+/// * `Result<()>` - The result of resuming the network
 pub async fn resume() -> crate::error::Result<()> {
     info!("Resuming network");
     let localhost = LOCALHOST

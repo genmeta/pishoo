@@ -21,6 +21,8 @@ pub struct Gateway {
     pub types: HashMap<String, String>,
     /// Default MIME type
     pub default_type: Option<String>,
+    /// Index files
+    pub index_files: Vec<String>,
     pub servers: HashMap<SocketAddr, Server>,
 }
 
@@ -74,6 +76,9 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
                     gateway.default_type = Some(arg.clone());
                 }
             }
+            "index" => {
+                gateway.index_files = directive.args;
+            }
             "server" => {
                 if let Some(directives) = directive.children {
                     gateway.insert_server(ServerConfig::parse(directives)?)?;
@@ -88,31 +93,35 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
         }
     }
 
+    organize_mime_types(&mut gateway);
+    organize_index_files(&mut gateway);
+
+    Ok(gateway)
+}
+
+/// Helper function to mime types
+fn organize_mime_types(gateway: &mut Gateway) {
+    let mut parent_mime_types = &gateway.types;
+    let mut parent_default_type = &gateway.default_type;
     // Process MIME types inheritance with override logic
     for server in gateway.servers.values_mut() {
-        let parent_mime_types = gateway.types.clone();
-        let parent_default_type = gateway.default_type.clone();
         if let Server::Reverse(servers) = server {
             for server_config in servers {
-                let effective_server_mime_types = if !server_config.types.is_empty() {
-                    &server_config.types
-                } else {
-                    &parent_mime_types
-                };
-                let effective_server_default_type = if server_config.default_type.is_some() {
-                    &server_config.default_type
-                } else {
-                    &parent_default_type
-                };
+                if !server_config.types.is_empty() {
+                    parent_mime_types = &server_config.types;
+                }
+                if server_config.default_type.is_some() {
+                    parent_default_type = &server_config.default_type;
+                }
 
                 for (_, location) in server_config.router.locations.iter_mut() {
                     match location {
                         Location::Root(file_location) | Location::Alias(file_location) => {
                             if file_location.mime_types.is_empty() {
-                                file_location.mime_types = effective_server_mime_types.clone();
+                                file_location.mime_types = parent_mime_types.clone();
                             }
                             if file_location.default_type.is_none() {
-                                file_location.default_type = effective_server_default_type.clone();
+                                file_location.default_type = parent_default_type.clone();
                             }
                         }
                         _ => {}
@@ -121,6 +130,28 @@ pub fn parse_gateway(directives: Vec<Directive<Nginx>>) -> Result<Gateway> {
             }
         }
     }
+}
 
-    Ok(gateway)
+fn organize_index_files(gateway: &mut Gateway) {
+    let mut parent_index_files = &gateway.index_files;
+    // Process index files inheritance with override logic
+    for server in gateway.servers.values_mut() {
+        if let Server::Reverse(servers) = server {
+            for server_config in servers {
+                if !server_config.index_files.is_empty() {
+                    parent_index_files = &server_config.index_files;
+                }
+                for (_, location) in server_config.router.locations.iter_mut() {
+                    match location {
+                        Location::Root(file_location) | Location::Alias(file_location) => {
+                            if file_location.index_files.is_empty() {
+                                file_location.index_files = parent_index_files.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }

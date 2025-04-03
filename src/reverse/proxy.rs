@@ -27,10 +27,18 @@ pub async fn handle(
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let uri = req.uri().to_string();
+    // TODO 处理 proxy_set_header
     match pass(location, req, receiver).await {
         Ok(resp) => {
             debug!("[Response handling][{}] Sending response", uri);
-            let (parts, body) = resp.into_parts();
+            let (mut parts, body) = resp.into_parts();
+
+            // 处理 add_header
+            for (header, value, always) in location.add_header.iter() {
+                if parts.status.is_success() || *always {
+                    parts.headers.insert(header, value.clone());
+                }
+            }
 
             // 发送响应头
             sender
