@@ -22,7 +22,14 @@ const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
 const MAX_DATA: u32 = 1 << 30; // 最大数据限制 (1MB)
 
-/// 启动反向代理服务器
+/// Start the QUIC proxy server
+///
+/// # Arguments
+/// * `bind` - The listening address of the server
+/// * `servers` - The list of server configurations
+///
+/// # Returns
+/// * `Result<()>` - An empty result if successful, or an error if failed
 pub async fn serve(bind: SocketAddr, servers: Vec<ServerConfig>) -> Result<()> {
     let localhost = ArcLocalHost::new(bind.port());
     localhost.init_network().await;

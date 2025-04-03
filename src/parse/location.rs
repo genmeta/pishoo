@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
@@ -22,8 +23,8 @@ pub enum Location {
 #[derive(Debug, Clone)]
 pub struct ProxyLocation {
     pub proxy_pass: String,
-    pub add_header: Vec<(String, String)>,
-    pub proxy_set_header: Vec<(String, String)>,
+    pub add_header: Vec<(HeaderName, HeaderValue, bool)>,
+    pub proxy_set_header: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ProxyLocation {
@@ -41,7 +42,7 @@ pub struct FileLocation {
     pub replace: String,
     pub mime_types: HashMap<String, String>,
     pub default_type: Option<String>,
-    pub index: Vec<String>,
+    pub index_files: Vec<String>,
 }
 
 impl FileLocation {
@@ -50,7 +51,7 @@ impl FileLocation {
             replace,
             mime_types: HashMap::new(),
             default_type: None,
-            index: vec![],
+            index_files: vec![],
         }
     }
 }
@@ -81,8 +82,8 @@ impl Location {
                     let mut location = ProxyLocation::new(proxy_pass);
                     for rule in nomal_rule {
                         match rule {
-                            Rule::AddHeader(name, value) => {
-                                location.add_header.push((name, value));
+                            Rule::AddHeader(name, value, always) => {
+                                location.add_header.push((name, value, always));
                             }
                             Rule::ProxySetHeader(name, value) => {
                                 location.proxy_set_header.push((name, value));
@@ -106,11 +107,10 @@ impl Location {
                             Rule::DefaultType(default_type) => {
                                 location.default_type = Some(default_type);
                             }
-                            _ => {
-                                return Err(CustomError::InvalidConfig(
-                                    "location must have mime_type and default_type".to_string(),
-                                ));
+                            Rule::IndexFiles(index_files) => {
+                                location.index_files = index_files;
                             }
+                            _ => {}
                         }
                     }
                     Ok((pattern, Location::Root(location)))
@@ -125,11 +125,10 @@ impl Location {
                             Rule::DefaultType(default_type) => {
                                 location.default_type = Some(default_type);
                             }
-                            _ => {
-                                return Err(CustomError::InvalidConfig(
-                                    "location must have mime_type and default_type".to_string(),
-                                ));
+                            Rule::IndexFiles(index_files) => {
+                                location.index_files = index_files;
                             }
+                            _ => {}
                         }
                     }
                     Ok((pattern, Location::Alias(location)))

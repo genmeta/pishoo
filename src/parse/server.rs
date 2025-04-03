@@ -18,19 +18,22 @@ pub struct ServerConfig {
     pub listen: SocketAddr,
     #[builder(default)]
     pub server_name: Vec<String>,
+    /// Enable SO_REUSEPORT
     #[builder(default = "false")]
     pub reuse_port: bool,
+    /// DNS resolver address
     pub resolver: SocketAddr,
+    /// SSL certificate
     #[builder(default)]
     pub cert: String,
+    /// SSL certificate key
     #[builder(default)]
     pub key: String,
+    /// Reverse proxy configuration
     #[builder(default)]
     pub router: Router,
-    // 白名单模糊匹配
     #[builder(default)]
     pub allow: Vec<String>,
-    // 黑名单精准匹配
     #[builder(default)]
     pub deny: Vec<String>,
     /// MIME types configuration
@@ -39,6 +42,9 @@ pub struct ServerConfig {
     /// Default MIME type
     #[builder(default)]
     pub default_type: Option<String>,
+    /// Index files
+    #[builder(default)]
+    pub index_files: Vec<String>,
 }
 
 impl ServerConfig {
@@ -98,6 +104,23 @@ impl ServerConfig {
                 "reuse_port" => {
                     builder.reuse_port(directive.args.first().is_some_and(|on| on == "on"));
                 }
+                "types" => {
+                    let mut types = HashMap::new();
+                    if let Some(directives) = directive.children {
+                        for directive in directives {
+                            for arg in directive.args {
+                                types.insert(arg, directive.name.clone());
+                            }
+                        }
+                    }
+                    builder.types(types);
+                }
+                "default_type" => {
+                    builder.default_type(directive.args.first().cloned());
+                }
+                "index" => {
+                    builder.index_files(directive.args);
+                }
                 "location" => {
                     let (pattern, location) = Location::parse(directive)?;
                     router.insert(pattern, location);
@@ -127,8 +150,6 @@ impl ServerConfig {
         if builder.resolver.is_none() {
             return Err(CustomError::MissingField("resolver".to_string()));
         }
-
-        // TODO 将 pishoo 的 mime types 配置项移植到这里
 
         builder
             .build()
