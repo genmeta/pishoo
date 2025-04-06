@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, command};
 use futures::future::join_all;
 use gateway::{
-    forward,
+    forward, new_parse,
     parse::{gateway::Server, parse_conf},
     reverse,
 };
@@ -60,6 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file = args.config_file;
     let configure = std::fs::read(&config_file)?;
     let gateway = parse_conf(&configure, config_file.parent().unwrap())?;
+    let aaa = new_parse::parse(&configure, config_file.parent().unwrap())?;
+    println!("{:#?}", aaa);
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
