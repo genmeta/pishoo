@@ -1,7 +1,4 @@
-use std::{
-    net::SocketAddr,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 use acl::{Acl, parse_host_matches};
 use bytes::Bytes;
@@ -16,7 +13,12 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
-use crate::{error::CustomError, forward, localhost::ArcLocalHost};
+use crate::{
+    error::CustomError,
+    forward,
+    localhost::ArcLocalHost,
+    new_parse::{Node, Value},
+};
 
 mod acl;
 mod normal;
@@ -42,12 +44,15 @@ type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 ///
 /// # Returns
 /// * `Result<String>` - The address the server is listening on
-pub async fn serve(
-    addr: SocketAddr,
-    resolver: SocketAddr,
-    allow: Vec<String>,
-    deny: Vec<String>,
-) -> crate::error::Result<String> {
+pub async fn serve(config: Arc<Node>) -> crate::error::Result<String> {
+    let addr = if let Some(Value::Addr(addr)) = config.get("listen") {
+        *addr
+    } else {
+        return Err(CustomError::InvalidConfig(
+            "Invalid listen address".to_string(),
+        ));
+    };
+
     let listener = TcpListener::bind(addr).await.map_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
         e
@@ -62,6 +67,25 @@ pub async fn serve(
     let localhost = ArcLocalHost::new(local_addr.port());
     LOCALHOST.get_or_init(|| localhost.clone());
     localhost.init_network().await;
+
+    let resolver = if let Some(Value::Addr(resolver)) = config.get("resolver") {
+        *resolver
+    } else {
+        unreachable!("Resolver address is required");
+    };
+
+    // TODO 向父级回溯
+    let allow = if let Some(Value::StringVec(allow)) = config.get("allow") {
+        allow.clone()
+    } else {
+        Vec::new()
+    };
+
+    let deny = if let Some(Value::StringVec(deny)) = config.get("deny") {
+        deny.clone()
+    } else {
+        Vec::new()
+    };
 
     // Acl 规则解析
     let allow = Acl::new(parse_host_matches(allow));

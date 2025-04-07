@@ -23,10 +23,10 @@ mod pishoo;
 mod proxy;
 mod server;
 
-type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<ParseValue>>;
+type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
 
 #[derive(Debug)]
-pub enum ParseValue {
+pub enum Value {
     String(String),
     StringVec(Vec<String>),
     StringMap(HashMap<String, String>),
@@ -35,26 +35,33 @@ pub enum ParseValue {
     Path(PathBuf),
     Header(Vec<(HeaderName, HeaderValue)>),
     HeaderAllways(Vec<(HeaderName, HeaderValue, bool)>),
-    Location(Pattern, HashMap<String, ParseValue>),
-    ValueMap(HashMap<String, ParseValue>),
-    Nodes(Vec<Arc<ParseNode>>),
+    Pattern(Pattern, HashMap<String, Value>),
+    ValueMap(HashMap<String, Value>),
+    Nodes(Vec<Arc<Node>>),
+}
+
+impl Value {
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match self {
+            Value::ValueMap(map) => map.get(key),
+            Value::Pattern(_, map) => map.get(key),
+            _ => None,
+        }
+    }
 }
 
 // 包含数据和父链接的节点结构
 #[derive(Debug)]
-pub struct ParseNode {
+pub struct Node {
     // 使用RwLock实现内部可变性
-    value: ParseValue,
+    value: Value,
     // Weak指针避免循环引用
-    parent: OnceCell<Option<Weak<ParseNode>>>,
+    parent: OnceCell<Option<Weak<Node>>>,
 }
 
-impl ParseNode {
-    pub fn new(value: ParseValue) -> Self {
-        assert!(matches!(
-            value,
-            ParseValue::ValueMap(..) | ParseValue::Location(..)
-        ));
+impl Node {
+    pub fn new(value: Value) -> Self {
+        assert!(matches!(value, Value::ValueMap(..) | Value::Pattern(..)));
 
         Self {
             value,
@@ -63,7 +70,7 @@ impl ParseNode {
     }
 
     // 获取存活的父节点Arc
-    pub fn parent(&self) -> Option<Arc<ParseNode>> {
+    pub fn parent(&self) -> Option<Arc<Node>> {
         self.parent
             .get()
             .and_then(|opt_weak_ref| opt_weak_ref.as_ref())
@@ -71,16 +78,31 @@ impl ParseNode {
     }
 
     // 不可变访问节点值
-    pub fn value(&self) -> &ParseValue {
+    pub fn value(&self) -> &Value {
         &self.value
     }
 
-    fn set_parent(&self, parent: Option<Weak<ParseNode>>) {
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.value.get(key)
+    }
+
+    fn set_parent(&self, parent: Option<Weak<Node>>) {
         self.parent.set(parent).expect("Parent link set multiple times for the same node. This indicates a bug in the tree transformation logic.");
+    }
+
+    pub fn backtrack_node(self: &Arc<Self>, key: &str) -> Option<Arc<Node>> {
+        let mut current_node = Arc::clone(self);
+        while let Some(parent) = current_node.parent() {
+            if current_node.value().get(key).is_some() {
+                return Some(Arc::clone(&current_node));
+            }
+            current_node = parent;
+        }
+        None
     }
 }
 
-pub fn parse(configure: &[u8], root: &Path) -> Result<Arc<ParseNode>> {
+pub fn parse(configure: &[u8], root: &Path) -> Result<Arc<Node>> {
     let directives = Directive::<Nginx>::parse(configure)?;
 
     let processed_directives = directives
@@ -91,7 +113,7 @@ pub fn parse(configure: &[u8], root: &Path) -> Result<Arc<ParseNode>> {
     parse_conf(processed_directives).inspect_err(|e| error!("Error parsing directives: {}", e))
 }
 
-fn parse_string_map(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
     if let Some(children) = directive.children {
         let mut map = HashMap::new();
         for directive in children {
@@ -100,14 +122,14 @@ fn parse_string_map(directive: Directive<Nginx>) -> Result<ParseValue> {
                 map.insert(arg, value.clone());
             }
         }
-        return Ok(ParseValue::StringMap(map));
+        return Ok(Value::StringMap(map));
     }
-    Ok(ParseValue::ValueMap(HashMap::new()))
+    Ok(Value::ValueMap(HashMap::new()))
 }
 
-fn parse_string(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
-        [string] => Ok(ParseValue::String(string.to_string())),
+        [string] => Ok(Value::String(string.to_string())),
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
             directive.name
@@ -115,11 +137,11 @@ fn parse_string(directive: Directive<Nginx>) -> Result<ParseValue> {
     }
 }
 
-fn parse_address(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
             let addr = string.parse::<SocketAddr>()?;
-            Ok(ParseValue::Addr(addr))
+            Ok(Value::Addr(addr))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
@@ -128,14 +150,14 @@ fn parse_address(directive: Directive<Nginx>) -> Result<ParseValue> {
     }
 }
 
-fn parse_path(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
             let path = PathBuf::from(string);
             if !path.exists() {
                 return Err(anyhow!("Path does not exist: {}", string));
             }
-            Ok(ParseValue::Path(path))
+            Ok(Value::Path(path))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
@@ -144,16 +166,16 @@ fn parse_path(directive: Directive<Nginx>) -> Result<ParseValue> {
     }
 }
 
-fn parse_string_vec(directive: Directive<Nginx>) -> Result<ParseValue> {
-    Ok(ParseValue::StringVec(directive.args))
+fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
+    Ok(Value::StringVec(directive.args))
 }
 
-fn parse_header(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_header(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [name, value] => {
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(ParseValue::Header(vec![(header_name, header_value)]))
+            Ok(Value::Header(vec![(header_name, header_value)]))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
@@ -162,12 +184,12 @@ fn parse_header(directive: Directive<Nginx>) -> Result<ParseValue> {
     }
 }
 
-fn parse_header_allways(directive: Directive<Nginx>) -> Result<ParseValue> {
+fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [name, value] => {
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(ParseValue::HeaderAllways(vec![(
+            Ok(Value::HeaderAllways(vec![(
                 header_name,
                 header_value,
                 false,
@@ -179,7 +201,7 @@ fn parse_header_allways(directive: Directive<Nginx>) -> Result<ParseValue> {
             }
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(ParseValue::HeaderAllways(vec![(
+            Ok(Value::HeaderAllways(vec![(
                 header_name,
                 header_value,
                 true,

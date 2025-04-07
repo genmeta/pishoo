@@ -1,12 +1,14 @@
-use futures::future::join_all;
+use std::sync::Arc;
+
+use anyhow::Result;
 use gateway::{
     forward,
-    parse::{gateway::Server, parse_conf},
+    new_parse::{self, Value},
 };
-use tracing::info;
+use tokio::task::JoinSet;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_file(true)
@@ -25,35 +27,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     };
     let config_file = std::path::Path::new(config_file);
-
-    let configure = std::fs::read(config_file)?;
-    let gateway = parse_conf(&configure, config_file.parent().unwrap())?;
+    let configure = std::fs::read(config_file).unwrap();
+    let config = new_parse::parse(&configure, config_file.parent().unwrap())?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
-    let mut handlers = Vec::new();
-    for (bind, record) in gateway.servers {
-        let handle = tokio::spawn({
-            async move {
-                info!("Launching server on {}, servers: {:#?}", bind, record);
-                if let Server::Forward(server) = record {
-                    forward::serve(server.listen, server.resolver, server.allow, server.deny)
-                        .await?;
-                }
+    let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
+        Arc::clone(pishoo.first().unwrap())
+    } else {
+        return Err(anyhow::anyhow!("Invalid pishoo"));
+    };
 
-                Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())
-            }
-        });
-        handlers.push(handle);
+    let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
+        pishoo
+    } else {
+        &Vec::new()
+    };
+
+    let mut handler = JoinSet::new();
+    for proxy in proxys {
+        handler.spawn(forward::serve(Arc::clone(proxy)));
     }
+    handler.join_all().await;
 
-    handlers.push(tokio::spawn(async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            info!("I'm still alive");
-        }
-    }));
-
-    join_all(handlers).await;
-    Ok(())
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tracing::info!("still running");
+    }
 }

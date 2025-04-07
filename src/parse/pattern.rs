@@ -26,12 +26,12 @@ pub enum Pattern {
 impl Pattern {
     pub fn priority(&self) -> usize {
         match self {
-            Pattern::Exact(_) => 0,
-            Pattern::Prefix(_) => 1,
-            Pattern::Regex(_) => 2,
-            Pattern::CRegex(_) => 3,
-            Pattern::NormalPrefix(_) => 4,
-            Pattern::Common => 5,
+            Pattern::Exact(_) => 5,
+            Pattern::Prefix(_) => 4,
+            Pattern::Regex(_) => 3,
+            Pattern::CRegex(_) => 2,
+            Pattern::NormalPrefix(_) => 1,
+            Pattern::Common => 0,
         }
     }
 

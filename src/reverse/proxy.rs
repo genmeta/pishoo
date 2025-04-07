@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
@@ -16,12 +16,12 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::location::ProxyLocation,
+    new_parse::{Node, Value},
     reverse::build_error_response,
 };
 
 pub async fn handle(
-    location: &ProxyLocation,
+    location: &Arc<Node>,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
@@ -33,8 +33,17 @@ pub async fn handle(
             debug!("[Response handling][{}] Sending response", uri);
             let (mut parts, body) = resp.into_parts();
 
+            let add_header = if let Some(Value::HeaderAllways(header)) = location.get("add_header")
+            {
+                header
+            } else {
+                &Vec::new()
+            };
+
+            info!("[Response handling][{}] add_header: {:#?}", uri, add_header);
+
             // 处理 add_header
-            for (header, value, always) in location.add_header.iter() {
+            for (header, value, always) in add_header {
                 if parts.status.is_success() || *always {
                     parts.headers.insert(header, value.clone());
                 }
@@ -63,15 +72,23 @@ pub async fn handle(
 
 /// 代理请求
 pub async fn pass(
-    location: &ProxyLocation,
+    location: &Node,
     req: Request<()>,
     mut receiver: RequestStream<RecvStream, Bytes>,
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
+    let proxy_pass = if let Some(Value::String(proxy_pass)) = location.get("proxy_pass") {
+        proxy_pass
+    } else {
+        return Err(CustomError::InvalidConfig(
+            "Invalid proxy_pass configuration".to_string(),
+        ));
+    };
+
     let target_uri = Uri::from_str(&format!(
         "{}{}",
-        location.proxy_pass,
+        proxy_pass,
         parts
             .uri
             .path_and_query()

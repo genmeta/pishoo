@@ -4,11 +4,10 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, ParseNode, ParseValue, parse_string, parse_string_map, proxy::parse_proxy,
-    server::parse_server,
+    Node, ParseFn, Value, parse_string, parse_string_map, proxy::parse_proxy, server::parse_server,
 };
 
-pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<ParseValue> {
+pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
 
     sub_parser.insert("types", Box::new(parse_string_map));
@@ -22,18 +21,15 @@ pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<ParseValue> {
             let name = directive.name.clone();
             if let Some(parser) = sub_parser.get(name.as_str()) {
                 match parser(directive)? {
-                    value @ ParseValue::ValueMap(..) => {
+                    value @ Value::ValueMap(..) => {
                         if let Some(exist_value) = values.get_mut(&name) {
-                            if let ParseValue::Nodes(childern) = exist_value {
-                                childern.push(Arc::new(ParseNode::new(value)));
+                            if let Value::Nodes(childern) = exist_value {
+                                childern.push(Arc::new(Node::new(value)));
                             } else {
                                 return Err(anyhow!("unexpected value type"));
                             }
                         } else {
-                            values.insert(
-                                name,
-                                ParseValue::Nodes(vec![Arc::new(ParseNode::new(value))]),
-                            );
+                            values.insert(name, Value::Nodes(vec![Arc::new(Node::new(value))]));
                         }
                     }
                     value => {
@@ -46,5 +42,5 @@ pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<ParseValue> {
         }
     }
 
-    Ok(ParseValue::ValueMap(values))
+    Ok(Value::ValueMap(values))
 }

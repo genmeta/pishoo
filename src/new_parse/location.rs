@@ -4,12 +4,12 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, ParseValue, parse_header, parse_header_allways, parse_path, parse_string,
+    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_string, parse_string_map,
     parse_string_vec,
 };
 use crate::parse::pattern::parse_pattern;
 
-pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<ParseValue> {
+pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
 
     sub_parser.insert("proxy_pass", Box::new(parse_string));
@@ -18,6 +18,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<ParseValue> 
     sub_parser.insert("index", Box::new(parse_string_vec));
     sub_parser.insert("proxy_set_header", Box::new(parse_header));
     sub_parser.insert("add_header", Box::new(parse_header_allways));
+    sub_parser.insert("types", Box::new(parse_string_map));
 
     let pattern = parse_pattern(&directive.args)?;
     let mut values = HashMap::new();
@@ -26,26 +27,26 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<ParseValue> 
             let name = directive.name.clone();
             if let Some(parser) = sub_parser.get(name.as_str()) {
                 match parser(directive)? {
-                    ParseValue::Header(header) => {
+                    Value::Header(header) => {
                         if let Some(exist_value) = values.get_mut(&name) {
-                            if let ParseValue::Header(exist_header) = exist_value {
+                            if let Value::Header(exist_header) = exist_value {
                                 exist_header.extend(header);
                             } else {
                                 return Err(anyhow!("unexpected value type"));
                             }
                         } else {
-                            values.insert(name, ParseValue::Header(header));
+                            values.insert(name, Value::Header(header));
                         }
                     }
-                    ParseValue::HeaderAllways(header) => {
+                    Value::HeaderAllways(header) => {
                         if let Some(exist_vec) = values.get_mut(&name) {
-                            if let ParseValue::HeaderAllways(exist_header) = exist_vec {
+                            if let Value::HeaderAllways(exist_header) = exist_vec {
                                 exist_header.extend(header);
                             } else {
                                 return Err(anyhow!("unexpected value type"));
                             }
                         } else {
-                            values.insert(name, ParseValue::HeaderAllways(header));
+                            values.insert(name, Value::HeaderAllways(header));
                         }
                     }
                     value => {
@@ -58,5 +59,5 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<ParseValue> 
         }
     }
 
-    Ok(ParseValue::Location(pattern, values))
+    Ok(Value::Pattern(pattern, values))
 }

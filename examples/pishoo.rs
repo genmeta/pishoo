@@ -1,12 +1,13 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use anyhow::Result;
 use clap::{Parser, command};
-use futures::future::join_all;
 use gateway::{
-    forward, new_parse,
-    parse::{gateway::Server, parse_conf},
+    forward,
+    new_parse::{self, Value},
     reverse,
 };
+use tokio::task::JoinSet;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -43,7 +44,7 @@ struct Args {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     tracing_subscriber::fmt()
@@ -59,33 +60,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_file = args.config_file;
     let configure = std::fs::read(&config_file)?;
-    let gateway = parse_conf(&configure, config_file.parent().unwrap())?;
-    let aaa = new_parse::parse(&configure, config_file.parent().unwrap())?;
-    println!("{:#?}", aaa);
+    let config = new_parse::parse(&configure, config_file.parent().unwrap())?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
-    let mut handlers = Vec::new();
-    for (bind, record) in gateway.servers {
-        let handle = tokio::spawn({
-            async move {
-                match record {
-                    Server::Reverse(servers) => {
-                        reverse::serve(bind, servers).await?;
-                    }
-                    Server::Forward(server) => {
-                        forward::serve(server.listen, server.resolver, server.allow, server.deny)
-                            .await?;
-                    }
-                }
+    let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
+        Arc::clone(pishoo.first().unwrap())
+    } else {
+        return Err(anyhow::anyhow!("pishoo block not found"));
+    };
 
-                Ok::<_, Box<dyn std::error::Error + 'static + Send + Sync>>(())
-            }
-        });
-        handlers.push(handle);
+    let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
+        pishoo
+    } else {
+        &Vec::new()
+    };
+
+    // TODO 整理 相同 bind 的 server
+    let servers = if let Some(Value::Nodes(servers)) = pishoo.get("server") {
+        servers
+    } else {
+        &Vec::new()
+    };
+
+    let mut records = HashMap::new();
+    for server in servers {
+        let addr = if let Some(Value::Addr(addr)) = server.get("listen") {
+            addr
+        } else {
+            unreachable!("listen directive not found")
+        };
+        records
+            .entry(addr)
+            .or_insert(Vec::new())
+            .push(Arc::clone(server));
     }
 
-    join_all(handlers).await;
+    let mut handler = JoinSet::new();
+
+    for (addr, servers) in records {
+        handler.spawn(reverse::serve(*addr, servers));
+    }
+
+    for proxy in proxys {
+        handler.spawn(forward::serve(Arc::clone(proxy)));
+    }
+
+    handler.join_all().await;
 
     Ok(())
 }
