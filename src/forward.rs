@@ -17,7 +17,7 @@ use crate::{
     error::CustomError,
     forward,
     localhost::ArcLocalHost,
-    new_parse::{Node, Value},
+    parse::{Node, Value},
 };
 
 mod acl;
@@ -81,6 +81,7 @@ pub async fn serve(config: Arc<Node>) -> crate::error::Result<String> {
         Vec::new()
     };
 
+    // TODO 向父级回溯
     let deny = if let Some(Value::StringVec(deny)) = config.get("deny") {
         deny.clone()
     } else {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use gateway::{
     forward,
-    new_parse::{self, Value},
+    parse::{self, Value},
 };
 use tokio::task::JoinSet;
 
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     };
     let config_file = std::path::Path::new(config_file);
     let configure = std::fs::read(config_file).unwrap();
-    let config = new_parse::parse(&configure, config_file.parent().unwrap())?;
+    let config = parse::parse(&configure, config_file.parent().unwrap())?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 

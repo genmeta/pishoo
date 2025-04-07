@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    new_parse::{Node, Value},
+    parse::{Node, Value},
     reverse::build_error_response,
 };
 

@@ -1,70 +1,38 @@
-//! Proxy configuration parser
-//!
-//! Handles parsing of server blocks and their components including:
-//! - Listen directives
-//! - Access control lists
-//! - DNS server configuration
+use std::collections::HashMap;
 
-use std::net::SocketAddr;
-
-use derive_builder::Builder;
+use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use crate::error::{CustomError, Result};
+use super::{ParseFn, Value, parse_address, parse_string, parse_string_map, parse_string_vec};
 
-#[derive(Builder, Debug, Clone)]
-pub struct ProxyConfig {
-    pub listen: SocketAddr,
-    pub resolver: SocketAddr,
-    // 白名单模糊匹配
-    #[builder(default)]
-    pub allow: Vec<String>,
-    // 黑名单精准匹配
-    #[builder(default)]
-    pub deny: Vec<String>,
-}
+pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
+    let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
 
-impl ProxyConfig {
-    /// Parse the first argument of a directive as a SocketAddr
-    fn parse_socket_addr(directive: &Directive<Nginx>, field_name: &str) -> Result<SocketAddr> {
-        directive
-            .args
-            .first()
-            .ok_or_else(|| CustomError::MissingField(field_name.to_string()))
-            .and_then(|addr| {
-                addr.parse()
-                    .map_err(|e| CustomError::InvalidArgs(format!("{}: {}", addr, e)))
-            })
-    }
+    sub_parser.insert("listen", Box::new(parse_address));
+    sub_parser.insert("resolver", Box::new(parse_address));
+    sub_parser.insert("allow", Box::new(parse_string_vec));
+    sub_parser.insert("deny", Box::new(parse_string_vec));
+    sub_parser.insert("types", Box::new(parse_string_map));
+    sub_parser.insert("default_type", Box::new(parse_string));
 
-    pub fn parse(directives: Vec<Directive<Nginx>>) -> Result<Self> {
-        let mut builder = ProxyConfigBuilder::default();
-
-        for directive in directives {
-            match directive.name.as_str() {
-                "listen" => {
-                    builder.listen(Self::parse_socket_addr(&directive, "listen address")?);
-                }
-                "resolver" => {
-                    builder.resolver(Self::parse_socket_addr(&directive, "resolver")?);
-                }
-                "allow" => {
-                    builder.allow(directive.args);
-                }
-                "deny" => {
-                    builder.deny(directive.args);
-                }
-                _ => return Err(CustomError::UnknownDirective(directive.name)),
+    let mut values = HashMap::new();
+    if let Some(children) = directive.children {
+        for directive in children {
+            let name = directive.name.clone();
+            if let Some(parser) = sub_parser.get(name.as_str()) {
+                values.insert(name, parser(directive)?);
+            } else {
+                return Err(anyhow!("unknown directive {}", name));
             }
         }
-
-        // Ensure dns_server is set
-        if builder.resolver.is_none() {
-            return Err(CustomError::MissingField("resolver".to_string()));
-        }
-
-        builder
-            .build()
-            .map_err(|e| CustomError::MissingField(e.to_string()))
     }
+
+    if !values.contains_key("listen") {
+        return Err(anyhow!("missing directive listen"));
+    }
+    if !values.contains_key("resolver") {
+        return Err(anyhow!("missing directive resolver"));
+    }
+
+    Ok(Value::ValueMap(values))
 }

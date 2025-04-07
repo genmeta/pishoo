@@ -1,145 +1,62 @@
-//! Nginx location block parser
-//!
-//! Handles parsing of location directives and their configuration rules
-
 use std::collections::HashMap;
 
-use http::{HeaderName, HeaderValue};
+use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    pattern::{Pattern, parse_pattern},
-    rule::{Rule, parse_rule},
+    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_string, parse_string_map,
+    parse_string_vec, pattern::parse_pattern,
 };
-use crate::error::{CustomError, Result};
 
-#[derive(Debug, Clone)]
-pub enum Location {
-    Proxy(ProxyLocation),
-    Root(FileLocation),
-    Alias(FileLocation),
-}
+pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
+    let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
 
-#[derive(Debug, Clone)]
-pub struct ProxyLocation {
-    pub proxy_pass: String,
-    pub add_header: Vec<(HeaderName, HeaderValue, bool)>,
-    pub proxy_set_header: Vec<(HeaderName, HeaderValue)>,
-}
+    sub_parser.insert("proxy_pass", Box::new(parse_string));
+    sub_parser.insert("root", Box::new(parse_path));
+    sub_parser.insert("alias", Box::new(parse_path));
+    sub_parser.insert("index", Box::new(parse_string_vec));
+    sub_parser.insert("proxy_set_header", Box::new(parse_header));
+    sub_parser.insert("add_header", Box::new(parse_header_allways));
+    sub_parser.insert("types", Box::new(parse_string_map));
 
-impl ProxyLocation {
-    pub fn new(proxy_pass: String) -> Self {
-        Self {
-            proxy_pass,
-            add_header: vec![],
-            proxy_set_header: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FileLocation {
-    pub replace: String,
-    pub mime_types: HashMap<String, String>,
-    pub default_type: Option<String>,
-    pub index_files: Vec<String>,
-}
-
-impl FileLocation {
-    pub fn new(replace: String) -> Self {
-        Self {
-            replace,
-            mime_types: HashMap::new(),
-            default_type: None,
-            index_files: vec![],
-        }
-    }
-}
-
-impl Location {
-    pub fn parse(location: Directive<Nginx>) -> Result<(Pattern, Self)> {
-        let pattern = parse_pattern(&location.args)?;
-
-        let mut type_rule = None;
-        let mut nomal_rule = vec![];
-
-        for rule in location.children.into_iter().flatten().flat_map(parse_rule) {
-            match rule {
-                Rule::ProxyPass(_) | Rule::Root(_) | Rule::Alias(_) => {
-                    if type_rule.is_none() {
-                        type_rule = Some(rule);
+    let pattern = parse_pattern(&directive.args)?;
+    let mut values = HashMap::new();
+    if let Some(children) = directive.children {
+        for directive in children {
+            let name = directive.name.clone();
+            if let Some(parser) = sub_parser.get(name.as_str()) {
+                match parser(directive)? {
+                    Value::Header(header) => {
+                        if let Some(exist_value) = values.get_mut(&name) {
+                            if let Value::Header(exist_header) = exist_value {
+                                exist_header.extend(header);
+                            } else {
+                                return Err(anyhow!("unexpected value type"));
+                            }
+                        } else {
+                            values.insert(name, Value::Header(header));
+                        }
+                    }
+                    Value::HeaderAllways(header) => {
+                        if let Some(exist_vec) = values.get_mut(&name) {
+                            if let Value::HeaderAllways(exist_header) = exist_vec {
+                                exist_header.extend(header);
+                            } else {
+                                return Err(anyhow!("unexpected value type"));
+                            }
+                        } else {
+                            values.insert(name, Value::HeaderAllways(header));
+                        }
+                    }
+                    value => {
+                        values.insert(name, value);
                     }
                 }
-                _ => {
-                    nomal_rule.push(rule);
-                }
+            } else {
+                return Err(anyhow!("unknown directive {}", name));
             }
         }
-
-        match type_rule {
-            Some(rule) => match rule {
-                Rule::ProxyPass(proxy_pass) => {
-                    let mut location = ProxyLocation::new(proxy_pass);
-                    for rule in nomal_rule {
-                        match rule {
-                            Rule::AddHeader(name, value, always) => {
-                                location.add_header.push((name, value, always));
-                            }
-                            Rule::ProxySetHeader(name, value) => {
-                                location.proxy_set_header.push((name, value));
-                            }
-                            _ => {
-                                return Err(CustomError::InvalidConfig(
-                                    "location must have proxy_pass root or alias".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    Ok((pattern, Location::Proxy(location)))
-                }
-                Rule::Root(root) => {
-                    let mut location = FileLocation::new(root);
-                    for rule in nomal_rule {
-                        match rule {
-                            Rule::MimeTypes(mime_type) => {
-                                location.mime_types = mime_type;
-                            }
-                            Rule::DefaultType(default_type) => {
-                                location.default_type = Some(default_type);
-                            }
-                            Rule::IndexFiles(index_files) => {
-                                location.index_files = index_files;
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok((pattern, Location::Root(location)))
-                }
-                Rule::Alias(alias) => {
-                    let mut location = FileLocation::new(alias);
-                    for rule in nomal_rule {
-                        match rule {
-                            Rule::MimeTypes(mime_type) => {
-                                location.mime_types = mime_type;
-                            }
-                            Rule::DefaultType(default_type) => {
-                                location.default_type = Some(default_type);
-                            }
-                            Rule::IndexFiles(index_files) => {
-                                location.index_files = index_files;
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok((pattern, Location::Alias(location)))
-                }
-                _ => Err(CustomError::InvalidConfig(
-                    "location must have proxy_pass root or alias".to_string(),
-                )),
-            },
-            None => Err(CustomError::MissingConfig(
-                "location must have proxy_pass root or alias".to_string(),
-            )),
-        }
     }
+
+    Ok(Value::Pattern(pattern, values))
 }
