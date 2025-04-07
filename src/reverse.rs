@@ -11,7 +11,7 @@ use crate::{
     dns::Dns,
     error::{CustomError, Result},
     localhost::ArcLocalHost,
-    new_parse::{Node, Value},
+    parse::{Node, Value},
     reverse,
 };
 
