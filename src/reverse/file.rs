@@ -1,71 +1,101 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::SendStream;
 use http::{Request, Response, Uri};
 use tokio::io::{AsyncReadExt, BufReader};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::location::FileLocation,
+    new_parse::{Node, Value},
     reverse::build_error_response,
 };
 
 /// 处理 ROOT 静态文件请求
 pub async fn root(
-    location: &FileLocation,
+    location: &Arc<Node>,
     req: Request<()>,
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    // 对于 Root 类型，把请求路径直接拼接到根目录上
-    let mut file_path = format!("{}{}", location.replace, req.uri().path());
+    info!("location: {:#?}", location);
 
-    serve_static_file(
-        &mut file_path,
-        req.uri(),
-        &location.mime_types,
-        &location.index_files,
-        &location.default_type,
-        sender,
-    )
-    .await?;
+    let root = if let Some(Value::Path(root)) = location.get("root") {
+        root
+    } else {
+        return Err(CustomError::InvalidConfig(
+            "Invalid root configuration".to_string(),
+        ));
+    };
+
+    info!("root: {:#?}", root);
+
+    // 对于 Root 类型，把请求路径直接拼接到根目录上
+    let mut file_path = format!("{}{}", root.display(), req.uri().path());
+
+    serve_static_file(location, &mut file_path, req.uri(), sender).await?;
     Ok(())
 }
 
 /// 处理 ALIAS 静态文件请求
 pub async fn alias(
-    location: &FileLocation,
+    location: &Arc<Node>,
     pattern: String,
     req: Request<()>,
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     // 在 alias 情况下，需要去除 URL 中匹配到的前缀
     let relative_path = req.uri().path().trim_start_matches(&pattern);
-    let mut file_path = format!("{}{}", location.replace, relative_path);
 
-    serve_static_file(
-        &mut file_path,
-        req.uri(),
-        &location.mime_types,
-        &location.index_files,
-        &location.default_type,
-        sender,
-    )
-    .await?;
+    let alias = if let Some(Value::Path(alias)) = location.get("alias") {
+        alias
+    } else {
+        return Err(CustomError::InvalidConfig(
+            "Invalid alias configuration".to_string(),
+        ));
+    };
+
+    let mut file_path = format!("{}{}", alias.display(), relative_path);
+
+    serve_static_file(location, &mut file_path, req.uri(), sender).await?;
     Ok(())
 }
 
 /// 异步加载文件，并以流式方式通过 sender 发送响应体。
 async fn serve_static_file(
+    location: &Arc<Node>,
     file_path: &mut String,
     uri: &Uri,
-    mime_types: &HashMap<String, String>,
-    index_files: &[String],
-    default_type: &Option<String>,
     sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    let node = location.backtrack_node("types");
+    let mime_types = node.as_ref().map(|node| {
+        if let Some(Value::StringMap(mime_types)) = node.get("types") {
+            mime_types
+        } else {
+            unreachable!("Invalid mime_types value")
+        }
+    });
+
+    let node = location.backtrack_node("default_type");
+    let default_type = node.as_ref().map(|node| {
+        if let Some(Value::String(default_type)) = node.get("default_type") {
+            default_type
+        } else {
+            unreachable!("Invalid default_type value")
+        }
+    });
+
+    let node = location.backtrack_node("index");
+    let index_files = node.as_ref().map(|node| {
+        if let Some(Value::StringVec(index_files)) = node.get("index") {
+            index_files
+        } else {
+            unreachable!("Invalid index value")
+        }
+    });
+
     match index(file_path, index_files).await {
         Ok(()) => {}
         Err(e) => {
@@ -104,7 +134,9 @@ async fn serve_static_file(
             };
 
             let content_length = metadata.len();
-            let content_type = infer_content_type(file_path, mime_types, default_type.as_ref());
+
+            let content_type = mime_types
+                .and_then(|mime_types| infer_content_type(file_path, mime_types, default_type));
 
             let response = Response::builder()
                 .status(200)
@@ -151,7 +183,8 @@ async fn serve_static_file(
     Ok(())
 }
 
-async fn index(file_path: &mut String, index_files: &[String]) -> Result<()> {
+/// TODO io::Error Not
+async fn index(file_path: &mut String, index_files: Option<&Vec<String>>) -> Result<()> {
     // 1. 检查初始路径是否存在及其元数据
     let metadata = match tokio::fs::metadata(&*file_path).await {
         Ok(meta) => meta,
@@ -166,6 +199,17 @@ async fn index(file_path: &mut String, index_files: &[String]) -> Result<()> {
 
     // 2. 检查是否是目录
     if metadata.is_dir() {
+        let index_files = match index_files {
+            Some(index_files) => index_files,
+            None => {
+                // 如果没有提供 index_files，则返回错误
+                return Err(CustomError::FileNotFound(format!(
+                    "No index files provided for directory: {}",
+                    file_path
+                )));
+            }
+        };
+
         if !file_path.ends_with('/') {
             file_path.push('/');
         }
@@ -178,26 +222,16 @@ async fn index(file_path: &mut String, index_files: &[String]) -> Result<()> {
             let mut potential_path = base_dir_path.clone();
             potential_path.push_str(index_filename);
 
-            // 4. 检查拼接后的文件路径是否存在
-            match tokio::fs::metadata(&potential_path).await {
-                Ok(index_meta) => {
-                    // 确保找到的是文件，而不是子目录或其他类型
-                    if index_meta.is_file() {
-                        // 找到了存在的文件！更新 file_path 并退出循环
-                        *file_path = potential_path;
-                        found_index = true;
-                        break; // 找到第一个就跳出循环
-                    }
-                    // 如果存在但不是文件（例如是同名目录），则继续尝试下一个 index 文件
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
+            if let Ok(index_meta) = tokio::fs::metadata(&*potential_path).await
+                && index_meta.is_file()
+            {
+                *file_path = potential_path;
+                found_index = true;
+                break; // 找到第一个就跳出循环
             }
         }
 
-        // 5. 如果循环结束后仍未找到任何 index 文件
+        // 如果循环结束后仍未找到任何 index 文件
         if !found_index {
             return Err(CustomError::FileNotFound(format!(
                 "No suitable index file found in directory '{}'",
@@ -208,7 +242,7 @@ async fn index(file_path: &mut String, index_files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// TODO 通过 MIME 类型推断文件类型
+/// 通过 MIME 类型推断文件类型
 fn infer_content_type<'a>(
     file_path: &str,
     mime_types: &'a HashMap<String, String>,

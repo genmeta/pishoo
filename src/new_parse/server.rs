@@ -4,11 +4,11 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, ParseNode, ParseValue, location::parse_location, parse_address, parse_path,
-    parse_string_vec,
+    Node, ParseFn, Value, location::parse_location, parse_address, parse_path, parse_string,
+    parse_string_map, parse_string_vec,
 };
 
-pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<ParseValue> {
+pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
     let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
 
     sub_parser.insert("listen", Box::new(parse_address));
@@ -17,6 +17,8 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<ParseValue> {
     sub_parser.insert("ssl_certificate", Box::new(parse_path));
     sub_parser.insert("ssl_certificate_key", Box::new(parse_path));
     sub_parser.insert("location", Box::new(parse_location));
+    sub_parser.insert("types", Box::new(parse_string_map));
+    sub_parser.insert("default_type", Box::new(parse_string));
 
     let mut values = HashMap::new();
     if let Some(children) = directive.children {
@@ -24,18 +26,15 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<ParseValue> {
             let name = directive.name.clone();
             if let Some(parser) = sub_parser.get(name.as_str()) {
                 match parser(directive)? {
-                    value @ ParseValue::Location(..) => {
+                    value @ Value::Pattern(..) => {
                         if let Some(exist_value) = values.get_mut(&name) {
-                            if let ParseValue::Nodes(childern) = exist_value {
-                                childern.push(Arc::new(ParseNode::new(value)));
+                            if let Value::Nodes(childern) = exist_value {
+                                childern.push(Arc::new(Node::new(value)));
                             } else {
                                 return Err(anyhow!("unexpected value type"));
                             }
                         } else {
-                            values.insert(
-                                name,
-                                ParseValue::Nodes(vec![Arc::new(ParseNode::new(value))]),
-                            );
+                            values.insert(name, Value::Nodes(vec![Arc::new(Node::new(value))]));
                         }
                     }
                     value => {
@@ -47,5 +46,23 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<ParseValue> {
             }
         }
     }
-    Ok(ParseValue::ValueMap(values))
+
+    if !values.contains_key("listen") {
+        return Err(anyhow!("server directive must have listen directive"));
+    }
+    if !values.contains_key("resolver") {
+        return Err(anyhow!("server directive must have resolver directive"));
+    }
+    if !values.contains_key("ssl_certificate") {
+        return Err(anyhow!(
+            "server directive must have ssl_certificate directive"
+        ));
+    }
+    if !values.contains_key("ssl_certificate_key") {
+        return Err(anyhow!(
+            "server directive must have ssl_certificate_key directive"
+        ));
+    }
+
+    Ok(Value::ValueMap(values))
 }
