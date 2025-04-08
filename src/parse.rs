@@ -105,15 +105,17 @@ impl Node {
     }
 }
 
-pub fn parse(configure: &[u8], root: &Path) -> Result<Arc<Node>> {
-    let directives = Directive::<Nginx>::parse(configure)?;
+pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
+    let mut directives = Directive::<Nginx>::parse(configure)?;
 
-    let processed_directives = directives
-        .into_iter()
-        .map(|mut directive| directive.resolve_include(root).map(|_| directive))
-        .collect::<Result<Vec<_>>>()?;
+    if let Some(root) = root {
+        directives = directives
+            .into_iter()
+            .map(|mut directive| directive.resolve_include(root).map(|_| directive))
+            .collect::<Result<Vec<_>>>()?;
+    }
 
-    parse_conf(processed_directives).inspect_err(|e| error!("Error parsing directives: {}", e))
+    parse_conf(directives).inspect_err(|e| error!("Error parsing directives: {}", e))
 }
 
 fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
