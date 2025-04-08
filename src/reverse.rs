@@ -17,6 +17,7 @@ use crate::{
 
 mod file;
 mod proxy;
+#[cfg(feature = "sshd")]
 mod sshd;
 
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
@@ -232,6 +233,7 @@ async fn handle_request(
     } else if location_value.contains_key("alias") {
         reverse::file::alias(location, final_pattern, req, sender).await?;
     } else if location_value.contains_key("ssh_login") {
+        #[cfg(feature = "sshd")]
         reverse::sshd::login(location, req, receiver, sender).await?;
     }
 

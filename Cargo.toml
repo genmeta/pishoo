@@ -56,16 +56,28 @@ pnet = "0.35.0"
 regex = "1"
 
 # ssh
-libc = "0.2"
-base64 = "0.22"
-pwhash = "1"
-pam = "0.7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+libc = { version = "0.2", optional = true }
+base64 = { version = "0.22", optional = true }
+pwhash = { version = "1", optional = true }
+pam = { version = "0.7", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
+
+[features]
+default = []
+sshd = [
+    "dep:libc",
+    "dep:base64",
+    "dep:pwhash",
+    "dep:pam",
+    "dep:serde",
+    "dep:serde_json",
+]
+
 
 [[example]]
 name = "forward"
