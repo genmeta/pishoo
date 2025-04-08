@@ -1,5 +1,3 @@
-#![feature(let_chains)]
-
 use std::io::{self};
 mod common;
 pub mod config;

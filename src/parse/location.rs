@@ -4,28 +4,29 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_string, parse_string_map,
-    parse_string_vec, pattern::parse_pattern,
+    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_ssh_login, parse_string,
+    parse_string_map, parse_string_vec, pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
-    let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
+    let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    sub_parser.insert("proxy_pass", Box::new(parse_string));
-    sub_parser.insert("root", Box::new(parse_path));
-    sub_parser.insert("alias", Box::new(parse_path));
-    sub_parser.insert("index", Box::new(parse_string_vec));
-    sub_parser.insert("proxy_set_header", Box::new(parse_header));
-    sub_parser.insert("add_header", Box::new(parse_header_allways));
-    sub_parser.insert("types", Box::new(parse_string_map));
+    commands.insert("types", Box::new(parse_string_map));
+    commands.insert("root", Box::new(parse_path));
+    commands.insert("alias", Box::new(parse_path));
+    commands.insert("index", Box::new(parse_string_vec));
+    commands.insert("add_header", Box::new(parse_header_allways));
+    commands.insert("proxy_set_header", Box::new(parse_header));
+    commands.insert("proxy_pass", Box::new(parse_string));
+    commands.insert("ssh_login", Box::new(parse_ssh_login));
 
     let pattern = parse_pattern(&directive.args)?;
     let mut values = HashMap::new();
     if let Some(children) = directive.children {
         for directive in children {
             let name = directive.name.clone();
-            if let Some(parser) = sub_parser.get(name.as_str()) {
-                match parser(directive)? {
+            if let Some(command) = commands.get(name.as_str()) {
+                match command(directive)? {
                     Value::Header(header) => {
                         if let Some(exist_value) = values.get_mut(&name) {
                             if let Value::Header(exist_header) = exist_value {

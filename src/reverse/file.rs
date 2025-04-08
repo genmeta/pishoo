@@ -222,12 +222,12 @@ async fn index(file_path: &mut String, index_files: Option<&Vec<String>>) -> Res
             let mut potential_path = base_dir_path.clone();
             potential_path.push_str(index_filename);
 
-            if let Ok(index_meta) = tokio::fs::metadata(&*potential_path).await
-                && index_meta.is_file()
-            {
-                *file_path = potential_path;
-                found_index = true;
-                break; // 找到第一个就跳出循环
+            if let Ok(index_meta) = tokio::fs::metadata(&*potential_path).await {
+                if index_meta.is_file() {
+                    *file_path = potential_path;
+                    found_index = true;
+                    break; // 找到第一个就跳出循环
+                }
             }
         }
 
