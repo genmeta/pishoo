@@ -12,7 +12,10 @@ use h3_shim::{RecvStream, SendStream};
 use http::{Request, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::Result, parse::Node};
+use crate::{
+    error::Result,
+    parse::{Node, Value},
+};
 
 // 定义客户端与服务器通信的消息结构
 #[derive(Serialize, Deserialize, Debug)]
@@ -24,8 +27,21 @@ enum TerminalMessage {
     Heartbeat,
 }
 
+/// location /ssh {
+///     ssh_login basic | ssl; # ssl 需要server级配置ssl_verify_client
+///     
+///     # 如果是ssl证书认证，可能有多个证书/客户端名字，对应多个用户；
+///     # 也可能是一个客户端名字，可以变换多个用户
+///     ssh_ssl_user alice.genmeta.net alice; # ssl证书验证有效
+///     ssh_ssl_user bob.genmeta.net bob;
+///     ssh_ssl_user xxx.genmeta.net $user; # 很多用户都用同一个证书
+
+///     # basic auth就使用basic auth中的用户, 不准是root
+///     # ssl auth，若使用url中的用户，也不准是root
+///     ssh_deny root;
+/// }
 pub async fn login(
-    _location: &Arc<Node>,
+    location: &Arc<Node>,
     request: Request<()>,
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
@@ -42,6 +58,26 @@ pub async fn login(
         )
         .into());
     }
+
+    let ssh_login = if let Some(Value::String(ssl_login)) = location.get("ssh_auth") {
+        ssl_login
+    } else {
+        unreachable!();
+    };
+
+    if ssh_login == "ssl" {
+        let resp = http::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(())?;
+        sender.send_response(resp).await?;
+        sender.finish().await?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Ssl login is not supported now",
+        )
+        .into());
+    }
+
     // 从 Authorization 头获取认证信息
     let auth_header = match request.headers().get("Authorization") {
         Some(value) => value.to_str().unwrap_or_default(),

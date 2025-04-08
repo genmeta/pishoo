@@ -219,11 +219,14 @@ fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
 
 fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
-        [auth] => Ok(Value::SshLogin(auth.to_string())),
-        _ => Err(anyhow!(
-            "Invalid number of arguments for directive: {}",
-            directive.name
-        )),
+        [auth] => {
+            if auth != "basic" || auth != "ssl" {
+                Err(anyhow!("Invalid value for directive: {}", directive.name))
+            } else {
+                Ok(Value::SshLogin(auth.to_string()))
+            }
+        }
+        _ => Err(anyhow!("Invalid value for directive: {}", directive.name)),
     }
 }
 
