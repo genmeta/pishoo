@@ -4,8 +4,9 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_ssh_login, parse_string,
-    parse_string_map, parse_string_vec, pattern::parse_pattern,
+    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_ssh_deny,
+    parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_map, parse_string_vec,
+    pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
@@ -19,6 +20,8 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("proxy_set_header", Box::new(parse_header));
     commands.insert("proxy_pass", Box::new(parse_string));
     commands.insert("ssh_login", Box::new(parse_ssh_login));
+    commands.insert("ssh_ssl_user", Box::new(parse_ssh_ssl_user));
+    commands.insert("ssh_deny", Box::new(parse_ssh_deny));
 
     let pattern = parse_pattern(&directive.args)?;
     let mut values = HashMap::new();
@@ -47,6 +50,17 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
                             }
                         } else {
                             values.insert(name, Value::HeaderAllways(header));
+                        }
+                    }
+                    Value::SshSslUser(ssl_user) => {
+                        if let Some(exist_value) = values.get_mut(&name) {
+                            if let Value::SshSslUser(exist_header) = exist_value {
+                                exist_header.extend(ssl_user);
+                            } else {
+                                return Err(anyhow!("unexpected value type"));
+                            }
+                        } else {
+                            values.insert(name, Value::SshSslUser(ssl_user));
                         }
                     }
                     value => {

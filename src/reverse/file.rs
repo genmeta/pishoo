@@ -17,7 +17,7 @@ use crate::{
 pub async fn root(
     location: &Arc<Node>,
     req: Request<()>,
-    sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
+    sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     info!("location: {:#?}", location);
 
@@ -43,7 +43,7 @@ pub async fn alias(
     location: &Arc<Node>,
     pattern: String,
     req: Request<()>,
-    sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
+    sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     // 在 alias 情况下，需要去除 URL 中匹配到的前缀
     let relative_path = req.uri().path().trim_start_matches(&pattern);
@@ -67,7 +67,7 @@ async fn serve_static_file(
     location: &Arc<Node>,
     file_path: &mut String,
     uri: &Uri,
-    sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
+    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let node = location.backtrack_node("types");
     let mime_types = node.as_ref().map(|node| {
@@ -180,6 +180,10 @@ async fn serve_static_file(
             sender.send_response(build_error_response()?).await?;
         }
     }
+
+    // 结束流
+    sender.finish().await?;
+    debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
 }
 

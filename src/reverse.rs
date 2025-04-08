@@ -17,6 +17,7 @@ use crate::{
 
 mod file;
 mod proxy;
+mod sshd;
 
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 const MAX_STREAMS: u64 = 100; // 最大双向/单向流数量
@@ -195,7 +196,6 @@ async fn handle_request(
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    let uri = req.uri().clone();
     let host = req
         .uri()
         .authority()
@@ -217,7 +217,7 @@ async fn handle_request(
     let (location, final_pattern) = match_location(locations, req.uri().path())
         .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
 
-    let (mut sender, receiver) = stream.split();
+    let (sender, receiver) = stream.split();
 
     let location_value = if let Value::Pattern(_, map) = location.value() {
         map
@@ -226,17 +226,15 @@ async fn handle_request(
     };
 
     if location_value.contains_key("proxy_pass") {
-        reverse::proxy::handle(location, req, receiver, &mut sender).await?;
+        reverse::proxy::handle(location, req, receiver, sender).await?;
     } else if location_value.contains_key("root") {
-        reverse::file::root(location, req, &mut sender).await?;
+        reverse::file::root(location, req, sender).await?;
     } else if location_value.contains_key("alias") {
-        reverse::file::alias(location, final_pattern, req, &mut sender).await?;
+        reverse::file::alias(location, final_pattern, req, sender).await?;
+    } else if location_value.contains_key("ssh_login") {
+        reverse::sshd::login(location, req, receiver, sender).await?;
     }
 
-    // 结束流
-    debug!("[Response handling][{}] Closing stream", uri);
-    sender.finish().await?;
-    debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
 }
 
