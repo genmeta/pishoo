@@ -8,19 +8,19 @@ use super::{
 };
 
 pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
-    let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
+    let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    sub_parser.insert("types", Box::new(parse_string_map));
-    sub_parser.insert("default_type", Box::new(parse_string));
-    sub_parser.insert("server", Box::new(parse_server));
-    sub_parser.insert("proxy", Box::new(parse_proxy));
+    commands.insert("types", Box::new(parse_string_map));
+    commands.insert("default_type", Box::new(parse_string));
+    commands.insert("server", Box::new(parse_server));
+    commands.insert("proxy", Box::new(parse_proxy));
 
     let mut values = HashMap::new();
     if let Some(children) = directive.children {
         for directive in children {
             let name = directive.name.clone();
-            if let Some(parser) = sub_parser.get(name.as_str()) {
-                match parser(directive)? {
+            if let Some(command) = commands.get(name.as_str()) {
+                match command(directive)? {
                     value @ Value::ValueMap(..) => {
                         if let Some(exist_value) = values.get_mut(&name) {
                             if let Value::Nodes(childern) = exist_value {

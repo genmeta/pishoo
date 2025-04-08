@@ -9,23 +9,23 @@ use super::{
 };
 
 pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
-    let mut sub_parser: HashMap<&'static str, ParseFn> = HashMap::new();
+    let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    sub_parser.insert("listen", Box::new(parse_address));
-    sub_parser.insert("server_name", Box::new(parse_string_vec));
-    sub_parser.insert("resolver", Box::new(parse_address));
-    sub_parser.insert("ssl_certificate", Box::new(parse_path));
-    sub_parser.insert("ssl_certificate_key", Box::new(parse_path));
-    sub_parser.insert("location", Box::new(parse_location));
-    sub_parser.insert("types", Box::new(parse_string_map));
-    sub_parser.insert("default_type", Box::new(parse_string));
+    commands.insert("listen", Box::new(parse_address));
+    commands.insert("server_name", Box::new(parse_string_vec));
+    commands.insert("resolver", Box::new(parse_address));
+    commands.insert("ssl_certificate", Box::new(parse_path));
+    commands.insert("ssl_certificate_key", Box::new(parse_path));
+    commands.insert("location", Box::new(parse_location));
+    commands.insert("types", Box::new(parse_string_map));
+    commands.insert("default_type", Box::new(parse_string));
 
     let mut values = HashMap::new();
     if let Some(children) = directive.children {
         for directive in children {
             let name = directive.name.clone();
-            if let Some(parser) = sub_parser.get(name.as_str()) {
-                match parser(directive)? {
+            if let Some(command) = commands.get(name.as_str()) {
+                match command(directive)? {
                     value @ Value::Pattern(..) => {
                         if let Some(exist_value) = values.get_mut(&name) {
                             if let Value::Nodes(childern) = exist_value {
