@@ -24,7 +24,7 @@ pub async fn handle(
     location: &Arc<Node>,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
-    sender: &mut RequestStream<SendStream<Bytes>, Bytes>,
+    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let uri = req.uri().to_string();
     // TODO 处理 proxy_set_header
@@ -67,6 +67,10 @@ pub async fn handle(
             sender.send_response(build_error_response()?).await?;
         }
     };
+
+    // 结束流
+    sender.finish().await?;
+    debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
 }
 
