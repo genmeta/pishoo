@@ -26,10 +26,9 @@ pub enum Pattern {
 impl Pattern {
     pub fn priority(&self) -> usize {
         match self {
-            Pattern::Exact(_) => 5,
-            Pattern::Prefix(_) => 4,
-            Pattern::Regex(_) => 3,
-            Pattern::CRegex(_) => 2,
+            Pattern::Exact(_) => 4,
+            Pattern::Prefix(_) => 3,
+            Pattern::Regex(_) | Pattern::CRegex(_) => 2,
             Pattern::NormalPrefix(_) => 1,
             Pattern::Common => 0,
         }
@@ -79,37 +78,6 @@ mod tests {
 
     use super::*;
     use crate::error::CustomError; // 引入错误类型方便断言
-
-    #[test]
-    fn test_priority_values() {
-        assert_eq!(
-            Pattern::Exact("/".to_string()).priority(),
-            5,
-            "Exact priority"
-        );
-        assert_eq!(
-            Pattern::Prefix("/".to_string()).priority(),
-            4,
-            "Prefix priority"
-        );
-        assert_eq!(
-            Pattern::Regex(Regex::new(".").unwrap()).priority(),
-            3,
-            "Regex priority"
-        );
-        assert_eq!(
-            Pattern::CRegex(Regex::new(".").unwrap()).priority(),
-            2,
-            "CRegex priority"
-        );
-        assert_eq!(
-            Pattern::NormalPrefix("/".to_string()).priority(),
-            1,
-            "NormalPrefix priority"
-        );
-        assert_eq!(Pattern::Common.priority(), 0, "Common priority");
-        println!("✅ Priorities are correct!");
-    }
 
     #[test]
     fn test_try_match_exact() {

@@ -76,7 +76,6 @@ async fn main() -> Result<()> {
         &Vec::new()
     };
 
-    // TODO 整理 相同 bind 的 server
     let servers = if let Some(Value::Nodes(servers)) = pishoo.get("server") {
         servers
     } else {
