@@ -33,8 +33,7 @@ pub async fn handle(
             debug!("[Response handling][{}] Sending response", uri);
             let (mut parts, body) = resp.into_parts();
 
-            let add_header = if let Some(Value::HeaderAllways(header)) = location.get("add_header")
-            {
+            let add_header = if let Some(Value::Header(header)) = location.get("add_header") {
                 header
             } else {
                 &Vec::new()
@@ -44,7 +43,7 @@ pub async fn handle(
 
             // 处理 add_header
             for (header, value, always) in add_header {
-                if parts.status.is_success() || *always {
+                if parts.status.is_success() || parts.status.is_redirection() || *always {
                     parts.headers.insert(header, value.clone());
                 }
             }
