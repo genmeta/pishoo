@@ -33,8 +33,7 @@ pub enum Value {
     Boolean(bool),
     Addr(SocketAddr),
     Path(PathBuf),
-    Header(Vec<(HeaderName, HeaderValue)>),
-    HeaderAllways(Vec<(HeaderName, HeaderValue, bool)>),
+    Header(Vec<(HeaderName, HeaderValue, bool)>),
     Pattern(Pattern, HashMap<String, Value>),
     SshLogin(String),
     SshSslUser(Vec<(String, String)>),
@@ -180,7 +179,7 @@ fn parse_header(directive: Directive<Nginx>) -> Result<Value> {
         [name, value] => {
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(Value::Header(vec![(header_name, header_value)]))
+            Ok(Value::Header(vec![(header_name, header_value, true)]))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
@@ -194,11 +193,7 @@ fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
         [name, value] => {
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(Value::HeaderAllways(vec![(
-                header_name,
-                header_value,
-                false,
-            )]))
+            Ok(Value::Header(vec![(header_name, header_value, false)]))
         }
         [name, value, always] => {
             if always.as_str() != "always" {
@@ -206,11 +201,7 @@ fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
             }
             let header_name = HeaderName::from_bytes(name.as_bytes())?;
             let header_value = HeaderValue::from_bytes(value.as_bytes())?;
-            Ok(Value::HeaderAllways(vec![(
-                header_name,
-                header_value,
-                true,
-            )]))
+            Ok(Value::Header(vec![(header_name, header_value, true)]))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",

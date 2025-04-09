@@ -41,17 +41,6 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
                             values.insert(name, Value::Header(header));
                         }
                     }
-                    Value::HeaderAllways(header) => {
-                        if let Some(exist_vec) = values.get_mut(&name) {
-                            if let Value::HeaderAllways(exist_header) = exist_vec {
-                                exist_header.extend(header);
-                            } else {
-                                return Err(anyhow!("unexpected value type"));
-                            }
-                        } else {
-                            values.insert(name, Value::HeaderAllways(header));
-                        }
-                    }
                     Value::SshSslUser(ssl_user) => {
                         if let Some(exist_value) = values.get_mut(&name) {
                             if let Value::SshSslUser(exist_header) = exist_value {
