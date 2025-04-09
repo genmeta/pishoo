@@ -34,6 +34,8 @@ pub enum Value {
     Addr(SocketAddr),
     Path(PathBuf),
     Header(Vec<(HeaderName, HeaderValue, bool)>),
+    Types(HashMap<String, HeaderValue>),
+    HeaderValue(HeaderValue),
     Pattern(Pattern, HashMap<String, Value>),
     SshLogin(String),
     SshSslUser(Vec<(String, String)>),
@@ -117,6 +119,7 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
     parse_conf(directives).inspect_err(|e| error!("Error parsing directives: {}", e))
 }
 
+#[allow(dead_code)]
 fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
     if let Some(children) = directive.children {
         let mut map = HashMap::new();
@@ -127,6 +130,33 @@ fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
             }
         }
         return Ok(Value::StringMap(map));
+    }
+    Ok(Value::ValueMap(HashMap::new()))
+}
+
+fn parse_header_value(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [value] => {
+            let header_value = HeaderValue::from_str(value)?;
+            Ok(Value::HeaderValue(header_value))
+        }
+        _ => Err(anyhow!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        )),
+    }
+}
+
+fn parse_types(directive: Directive<Nginx>) -> Result<Value> {
+    if let Some(children) = directive.children {
+        let mut map = HashMap::new();
+        for directive in children {
+            let value = HeaderValue::from_str(directive.name.as_str())?;
+            for arg in directive.args {
+                map.insert(arg, value.clone());
+            }
+        }
+        return Ok(Value::Types(map));
     }
     Ok(Value::ValueMap(HashMap::new()))
 }

@@ -5,14 +5,14 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
     ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_ssh_deny,
-    parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_map, parse_string_vec,
+    parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_vec, parse_types,
     pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    commands.insert("types", Box::new(parse_string_map));
+    commands.insert("types", Box::new(parse_types));
     commands.insert("root", Box::new(parse_path));
     commands.insert("alias", Box::new(parse_path));
     commands.insert("index", Box::new(parse_string_vec));

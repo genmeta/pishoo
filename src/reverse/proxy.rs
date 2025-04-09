@@ -15,6 +15,7 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{debug, error, info};
 
 use crate::{
+    command,
     error::{CustomError, Result},
     parse::{Node, Value},
     reverse::build_error_response,
@@ -28,47 +29,41 @@ pub async fn handle(
 ) -> Result<()> {
     let uri = req.uri().to_string();
     // TODO 处理 proxy_set_header
-    match pass(location, req, receiver).await {
-        Ok(resp) => {
-            debug!("[Response handling][{}] Sending response", uri);
-            let (mut parts, body) = resp.into_parts();
-
-            let add_header = if let Some(Value::Header(header)) = location.get("add_header") {
-                header
-            } else {
-                &Vec::new()
-            };
-
-            info!("[Response handling][{}] add_header: {:#?}", uri, add_header);
-
-            // 处理 add_header
-            for (header, value, always) in add_header {
-                if parts.status.is_success() || parts.status.is_redirection() || *always {
-                    parts.headers.insert(header, value.clone());
-                }
-            }
-
-            // 发送响应头
-            sender
-                .send_response(Response::from_parts(parts, ()))
-                .await?;
-
-            debug!("[Response handling][{}] Sending response headers", uri);
-            // 流式发送响应体
-            let mut body_stream = body.into_data_stream();
-            while let Some(Ok(chunk)) = body_stream.next().await {
-                sender.send_data(chunk).await?;
-            }
-            debug!("sent response body completely");
-        }
+    let resp = match pass(location, req, receiver).await {
+        Ok(resp) => resp,
         Err(e) => {
             error!("[Response handling][{}] Proxy request error: {:?}", uri, e);
-            sender.send_response(build_error_response()?).await?;
+            sender.send_response(build_error_response()).await?;
+            sender.finish().await?;
+            return Ok(());
         }
     };
 
+    debug!("[Response handling][{}] Sending response", uri);
+    let (mut parts, body) = resp.into_parts();
+
+    // 添加自定义响应头字段
+    command::add_header(location, &mut parts);
+
+    // 发送响应头
+    sender
+        .send_response(Response::from_parts(parts, ()))
+        .await?;
+
+    debug!("[Response handling][{}] Sending response headers", uri);
+    // 流式发送响应体
+    let mut body_stream = body.into_data_stream();
+    while let Some(Ok(chunk)) = body_stream.next().await {
+        sender.send_data(chunk).await?;
+    }
+    debug!("sent response body completely");
     // 结束流
-    sender.finish().await?;
+    sender.finish().await.inspect_err(|e| {
+        error!(
+            "[Response handling][{}] Error finishing response stream: {:?}",
+            uri, e
+        )
+    })?;
     debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
 }
@@ -109,10 +104,11 @@ pub async fn pass(
     let port = new_parts.uri.port().map(|p| p.as_u16()).unwrap_or(80);
 
     // 建立TCP连接
-    let io =
-        TokioIo::new(TcpStream::connect((host, port)).await.inspect_err(|e| {
-            error!("TCP connection error: {}:{} | detail: {:?}", host, port, e)
-        })?);
+    let io = TokioIo::new(
+        TcpStream::connect((host, port))
+            .await
+            .inspect_err(|e| error!("TCP connection error: {}:{} : {:?}", host, port, e))?,
+    );
 
     // 创建HTTP客户端连接
     let (mut sender, conn) = Builder::new()
@@ -122,14 +118,14 @@ pub async fn pass(
         .await?;
 
     info!(
-        "[Request processing] HTTP client connection established | target: {:?}",
+        "[Request processing] HTTP client connection established: {:?}",
         target_uri
     );
 
     // 启动连接维护任务
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            error!("[Proxy connection] Maintenance failed | detail: {:?}", e);
+            error!("[Proxy connection] Maintenance failed: {:?}", e);
         }
     });
 
@@ -141,25 +137,17 @@ pub async fn pass(
     // 异步转发请求体数据
     tokio::spawn(async move {
         while let Ok(Some(chunk)) = receiver.recv_data().await.inspect_err(|e| {
-            error!(
-                "[Request processing] Request body reception error | detail: {:?}",
-                e
-            );
+            error!("[Request processing] Request body reception error: {:?}", e);
         }) {
             let mut data = chunk.chunk();
             debug!(
-                "[Request processing] Sending request body | data_length: {}",
+                "[Request processing] Sending request body data_length: {}",
                 data.len()
             );
             let _ = tx
                 .send(Ok(Frame::data(data.copy_to_bytes(data.len()))))
                 .await
-                .inspect_err(|e| {
-                    error!(
-                        "[Request processing] Request body send error | detail: {:?}",
-                        e
-                    )
-                });
+                .inspect_err(|e| error!("[Request processing] Request body send error: {:?}", e));
         }
     });
 
@@ -167,8 +155,8 @@ pub async fn pass(
     let response = sender
         .send_request(Request::from_parts(new_parts, body))
         .await
-        .inspect_err(|e| error!("[Request processing] Request send error | detail: {:?}", e))?;
+        .inspect_err(|e| error!("[Request processing] Request send error: {:?}", e))?;
 
-    info!("[Request processing] Finished sending request body");
+    debug!("[Request processing] Finished sending request body");
     Ok(response)
 }

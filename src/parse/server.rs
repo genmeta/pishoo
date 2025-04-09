@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    Node, ParseFn, Value, location::parse_location, parse_address, parse_path, parse_string,
-    parse_string_map, parse_string_vec,
+    Node, ParseFn, Value, location::parse_location, parse_address, parse_header_value, parse_path,
+    parse_string_vec, parse_types,
 };
 
 pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
@@ -17,8 +17,8 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("ssl_certificate", Box::new(parse_path));
     commands.insert("ssl_certificate_key", Box::new(parse_path));
     commands.insert("location", Box::new(parse_location));
-    commands.insert("types", Box::new(parse_string_map));
-    commands.insert("default_type", Box::new(parse_string));
+    commands.insert("types", Box::new(parse_types));
+    commands.insert("default_type", Box::new(parse_header_value));
 
     let mut values = HashMap::new();
     if let Some(children) = directive.children {
