@@ -1,270 +1,171 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::SendStream;
-use http::{Request, Response, Uri};
+use http::{Request, Response, StatusCode, Uri, header::CONTENT_LENGTH};
 use tokio::io::{AsyncReadExt, BufReader};
-use tracing::{debug, error, info};
+use tracing::debug;
 
 use crate::{
-    error::{CustomError, Result},
+    command::{content_type, index},
+    error::Result,
     parse::{Node, Value},
     reverse::build_error_response,
 };
 
-/// 处理 ROOT 静态文件请求
+/// Handles incoming HTTP requests, attempting to serve a static file based on a configured root directory.
+///
+/// It retrieves the root directory path from the `location` configuration.
+/// If the root path is found, it constructs the full path to the requested file
+/// by combining the root path and the request's URI path. It then delegates
+/// the actual file serving process to the `serve_static_file` function.
+///
+/// If the `root` path configuration is missing or invalid in `location`,
+/// it sends a generic error response back to the client.
+///
+/// # Parameters
+///
+/// * `location`: An `Arc<Node>` containing configuration, expected to hold a `root` path value.
+/// * `req`: The incoming HTTP `Request`. Its URI path is used to determine the file to serve.
+/// * `sender`: The `RequestStream` used to send the HTTP response (either the file or an error) back to the client.
+///
+/// # Returns
+///
+/// * `Ok(())` if a response (either the file or an error message) was successfully initiated.
+/// * `Err` if an error occurred during the process of sending the response (e.g., I/O error in `serve_static_file`).
 pub async fn root(
     location: &Arc<Node>,
     req: Request<()>,
-    sender: RequestStream<SendStream<Bytes>, Bytes>,
+    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    info!("location: {:#?}", location);
-
     let root = if let Some(Value::Path(root)) = location.get("root") {
         root
     } else {
-        return Err(CustomError::InvalidConfig(
-            "Invalid root configuration".to_string(),
-        ));
+        sender.send_response(build_error_response()).await?;
+        sender.finish().await?;
+        return Ok(());
     };
 
-    info!("root: {:#?}", root);
-
-    // 对于 Root 类型，把请求路径直接拼接到根目录上
-    let mut file_path = format!("{}{}", root.display(), req.uri().path());
-
-    serve_static_file(location, &mut file_path, req.uri(), sender).await?;
+    let file_path = format!("{}{}", root.display(), req.uri().path());
+    serve_static_file(location, &file_path, req.uri(), sender).await?;
     Ok(())
 }
 
-/// 处理 ALIAS 静态文件请求
+/// Handles HTTP requests that match a specific `pattern` by serving files from an aliased directory.
+///
+/// This function is typically used when a URL prefix (`pattern`) should map to a
+/// different directory (`alias`) on the filesystem than the one implied by the
+/// URL structure alone. It removes the matched `pattern` from the beginning of
+/// the request URI's path to determine the relative path within the `alias` directory.
+///
+/// It retrieves the `alias` target directory path from the `location` configuration.
+/// If the `alias` path is found, it constructs the full path to the requested file
+/// and delegates the file serving process to `serve_static_file`.
+///
+/// If the `alias` path configuration is missing or invalid in `location`,
+/// it sends a generic error response back to the client.
+///
+/// # Parameters
+///
+/// * `location`: An `Arc<Node>` containing configuration, expected to hold an `alias` path value.
+/// * `pattern`: The URL path prefix that was matched to invoke this handler.
+/// * `req`: The incoming HTTP `Request`. Its URI path, relative to the `pattern`, is used.
+/// * `sender`: The `RequestStream` used to send the HTTP response (either the file or an error) back to the client.
+///
+/// # Returns
+///
+/// * `Ok(())` if a response (either the file or an error message) was successfully initiated.
+/// * `Err` if an error occurred during the process of sending the response (e.g., I/O error in `serve_static_file`).
 pub async fn alias(
     location: &Arc<Node>,
     pattern: String,
     req: Request<()>,
-    sender: RequestStream<SendStream<Bytes>, Bytes>,
+    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    // 在 alias 情况下，需要去除 URL 中匹配到的前缀
+    // In the case of an `alias`, it is necessary to remove the matched prefix from the URL.
     let relative_path = req.uri().path().trim_start_matches(&pattern);
 
     let alias = if let Some(Value::Path(alias)) = location.get("alias") {
         alias
     } else {
-        return Err(CustomError::InvalidConfig(
-            "Invalid alias configuration".to_string(),
-        ));
+        sender.send_response(build_error_response()).await?;
+        sender.finish().await?;
+        return Ok(());
     };
 
-    let mut file_path = format!("{}{}", alias.display(), relative_path);
-
-    serve_static_file(location, &mut file_path, req.uri(), sender).await?;
+    let file_path = format!("{}{}", alias.display(), relative_path);
+    serve_static_file(location, &file_path, req.uri(), sender).await?;
     Ok(())
 }
 
-/// 异步加载文件，并以流式方式通过 sender 发送响应体。
+/// Asynchronously serves a static file located at `file_path`.
+///
+/// This function attempts to find the specified file using the `location` context.
+/// If found, it sends an HTTP 200 OK response with appropriate `Content-Type`
+/// and `Content-Length` headers, then streams the file content back to the client.
+/// If the file is not found, it sends a 404 Not Found response.
+///
+/// # Parameters
+///
+/// * `location`: Context used to locate the file (e.g., root directory configuration).
+/// * `file_path`: The path to the static file relative to the `location`.
+/// * `uri`: The original request URI, used primarily for logging purposes.
+/// * `sender`: The stream used to send the HTTP response (headers and body data) back to the client.
+///
+/// # Returns
+///
+/// * `Ok(())` if the file was served successfully or a 404 response was sent.
+/// * `Err` if there was an I/O error reading the file or an error sending the response.
 async fn serve_static_file(
     location: &Arc<Node>,
-    file_path: &mut String,
+    file_path: &str,
     uri: &Uri,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    let node = location.backtrack_node("types");
-    let mime_types = node.as_ref().map(|node| {
-        if let Some(Value::StringMap(mime_types)) = node.get("types") {
-            mime_types
-        } else {
-            unreachable!("Invalid mime_types value")
-        }
-    });
+    debug!("[Response handling][{}] Processing static file", uri);
 
-    let node = location.backtrack_node("default_type");
-    let default_type = node.as_ref().map(|node| {
-        if let Some(Value::String(default_type)) = node.get("default_type") {
-            default_type
-        } else {
-            unreachable!("Invalid default_type value")
-        }
-    });
+    let (file, file_size, file_path) = match index(location, file_path).await {
+        Ok(result) => result,
+        _ => {
+            let response = Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(())
+                .expect("Failed to build response");
 
-    let node = location.backtrack_node("index");
-    let index_files = node.as_ref().map(|node| {
-        if let Some(Value::StringVec(index_files)) = node.get("index") {
-            index_files
-        } else {
-            unreachable!("Invalid index value")
-        }
-    });
-
-    match index(file_path, index_files).await {
-        Ok(()) => {}
-        Err(e) => {
-            match e {
-                CustomError::FileNotFound(_) => {
-                    // 如果 index 文件不存在，直接返回 404
-                    sender.send_response(build_unfound_response()?).await?;
-                    return Ok(());
-                }
-                _ => {
-                    // 其他错误直接返回
-                    error!(
-                        "[Static file serving][{}] Failed to get metadata: {:?}",
-                        uri, e
-                    );
-                    sender.send_response(build_error_response()?).await?;
-                    return Ok(());
-                }
-            }
+            sender.send_response(response).await?;
+            sender.finish().await?;
+            return Ok(());
         }
     };
 
-    match tokio::fs::File::open(&*file_path).await {
-        Ok(file) => {
-            // 获取文件元数据，用于确定文件大小
-            let metadata = match tokio::fs::metadata(&*file_path).await {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    error!(
-                        "[Static file serving][{}] Failed to get metadata: {:?}",
-                        uri, e
-                    );
-                    sender.send_response(build_unfound_response()?).await?;
-                    return Ok(());
-                }
-            };
+    let (mut parts, body) = Response::<()>::default().into_parts();
 
-            let content_length = metadata.len();
+    parts.status = StatusCode::OK;
 
-            let content_type = mime_types
-                .and_then(|mime_types| infer_content_type(file_path, mime_types, default_type));
+    // 添加长度
+    // TODO gzip 压缩时不添加长度
+    parts.headers.insert(CONTENT_LENGTH, file_size.into());
+    content_type(location, &mut parts, &file_path);
 
-            let response = Response::builder()
-                .status(200)
-                .header("Content-Length", content_length);
+    let response = Response::from_parts(parts, body);
+    sender.send_response(response).await?;
 
-            let response = match content_type {
-                Some(content_type) => response.header("Content-Type", content_type),
-                None => {
-                    error!(
-                        "[Static file serving][{}] Failed to infer content type for {}",
-                        uri, file_path
-                    );
-                    response
-                }
-            };
-
-            let response = response.body(()).inspect_err(|e| {
-                error!(
-                    "[Static file serving][{}] Failed to build response: {}",
-                    uri, e
-                )
-            })?;
-            sender.send_response(response).await?;
-
-            debug!(
-                "[Static file serving][{}] Serving file {} ({} bytes)",
-                uri, file_path, content_length
-            );
-
-            let mut reader = BufReader::new(file);
-            let mut buffer = [0u8; 8192];
-            while reader.read(&mut buffer).await? > 0 {
-                sender.send_data(Bytes::copy_from_slice(&buffer)).await?;
-            }
-        }
-        Err(e) => {
-            error!(
-                "[Static file serving][{}] Failed to open {}: {:?}",
-                uri, file_path, e
-            );
-            sender.send_response(build_error_response()?).await?;
-        }
+    let mut reader = BufReader::new(file);
+    let mut buffer = [0u8; 8192];
+    while reader.read(&mut buffer).await? > 0 {
+        sender
+            .send_data(Bytes::copy_from_slice(&buffer))
+            .await
+            .inspect_err(|e| debug!("[Response handling][{}] Error sending data: {}", uri, e))?;
     }
 
-    // 结束流
-    sender.finish().await?;
+    debug!("[Response handling][{}] File sent successfully", uri);
+
+    sender
+        .finish()
+        .await
+        .inspect_err(|e| debug!("[Response handling][{}] Error sending response: {}", uri, e))?;
     debug!("[Response handling][{}] Processing completed", uri);
     Ok(())
-}
-
-/// TODO io::Error Not
-async fn index(file_path: &mut String, index_files: Option<&Vec<String>>) -> Result<()> {
-    // 1. 检查初始路径是否存在及其元数据
-    let metadata = match tokio::fs::metadata(&*file_path).await {
-        Ok(meta) => meta,
-        Err(_) => {
-            // 如果初始路径本身就不存在，直接返回错误
-            return Err(CustomError::FileNotFound(format!(
-                "Failed to get metadata for initial path: {}",
-                file_path
-            )));
-        }
-    };
-
-    // 2. 检查是否是目录
-    if metadata.is_dir() {
-        let index_files = match index_files {
-            Some(index_files) => index_files,
-            None => {
-                // 如果没有提供 index_files，则返回错误
-                return Err(CustomError::FileNotFound(format!(
-                    "No index files provided for directory: {}",
-                    file_path
-                )));
-            }
-        };
-
-        if !file_path.ends_with('/') {
-            file_path.push('/');
-        }
-        let base_dir_path = file_path.clone();
-
-        // 3. 遍历 index_files 列表
-        let mut found_index = false;
-        for index_filename in index_files {
-            // 构建当前尝试的完整文件路径
-            let mut potential_path = base_dir_path.clone();
-            potential_path.push_str(index_filename);
-
-            if let Ok(index_meta) = tokio::fs::metadata(&*potential_path).await {
-                if index_meta.is_file() {
-                    *file_path = potential_path;
-                    found_index = true;
-                    break; // 找到第一个就跳出循环
-                }
-            }
-        }
-
-        // 如果循环结束后仍未找到任何 index 文件
-        if !found_index {
-            return Err(CustomError::FileNotFound(format!(
-                "No suitable index file found in directory '{}'",
-                base_dir_path
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// 通过 MIME 类型推断文件类型
-fn infer_content_type<'a>(
-    file_path: &str,
-    mime_types: &'a HashMap<String, String>,
-    default_type: Option<&'a String>,
-) -> Option<&'a String> {
-    let ext = match file_path.rsplit(".").next() {
-        Some(ext) => ext.to_lowercase(),
-        None => return default_type,
-    };
-    match mime_types.get(&ext) {
-        Some(content_type) => Some(content_type),
-        None => default_type,
-    }
-}
-
-fn build_unfound_response() -> Result<Response<()>> {
-    Ok(Response::builder()
-        .status(404)
-        .body(())
-        .inspect_err(|e| error!("Failed to build 404 response: {}", e))?)
 }

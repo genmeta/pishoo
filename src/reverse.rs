@@ -274,9 +274,9 @@ fn match_location<'l>(locations: &'l [Arc<Node>], path: &str) -> Option<(&'l Arc
 }
 
 /// 构造错误响应
-fn build_error_response() -> Result<Response<()>> {
+fn build_error_response() -> Response<()> {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(())
-        .map_err(CustomError::HttpError)
+        .unwrap()
 }

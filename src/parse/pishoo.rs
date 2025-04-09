@@ -4,14 +4,14 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    Node, ParseFn, Value, parse_string, parse_string_map, proxy::parse_proxy, server::parse_server,
+    Node, ParseFn, Value, parse_header_value, parse_types, proxy::parse_proxy, server::parse_server,
 };
 
 pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    commands.insert("types", Box::new(parse_string_map));
-    commands.insert("default_type", Box::new(parse_string));
+    commands.insert("types", Box::new(parse_types));
+    commands.insert("default_type", Box::new(parse_header_value));
     commands.insert("server", Box::new(parse_server));
     commands.insert("proxy", Box::new(parse_proxy));
 

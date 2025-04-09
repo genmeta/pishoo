@@ -1,4 +1,6 @@
 use std::io::{self};
+
+mod command;
 mod common;
 pub mod config;
 mod dns;
