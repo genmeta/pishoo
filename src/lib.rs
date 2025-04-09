@@ -2,7 +2,6 @@ use std::io::{self};
 
 mod command;
 mod common;
-pub mod config;
 mod dns;
 pub mod error;
 pub mod forward;
