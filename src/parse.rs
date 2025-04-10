@@ -216,7 +216,7 @@ fn parse_header(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
+fn parse_header_always(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [name, value] => {
             let header_name = HeaderName::from_bytes(name.as_bytes())?;

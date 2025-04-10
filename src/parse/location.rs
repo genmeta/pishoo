@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, Value, parse_header, parse_header_allways, parse_path, parse_ssh_login,
+    ParseFn, Value, parse_header, parse_header_always, parse_path, parse_ssh_login,
     parse_ssh_ssl_user, parse_string, parse_string_vec, parse_types, pattern::parse_pattern,
 };
 
@@ -15,7 +15,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("root", Box::new(parse_path));
     commands.insert("alias", Box::new(parse_path));
     commands.insert("index", Box::new(parse_string_vec));
-    commands.insert("add_header", Box::new(parse_header_allways));
+    commands.insert("add_header", Box::new(parse_header_always));
     commands.insert("proxy_set_header", Box::new(parse_header));
     commands.insert("proxy_pass", Box::new(parse_string));
     commands.insert("ssh_login", Box::new(parse_ssh_login));
