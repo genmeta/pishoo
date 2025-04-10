@@ -23,8 +23,8 @@ pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
                 match command(directive)? {
                     value @ Value::ValueMap(..) => {
                         if let Some(exist_value) = values.get_mut(&name) {
-                            if let Value::Nodes(childern) = exist_value {
-                                childern.push(Arc::new(Node::new(value)));
+                            if let Value::Nodes(children) = exist_value {
+                                children.push(Arc::new(Node::new(value)));
                             } else {
                                 return Err(anyhow!("unexpected value type"));
                             }
