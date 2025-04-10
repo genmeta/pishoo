@@ -37,9 +37,7 @@ pub enum Value {
     Types(HashMap<String, HeaderValue>),
     HeaderValue(HeaderValue),
     Pattern(Pattern, HashMap<String, Value>),
-    SshLogin(String),
     SshSslUser(Vec<(String, String)>),
-    SshDeny(String),
     ValueMap(HashMap<String, Value>),
     Nodes(Vec<Arc<Node>>),
 }
@@ -243,10 +241,10 @@ fn parse_header_allways(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [auth] => {
-            if auth != "basic" || auth != "ssl" {
+            if auth != "basic" && auth != "ssl" {
                 Err(anyhow!("Invalid value for directive: {}", directive.name))
             } else {
-                Ok(Value::SshLogin(auth.to_string()))
+                Ok(Value::String(auth.to_string()))
             }
         }
         _ => Err(anyhow!("Invalid value for directive: {}", directive.name)),
@@ -259,16 +257,6 @@ fn parse_ssh_ssl_user(directive: Directive<Nginx>) -> Result<Value> {
             name.to_string(),
             user.to_string(),
         )])),
-        _ => Err(anyhow!(
-            "Invalid number of arguments for directive: {}",
-            directive.name
-        )),
-    }
-}
-
-fn parse_ssh_deny(directive: Directive<Nginx>) -> Result<Value> {
-    match &directive.args[..] {
-        [users] => Ok(Value::SshDeny(users.to_string())),
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
             directive.name

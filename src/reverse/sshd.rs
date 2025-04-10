@@ -59,7 +59,7 @@ pub async fn login(
         .into());
     }
 
-    let ssh_login = if let Some(Value::String(ssl_login)) = location.get("ssh_auth") {
+    let ssh_login = if let Some(Value::String(ssl_login)) = location.get("ssh_login") {
         ssl_login
     } else {
         unreachable!();
