@@ -106,6 +106,25 @@ pub(crate) fn add_header(node: &Arc<Node>, parts: &mut Parts) {
     }
 }
 
+/// Determines and sets the "Content-Type" header for a given file path based on configuration.
+///
+/// This function retrieves MIME type mapping and a default type from configuration nodes
+/// found by searching upwards from the provided `node` using `backtrack_node`.
+/// It uses the `infer_content_type` function to determine the appropriate `Content-Type`
+/// based on the file extension of `file_path`. If a type is inferred, it's added
+/// to the `parts.headers`.
+///
+/// # Arguments
+///
+/// * `node` - The context `Node` potentially containing or inheriting `types` and `default_type` configurations.
+/// * `parts` - A mutable representation of response parts (e.g., headers) where the
+///   `Content-Type` header will be set.
+/// * `file_path` - The path of the file whose content type needs to be determined.
+///
+/// # Panics
+///
+/// Panics with `unreachable!` if a configuration node for `types` or `default_type` is found
+/// but contains a value of an unexpected type, indicating invalid configuration data.
 pub(crate) fn content_type(node: &Arc<Node>, parts: &mut Parts, file_path: &str) {
     let node_found = node.backtrack_node("types");
     let mime_types = node_found.as_ref().map(|node| {
