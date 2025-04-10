@@ -17,8 +17,8 @@ pub fn parse_conf(directives: Vec<Directive<Nginx>>) -> Result<Arc<Node>> {
             match command(directive)? {
                 value @ Value::ValueMap(..) => {
                     if let Some(exist_value) = values.get_mut(&name) {
-                        if let Value::Nodes(childern) = exist_value {
-                            childern.push(Arc::new(Node::new(value)));
+                        if let Value::Nodes(children) = exist_value {
+                            children.push(Arc::new(Node::new(value)));
                         } else {
                             return Err(anyhow!("unexpected value type"));
                         }
@@ -45,8 +45,8 @@ pub fn parse_conf(directives: Vec<Directive<Nginx>>) -> Result<Arc<Node>> {
 fn put_parent(node: &Arc<Node>) {
     if let Value::ValueMap(map) = node.value() {
         for value in map.values() {
-            if let Value::Nodes(childern) = value {
-                for child in childern {
+            if let Value::Nodes(children) = value {
+                for child in children {
                     child.set_parent(Some(Arc::downgrade(node)));
                     put_parent(child);
                 }
