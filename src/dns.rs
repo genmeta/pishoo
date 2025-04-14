@@ -1,51 +1,133 @@
-use std::{net::SocketAddr, time::Duration, vec};
+use std::{
+    collections::HashMap,
+    io,
+    net::SocketAddr,
+    sync::{Arc, LazyLock},
+    time::Duration,
+    vec,
+};
 
 use async_trait::async_trait;
-use futures::io;
 use gm_quic::EndpointAddr;
-use tokio::{net::UdpSocket, time::timeout};
-use tracing::{debug, info, warn};
+use parking_lot::Mutex;
+use qtraversal::MAPPED_ENDPOINTS;
+use tokio::{net::UdpSocket, task::JoinSet, time::timeout};
+use tracing::{debug, error, info, warn};
 
-use crate::{Resolver, localhost::ArcLocalHost};
+use crate::Resolver;
 
-#[derive(Clone, Copy)]
-pub struct Dns(SocketAddr);
+/// 记录全局的 需要发布的域名, 与其绑定的 binds
+static RECORDS: LazyLock<Mutex<RecordsList>> = LazyLock::new(Default::default);
+
+// 新增类型定义
+type RecordsList = Vec<Record>;
+
+struct Record {
+    name: String,
+    resolver: UdpResolver,
+    binds: Vec<SocketAddr>,
+}
+
+#[derive(Clone, Default)]
+pub struct Dns {
+    mapped_endpoints: Arc<Mutex<HashMap<SocketAddr, EndpointAddr>>>,
+}
 
 impl Dns {
-    pub fn new(server: SocketAddr) -> Dns {
-        Dns(server)
-    }
-
-    pub fn spwan_publish(&self, names: Vec<String>, localhost: ArcLocalHost) {
+    pub fn spawn_publish(&self) {
+        // 定时任务, 监听 MAPPED_ENDPOINTS 队列, 更新 binds => EndpointAddr, 并在更新时 通知 DNS 服务器
         tokio::spawn({
-            let dns = *self;
+            let dns = self.clone();
+            async move {
+                while let Some((bind, endpoint)) = MAPPED_ENDPOINTS.pop().await {
+                    dns.mapped_endpoints.lock().insert(bind, endpoint);
+                    match dns.publish_records().await {
+                        Ok(()) => {
+                            info!("[DNS] Published records successfully");
+                        }
+                        Err(e) => {
+                            error!("[DNS] Failed to publish records: {}", e);
+                        }
+                    };
+                }
+            }
+        });
+
+        tokio::spawn({
+            let dns = self.clone();
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
             async move {
                 loop {
-                    let eps = localhost.relay_addr().await;
-                    if !eps.is_empty() {
-                        for name in names.iter() {
-                            if let Err(e) = dns.publish(name, &eps).await {
-                                warn!("Failed to report host {}: {}", name, e);
-                            }
+                    match dns.publish_records().await {
+                        Ok(()) => {
+                            info!("[DNS] Published records successfully");
                         }
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    } else {
-                        // if there is no endpoint address, wait for 1 second and try again
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
+                        Err(e) => {
+                            error!("[DNS] Failed to publish records: {}", e);
+                        }
+                    };
+                    interval.tick().await;
                 }
             }
         });
     }
+
+    /// 发布所有需要发布的域名到 DNS 服务器
+    async fn publish_records(&self) -> io::Result<()> {
+        let mut handler = JoinSet::new();
+        {
+            let records_guard = RECORDS.lock();
+            let mapped_endpoints_guard = self.mapped_endpoints.lock();
+            for record in records_guard.iter() {
+                let mut eps = vec![];
+                for bind in &record.binds {
+                    if let Some(ep) = mapped_endpoints_guard.get(bind) {
+                        eps.push(*ep);
+                    } else {
+                        warn!("[DNS] No endpoint found for bind: {}", bind);
+                    }
+                }
+                handler.spawn({
+                    let server_name = record.name.to_string();
+                    let resolver = record.resolver;
+                    async move { resolver.publish(&server_name, &eps).await }
+                });
+            }
+        };
+
+        handler.join_all().await;
+
+        Ok(())
+    }
+
+    pub fn add_record(name: String, resolver: SocketAddr, binds: Vec<SocketAddr>) {
+        let mut records = RECORDS.lock();
+        records.push(Record {
+            name,
+            resolver: UdpResolver::new(resolver),
+            binds,
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UdpResolver {
+    resolver: SocketAddr,
+}
+
+impl UdpResolver {
+    pub fn new(resolver: SocketAddr) -> Self {
+        UdpResolver { resolver }
+    }
 }
 
 #[async_trait]
-impl Resolver for Dns {
+impl Resolver for UdpResolver {
     async fn publish(&self, name: &str, addresses: &[EndpointAddr]) -> io::Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         let report = format!("REPORT {} {}", name, dns_serialize(addresses));
-        info!("Sending DNS report: {}", report);
-        socket.send_to(report.as_bytes(), self.0).await?;
+        debug!("Sending DNS report: {}", report);
+        socket.send_to(report.as_bytes(), self.resolver).await?;
         Ok(())
     }
 
@@ -55,7 +137,7 @@ impl Resolver for Dns {
         let mut buffer = vec![0u8; 1024];
         const RETRY: u8 = 3;
         for i in 0..RETRY {
-            socket.send_to(query.as_bytes(), self.0).await?;
+            socket.send_to(query.as_bytes(), self.resolver).await?;
             match timeout(Duration::from_secs(1), socket.recv_from(&mut buffer)).await? {
                 Ok((len, _src)) => {
                     buffer.truncate(len);
@@ -68,8 +150,8 @@ impl Resolver for Dns {
                 }
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
             "DNS query timed out",
         ))
     }
@@ -144,7 +226,7 @@ mod tests {
             outer: "127.0.0.1:5678".parse().unwrap(),
         };
 
-        let dns_server = Dns::new("1.12.74.4:5300".parse().unwrap());
+        let dns_server = UdpResolver::new("1.12.74.4:5300".parse().unwrap());
         dns_server
             .publish("relay.example.com", &[ep])
             .await

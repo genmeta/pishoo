@@ -93,9 +93,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.97"
+version = "1.0.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcfed56ad506cb2c684a14971b8861fdc3baaaae314b9e5f9bb532cbe3ba7a4f"
+checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
 name = "async-trait"
@@ -162,10 +162,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "borsh"
+version = "1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8646f98db542e39fc66e68a20b2144f6a732636df7c2354e74645faaa433ce"
+dependencies = [
+ "cfg_aliases",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
+
+[[package]]
+name = "bytecheck"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50690fb3370fb9fe3550372746084c46f2ac8c9685c583d2be10eefd89d3d1a3"
+dependencies = [
+ "bytecheck_derive",
+ "ptr_meta",
+ "rancor",
+ "simdutf8",
+]
+
+[[package]]
+name = "bytecheck_derive"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb7846e0cb180355c2dec69e721edafa36919850f1a9f52ffba4ebc0393cb71"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
 
 [[package]]
 name = "byteorder"
@@ -181,9 +213,9 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
-version = "1.2.18"
+version = "1.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525046617d8376e3db1deffb079e91cef90a89fc3ca5c185bbf8c9ecdd15cd5c"
+checksum = "8e3a13707ac958681c13b39b458c073d0d9bc8a22cb1b2f4c8e55eb72c13f362"
 dependencies = [
  "shlex",
 ]
@@ -193,6 +225,12 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
@@ -218,9 +256,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.35"
+version = "4.5.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8aa86934b44c19c50f87cc2790e19f54f7a67aedb64101c2e1a2e5ecfb73944"
+checksum = "2df961d8c8a0d08aa9945718ccf584145eee3f3aa06cddbeac12933781102e04"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -228,9 +266,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.35"
+version = "4.5.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2414dbb2dd0695280da6ea9261e327479e9d37b0630f6b53ba2a11c60c679fd9"
+checksum = "132dbda40fb6753878316a489d5a1242a8ef2f0d9e47ba01c951ea8aa7d013a5"
 dependencies = [
  "anstream",
  "anstyle",
@@ -374,17 +412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deref-derive"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4255bb7dd538590188bd0aea52e48bd699b19bd90b0d069ec2ced8461fe23273"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -446,6 +473,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
 name = "enum_dispatch"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -462,6 +495,16 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "errno"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "976dd42dc7e85965fe702eb8164f21f450704bdde31faefd6471dba214cb594e"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "fastrand"
@@ -579,9 +622,8 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
- "dashmap",
- "derive_builder",
  "futures",
+ "getifs",
  "getrandom 0.3.1",
  "gm-quic",
  "h3",
@@ -593,15 +635,16 @@ dependencies = [
  "libc",
  "misc-conf",
  "pam",
+ "parking_lot",
  "pnet",
  "pwhash",
  "qconnection",
  "qinterface",
+ "qlog",
  "qtraversal",
  "regex",
  "rustls",
  "rustls-native-certs",
- "rustls-webpki",
  "serde",
  "serde_json",
  "thiserror",
@@ -619,6 +662,29 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "getifs"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c8154ac1dccfcb17e393e9cd4e9c5c67161e6a94659ebcb64688e80fbd3aba0"
+dependencies = [
+ "bitflags",
+ "either",
+ "hardware-address",
+ "ipnet",
+ "iprfc",
+ "iprobe",
+ "libc",
+ "linux-raw-sys",
+ "paste",
+ "rustix",
+ "smallvec-wrapper",
+ "smol_str",
+ "triomphe",
+ "widestring",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -682,11 +748,11 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "dashmap",
- "deref-derive",
+ "derive_more",
  "futures",
  "qbase",
  "qcongestion",
@@ -694,6 +760,7 @@ dependencies = [
  "qinterface",
  "qlog",
  "qrecovery",
+ "qtraversal",
  "qunreliable",
  "rustls",
  "thiserror",
@@ -703,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "h3"
-version = "0.0.6"
+version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e7675a0963b47a6d12fe44c279918b4ffb19baee838ac37f48d2722ad5bc6ab"
+checksum = "7dfb059a4f28a66f186ed16ad912d142f490676acba59353831d7cb45a96b0d3"
 dependencies = [
  "bytes",
  "fastrand",
@@ -717,17 +784,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3-datagram"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98c058c00e0ff53a456ad97cc0df2d0f44fbe7a2c11c9eca87c25471ca68fa1c"
+dependencies = [
+ "bytes",
+ "h3",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "h3-shim"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "futures",
  "gm-quic",
  "h3",
+ "h3-datagram",
  "qbase",
  "qconnection",
  "tokio",
+]
+
+[[package]]
+name = "hardware-address"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d26f5298d7c8edca43d555a291540a24805142fa7da4da1359167846b9ef39"
+dependencies = [
+ "paste",
+ "thiserror",
 ]
 
 [[package]]
@@ -910,12 +999,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnet"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
+
+[[package]]
 name = "ipnetwork"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "iprfc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bc9535b4a1d67bfcd48132d801bedcba48364615bd718b1d63da985e93d5310"
+dependencies = [
+ "bitflags",
+ "ipnet",
+ "paste",
+]
+
+[[package]]
+name = "iprobe"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff11c64cf994eda9584764f77c94dd1a7499bcbe1634f2c330e7ab9e0d7f5a6d"
+dependencies = [
+ "rustix",
 ]
 
 [[package]]
@@ -962,6 +1077,12 @@ name = "libc"
 version = "0.2.171"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd945864f07fe9f5371a27ad7b52a172b4b499999f1d97574c9fa68373937e12"
 
 [[package]]
 name = "lock_api"
@@ -1017,6 +1138,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1056,20 +1186,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "nat"
-version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/mnet.git#7bf18a58489ded289851faf115268021a5e50298"
+name = "munge"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0091202c98cf06da46c279fdf50cccb6b1c43b4521abdf6a27b4c7e71d5d9d7"
 dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "flagset",
- "futures",
- "nom 7.1.3",
- "rand 0.8.5",
- "tokio",
- "tracing",
- "tracing-subscriber",
+ "munge_macro",
+]
+
+[[package]]
+name = "munge_macro"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "734799cf91479720b2f970c61a22850940dd91e27d4f02b1c6fc792778df2459"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -1206,6 +1352,12 @@ dependencies = [
  "smallvec",
  "windows-targets",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "phf"
@@ -1407,6 +1559,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptr_meta"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe9e76f66d3f9606f44e45598d155cb13ecf09f4a28199e48daf8c8fc937ea90"
+dependencies = [
+ "ptr_meta_derive",
+]
+
+[[package]]
+name = "ptr_meta_derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca414edb151b4c8d125c12566ab0d74dc9cdba36fb80eb7b848c15f495fd32d1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "pwhash"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1424,13 +1596,11 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bitflags",
  "bytes",
- "dashmap",
- "deref-derive",
- "derive_builder",
+ "derive_more",
  "enum_dispatch",
  "futures",
  "getset",
@@ -1445,12 +1615,10 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
- "dashmap",
  "qbase",
  "qlog",
- "qrecovery",
  "rand 0.9.0",
  "tokio",
  "tracing",
@@ -1459,17 +1627,19 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "dashmap",
- "deref-derive",
+ "derive_more",
+ "enum_dispatch",
  "futures",
  "qbase",
  "qcongestion",
  "qinterface",
  "qlog",
  "qrecovery",
+ "qtraversal",
  "qunreliable",
  "rand 0.9.0",
  "rustls",
@@ -1480,15 +1650,17 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
+ "async-trait",
  "bytes",
  "dashmap",
- "deref-derive",
+ "derive_more",
  "futures",
- "nom 8.0.0",
  "qbase",
+ "qlog",
  "qudp",
+ "rustls",
  "serde",
  "thiserror",
  "tokio",
@@ -1498,7 +1670,7 @@ dependencies = [
 [[package]]
 name = "qlog"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1516,10 +1688,10 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
- "deref-derive",
+ "derive_more",
  "enum_dispatch",
  "futures",
  "qbase",
@@ -1534,24 +1706,20 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
- "deref-derive",
+ "derive_more",
+ "enum_dispatch",
+ "flagset",
  "futures",
- "gm-quic",
- "log",
- "nat",
  "nom 8.0.0",
  "qbase",
- "qcongestion",
- "qconnection",
  "qinterface",
- "qrecovery",
  "qudp",
- "qunreliable",
+ "rand 0.9.0",
  "rustls",
  "thiserror",
  "tokio",
@@ -1561,12 +1729,12 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "cfg-if",
  "libc",
- "log",
+ "nix",
  "socket2",
  "tokio",
  "tracing",
@@ -1576,12 +1744,13 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#f87b28df2bfeaee57b0b96aae723ec93ed856851"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fattack#0e252b443c256e218cab2d42561e0c49d96734de"
 dependencies = [
  "bytes",
  "futures",
  "qbase",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1591,6 +1760,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1885c039570dc00dcb4ff087a89e185fd56bae234ddc7f056a945bf36467248d"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "rancor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caf5f7161924b9d1cea0e4cabc97c372cea92b5f927fc13c6bca67157a0ad947"
+dependencies = [
+ "ptr_meta",
 ]
 
 [[package]]
@@ -1758,6 +1936,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
+name = "rend"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a35e8a6bf28cd121053a66aa2e6a2e3eaffad4a60012179f0e864aa5ffeff215"
+dependencies = [
+ "bytecheck",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1772,16 +1959,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "rkyv"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e147371c75553e1e2fcdb483944a8540b8438c31426279553b9a8182a9b7b65"
+dependencies = [
+ "bytecheck",
+ "bytes",
+ "hashbrown 0.15.2",
+ "indexmap 2.9.0",
+ "munge",
+ "ptr_meta",
+ "rancor",
+ "rend",
+ "rkyv_derive",
+ "smallvec",
+ "tinyvec",
+ "uuid",
+]
+
+[[package]]
+name = "rkyv_derive"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "246b40ac189af6c675d124b802e8ef6d5246c53e17367ce9501f8f66a81abb7a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
 
 [[package]]
-name = "rustls"
-version = "0.23.25"
+name = "rustix"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "822ee9188ac4ec04a2f0531e55d035fb2de73f18b41a63c70c2712503b6fb13c"
+checksum = "d97817398dd4bb2e6da002002db259209759911da105da92bec29ccb12cf58bf"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustls"
+version = "0.23.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df51b5869f3a441595eac5e8ff14d486ff285f7b8c0df8770e49c3b56351f0f0"
 dependencies = [
  "once_cell",
  "ring",
@@ -1983,6 +2214,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "siphasher"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2004,6 +2241,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8917285742e9f3e1683f0a9c4e6b57960b7314d0b08d30d1ecd426713ee2eee9"
 
 [[package]]
+name = "smallvec-wrapper"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71a120c9f2941389140711334f4aec8f54544cffd18b86bc20eb1230cd73191b"
+dependencies = [
+ "either",
+ "paste",
+ "rkyv",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "smol_str"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
+dependencies = [
+ "borsh",
+ "serde",
+]
+
+[[package]]
 name = "socket2"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2012,6 +2272,12 @@ dependencies = [
  "libc",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "stable_deref_trait"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
 name = "strsim"
@@ -2111,6 +2377,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09b3661f17e86524eccd4371ab0429194e0d7c008abb45f7a7495b1719463c71"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "tokio"
 version = "1.44.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2179,18 +2460,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
 dependencies = [
  "once_cell",
- "valuable",
-]
-
-[[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
 ]
 
 [[package]]
@@ -2204,12 +2473,20 @@ dependencies = [
  "once_cell",
  "regex",
  "sharded-slab",
- "smallvec",
  "thread_local",
  "time",
  "tracing",
  "tracing-core",
- "tracing-log",
+]
+
+[[package]]
+name = "triomphe"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef8f7726da4807b58ea5c96fdc122f80702030edc33b35aff9190a51148ccc85"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -2264,10 +2541,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "valuable"
-version = "0.1.1"
+name = "uuid"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+checksum = "458f7a779bf54acc9f347480ac654f68407d3aab21269a6e3c9f922acd9e2da9"
 
 [[package]]
 name = "version_check"
@@ -2362,6 +2639,12 @@ checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd7cf3379ca1aac9eea11fba24fd7e315d621f8dfe35c8d7d2be8b793726e07d"
 
 [[package]]
 name = "winapi"

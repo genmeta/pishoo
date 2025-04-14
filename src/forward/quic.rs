@@ -12,9 +12,8 @@ use tracing::{error, info, warn};
 use super::{BoxResponse, H3Conn, H3SendRequest};
 use crate::{
     Resolver,
-    dns::Dns,
+    dns::UdpResolver,
     forward::{CHANNEL_BUFFER_SIZE, build_empty_response, build_error_response, validate_host},
-    localhost::ArcLocalHost,
 };
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
@@ -22,7 +21,6 @@ const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 /// 处理普通 HTTP 请求
 pub async fn proxy(
     quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
     resolver: SocketAddr,
 ) -> Result<BoxResponse, hyper::Error> {
@@ -40,7 +38,7 @@ pub async fn proxy(
 
     // 创建 QUIC 连接
     let (mut h3_conn, send_request) =
-        match create_quic_connection(quic_client, localhost, host, resolver).await {
+        match create_quic_connection(quic_client, host, resolver).await {
             Ok(conn) => conn,
             Err(msg) => {
                 error!(
@@ -85,7 +83,6 @@ pub async fn proxy(
 /// 处理 CONNECT 隧道请求
 pub async fn connect(
     quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
     req: Request<hyper::body::Incoming>,
     resolver: SocketAddr,
 ) -> Result<BoxResponse, hyper::Error> {
@@ -104,9 +101,7 @@ pub async fn connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
-                let service = service_fn(move |req| {
-                    proxy(quic_client.clone(), localhost.clone(), req, resolver)
-                });
+                let service = service_fn(move |req| proxy(quic_client.clone(), req, resolver));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -195,47 +190,42 @@ async fn send(
 /// 创建 QUIC 连接并进行地址注册
 async fn create_quic_connection(
     quic_client: Arc<QuicClient>,
-    localhost: ArcLocalHost,
     host: &str,
     resolver: SocketAddr,
 ) -> Result<(H3Conn, H3SendRequest), String> {
-    let dns = Dns::new(resolver);
+    let resolver = UdpResolver::new(resolver);
 
+    let mut remote_endpoints = Vec::new();
+
+    // DNS 解析重试
     for retry in 0..MAX_RETRY_COUNT {
-        // DNS 解析
-        let remotes = match dns.look_up(host).await {
-            Ok(remotes) => {
-                info!("[DNS]: resolved: {} -> {:?}", host, remotes);
-                remotes
+        match resolver.look_up(host).await {
+            Ok(endpoints) => {
+                info!("[DNS]: resolved: {host} -> {endpoints:?}");
+                remote_endpoints = endpoints;
+                break;
             }
             Err(err) => {
-                error!("DNS lookup failed: {}", err);
+                warn!("[DNS] lookup {host} failed: {err} retry: {retry}");
                 continue;
             }
-        };
+        }
+    }
 
+    if remote_endpoints.is_empty() {
+        return Err(format!("[DNS] lookup failed for: {host}"));
+    }
+
+    for retry in 0..MAX_RETRY_COUNT {
         // 选择地址（按照重试次数选择不同地址）
-        let index = retry.min(remotes.len() - 1);
-        let remote = remotes[index];
-
-        let pathway_socket = match localhost.match_pathway(remote).await {
-            Some(ps) => ps,
-            None => {
-                warn!(
-                    "[Forward]: no pathway found for {:?}, retry: {}",
-                    remote, retry
-                );
-                continue;
-            }
-        };
-        let (pathway, socket) = pathway_socket;
+        let index = retry.min(remote_endpoints.len() - 1);
+        let endpoint = remote_endpoints[index];
 
         // 建立 QUIC 连接
-        let conn = match quic_client.connect(host, socket, pathway) {
+        let conn = match quic_client.connect(host, endpoint) {
             Ok(conn) => conn,
             Err(e) => return Err(format!("QUIC connect error: {:?}", e)),
         };
-        localhost.add_direct_address(conn.clone());
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
@@ -245,13 +235,14 @@ async fn create_quic_connection(
             Ok(result) => return result.map_err(|e| format!("h3 client creation failed: {}", e)),
             Err(e) => {
                 error!(
-                    "[Forward] H3 client creation timeout: {}, retry: {}",
+                    "[Forward] H3 client creation failed: {}, retry: {}",
                     e, retry
                 );
 
                 // 最终失败时尝试刷新网络信息
                 if retry == MAX_RETRY_COUNT - 1 {
-                    let _ = localhost.resume_network().await;
+                    // TODO 需要考虑在当前情况下, 失败的原因, 目前刷新网络的代价太大
+                    // let _ = localhost.resume_network().await;
                     return Err(format!(
                         "H3 client creation failed after all retries: {}",
                         e

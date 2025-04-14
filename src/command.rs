@@ -1,9 +1,12 @@
 use std::{collections::HashMap, io, sync::Arc};
 
+use acl::Acl;
 use http::{HeaderValue, response::Parts};
 use tokio::fs::File;
 
 use crate::parse::{Node, Value};
+
+pub(crate) mod acl;
 
 /// Attempts to open a file directly or serve an index file if the path points to a directory.
 ///
@@ -178,4 +181,39 @@ fn infer_content_type<'a>(
         Some(content_type) => Some(content_type),
         None => default_type,
     }
+}
+
+pub(crate) fn acl(node: &Arc<Node>) -> Acl {
+    let node_found = node.backtrack_node("allow");
+    let allow = node_found.as_ref().map(|node| {
+        if let Some(Value::StringVec(allow)) = node.get("allow") {
+            allow
+        } else {
+            unreachable!("Invalid allow value")
+        }
+    });
+    let allow = if let Some(allow) = allow {
+        allow
+    } else {
+        &Vec::new()
+    };
+
+    let node_found = node.backtrack_node("deny");
+    let deny = node_found.as_ref().map(|node| {
+        if let Some(Value::StringVec(deny)) = node.get("deny") {
+            deny
+        } else {
+            unreachable!("Invalid deny value")
+        }
+    });
+    let deny = if let Some(deny) = deny {
+        deny
+    } else {
+        &Vec::new()
+    };
+
+    let allow = acl::parse_host_matches(allow);
+    let deny = acl::parse_host_matches(deny);
+
+    Acl::new(allow, deny)
 }
