@@ -140,6 +140,8 @@ pub async fn login(
         .into());
     };
 
+    tracing::debug!("[SSH] Username: {}, Password: {}", username, password);
+
     let resp = http::Response::builder().status(StatusCode::OK).body(())?;
     sender.send_response(resp).await?;
 
@@ -378,54 +380,18 @@ async fn copy_between_pty_and_stream(
     }
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
 fn verify_password(username: &str, password: &str) -> bool {
-    #[cfg(target_os = "linux")]
-    use std::io::{BufRead, BufReader};
-
-    let mut password_hash = None;
-    // 读取 /etc/shadow 或 /etc/master.passwd (BSD systems)
-    let shadow_path = if cfg!(target_os = "linux") {
-        "/etc/shadow"
-    } else {
-        "/etc/master.passwd" // BSD systems use master.passwd
+    #[cfg(unix)]
+    return {
+        let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
+        auth.get_handler().set_credentials(username, password);
+        if let Err(e) = auth.authenticate() {
+            println!("Authentication failed: {}", e);
+            return false;
+        }
+        true
     };
 
-    // 读取 /etc/shadow 获取密码哈希
-    if let Ok(shadow_file) = File::open(shadow_path) {
-        let reader = BufReader::new(shadow_file);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                let fields: Vec<&str> = line.split(':').collect();
-                if fields.len() >= 2 && fields[0] == username {
-                    password_hash = Some(fields[1].to_string());
-                    break;
-                }
-            }
-        }
-    }
-
-    // 验证密码
-    if let Some(hash) = password_hash {
-        return pwhash::unix::verify(password, &hash);
-    }
-
+    #[allow(unreachable_code)]
     false
-}
-
-#[cfg(target_os = "macos")]
-fn verify_password(username: &str, password: &str) -> bool {
-    // macOS上可以使用`dscl`命令来验证密码
-    let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
-    auth.get_handler().set_credentials(username, password);
-    if let Err(e) = auth.authenticate() {
-        println!("Authentication failed: {}", e);
-        return false;
-    }
-    true
 }
