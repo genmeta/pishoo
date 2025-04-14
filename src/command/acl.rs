@@ -1,19 +1,32 @@
 #[derive(Debug, Clone, Default)]
 pub struct Acl {
-    matches: Vec<HostMatch>,
+    allow: Vec<HostMatch>,
+    deny: Vec<HostMatch>,
 }
 
 impl Acl {
-    pub fn new(matches: Vec<HostMatch>) -> Self {
-        Self { matches }
+    pub fn new(allow: Vec<HostMatch>, deny: Vec<HostMatch>) -> Self {
+        Self { allow, deny }
     }
 
-    pub fn check_host(&self, host: &str) -> bool {
-        let host_lower = host.to_ascii_lowercase();
-        let remain_lower = host_lower.split_once('.').map(|(_, remain)| remain);
-        self.matches
-            .iter()
-            .any(|m| m.matches(&host_lower, remain_lower))
+    pub fn check(&self, host: &str) -> bool {
+        if self.allow.is_empty() {
+            return false;
+        }
+
+        if !check_host(&self.allow, host) {
+            return false;
+        }
+
+        if self.deny.is_empty() {
+            return true;
+        }
+
+        if check_host(&self.deny, host) {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -25,7 +38,7 @@ pub enum HostMatch {
 }
 
 impl HostMatch {
-    fn from_pattern(host: String) -> Self {
+    fn from_pattern(host: &str) -> Self {
         if host == "*" {
             return HostMatch::AllAllow;
         }
@@ -54,9 +67,15 @@ impl HostMatch {
     }
 }
 
-pub fn parse_host_matches(hosts: Vec<String>) -> Vec<HostMatch> {
+pub fn parse_host_matches(hosts: &[String]) -> Vec<HostMatch> {
     hosts
-        .into_iter()
-        .map(HostMatch::from_pattern) // Use the associated function
+        .iter()
+        .map(|host| HostMatch::from_pattern(host)) // Use the associated function
         .collect()
+}
+
+fn check_host(matches: &[HostMatch], host: &str) -> bool {
+    let host_lower = host.to_ascii_lowercase();
+    let remain_lower = host_lower.split_once('.').map(|(_, remain)| remain);
+    matches.iter().any(|m| m.matches(&host_lower, remain_lower))
 }

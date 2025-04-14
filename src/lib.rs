@@ -1,8 +1,10 @@
+#![feature(ip)]
+
 use std::io::{self};
 
 mod command;
 mod common;
-mod dns;
+pub mod dns;
 pub mod error;
 pub mod forward;
 mod localhost;

@@ -1,222 +1,132 @@
-use std::{
-    io,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
-use dashmap::DashMap;
-use gm_quic::{Connection, EndpointAddr, Link, Pathway};
-use qconnection::traversal::NatType;
-use qinterface::forward::ForwardInterface;
-use qtraversal::AddressRegisty;
-use tracing::{info, warn};
+use gm_quic::{ProductQuicInterface, QuicInterface};
+use qtraversal::iface::UdpQuicInterface;
+use tracing::info;
 
-pub const AGENT: &str = "1.12.74.4:20002";
-pub const AGENT_V6: &str = "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20002";
-
-struct LocalHost {
-    port: u16,
-    registrys: DashMap<SocketAddr, AddressRegisty>,
-    bind_address: DashMap<SocketAddr, String>,
+pub struct TraversalFactory {
+    agents: Vec<SocketAddr>,
+    /// ip => device name
+    devices: HashMap<String, String>,
 }
 
-impl LocalHost {
-    fn new(port: u16) -> Self {
+impl TraversalFactory {
+    pub fn with(agents: &[SocketAddr]) -> Self {
+        let devices = scan_device();
         Self {
-            port,
-            registrys: DashMap::new(),
-            bind_address: DashMap::new(),
+            agents: agents.to_vec(),
+            devices,
         }
+    }
+
+    pub fn devices(&self) -> &HashMap<String, String> {
+        &self.devices
     }
 }
 
-#[derive(Clone)]
-pub struct ArcLocalHost(Arc<LocalHost>);
+impl ProductQuicInterface for TraversalFactory {
+    fn bind(&self, bind: SocketAddr) -> io::Result<Arc<dyn QuicInterface>> {
+        let agent = if let Some(agent) = self
+            .agents
+            .iter()
+            .find(|addr| addr.is_ipv4() == bind.is_ipv4())
+        {
+            *agent
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bind address must be ipv4 or ipv6",
+            ));
+        };
 
-impl ArcLocalHost {
-    pub fn new(port: u16) -> Self {
-        Self(Arc::new(LocalHost::new(port)))
+        let iface = UdpQuicInterface::new(bind, agent);
+
+        let iface = if let Some(device) = self.devices.get(bind.ip().to_string().as_str()) {
+            iface.inspect(|iface| {
+                iface.bind_device(device).unwrap();
+            })
+        } else {
+            iface
+        };
+
+        iface.map(|iface| Arc::new(iface) as Arc<dyn QuicInterface>)
     }
+}
 
-    pub async fn init_network(&self) {
-        self.scan_device();
-        for item in self.0.bind_address.iter() {
-            let addr = *item.key();
-            let name = item.value().clone();
-            let agent: SocketAddr = match addr.is_ipv4() {
-                true => AGENT.parse().unwrap(),
-                false => AGENT_V6.parse().unwrap(),
-            };
-            let registry = AddressRegisty::new(addr, agent);
-            if let Err(e) = registry {
-                warn!(
-                    "init_network failed for addr {:?} {}  error {:?}",
-                    addr, name, e
+// TODO 分类 ADDRESS 返回 IP, name
+#[cfg(target_os = "android")]
+fn scan_device() -> HashMap<String, String> {
+    use std::net::IpAddr;
+
+    let mut addresses = HashMap::new();
+
+    let interfaces = pnet::datalink::interfaces();
+    for iface in interfaces {
+        if iface.is_up() && !iface.is_loopback() {
+            if let Some(ip) = iface.ips.iter().filter(|ip| ip.is_ipv4()).next_back() {
+                info!(
+                    "scan_device found address {} for interface {}",
+                    ip, iface.name
                 );
-                continue;
-            }
-            let registry = registry.unwrap();
-            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-            if registry.bind_device(&name).is_err() {
-                warn!("init_network failed for device {}", name);
+                addresses.insert(ip.ip().to_string(), iface.name.clone());
             }
 
-            self.0.registrys.insert(addr, registry.clone());
-            tokio::spawn({
-                let localhost = self.clone();
-                async move {
-                    if let Ok(outer) = registry.detect_outer_addr().await {
-                        info!(
-                            "init_network success for outer addr {:?} local {} device {}",
-                            outer, addr, name
-                        );
-                    } else {
-                        warn!("init_network failed for addr {:?} {}", addr, name);
-                        localhost.0.registrys.remove(&addr);
-                        return;
-                    }
-                    let nat_type = registry.detect_nat_type().await;
-                    info!(
-                        "init_network found nat_type {:?} for addr {:?} local {} device {}",
-                        nat_type, addr, addr, name
-                    );
-                    let _ = registry.keep_alive(Duration::from_secs(30));
-                }
-            });
-        }
-        info!("LocalHost init network done.");
-    }
-
-    // TODO: remote 可能是直连
-    pub async fn match_pathway(&self, remote: EndpointAddr) -> Option<(Pathway, Link)> {
-        for item in self.0.registrys.iter() {
-            if item.key().is_ipv4() == remote.is_ipv4() {
-                let outer = item.value().outer_addr().await;
-                if outer.is_err() {
-                    warn!("local addr {:?} outer error", item.key());
-                    continue;
-                }
-                let outer = outer.unwrap();
-                let local = EndpointAddr::Agent {
-                    agent: item.value().agent(),
-                    outer,
-                };
-                let pathway = Pathway::new(local, remote);
-                let socket = Link::new(*item.key(), *remote);
-                return Some((pathway, socket));
-            }
-        }
-        None
-    }
-
-    pub async fn relay_addr(&self) -> Vec<EndpointAddr> {
-        let mut eps: Vec<EndpointAddr> = Vec::new();
-        for item in self.0.registrys.iter() {
-            let registry = item.value();
-            let agent = registry.agent();
-            if let Ok(outer) = registry.outer_addr().await {
-                eps.push(EndpointAddr::Agent { agent, outer });
-            } else {
-                warn!("get outer error, bind {} ", registry.bind_addr());
-            }
-        }
-        eps
-    }
-
-    pub fn add_direct_address(&self, conn: Arc<Connection>) {
-        let localhost = self.clone();
-        tokio::spawn(async move {
-            for addr in localhost.addresses() {
-                let _ = conn.add_address(addr, addr, 0, NatType::RestrictedCone);
-                info!("add direct loacl addr {}", addr)
-            }
-            for item in localhost.0.registrys.iter() {
-                let registry = item.value();
-                let bind = registry.bind_addr();
-                if let Ok(outer) = registry.outer_addr().await {
-                    if let Ok(nat_type) = registry.nat_type().await {
-                        info!("add direct addr {} outer {} {:?}", bind, outer, nat_type);
-                        let _ = conn.add_address(bind, outer, 1, nat_type);
-                    }
-                }
-            }
-        });
-    }
-
-    pub fn iface(&self, bind: SocketAddr) -> Option<ForwardInterface> {
-        let ret = self.0.registrys.get(&bind)?;
-        let registry = ret.value();
-        Some(registry.iface())
-    }
-
-    pub fn addresses(&self) -> Vec<SocketAddr> {
-        self.0.bind_address.iter().map(|item| *item.key()).collect()
-    }
-
-    pub async fn resume_network(&self) -> io::Result<()> {
-        let mut to_remove = Vec::new();
-
-        for item in self.0.registrys.iter() {
-            let key = item.key();
-            let value = item.value();
-            if value.detect_outer_addr().await.is_err() || value.detect_nat_type().await.is_err() {
-                warn!("resume_network failed for addr {}", key);
-                to_remove.push(*key);
-            }
-        }
-
-        for key in to_remove {
-            self.0.registrys.remove(&key);
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn scan_device(&self) {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        let addr4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.0.port);
-        let addr6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.0.port);
-        self.0.bind_address.insert(addr4, "eth0".to_string());
-        self.0.bind_address.insert(addr6, "eth0".to_string());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn scan_device(&self) {
-        let interfaces = pnet::datalink::interfaces();
-        for iface in interfaces {
-            if iface.is_up() && !iface.is_loopback() {
-                if let Some(ip) = iface.ips.iter().filter(|ip| ip.is_ipv4()).next_back() {
-                    let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                    info!(
-                        "scan_device found address {} for interface {}",
-                        socket_addr, iface.name
-                    );
-                    self.0.bind_address.insert(socket_addr, iface.name.clone());
-                }
-
-                if let Some(ip) = iface
-                    .ips
-                    .iter()
-                    .filter(|ip| {
-                        ip.is_ipv6() && {
-                            if let IpAddr::V6(v6_ip) = ip.ip() {
-                                (v6_ip.segments()[0] & 0xffc0) != 0xfe80
-                            } else {
-                                false
-                            }
+            if let Some(ip) = iface
+                .ips
+                .iter()
+                .filter(|ip| {
+                    ip.is_ipv6() && {
+                        if let IpAddr::V6(v6_ip) = ip.ip() {
+                            (v6_ip.segments()[0] & 0xffc0) != 0xfe80
+                        } else {
+                            false
                         }
-                    })
-                    .next_back()
-                {
-                    let socket_addr = SocketAddr::new(ip.ip(), self.0.port);
-                    info!(
-                        "scan_device found address {} for interface {}",
-                        socket_addr, iface.name
-                    );
-                    self.0.bind_address.insert(socket_addr, iface.name.clone());
-                }
+                    }
+                })
+                .next_back()
+            {
+                info!(
+                    "scan_device found address {} for interface {}",
+                    ip, iface.name
+                );
+                addresses.insert(ip.ip().to_string(), iface.name.clone());
             }
         }
     }
+    addresses
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn scan_device() -> HashMap<String, String> {
+    use tracing::error;
+
+    let mut addresses = HashMap::new();
+
+    let ift = getifs::interfaces()
+        .inspect_err(|e| {
+            error!("Failed to get network interfaces: {:?}", e);
+        })
+        .expect("Failed to get network interfaces");
+    tracing::debug!("all interfaces {:?}", ift);
+    for ifi in ift {
+        if let Ok(addrs) = ifi.ipv4_addrs_by_filter(|addr| addr.is_global() || addr.is_private()) {
+            if let Some(addr) = addrs.last() {
+                let addr = addr.addr();
+                let name = ifi.name().to_string();
+                info!("scan_device found address {} for interface {}", addr, name);
+                addresses.insert(addr.to_string(), name);
+            }
+        }
+
+        if let Ok(addrs) = ifi.ipv6_addrs_by_filter(|addr| addr.is_global()) {
+            if let Some(addr) = addrs.last() {
+                let addr = addr.addr();
+                let name = ifi.name().to_string();
+                info!("scan_device found address {} for interface {}", addr, name);
+                addresses.insert(addr.to_string(), name);
+            }
+        }
+    }
+
+    addresses
 }

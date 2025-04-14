@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use anyhow::Result;
 use clap::{Parser, command};
 use gateway::{
+    dns::Dns,
     forward,
     parse::{self, Value},
     reverse,
@@ -94,6 +95,10 @@ async fn main() -> Result<()> {
             .or_insert(Vec::new())
             .push(Arc::clone(server));
     }
+
+    // 启动 DNS 服务器
+    let dns = Dns::default();
+    dns.spawn_publish();
 
     let mut handler = JoinSet::new();
 

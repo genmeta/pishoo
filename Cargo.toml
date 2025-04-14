@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 
 # HTTP和网络协议
 bytes = "1.10"
-h3 = { version = "0.0.6", features = ["tracing"] }
+h3 = { version = "0.0.7", features = ["tracing"] }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
@@ -38,7 +38,6 @@ hyper-util = { version = "0.1.10", features = ["tokio"] }
 # TLS和安全
 rustls = { version = "0.23.25", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
-rustls-webpki = "0.103.0"
 getrandom = "=0.3.1"
 
 # QUIC相关
@@ -46,14 +45,19 @@ gm-quic = "0.1.0"
 h3-shim = "0.1.0"
 qconnection = "0.1.0"
 qinterface = "0.1.0"
+qlog = { version = "0.1.0", features = ["enabled"] }
 qtraversal = "0.1.0"
 
 # 数据结构和工具
-dashmap = "6"
-derive_builder = "0.20"
 misc-conf = "0.1"
-pnet = "0.35.0"
 regex = "1"
+parking_lot = "0.12"
+
+[target.'cfg(target_os = "android")'.dependencies]
+pnet = "0.35.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+getifs = "0.3"
 
 # ssh
 libc = { version = "0.2", optional = true }
@@ -88,14 +92,12 @@ name = "pishoo"
 path = "examples/pishoo.rs"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-
-[patch.'ssh://git@github.com/genmeta/gm-quic-traversal.git']
-nat = { git = "ssh://git@github.com/genmeta/mnet.git" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+qlog = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
 
 [profile.dev]
 panic = "abort"

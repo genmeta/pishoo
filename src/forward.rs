@@ -1,6 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::{net::SocketAddr, sync::Arc};
 
-use acl::{Acl, parse_host_matches};
 use bytes::Bytes;
 use futures::FutureExt;
 use gm_quic::{ClientParameters, QuicClient};
@@ -8,25 +7,22 @@ use http::StatusCode;
 use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
-use qinterface::handy::Usc;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
 use crate::{
+    command,
     error::CustomError,
     forward,
-    localhost::ArcLocalHost,
+    localhost::TraversalFactory,
     parse::{Node, Value},
 };
 
-mod acl;
 mod normal;
 mod quic;
 
 static ALPN: &[u8] = b"h3";
-
-static LOCALHOST: OnceLock<ArcLocalHost> = OnceLock::new();
 
 const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
 
@@ -44,8 +40,8 @@ type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 ///
 /// # Returns
 /// * `Result<String>` - The address the server is listening on
-pub async fn serve(config: Arc<Node>) -> crate::error::Result<String> {
-    let addr = if let Some(Value::Addr(addr)) = config.get("listen") {
+pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
+    let addr = if let Some(Value::Addr(addr)) = node.get("listen") {
         *addr
     } else {
         return Err(CustomError::InvalidConfig(
@@ -64,73 +60,42 @@ pub async fn serve(config: Arc<Node>) -> crate::error::Result<String> {
 
     info!("Listening on: http://{}", local_addr);
 
-    let localhost = ArcLocalHost::new(local_addr.port());
-    LOCALHOST.get_or_init(|| localhost.clone());
-    localhost.init_network().await;
-
-    let resolver = if let Some(Value::Addr(resolver)) = config.get("resolver") {
+    let resolver = if let Some(Value::Addr(resolver)) = node.get("resolver") {
         *resolver
     } else {
         unreachable!("Resolver address is required");
     };
 
-    // TODO 向父级回溯
-    let allow = if let Some(Value::StringVec(allow)) = config.get("allow") {
-        allow.clone()
-    } else {
-        Vec::new()
-    };
+    // 访问权限控制
+    let acl = Arc::new(command::acl(&node));
 
-    // TODO 向父级回溯
-    let deny = if let Some(Value::StringVec(deny)) = config.get("deny") {
-        deny.clone()
-    } else {
-        Vec::new()
-    };
+    // TODO resume 重启以下任务
 
-    // Acl 规则解析
-    let allow = Acl::new(parse_host_matches(allow));
-    let deny = Acl::new(parse_host_matches(deny));
-    let check_host = move |host: &str| {
-        // Rule 1: Must match at least one allow pattern
-        if !allow.check_host(host) {
-            return false;
-        }
-        // Rule 2: If allowed, must not match any deny pattern
-        if deny.check_host(host) {
-            return false;
-        }
-        true
-    };
-    let check_host = Arc::new(check_host);
-
-    let quic_client = Arc::new(create_quic_client(localhost.clone()).await);
+    let quic_client = Arc::new(create_quic_client().await);
 
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let io = TokioIo::new(stream);
             let quic_client = quic_client.clone();
-            let check_host = check_host.clone();
+            let acl = acl.clone();
 
             tokio::task::spawn({
-                let localhost = localhost.clone();
                 async move {
                     // 为每个连接创建服务处理器
                     let service = service_fn(move |req| {
                         let host = validate_host(&req).unwrap();
 
-                        if !check_host(host) {
+                        if !acl.check(host) {
                             return forward::normal::proxy(req).boxed();
                         }
 
                         let is_connect = req.method() == "CONNECT";
                         let quic_client = quic_client.clone();
-                        let localhost = localhost.clone();
                         async move {
                             if is_connect {
-                                forward::quic::connect(quic_client, localhost, req, resolver).await
+                                forward::quic::connect(quic_client, req, resolver).await
                             } else {
-                                forward::quic::proxy(quic_client, localhost, req, resolver).await
+                                forward::quic::proxy(quic_client, req, resolver).await
                             }
                         }
                         .boxed()
@@ -159,34 +124,57 @@ pub async fn serve(config: Arc<Node>) -> crate::error::Result<String> {
 /// # Returns
 /// * `Result<()>` - The result of resuming the network
 pub async fn resume() -> crate::error::Result<()> {
-    info!("Resuming network");
-    let localhost = LOCALHOST
-        .get()
-        .ok_or(CustomError::LocalhostNotInitialized)?;
-    localhost.resume_network().await.inspect_err(|e| {
-        error!("Network resume failed: {:?}", e);
-    })?;
-    info!("Network resumed");
+    // TODO 如果超时30s以下, 重启网络
+    // TODO 如果超时30s以上, 尝试向 端口进行请求, 如果失败则重启整个代理服务
+
+    // info!("Resuming network");
+    // let localhost = LOCALHOST
+    //     .get()
+    //     .ok_or(CustomError::LocalhostNotInitialized)?;
+    // localhost.resume_network().await.inspect_err(|e| {
+    //     error!("Network resume failed: {:?}", e);
+    // })?;
+    // info!("Network resumed");
+    Ok(())
+}
+
+pub async fn stop() -> crate::error::Result<()> {
+    // TODO 记录停止时间
     Ok(())
 }
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
-async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
-    let params = create_client_params();
-    let tls_config = configure_tls();
-    let binds = localhost.addresses();
-    QuicClient::builder_with_tls(tls_config)
-        .with_parameters(params)
-        .reuse_interfaces()
-        .with_keylog(true)
-        // .reuse_connection()
-        .with_iface_binder(move |addr| {
-            if let Some(iface) = localhost.iface(addr) {
-                Ok(Arc::new(Usc::new(iface)?))
-            } else {
-                Ok(Arc::new(Usc::bind(addr)?))
+async fn create_quic_client() -> QuicClient {
+    let agents = [
+        "1.12.74.4:20004".parse().unwrap(),
+        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004"
+            .parse()
+            .unwrap(),
+    ];
+
+    let factory = TraversalFactory::with(&agents[..]);
+
+    let mut binds = Vec::new();
+
+    for device_ip in factory.devices().keys() {
+        let device_ip = match device_ip.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                error!("Invalid device IP {}: {:?}", device_ip, e);
+                continue;
             }
-        })
+        };
+        // TODO 此处使用 0 端口, 测试通过, 但不太确定是否有什么问题
+        binds.push(SocketAddr::new(device_ip, 0));
+    }
+
+    tracing::debug!("QUIC client binds: {:?}", binds);
+
+    gm_quic::QuicClient::builder_with_tls(configure_tls())
+        .reuse_address()
+        .with_alpns([ALPN])
+        .with_iface_factory(factory)
+        .with_parameters(create_client_params())
         .bind(&binds[..])
         .unwrap()
         .build()
@@ -195,17 +183,14 @@ async fn create_quic_client(localhost: ArcLocalHost) -> QuicClient {
 /// 配置 QUIC 协议参数
 fn create_client_params() -> ClientParameters {
     let mut params = ClientParameters::default();
-    let window_size = (1u32 << 30).into(); // 1MB 窗口大小
 
     // 流控制参数
-    params.set_initial_max_streams_bidi(100u32.into());
-    params.set_initial_max_streams_uni(100u32.into());
-    params.set_initial_max_data(window_size);
-    params.set_initial_max_stream_data_uni(window_size);
-    params.set_initial_max_stream_data_bidi_local(window_size);
-    params.set_initial_max_stream_data_bidi_remote(window_size);
-    params.set_active_connection_id_limit(10);
-    params.set_max_ack_delay(100);
+    params.set_initial_max_streams_bidi(100u32);
+    params.set_initial_max_streams_uni(100u32);
+    params.set_initial_max_data(1u32 << 30);
+    params.set_initial_max_stream_data_uni(1u32 << 30);
+    params.set_initial_max_stream_data_bidi_local(1u32 << 30);
+    params.set_initial_max_stream_data_bidi_remote(1u32 << 30);
 
     params
 }
@@ -220,7 +205,6 @@ fn configure_tls() -> rustls::ClientConfig {
         .with_no_client_auth();
 
     // TLS 特性配置
-    config.alpn_protocols = vec![ALPN.into()];
     config.resumption = rustls::client::Resumption::disabled();
     config.key_log = Arc::new(rustls::KeyLogFile::new());
 
