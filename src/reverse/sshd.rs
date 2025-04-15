@@ -258,10 +258,7 @@ async fn copy_between_pty_and_stream(
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    _ = sender
-                        .send_data(Bytes::from(format!("从PTY读取失败: {}", err)))
-                        .await
-                        .inspect_err(|e| tracing::error!("发送错误消息失败: {}", e));
+                    tracing::error!("从PTY读取失败: {}", err);
                     break;
                 }
                 0 => break, // EOF
