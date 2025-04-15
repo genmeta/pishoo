@@ -3,6 +3,31 @@ name = "gateway"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.deb]
+name = "pishoo"
+maintainer = "Genmeta <quic_team@genmeta.net>"
+copyright = "2025, Genmeta <quic_team@genmeta.net>"
+extended-description = """
+A reverse proxy for QUIC.
+"""
+depends = "$auto"
+section = "net"
+priority = "optional"
+assets = [
+    [
+        "target/release/examples/pishoo",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "res/config/pishoo.conf",
+        "etc/pishoo/pishoo.conf",
+        "644",
+    ],
+]
+maintainer-scripts = "res/systemd/"
+systemd-units = [{ unit-name = "pishoo", enable = false }]
+
 [dependencies]
 # 核心错误处理
 anyhow = "1"
