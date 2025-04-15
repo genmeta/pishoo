@@ -99,6 +99,10 @@ async fn run(options: Options) -> Result<(), Box<dyn core::error::Error + Send +
                             (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
                                 tx.send(TerminalMessage::Signal(20)).await
                             }
+                            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x18".to_string()))
+                                    .await
+                            }
                             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                                 tx.send(TerminalMessage::ControlSequence("\x04".to_string()))
                                     .await

@@ -330,6 +330,7 @@ async fn copy_between_pty_and_stream(
                                 // 处理各种控制序列
                                 let sequence = match seq.as_str() {
                                     "\x04" => "\x04",       // Ctrl+D (EOF)
+                                    "\x18" => "\x18",       // Ctrl+X (SIGQUIT)
                                     "\x7f" => "\x7f",       // Backspace
                                     "\x1b[3~" => "\x1b[3~", // Delete
                                     "\x1b" => "\x1b",       // Esc
