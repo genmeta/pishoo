@@ -93,19 +93,55 @@ async fn run(options: Options) -> Result<(), Box<dyn core::error::Error + Send +
                     }) => {
                         let result = match (code, modifiers) {
                             // Control 组合键
+                            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x01".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x02".to_string()))
+                                    .await
+                            }
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 tx.send(TerminalMessage::Signal(2)).await
                             }
-                            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
-                                tx.send(TerminalMessage::Signal(20)).await
+                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x04".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x07".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x0a".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x0b".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x0f".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x12".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x14".to_string()))
+                                    .await
+                            }
+                            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::ControlSequence("\x15".to_string()))
+                                    .await
                             }
                             (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
                                 tx.send(TerminalMessage::ControlSequence("\x18".to_string()))
                                     .await
                             }
-                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                tx.send(TerminalMessage::ControlSequence("\x04".to_string()))
-                                    .await
+                            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                                tx.send(TerminalMessage::Signal(20)).await
                             }
                             // 普通字符输入
                             (KeyCode::Char(c), _) => {
