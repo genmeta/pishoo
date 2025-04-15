@@ -15,7 +15,7 @@ section = "net"
 priority = "optional"
 assets = [
     [
-        "target/release/examples/pishoo",
+        "target/release/pishoo",
         "usr/bin/",
         "755",
     ],
@@ -26,7 +26,7 @@ assets = [
     ],
 ]
 maintainer-scripts = "res/systemd/"
-systemd-units = [{ unit-name = "pishoo", enable = false }]
+systemd-units = { enable = false }
 
 [dependencies]
 # 核心错误处理
@@ -86,13 +86,8 @@ getifs = "0.3"
 
 # ssh
 libc = { version = "0.2", optional = true }
-base64 = { version = "0.22", optional = true }
 pam = { version = "0.7", optional = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
 
-
-[dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -103,16 +98,15 @@ base64 = "0.22"
 
 [features]
 default = []
-sshd = ["dep:libc", "dep:base64", "dep:pam", "dep:serde", "dep:serde_json"]
+sshd = ["dep:libc", "dep:pam"]
 
+[[bin]]
+name = "pishoo"
+path = "src/pishoo.rs"
 
 [[example]]
 name = "forward"
 path = "examples/forward.rs"
-
-[[example]]
-name = "pishoo"
-path = "examples/pishoo.rs"
 
 [[example]]
 name = "h3-ssh"
