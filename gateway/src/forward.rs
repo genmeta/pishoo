@@ -191,6 +191,7 @@ fn create_client_params() -> ClientParameters {
     params.set_initial_max_stream_data_uni(1u32 << 30);
     params.set_initial_max_stream_data_bidi_local(1u32 << 30);
     params.set_initial_max_stream_data_bidi_remote(1u32 << 30);
+    params.set_active_connection_id_limit(10u32);
 
     params
 }
