@@ -11,6 +11,7 @@ use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, StatusCode};
 use serde::{Deserialize, Serialize};
+use tokio::io::unix::AsyncFd;
 
 use crate::{
     error::Result,
@@ -247,27 +248,60 @@ async fn copy_between_pty_and_stream(
 ) {
     // 启动读取PTY任务
     let master_fd = pty_master.as_raw_fd();
+    let async_fd = match AsyncFd::new(master_fd) {
+        Ok(fd) => fd,
+        Err(e) => {
+            tracing::error!("创建 AsyncFd 失败: {}", e);
+            return; // 直接返回 IO 错误
+        }
+    };
+
     let read_task = tokio::spawn(async move {
         let mut read_buf = [0u8; 8192];
         loop {
-            match unsafe { libc::read(master_fd, read_buf.as_mut_ptr() as *mut _, read_buf.len()) }
-            {
-                -1 => {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::WouldBlock {
-                        tokio::task::yield_now().await;
-                        continue;
-                    }
-                    tracing::error!("从PTY读取失败: {}", err);
+            let mut read_guard = match async_fd.readable().await {
+                Ok(guard) => guard,
+                Err(e) => {
+                    tracing::error!("等待 PTY master 可读失败: {}", e);
                     break;
                 }
-                0 => break, // EOF
-                n => {
-                    let data = Bytes::copy_from_slice(&read_buf[..n as usize]);
+            };
+
+            tracing::trace!("PTY master 可读事件触发");
+
+            match read_guard.try_io(|_inner| {
+                let ret = unsafe {
+                    libc::read(
+                        master_fd,                                  // 或者 _inner.as_raw_fd()
+                        read_buf.as_mut_ptr() as *mut libc::c_void, // 强制转换为 *mut c_void
+                        read_buf.len(),
+                    )
+                };
+                if ret == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(ret as usize)
+                }
+            }) {
+                Ok(Ok(0)) => {
+                    tracing::info!("PTY master 检测到 EOF");
+                    break;
+                }
+                Ok(Ok(n)) => {
+                    tracing::trace!("从 PTY 读取了 {} 字节", n);
+                    let data = Bytes::copy_from_slice(&read_buf[..n]);
                     if let Err(e) = sender.send_data(data).await {
-                        tracing::error!("发送数据失败: {}", e);
+                        tracing::error!("发送数据到 channel 失败: {}", e);
                         break;
                     }
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("从 PTY 读取失败: {}", e);
+                    break;
+                }
+                Err(_would_block) => {
+                    tracing::trace!("try_io 返回 WouldBlock，继续等待");
+                    continue;
                 }
             }
         }
