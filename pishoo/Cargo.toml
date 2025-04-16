@@ -29,6 +29,10 @@ assets = [
         "etc/pishoo/pishoo.conf",
         "644",
     ],
+    [
+        "var/log/pishoo/",
+        "755",
+    ],
 ]
 maintainer-scripts = "res/systemd/"
 systemd-units = { enable = false }
