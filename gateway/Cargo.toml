@@ -45,7 +45,7 @@ gm-quic = { workspace = true }
 h3-shim = { workspace = true }
 qconnection = { workspace = true }
 qinterface = { workspace = true }
-qlog = { workspace = true, features = ["enabled"] }
+qevent = { workspace = true, features = ["enabled"] }
 qtraversal = { workspace = true }
 
 # --- Data Structures & Utilities ---

@@ -40,12 +40,12 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 h3 = { version = "0.0.7", features = ["tracing"] }
 
 # --- QUIC Implementation ---
-gm-quic = "0.1.0"
-h3-shim = "0.1.0"
-qconnection = "0.1.0"
-qinterface = "0.1.0"
-qlog = "0.1.0"
-qtraversal = "0.1.0"
+gm-quic = "0.2.0"
+h3-shim = "0.2.0"
+qconnection = "0.2.0"
+qinterface = "0.2.0"
+qevent = "0.2.0"
+qtraversal = "0.2.0"
 
 # --- Security & TLS ---
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -67,12 +67,12 @@ pam = "0.7"
 
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
-qlog = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
 
 [profile.dev]
 panic = "abort"
