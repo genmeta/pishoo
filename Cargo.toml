@@ -6,14 +6,9 @@ edition = "2024"
 [package.metadata.deb]
 name = "pishoo"
 maintainer = " Genmeta QUIC Team <quic_team@genmeta.net>"
-copyright = "2025,  Genmeta QUIC Team <quic_team@genmeta.net>"
+copyright = "2025, Genmeta QUIC Team <quic_team@genmeta.net>"
 extended-description = """
-Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for HTTP/3
-and end-to-end encrypted communication. Built for privacy and security scenarios,
-it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to
-streamline traffic between edge networks and backend services. Its architecture is
-designed to safeguard your data from infringement and ensures that it can be accessed
-and utilized securely.
+Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely.
 """
 depends = "$auto"
 section = "net"
@@ -105,6 +100,7 @@ base64 = "0.22"
 default = []
 sshd = ["dep:libc", "dep:pam"]
 
+# TODO 拆分到 pishoo package
 [[bin]]
 name = "pishoo"
 path = "src/pishoo.rs"
