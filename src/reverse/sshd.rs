@@ -301,6 +301,7 @@ async fn copy_between_pty_and_stream(
                 }
                 Err(_would_block) => {
                     tracing::trace!("try_io 返回 WouldBlock，继续等待");
+                    tokio::task::yield_now().await;
                     continue;
                 }
             }
