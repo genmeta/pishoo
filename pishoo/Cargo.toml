@@ -30,7 +30,7 @@ assets = [
         "644",
     ],
     [
-        "",
+        "res/log/",
         "var/log/pishoo/",
         "755",
     ],
