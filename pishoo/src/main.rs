@@ -56,9 +56,6 @@ async fn main() -> Result<()> {
         .init();
     tracing::info!("Tracing initialized.");
 
-    // 初始化TLS
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let config_file = args.config_file;
     let configure = std::fs::read(&config_file)?;
     let config = parse::parse(&configure, config_file.parent())?;

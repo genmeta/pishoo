@@ -1,45 +1,24 @@
-[package]
-name = "gateway"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["gateway", "pishoo"]
 
-[package.metadata.deb]
-name = "pishoo"
-maintainer = " Genmeta QUIC Team <quic_team@genmeta.net>"
-copyright = "2025, Genmeta QUIC Team <quic_team@genmeta.net>"
-extended-description = """
-Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely.
-"""
-depends = "$auto"
-section = "net"
-priority = "optional"
-assets = [
-    [
-        "target/release/pishoo",
-        "usr/bin/",
-        "755",
-    ],
-    [
-        "res/config/pishoo.conf",
-        "etc/pishoo/pishoo.conf",
-        "644",
-    ],
-]
-maintainer-scripts = "res/systemd/"
-systemd-units = { enable = false }
 
-[dependencies]
-# 核心错误处理
+[workspace.dependencies]
+# --- Core & Error Handling ---
 anyhow = "1"
 thiserror = "2"
 
-# 异步运行时
+# --- Async Runtime & Utilities ---
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1.17"
+tokio-stream = "0.1"
 futures = "0.3"
-async-trait = "0.1.83"
+async-trait = "0.1"
 
-# 日志和追踪
+# --- Serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Logging & Tracing ---
 tracing = { version = "0.1", default-features = false, features = [
     "std",
     "attributes",
@@ -52,68 +31,40 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "local-time",
 ] }
 
-# HTTP和网络协议
-bytes = "1.10"
-h3 = { version = "0.0.7", features = ["tracing"] }
+# --- Networking & HTTP ---
+bytes = "1"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
-hyper-util = { version = "0.1.10", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+h3 = { version = "0.0.7", features = ["tracing"] }
 
-# TLS和安全
-rustls = { version = "0.23.25", default-features = false, features = ["ring"] }
-rustls-native-certs = "0.8"
-getrandom = "=0.3.1"
-
-# QUIC相关
+# --- QUIC Implementation ---
 gm-quic = "0.1.0"
 h3-shim = "0.1.0"
 qconnection = "0.1.0"
 qinterface = "0.1.0"
-qlog = { version = "0.1.0", features = ["enabled"] }
+qlog = "0.1.0"
 qtraversal = "0.1.0"
 
-# 数据结构和工具
-misc-conf = "0.1"
+# --- Security & TLS ---
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
+getrandom = "0.3.1"
+
+# --- Utilities ---
 regex = "1"
 parking_lot = "0.12"
-
-[target.'cfg(target_os = "android")'.dependencies]
-pnet = "0.35.0"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-getifs = "0.3"
-
-# ssh
-libc = { version = "0.2", optional = true }
-pam = { version = "0.7", optional = true }
-
+misc-conf = "0.1"
 clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 crossterm = { version = "0.29", features = ["events", "event-stream"] }
 rpassword = "7.3"
 base64 = "0.22"
 
+# --- System Interaction ---
+libc = "0.2"
+pam = "0.7"
 
-[features]
-default = []
-sshd = ["dep:libc", "dep:pam"]
-
-# TODO 拆分到 pishoo package
-[[bin]]
-name = "pishoo"
-path = "src/pishoo.rs"
-description = "modern, secure, QUIC-powered web/proxy engine"
-homepage = "https://pishoo.genmeta.net"
-
-[[example]]
-name = "forward"
-path = "examples/forward.rs"
-
-[[example]]
-name = "h3-ssh"
-path = "examples/h3-ssh.rs"
 
 [patch.crates-io]
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/attack" }

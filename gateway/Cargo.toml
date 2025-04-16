@@ -1,0 +1,79 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2024"
+
+[[example]]
+name = "forward"
+path = "examples/forward.rs"
+
+[[example]]
+name = "h3-ssh"
+path = "examples/h3-ssh.rs"
+
+
+[dependencies]
+# --- Core & Error Handling ---
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# --- Async Runtime & Utilities ---
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# --- Logging & Tracing ---
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# --- Networking & HTTP ---
+bytes = { workspace = true }
+h3 = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+
+# --- Security & TLS ---
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+getrandom = { workspace = true }
+
+# --- QUIC Implementation ---
+gm-quic = { workspace = true }
+h3-shim = { workspace = true }
+qconnection = { workspace = true }
+qinterface = { workspace = true }
+qlog = { workspace = true, features = ["enabled"] }
+qtraversal = { workspace = true }
+
+# --- Data Structures & Utilities ---
+misc-conf = { workspace = true }
+regex = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+crossterm = { workspace = true }
+rpassword = { workspace = true }
+base64 = { workspace = true }
+
+
+libc = { workspace = true, optional = true }
+pam = { workspace = true, optional = true }
+
+# --- Platform Specific Dependencies ---
+[target.'cfg(target_os = "android")'.dependencies]
+pnet = "0.35.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+getifs = "0.3"
+
+
+[dev-dependencies]
+clap = { workspace = true }
+
+
+[features]
+default = []
+sshd = ["dep:libc", "dep:pam"]
