@@ -8,7 +8,7 @@ use tracing::error;
 
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
-    let root_cert = include_bytes!("../root.crt");
+    let root_cert = include_bytes!("../../root.crt");
 
     ROOT_CERT_STORE
         .get_or_init(|| {
