@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -7,6 +7,7 @@ use http::StatusCode;
 use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
+use qevent::telemetry::handy::DefaultSeqLogger;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -174,6 +175,7 @@ async fn create_quic_client() -> QuicClient {
         .reuse_address()
         .with_alpns([ALPN])
         .with_iface_factory(factory)
+        .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
         .with_parameters(create_client_params())
         .bind(&binds[..])
         .unwrap()

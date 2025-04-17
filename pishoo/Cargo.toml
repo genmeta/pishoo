@@ -11,7 +11,6 @@ edition = "2024"
 [package.metadata.deb]
 name = "pishoo"
 maintainer = " Genmeta QUIC Team <quic_team@genmeta.net>"
-copyright = "2025, Genmeta QUIC Team <quic_team@genmeta.net>"
 extended-description = """
 Pishoo (\"Prosperity Guardian Beast\") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely.
 """
@@ -25,18 +24,13 @@ assets = [
         "755",
     ],
     [
-        "res/config/pishoo.conf",
+        "pkg/common/config/pishoo.conf",
         "etc/pishoo/pishoo.conf",
         "644",
     ],
-    [
-        "res/log",
-        "var/log/pishoo",
-        "755",
-    ],
 ]
-maintainer-scripts = "res/systemd/"
-systemd-units = { enable = false }
+maintainer-scripts = "pkg/debian/"
+systemd-units = { unit-name = "pishoo", unit-scripts = "pkg/common/service", enable = false }
 
 [dependencies]
 # --- Workspace Member ---
