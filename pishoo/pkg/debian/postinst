@@ -6,20 +6,19 @@ LOG_PERMISSIONS="755"
 
 case "$1" in
   configure)
-        if [ ! -d "$LOG_DIR" ]; then
-            mkdir -p "$LOG_DIR"
-            if [ $? -ne 0 ]; then
-                echo "Failed to create log directory $LOG_DIR" >&2
-                exit 1
-            fi
-
-            chmod $LOG_PERMISSIONS "$LOG_DIR"
-            if [ $? -ne 0 ]; then
-                echo "Failed to set permissions on log directory $LOG_DIR" >&2
-                exit 1
-            fi
-          fi
+    if [ ! -d "$LOG_DIR" ]; then
+        mkdir -p "$LOG_DIR"
+        if [ $? -ne 0 ]; then
+            echo "Failed to create log directory $LOG_DIR" >&2
+            exit 1
         fi
+
+        chmod $LOG_PERMISSIONS "$LOG_DIR"
+        if [ $? -ne 0 ]; then
+            echo "Failed to set permissions on log directory $LOG_DIR" >&2
+            exit 1
+        fi
+    fi
     ;;
   triggered)
     if command -v systemctl > /dev/null 2>&1 && systemctl is-active --quiet pishoo; then
