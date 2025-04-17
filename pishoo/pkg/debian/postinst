@@ -6,7 +6,7 @@ LOG_PERMISSIONS="755"
 
 case "$1" in
   configure|configure-in-favour)
-        if [! -d "$LOG_DIR" ]; then
+        if [ ! -d "$LOG_DIR" ]; then
             mkdir -p "$LOG_DIR"
             if [ $? -ne 0 ]; then
                 echo "Failed to create log directory $LOG_DIR" >&2
