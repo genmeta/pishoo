@@ -1,0 +1,38 @@
+#!/bin/sh
+
+set -e
+
+LOG_DIR="/var/log/pishoo"
+LOG_PERMISSIONS="755"
+
+case "$1" in
+    configure|configure-in-favour)
+        if [! -d "$LOG_DIR" ]; then
+            mkdir -p "$LOG_DIR"
+            if [ $? -ne 0 ]; then
+                echo "Failed to create log directory $LOG_DIR" >&2
+                exit 1
+            fi
+        fi
+        chmod $LOG_PERMISSIONS "$LOG_DIR"
+        if [ $? -ne 0 ]; then
+            echo "Failed to set permissions on log directory $LOG_DIR" >&2
+            exit 1
+        fi
+    ;;
+    remove|remove-in-favour|deconfigure|deconfigure-in-favour)
+        if command -v systemctl > /dev/null 2>&1 && systemctl is-active --quiet pishoo; then
+            systemctl stop pishoo
+        elif [ -x "/etc/init.d/pishoo" ]; then
+            invoke-rc.d pishoo stop || exit $?
+        fi
+        ;;
+    upgrade|failed-upgrade)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
