@@ -1,12 +1,11 @@
 #!/bin/sh
-
 set -e
 
 LOG_DIR="/var/log/pishoo"
 LOG_PERMISSIONS="755"
 
 case "$1" in
-    configure|configure-in-favour)
+  configure|configure-in-favour)
         if [! -d "$LOG_DIR" ]; then
             mkdir -p "$LOG_DIR"
             if [ $? -ne 0 ]; then
@@ -20,19 +19,34 @@ case "$1" in
             exit 1
         fi
     ;;
-    remove|remove-in-favour|deconfigure|deconfigure-in-favour)
-        if command -v systemctl > /dev/null 2>&1 && systemctl is-active --quiet pishoo; then
-            systemctl stop pishoo
-        elif [ -x "/etc/init.d/pishoo" ]; then
-            invoke-rc.d pishoo stop || exit $?
-        fi
-        ;;
-    upgrade|failed-upgrade)
-        ;;
-    *)
-        echo "prerm called with unknown argument \`$1'" >&2
-        exit 1
-        ;;
+  abort-upgrade|abort-remove|abort-deconfigure|configure)
+    ;;
+  triggered)
+    if command -v systemctl > /dev/null 2>&1 && systemctl is-active --quiet pishoo; then
+      echo "Triggering pishoo reload ..."
+      systemctl reload pishoo
+    elif [ -x "/etc/init.d/pishoo" ] && invoke-rc.d --quiet pishoo status >/dev/null; then
+      echo "Triggering pishoo reload ..."
+      invoke-rc.d pishoo reload || true
+    fi
+    exit 0
+    ;;
+  *)
+    echo "postinst called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
 esac
+
+if command -v systemctl > /dev/null 2>&1 && systemctl is-active --quiet pishoo; then
+  systemctl upgrade pishoo || systemctl restart pishoo
+  exit $?
+elif [ -x "/etc/init.d/pishoo" ] && invoke-rc.d --quiet pishoo status >/dev/null; then
+  invoke-rc.d pishoo upgrade || invoke-rc.d pishoo restart
+  exit $?
+else
+  echo "Not attempting to start Pishoo, please start Pishoo yourself."
+  exit 0
+fi
+
 
 exit 0
