@@ -21,3 +21,6 @@ tarpaulin-report.html
 Cargo.lock
 
 .DS_Store
+
+# Keychain files
+keychain/test.genmeta.net
