@@ -40,12 +40,12 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 h3 = { version = "0.0.7", features = ["tracing"] }
 
 # --- QUIC Implementation ---
-gm-quic = "0.2.0"
-h3-shim = "0.2.0"
-qconnection = "0.2.0"
-qinterface = "0.2.0"
-qevent = "0.2.0"
-qtraversal = "0.2.0"
+gm-quic = "0.2.1"
+h3-shim = "0.2.1"
+qconnection = "0.2.1"
+qinterface = "0.2.1"
+qevent = "0.2.1"
+qtraversal = "0.2.1"
 
 # --- Security & TLS ---
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

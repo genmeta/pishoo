@@ -7,7 +7,7 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use tokio::time::timeout;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 use super::{BoxResponse, H3Conn, H3SendRequest};
 use crate::{
@@ -18,8 +18,18 @@ use crate::{
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 
-/// 处理普通 HTTP 请求
 pub async fn proxy(
+    quic_client: Arc<QuicClient>,
+    req: Request<hyper::body::Incoming>,
+    resolver: SocketAddr,
+) -> Result<BoxResponse, hyper::Error> {
+    proxy_inner(quic_client, req, resolver)
+        .instrument(tracing::info_span!("proxy", odcid = tracing::field::Empty))
+        .await
+}
+
+/// 处理普通 HTTP 请求
+pub async fn proxy_inner(
     quic_client: Arc<QuicClient>,
     req: Request<hyper::body::Incoming>,
     resolver: SocketAddr,
@@ -61,6 +71,7 @@ pub async fn proxy(
                 ),
             };
         }
+        .in_current_span()
     });
 
     // 代理请求并返回响应
@@ -134,18 +145,21 @@ async fn send(
     let (mut sender, mut recver) = stream.split();
 
     // 发送请求体
-    tokio::spawn(async move {
-        let mut body_stream = body.into_data_stream();
-        while let Some(Ok(chunk)) = body_stream.next().await {
-            if let Err(e) = sender.send_data(chunk).await {
-                error!("Error sending request data: {}", e);
-                break;
+    tokio::spawn(
+        async move {
+            let mut body_stream = body.into_data_stream();
+            while let Some(Ok(chunk)) = body_stream.next().await {
+                if let Err(e) = sender.send_data(chunk).await {
+                    error!("Error sending request data: {}", e);
+                    break;
+                }
             }
+            if let Err(e) = sender.finish().await {
+                error!("Error finishing stream: {}", e);
+            };
         }
-        if let Err(e) = sender.finish().await {
-            error!("Error finishing stream: {}", e);
-        };
-    });
+        .in_current_span(),
+    );
 
     info!("[Forward][{}] Request body sent", uri);
 
@@ -159,32 +173,35 @@ async fn send(
     let body = StreamBody::new(ReceiverStream::new(rx));
 
     // 异步接收响应体数据
-    tokio::spawn(async move {
-        let _send_request = send_request.clone();
-        loop {
-            info!("[Proxy][{}] Waiting for response data", uri);
-            match recver.recv_data().await {
-                Ok(Some(mut buf)) => {
-                    info!("[Proxy][{}] Received response data", uri);
-                    let bytes = buf.copy_to_bytes(buf.remaining());
-                    if let Err(e) = tx.send(Ok(Frame::data(bytes))).await {
-                        error!("[Proxy][{}] Failed to send response: {}", uri, e);
+    tokio::spawn(
+        async move {
+            let _send_request = send_request.clone();
+            loop {
+                info!("[Proxy][{}] Waiting for response data", uri);
+                match recver.recv_data().await {
+                    Ok(Some(mut buf)) => {
+                        info!("[Proxy][{}] Received response data", uri);
+                        let bytes = buf.copy_to_bytes(buf.remaining());
+                        if let Err(e) = tx.send(Ok(Frame::data(bytes))).await {
+                            error!("[Proxy][{}] Failed to send response: {}", uri, e);
+                            break;
+                        }
+                        info!("[Proxy][{}] Response data sent", uri);
+                    }
+                    Ok(None) => {
+                        info!("[Proxy][{}] Response received completely", uri);
                         break;
                     }
-                    info!("[Proxy][{}] Response data sent", uri);
+                    Err(err) => {
+                        info!("[Proxy][{}] Data receiving error: {}", uri, err);
+                        break;
+                    }
                 }
-                Ok(None) => {
-                    info!("[Proxy][{}] Response received completely", uri);
-                    break;
-                }
-                Err(err) => {
-                    info!("[Proxy][{}] Data receiving error: {}", uri, err);
-                    break;
-                }
+                info!("[Proxy][{}] Waiting for response data end", uri);
             }
-            info!("[Proxy][{}] Waiting for response data end", uri);
         }
-    });
+        .in_current_span(),
+    );
 
     info!("[Forward] Response body receiver started");
 
@@ -230,6 +247,16 @@ async fn create_quic_connection(
             Ok(conn) => conn,
             Err(e) => return Err(format!("QUIC connect error: {:?}", e)),
         };
+        tracing::Span::current().record(
+            "odcid",
+            format!(
+                "{:x}",
+                conn.origin_dcid().map_err(|e| {
+                    error!("Failed to get origin DCID: {}", e);
+                    format!("{:?}", e)
+                })?
+            ),
+        );
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;

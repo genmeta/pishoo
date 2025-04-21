@@ -722,8 +722,8 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "gm-quic"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "dashmap",
@@ -771,8 +771,8 @@ dependencies = [
 
 [[package]]
 name = "h3-shim"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "futures",
@@ -1547,8 +1547,8 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1566,8 +1566,8 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "qbase",
  "qevent",
@@ -1578,8 +1578,8 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1601,8 +1601,8 @@ dependencies = [
 
 [[package]]
 name = "qevent"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1619,8 +1619,8 @@ dependencies = [
 
 [[package]]
 name = "qinterface"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1639,8 +1639,8 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1657,8 +1657,8 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1680,8 +1680,8 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1695,8 +1695,8 @@ dependencies = [
 
 [[package]]
 name = "qunreliable"
-version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#fe0465112a39ea66707d1d38fc11ddd72fd3113e"
+version = "0.2.1"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1bed4c913a05d217d529997fe42b97dd53b3f619"
 dependencies = [
  "bytes",
  "futures",
