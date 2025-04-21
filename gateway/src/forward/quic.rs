@@ -7,7 +7,7 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use tokio::time::timeout;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::{BoxResponse, H3Conn, H3SendRequest};
 use crate::{
@@ -162,23 +162,27 @@ async fn send(
     tokio::spawn(async move {
         let _send_request = send_request.clone();
         loop {
+            info!("[Proxy][{}] Waiting for response data", uri);
             match recver.recv_data().await {
                 Ok(Some(mut buf)) => {
+                    info!("[Proxy][{}] Received response data", uri);
                     let bytes = buf.copy_to_bytes(buf.remaining());
                     if let Err(e) = tx.send(Ok(Frame::data(bytes))).await {
                         error!("[Proxy][{}] Failed to send response: {}", uri, e);
                         break;
                     }
+                    info!("[Proxy][{}] Response data sent", uri);
                 }
                 Ok(None) => {
                     info!("[Proxy][{}] Response received completely", uri);
                     break;
                 }
                 Err(err) => {
-                    error!("[Proxy][{}] Data receiving error: {}", uri, err);
+                    info!("[Proxy][{}] Data receiving error: {}", uri, err);
                     break;
                 }
             }
+            info!("[Proxy][{}] Waiting for response data end", uri);
         }
     });
 
