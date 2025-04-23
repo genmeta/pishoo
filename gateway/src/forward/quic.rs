@@ -248,11 +248,16 @@ async fn create_quic_connection(
         // 选择地址（按照重试次数选择不同地址）
         let index = retry.min(remote_endpoints.len() - 1);
         let endpoint = remote_endpoints[index];
-
         // 建立 QUIC 连接
         let conn = match quic_client.connect(host, endpoint) {
             Ok(conn) => conn,
-            Err(e) => return Err(format!("QUIC connect error: {:?}", e)),
+            Err(e) => {
+                warn!(
+                    "[Forward] Failed to connect to {}: {}, retry: {}",
+                    endpoint, e, retry
+                );
+                continue;
+            }
         };
 
         // HTTP/3 客户端
