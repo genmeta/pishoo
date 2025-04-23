@@ -75,7 +75,9 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     let quic_client = Arc::new(create_quic_client().await);
 
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        while let Ok((stream, _)) = listener.accept().await.inspect_err(|e| {
+            error!("TCP listener accept failed: {:?}", e);
+        }) {
             let io = TokioIo::new(stream);
             let quic_client = quic_client.clone();
             let acl = acl.clone();

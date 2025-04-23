@@ -154,6 +154,7 @@ async fn send(
                     break;
                 }
             }
+            // TODO 没发 fin
             if let Err(e) = sender.finish().await {
                 error!("Error finishing stream: {}", e);
             };
@@ -164,7 +165,13 @@ async fn send(
     info!("[Forward][{}] Request body sent", uri);
 
     // 接收响应头
-    let (mut parts, _) = recver.recv_response().await?.into_parts();
+    let (mut parts, _) = recver
+        .recv_response()
+        .await
+        .inspect_err(|e| {
+            error!("[Forward][{}] Failed to receive response: {}", uri, e);
+        })?
+        .into_parts();
     info!("[Forward] Received response headers: {:?}", parts);
     parts.version = http::Version::HTTP_11;
 
@@ -247,23 +254,28 @@ async fn create_quic_connection(
             Ok(conn) => conn,
             Err(e) => return Err(format!("QUIC connect error: {:?}", e)),
         };
-        tracing::Span::current().record(
-            "odcid",
-            format!(
-                "{:x}",
-                conn.origin_dcid().map_err(|e| {
-                    error!("Failed to get origin DCID: {}", e);
-                    format!("{:?}", e)
-                })?
-            ),
-        );
 
         // HTTP/3 客户端
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
 
         // 创建 H3 客户端并设置超时
-        match timeout(Duration::from_millis(300), h3::client::new(gm_quic_conn)).await {
-            Ok(result) => return result.map_err(|e| format!("h3 client creation failed: {}", e)),
+        match timeout(Duration::from_millis(1000), h3::client::new(gm_quic_conn)).await {
+            Ok(result) => {
+                return {
+                    tracing::Span::current().record(
+                        "odcid",
+                        format!(
+                            "{:x}",
+                            conn.origin_dcid().map_err(|e| {
+                                error!("Failed to get origin DCID: {}", e);
+                                format!("{:?}", e)
+                            })?
+                        ),
+                    );
+
+                    result.map_err(|e| format!("h3 client creation failed: {}", e))
+                };
+            }
             Err(e) => {
                 error!(
                     "[Forward] H3 client creation failed: {}, retry: {}",
