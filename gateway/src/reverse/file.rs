@@ -5,7 +5,7 @@ use h3::server::RequestStream;
 use h3_shim::SendStream;
 use http::{Request, Response, StatusCode, Uri, header::CONTENT_LENGTH};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     command::{content_type, index},
@@ -153,7 +153,10 @@ async fn serve_static_file(
 
     let mut reader = BufReader::new(file);
     loop {
-        let buffer_slice = reader.fill_buf().await?;
+        let buffer_slice = reader
+            .fill_buf()
+            .await
+            .inspect_err(|e| error!("[Response handling][{}] Error reading file: {}", uri, e))?;
         if buffer_slice.is_empty() {
             break;
         }
@@ -162,7 +165,7 @@ async fn serve_static_file(
         sender
             .send_data(data_to_send)
             .await
-            .inspect_err(|e| debug!("[Response handling][{}] Error sending data: {}", uri, e))?;
+            .inspect_err(|e| error!("[Response handling][{}] Error sending data: {}", uri, e))?;
         reader.consume(len);
     }
 

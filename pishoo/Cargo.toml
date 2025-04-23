@@ -18,18 +18,7 @@ Pishoo (\"Prosperity Guardian Beast\") is a powerful proxy server optimized for 
 depends = "$auto"
 section = "httpd"
 priority = "optional"
-assets = [
-    [
-        "target/release/pishoo",
-        "usr/bin/",
-        "755",
-    ],
-    [
-        "pkg/common/config/pishoo.conf",
-        "etc/pishoo/pishoo.conf",
-        "644",
-    ],
-]
+assets = [["target/release/pishoo", "usr/bin/", "755"]]
 maintainer-scripts = "pkg/debian/"
 systemd-units = { unit-name = "pishoo", unit-scripts = "pkg/common/service", enable = false }
 

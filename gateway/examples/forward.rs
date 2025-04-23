@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_max_level(tracing::Level::INFO)
         .with_file(true)
         .with_line_number(true)
         .with_ansi(false)
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     handler.join_all().await;
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         tracing::info!("still running");
     }
 }
