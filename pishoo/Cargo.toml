@@ -15,7 +15,7 @@ copyright = "Copyright © 2025 Genmeta QUIC Team"
 extended-description = """
 Pishoo (\"Prosperity Guardian Beast\") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely.
 """
-depends = "$auto"
+depends = "libc6 (>= 2.7-1)"
 section = "httpd"
 priority = "optional"
 assets = [["target/release/pishoo", "usr/bin/", "755"]]
