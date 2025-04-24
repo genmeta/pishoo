@@ -1,13 +1,12 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use gm_quic::{ClientParameters, QuicClient};
+use gm_quic::{ClientParameters, Interfaces, QuicClient};
 use http::StatusCode;
 use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
-use qevent::telemetry::handy::DefaultSeqLogger;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -70,8 +69,6 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
 
-    // TODO resume 重启以下任务
-
     let quic_client = Arc::new(create_quic_client().await);
 
     tokio::spawn(async move {
@@ -126,23 +123,29 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
 ///
 /// # Returns
 /// * `Result<()>` - The result of resuming the network
-pub async fn resume() -> crate::error::Result<()> {
-    // TODO 如果超时30s以下, 重启网络
-    // TODO 如果超时30s以上, 尝试向 端口进行请求, 如果失败则重启整个代理服务
+pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
+    // 获取绑定地址
+    let addr = if let Some(Value::Addr(addr)) = node.get("listen") {
+        *addr
+    } else {
+        return Err(CustomError::InvalidConfig(
+            "Invalid listen address".to_string(),
+        ));
+    };
 
-    // info!("Resuming network");
-    // let localhost = LOCALHOST
-    //     .get()
-    //     .ok_or(CustomError::LocalhostNotInitialized)?;
-    // localhost.resume_network().await.inspect_err(|e| {
-    //     error!("Network resume failed: {:?}", e);
-    // })?;
-    // info!("Network resumed");
-    Ok(())
-}
-
-pub async fn stop() -> crate::error::Result<()> {
-    // TODO 记录停止时间
+    // 如果 addr 正在使用, 则直接返回
+    match TcpListener::bind(addr).await {
+        Ok(_) => {
+            let _ = serve(node).await.inspect_err(|e| {
+                error!("TCP listener binding failed: {:?}", e);
+            });
+            return Ok(());
+        }
+        Err(_e) => {
+            Interfaces::resume();
+            info!("Resumed")
+        }
+    }
     Ok(())
 }
 
@@ -177,7 +180,7 @@ async fn create_quic_client() -> QuicClient {
         .reuse_address()
         .with_alpns([ALPN])
         .with_iface_factory(factory)
-        .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
+        // .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
         .with_parameters(create_client_params())
         .bind(&binds[..])
         .unwrap()

@@ -264,7 +264,7 @@ async fn create_quic_connection(
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
 
         // 创建 H3 客户端并设置超时
-        match timeout(Duration::from_millis(1000), h3::client::new(gm_quic_conn)).await {
+        match timeout(Duration::from_millis(5000), h3::client::new(gm_quic_conn)).await {
             Ok(result) => {
                 return {
                     tracing::Span::current().record(
