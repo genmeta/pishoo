@@ -2,7 +2,7 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
 use gm_quic::{ProductQuicInterface, QuicInterface};
 use qtraversal::iface::UdpQuicInterface;
-use tracing::info;
+use tracing::{error, info};
 
 pub struct TraversalFactory {
     agents: Vec<SocketAddr>,
@@ -43,7 +43,13 @@ impl ProductQuicInterface for TraversalFactory {
 
         let iface = if let Some(device) = self.devices.get(bind.ip().to_string().as_str()) {
             iface.inspect(|iface| {
-                iface.bind_device(device).unwrap();
+                match iface.bind_device(device) {
+                    Ok(_) => info!("bind device {} for interface {}", device, bind),
+                    Err(e) => error!(
+                        "failed to bind device {} for interface {}: {}",
+                        device, bind, e
+                    ),
+                };
             })
         } else {
             iface

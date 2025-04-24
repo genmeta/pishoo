@@ -1,11 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use gm_quic::QuicServer;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
-use qevent::telemetry::handy::DefaultSeqLogger;
 use tracing::{debug, error, info};
 
 use crate::{
@@ -98,7 +97,7 @@ fn create_quic_server(
         .with_supported_versions([1u32]) // 支持QUIC版本1
         .without_client_cert_verifier() // 禁用证书验证
         .with_iface_factory(factory)
-        .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
+        // .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
         .with_parameters(create_server_params())
         .enable_sni();
 

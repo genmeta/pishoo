@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - platform: "ubuntu-22.04"
@@ -62,13 +62,13 @@ jobs:
       # 使用 cross 编译项目
       - name: Build release
         run: |
-          cross +nightly build --features sshd --example pishoo --target ${{ matrix.target }}  --release
+          cross +nightly build --bin pishoo --target ${{ matrix.target }}  --release
 
       # 准备部署工件
       - name: Prepare Artifact
         run: |
           mkdir -p deploy
-          cp target/${{ matrix.target }}/release/examples/pishoo deploy/pishoo-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/pishoo deploy/pishoo-${{ matrix.target }}
 
       # 上传编译产物
       - name: Upload Artifact
