@@ -24,7 +24,7 @@ systemd-units = { unit-name = "pishoo", unit-scripts = "pkg/common/service", ena
 
 [dependencies]
 # --- Workspace Member ---
-gateway = { path = "../gateway", features = ["sshd"] }
+gateway = { path = "../gateway" }
 
 # --- Core & Error Handling ---
 anyhow = { workspace = true }
@@ -38,3 +38,7 @@ clap = { workspace = true }
 # --- Logging & Tracing ---
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+sshd = ["gateway/sshd"]
