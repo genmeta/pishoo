@@ -19,8 +19,6 @@ depends = "pishoo-common (>= 0.1.0), $auto"
 section = "httpd"
 priority = "optional"
 assets = [["target/release/pishoo", "usr/bin/", "755"]]
-maintainer-scripts = "pkg/debian/"
-systemd-units = { unit-name = "pishoo", unit-scripts = "pkg/common/service", enable = false }
 
 [dependencies]
 # --- Workspace Member ---
