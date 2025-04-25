@@ -84,15 +84,26 @@ pub async fn pass(
         ));
     };
 
-    let target_uri = Uri::from_str(&format!(
-        "{}{}",
-        proxy_pass,
-        parts
+    let target_host = Uri::from_str(proxy_pass)
+        .map_err(|_| CustomError::InvalidConfig("Invalid proxy_pass URI".to_string()))?;
+
+    // let target_uri = Uri::from_str(&format!(
+    //     "{}{}",
+    //     proxy_pass,
+    //     parts
+    //         .uri
+    //         .path_and_query()
+    //         .map(|p| p.to_string())
+    //         .unwrap_or_default()
+    // ))?;
+
+    let target_uri = Uri::from_str(
+        &parts
             .uri
             .path_and_query()
             .map(|p| p.to_string())
-            .unwrap_or_default()
-    ))?;
+            .unwrap_or_default(),
+    )?;
 
     // 准备请求参数
     let mut new_parts = parts;
@@ -100,8 +111,8 @@ pub async fn pass(
     new_parts.version = Version::HTTP_11;
 
     // 解析目标地址
-    let host = new_parts.uri.host().ok_or(CustomError::MissingHost)?;
-    let port = new_parts.uri.port().map(|p| p.as_u16()).unwrap_or(80);
+    let host = target_host.host().ok_or(CustomError::MissingHost)?;
+    let port = target_host.port().map(|p| p.as_u16()).unwrap_or(80);
 
     // 建立TCP连接
     let io = TokioIo::new(
