@@ -205,6 +205,11 @@ pub async fn login(
                 CString::new(shell.as_bytes()).unwrap().as_ptr(),
                 1,
             );
+            libc::setenv(
+                CString::new("TERM").unwrap().as_ptr(),
+                CString::new("xterm-256color").unwrap().as_ptr(),
+                1,
+            );
 
             // 切换工作目录
             if libc::chdir((*pw).pw_dir) != 0 {
@@ -221,6 +226,7 @@ pub async fn login(
             libc::execl(
                 shell.as_ptr(),
                 shell.as_ptr(),
+                CString::new("--login").unwrap().as_ptr(),
                 std::ptr::null::<libc::c_char>() as *const _,
             );
             libc::exit(0);
