@@ -77,3 +77,4 @@ clap = { workspace = true }
 [features]
 default = []
 sshd = ["dep:libc", "dep:pam"]
+qlog = []

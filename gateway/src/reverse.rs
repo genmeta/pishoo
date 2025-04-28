@@ -101,6 +101,15 @@ fn create_quic_server(
         .with_parameters(create_server_params())
         .enable_sni();
 
+    #[cfg(feature = "qlog")]
+    {
+        use std::path::PathBuf;
+
+        use qevent::telemetry::handy::DefaultSeqLogger;
+
+        builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+    }
+
     // 为每个服务器添加TLS证书
     for server in servers {
         let cert_path = if let Some(Value::Path(cert_path)) = server.get("ssl_certificate") {
