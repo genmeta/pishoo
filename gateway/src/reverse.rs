@@ -93,13 +93,11 @@ fn create_quic_server(
         binds.push(bind);
     }
 
+    #[allow(unused_mut)]
     let mut builder = gm_quic::QuicServer::builder()
         .with_supported_versions([1u32]) // 支持QUIC版本1
         .without_client_cert_verifier() // 禁用证书验证
-        .with_iface_factory(factory)
-        // .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
-        .with_parameters(create_server_params())
-        .enable_sni();
+        .with_iface_factory(factory);
 
     #[cfg(feature = "qlog")]
     {
@@ -109,6 +107,8 @@ fn create_quic_server(
 
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
+
+    let mut builder = builder.with_parameters(create_server_params()).enable_sni();
 
     // 为每个服务器添加TLS证书
     for server in servers {
