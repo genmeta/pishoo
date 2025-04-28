@@ -87,16 +87,6 @@ pub async fn pass(
     let target_host = Uri::from_str(proxy_pass)
         .map_err(|_| CustomError::InvalidConfig("Invalid proxy_pass URI".to_string()))?;
 
-    // let target_uri = Uri::from_str(&format!(
-    //     "{}{}",
-    //     proxy_pass,
-    //     parts
-    //         .uri
-    //         .path_and_query()
-    //         .map(|p| p.to_string())
-    //         .unwrap_or_default()
-    // ))?;
-
     let target_uri = Uri::from_str(
         &parts
             .uri

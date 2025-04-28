@@ -47,7 +47,7 @@ pub async fn proxy_inner(
     };
 
     // 创建 QUIC 连接
-    let (mut h3_conn, send_request) =
+    let (mut _h3_conn, send_request) =
         match create_quic_connection(quic_client, host, resolver).await {
             Ok(conn) => conn,
             Err(msg) => {
@@ -60,19 +60,19 @@ pub async fn proxy_inner(
         };
     info!("[Forward][{}]: quic connection established", uri);
 
-    tokio::spawn({
-        let uri = uri.clone();
-        async move {
-            match h3_conn.wait_idle().await {
-                Ok(_) => info!("[Forward][{}] QUIC connection idle", uri),
-                Err(err) => error!(
-                    "[Forward][{}] QUIC connection idle check failed: {}",
-                    uri, err
-                ),
-            };
-        }
-        .in_current_span()
-    });
+    // tokio::spawn({
+    //     let uri = uri.clone();
+    //     async move {
+    //         match h3_conn.wait_idle().await {
+    //             Ok(_) => info!("[Forward][{}] QUIC connection idle", uri),
+    //             Err(err) => error!(
+    //                 "[Forward][{}] QUIC connection idle check failed: {}",
+    //                 uri, err
+    //             ),
+    //         };
+    //     }
+    //     .in_current_span()
+    // });
 
     // 代理请求并返回响应
     match send(send_request, req).await {
@@ -145,7 +145,8 @@ async fn send(
     let (mut sender, mut recver) = stream.split();
 
     // 发送请求体
-    tokio::spawn(
+    tokio::spawn({
+        let uri = uri.clone();
         async move {
             let mut body_stream = body.into_data_stream();
             while let Some(Ok(chunk)) = body_stream.next().await {
@@ -154,13 +155,15 @@ async fn send(
                     break;
                 }
             }
+
             // TODO 没发 fin
-            if let Err(e) = sender.finish().await {
-                error!("Error finishing stream: {}", e);
-            };
+            match sender.finish().await {
+                Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
+                Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+            }
         }
-        .in_current_span(),
-    );
+        .in_current_span()
+    });
 
     info!("[Forward][{}] Request body sent", uri);
 
@@ -244,17 +247,14 @@ async fn create_quic_connection(
         return Err(format!("[DNS] lookup failed for: {host}"));
     }
 
-    for retry in 0..MAX_RETRY_COUNT {
-        // 选择地址（按照重试次数选择不同地址）
-        let index = retry.min(remote_endpoints.len() - 1);
-        let endpoint = remote_endpoints[index];
+    for (index, endpoint) in remote_endpoints.iter().enumerate() {
         // 建立 QUIC 连接
-        let conn = match quic_client.connect(host, endpoint) {
+        let conn = match quic_client.connect(host, *endpoint) {
             Ok(conn) => conn,
             Err(e) => {
                 warn!(
-                    "[Forward] Failed to connect to {}: {}, retry: {}",
-                    endpoint, e, retry
+                    "[Forward] Failed to connect to {}: {}, retry: {} of {}",
+                    endpoint, e, index, endpoint
                 );
                 continue;
             }
@@ -283,19 +283,9 @@ async fn create_quic_connection(
             }
             Err(e) => {
                 error!(
-                    "[Forward] H3 client creation failed: {}, retry: {}",
-                    e, retry
+                    "[Forward] H3 client creation failed: {}, retry: {} of {}",
+                    e, index, endpoint
                 );
-
-                // 最终失败时尝试刷新网络信息
-                if retry == MAX_RETRY_COUNT - 1 {
-                    // TODO 需要考虑在当前情况下, 失败的原因, 目前刷新网络的代价太大
-                    // let _ = localhost.resume_network().await;
-                    return Err(format!(
-                        "H3 client creation failed after all retries: {}",
-                        e
-                    ));
-                }
             }
         }
     }

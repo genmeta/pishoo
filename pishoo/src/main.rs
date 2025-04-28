@@ -42,14 +42,21 @@ struct Args {
     quiet: bool,
     #[arg(short = 'g', help = "set global directives out of configuration file")]
     directives: Vec<String>,
+    #[arg(
+        default_value_t = false,
+        help = "enable logging, write to /var/pishoo/pishoo.log"
+    )]
+    log: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // TODO 将日志存储到 /var/pishoo/pishoo.log 中
+
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_file(true)
         .with_line_number(true)
         .with_ansi(false)
