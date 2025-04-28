@@ -176,7 +176,8 @@ async fn create_quic_client() -> QuicClient {
 
     tracing::debug!("QUIC client binds: {:?}", binds);
 
-    let builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
+    #[allow(unused_mut)]
+    let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
         .reuse_address()
         .with_alpns([ALPN])
         .with_iface_factory(factory);
@@ -187,8 +188,7 @@ async fn create_quic_client() -> QuicClient {
 
         use qevent::telemetry::handy::DefaultSeqLogger;
 
-        let builder =
-            builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+        builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
     builder
