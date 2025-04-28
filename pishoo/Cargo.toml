@@ -40,3 +40,4 @@ tracing-subscriber = { workspace = true }
 [features]
 default = []
 sshd = ["gateway/sshd"]
+qlog = ["gateway/qlog"]

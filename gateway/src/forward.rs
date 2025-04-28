@@ -176,11 +176,22 @@ async fn create_quic_client() -> QuicClient {
 
     tracing::debug!("QUIC client binds: {:?}", binds);
 
-    gm_quic::QuicClient::builder_with_tls(configure_tls())
+    let builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
         .reuse_address()
         .with_alpns([ALPN])
-        .with_iface_factory(factory)
-        // .with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))))
+        .with_iface_factory(factory);
+
+    #[cfg(feature = "qlog")]
+    {
+        use std::path::PathBuf;
+
+        use qevent::telemetry::handy::DefaultSeqLogger;
+
+        let builder =
+            builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+    }
+
+    builder
         .with_parameters(create_client_params())
         .bind(&binds[..])
         .unwrap()
