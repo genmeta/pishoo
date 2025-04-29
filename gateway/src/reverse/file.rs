@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, error};
 
 use crate::{
-    command::{content_type, index},
+    command::{self, content_type, index},
     error::Result,
     parse::{Node, Value},
     reverse::build_error_response,
@@ -142,6 +142,8 @@ async fn serve_static_file(
     let (mut parts, body) = Response::<()>::default().into_parts();
 
     parts.status = StatusCode::OK;
+
+    command::add_header(location, &mut parts);
 
     // 添加长度
     // TODO gzip 压缩时不添加长度
