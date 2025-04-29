@@ -60,20 +60,6 @@ pub async fn proxy_inner(
         };
     info!("[Forward][{}]: quic connection established", uri);
 
-    // tokio::spawn({
-    //     let uri = uri.clone();
-    //     async move {
-    //         match h3_conn.wait_idle().await {
-    //             Ok(_) => info!("[Forward][{}] QUIC connection idle", uri),
-    //             Err(err) => error!(
-    //                 "[Forward][{}] QUIC connection idle check failed: {}",
-    //                 uri, err
-    //             ),
-    //         };
-    //     }
-    //     .in_current_span()
-    // });
-
     // 代理请求并返回响应
     match send(send_request, req).await {
         Ok(response) => {
@@ -187,16 +173,13 @@ async fn send(
         async move {
             let _send_request = send_request.clone();
             loop {
-                info!("[Proxy][{}] Waiting for response data", uri);
                 match recver.recv_data().await {
                     Ok(Some(mut buf)) => {
-                        info!("[Proxy][{}] Received response data", uri);
                         let bytes = buf.copy_to_bytes(buf.remaining());
                         if let Err(e) = tx.send(Ok(Frame::data(bytes))).await {
                             error!("[Proxy][{}] Failed to send response: {}", uri, e);
                             break;
                         }
-                        info!("[Proxy][{}] Response data sent", uri);
                     }
                     Ok(None) => {
                         info!("[Proxy][{}] Response received completely", uri);
@@ -207,7 +190,6 @@ async fn send(
                         break;
                     }
                 }
-                info!("[Proxy][{}] Waiting for response data end", uri);
             }
         }
         .in_current_span(),

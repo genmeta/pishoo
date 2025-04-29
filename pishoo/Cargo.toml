@@ -36,8 +36,10 @@ clap = { workspace = true }
 # --- Logging & Tracing ---
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+console-subscriber = { workspace = true, optional = true }
 
 [features]
 default = []
 sshd = ["gateway/sshd"]
 qlog = ["gateway/qlog"]
+console_subscriber = ["dep:console-subscriber"]
