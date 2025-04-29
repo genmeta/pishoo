@@ -53,14 +53,18 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // TODO 将日志存储到 /var/pishoo/pishoo.log 中
+    // TODO 将日志存储到 /var/pishoo/pishoo.log
 
+    #[cfg(not(feature = "console_subscriber"))]
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_file(true)
         .with_line_number(true)
         .with_ansi(false)
         .init();
+
+    #[cfg(feature = "console_subscriber")]
+    console_subscriber::init();
     tracing::info!("Tracing initialized.");
 
     let config_file = args.config_file;
