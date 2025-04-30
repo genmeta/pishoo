@@ -295,9 +295,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
-version = "0.4.40"
+version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a7964611d71df112cb1730f2ee67324fcf4d0fc6606acbbe9bfe06df124637c"
+checksum = "c469d952047f47f91b68d1cba3f10d63c11d73e4636f24f08daf0278abf01c4d"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
@@ -877,7 +877,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "dashmap",
@@ -945,7 +945,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1840,7 +1840,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1859,7 +1859,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "qbase",
  "qevent",
@@ -1871,7 +1871,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1894,7 +1894,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1912,7 +1912,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1932,7 +1932,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1950,7 +1950,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1973,7 +1973,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1988,7 +1988,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#a9fe4d09a6a9806ed2b950db91f27c8b356e1e22"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#87e32cc45c89c22d724937b6366de84691587a35"
 dependencies = [
  "bytes",
  "futures",

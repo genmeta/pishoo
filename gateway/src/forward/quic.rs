@@ -246,20 +246,23 @@ async fn create_quic_connection(
         let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
 
         // 创建 H3 客户端并设置超时
-        match timeout(Duration::from_millis(5000), h3::client::new(gm_quic_conn)).await {
+        match timeout(
+            Duration::from_millis(5000 * (index + 1) as u64),
+            h3::client::new(gm_quic_conn),
+        )
+        .await
+        {
             Ok(result) => {
-                return {
-                    tracing::Span::current().record(
-                        "odcid",
-                        format!(
-                            "{:x}",
-                            conn.origin_dcid().map_err(|e| {
-                                error!("Failed to get origin DCID: {}", e);
-                                format!("{:?}", e)
-                            })?
-                        ),
-                    );
+                let origin_dcid = match conn.origin_dcid() {
+                    Ok(dcid) => dcid,
+                    Err(e) => {
+                        error!("Failed to get origin DCID: {}", e);
+                        continue;
+                    }
+                };
 
+                return {
+                    tracing::Span::current().record("odcid", format!("{:x}", origin_dcid));
                     result.map_err(|e| format!("h3 client creation failed: {}", e))
                 };
             }

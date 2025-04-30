@@ -182,6 +182,36 @@ fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
+fn parse_server_address(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        // TODO 如果只有一个参数, 那么就是指定的 所有网卡 的 ipv4 ipv6 的端口 ::5380
+        // TODO 如果有两个参数 ipv4 ipv6
+        // TODO 支持的配置格式:
+        // listen ALL       80; => 所有网卡的 ipv4 的 80 端口
+        // listen ALL_IPV4  80; => 所有网卡的 ipv6 的 80 端口
+        // listen ALL_IPV6  80; => 所有网卡的 ipv4 的 80 端口
+        // listen EN0       80; => 指定网卡的 ipv4 和 ipv6 的 80 端口
+        // listen EN0_IPV4  80; => 指定网卡的 ipv4 的 80 端口
+        // listen EN0_IPV6  80; => 指定网卡的 ipv6 的 80 端口
+        //
+        // 1. ALL 包含的是那些类型的网卡?
+        //    - 当前的筛选条件,
+        //        - |IPV4 |addr| addr.is_global() || addr.is_private()
+        //        - |IPV6 |addr| addr.is_global()
+        // 2. 如果配置了 ALL 需要包含 lo0 吗?
+        //    - 目前的想法是, 不需要, lo0 需要手动指定才会开启
+        // 3. listen 可以多次配置, 最终会合并成一个列表
+        [string] => {
+            let addr = string.parse::<SocketAddr>()?;
+            Ok(Value::Addr(addr))
+        }
+        _ => Err(anyhow!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        )),
+    }
+}
+
 fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
