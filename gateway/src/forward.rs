@@ -24,7 +24,7 @@ mod quic;
 
 static ALPN: &[u8] = b"h3";
 
-const CHANNEL_BUFFER_SIZE: usize = 114514; // 响应通道缓冲区大小
+const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
 
 type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper::Error>>>>;
 type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
