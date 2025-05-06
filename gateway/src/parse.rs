@@ -94,13 +94,13 @@ impl Node {
 
     pub fn backtrack_node(self: &Arc<Self>, key: &str) -> Option<Arc<Node>> {
         let mut current_node = Arc::clone(self);
-        while let Some(parent) = current_node.parent() {
+        loop {
             if current_node.value().get(key).is_some() {
                 return Some(Arc::clone(&current_node));
             }
+            let parent = current_node.parent()?;
             current_node = parent;
         }
-        None
     }
 }
 
