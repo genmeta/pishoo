@@ -21,9 +21,7 @@ use crate::{
 // 定义客户端与服务器通信的消息结构
 #[derive(Serialize, Deserialize, Debug)]
 enum TerminalMessage {
-    Text(String),
     WindowSize { rows: u16, cols: u16 },
-    Signal(i32),
     ControlSequence(String),
     Heartbeat,
 }
@@ -187,7 +185,7 @@ pub async fn login(
             libc::initgroups((*pw).pw_name, (*pw).pw_gid as _);
             // 设置gid和uid
             if libc::setgid((*pw).pw_gid) != 0 || libc::setuid((*pw).pw_uid) != 0 {
-                eprintln!("Failed to setuid/setgid");
+                tracing::error!("Failed to setuid/setgid");
                 libc::exit(1);
             }
 
@@ -331,14 +329,6 @@ async fn copy_between_pty_and_stream(
                 match TerminalMessage::deserialize(&mut de) {
                     Ok(msg) => {
                         match msg {
-                            TerminalMessage::Text(text) => {
-                                // 将文本写入PTY
-                                if let Err(e) = pty_master.write_all(text.as_bytes()) {
-                                    eprintln!("写入PTY失败: {}", e);
-                                    recver.stop_sending(h3::error::Code::H3_INTERNAL_ERROR);
-                                    return;
-                                }
-                            }
                             TerminalMessage::WindowSize { rows, cols } => {
                                 // 设置PTY窗口大小
                                 unsafe {
@@ -351,23 +341,10 @@ async fn copy_between_pty_and_stream(
                                     libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsz);
                                 }
                             }
-                            TerminalMessage::Signal(signal) => {
-                                // 将信号转换为对应的控制字符写入PTY
-                                let ctrl_char = match signal {
-                                    2 => "\x03", // Ctrl+C (SIGINT)
-                                    3 => "\x1A", // Ctrl+Z (SIGTSTP)
-                                    _ => return,
-                                };
-                                if let Err(e) = pty_master.write_all(ctrl_char.as_bytes()) {
-                                    eprintln!("写入PTY控制字符失败: {}", e);
-                                    recver.stop_sending(h3::error::Code::H3_INTERNAL_ERROR);
-                                    return;
-                                }
-                            }
                             TerminalMessage::ControlSequence(sequence) => {
                                 if let Err(e) = pty_master.write_all(sequence.as_bytes()) {
                                     tracing::error!("写入PTY控制序列失败: {}", e);
-                                    recver.stop_sending(h3::error::Code::H3_INTERNAL_ERROR);
+                                    recver.stop_sending(h3::error::Code::H3_NO_ERROR);
                                     return;
                                 }
                             }
@@ -385,7 +362,7 @@ async fn copy_between_pty_and_stream(
                     }
                     Err(e) => {
                         // TODO: fetal error
-                        eprintln!("JSON解析错误: {}", e);
+                        tracing::error!("JSON解析错误: {}", e);
                         read_buffer.clear();
                         break;
                     }
@@ -407,7 +384,7 @@ fn verify_password(username: &str, password: &str) -> bool {
         let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
         auth.get_handler().set_credentials(username, password);
         if let Err(e) = auth.authenticate() {
-            println!("Authentication failed: {}", e);
+            println!("Authentication failed: {e}");
             return false;
         }
         true
