@@ -1,17 +1,24 @@
 use std::{
     ffi::{CStr, CString},
-    fs::File,
-    io::Write,
-    os::fd::{AsRawFd, FromRawFd},
+    io,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            io::RawFd,
+            prelude::{CommandExt, OwnedFd},
+        },
+    },
     sync::Arc,
 };
 
 use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
-use http::{Request, StatusCode};
+use http::{Request, Response, StatusCode};
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
+use tracing::Instrument;
 
 use crate::{
     error::Result,
@@ -26,6 +33,12 @@ enum TerminalMessage {
     Heartbeat,
 }
 
+fn map_errno(errno: nix::Error, message: &str) -> std::io::Error {
+    let error = std::io::Error::from(errno);
+    std::io::Error::new(error.kind(), format!("{message}: {errno}"))
+}
+
+/// ``` conf
 /// location /ssh {
 ///     ssh_login basic | ssl; # ssl 需要server级配置ssl_verify_client
 ///
@@ -39,42 +52,37 @@ enum TerminalMessage {
 ///     # ssl auth，若使用url中的用户，也不准是root
 ///     ssh_deny root;
 /// }
-pub async fn login(
+/// ```
+async fn parse_request(
     location: &Arc<Node>,
     request: Request<()>,
-    recver: RequestStream<RecvStream, Bytes>,
-    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
-) -> Result<()> {
+) -> (Response<()>, Result<(String, String)>) {
     if request.method() != http::Method::PUT {
         let resp = http::Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(())?;
-        sender.send_response(resp).await?;
-        sender.finish().await?;
-        return Err(std::io::Error::new(
+            .body(())
+            .unwrap();
+        let error = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "Missing Authorization header",
-        )
-        .into());
+        );
+        return (resp, Err(error.into()));
     }
 
-    let ssh_login = if let Some(Value::String(ssl_login)) = location.get("ssh_login") {
-        ssl_login
-    } else {
+    let Some(Value::String(ssh_login)) = location.get("ssh_login") else {
         unreachable!();
     };
 
     if ssh_login == "ssl" {
         let resp = http::Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(())?;
-        sender.send_response(resp).await?;
-        sender.finish().await?;
-        return Err(std::io::Error::new(
+            .body(())
+            .unwrap();
+        let error = std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "Ssl login is not supported now",
-        )
-        .into());
+        );
+        return (resp, Err(error.into()));
     }
 
     // 从 Authorization 头获取认证信息
@@ -83,14 +91,13 @@ pub async fn login(
         None => {
             let resp = http::Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
-                .body(())?;
-            sender.send_response(resp).await?;
-            sender.finish().await?;
-            return Err(std::io::Error::new(
+                .body(())
+                .unwrap();
+            let error = std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "Missing Authorization header",
-            )
-            .into());
+            );
+            return (resp, Err(error.into()));
         }
     };
 
@@ -102,278 +109,297 @@ pub async fn login(
             Err(_) => {
                 let resp = http::Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(())?;
-                sender.send_response(resp).await?;
-                sender.finish().await?;
-                return Err(std::io::Error::new(
+                    .body(())
+                    .unwrap();
+                let error = std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "Missing Authorization header",
-                )
-                .into());
+                );
+                return (resp, Err(error.into()));
             }
         },
         None => {
             let resp = http::Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(())?;
-            sender.send_response(resp).await?;
-            sender.finish().await?;
-            return Err(std::io::Error::new(
+                .body(())
+                .unwrap();
+            let error = std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "Missing Authorization header",
-            )
-            .into());
+            );
+            return (resp, Err(error.into()));
         }
     };
 
     let Some((username, password)) = credentials.split_once(':') else {
         let resp = http::Response::builder()
             .status(StatusCode::BAD_REQUEST)
-            .body(())?;
-        sender.send_response(resp).await?;
-        sender.finish().await?;
-        return Err(std::io::Error::new(
+            .body(())
+            .unwrap();
+        let error = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "Missing Authorization header",
-        )
-        .into());
+        );
+        return (resp, Err(error.into()));
     };
 
+    let resp = http::Response::builder()
+        .status(StatusCode::OK)
+        .body(())
+        .unwrap();
+    (resp, Ok((username.to_string(), password.to_string())))
+}
+pub async fn login(
+    location: &Arc<Node>,
+    request: Request<()>,
+    recver: RequestStream<RecvStream, Bytes>,
+    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
+) -> Result<()> {
+    let (resp, result) = parse_request(location, request).await;
+    let (username, password) = match result {
+        Ok((username, password)) => {
+            sender.send_response(resp).await?;
+            (username, password)
+        }
+        Err(e) => {
+            sender.send_response(resp).await?;
+            sender.finish().await?;
+            tracing::error!("[SSH] Invalid request: {e}");
+            return Err(e);
+        }
+    };
     tracing::debug!("[SSH] Username: {}, Password: {}", username, password);
 
-    let resp = http::Response::builder().status(StatusCode::OK).body(())?;
-    sender.send_response(resp).await?;
+    // 创建一个伪终端
+    let nix::pty::OpenptyResult { master, slave } =
+        nix::pty::openpty(None, None).map_err(|errno| map_errno(errno, "Failed to openpty"))?;
 
-    // 创建PTY
-    let mut master: libc::c_int = 0;
-    let mut slave: libc::c_int = 0;
-    let mut name_buf = [0u8; 64];
-    unsafe {
-        libc::openpty(
-            &mut master as *mut _,
-            &mut slave as *mut _,
-            name_buf.as_mut_ptr() as *mut _,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
-    // Fork子进程
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // 子进程
-        unsafe {
-            libc::close(master);
-            libc::login_tty(slave);
-
-            // 设置用户
-            let user = CString::new(username).unwrap();
-            let pw = libc::getpwnam(user.as_ptr());
-            if pw.is_null() {
-                println!("User not found");
-                libc::exit(1);
+    // Fork出子进程
+    match unsafe { nix::unistd::fork() }.map_err(|errno| map_errno(errno, "Failed to fork"))? {
+        nix::unistd::ForkResult::Parent { child: _ } => {
+            // 断开连接
+            nix::unistd::close(slave.as_raw_fd())
+                .map_err(|errno| map_errno(errno, "Failed to close slave fd in master process"))?;
+            // 设置fd为非阻塞模式
+            unsafe {
+                let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            };
+            // 启动
+            copy_between_pty_and_stream(master, sender, recver).await;
+        }
+        // 子进程不要抛出错误，出现错误，打印日志，直接exit
+        nix::unistd::ForkResult::Child => {
+            // 断开连接
+            if let Err(errno) = nix::unistd::close(master.as_raw_fd()) {
+                tracing::error!("[SSH] Failed to close master fd in child process: {errno:?}");
+                std::process::exit(1);
             }
-
-            // 暂且先用这种方式校验权限，这种方式不够安全
-            // 后续改成quic连接级的证书校验
-            if !verify_password(username, password) {
-                println!("Authentication failed");
-                libc::exit(1);
-            }
-
-            // 设置补充组
-            libc::initgroups((*pw).pw_name, (*pw).pw_gid as _);
-            // 设置gid和uid
-            if libc::setgid((*pw).pw_gid) != 0 || libc::setuid((*pw).pw_uid) != 0 {
-                tracing::error!("Failed to setuid/setgid");
-                libc::exit(1);
-            }
-
-            // 设置环境变量
-            let home = CStr::from_ptr((*pw).pw_dir).to_string_lossy();
-            let shell = CStr::from_ptr((*pw).pw_shell).to_string_lossy();
-            libc::setenv(
-                CString::new("HOME").unwrap().as_ptr(),
-                CString::new(home.as_bytes()).unwrap().as_ptr(),
-                1,
-            );
-            libc::setenv(CString::new("USER").unwrap().as_ptr(), user.as_ptr(), 1);
-            libc::setenv(
-                CString::new("SHELL").unwrap().as_ptr(),
-                CString::new(shell.as_bytes()).unwrap().as_ptr(),
-                1,
-            );
-            libc::setenv(
-                CString::new("TERM").unwrap().as_ptr(),
-                CString::new("xterm-256color").unwrap().as_ptr(),
-                1,
-            );
-
-            // 切换工作目录
-            if libc::chdir((*pw).pw_dir) != 0 {
-                libc::exit(1);
-            }
-
-            // 执行shell
-            let shell = CString::new(
-                CStr::from_ptr((*pw).pw_shell)
-                    .to_str()
-                    .unwrap_or("/bin/bash"),
-            )
-            .unwrap();
-            libc::execl(
-                shell.as_ptr(),
-                shell.as_ptr(),
-                CString::new("--login").unwrap().as_ptr(),
-                std::ptr::null::<libc::c_char>() as *const _,
-            );
-            libc::exit(0);
+            // 这个函数正常不会返回。返回了就说明出错了
+            let exec_error = exec_shell(&username, &password, slave);
+            tracing::error!("[SSH] Failed to exec shell: {exec_error:?}");
+            std::process::exit(1)
         }
     }
-
-    // 主进程
-    unsafe { libc::close(slave) };
-    // 设置master fd为非阻塞模式
-    let pty_master = unsafe {
-        let flags = libc::fcntl(master, libc::F_GETFL);
-        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        std::fs::File::from_raw_fd(master as _)
-    };
-
-    copy_between_pty_and_stream(pty_master, sender, recver).await;
 
     Ok(())
 }
 
+fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> io::Error {
+    fn login_tty(slave_fd: RawFd) -> nix::Result<()> {
+        nix::unistd::setsid()?;
+
+        nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
+        unsafe { tiocsctty(slave_fd, 0)? };
+
+        nix::unistd::dup2(slave_fd, libc::STDIN_FILENO)?;
+        nix::unistd::dup2(slave_fd, libc::STDOUT_FILENO)?;
+        nix::unistd::dup2(slave_fd, libc::STDERR_FILENO)?;
+
+        if slave_fd > libc::STDERR_FILENO {
+            nix::unistd::close(slave_fd)?;
+        }
+
+        Ok(())
+    }
+    // 设置终端为登录终端
+    if let Err(errno) = login_tty(slave.as_raw_fd()) {
+        return map_errno(errno, "Failed to login_tty");
+    };
+
+    // 寻找用户，验证密码
+    let user = CString::new(username).unwrap();
+    let pw = unsafe { libc::getpwnam(user.as_ptr()) };
+    if pw.is_null() {
+        tracing::error!("[SSH] User not found");
+        std::process::exit(1)
+    }
+
+    // 暂时只支持此验证方式。TODO：支持ssl验证
+    if !verify_password(username, password) {
+        tracing::error!("[SSH] Authentication failed");
+        std::process::exit(1)
+    }
+
+    // 获取登陆Shell。AI: 在unix，CStr一定是utf-8
+    let pw = unsafe { &*pw };
+    let shell = unsafe { CStr::from_ptr(pw.pw_shell) }
+        .to_str()
+        .expect("unreachable");
+    let home = unsafe { CStr::from_ptr(pw.pw_dir) }
+        .to_str()
+        .expect("unreachable");
+    // 设置环境变量，设置uid，gid，调用exec等操作由标准库完成
+    std::process::Command::new(shell)
+        .gid(pw.pw_gid)
+        .uid(pw.pw_uid)
+        .current_dir(home)
+        .arg0(shell)
+        .arg("--login")
+        .env("HOME", home)
+        .env("USER", username)
+        .env("SHELL", shell)
+        .env("TERM", "xterm-256color")
+        .exec()
+    // 这里不会返回
+}
+
 async fn copy_between_pty_and_stream(
-    mut pty_master: File,
+    pty_master: OwnedFd,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
     mut recver: RequestStream<RecvStream, Bytes>,
 ) {
-    // 启动读取PTY任务
-    let master_fd = pty_master.as_raw_fd();
-    let async_fd = match AsyncFd::new(master_fd) {
-        Ok(fd) => fd,
+    let async_fd = match AsyncFd::new(pty_master) {
+        Ok(async_fd) => Arc::new(async_fd),
         Err(e) => {
-            tracing::error!("创建 AsyncFd 失败: {}", e);
-            return; // 直接返回 IO 错误
+            tracing::error!("[SSH] Failed to create async fd: {}", e);
+            sender.stop_stream(h3::error::Code::H3_NO_ERROR);
+            recver.stop_sending(h3::error::Code::H3_NO_ERROR);
+            return; // 直接结束
         }
     };
 
-    let read_task = tokio::spawn(async move {
-        let mut read_buf = [0u8; 8192];
+    // 简易异步IO
+    async fn read<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            let mut read_guard = match async_fd.readable().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::error!("等待 PTY master 可读失败: {}", e);
-                    break;
-                }
-            };
-
-            tracing::trace!("PTY master 可读事件触发");
-
-            match read_guard.try_io(|_inner| {
-                let ret = unsafe {
-                    libc::read(
-                        master_fd,                                  // 或者 _inner.as_raw_fd()
-                        read_buf.as_mut_ptr() as *mut libc::c_void, // 强制转换为 *mut c_void
-                        read_buf.len(),
-                    )
-                };
-                if ret == -1 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(ret as usize)
-                }
+            let mut read = async_fd.readable().await?;
+            if let Ok(result) = read.try_io(|async_fd| {
+                nix::unistd::read(async_fd.as_raw_fd(), buf).map_err(io::Error::from)
             }) {
-                Ok(Ok(0)) => {
-                    tracing::info!("PTY master 检测到 EOF");
-                    break;
-                }
-                Ok(Ok(n)) => {
-                    tracing::trace!("从 PTY 读取了 {} 字节", n);
-                    let data = Bytes::copy_from_slice(&read_buf[..n]);
-                    if let Err(e) = sender.send_data(data).await {
-                        tracing::error!("发送数据到 channel 失败: {}", e);
-                        break;
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("从 PTY 读取失败: {}", e);
-                    break;
-                }
-                Err(_would_block) => {
-                    tracing::trace!("try_io 返回 WouldBlock，继续等待");
-                    tokio::task::yield_now().await;
-                    continue;
-                }
+                return result;
             }
         }
-        _ = sender
-            .finish()
-            .await
-            .inspect_err(|e| tracing::error!("关闭发送端失败: {}", e));
-    });
+    }
 
-    // 启动写入PTY任务
-    let write_task = tokio::spawn(async move {
-        let mut read_buffer = Vec::new();
-        while let Ok(Some(data)) = recver.recv_data().await {
-            let buf = data.chunk();
-            read_buffer.extend_from_slice(buf);
+    async fn write<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut write = async_fd.writable().await?;
+            if let Ok(result) =
+                write.try_io(|async_fd| nix::unistd::write(async_fd, buf).map_err(io::Error::from))
+            {
+                return result;
+            }
+        }
+    }
 
-            let mut buf = std::io::Cursor::new(&read_buffer);
-            let mut de = serde_json::Deserializer::from_reader(&mut buf);
+    async fn write_all<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &[u8]) -> io::Result<()> {
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            let written = write(async_fd, remaining).await?;
+            remaining = &remaining[written..];
+        }
+        Ok(())
+    }
+
+    // 从pty读取，通过stream发送到client
+    let pty_master = Arc::clone(&async_fd);
+    let read_task = tokio::spawn(
+        async move {
+            let mut read_buf = [0u8; 8192];
             loop {
-                match TerminalMessage::deserialize(&mut de) {
-                    Ok(msg) => {
-                        match msg {
-                            TerminalMessage::WindowSize { rows, cols } => {
-                                // 设置PTY窗口大小
-                                unsafe {
-                                    let winsz = libc::winsize {
-                                        ws_row: rows,
-                                        ws_col: cols,
-                                        ws_xpixel: 0,
-                                        ws_ypixel: 0,
-                                    };
-                                    libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsz);
-                                }
-                            }
-                            TerminalMessage::ControlSequence(sequence) => {
-                                if let Err(e) = pty_master.write_all(sequence.as_bytes()) {
-                                    tracing::error!("写入PTY控制序列失败: {}", e);
-                                    recver.stop_sending(h3::error::Code::H3_NO_ERROR);
-                                    return;
-                                }
-                            }
-                            TerminalMessage::Heartbeat => {
-                                // 心跳包,不需要处理
-                                continue;
-                            }
+                match read(&pty_master, &mut read_buf).await {
+                    Ok(0) => {
+                        tracing::debug!("[SSH] Read PTY EOF");
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = Bytes::copy_from_slice(&read_buf[..n]);
+                        if sender.send_data(data).await.is_err() {
+                            tracing::debug!("[SSH] Failed to send data to peer");
+                            break;
                         }
                     }
-                    Err(e) if e.is_eof() => {
-                        // 保存未处理完的数据
-                        let pos = buf.position() as usize;
-                        read_buffer.drain(..pos);
-                        break;
-                    }
                     Err(e) => {
-                        // TODO: fetal error
-                        tracing::error!("JSON解析错误: {}", e);
-                        read_buffer.clear();
+                        tracing::debug!("[SSH] Failed to read from PTY: {}", e);
                         break;
                     }
                 }
             }
+            _ = sender.finish().await
         }
-    });
+        .in_current_span(),
+    );
 
-    // 等待任意一个任务完成
+    // 解析来自client的信息，通过pty发送到shell
+    let pty_master = Arc::clone(&async_fd);
+    let write_task = tokio::spawn(
+        async move {
+            let mut read_buf = vec![];
+            'receive: while let Ok(Some(mut data)) = recver.recv_data().await {
+                while data.remaining() > 0 {
+                    let chunk = data.chunk();
+                    read_buf.extend_from_slice(chunk);
+                    data.advance(chunk.len());
+                }
+                loop {
+                    let mut unread = read_buf.as_slice();
+                    let mut de = serde_json::Deserializer::from_reader(&mut unread);
+                    let message = match TerminalMessage::deserialize(&mut de) {
+                        Ok(message) => message,
+                        // 暂停解析，等待更多数据
+                        Err(e) if e.is_eof() => continue 'receive,
+                        // 解析失败
+                        Err(e) => {
+                            tracing::debug!("[SSH] Failed to deserialize message: {e}");
+                            break 'receive;
+                        }
+                    };
+
+                    // 解析成功，移除被读取的数据
+                    read_buf.drain(..read_buf.len() - unread.len());
+                    match message {
+                        TerminalMessage::WindowSize { rows, cols } => {
+                            // 设置PTY窗口大小
+                            unsafe {
+                                let winsz = libc::winsize {
+                                    ws_row: rows,
+                                    ws_col: cols,
+                                    ws_xpixel: 0,
+                                    ws_ypixel: 0,
+                                };
+                                libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsz);
+                            }
+                        }
+                        TerminalMessage::ControlSequence(sequence) => {
+                            if let Err(e) = write_all(&pty_master, sequence.as_bytes()).await {
+                                tracing::debug!("[SSH] Failed to write sequence to PTY: {e}");
+                                break 'receive;
+                            }
+                        }
+                        TerminalMessage::Heartbeat => {
+                            // 心跳包,不需要处理
+                            continue;
+                        }
+                    }
+                }
+            }
+            recver.stop_sending(h3::error::Code::H3_NO_ERROR);
+        }
+        .in_current_span(),
+    );
+
     tokio::select! {
-        _ = read_task => {}
+        _ = read_task => {},
         _ = write_task => {}
     }
 }
@@ -383,11 +409,7 @@ fn verify_password(username: &str, password: &str) -> bool {
     return {
         let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
         auth.get_handler().set_credentials(username, password);
-        if let Err(e) = auth.authenticate() {
-            println!("Authentication failed: {e}");
-            return false;
-        }
-        true
+        auth.authenticate().is_ok()
     };
 
     #[allow(unreachable_code)]

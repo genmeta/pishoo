@@ -59,8 +59,14 @@ rpassword = { workspace = true }
 base64 = { workspace = true }
 
 
-libc = { workspace = true, optional = true }
 pam = { workspace = true, optional = true }
+nix = { workspace = true, optional = true, features = [
+    "fs",
+    "ioctl",
+    "process",
+    "term",
+    "user",
+] }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(target_os = "android")'.dependencies]
@@ -75,6 +81,6 @@ clap = { workspace = true }
 
 
 [features]
-default = []
-sshd = ["dep:libc", "dep:pam"]
+default = ["sshd"]
+sshd = ["dep:pam", "dep:nix"]
 qlog = []
