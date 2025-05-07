@@ -59,7 +59,6 @@ rpassword = { workspace = true }
 base64 = { workspace = true }
 
 
-pam = { workspace = true, optional = true }
 nix = { workspace = true, optional = true, features = [
     "fs",
     "ioctl",
@@ -67,6 +66,7 @@ nix = { workspace = true, optional = true, features = [
     "term",
     "user",
 ] }
+pam = { workspace = true, optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(target_os = "android")'.dependencies]

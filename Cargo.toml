@@ -64,9 +64,8 @@ base64 = "0.22"
 
 # --- System Interaction ---
 libc = "0.2"
-pam = "0.7"
 nix = "0.29"
-
+pam = "0.7"
 
 [patch.crates-io]
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }

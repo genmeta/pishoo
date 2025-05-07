@@ -42,11 +42,12 @@ struct Args {
     quiet: bool,
     #[arg(short = 'g', help = "set global directives out of configuration file")]
     directives: Vec<String>,
-    #[arg(
-        default_value_t = false,
-        help = "enable logging, write to /var/pishoo/pishoo.log"
-    )]
-    log: bool,
+    // TODO
+    // #[arg(
+    //     default_value_t = false,
+    //     help = "enable logging, write to /var/pishoo/pishoo.log"
+    // )]
+    // log: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]

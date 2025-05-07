@@ -14,7 +14,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
-use http::{Request, Response, StatusCode};
+use http::{HeaderMap, Request, Response, StatusCode};
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
@@ -31,6 +31,15 @@ enum TerminalMessage {
     WindowSize { rows: u16, cols: u16 },
     ControlSequence(String),
     Heartbeat,
+}
+
+// TODO：支持ssl验证
+#[derive(Debug)]
+enum Authorization {
+    Basic {
+        username: String,
+        password: Option<String>,
+    },
 }
 
 fn map_errno(errno: nix::Error, message: &str) -> std::io::Error {
@@ -56,7 +65,7 @@ fn map_errno(errno: nix::Error, message: &str) -> std::io::Error {
 async fn parse_request(
     location: &Arc<Node>,
     request: Request<()>,
-) -> (Response<()>, Result<(String, String)>) {
+) -> (Response<()>, Result<Authorization>) {
     if request.method() != http::Method::PUT {
         let resp = http::Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -73,6 +82,11 @@ async fn parse_request(
         unreachable!();
     };
 
+    let auth = match Authorization::try_from(request.headers()) {
+        Ok(auth) => auth,
+        Err((resp, error)) => return (resp, Err(error.into())),
+    };
+
     if ssh_login == "ssl" {
         let resp = http::Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -85,66 +99,8 @@ async fn parse_request(
         return (resp, Err(error.into()));
     }
 
-    // 从 Authorization 头获取认证信息
-    let auth_header = match request.headers().get("Authorization") {
-        Some(value) => value.to_str().unwrap_or_default(),
-        None => {
-            let resp = http::Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(())
-                .unwrap();
-            let error = std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Missing Authorization header",
-            );
-            return (resp, Err(error.into()));
-        }
-    };
-
-    // 解析 Basic Auth
-    use base64::Engine;
-    let credentials = match auth_header.strip_prefix("Basic ") {
-        Some(b64) => match base64::engine::general_purpose::STANDARD.decode(b64) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            Err(_) => {
-                let resp = http::Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(())
-                    .unwrap();
-                let error = std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Missing Authorization header",
-                );
-                return (resp, Err(error.into()));
-            }
-        },
-        None => {
-            let resp = http::Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(())
-                .unwrap();
-            let error = std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Missing Authorization header",
-            );
-            return (resp, Err(error.into()));
-        }
-    };
-
-    let Some((username, password)) = credentials.split_once(':') else {
-        let resp = http::Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(())
-            .unwrap();
-        let error = std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Missing Authorization header",
-        );
-        return (resp, Err(error.into()));
-    };
-
     if let Some(Value::StringVec(ssh_deny)) = location.get("ssh_deny")
-        && ssh_deny.contains(&username.to_string())
+        && ssh_deny.contains(auth.username())
     {
         let resp = http::Response::builder()
             .status(StatusCode::FORBIDDEN)
@@ -159,7 +115,7 @@ async fn parse_request(
         .status(StatusCode::OK)
         .body(())
         .unwrap();
-    (resp, Ok((username.to_string(), password.to_string())))
+    (resp, Ok(auth))
 }
 pub async fn login(
     location: &Arc<Node>,
@@ -168,10 +124,10 @@ pub async fn login(
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let (resp, result) = parse_request(location, request).await;
-    let (username, password) = match result {
-        Ok((username, password)) => {
+    let auth = match result {
+        Ok(auth) => {
             sender.send_response(resp).await?;
-            (username, password)
+            auth
         }
         Err(e) => {
             sender.send_response(resp).await?;
@@ -180,7 +136,7 @@ pub async fn login(
             return Err(e);
         }
     };
-    tracing::debug!("[SSH] Username: {}, Password: {}", username, password);
+    tracing::debug!("[SSH] Authorization: {auth:?}");
 
     // 创建一个伪终端
     let nix::pty::OpenptyResult { master, slave } =
@@ -191,9 +147,7 @@ pub async fn login(
         nix::unistd::ForkResult::Parent { child: _ } => {
             let init_master_fd = async {
                 // 断开连接
-                nix::unistd::close(slave.as_raw_fd()).map_err(|errno| {
-                    map_errno(errno, "Failed to close slave fd in master process")
-                })?;
+                drop(slave);
                 // 设置fd为非阻塞模式
                 let flags = nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::F_GETFL)
                     .map_err(|errno| map_errno(errno, "Failed to get master fd flags"))?;
@@ -223,21 +177,16 @@ pub async fn login(
         // 子进程的内容会被转发到cliet，所以使用eprintln
         nix::unistd::ForkResult::Child => {
             // 断开连接
-            if let Err(errno) = nix::unistd::close(master.as_raw_fd()) {
-                eprintln!(
-                    "[SSH] Server internal error(Failed to close master fd in child process: {errno:?})"
-                );
-                std::process::exit(1);
-            }
+            drop(master);
             // 这个函数正常不会返回。返回了就说明出错了
-            exec_shell(&username, &password, slave);
+            exec_shell(&auth, slave);
         }
     }
 
     Ok(())
 }
 
-fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> ! {
+fn exec_shell(auth: &Authorization, slave: OwnedFd) -> ! {
     fn login_tty(slave_fd: RawFd) -> nix::Result<()> {
         nix::unistd::setsid()?;
 
@@ -261,16 +210,15 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> ! {
     };
 
     // 寻找用户，验证密码
-    let user = CString::new(username).unwrap();
+    let user = CString::new(auth.username().to_owned()).unwrap();
     let pw = unsafe { libc::getpwnam(user.as_ptr()) };
     if pw.is_null() {
         eprintln!("[SSH] User not found");
         std::process::exit(1)
     }
 
-    // 暂时只支持此验证方式。TODO：支持ssl验证
-    if !verify_password(username, password) {
-        eprintln!("[SSH] Authentication failed");
+    if !auth.authorize() {
+        eprintln!("[SSH] Authentication failed!");
         std::process::exit(1)
     }
 
@@ -282,6 +230,7 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> ! {
     let home = unsafe { CStr::from_ptr(pw.pw_dir) }
         .to_str()
         .expect("unreachable");
+
     // 设置环境变量，设置uid，gid，调用exec等操作由标准库完成
     // 这里不会返回，除非exec失败
     let exec_error = std::process::Command::new(shell)
@@ -291,7 +240,7 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> ! {
         .arg0(shell)
         .arg("--login")
         .env("HOME", home)
-        .env("USER", username)
+        .env("USER", auth.username())
         .env("SHELL", shell)
         .env("TERM", "xterm-256color")
         .exec();
@@ -432,9 +381,114 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
     }
 }
 
+impl TryFrom<&HeaderMap> for Authorization {
+    type Error = (Response<()>, std::io::Error);
+
+    fn try_from(headers: &HeaderMap) -> std::result::Result<Self, Self::Error> {
+        let auth_header = match headers.get("Authorization") {
+            Some(value) => value.to_str().unwrap_or_default(),
+            None => {
+                let resp = http::Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(())
+                    .unwrap();
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Missing Authorization header",
+                );
+                return Err((resp, error));
+            }
+        };
+
+        // 解析 Basic Auth
+        use base64::Engine;
+        let credentials = match auth_header.strip_prefix("Basic ") {
+            Some(b64) => match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(_) => {
+                    let resp = http::Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(())
+                        .unwrap();
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Missing Authorization header",
+                    );
+                    return Err((resp, error));
+                }
+            },
+            None => {
+                let resp = http::Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(())
+                    .unwrap();
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Missing Authorization header",
+                );
+                return Err((resp, error));
+            }
+        };
+
+        Ok(match credentials.split_once(':') {
+            Some((username, password)) => Self::Basic {
+                username: username.to_owned(),
+                password: Some(password.to_owned()),
+            },
+            None => Self::Basic {
+                username: credentials,
+                password: None,
+            },
+        })
+    }
+}
+
+impl Authorization {
+    fn username(&self) -> &String {
+        match self {
+            Authorization::Basic { username, .. } => username,
+        }
+    }
+
+    fn authorize(&self) -> bool {
+        match self {
+            Authorization::Basic {
+                username,
+                password: None,
+            } => {
+                const MAX_RETRIES: usize = 3;
+                for i in 0..MAX_RETRIES {
+                    match rpassword::prompt_password(format!(
+                        "[SSH] Please input password for {username}: "
+                    )) {
+                        Ok(password) => match verify_password(username, &password) {
+                            true => return true,
+                            false if i == MAX_RETRIES - 1 => break,
+                            false => {
+                                eprintln!("[SSH] Authentication failed! Try again.");
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("[SSH] Failed to read password: {e}");
+                            return false;
+                        }
+                    }
+                }
+                false
+            }
+            Authorization::Basic {
+                password: Some(password),
+                ..
+            } => verify_password(self.username(), password),
+        }
+    }
+}
+
 fn verify_password(username: &str, password: &str) -> bool {
     #[cfg(unix)]
     return {
+        tracing::debug!("[SSH] Verifying password {password} for {username}");
         let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
         auth.get_handler().set_credentials(username, password);
         auth.authenticate().is_ok()
