@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use gm_quic::QuicServer;
@@ -158,6 +158,7 @@ fn create_server_params() -> gm_quic::ServerParameters {
     params.set_initial_max_stream_data_bidi_local(1u32 << 20);
     params.set_initial_max_stream_data_bidi_remote(1u32 << 20);
     params.set_active_connection_id_limit(10u32);
+    params.set_max_idle_timeout(Duration::from_secs(30));
 
     params
 }
