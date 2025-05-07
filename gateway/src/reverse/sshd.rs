@@ -143,6 +143,18 @@ async fn parse_request(
         return (resp, Err(error.into()));
     };
 
+    if let Some(Value::StringVec(ssh_deny)) = location.get("ssh_deny")
+        && ssh_deny.contains(&username.to_string())
+    {
+        let resp = http::Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(())
+            .unwrap();
+        let error =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "User is not allowed");
+        return (resp, Err(error.into()));
+    }
+
     let resp = http::Response::builder()
         .status(StatusCode::OK)
         .body(())
@@ -152,7 +164,7 @@ async fn parse_request(
 pub async fn login(
     location: &Arc<Node>,
     request: Request<()>,
-    recver: RequestStream<RecvStream, Bytes>,
+    mut recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let (resp, result) = parse_request(location, request).await;
@@ -177,35 +189,55 @@ pub async fn login(
     // Fork出子进程
     match unsafe { nix::unistd::fork() }.map_err(|errno| map_errno(errno, "Failed to fork"))? {
         nix::unistd::ForkResult::Parent { child: _ } => {
-            // 断开连接
-            nix::unistd::close(slave.as_raw_fd())
-                .map_err(|errno| map_errno(errno, "Failed to close slave fd in master process"))?;
-            // 设置fd为非阻塞模式
-            unsafe {
-                let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
-                libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let init_master_fd = async {
+                // 断开连接
+                nix::unistd::close(slave.as_raw_fd()).map_err(|errno| {
+                    map_errno(errno, "Failed to close slave fd in master process")
+                })?;
+                // 设置fd为非阻塞模式
+                let flags = nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::F_GETFL)
+                    .map_err(|errno| map_errno(errno, "Failed to get master fd flags"))?;
+                let flags =
+                    nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK;
+                nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::F_SETFL(flags))
+                    .map_err(|errno| map_errno(errno, "Failed to set master fd flags"))?;
+
+                // 创建async_fd
+                AsyncFd::new(master).map_err(|e| {
+                    io::Error::new(e.kind(), format!("Failed to create async fd: {e}"))
+                })
             };
-            // 启动
-            copy_between_pty_and_stream(master, sender, recver).await;
+            match init_master_fd.await {
+                Ok(async_fd) => {
+                    copy_between_pty_and_stream(async_fd, sender, recver).await;
+                }
+                Err(e) => {
+                    tracing::error!("[SSH] Failed to init master fd: {e}");
+                    sender.stop_stream(h3::error::Code::H3_NO_ERROR);
+                    recver.stop_sending(h3::error::Code::H3_NO_ERROR);
+                    return Err(e.into());
+                }
+            }
         }
         // 子进程不要抛出错误，出现错误，打印日志，直接exit
+        // 子进程的内容会被转发到cliet，所以使用eprintln
         nix::unistd::ForkResult::Child => {
             // 断开连接
             if let Err(errno) = nix::unistd::close(master.as_raw_fd()) {
-                tracing::error!("[SSH] Failed to close master fd in child process: {errno:?}");
+                eprintln!(
+                    "[SSH] Server internal error(Failed to close master fd in child process: {errno:?})"
+                );
                 std::process::exit(1);
             }
             // 这个函数正常不会返回。返回了就说明出错了
-            let exec_error = exec_shell(&username, &password, slave);
-            tracing::error!("[SSH] Failed to exec shell: {exec_error:?}");
-            std::process::exit(1)
+            exec_shell(&username, &password, slave);
         }
     }
 
     Ok(())
 }
 
-fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> io::Error {
+fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> ! {
     fn login_tty(slave_fd: RawFd) -> nix::Result<()> {
         nix::unistd::setsid()?;
 
@@ -224,20 +256,21 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> io::Error {
     }
     // 设置终端为登录终端
     if let Err(errno) = login_tty(slave.as_raw_fd()) {
-        return map_errno(errno, "Failed to login_tty");
+        eprintln!("[SSH] Server internal error(Failed to login_tty: {errno:?})");
+        std::process::exit(1);
     };
 
     // 寻找用户，验证密码
     let user = CString::new(username).unwrap();
     let pw = unsafe { libc::getpwnam(user.as_ptr()) };
     if pw.is_null() {
-        tracing::error!("[SSH] User not found");
+        eprintln!("[SSH] User not found");
         std::process::exit(1)
     }
 
     // 暂时只支持此验证方式。TODO：支持ssl验证
     if !verify_password(username, password) {
-        tracing::error!("[SSH] Authentication failed");
+        eprintln!("[SSH] Authentication failed");
         std::process::exit(1)
     }
 
@@ -250,7 +283,8 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> io::Error {
         .to_str()
         .expect("unreachable");
     // 设置环境变量，设置uid，gid，调用exec等操作由标准库完成
-    std::process::Command::new(shell)
+    // 这里不会返回，除非exec失败
+    let exec_error = std::process::Command::new(shell)
         .gid(pw.pw_gid)
         .uid(pw.pw_uid)
         .current_dir(home)
@@ -260,25 +294,17 @@ fn exec_shell(username: &str, password: &str, slave: OwnedFd) -> io::Error {
         .env("USER", username)
         .env("SHELL", shell)
         .env("TERM", "xterm-256color")
-        .exec()
-    // 这里不会返回
+        .exec();
+
+    eprintln!("[SSH] Server internal error(Failed to exec shell: {exec_error:?})");
+    std::process::exit(1)
 }
 
-async fn copy_between_pty_and_stream(
-    pty_master: OwnedFd,
+async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
+    pty_master: AsyncFd<F>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
     mut recver: RequestStream<RecvStream, Bytes>,
 ) {
-    let async_fd = match AsyncFd::new(pty_master) {
-        Ok(async_fd) => Arc::new(async_fd),
-        Err(e) => {
-            tracing::error!("[SSH] Failed to create async fd: {}", e);
-            sender.stop_stream(h3::error::Code::H3_NO_ERROR);
-            recver.stop_sending(h3::error::Code::H3_NO_ERROR);
-            return; // 直接结束
-        }
-    };
-
     // 简易异步IO
     async fn read<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &mut [u8]) -> io::Result<usize> {
         loop {
@@ -310,6 +336,8 @@ async fn copy_between_pty_and_stream(
         }
         Ok(())
     }
+
+    let async_fd = Arc::new(pty_master);
 
     // 从pty读取，通过stream发送到client
     let pty_master = Arc::clone(&async_fd);

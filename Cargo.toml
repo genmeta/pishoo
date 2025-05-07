@@ -80,8 +80,8 @@ qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = 
 panic = "abort"
 
 [profile.release]
-# opt-level = "z"
-# lto = true
-# codegen-units = 1
-# panic = "abort"
-# strip = "symbols"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

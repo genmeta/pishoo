@@ -20,7 +20,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("proxy_pass", Box::new(parse_string));
     commands.insert("ssh_login", Box::new(parse_ssh_login));
     commands.insert("ssh_ssl_user", Box::new(parse_ssh_ssl_user));
-    commands.insert("ssh_deny", Box::new(parse_string));
+    commands.insert("ssh_deny", Box::new(parse_string_vec));
 
     let pattern = parse_pattern(&directive.args)?;
     let mut values = HashMap::new();
