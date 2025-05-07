@@ -153,10 +153,10 @@ fn create_server_params() -> gm_quic::ServerParameters {
 
     params.set_initial_max_streams_bidi(100u32); // 双向流限制
     params.set_initial_max_streams_uni(100u32); // 单向流限制
-    params.set_initial_max_data(1u32 << 30); // 连接总数据限制
-    params.set_initial_max_stream_data_uni(1u32 << 30);
-    params.set_initial_max_stream_data_bidi_local(1u32 << 30);
-    params.set_initial_max_stream_data_bidi_remote(1u32 << 30);
+    params.set_initial_max_data(1u32 << 20); // 连接总数据限制
+    params.set_initial_max_stream_data_uni(1u32 << 20);
+    params.set_initial_max_stream_data_bidi_local(1u32 << 20);
+    params.set_initial_max_stream_data_bidi_remote(1u32 << 20);
     params.set_active_connection_id_limit(10u32);
 
     params
