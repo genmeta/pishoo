@@ -878,7 +878,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "dashmap",
@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1402,9 +1402,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1841,7 +1841,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1860,7 +1860,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "qbase",
  "qevent",
@@ -1872,7 +1872,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1895,7 +1895,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -1913,7 +1913,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1933,7 +1933,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1951,7 +1951,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1974,7 +1974,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1989,7 +1989,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.2.1"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#780ddc287f8945cc55a8095c75c7d5f5c7a92a0c"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#9b73cd6f3a3ef5cd8cdbd525a93edba8a1e4f92b"
 dependencies = [
  "bytes",
  "futures",
@@ -2307,9 +2307,12 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c"
+checksum = "229a4a4c221013e7e1f1a043678c5cc39fe5171437c88fb47151a21e6f5b5c79"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "rustls-webpki"

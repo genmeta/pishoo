@@ -70,7 +70,7 @@ pub async fn proxy_inner(
             Ok(response)
         }
         Err(err) => {
-            let reason = format!("[Forward][{}] Request proxy failed: {}", uri, err);
+            let reason = format!("[Forward][{uri}] Request proxy failed: {err}");
             error!("{}", reason);
             Ok(build_error_response(reason))
         }
@@ -262,8 +262,8 @@ async fn create_quic_connection(
                 };
 
                 return {
-                    tracing::Span::current().record("odcid", format!("{:x}", origin_dcid));
-                    result.map_err(|e| format!("h3 client creation failed: {}", e))
+                    tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
+                    result.map_err(|e| format!("h3 client creation failed: {e}"))
                 };
             }
             Err(e) => {

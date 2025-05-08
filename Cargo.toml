@@ -64,7 +64,7 @@ base64 = "0.22"
 
 # --- System Interaction ---
 libc = "0.2"
-nix = "0.29"
+nix = "0.30"
 pam = "0.7"
 
 [patch.crates-io]

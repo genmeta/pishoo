@@ -237,7 +237,7 @@ fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<&str, String> {
         .host()
         .or_else(|| req.headers().get("host").and_then(|h| h.to_str().ok()))
         .ok_or_else(|| {
-            let reason = format!("Invalid Host header: {:?}", req);
+            let reason = format!("Invalid Host header: {req:?}");
             warn!("{}", reason);
             reason
         })

@@ -80,7 +80,7 @@ pub(crate) async fn index(
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        format!("File not found: {}", file_path),
+        format!("File not found: {file_path}"),
     ))
 }
 

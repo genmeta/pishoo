@@ -132,7 +132,7 @@ impl Resolver for UdpResolver {
     }
 
     async fn look_up(&self, name: &str) -> io::Result<Vec<EndpointAddr>> {
-        let query = format!("QUERY {}", name);
+        let query = format!("QUERY {name}");
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         let mut buffer = vec![0u8; 1024];
         const RETRY: u8 = 3;
@@ -164,14 +164,14 @@ fn dns_deserialize(response: &str) -> io::Result<Vec<EndpointAddr>> {
     let invalid_data = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
     let (addrs, _ttl) = response
         .split_once(' ')
-        .ok_or_else(|| invalid_data(format!("invalid format: {}", response)))?;
+        .ok_or_else(|| invalid_data(format!("invalid format: {response}")))?;
 
     addrs
         .split(',')
         .map(|s| {
             s.trim().parse().map_err(|e| {
                 warn!("Invalid endpoint address '{}': {}", s, e);
-                invalid_data(format!("address parse failed: {}", e))
+                invalid_data(format!("address parse failed: {e}"))
             })
         })
         .collect()
@@ -182,7 +182,7 @@ fn dns_serialize(addresses: &[EndpointAddr]) -> String {
     addresses
         .iter()
         .map(|ep| match ep {
-            EndpointAddr::Agent { agent, outer } => format!("{}-{}", agent, outer),
+            EndpointAddr::Agent { agent, outer } => format!("{agent}-{outer}"),
             EndpointAddr::Direct { addr } => addr.to_string(),
         })
         .collect::<Vec<String>>()

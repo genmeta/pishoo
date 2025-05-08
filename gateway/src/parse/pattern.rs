@@ -55,11 +55,10 @@ pub fn parse_pattern(args: &[String]) -> Result<Pattern> {
             "=" => Pattern::Exact(pattern.clone()),
             "^~" => Pattern::Prefix(pattern.clone()),
             "~" => Pattern::Regex(Regex::new(pattern)?),
-            "~*" => Pattern::CRegex(Regex::new(&format!("(?i){}", pattern))?),
+            "~*" => Pattern::CRegex(Regex::new(&format!("(?i){pattern}"))?),
             _ => {
                 return Err(CustomError::UnsupportedConfig(format!(
-                    "unsupported location symbol: {}",
-                    symbol
+                    "unsupported location symbol: {symbol}"
                 )));
             }
         },

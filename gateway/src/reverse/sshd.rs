@@ -2,7 +2,7 @@ use std::{
     ffi::{CStr, CString},
     io,
     os::{
-        fd::AsRawFd,
+        fd::{AsFd, AsRawFd, FromRawFd},
         unix::{
             io::RawFd,
             prelude::{CommandExt, OwnedFd},
@@ -15,7 +15,10 @@ use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{HeaderMap, Request, Response, StatusCode};
-use nix::libc;
+use nix::{
+    libc,
+    unistd::{dup2_stderr, dup2_stdin, dup2_stdout},
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tracing::Instrument;
@@ -149,11 +152,11 @@ pub async fn login(
                 // 断开连接
                 drop(slave);
                 // 设置fd为非阻塞模式
-                let flags = nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::F_GETFL)
+                let flags = nix::fcntl::fcntl(master.as_fd(), nix::fcntl::F_GETFL)
                     .map_err(|errno| map_errno(errno, "Failed to get master fd flags"))?;
                 let flags =
                     nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK;
-                nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::F_SETFL(flags))
+                nix::fcntl::fcntl(master.as_fd(), nix::fcntl::F_SETFL(flags))
                     .map_err(|errno| map_errno(errno, "Failed to set master fd flags"))?;
 
                 // 创建async_fd
@@ -192,10 +195,11 @@ fn exec_shell(auth: &Authorization, slave: OwnedFd) -> ! {
 
         nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
         unsafe { tiocsctty(slave_fd, 0)? };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave_fd) };
 
-        nix::unistd::dup2(slave_fd, libc::STDIN_FILENO)?;
-        nix::unistd::dup2(slave_fd, libc::STDOUT_FILENO)?;
-        nix::unistd::dup2(slave_fd, libc::STDERR_FILENO)?;
+        dup2_stdin(slave.as_fd())?;
+        dup2_stdout(slave.as_fd())?;
+        dup2_stderr(slave.as_fd())?;
 
         if slave_fd > libc::STDERR_FILENO {
             nix::unistd::close(slave_fd)?;
@@ -258,9 +262,9 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
     async fn read<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut read = async_fd.readable().await?;
-            if let Ok(result) = read.try_io(|async_fd| {
-                nix::unistd::read(async_fd.as_raw_fd(), buf).map_err(io::Error::from)
-            }) {
+            if let Ok(result) =
+                read.try_io(|async_fd| nix::unistd::read(async_fd, buf).map_err(io::Error::from))
+            {
                 return result;
             }
         }
