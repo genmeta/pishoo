@@ -60,7 +60,7 @@ impl ProductQuicInterface for TraversalFactory {
 }
 
 // TODO 分类 ADDRESS 返回 IP, name
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_env = "ohos"))]
 fn scan_device() -> HashMap<String, String> {
     use std::net::IpAddr;
 
@@ -102,7 +102,7 @@ fn scan_device() -> HashMap<String, String> {
     addresses
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub(crate) fn scan_device() -> HashMap<String, String> {
     use tracing::error;
 

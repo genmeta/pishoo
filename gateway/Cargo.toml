@@ -69,10 +69,10 @@ nix = { workspace = true, optional = true, features = [
 pam = { workspace = true, optional = true }
 
 # --- Platform Specific Dependencies ---
-[target.'cfg(target_os = "android")'.dependencies]
+[target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
 pnet = "0.35.0"
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
+[target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
 getifs = "0.3"
 
 
