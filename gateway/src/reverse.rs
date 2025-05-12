@@ -5,13 +5,13 @@ use gm_quic::QuicServer;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
+use qdns::{Dns, Resolve};
 use tracing::{debug, error, info};
 
 use crate::{
-    dns::Dns,
     error::{CustomError, Result},
     localhost::TraversalFactory,
-    parse::{Node, Value},
+    parse::{Node, Resolver, Value},
     reverse,
 };
 
@@ -23,7 +23,7 @@ mod sshd;
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
-type ResolverList = Vec<(String, SocketAddr)>;
+type ServerResolverList<'a> = Vec<(String, &'a Resolver)>;
 
 /// Start the QUIC proxy server
 ///
@@ -34,22 +34,31 @@ type ResolverList = Vec<(String, SocketAddr)>;
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
 pub async fn serve(bind: SocketAddr, servers: Vec<Arc<Node>>) -> Result<String> {
-    let (routers, resolvers) = init_routers(&servers)?;
+    let (routers, server_resolvers) = init_routers(&servers)?;
+
     let (quic_server, binds) = create_quic_server(bind, &servers)?;
-    for (server_name, resolver) in resolvers {
+
+    // 复用resolvers表。对于http dns resolver尤其重要
+    let mut resolvers = HashMap::new();
+    for (server_name, resolver) in server_resolvers {
+        let resolver = resolvers
+            .entry(resolver)
+            .or_insert_with(|| Arc::<dyn Resolve + Send + Sync>::from(resolver))
+            .clone();
         Dns::add_record(server_name, resolver, binds.clone());
     }
+
     handle_connections(quic_server, routers).await?;
     Ok("Server exited".to_string())
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
-fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ResolverList)> {
+fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ServerResolverList)> {
     let mut routers = HashMap::new();
     let mut resolvers = vec![];
     for server in servers {
-        let resolver = if let Some(Value::Addr(resolver)) = server.get("resolver") {
-            *resolver
+        let resolver = if let Some(Value::Resolver(resolver)) = server.get("resolver") {
+            resolver
         } else {
             unreachable!("Invalid resolver address");
         };

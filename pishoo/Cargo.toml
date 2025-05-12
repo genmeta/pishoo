@@ -24,6 +24,9 @@ assets = [["target/release/pishoo", "usr/bin/", "755"]]
 # --- Workspace Member ---
 gateway = { path = "../gateway" }
 
+# --- DNS Publishing & Resolution 
+qdns = { workspace = true }
+
 # --- Core & Error Handling ---
 anyhow = { workspace = true }
 
@@ -37,6 +40,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
+
 
 [features]
 default = []

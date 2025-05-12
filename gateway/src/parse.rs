@@ -7,12 +7,13 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use conf::parse_conf;
-use http::{HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
 use pattern::Pattern;
+use qdns::Resolve;
 use tokio::sync::OnceCell;
 use tracing::error;
 
@@ -28,6 +29,7 @@ type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
 #[derive(Debug)]
 pub enum Value {
     String(String),
+    Resolver(Resolver),
     StringVec(Vec<String>),
     StringMap(HashMap<String, String>),
     Boolean(bool),
@@ -48,6 +50,27 @@ impl Value {
             Value::ValueMap(map) => map.get(key),
             Value::Pattern(_, map) => map.get(key),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub enum Resolver {
+    Udp { server_addr: SocketAddr },
+    Http { base_url: Uri },
+}
+
+impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
+    fn from(resolver: &Resolver) -> Self {
+        use qdns::*;
+        match resolver {
+            Resolver::Udp { server_addr } => {
+                Arc::new(UdpResolver::new(*server_addr)) as Arc<dyn Resolve + Send + Sync>
+            }
+            Resolver::Http { base_url } => Arc::new(
+                HttpResolver::new(base_url.to_string())
+                    .expect("HTTP dns server base_url has been checked"),
+            ),
         }
     }
 }
@@ -175,6 +198,32 @@ fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
             let addr = string.parse::<SocketAddr>()?;
             Ok(Value::Addr(addr))
         }
+        _ => Err(anyhow!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        )),
+    }
+}
+
+fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [kind, resolver] => match kind.as_str() {
+            "udp" => {
+                let server_addr = resolver
+                    .parse::<SocketAddr>()
+                    .map_err(|e| anyhow!("Invalid address whiling parsing udp resolver: {e:?}",))?;
+                Ok(Value::Resolver(Resolver::Udp { server_addr }))
+            }
+            "http" => {
+                let base_url = resolver.parse::<Uri>().map_err(|e| {
+                    anyhow!("Invalid address whiling parsing http resolver: {e:?}",)
+                })?;
+                Ok(Value::Resolver(Resolver::Http { base_url }))
+            }
+            _ => Err(anyhow!(
+                "Unknown resolver kind: {kind}, expected `udp` or `http`"
+            )),
+        },
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
             directive.name

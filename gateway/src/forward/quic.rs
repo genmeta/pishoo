@@ -1,19 +1,18 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use bytes::Buf;
 use gm_quic::QuicClient;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
+use qdns::Resolve;
 use tokio::time::timeout;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{Instrument, error, info, warn};
 
 use super::{BoxResponse, H3Conn, H3SendRequest};
-use crate::{
-    Resolver,
-    dns::UdpResolver,
-    forward::{CHANNEL_BUFFER_SIZE, build_empty_response, build_error_response, validate_host},
+use crate::forward::{
+    CHANNEL_BUFFER_SIZE, build_empty_response, build_error_response, validate_host,
 };
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
@@ -21,7 +20,7 @@ const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 pub async fn proxy(
     quic_client: Arc<QuicClient>,
     req: Request<hyper::body::Incoming>,
-    resolver: SocketAddr,
+    resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
     proxy_inner(quic_client, req, resolver)
         .instrument(tracing::info_span!("proxy", odcid = tracing::field::Empty))
@@ -32,7 +31,7 @@ pub async fn proxy(
 pub async fn proxy_inner(
     quic_client: Arc<QuicClient>,
     req: Request<hyper::body::Incoming>,
-    resolver: SocketAddr,
+    resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
     info!("[Forward] Request: {}", uri);
@@ -81,7 +80,7 @@ pub async fn proxy_inner(
 pub async fn connect(
     quic_client: Arc<QuicClient>,
     req: Request<hyper::body::Incoming>,
-    resolver: SocketAddr,
+    resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
 
@@ -98,7 +97,8 @@ pub async fn connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
-                let service = service_fn(move |req| proxy(quic_client.clone(), req, resolver));
+                let service =
+                    service_fn(move |req| proxy(quic_client.clone(), req, resolver.clone()));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -204,15 +204,13 @@ async fn send(
 async fn create_quic_connection(
     quic_client: Arc<QuicClient>,
     host: &str,
-    resolver: SocketAddr,
+    resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<(H3Conn, H3SendRequest), String> {
-    let resolver = UdpResolver::new(resolver);
-
     let mut remote_endpoints = Vec::new();
 
     // DNS 解析重试
     for retry in 0..MAX_RETRY_COUNT {
-        match resolver.look_up(host).await {
+        match resolver.lookup(host).await {
             Ok(endpoints) => {
                 info!("[DNS]: resolved: {host} -> {endpoints:?}");
                 remote_endpoints = endpoints;

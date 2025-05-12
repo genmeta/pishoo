@@ -7,6 +7,7 @@ use http::StatusCode;
 use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
+use qdns::Resolve;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -60,11 +61,12 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
 
     info!("Listening on: http://{}", local_addr);
 
-    let resolver = if let Some(Value::Addr(resolver)) = node.get("resolver") {
-        *resolver
-    } else {
-        unreachable!("Resolver address is required");
-    };
+    let resolver: Arc<dyn Resolve + Send + Sync> =
+        if let Some(Value::Resolver(resolver)) = node.get("resolver") {
+            resolver.into()
+        } else {
+            unreachable!("Resolver address is required");
+        };
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
@@ -78,6 +80,7 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
             let io = TokioIo::new(stream);
             let quic_client = quic_client.clone();
             let acl = acl.clone();
+            let resolver = resolver.clone();
 
             tokio::task::spawn({
                 async move {
@@ -91,6 +94,7 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
 
                         let is_connect = req.method() == "CONNECT";
                         let quic_client = quic_client.clone();
+                        let resolver = resolver.clone();
                         async move {
                             if is_connect {
                                 forward::quic::connect(quic_client, req, resolver).await

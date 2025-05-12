@@ -5,7 +5,7 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
     Node, ParseFn, Value, location::parse_location, parse_address, parse_header_value, parse_path,
-    parse_string_vec, parse_types,
+    parse_resolver, parse_string_vec, parse_types,
 };
 
 pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
@@ -13,7 +13,7 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
 
     commands.insert("listen", Box::new(parse_address));
     commands.insert("server_name", Box::new(parse_string_vec));
-    commands.insert("resolver", Box::new(parse_address));
+    commands.insert("resolver", Box::new(parse_resolver));
     commands.insert("ssl_certificate", Box::new(parse_path));
     commands.insert("ssl_certificate_key", Box::new(parse_path));
     commands.insert("location", Box::new(parse_location));

@@ -3,11 +3,11 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use anyhow::Result;
 use clap::{Parser, command};
 use gateway::{
-    dns::Dns,
     forward,
     parse::{self, Value},
     reverse,
 };
+use qdns::Dns;
 use tokio::task::JoinSet;
 
 #[derive(Parser, Debug)]
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
             .push(Arc::clone(server));
     }
 
-    // 启动 DNS 服务器
+    // 启动自动 DNS 汇报
     let dns = Dns::default();
     dns.spawn_publish();
 
