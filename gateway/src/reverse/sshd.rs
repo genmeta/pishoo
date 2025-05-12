@@ -2,11 +2,8 @@ use std::{
     ffi::{CStr, CString},
     io,
     os::{
-        fd::{AsFd, AsRawFd, FromRawFd},
-        unix::{
-            io::RawFd,
-            prelude::{CommandExt, OwnedFd},
-        },
+        fd::{AsFd, AsRawFd},
+        unix::prelude::CommandExt,
     },
     sync::Arc,
 };
@@ -15,10 +12,7 @@ use bytes::{Buf, Bytes};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{HeaderMap, Request, Response, StatusCode};
-use nix::{
-    libc,
-    unistd::{dup2_stderr, dup2_stdin, dup2_stdout},
-};
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tracing::Instrument;
@@ -141,16 +135,12 @@ pub async fn login(
     };
     tracing::debug!("[SSH] Authorization: {auth:?}");
 
-    // 创建一个伪终端
-    let nix::pty::OpenptyResult { master, slave } =
-        nix::pty::openpty(None, None).map_err(|errno| map_errno(errno, "Failed to openpty"))?;
-
-    // Fork出子进程
-    match unsafe { nix::unistd::fork() }.map_err(|errno| map_errno(errno, "Failed to fork"))? {
-        nix::unistd::ForkResult::Parent { child: _ } => {
+    // 创建一个伪终端，frok子进程，设置终端为登录终端
+    match unsafe { nix::pty::forkpty(None, None) }
+        .map_err(|errno| map_errno(errno, "Failed to forkpty"))?
+    {
+        nix::pty::ForkptyResult::Parent { child: _, master } => {
             let init_master_fd = async {
-                // 断开连接
-                drop(slave);
                 // 设置fd为非阻塞模式
                 let flags = nix::fcntl::fcntl(master.as_fd(), nix::fcntl::F_GETFL)
                     .map_err(|errno| map_errno(errno, "Failed to get master fd flags"))?;
@@ -178,41 +168,13 @@ pub async fn login(
         }
         // 子进程不要抛出错误，出现错误，打印日志，直接exit
         // 子进程的内容会被转发到cliet，所以使用eprintln
-        nix::unistd::ForkResult::Child => {
-            // 断开连接
-            drop(master);
-            // 这个函数正常不会返回。返回了就说明出错了
-            exec_shell(&auth, slave);
-        }
+        nix::pty::ForkptyResult::Child => exec_shell(&auth),
     }
 
     Ok(())
 }
 
-fn exec_shell(auth: &Authorization, slave: OwnedFd) -> ! {
-    fn login_tty(slave_fd: RawFd) -> nix::Result<()> {
-        nix::unistd::setsid()?;
-
-        nix::ioctl_write_int_bad!(tiocsctty, libc::TIOCSCTTY);
-        unsafe { tiocsctty(slave_fd, 0)? };
-        let slave = unsafe { OwnedFd::from_raw_fd(slave_fd) };
-
-        dup2_stdin(slave.as_fd())?;
-        dup2_stdout(slave.as_fd())?;
-        dup2_stderr(slave.as_fd())?;
-
-        if slave_fd > libc::STDERR_FILENO {
-            nix::unistd::close(slave_fd)?;
-        }
-
-        Ok(())
-    }
-    // 设置终端为登录终端
-    if let Err(errno) = login_tty(slave.as_raw_fd()) {
-        eprintln!("[SSH] Server internal error(Failed to login_tty: {errno:?})");
-        std::process::exit(1);
-    };
-
+fn exec_shell(auth: &Authorization) -> ! {
     // 寻找用户，验证密码
     let user = CString::new(auth.username().to_owned()).unwrap();
     let pw = unsafe { libc::getpwnam(user.as_ptr()) };
