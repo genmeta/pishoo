@@ -13,7 +13,7 @@ use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{HeaderMap, Request, Response, StatusCode};
 use nix::libc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 use tracing::Instrument;
 
@@ -23,10 +23,11 @@ use crate::{
 };
 
 // 定义客户端与服务器通信的消息结构
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 enum TerminalMessage {
     WindowSize { rows: u16, cols: u16 },
-    ControlSequence(String),
+    Terminal { sequence: Vec<u8> },
+    // ControlSequence(String),
     Heartbeat,
 }
 
@@ -296,7 +297,7 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
                 }
                 loop {
                     let mut unread = read_buf.as_slice();
-                    let mut de = serde_json::Deserializer::from_reader(&mut unread);
+                    let mut de = serde_cbor::Deserializer::from_reader(&mut unread);
                     let message = match TerminalMessage::deserialize(&mut de) {
                         Ok(message) => message,
                         // 暂停解析，等待更多数据
@@ -311,6 +312,14 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
                     // 解析成功，移除被读取的数据
                     read_buf.drain(..read_buf.len() - unread.len());
                     match message {
+                        // 最通用的消息
+                        TerminalMessage::Terminal { sequence } => {
+                            // 发送数据到shell
+                            if let Err(e) = write_all(&pty_master, &sequence).await {
+                                tracing::debug!("[SSH] Failed to write sequence to PTY: {e}");
+                                break 'receive;
+                            }
+                        }
                         TerminalMessage::WindowSize { rows, cols } => {
                             // 设置PTY窗口大小
                             unsafe {
@@ -321,12 +330,6 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
                                     ws_ypixel: 0,
                                 };
                                 libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsz);
-                            }
-                        }
-                        TerminalMessage::ControlSequence(sequence) => {
-                            if let Err(e) = write_all(&pty_master, sequence.as_bytes()).await {
-                                tracing::debug!("[SSH] Failed to write sequence to PTY: {e}");
-                                break 'receive;
                             }
                         }
                         TerminalMessage::Heartbeat => {
