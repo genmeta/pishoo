@@ -179,12 +179,12 @@ fn exec_shell(auth: &Authorization) -> ! {
     let user = CString::new(auth.username().to_owned()).unwrap();
     let pw = unsafe { libc::getpwnam(user.as_ptr()) };
     if pw.is_null() {
-        eprintln!("[SSH] User not found");
+        eprintln!("User not found");
         std::process::exit(1)
     }
 
     if !auth.authorize() {
-        eprintln!("[SSH] Authentication failed!");
+        eprintln!("Authentication failed!");
         std::process::exit(1)
     }
 
@@ -211,7 +211,7 @@ fn exec_shell(auth: &Authorization) -> ! {
         .env("TERM", "xterm-256color")
         .exec();
 
-    eprintln!("[SSH] Server internal error(Failed to exec shell: {exec_error:?})");
+    eprintln!("Server internal error(Failed to exec shell: {exec_error:?})");
     std::process::exit(1)
 }
 
@@ -425,18 +425,18 @@ impl Authorization {
                 const MAX_RETRIES: usize = 3;
                 for i in 0..MAX_RETRIES {
                     match rpassword::prompt_password(format!(
-                        "[SSH] Please input password for {username}: "
+                        "Please input password for {username}: "
                     )) {
                         Ok(password) => match verify_password(username, &password) {
                             true => return true,
                             false if i == MAX_RETRIES - 1 => break,
                             false => {
-                                eprintln!("[SSH] Authentication failed! Try again.");
+                                eprintln!("Authentication failed! Try again.");
                                 continue;
                             }
                         },
                         Err(e) => {
-                            eprintln!("[SSH] Failed to read password: {e}");
+                            eprintln!("Failed to read password: {e}");
                             return false;
                         }
                     }
