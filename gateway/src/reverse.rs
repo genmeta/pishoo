@@ -6,11 +6,11 @@ use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
 use qdns::{Dns, Resolve};
+use qtraversal::iface::TraversalFactory;
 use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    localhost::TraversalFactory,
     parse::{Node, Resolver, Value},
     reverse,
 };
@@ -96,7 +96,7 @@ fn create_quic_server(
 
     if ip.is_unspecified() {
         for device_ip in factory.devices().keys() {
-            binds.push(SocketAddr::new(device_ip.parse()?, port));
+            binds.push(SocketAddr::new(*device_ip, port));
         }
     } else {
         binds.push(bind);

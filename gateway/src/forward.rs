@@ -8,6 +8,7 @@ use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::Resolve;
+use qtraversal::iface::TraversalFactory;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -16,7 +17,6 @@ use crate::{
     command,
     error::CustomError,
     forward,
-    localhost::TraversalFactory,
     parse::{Node, Value},
 };
 
@@ -167,15 +167,8 @@ async fn create_quic_client() -> QuicClient {
     let mut binds = Vec::new();
 
     for device_ip in factory.devices().keys() {
-        let device_ip = match device_ip.parse() {
-            Ok(ip) => ip,
-            Err(e) => {
-                error!("Invalid device IP {}: {:?}", device_ip, e);
-                continue;
-            }
-        };
         // TODO 此处使用 0 端口, 测试通过, 但不太确定是否有什么问题
-        binds.push(SocketAddr::new(device_ip, 0));
+        binds.push(SocketAddr::new(*device_ip, 0));
     }
 
     tracing::debug!("QUIC client binds: {:?}", binds);
