@@ -457,7 +457,6 @@ impl Authorization {
 fn verify_password(username: &str, password: &str) -> bool {
     #[cfg(unix)]
     return {
-        tracing::debug!("[SSH] Verifying password {password} for {username}");
         let mut auth = pam::Authenticator::with_password("login").expect("Init pam failed");
         auth.get_handler().set_credentials(username, password);
         auth.authenticate().is_ok()
