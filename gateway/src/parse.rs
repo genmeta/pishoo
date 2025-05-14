@@ -26,6 +26,53 @@ mod server;
 
 type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum IPVersion {
+    V4,
+    V6,
+    #[default]
+    Dual,
+}
+
+impl TryFrom<&str> for IPVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        match value {
+            "v4" => Ok(IPVersion::V4),
+            "v6" => Ok(IPVersion::V6),
+            "dual" => Ok(IPVersion::Dual),
+            _ => Err(anyhow!("Invalid IP version: {}", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IfaceType {
+    All,
+    External,
+    Internal,
+    Exact(String),
+}
+
+impl From<&str> for IfaceType {
+    fn from(value: &str) -> Self {
+        match value {
+            "all" => IfaceType::All,
+            "external" => IfaceType::External,
+            "internal" => IfaceType::Internal,
+            _ => IfaceType::Exact(value.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Listen {
+    pub typ: IfaceType,
+    pub version: IPVersion,
+    pub port: u16,
+}
+
 #[derive(Debug)]
 pub enum Value {
     String(String),
@@ -38,6 +85,7 @@ pub enum Value {
     Header(Vec<(HeaderName, HeaderValue, bool)>),
     Types(HashMap<String, HeaderValue>),
     HeaderValue(HeaderValue),
+    Listen(Vec<Listen>),
     Pattern(Pattern, HashMap<String, Value>),
     SshSslUser(Vec<(String, String)>),
     ValueMap(HashMap<String, Value>),
@@ -192,6 +240,63 @@ fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
+/// listen [all/external/internal/lo/en0] [v6only|v4only|dual] [0|80]
+fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [iface] => {
+            // 单个参数 只能是网卡名, 省略了 version 和端口的情况
+            Ok(Value::Listen(vec![Listen {
+                typ: IfaceType::from(iface.as_str()),
+                version: IPVersion::default(),
+                port: 0,
+            }]))
+        }
+        [iface, param] => {
+            // 两个参数, 可能是
+            // 1. 网卡名和 v6only|v4only|dual
+            // 2. 网卡名和端口
+
+            let typ = IfaceType::from(iface.as_str());
+            let version = IPVersion::try_from(param.as_str()).ok();
+            let port = if version.is_none() {
+                param.parse::<u16>().ok()
+            } else {
+                None
+            };
+            if version.is_none() && port.is_none() {
+                return Err(anyhow!(
+                    "Invalid argument for directive: {}:{}",
+                    directive.name,
+                    param
+                ));
+            }
+
+            Ok(Value::Listen(vec![Listen {
+                typ,
+                version: version.unwrap_or_default(),
+                port: port.unwrap_or_default(),
+            }]))
+        }
+        [iface, version, port] => {
+            // 三个参数, 只能是 网卡名和 v6only|v4only|dual 和端口
+            let typ = IfaceType::from(iface.as_str());
+            let version = IPVersion::try_from(version.as_str())?;
+            let port = port.parse::<u16>().map_err(|e| {
+                anyhow!(
+                    "Invalid port while parsing listen directive: {}:{}",
+                    directive.name,
+                    e
+                )
+            })?;
+            Ok(Value::Listen(vec![Listen { typ, version, port }]))
+        }
+        _ => Err(anyhow!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        )),
+    }
+}
+
 fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
@@ -224,36 +329,6 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
                 "Unknown resolver kind: {kind}, expected `udp` or `http`"
             )),
         },
-        _ => Err(anyhow!(
-            "Invalid number of arguments for directive: {}",
-            directive.name
-        )),
-    }
-}
-
-fn parse_server_address(directive: Directive<Nginx>) -> Result<Value> {
-    match &directive.args[..] {
-        // TODO 如果只有一个参数, 那么就是指定的 所有网卡 的 ipv4 ipv6 的端口 ::5380
-        // TODO 如果有两个参数 ipv4 ipv6
-        // TODO 支持的配置格式:
-        // listen ALL       80; => 所有网卡的 ipv4 的 80 端口
-        // listen ALL_IPV4  80; => 所有网卡的 ipv6 的 80 端口
-        // listen ALL_IPV6  80; => 所有网卡的 ipv4 的 80 端口
-        // listen EN0       80; => 指定网卡的 ipv4 和 ipv6 的 80 端口
-        // listen EN0_IPV4  80; => 指定网卡的 ipv4 的 80 端口
-        // listen EN0_IPV6  80; => 指定网卡的 ipv6 的 80 端口
-        //
-        // 1. ALL 包含的是那些类型的网卡?
-        //    - 当前的筛选条件,
-        //        - |IPV4 |addr| addr.is_global() || addr.is_private()
-        //        - |IPV6 |addr| addr.is_global()
-        // 2. 如果配置了 ALL 需要包含 lo0 吗?
-        //    - 目前的想法是, 不需要, lo0 需要手动指定才会开启
-        // 3. listen 可以多次配置, 最终会合并成一个列表
-        [string] => {
-            let addr = string.parse::<SocketAddr>()?;
-            Ok(Value::Addr(addr))
-        }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
             directive.name

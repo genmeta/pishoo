@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::{Parser, command};
@@ -92,28 +92,13 @@ async fn main() -> Result<()> {
         &Vec::new()
     };
 
-    let mut records = HashMap::new();
-    for server in servers {
-        let addr = if let Some(Value::Addr(addr)) = server.get("listen") {
-            addr
-        } else {
-            unreachable!("listen directive not found")
-        };
-        records
-            .entry(addr)
-            .or_insert(Vec::new())
-            .push(Arc::clone(server));
-    }
-
     // 启动自动 DNS 汇报
     let dns = Dns::default();
     dns.spawn_publish();
 
     let mut handler = JoinSet::new();
 
-    for (addr, servers) in records {
-        handler.spawn(reverse::serve(*addr, servers));
-    }
+    handler.spawn(reverse::serve(servers.clone()));
 
     for proxy in proxys {
         handler.spawn(forward::serve(Arc::clone(proxy)));

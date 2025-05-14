@@ -3,13 +3,16 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use super::{ParseFn, Value, parse_address, parse_header_value, parse_string_vec, parse_types};
+use super::{
+    ParseFn, Value, parse_address, parse_header_value, parse_resolver, parse_string_vec,
+    parse_types,
+};
 
 pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
     commands.insert("listen", Box::new(parse_address));
-    commands.insert("resolver", Box::new(parse_address));
+    commands.insert("resolver", Box::new(parse_resolver));
     commands.insert("allow", Box::new(parse_string_vec));
     commands.insert("deny", Box::new(parse_string_vec));
     commands.insert("types", Box::new(parse_types));

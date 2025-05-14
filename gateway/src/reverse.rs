@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use gm_quic::QuicServer;
@@ -11,7 +16,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::{Node, Resolver, Value},
+    parse::{IPVersion, IfaceType, Node, Resolver, Value},
     reverse,
 };
 
@@ -33,10 +38,10 @@ type ServerResolverList<'a> = Vec<(String, &'a Resolver)>;
 ///
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
-pub async fn serve(bind: SocketAddr, servers: Vec<Arc<Node>>) -> Result<String> {
+pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
     let (routers, server_resolvers) = init_routers(&servers)?;
 
-    let (quic_server, binds) = create_quic_server(bind, &servers)?;
+    let (quic_server, binds) = create_quic_server(&servers)?;
 
     // 复用resolvers表。对于http dns resolver尤其重要
     let mut resolvers = HashMap::new();
@@ -45,7 +50,16 @@ pub async fn serve(bind: SocketAddr, servers: Vec<Arc<Node>>) -> Result<String> 
             .entry(resolver)
             .or_insert_with(|| Arc::<dyn Resolve + Send + Sync>::from(resolver))
             .clone();
-        Dns::add_record(server_name, resolver, binds.clone());
+        Dns::add_record(
+            server_name.clone(),
+            resolver,
+            binds
+                .get(&server_name)
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect(),
+        );
     }
 
     handle_connections(quic_server, routers).await?;
@@ -79,10 +93,10 @@ fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ServerResolverList)
 }
 
 /// 创建QUIC服务器实例
+#[allow(clippy::type_complexity)]
 fn create_quic_server(
-    bind: SocketAddr,
     servers: &[Arc<Node>],
-) -> Result<(Arc<QuicServer>, Vec<SocketAddr>)> {
+) -> Result<(Arc<QuicServer>, HashMap<String, HashSet<SocketAddr>>)> {
     let agents = [
         "1.12.74.4:20004".parse()?,
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
@@ -90,17 +104,135 @@ fn create_quic_server(
 
     let factory = TraversalFactory::with(&agents[..]);
 
-    let ip = bind.ip();
-    let port = bind.port();
-    let mut binds = Vec::new();
+    let mut ifaces = HashSet::new();
+    let mut server_binds = HashMap::new();
 
-    if ip.is_unspecified() {
-        for device_ip in factory.devices().keys() {
-            binds.push(SocketAddr::new(*device_ip, port));
+    for server in servers {
+        let list = if let Some(Value::Listen(list)) = server.get("listen") {
+            list
+        } else {
+            unreachable!("Invalid listen address");
+        };
+
+        let mut server_ifaces = HashSet::new();
+        for iface in list {
+            ifaces.insert(iface);
+            server_ifaces.insert(iface);
         }
-    } else {
-        binds.push(bind);
+
+        let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
+            server_name.clone()
+        } else {
+            unreachable!("Invalid server name");
+        };
+
+        for name in server_name {
+            server_binds.insert(name, server_ifaces.clone());
+        }
     }
+
+    let mut server_total_binds = HashMap::new();
+
+    for (server_name, server_listen) in server_binds {
+        let mut binds = HashSet::new();
+        for iface in server_listen {
+            match &iface.typ {
+                IfaceType::All => {
+                    for device_ip in factory.devices().keys() {
+                        match device_ip {
+                            IpAddr::V4(_ip) => {
+                                if iface.version == IPVersion::V4
+                                    || iface.version == IPVersion::Dual
+                                {
+                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                }
+                            }
+                            IpAddr::V6(_ip) => {
+                                if iface.version == IPVersion::V6
+                                    || iface.version == IPVersion::Dual
+                                {
+                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                }
+                            }
+                        }
+                    }
+                }
+                IfaceType::External => {
+                    for device_ip in factory.devices().keys() {
+                        match device_ip {
+                            IpAddr::V4(ip) => {
+                                if (iface.version == IPVersion::V4
+                                    || iface.version == IPVersion::Dual)
+                                    && !ip.is_loopback()
+                                {
+                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                }
+                            }
+                            IpAddr::V6(ip) => {
+                                if (iface.version == IPVersion::V6
+                                    || iface.version == IPVersion::Dual)
+                                    && !ip.is_loopback()
+                                {
+                                    {
+                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                IfaceType::Internal => {
+                    for device_ip in factory.devices().keys() {
+                        match device_ip {
+                            IpAddr::V4(ip) => {
+                                if (iface.version == IPVersion::V4
+                                    || iface.version == IPVersion::Dual)
+                                    && ip.is_loopback()
+                                {
+                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                }
+                            }
+                            IpAddr::V6(ip) => {
+                                if (iface.version == IPVersion::V6
+                                    || iface.version == IPVersion::Dual)
+                                    && ip.is_loopback()
+                                {
+                                    {
+                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                IfaceType::Exact(name) => {
+                    for (device_ip, device_name) in factory.devices() {
+                        if name.eq(device_name) {
+                            match device_ip {
+                                IpAddr::V4(_ip) => {
+                                    if iface.version == IPVersion::V4
+                                        || iface.version == IPVersion::Dual
+                                    {
+                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                    }
+                                }
+                                IpAddr::V6(_ip) => {
+                                    if iface.version == IPVersion::V6
+                                        || iface.version == IPVersion::Dual
+                                    {
+                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        server_total_binds.insert(server_name, binds);
+    }
+
+    let binds: Vec<SocketAddr> = server_total_binds.values().flatten().cloned().collect();
 
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicServer::builder()
@@ -153,7 +285,7 @@ fn create_quic_server(
         .inspect_err(|e| {
             error!("listen err {:?}", e);
         })?;
-    Ok((server, binds))
+    Ok((server, server_total_binds))
 }
 
 /// 创建QUIC服务器参数配置
@@ -199,6 +331,8 @@ async fn handle_connections(
         };
 
         debug!("[Handle Conn] H3 connection established");
+
+        debug!("RouterMap: {:?}", routers);
 
         // 为每个连接创建异步任务
         tokio::spawn({

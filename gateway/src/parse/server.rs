@@ -4,14 +4,14 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    Node, ParseFn, Value, location::parse_location, parse_address, parse_header_value, parse_path,
+    Node, ParseFn, Value, location::parse_location, parse_header_value, parse_listen, parse_path,
     parse_resolver, parse_string_vec, parse_types,
 };
 
 pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
-    commands.insert("listen", Box::new(parse_address));
+    commands.insert("listen", Box::new(parse_listen));
     commands.insert("server_name", Box::new(parse_string_vec));
     commands.insert("resolver", Box::new(parse_resolver));
     commands.insert("ssl_certificate", Box::new(parse_path));
