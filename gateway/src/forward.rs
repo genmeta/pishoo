@@ -2,13 +2,12 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use gm_quic::{ClientParameters, Interfaces, QuicClient};
+use gm_quic::{ClientParameters, QuicClient};
 use http::StatusCode;
 use http_body_util::StreamBody;
 use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::Resolve;
-use qtraversal::iface::TraversalFactory;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -60,7 +59,6 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     })?;
 
     info!("Listening on: http://{}", local_addr);
-
     let resolver: Arc<dyn Resolve + Send + Sync> =
         if let Some(Value::Resolver(resolver)) = node.get("resolver") {
             resolver.into()
@@ -136,8 +134,6 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             "Invalid listen address".to_string(),
         ));
     };
-
-    // 如果 addr 正在使用, 则直接返回
     match TcpListener::bind(addr).await {
         Ok(_) => {
             let _ = serve(node).await.inspect_err(|e| {
@@ -146,8 +142,8 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             return Ok(());
         }
         Err(_e) => {
-            Interfaces::resume();
-            info!("Resumed")
+            gm_quic::resume().await;
+            error!("TCP listener binding failed: {:?}", _e);
         }
     }
     Ok(())
@@ -162,22 +158,13 @@ async fn create_quic_client() -> QuicClient {
             .unwrap(),
     ];
 
-    let factory = TraversalFactory::with(&agents[..]);
-
-    let mut binds = Vec::new();
-
-    for device_ip in factory.devices().keys() {
-        // TODO 此处使用 0 端口, 测试通过, 但不太确定是否有什么问题
-        binds.push(SocketAddr::new(*device_ip, 0));
-    }
-
-    tracing::debug!("QUIC client binds: {:?}", binds);
-
+    // p2p 模式 client 无需绑定地址，自动扫描添加，client 也无需产生 iface， 因此不用设置 factory
+    // 关键要初始化网络，设置reuse_address
+    gm_quic::init_network(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
         .reuse_address()
-        .with_alpns([ALPN])
-        .with_iface_factory(factory);
+        .with_alpns([ALPN]);
 
     #[cfg(feature = "qlog")]
     {
@@ -188,11 +175,7 @@ async fn create_quic_client() -> QuicClient {
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
-    builder
-        .with_parameters(create_client_params())
-        .bind(&binds[..])
-        .unwrap()
-        .build()
+    builder.with_parameters(create_client_params()).build()
 }
 
 /// 配置 QUIC 协议参数
