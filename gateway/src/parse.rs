@@ -26,53 +26,6 @@ mod server;
 
 type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum IPVersion {
-    V4,
-    V6,
-    #[default]
-    Dual,
-}
-
-impl TryFrom<&str> for IPVersion {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &str) -> Result<Self> {
-        match value {
-            "v4" => Ok(IPVersion::V4),
-            "v6" => Ok(IPVersion::V6),
-            "dual" => Ok(IPVersion::Dual),
-            _ => Err(anyhow!("Invalid IP version: {}", value)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum IfaceType {
-    All,
-    External,
-    Internal,
-    Exact(String),
-}
-
-impl From<&str> for IfaceType {
-    fn from(value: &str) -> Self {
-        match value {
-            "all" => IfaceType::All,
-            "external" => IfaceType::External,
-            "internal" => IfaceType::Internal,
-            _ => IfaceType::Exact(value.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Listen {
-    pub typ: IfaceType,
-    pub version: IPVersion,
-    pub port: u16,
-}
-
 #[derive(Debug)]
 pub enum Value {
     String(String),
@@ -121,6 +74,53 @@ impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
             ),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum IPVersion {
+    V4,
+    V6,
+    #[default]
+    Dual,
+}
+
+impl TryFrom<&str> for IPVersion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        match value {
+            "v4only" => Ok(IPVersion::V4),
+            "v6only" => Ok(IPVersion::V6),
+            "dual" => Ok(IPVersion::Dual),
+            _ => Err(anyhow!("Invalid IP version: {}", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IfaceType {
+    All,
+    External,
+    Internal,
+    Exact(String),
+}
+
+impl From<&str> for IfaceType {
+    fn from(value: &str) -> Self {
+        match value {
+            "all" => IfaceType::All,
+            "external" => IfaceType::External,
+            "internal" => IfaceType::Internal,
+            _ => IfaceType::Exact(value.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Listen {
+    pub typ: IfaceType,
+    pub version: IPVersion,
+    pub port: u16,
 }
 
 // 包含数据和父链接的节点结构

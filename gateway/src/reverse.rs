@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
-    parse::{IPVersion, IfaceType, Node, Resolver, Value},
+    parse::{IPVersion, IfaceType, Listen, Node, Resolver, Value},
     reverse,
 };
 
@@ -104,8 +104,8 @@ fn create_quic_server(
 
     let factory = TraversalFactory::with(&agents[..]);
 
-    let mut ifaces = HashSet::new();
     let mut server_binds = HashMap::new();
+    let mut ifaces = HashSet::new();
 
     for server in servers {
         let list = if let Some(Value::Listen(list)) = server.get("listen") {
@@ -114,17 +114,14 @@ fn create_quic_server(
             unreachable!("Invalid listen address");
         };
 
-        let mut server_ifaces = HashSet::new();
-        for iface in list {
-            ifaces.insert(iface);
-            server_ifaces.insert(iface);
-        }
-
         let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
             server_name.clone()
         } else {
             unreachable!("Invalid server name");
         };
+
+        let server_ifaces: HashSet<_> = list.iter().cloned().collect();
+        ifaces.extend(server_ifaces.clone());
 
         for name in server_name {
             server_binds.insert(name, server_ifaces.clone());
@@ -134,101 +131,10 @@ fn create_quic_server(
     let mut server_total_binds = HashMap::new();
 
     for (server_name, server_listen) in server_binds {
-        let mut binds = HashSet::new();
-        for iface in server_listen {
-            match &iface.typ {
-                IfaceType::All => {
-                    for device_ip in factory.devices().keys() {
-                        match device_ip {
-                            IpAddr::V4(_ip) => {
-                                if iface.version == IPVersion::V4
-                                    || iface.version == IPVersion::Dual
-                                {
-                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                }
-                            }
-                            IpAddr::V6(_ip) => {
-                                if iface.version == IPVersion::V6
-                                    || iface.version == IPVersion::Dual
-                                {
-                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                }
-                            }
-                        }
-                    }
-                }
-                IfaceType::External => {
-                    for device_ip in factory.devices().keys() {
-                        match device_ip {
-                            IpAddr::V4(ip) => {
-                                if (iface.version == IPVersion::V4
-                                    || iface.version == IPVersion::Dual)
-                                    && !ip.is_loopback()
-                                {
-                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                }
-                            }
-                            IpAddr::V6(ip) => {
-                                if (iface.version == IPVersion::V6
-                                    || iface.version == IPVersion::Dual)
-                                    && !ip.is_loopback()
-                                {
-                                    {
-                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                IfaceType::Internal => {
-                    for device_ip in factory.devices().keys() {
-                        match device_ip {
-                            IpAddr::V4(ip) => {
-                                if (iface.version == IPVersion::V4
-                                    || iface.version == IPVersion::Dual)
-                                    && ip.is_loopback()
-                                {
-                                    binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                }
-                            }
-                            IpAddr::V6(ip) => {
-                                if (iface.version == IPVersion::V6
-                                    || iface.version == IPVersion::Dual)
-                                    && ip.is_loopback()
-                                {
-                                    {
-                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                IfaceType::Exact(name) => {
-                    for (device_ip, device_name) in factory.devices() {
-                        if name.eq(device_name) {
-                            match device_ip {
-                                IpAddr::V4(_ip) => {
-                                    if iface.version == IPVersion::V4
-                                        || iface.version == IPVersion::Dual
-                                    {
-                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                    }
-                                }
-                                IpAddr::V6(_ip) => {
-                                    if iface.version == IPVersion::V6
-                                        || iface.version == IPVersion::Dual
-                                    {
-                                        binds.insert(SocketAddr::new(*device_ip, iface.port));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let binds = server_listen
+            .iter()
+            .flat_map(|iface| resolve_binds(&factory, iface))
+            .collect::<HashSet<_>>();
         server_total_binds.insert(server_name, binds);
     }
 
@@ -285,6 +191,7 @@ fn create_quic_server(
         .inspect_err(|e| {
             error!("listen err {:?}", e);
         })?;
+
     Ok((server, server_total_binds))
 }
 
@@ -302,6 +209,28 @@ fn create_server_params() -> gm_quic::ServerParameters {
     params.set_max_idle_timeout(Duration::from_secs(30));
 
     params
+}
+
+fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<SocketAddr> {
+    let mut binds = Vec::new();
+    for device_ip in factory.devices().keys() {
+        let is_match = match (&iface.typ, device_ip) {
+            (IfaceType::All, _) => true,
+            (IfaceType::External, IpAddr::V4(ip)) => !ip.is_loopback(),
+            (IfaceType::External, IpAddr::V6(ip)) => !ip.is_loopback(),
+            (IfaceType::Internal, IpAddr::V4(ip)) => ip.is_loopback(),
+            (IfaceType::Internal, IpAddr::V6(ip)) => ip.is_loopback(),
+            (IfaceType::Exact(name), _) => factory.devices().get(device_ip) == Some(name),
+        };
+        let version_match = match device_ip {
+            IpAddr::V4(_) => matches!(iface.version, IPVersion::V4 | IPVersion::Dual),
+            IpAddr::V6(_) => matches!(iface.version, IPVersion::V6 | IPVersion::Dual),
+        };
+        if is_match && version_match {
+            binds.push(SocketAddr::new(*device_ip, iface.port));
+        }
+    }
+    binds
 }
 
 /// 处理客户端连接
