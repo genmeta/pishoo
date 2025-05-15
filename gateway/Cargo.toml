@@ -58,8 +58,9 @@ serde_cbor = { workspace = true }
 crossterm = { workspace = true }
 rpassword = { workspace = true }
 base64 = { workspace = true }
+derive_more = { workspace = true, features = ["from"] }
 
-
+# sshd
 nix = { workspace = true, optional = true, features = [
     "fs",
     "ioctl",
@@ -68,6 +69,9 @@ nix = { workspace = true, optional = true, features = [
     "user",
 ] }
 pam = { workspace = true, optional = true }
+
+# socks
+socks5-proto = { workspace = true, optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -82,6 +86,7 @@ clap = { workspace = true }
 
 
 [features]
-default = ["sshd"]
+default = ["sshd", "socks"]
 sshd = ["dep:pam", "dep:nix"]
+socks = ["dep:socks5-proto"]
 qlog = []

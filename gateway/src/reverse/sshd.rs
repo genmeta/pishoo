@@ -8,18 +8,22 @@ use std::{
     sync::Arc,
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{HeaderMap, Request, Response, StatusCode};
 use nix::libc;
 use serde::Deserialize;
-use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
 use tracing::Instrument;
+
+#[cfg(feature = "socks")]
+mod socks;
 
 use crate::{
     error::Result,
     parse::{Node, Value},
+    utils::{H3StreamReader, H3StreamWriter},
 };
 
 // 定义客户端与服务器通信的消息结构
@@ -115,6 +119,7 @@ async fn parse_request(
         .unwrap();
     (resp, Ok(auth))
 }
+
 pub async fn login(
     location: &Arc<Node>,
     request: Request<()>,
@@ -130,11 +135,11 @@ pub async fn login(
         Err(e) => {
             sender.send_response(resp).await?;
             sender.finish().await?;
-            tracing::error!("[SSH] Invalid request: {e}");
+            tracing::error!(target: "sshd", "Invalid request: {e}");
             return Err(e);
         }
     };
-    tracing::debug!("[SSH] Authorization: {auth:?}");
+    tracing::debug!(target: "sshd", "Authorization: {auth:?}");
 
     // 创建一个伪终端，frok子进程，设置终端为登录终端
     match unsafe { nix::pty::forkpty(None, None) }
@@ -157,10 +162,11 @@ pub async fn login(
             };
             match init_master_fd.await {
                 Ok(async_fd) => {
+                    tracing::info!(target: "sshd", "Begin copy between pty and stream");
                     copy_between_pty_and_stream(async_fd, sender, recver).await;
                 }
                 Err(e) => {
-                    tracing::error!("[SSH] Failed to init master fd: {e}");
+                    tracing::error!(target: "sshd", "Failed to init master fd: {e}");
                     sender.stop_stream(h3::error::Code::H3_NO_ERROR);
                     recver.stop_sending(h3::error::Code::H3_NO_ERROR);
                     return Err(e.into());
@@ -180,7 +186,7 @@ fn exec_shell(auth: &Authorization) -> ! {
     let user = CString::new(auth.username().to_owned()).unwrap();
     let pw = unsafe { libc::getpwnam(user.as_ptr()) };
     if pw.is_null() {
-        eprintln!("User not found");
+        eprintln!("User {} not found", auth.username());
         std::process::exit(1)
     }
 
@@ -259,27 +265,27 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
     let pty_master = Arc::clone(&async_fd);
     let read_task = tokio::spawn(
         async move {
+            let mut stream_writer = H3StreamWriter::new(&mut sender);
             let mut read_buf = [0u8; 8192];
             loop {
                 match read(&pty_master, &mut read_buf).await {
                     Ok(0) => {
-                        tracing::debug!("[SSH] Read PTY EOF");
+                        tracing::debug!(target: "sshd", "Read PTY EOF");
                         break;
                     }
                     Ok(n) => {
-                        let data = Bytes::copy_from_slice(&read_buf[..n]);
-                        if sender.send_data(data).await.is_err() {
-                            tracing::debug!("[SSH] Failed to send data to peer");
+                        if stream_writer.write_all(&read_buf[..n]).await.is_err() {
+                            tracing::debug!(target: "sshd", "Failed to send data to peer");
                             break;
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("[SSH] Failed to read from PTY: {}", e);
+                        tracing::debug!(target: "sshd", "Failed to read from PTY: {}", e);
                         break;
                     }
                 }
             }
-            _ = sender.finish().await
+            _ = stream_writer.shutdown().await
         }
         .in_current_span(),
     );
@@ -288,12 +294,12 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
     let pty_master = Arc::clone(&async_fd);
     let write_task = tokio::spawn(
         async move {
+            let mut stream_reader = H3StreamReader::new(&mut recver);
             let mut read_buf = vec![];
-            'receive: while let Ok(Some(mut data)) = recver.recv_data().await {
-                while data.remaining() > 0 {
-                    let chunk = data.chunk();
-                    read_buf.extend_from_slice(chunk);
-                    data.advance(chunk.len());
+            'receive: while stream_reader.read_buf(&mut read_buf).await.is_ok() {
+                if read_buf.is_empty() {
+                    tracing::debug!(target: "sshd", "Read stream EOF");
+                    break 'receive;
                 }
                 loop {
                     let mut unread = read_buf.as_slice();
@@ -304,7 +310,7 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
                         Err(e) if e.is_eof() => continue 'receive,
                         // 解析失败
                         Err(e) => {
-                            tracing::debug!("[SSH] Failed to deserialize message: {e}");
+                            tracing::debug!(target: "sshd", "Failed to deserialize TerminalMessage: {e}");
                             break 'receive;
                         }
                     };
@@ -316,7 +322,7 @@ async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
                         TerminalMessage::Terminal { sequence } => {
                             // 发送数据到shell
                             if let Err(e) = write_all(&pty_master, &sequence).await {
-                                tracing::debug!("[SSH] Failed to write sequence to PTY: {e}");
+                                tracing::debug!(target: "sshd", "Failed to write sequence to PTY: {e}");
                                 break 'receive;
                             }
                         }
