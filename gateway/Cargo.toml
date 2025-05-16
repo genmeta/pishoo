@@ -7,10 +7,6 @@ edition = "2024"
 name = "forward"
 path = "examples/forward.rs"
 
-[[example]]
-name = "h3-ssh"
-path = "examples/h3-ssh.rs"
-
 
 [dependencies]
 # --- Core & Error Handling ---
@@ -54,7 +50,6 @@ misc-conf = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
-serde_cbor = { workspace = true }
 crossterm = { workspace = true }
 rpassword = { workspace = true }
 base64 = { workspace = true }
@@ -69,9 +64,13 @@ nix = { workspace = true, optional = true, features = [
     "user",
 ] }
 pam = { workspace = true, optional = true }
+serde_cbor = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 
 # socks
+dashmap = { workspace = true, optional = true }
 socks5-proto = { workspace = true, optional = true }
+pin-project-lite = { workspace = true, optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -87,6 +86,20 @@ clap = { workspace = true }
 
 [features]
 default = ["sshd", "socks"]
-sshd = ["dep:pam", "dep:nix"]
-socks = ["dep:socks5-proto"]
+sshd = [
+    "dep:pam",
+    "dep:nix",
+    "dep:serde_cbor",
+    "dep:tokio-util",
+    "tokio-util/codec",
+    "tokio-util/io",
+    "bytes/serde",
+]
+socks = [
+    "sshd",
+    "dep:socks5-proto",
+    "tokio-util/rt",
+    "dep:dashmap",
+    "dep:pin-project-lite",
+]
 qlog = []

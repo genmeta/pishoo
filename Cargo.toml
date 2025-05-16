@@ -13,10 +13,12 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
+tokio-util = "0.7"
 
 # --- Serialization ---
 serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11"
+tokio-serde = "0.9"
 
 # --- Logging & Tracing ---
 tracing = { version = "0.1", default-features = false, features = [
@@ -64,6 +66,8 @@ rpassword = "7.3"
 base64 = "0.22"
 socks5-proto = "0.4"
 derive_more = "2"
+dashmap = "6"
+pin-project-lite = "0.2"
 
 # --- System Interaction ---
 libc = "0.2"

@@ -1,37 +1,56 @@
 use std::{
     ffi::{CStr, CString},
-    io,
     os::{
-        fd::{AsFd, AsRawFd},
-        unix::prelude::CommandExt,
+        fd::AsRawFd,
+        unix::prelude::{AsFd, CommandExt},
     },
     sync::Arc,
 };
 
+use async_fd::AsyncFd;
 use bytes::Bytes;
+use futures::{SinkExt, StreamExt, TryStreamExt, channel::mpsc};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{HeaderMap, Request, Response, StatusCode};
+use map_sink::MapSinkExt;
 use nix::libc;
-use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio_util::{
+    codec::{self},
+    io::{ReaderStream, StreamReader},
+};
 use tracing::Instrument;
 
+mod async_fd;
+mod cbor_codec;
+mod h3_stream;
+mod map_sink;
 #[cfg(feature = "socks")]
 mod socks;
+
+use h3_stream::H3StreamReader;
 
 use crate::{
     error::Result,
     parse::{Node, Value},
-    utils::{H3StreamReader, H3StreamWriter},
 };
 
 // 定义客户端与服务器通信的消息结构
 #[derive(Deserialize, Debug)]
-enum TerminalMessage {
+enum ClientMessage {
     WindowSize { rows: u16, cols: u16 },
-    Terminal { sequence: Vec<u8> },
-    // ControlSequence(String),
+    Terminal { sequence: Bytes },
+    // 相比socket addr，一个128位id进行多路复用的开销更小
+    Socks(socks::ClientSocksMessage),
+    Heartbeat,
+}
+
+#[derive(Serialize, Debug)]
+enum ServerMessage {
+    Terminal { sequence: Bytes },
+    Socks(socks::ServerSocksMessage),
     Heartbeat,
 }
 
@@ -145,34 +164,19 @@ pub async fn login(
     match unsafe { nix::pty::forkpty(None, None) }
         .map_err(|errno| map_errno(errno, "Failed to forkpty"))?
     {
-        nix::pty::ForkptyResult::Parent { child: _, master } => {
-            let init_master_fd = async {
-                // 设置fd为非阻塞模式
-                let flags = nix::fcntl::fcntl(master.as_fd(), nix::fcntl::F_GETFL)
-                    .map_err(|errno| map_errno(errno, "Failed to get master fd flags"))?;
-                let flags =
-                    nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK;
-                nix::fcntl::fcntl(master.as_fd(), nix::fcntl::F_SETFL(flags))
-                    .map_err(|errno| map_errno(errno, "Failed to set master fd flags"))?;
+        nix::pty::ForkptyResult::Parent { child: _, master } => match AsyncFd::new(master) {
+            Ok(async_fd) => {
+                tracing::info!(target: "sshd", "Begin copy between pty and stream");
 
-                // 创建async_fd
-                AsyncFd::new(master).map_err(|e| {
-                    io::Error::new(e.kind(), format!("Failed to create async fd: {e}"))
-                })
-            };
-            match init_master_fd.await {
-                Ok(async_fd) => {
-                    tracing::info!(target: "sshd", "Begin copy between pty and stream");
-                    copy_between_pty_and_stream(async_fd, sender, recver).await;
-                }
-                Err(e) => {
-                    tracing::error!(target: "sshd", "Failed to init master fd: {e}");
-                    sender.stop_stream(h3::error::Code::H3_NO_ERROR);
-                    recver.stop_sending(h3::error::Code::H3_NO_ERROR);
-                    return Err(e.into());
-                }
+                run(async_fd, sender, recver).await;
             }
-        }
+            Err(e) => {
+                tracing::error!(target: "sshd", "Failed to init master fd: {e}");
+                sender.stop_stream(h3::error::Code::H3_NO_ERROR);
+                recver.stop_sending(h3::error::Code::H3_NO_ERROR);
+                return Err(e.into());
+            }
+        },
         // 子进程不要抛出错误，出现错误，打印日志，直接exit
         // 子进程的内容会被转发到cliet，所以使用eprintln
         nix::pty::ForkptyResult::Child => exec_shell(&auth),
@@ -222,137 +226,128 @@ fn exec_shell(auth: &Authorization) -> ! {
     std::process::exit(1)
 }
 
-async fn copy_between_pty_and_stream<F: AsRawFd + Send + Sync + 'static>(
-    pty_master: AsyncFd<F>,
+async fn run(
+    pty_master: AsyncFd,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
     mut recver: RequestStream<RecvStream, Bytes>,
 ) {
-    // 简易异步IO
-    async fn read<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            let mut read = async_fd.readable().await?;
-            if let Ok(result) =
-                read.try_io(|async_fd| nix::unistd::read(async_fd, buf).map_err(io::Error::from))
-            {
-                return result;
+    let (pty_read_half, mut pty_write_half) = pty_master.split();
+
+    let (mut message_sender, mut pending_messages) = mpsc::channel(32);
+
+    let send_messages = async move {
+        let mut sender = codec::FramedWrite::new(
+            h3_stream::H3StreamWriter::new(&mut sender),
+            cbor_codec::CborEncoder::default(),
+        );
+        while let Some(message) = pending_messages.next().await {
+            if let Err(send_error) = sender.send(message).await {
+                tracing::error!(target: "sshd", "Failed to send message: {send_error:?}");
+                break;
             }
         }
-    }
-
-    async fn write<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            let mut write = async_fd.writable().await?;
-            if let Ok(result) =
-                write.try_io(|async_fd| nix::unistd::write(async_fd, buf).map_err(io::Error::from))
-            {
-                return result;
-            }
+        if let Err(close_error) = sender.close().await {
+            tracing::error!(target: "sshd", "Failed to close stream: {close_error:?}");
         }
-    }
+    };
 
-    async fn write_all<F: AsRawFd>(async_fd: &AsyncFd<F>, buf: &[u8]) -> io::Result<()> {
-        let mut remaining = buf;
-        while !remaining.is_empty() {
-            let written = write(async_fd, remaining).await?;
-            remaining = &remaining[written..];
-        }
-        Ok(())
-    }
-
-    let async_fd = Arc::new(pty_master);
+    let socks_server = socks::SocksServer::default();
 
     // 从pty读取，通过stream发送到client
-    let pty_master = Arc::clone(&async_fd);
-    let read_task = tokio::spawn(
-        async move {
-            let mut stream_writer = H3StreamWriter::new(&mut sender);
-            let mut read_buf = [0u8; 8192];
-            loop {
-                match read(&pty_master, &mut read_buf).await {
-                    Ok(0) => {
-                        tracing::debug!(target: "sshd", "Read PTY EOF");
+    let mut terminal_message_sender = message_sender.clone();
+    let send_terminal = async move {
+        let mut pty_read_stream = ReaderStream::new(pty_read_half);
+        loop {
+            match pty_read_stream.try_next().await {
+                Ok(Some(sequence)) => {
+                    let message = ServerMessage::Terminal { sequence };
+                    if terminal_message_sender.send(message).await.is_err() {
+                        tracing::debug!(target: "sshd", "Failed to send data to peer");
                         break;
                     }
-                    Ok(n) => {
-                        if stream_writer.write_all(&read_buf[..n]).await.is_err() {
-                            tracing::debug!(target: "sshd", "Failed to send data to peer");
-                            break;
-                        }
+                }
+                Ok(None) => {
+                    tracing::debug!(target: "sshd", "Read PTY EOF");
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(target: "sshd", "Failed to read from PTY: {}", e);
+                    break;
+                }
+            }
+        }
+        terminal_message_sender.close_channel();
+    };
+
+    // 解析来自client的信息
+    let recv_messages = async move {
+        let mut messages_reader = codec::FramedRead::new(
+            StreamReader::new(H3StreamReader::new(&mut recver)),
+            cbor_codec::CborDecoder::default(),
+        );
+        loop {
+            let message: ClientMessage = match messages_reader.try_next().await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(de_error) => {
+                    tracing::debug!(target: "sshd", "Failed to deserialize message: {de_error}. aborting");
+                    break;
+                }
+            };
+            match message {
+                ClientMessage::WindowSize { rows, cols } => {
+                    // 设置PTY窗口大小
+                    unsafe {
+                        let winsz = libc::winsize {
+                            ws_row: rows,
+                            ws_col: cols,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        libc::ioctl(pty_write_half.as_fd().as_raw_fd(), libc::TIOCSWINSZ, &winsz);
                     }
-                    Err(e) => {
-                        tracing::debug!(target: "sshd", "Failed to read from PTY: {}", e);
+                }
+                // Shell
+                ClientMessage::Terminal { sequence } => {
+                    // 发送数据到shell
+                    if let Err(e) = pty_write_half.write_all(&sequence).await {
+                        tracing::debug!(target: "sshd", "Failed to write sequence to PTY: {e}");
+                        break;
+                    }
+                }
+                ClientMessage::Socks(socks) => match socks {
+                    socks::ClientSocksMessage::Init { token } => {
+                        let socks_message_sender =
+                            message_sender
+                                .clone()
+                                .mapped(|data: socks::ServerSocksMessage| {
+                                    Ok(ServerMessage::Socks(data))
+                                });
+                        socks_server.accpet(token, socks_message_sender)
+                    }
+                    socks::ClientSocksMessage::Data { token, data } => {
+                        socks_server.receive(token, data).await;
+                    }
+                    socks::ClientSocksMessage::Finish { token } => {
+                        socks_server.close(token);
+                    }
+                },
+                ClientMessage::Heartbeat => {
+                    // 心跳包，返回一个心跳包
+                    if let Err(error) = message_sender.send(ServerMessage::Heartbeat).await {
+                        tracing::warn!(target: "sshd", "Failed to send heartbeat to peer: {error:?}");
                         break;
                     }
                 }
             }
-            _ = stream_writer.shutdown().await
         }
-        .in_current_span(),
-    );
-
-    // 解析来自client的信息，通过pty发送到shell
-    let pty_master = Arc::clone(&async_fd);
-    let write_task = tokio::spawn(
-        async move {
-            let mut stream_reader = H3StreamReader::new(&mut recver);
-            let mut read_buf = vec![];
-            'receive: while stream_reader.read_buf(&mut read_buf).await.is_ok() {
-                if read_buf.is_empty() {
-                    tracing::debug!(target: "sshd", "Read stream EOF");
-                    break 'receive;
-                }
-                loop {
-                    let mut unread = read_buf.as_slice();
-                    let mut de = serde_cbor::Deserializer::from_reader(&mut unread);
-                    let message = match TerminalMessage::deserialize(&mut de) {
-                        Ok(message) => message,
-                        // 暂停解析，等待更多数据
-                        Err(e) if e.is_eof() => continue 'receive,
-                        // 解析失败
-                        Err(e) => {
-                            tracing::debug!(target: "sshd", "Failed to deserialize TerminalMessage: {e}");
-                            break 'receive;
-                        }
-                    };
-
-                    // 解析成功，移除被读取的数据
-                    read_buf.drain(..read_buf.len() - unread.len());
-                    match message {
-                        // 最通用的消息
-                        TerminalMessage::Terminal { sequence } => {
-                            // 发送数据到shell
-                            if let Err(e) = write_all(&pty_master, &sequence).await {
-                                tracing::debug!(target: "sshd", "Failed to write sequence to PTY: {e}");
-                                break 'receive;
-                            }
-                        }
-                        TerminalMessage::WindowSize { rows, cols } => {
-                            // 设置PTY窗口大小
-                            unsafe {
-                                let winsz = libc::winsize {
-                                    ws_row: rows,
-                                    ws_col: cols,
-                                    ws_xpixel: 0,
-                                    ws_ypixel: 0,
-                                };
-                                libc::ioctl(pty_master.as_raw_fd(), libc::TIOCSWINSZ, &winsz);
-                            }
-                        }
-                        TerminalMessage::Heartbeat => {
-                            // 心跳包,不需要处理
-                            continue;
-                        }
-                    }
-                }
-            }
-            recver.stop_sending(h3::error::Code::H3_NO_ERROR);
-        }
-        .in_current_span(),
-    );
+        recver.stop_sending(h3::error::Code::H3_NO_ERROR);
+    };
 
     tokio::select! {
-        _ = read_task => {},
-        _ = write_task => {}
+        _ = tokio::spawn(send_messages.in_current_span()) => {},
+        _ = tokio::spawn(send_terminal.in_current_span()) => {},
+        _ = tokio::spawn(recv_messages.in_current_span()) => {}
     }
 }
 

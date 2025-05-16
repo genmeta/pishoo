@@ -6,6 +6,5 @@ pub mod error;
 pub mod forward;
 pub mod parse;
 pub mod reverse;
-mod utils;
 
 pub use gm_quic::EndpointAddr;
