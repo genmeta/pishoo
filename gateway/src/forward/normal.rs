@@ -1,10 +1,10 @@
-use bytes::Bytes;
+use std::io;
+
 use http::{Method, Request, Response};
-use http_body_util::{BodyExt, StreamBody};
-use hyper::{body::Frame, upgrade::Upgraded};
+use http_body_util::{BodyExt, combinators::BoxBody};
+use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{error, info};
 
 use super::BoxResponse;
@@ -68,21 +68,7 @@ pub async fn proxy(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, h
 
         let resp = sender.send_request(req).await?;
         let (parts, body) = resp.into_parts();
-        let mut data_stream = body.into_data_stream();
-
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<std::result::Result<Frame<Bytes>, hyper::Error>>(128);
-        let body_stream = StreamBody::new(ReceiverStream::new(rx));
-
-        tokio::spawn(async move {
-            while let Some(Ok(chunk)) = data_stream.next().await {
-                _ = tx.send(Ok(Frame::data(chunk))).await.inspect_err(|e| {
-                    error!("Error sending data frame: {:?}", e);
-                });
-            }
-        });
-
-        let resp = Response::from_parts(parts, body_stream);
+        let resp = Response::from_parts(parts, BoxBody::new(body.map_err(io::Error::other)));
         Ok(resp)
     }
 }

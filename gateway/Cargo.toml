@@ -65,7 +65,7 @@ nix = { workspace = true, optional = true, features = [
 ] }
 pam = { workspace = true, optional = true }
 serde_cbor = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
+tokio-util = { workspace = true }
 
 # socks
 dashmap = { workspace = true, optional = true }
@@ -90,7 +90,6 @@ sshd = [
     "dep:pam",
     "dep:nix",
     "dep:serde_cbor",
-    "dep:tokio-util",
     "tokio-util/codec",
     "tokio-util/io",
     "bytes/serde",

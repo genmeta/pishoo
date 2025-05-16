@@ -1,13 +1,18 @@
 use std::{
+    collections::VecDeque,
     io,
     pin::Pin,
     task::{Context, Poll, ready},
 };
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes};
 use derive_more::From;
 use futures::{Sink, Stream, future::BoxFuture};
-use tokio::io::AsyncWrite;
+use hyper::body::Frame;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+pub type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
+pub type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 #[derive(From)]
 pub enum H3RecvStream<'s> {
@@ -223,5 +228,94 @@ impl AsyncWrite for H3StreamWriter<'_> {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         <Self as Sink<&[u8]>>::poll_close(self, cx)
+    }
+}
+
+#[derive(From)]
+pub enum H3RecvStreamOwner {
+    Client(h3::client::RequestStream<h3_shim::RecvStream, Bytes>),
+    Server(h3::server::RequestStream<h3_shim::RecvStream, Bytes>),
+}
+
+/// A wrapper around a `h3::RequestStream<RecvStream, Bytes>` that implements [`Stream`].
+///
+/// For [`AsyncRead`], wrapper this in [`tokio_util::io::StreamReader`].
+///
+/// [`AsyncRead`]: tokio::io::AsyncRead
+pub struct H3StreamOwnerReader {
+    bytes: VecDeque<Bytes>,
+    stream: H3RecvStreamOwner,
+    _send_requst: H3SendRequest,
+}
+
+impl H3StreamOwnerReader {
+    pub fn new(
+        stream: impl Into<H3RecvStreamOwner>,
+        send_requst: H3SendRequest,
+    ) -> H3StreamOwnerReader {
+        H3StreamOwnerReader {
+            bytes: VecDeque::new(),
+            stream: stream.into(),
+            _send_requst: send_requst,
+        }
+    }
+}
+
+impl AsyncRead for H3StreamOwnerReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled_len = buf.filled().len();
+        loop {
+            while buf.has_remaining_mut()
+                && let Some(front) = this.bytes.front_mut()
+            {
+                let slice = front.split_to(front.remaining().min(buf.remaining()));
+                buf.put_slice(&slice);
+                if front.is_empty() {
+                    this.bytes.pop_front();
+                }
+            }
+
+            if buf.filled().len() > filled_len {
+                return Poll::Ready(Ok(()));
+            }
+
+            let poll_recv_data = match &mut this.stream {
+                H3RecvStreamOwner::Client(stream) => stream
+                    .poll_recv_data(cx)
+                    .map_ok(|buf| buf.map(|mut buf| buf.copy_to_bytes(buf.remaining()))),
+                H3RecvStreamOwner::Server(stream) => stream
+                    .poll_recv_data(cx)
+                    .map_ok(|buf| buf.map(|mut buf| buf.copy_to_bytes(buf.remaining()))),
+            };
+
+            match ready!(poll_recv_data.map_err(io::Error::other)?) {
+                Some(buf) => this.bytes.push_back(buf),
+                None => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+impl Stream for H3StreamOwnerReader {
+    type Item = io::Result<Frame<Bytes>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.get_mut().stream {
+            H3RecvStreamOwner::Client(request_stream) => request_stream
+                .poll_recv_data(cx)
+                .map_err(io::Error::other)
+                .map(|r| r.transpose())
+                .map_ok(|mut buf| Frame::data(buf.copy_to_bytes(buf.remaining()))),
+            H3RecvStreamOwner::Server(request_stream) => request_stream
+                .poll_recv_data(cx)
+                .map_err(io::Error::other)
+                .map(|r| r.transpose())
+                .map_ok(|mut buf| Frame::data(buf.copy_to_bytes(buf.remaining()))),
+        }
     }
 }

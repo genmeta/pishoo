@@ -153,6 +153,14 @@ async fn serve_static_file(
     let response = Response::from_parts(parts, body);
     sender.send_response(response).await?;
 
+    // TODO H3StreamWriter 实现目前会卡住
+    // {
+    //     let mut reader = BufReader::new(file);
+    //     let mut stream = H3StreamWriter::new(&mut sender);
+    //     tokio::io::copy(&mut reader, &mut stream)
+    //         .await
+    //         .inspect_err(|e| error!("[Response handling][{}] Error sending file: {}", uri, e))?;
+    // }
     let mut reader = BufReader::new(file);
     loop {
         let buffer_slice = reader

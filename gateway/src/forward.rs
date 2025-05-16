@@ -1,15 +1,14 @@
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
 use gm_quic::{ClientParameters, QuicClient};
 use http::StatusCode;
-use http_body_util::StreamBody;
-use hyper::{Request, Response, body::Frame, server::conn::http1, service::service_fn};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::Resolve;
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -24,11 +23,7 @@ mod quic;
 
 static ALPN: &[u8] = b"h3";
 
-const CHANNEL_BUFFER_SIZE: usize = 128; // 响应通道缓冲区大小
-
-type BoxResponse = Response<StreamBody<ReceiverStream<Result<Frame<Bytes>, hyper::Error>>>>;
-type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
-type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
+type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
 
 /// Start the QUIC proxy server
 ///
@@ -225,13 +220,7 @@ fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<&str, String> {
 
 /// 创建空响应
 fn build_empty_response() -> BoxResponse {
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 发送空数据帧
-    tokio::spawn(async move {
-        let _ = tx.send(Ok(Frame::data(Bytes::new()))).await;
-    });
+    let body = Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed();
 
     Response::builder()
         .status(StatusCode::OK)
@@ -242,13 +231,9 @@ fn build_empty_response() -> BoxResponse {
 /// 创建错误响应
 fn build_error_response(message: String) -> BoxResponse {
     error!("[Forward] Error response: {}", message);
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 发送错误信息
-    tokio::spawn(async move {
-        let _ = tx.send(Ok(Frame::data(Bytes::from(message)))).await;
-    });
+    let body = Full::new(Bytes::from(message))
+        .map_err(|_| unreachable!())
+        .boxed();
 
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)

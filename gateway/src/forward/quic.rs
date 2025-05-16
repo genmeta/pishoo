@@ -1,18 +1,18 @@
 use std::{sync::Arc, time::Duration};
 
-use bytes::Buf;
+use futures::TryStreamExt;
 use gm_quic::QuicClient;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
-use hyper::{body::Frame, server::conn::http1, service::service_fn};
+use hyper::{server::conn::http1, service::service_fn};
 use qdns::Resolve;
 use tokio::time::timeout;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tracing::{Instrument, error, info, warn};
 
-use super::{BoxResponse, H3Conn, H3SendRequest};
-use crate::forward::{
-    CHANNEL_BUFFER_SIZE, build_empty_response, build_error_response, validate_host,
+use super::BoxResponse;
+use crate::{
+    forward::{build_empty_response, build_error_response, validate_host},
+    h3::{H3Conn, H3SendRequest, H3StreamOwnerReader, H3StreamWriter},
 };
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
@@ -46,17 +46,25 @@ pub async fn proxy_inner(
     };
 
     // 创建 QUIC 连接
-    let (mut _h3_conn, send_request) =
-        match create_quic_connection(quic_client, host, resolver).await {
-            Ok(conn) => conn,
-            Err(msg) => {
-                error!(
-                    "[Forward][{}] Failed to create QUIC connection: {}",
-                    uri, msg
-                );
-                return Ok(build_error_response(msg));
+    let (mut conn, send_request) = match create_quic_connection(quic_client, host, resolver).await {
+        Ok(conn) => conn,
+        Err(msg) => {
+            error!(
+                "[Forward][{}] Failed to create QUIC connection: {}",
+                uri, msg
+            );
+            return Ok(build_error_response(msg));
+        }
+    };
+    tokio::task::spawn({
+        let uri = uri.clone();
+        async move {
+            if let Err(err) = conn.wait_idle().await {
+                error!("[Forward][{}] QUIC connection error: {}", uri, err);
             }
-        };
+        }
+    });
+
     info!("[Forward][{}]: quic connection established", uri);
 
     // 代理请求并返回响应
@@ -134,15 +142,16 @@ async fn send(
     tokio::spawn({
         let uri = uri.clone();
         async move {
-            let mut body_stream = body.into_data_stream();
-            while let Some(Ok(chunk)) = body_stream.next().await {
-                if let Err(e) = sender.send_data(chunk).await {
-                    error!("Error sending request data: {}", e);
-                    break;
+            {
+                let mut body_stream = tokio_util::io::StreamReader::new(
+                    body.into_data_stream().map_err(std::io::Error::other),
+                );
+                let mut stream = H3StreamWriter::new(&mut sender);
+                match tokio::io::copy(&mut body_stream, &mut stream).await {
+                    Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
+                    Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
                 }
             }
-
-            // TODO 没发 fin
             match sender.finish().await {
                 Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
                 Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
@@ -164,37 +173,8 @@ async fn send(
     info!("[Forward] Received response headers: {:?}", parts);
     parts.version = http::Version::HTTP_11;
 
-    // 准备响应体通道
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_BUFFER_SIZE);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 异步接收响应体数据
-    tokio::spawn(
-        async move {
-            let _send_request = send_request.clone();
-            loop {
-                match recver.recv_data().await {
-                    Ok(Some(mut buf)) => {
-                        let bytes = buf.copy_to_bytes(buf.remaining());
-                        if let Err(e) = tx.send(Ok(Frame::data(bytes))).await {
-                            error!("[Proxy][{}] Failed to send response: {}", uri, e);
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        info!("[Proxy][{}] Response received completely", uri);
-                        break;
-                    }
-                    Err(err) => {
-                        info!("[Proxy][{}] Data receiving error: {}", uri, err);
-                        break;
-                    }
-                }
-            }
-        }
-        .in_current_span(),
-    );
-
+    let recver_stream = H3StreamOwnerReader::new(recver, send_request);
+    let body = StreamBody::new(recver_stream).boxed();
     info!("[Forward] Response body receiver started");
 
     Ok(Response::from_parts(parts, body))

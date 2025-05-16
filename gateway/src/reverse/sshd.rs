@@ -25,15 +25,13 @@ use tracing::Instrument;
 
 mod async_fd;
 mod cbor_codec;
-mod h3_stream;
 mod map_sink;
 #[cfg(feature = "socks")]
 mod socks;
 
-use h3_stream::H3StreamReader;
-
 use crate::{
     error::Result,
+    h3::{H3StreamReader, H3StreamWriter},
     parse::{Node, Value},
 };
 
@@ -237,7 +235,7 @@ async fn run(
 
     let send_messages = async move {
         let mut sender = codec::FramedWrite::new(
-            h3_stream::H3StreamWriter::new(&mut sender),
+            H3StreamWriter::new(&mut sender),
             cbor_codec::CborEncoder::default(),
         );
         while let Some(message) = pending_messages.next().await {
