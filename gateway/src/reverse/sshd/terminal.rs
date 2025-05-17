@@ -1,0 +1,187 @@
+use std::os::unix::prelude::{AsFd, AsRawFd, CommandExt};
+
+use bytes::Bytes;
+use futures::{SinkExt, TryStreamExt};
+use nix::{
+    libc, pty,
+    sys::{self, socket},
+    unistd,
+};
+use serde::{Deserialize, Serialize};
+use tokio::io::{self, AsyncWriteExt};
+use tokio_util::{io::ReaderStream, task::AbortOnDropHandle};
+
+use super::{
+    Error,
+    async_fd::{AsyncFd, OwnedReadHalf, OwnedWriteHalf},
+    map_errno,
+    mux::{Recver, Sender},
+};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ClientTerminalMessage {
+    WindowSize { rows: u16, cols: u16 },
+    Sequence(Bytes),
+}
+
+pub type ServerTerminalMessage = Bytes;
+
+pub async fn shell(
+    user: &unistd::User,
+    pseudo: bool,
+    recver: Recver<'static, ClientTerminalMessage>,
+    sender: Sender<ServerTerminalMessage>,
+) -> Result<(), Error> {
+    exec(user, pseudo, None, recver, sender).await
+}
+
+pub async fn exec(
+    user: &unistd::User,
+    pseudo: bool,
+    command: Option<&str>,
+    mut recver: Recver<'static, ClientTerminalMessage>,
+    mut sender: Sender<ServerTerminalMessage>,
+) -> Result<(), Error> {
+    // TOOD: do_exec_no_pty
+    let (child, child_io) = match pseudo {
+        true => do_exec_pty(user, command).map_err(|e| format!("Failed to exec: {e:?}"))?,
+        false => do_exec_no_pty(user, command).map_err(|e| format!("Failed to exec: {e:?}"))?,
+    };
+    let (mut child_read_half, mut child_write_half) = child_io.split();
+
+    let mut close_sender = sender.clone();
+    let child_exit = tokio::task::spawn_blocking(move || sys::wait::waitpid(child, None));
+
+    let _send_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
+        send_terminal(&mut child_read_half, &mut sender).await
+    }));
+    let _recv_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
+        recv_terminal(&mut child_write_half, &mut recver).await
+    }));
+
+    // TOOD: status code
+    _ = child_exit.await;
+    _ = close_sender.close().await;
+    Ok(())
+}
+
+async fn send_terminal(
+    pty_read_half: &mut OwnedReadHalf,
+    message_sender: &mut Sender<ServerTerminalMessage>,
+) -> io::Result<()> {
+    let mut pty_read_stream = ReaderStream::new(pty_read_half);
+    while let Some(sequence) = pty_read_stream.try_next().await? {
+        message_sender.send(sequence).await?;
+    }
+    Ok(())
+}
+
+async fn recv_terminal(
+    pty_write_half: &mut OwnedWriteHalf,
+    recver: &mut Recver<'_, ClientTerminalMessage>,
+) -> io::Result<()> {
+    while let Some(terminal_message) = recver.try_next().await? {
+        match terminal_message {
+            ClientTerminalMessage::WindowSize { rows, cols } => {
+                // 设置PTY窗口大小
+                unsafe {
+                    let winsz = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    libc::ioctl(pty_write_half.as_fd().as_raw_fd(), libc::TIOCSWINSZ, &winsz);
+                }
+            }
+            ClientTerminalMessage::Sequence(sequence) => {
+                // 发送数据到shell
+                if let Err(e) = pty_write_half.write_all(&sequence).await {
+                    tracing::debug!(target: "sshd", "Failed to write sequence to PTY: {e}");
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn do_exec_pty(user: &unistd::User, command: Option<&str>) -> io::Result<(unistd::Pid, AsyncFd)> {
+    // 创建一个伪终端，frok子进程，设置终端为登录终端
+    match unsafe { pty::forkpty(None, None) }
+        .map_err(|errno| map_errno(errno, "Failed to forkpty"))?
+    {
+        pty::ForkptyResult::Parent { child, master } => Ok((child, AsyncFd::new(master)?)),
+        pty::ForkptyResult::Child => do_child(user, command),
+    }
+}
+
+// 在 terminal.rs 中添加
+fn do_exec_no_pty(
+    user: &unistd::User,
+    command: Option<&str>,
+) -> io::Result<(unistd::Pid, AsyncFd)> {
+    let (parent_sock, child_sock) = socket::socketpair(
+        socket::AddressFamily::Unix,
+        socket::SockType::Stream,
+        None,
+        socket::SockFlag::empty(),
+    )
+    .map_err(|errno| map_errno(errno, "Failed to create socketpair"))?;
+
+    match unsafe { unistd::fork() }.map_err(|errno| map_errno(errno, "Failed to fork"))? {
+        unistd::ForkResult::Parent { child } => {
+            // 父进程关闭读端，将写端转换为AsyncFd
+            drop(child_sock);
+            Ok((child, AsyncFd::new(parent_sock)?))
+        }
+        unistd::ForkResult::Child => {
+            drop(parent_sock);
+            // 子进程关闭写端，将读端设为标准输入
+
+            // 将管道读端设为标准输入
+            if let Err(e) = unistd::dup2_stdin(child_sock.as_fd()) {
+                eprintln!("Failed to dup2 stdin: {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = unistd::dup2_stdout(child_sock.as_fd()) {
+                eprintln!("Failed to dup2 stdout: {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = unistd::dup2_stderr(child_sock.as_fd()) {
+                eprintln!("Failed to dup2 stderr: {e}");
+                std::process::exit(1);
+            }
+
+            // 执行命令
+            do_child(user, command)
+        }
+    }
+}
+
+fn do_child(user: &unistd::User, command: Option<&str>) -> ! {
+    let shell0 = user
+        .shell
+        .file_name()
+        .expect("path terminates wont be `..`.");
+
+    // 设置环境变量，设置uid，gid，调用exec等操作由标准库完成
+    // 这里不会返回，除非exec失败
+    let mut call = std::process::Command::new(&user.shell);
+    call.gid(user.gid.as_raw())
+        .uid(user.uid.as_raw())
+        .current_dir(&user.dir)
+        .env("HOME", &user.dir)
+        .env("USER", &user.name)
+        .env("SHELL", &user.shell)
+        .env("TERM", "xterm-256color")
+        .arg0(shell0);
+    if let Some(command) = command {
+        call.args(["-c", command]);
+    }
+
+    let exec_error = call.exec();
+
+    eprintln!("Server internal error(Failed to exec shell: {exec_error:?})");
+    std::process::exit(1)
+}

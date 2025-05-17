@@ -41,7 +41,7 @@ impl Stream for H3StreamReader<'_> {
     type Item = io::Result<Bytes>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match &mut self.get_mut().stream {
+        let r = match &mut self.get_mut().stream {
             H3RecvStream::Client(request_stream) => request_stream
                 .poll_recv_data(cx)
                 .map_err(io::Error::other)
@@ -52,7 +52,9 @@ impl Stream for H3StreamReader<'_> {
                 .map_err(io::Error::other)
                 .map(|r| r.transpose())
                 .map_ok(|mut buf| buf.copy_to_bytes(buf.remaining())),
-        }
+        };
+        tracing::trace!(target: "dbg", result =?r, "poll_next called");
+        r
     }
 }
 
