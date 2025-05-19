@@ -29,7 +29,10 @@ pub async fn auth(
     reject_deny(username, location, &mut sender).await?;
 
     let user = match unistd::User::from_name(username) {
-        Ok(Some(user)) => user,
+        Ok(Some(user)) => {
+            tracing::debug!(target: "sshd", ?user, "User found");
+            user
+        }
         Ok(None) | Err(_) => {
             let reason = format!("User {username} not found");
             sender
@@ -77,13 +80,14 @@ pub async fn auth_password(
 ) -> Result<(), Error> {
     sender
         .send(ServerAuthMessage::Password {
-            prompt: format!("Please input password for {username}: "),
+            prompt: format!("{username}'s password: "),
         })
         .await?;
 
     let auth_password = async {
         const MAX_RETRIES: usize = 3;
         for i in 0..MAX_RETRIES {
+            tracing::debug!(target: "sshd", times=i, "Waiting for password from client");
             let Some(message) = recver.try_next().await? else {
                 return Err(Error::from("Failed to receive password from client"));
             };
@@ -100,10 +104,12 @@ pub async fn auth_password(
                         }
                         false => {
                             sender
-                            .send(ServerAuthMessage::Password {
-                                prompt: format!("Authentication failed, try again!\nPlease input password for {username}: "),
-                            })
-                            .await?;
+                                .send(ServerAuthMessage::Password {
+                                    prompt: format!(
+                                        "Authentication failed, try again!\n{username}'s password: "
+                                    ),
+                                })
+                                .await?;
                         }
                     }
                 }
