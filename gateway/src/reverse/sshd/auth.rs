@@ -24,7 +24,7 @@ pub async fn auth(
     username: &str,
     location: &Node,
     mut sender: Sender<ServerAuthMessage>,
-    recver: Recver<'_, ClientAuthMessage>,
+    recver: Recver<ClientAuthMessage>,
 ) -> Result<unistd::User, Error> {
     reject_deny(username, location, &mut sender).await?;
 
@@ -73,7 +73,7 @@ pub async fn reject_deny(
 pub async fn auth_password(
     username: &str,
     mut sender: Sender<ServerAuthMessage>,
-    mut recver: Recver<'_, ClientAuthMessage>,
+    mut recver: Recver<ClientAuthMessage>,
 ) -> Result<(), Error> {
     sender
         .send(ServerAuthMessage::Password {

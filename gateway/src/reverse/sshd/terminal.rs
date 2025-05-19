@@ -29,9 +29,9 @@ pub type ServerTerminalMessage = Bytes;
 pub async fn shell(
     user: &unistd::User,
     pseudo: bool,
-    recver: Recver<'static, ClientTerminalMessage>,
+    recver: Recver<ClientTerminalMessage>,
     sender: Sender<ServerTerminalMessage>,
-) -> Result<(), Error> {
+) -> Result<impl Future<Output = ()> + use<>, Error> {
     exec(user, pseudo, None, recver, sender).await
 }
 
@@ -39,9 +39,9 @@ pub async fn exec(
     user: &unistd::User,
     pseudo: bool,
     command: Option<&str>,
-    mut recver: Recver<'static, ClientTerminalMessage>,
+    mut recver: Recver<ClientTerminalMessage>,
     mut sender: Sender<ServerTerminalMessage>,
-) -> Result<(), Error> {
+) -> Result<impl Future<Output = ()> + use<>, Error> {
     // TOOD: do_exec_no_pty
     let (child, child_io) = match pseudo {
         true => do_exec_pty(user, command).map_err(|e| format!("Failed to exec: {e:?}"))?,
@@ -52,17 +52,18 @@ pub async fn exec(
     let mut close_sender = sender.clone();
     let child_exit = tokio::task::spawn_blocking(move || sys::wait::waitpid(child, None));
 
-    let _send_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
-        send_terminal(&mut child_read_half, &mut sender).await
-    }));
-    let _recv_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
-        recv_terminal(&mut child_write_half, &mut recver).await
-    }));
+    Ok(async move {
+        let _send_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
+            send_terminal(&mut child_read_half, &mut sender).await
+        }));
+        let _recv_terminal = AbortOnDropHandle::new(tokio::spawn(async move {
+            recv_terminal(&mut child_write_half, &mut recver).await
+        }));
 
-    // TOOD: status code
-    _ = child_exit.await;
-    _ = close_sender.close().await;
-    Ok(())
+        // TOOD: status code
+        _ = child_exit.await;
+        _ = close_sender.close().await;
+    })
 }
 
 async fn send_terminal(
@@ -78,7 +79,7 @@ async fn send_terminal(
 
 async fn recv_terminal(
     pty_write_half: &mut OwnedWriteHalf,
-    recver: &mut Recver<'_, ClientTerminalMessage>,
+    recver: &mut Recver<ClientTerminalMessage>,
 ) -> io::Result<()> {
     while let Some(terminal_message) = recver.try_next().await? {
         match terminal_message {

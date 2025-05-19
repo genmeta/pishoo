@@ -1,16 +1,18 @@
-use std::{self, fmt::Debug, sync::Arc};
+use std::{self, sync::Arc};
 
 use bytes::Bytes;
-use futures::{Sink, SinkExt, Stream, StreamExt, TryStream, TryStreamExt, channel::mpsc};
+use futures::{TryStream, TryStreamExt};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, Response, StatusCode};
-use mux::{ChannelMessage, NewChannel, OpenChannel};
-use tokio::io;
+use mux::{NewChannel, OpenChannel};
+use tokio::{
+    io::{self, AsyncWriteExt},
+    task::JoinSet,
+};
 use tokio_util::{
     codec,
     io::{CopyToBytes, SinkWriter, StreamReader},
-    task::AbortOnDropHandle,
 };
 
 mod async_fd;
@@ -21,9 +23,10 @@ mod mux;
 mod socks;
 mod terminal;
 
-use tracing::Instrument;
-
-use crate::parse::Node;
+use crate::{
+    h3::{H3Sink, H3Stream},
+    parse::Node,
+};
 
 fn map_errno(errno: nix::Error, message: &str) -> io::Error {
     let error = io::Error::from(errno);
@@ -70,7 +73,7 @@ async fn validate_request(request: Request<()>) -> (Response<()>, crate::error::
 pub async fn login(
     location: &Arc<Node>,
     request: Request<()>,
-    mut recver: RequestStream<RecvStream, Bytes>,
+    recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> crate::error::Result<()> {
     let (resp, result) = validate_request(request).await;
@@ -81,35 +84,20 @@ pub async fn login(
         return Err(e);
     }
 
-    let (message_sender, pending_messages) = mpsc::channel::<mux::ChannelMessage>(32);
-    let mux = Arc::new(mux::Mux::new(message_sender, mux::Role::Server));
-
-    let send_messages = async {
-        let message_sender = codec::FramedWrite::new(
-            crate::h3::H3StreamWriter::new(&mut sender),
-            cbor_codec::CborEncoder::default(),
-        );
-        send_messages(message_sender, pending_messages).await;
-        _ = sender.finish().await
-    };
-
-    let message_handler = mux.clone();
-    let (new_channels_sender, new_channels) = mpsc::channel::<NewChannel>(32);
-    let recv_messages = async {
-        let message_recver = codec::FramedRead::new(
-            StreamReader::new(crate::h3::H3StreamReader::new(&mut recver)),
+    let (_mux, incomings) = mux::Mux::new(
+        mux::Role::Server,
+        codec::FramedRead::new(
+            StreamReader::new(H3Stream::new(recver)),
             cbor_codec::CborDecoder::default(),
-        );
-        recv_messages(message_recver, new_channels_sender, message_handler).await;
-        recver.stop_sending(h3::error::Code::H3_NO_ERROR);
-    };
+        ),
+        codec::FramedWrite::new(
+            H3Sink::new(sender), // No need for SinkWriter
+            cbor_codec::CborEncoder::default(),
+        ),
+    );
 
-    tokio::select! {
-        _ = send_messages.in_current_span() => {},
-        _ = recv_messages.in_current_span() => {}
-        Err(e) = run(location, new_channels) => {
-            tracing::error!(target: "sshd", "Server failed: {e:?}");
-        }
+    if let Err(e) = run(location, incomings).await {
+        tracing::error!(target: "sshd", "Server failed: {e:?}");
     }
 
     Ok(())
@@ -117,10 +105,10 @@ pub async fn login(
 
 async fn run(
     location: &Node,
-    mut new_channels: impl Stream<Item = NewChannel> + Unpin,
+    mut new_channels: impl TryStream<Ok = NewChannel> + Unpin,
 ) -> Result<(), Error> {
     let user = {
-        let Some(open_auth) = new_channels.next().await else {
+        let Ok(Some(open_auth)) = new_channels.try_next().await else {
             return Ok(());
         };
 
@@ -133,8 +121,8 @@ async fn run(
 
         auth::auth(&username, location, sender, recver).await?
     };
-    let mut tasks = vec![];
-    while let Some(new_channel) = new_channels.next().await {
+    let mut tasks = JoinSet::new();
+    while let Ok(Some(new_channel)) = new_channels.try_next().await {
         match new_channel.request() {
             OpenChannel::Auth { .. } => {
                 return Err("Auth should only be preformed once".into());
@@ -142,74 +130,31 @@ async fn run(
             OpenChannel::Shell { pseudo } => {
                 let pseudo = pseudo.to_owned();
                 let (recver, sender) = new_channel.assume();
-                tasks.push(AbortOnDropHandle::new(tokio::spawn({
-                    let user = user.clone();
-                    async move { terminal::shell(&user, pseudo, recver, sender).await }
-                })));
+                let shell = terminal::shell(&user, pseudo, recver, sender).await?;
+                tasks.spawn(shell);
             }
             OpenChannel::Exec { pseudo, command } => {
                 let pseudo = pseudo.to_owned();
                 let command = command.to_owned();
                 let (recver, sender) = new_channel.assume();
-                tasks.push(AbortOnDropHandle::new(tokio::spawn({
-                    let user = user.clone();
-                    async move { terminal::exec(&user, pseudo,Some(&command), recver, sender).await }
-                })));
+                let exec = terminal::exec(&user, pseudo, Some(&command), recver, sender).await?;
+                tasks.spawn(exec);
             }
             OpenChannel::Socks {} => {
                 let (recver, sender) = new_channel.assume::<Bytes, Bytes>();
-                tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
+                tasks.spawn(async move {
                     let mut reader = StreamReader::new(recver);
                     let mut writer = SinkWriter::new(CopyToBytes::new(sender));
-                    Ok(socks::accpet(&mut reader, &mut writer).await?)
-                })));
+                    // 除了io错误还可能是socks协议违背/不支持之类的。这些属于单个Channel，错误不扩散。
+                    if let Err(failed) = socks::accpet(&mut reader, &mut writer).await {
+                        tracing::error!(target: "sshd", "Failed to accept socks5 request: {failed:?}");
+                    }
+                    _ = writer.shutdown().await
+                });
             }
             OpenChannel::Heartbeat {} => todo!(),
         }
     }
+    _ = tasks.join_all().await;
     Ok(())
-}
-
-async fn send_messages(
-    mut message_sender: impl Sink<ChannelMessage, Error: Debug> + Unpin,
-    mut pending_messages: impl Stream<Item = ChannelMessage> + Unpin,
-) {
-    while let Some(message) = pending_messages.next().await {
-        if let Err(send_error) = message_sender.send(message).await {
-            tracing::error!(target: "sshd", "Failed to send message: {send_error:?}");
-            break;
-        }
-    }
-}
-
-async fn recv_messages(
-    mut message_recver: impl TryStream<Ok = ChannelMessage, Error: Debug> + Unpin,
-    mut new_channels_sender: impl Sink<NewChannel> + Unpin,
-    mux: Arc<mux::Mux>,
-) {
-    loop {
-        let message: ChannelMessage = match message_recver.try_next().await {
-            Ok(Some(message)) => message,
-            Ok(None) => {
-                tracing::info!(target: "sshd", "Peer closed the stream");
-                break;
-            }
-            Err(recv_error) => {
-                tracing::error!(target: "sshd", "Read from peer error: {recv_error:?}");
-                break;
-            }
-        };
-
-        match mux.receive(message).await {
-            Ok(Some(new_channel)) => {
-                if (new_channels_sender.send(new_channel).await).is_err() {
-                    break;
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(target: "sshd", "Failed to receive message: {e:?}");
-            }
-        }
-    }
 }

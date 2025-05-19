@@ -1,18 +1,18 @@
 use std::{sync::Arc, time::Duration};
 
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use gm_quic::QuicClient;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
-use hyper::{server::conn::http1, service::service_fn};
+use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use qdns::Resolve;
-use tokio::time::timeout;
+use tokio::{io::AsyncWriteExt, time::timeout};
 use tracing::{Instrument, error, info, warn};
 
 use super::BoxResponse;
 use crate::{
     forward::{build_empty_response, build_error_response, validate_host},
-    h3::{H3Conn, H3SendRequest, H3StreamOwnerReader, H3StreamWriter},
+    h3::{H3Conn, H3SendRequest, H3Sink, H3Stream},
 };
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
@@ -136,23 +136,21 @@ async fn send(
     // 发送请求头
     let req = http::Request::from_parts(parts, ());
     let stream = send_request.send_request(req).await?;
-    let (mut sender, mut recver) = stream.split();
+    let (sender, mut recver) = stream.split();
 
     // 发送请求体
     tokio::spawn({
         let uri = uri.clone();
         async move {
-            {
-                let mut body_stream = tokio_util::io::StreamReader::new(
-                    body.into_data_stream().map_err(std::io::Error::other),
-                );
-                let mut stream = H3StreamWriter::new(&mut sender);
-                match tokio::io::copy(&mut body_stream, &mut stream).await {
-                    Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
-                    Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
-                }
+            let mut body_stream = tokio_util::io::StreamReader::new(
+                body.into_data_stream().map_err(std::io::Error::other),
+            );
+            let mut stream = H3Sink::new(sender);
+            match tokio::io::copy(&mut body_stream, &mut stream).await {
+                Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
+                Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
             }
-            match sender.finish().await {
+            match stream.shutdown().await {
                 Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
                 Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
             }
@@ -173,8 +171,8 @@ async fn send(
     info!("[Forward] Received response headers: {:?}", parts);
     parts.version = http::Version::HTTP_11;
 
-    let recver_stream = H3StreamOwnerReader::new(recver, send_request);
-    let body = StreamBody::new(recver_stream).boxed();
+    let recver_stream = H3Stream::new(recver);
+    let body = BodyExt::boxed(StreamBody::new(recver_stream.map(|b| b.map(Frame::data))));
     info!("[Forward] Response body receiver started");
 
     Ok(Response::from_parts(parts, body))

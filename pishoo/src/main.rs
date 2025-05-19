@@ -98,10 +98,20 @@ async fn main() -> Result<()> {
 
     let mut handler = JoinSet::new();
 
-    handler.spawn(reverse::serve(servers.clone()));
+    let reverse_server = reverse::serve(servers.clone());
+    handler.spawn(async move {
+        reverse_server.await.inspect_err(|e| {
+            tracing::error!("reverse server error: {}", e);
+        })
+    });
 
     for proxy in proxys {
-        handler.spawn(forward::serve(Arc::clone(proxy)));
+        let forward_server = forward::serve(Arc::clone(proxy));
+        handler.spawn(async move {
+            forward_server.await.inspect_err(|e| {
+                tracing::error!("reverse server error: {}", e);
+            })
+        });
     }
 
     handler.join_all().await;
