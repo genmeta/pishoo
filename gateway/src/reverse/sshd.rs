@@ -105,15 +105,23 @@ pub async fn login(
 
 async fn run(
     location: &Node,
-    mut new_channels: impl TryStream<Ok = NewChannel> + Unpin,
+    mut incomings: impl TryStream<Ok = NewChannel, Error = Error> + Unpin,
 ) -> Result<(), Error> {
     let user = {
-        let Ok(Some(open_auth)) = new_channels.try_next().await else {
-            return Ok(());
+        let open_auth = match incomings.try_next().await {
+            Ok(Some(new_channel)) => new_channel,
+            Err(e) => {
+                tracing::error!(target: "sshd", "Failed to accept channel: {e:?}");
+                return Err(e);
+            }
+            Ok(None) => {
+                tracing::error!(target: "sshd", "Failed to auth: no channel");
+                return Ok(());
+            }
         };
 
         let OpenChannel::Auth { username } = open_auth.request() else {
-            return Err(format!("expect Auth, not {:?}", open_auth.request()).into());
+            return Err(format!("Expect Auth, not {:?}", open_auth.request()).into());
         };
         let username = username.to_owned();
 
@@ -122,7 +130,7 @@ async fn run(
         auth::auth(&username, location, sender, recver).await?
     };
     let mut tasks = JoinSet::new();
-    while let Ok(Some(new_channel)) = new_channels.try_next().await {
+    while let Ok(Some(new_channel)) = incomings.try_next().await {
         match new_channel.request() {
             OpenChannel::Auth { .. } => {
                 return Err("Auth should only be preformed once".into());

@@ -79,6 +79,7 @@ pub async fn accpet(
                 .await?;
             tracing::info!(target: "socks", "Connected to {}", request.address);
             io::copy_bidirectional(&mut tcp_stream, &mut io::join(reader, writer)).await?;
+            tracing::info!(target: "socks", "Shutdown connect to {}", request.address);
             Ok(())
         }
         socks5_proto::Command::Bind | socks5_proto::Command::Associate => {
