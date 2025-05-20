@@ -9,7 +9,6 @@ use derive_more::From;
 use futures::{Sink, Stream, future::BoxFuture};
 use tokio::io::AsyncWrite;
 
-pub type H3Conn = h3::client::Connection<h3_shim::QuicConnection, Bytes>;
 pub type H3SendRequest = h3::client::SendRequest<h3_shim::OpenStreams, Bytes>;
 
 #[derive(From)]

@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::{StreamExt, TryStreamExt};
-use gm_quic::QuicClient;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
@@ -12,24 +11,25 @@ use tracing::{Instrument, error, info, warn};
 use super::BoxResponse;
 use crate::{
     forward::{build_empty_response, build_error_response, validate_host},
-    h3::{H3Conn, H3SendRequest, H3Sink, H3Stream},
+    h3::{H3SendRequest, H3Sink, H3Stream},
+    pool::H3ConnectionPool,
 };
 
 const MAX_RETRY_COUNT: usize = 3; // QUIC 连接最大重试次数
 
 pub async fn proxy(
-    quic_client: Arc<QuicClient>,
+    pool: Arc<H3ConnectionPool>,
     req: Request<hyper::body::Incoming>,
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
-    proxy_inner(quic_client, req, resolver)
+    proxy_inner(pool, req, resolver)
         .instrument(tracing::info_span!("proxy", odcid = tracing::field::Empty))
         .await
 }
 
 /// 处理普通 HTTP 请求
 pub async fn proxy_inner(
-    quic_client: Arc<QuicClient>,
+    pool: Arc<H3ConnectionPool>,
     req: Request<hyper::body::Incoming>,
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
@@ -46,7 +46,7 @@ pub async fn proxy_inner(
     };
 
     // 创建 QUIC 连接
-    let (mut conn, send_request) = match create_quic_connection(quic_client, host, resolver).await {
+    let send_request = match create_quic_connection(pool, host, resolver).await {
         Ok(conn) => conn,
         Err(msg) => {
             error!(
@@ -56,14 +56,6 @@ pub async fn proxy_inner(
             return Ok(build_error_response(msg));
         }
     };
-    tokio::task::spawn({
-        let uri = uri.clone();
-        async move {
-            if let Err(err) = conn.wait_idle().await {
-                error!("[Forward][{}] QUIC connection error: {}", uri, err);
-            }
-        }
-    });
 
     info!("[Forward][{}]: quic connection established", uri);
 
@@ -86,7 +78,7 @@ pub async fn proxy_inner(
 
 /// 处理 CONNECT 隧道请求
 pub async fn connect(
-    quic_client: Arc<QuicClient>,
+    pool: Arc<H3ConnectionPool>,
     req: Request<hyper::body::Incoming>,
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
@@ -105,8 +97,7 @@ pub async fn connect(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
-                let service =
-                    service_fn(move |req| proxy(quic_client.clone(), req, resolver.clone()));
+                let service = service_fn(move |req| proxy(pool.clone(), req, resolver.clone()));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -180,10 +171,10 @@ async fn send(
 
 /// 创建 QUIC 连接并进行地址注册
 async fn create_quic_connection(
-    quic_client: Arc<QuicClient>,
+    pool: Arc<H3ConnectionPool>,
     host: &str,
     resolver: Arc<dyn Resolve + Send + Sync>,
-) -> Result<(H3Conn, H3SendRequest), String> {
+) -> Result<H3SendRequest, String> {
     let mut remote_endpoints = Vec::new();
 
     // DNS 解析重试
@@ -206,40 +197,37 @@ async fn create_quic_connection(
     }
 
     for (index, endpoint) in remote_endpoints.iter().enumerate() {
-        // 建立 QUIC 连接
-        let conn = match quic_client.connect(host, *endpoint) {
-            Ok(conn) => conn,
-            Err(e) => {
-                warn!(
-                    "[Forward] Failed to connect to {}: {}, retry: {} of {}",
-                    endpoint, e, index, endpoint
-                );
-                continue;
-            }
-        };
-
-        // HTTP/3 客户端
-        let gm_quic_conn = h3_shim::QuicConnection::new(conn.clone()).await;
-
         // 创建 H3 客户端并设置超时
         match timeout(
             Duration::from_millis(5000 * (index + 1) as u64),
-            h3::client::new(gm_quic_conn),
+            pool.connect(host, *endpoint),
         )
         .await
         {
             Ok(result) => {
-                let origin_dcid = match conn.origin_dcid() {
-                    Ok(dcid) => dcid,
+                match result {
+                    Ok(conn) => {
+                        info!(
+                            "[Forward] H3 connection created successfully for: {}",
+                            endpoint
+                        );
+                        let origin_dcid = match conn.quic.origin_dcid() {
+                            Ok(dcid) => dcid,
+                            Err(e) => {
+                                error!("Failed to get origin DCID: {}", e);
+                                continue;
+                            }
+                        };
+                        tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
+                        return Ok(conn.h3.clone());
+                    }
                     Err(e) => {
-                        error!("Failed to get origin DCID: {}", e);
+                        error!(
+                            "[Forward] H3 connection creation failed: {}, retry: {} for {}",
+                            e, index, endpoint
+                        );
                         continue;
                     }
-                };
-
-                return {
-                    tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
-                    result.map_err(|e| format!("h3 client creation failed: {e}"))
                 };
             }
             Err(e) => {

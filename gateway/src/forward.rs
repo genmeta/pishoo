@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -16,6 +16,7 @@ use crate::{
     error::CustomError,
     forward,
     parse::{Node, Value},
+    pool::H3ConnectionPool,
 };
 
 mod normal;
@@ -65,13 +66,14 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     let acl = Arc::new(command::acl(&node));
 
     let quic_client = Arc::new(create_quic_client().await);
+    let pool = Arc::new(H3ConnectionPool::new(quic_client.clone()));
 
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await.inspect_err(|e| {
             error!("TCP listener accept failed: {:?}", e);
         }) {
             let io = TokioIo::new(stream);
-            let quic_client = quic_client.clone();
+            let pool = pool.clone();
             let acl = acl.clone();
             let resolver = resolver.clone();
 
@@ -86,13 +88,13 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
                         }
 
                         let is_connect = req.method() == "CONNECT";
-                        let quic_client = quic_client.clone();
+                        let pool = pool.clone();
                         let resolver = resolver.clone();
                         async move {
                             if is_connect {
-                                forward::quic::connect(quic_client, req, resolver).await
+                                forward::quic::connect(pool, req, resolver).await
                             } else {
-                                forward::quic::proxy(quic_client, req, resolver).await
+                                forward::quic::proxy(pool, req, resolver).await
                             }
                         }
                         .boxed()
@@ -185,6 +187,7 @@ fn create_client_params() -> ClientParameters {
     params.set_initial_max_stream_data_bidi_local(1u32 << 20);
     params.set_initial_max_stream_data_bidi_remote(1u32 << 20);
     params.set_active_connection_id_limit(10u32);
+    params.set_max_idle_timeout(Duration::from_secs(30));
 
     params
 }
