@@ -68,7 +68,7 @@ serde_cbor = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 
 # socks
-dashmap = { workspace = true, optional = true }
+dashmap = { workspace = true }
 socks5-proto = { workspace = true, optional = true }
 pin-project-lite = { workspace = true, optional = true }
 
@@ -94,11 +94,5 @@ sshd = [
     "tokio-util/io",
     "bytes/serde",
 ]
-socks = [
-    "sshd",
-    "dep:socks5-proto",
-    "tokio-util/rt",
-    "dep:dashmap",
-    "dep:pin-project-lite",
-]
+socks = ["sshd", "dep:socks5-proto", "tokio-util/rt", "dep:pin-project-lite"]
 qlog = []
