@@ -24,8 +24,8 @@ pub enum CustomError {
     UnsupportedConfig(String),
     #[error("io error: `{0}`")]
     IoError(#[from] std::io::Error),
-    #[error("h3 error: `{0}`")]
-    H3Error(#[from] h3::Error),
+    #[error("h3 stream error: `{0}`")]
+    H3Error(#[from] h3::error::StreamError),
     #[error("http error: `{0}`")]
     HttpError(#[from] http::Error),
     #[error("regex error: `{0}`")]

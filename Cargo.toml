@@ -40,7 +40,7 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-h3 = { version = "0.0.7", features = ["tracing"] }
+h3 = { version = "0.0.8", features = ["tracing"] }
 
 # --- QUIC Implementation ---
 gm-quic = "0.2.1"

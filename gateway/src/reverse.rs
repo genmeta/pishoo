@@ -243,7 +243,7 @@ async fn handle_connections(
         debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
 
         // 将QUIC连接包装为H3 QUIC连接
-        let h3_quic_conn = h3_shim::QuicConnection::new(conn).await;
+        let h3_quic_conn = h3_shim::QuicConnection::new(conn);
 
         debug!("QUIC connection wrapped as H3 QUIC connection");
 
@@ -267,14 +267,18 @@ async fn handle_connections(
         tokio::spawn({
             let routers_clone = routers.clone();
             async move {
-                while let Ok(Some((req, stream))) = h3_conn
+                while let Ok(Some(req_resolver)) = h3_conn
                     .accept()
                     .await
                     .inspect_err(|e| error!("Connection acceptance error: {:?}", e))
                 {
                     let routers = routers_clone.clone();
+                    let handle_request = async move {
+                        let (req, stream) = req_resolver.resolve_request().await?;
+                        handle_request(routers, req, stream).await
+                    };
                     tokio::spawn(async move {
-                        if let Err(e) = handle_request(routers, req, stream).await {
+                        if let Err(e) = handle_request.await {
                             error!("Request processing error: {}", e);
                         }
                     });
