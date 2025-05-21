@@ -1,0 +1,3 @@
+[target.mipsel-unknown-linux-musl]
+build-std = ["std", "alloc", "core", "proc_macro", "panic_abort"]
+image = "docker.io/rustembedded/cross:mipsel-unknown-linux-musl"
