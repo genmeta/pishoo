@@ -217,6 +217,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bitfield-struct"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2be5a46ba01b60005ae2c51a36a29cfe134bcacae2dd5cedcd4615fbaad1494b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.101",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -930,7 +941,7 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 [[package]]
 name = "gm-quic"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "dashmap",
@@ -948,6 +959,22 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "gmdns"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=feat%2Fmdns#05d733bdfc060afae5424c4c6282f165eb02a549"
+dependencies = [
+ "bitfield-struct",
+ "bytes",
+ "clap",
+ "nom 8.0.0",
+ "socket2",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -987,7 +1014,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "dashmap",
@@ -2034,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bitflags",
  "bytes",
@@ -2053,7 +2080,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "qbase",
  "qevent",
@@ -2065,7 +2092,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "dashmap",
@@ -2088,22 +2115,24 @@ dependencies = [
 [[package]]
 name = "qdns"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "async-trait",
  "dashmap",
+ "gmdns",
  "qbase",
  "qtraversal",
  "reqwest",
  "serde",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
 [[package]]
 name = "qevent"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -2121,7 +2150,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2141,7 +2170,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "derive_more",
@@ -2159,7 +2188,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2184,7 +2213,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -2254,7 +2283,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#cd80f542dd7f93abb676b96bff242d40a9b6aa98"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#1d036ae6cda2b47285a978ecaa2beca560f67386"
 dependencies = [
  "bytes",
  "futures",
@@ -3267,6 +3296,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3277,10 +3317,12 @@ dependencies = [
  "once_cell",
  "regex",
  "sharded-slab",
+ "smallvec",
  "thread_local",
  "time",
  "tracing",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]

@@ -1,10 +1,14 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use futures::{StreamExt, TryStreamExt};
+use gm_quic::EndpointAddr;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
-use qdns::Resolve;
+use qdns::{MdnsResolver, Resolve};
 use tokio::{io::AsyncWriteExt, time::timeout};
 use tracing::{Instrument, error, info, warn};
 
@@ -175,31 +179,15 @@ async fn create_quic_connection(
     host: &str,
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<H3SendRequest, String> {
-    let mut remote_endpoints = Vec::new();
-
-    // DNS 解析重试
-    for retry in 0..MAX_RETRY_COUNT {
-        match resolver.lookup(host).await {
-            Ok(endpoints) => {
-                info!("[DNS]: resolved: {host} -> {endpoints:?}");
-                remote_endpoints = endpoints;
-                break;
-            }
-            Err(err) => {
-                warn!("[DNS] lookup {host} failed: {err} retry: {retry}");
-                continue;
-            }
-        }
-    }
-
-    if remote_endpoints.is_empty() {
-        return Err(format!("[DNS] lookup failed for: {host}"));
-    }
-
+    let remote_endpoints = lookup(host, resolver).await?;
     for (index, endpoint) in remote_endpoints.iter().enumerate() {
         // 创建 H3 客户端并设置超时
+        let t = match endpoint {
+            EndpointAddr::Direct { addr: _ } => 1000,
+            EndpointAddr::Agent { agent: _, outer: _ } => 5000,
+        };
         match timeout(
-            Duration::from_millis(5000 * (index + 1) as u64),
+            Duration::from_millis(t * (index + 1) as u64),
             pool.connect(host, *endpoint),
         )
         .await
@@ -240,4 +228,45 @@ async fn create_quic_connection(
     }
 
     Err("Maximum retry attempts exceeded".to_string())
+}
+
+async fn lookup(
+    host: &str,
+    resolver: Arc<dyn Resolve + Send + Sync>,
+) -> Result<Vec<EndpointAddr>, String> {
+    if let Ok(endpoints) = mdns().lookup(host).await {
+        info!("[DNS]: mdns resolved: {host} -> {endpoints:?}");
+        return Ok(endpoints);
+    };
+    let mut remote_endpoints = Vec::new();
+    // DNS 解析重试
+    for retry in 0..MAX_RETRY_COUNT {
+        match resolver.lookup(host).await {
+            Ok(endpoints) => {
+                info!("[DNS]: resolved: {host} -> {endpoints:?}");
+                remote_endpoints = endpoints;
+                break;
+            }
+            Err(err) => {
+                warn!("[DNS] lookup {host} failed: {err} retry: {retry}");
+                continue;
+            }
+        }
+    }
+
+    if remote_endpoints.is_empty() {
+        return Err(format!("[DNS] lookup failed for: {host}"));
+    }
+
+    Ok(remote_endpoints)
+}
+
+pub(crate) fn mdns() -> MdnsResolver {
+    static MDNS: OnceLock<MdnsResolver> = OnceLock::new();
+    MDNS.get_or_init(|| {
+        let mdns = MdnsResolver::new();
+        let _ = mdns.add_server("_client._genmeta._local", vec![]);
+        mdns
+    })
+    .clone()
 }

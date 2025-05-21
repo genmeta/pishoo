@@ -8,6 +8,7 @@ use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::Resolve;
+use quic::mdns;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
@@ -58,6 +59,7 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
         } else {
             unreachable!("Resolver address is required");
         };
+    let _mdns = mdns();
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
