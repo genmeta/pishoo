@@ -4,26 +4,20 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use gm_quic::QuicClient;
 use h3::client::SendRequest;
-use h3_shim::{OpenStreams, QuicConnection};
 use qconnection::prelude::ToEndpointAddr;
-use tokio::{io, sync::Notify};
+use tokio::{io, sync::Mutex};
 
 #[derive(Clone)]
 pub struct ReusableConnection {
     #[allow(unused)]
     pub quic: Arc<gm_quic::Connection>,
-    pub h3: SendRequest<OpenStreams, Bytes>,
-}
-
-enum ConnectionState {
-    Connecting(Arc<Notify>),
-    Connected(ReusableConnection),
+    pub h3: SendRequest<h3_shim::OpenStreams, Bytes>,
 }
 
 /// H3 Connection reuse pool
 pub struct H3ConnectionPool {
     quic_client: Arc<QuicClient>,
-    h3_clients: Arc<DashMap<String, ConnectionState>>,
+    h3_clients: Arc<DashMap<String, Arc<Mutex<Option<ReusableConnection>>>>>,
 }
 
 impl H3ConnectionPool {
@@ -51,37 +45,32 @@ impl H3ConnectionPool {
     ) -> io::Result<ReusableConnection> {
         let server_name = server_name.into();
 
-        loop {
-            let notify = match self.h3_clients.get(&server_name) {
-                Some(entry) => match entry.value() {
-                    ConnectionState::Connected(conn) => {
-                        tracing::debug!("[Pool] Reusing existing connection for {}", server_name);
-                        return io::Result::Ok(conn.clone());
-                    }
-                    ConnectionState::Connecting(notify) => {
-                        tracing::debug!("[Pool] Waiting for connection for {}", server_name);
-                        Arc::clone(notify)
-                    }
-                },
+        let mut entry = None;
+
+        // Get a shared access so that multiple asynchronous tasks can asynchronously wait for other tasks
+        // to create connections
+        let entry = loop {
+            match entry {
+                Some(entry) => break entry,
                 None => {
-                    tracing::debug!("[Pool] Connecting to {}", server_name);
-                    let notify = Notify::new();
-                    self.h3_clients.insert(
-                        server_name.clone(),
-                        ConnectionState::Connecting(Arc::new(notify)),
-                    );
-                    break;
+                    self.h3_clients.entry(server_name.clone()).or_default();
+                    entry = self.h3_clients.get(&server_name).map(|e| e.clone());
                 }
-            };
-            notify.notified().await;
+            }
+        };
+
+        let mut entry = entry.lock().await;
+
+        if let Some(conn) = entry.as_ref() {
+            // todo: fresh quic conenc
+            tracing::debug!("[pool] Reusing connection to {server_name}");
+            return io::Result::Ok(conn.clone());
         }
 
         let connect_or_reuse = async {
-            tracing::info!("[Pool] Creating new connection for {}", server_name);
-
             let quic_connection = self.quic_client.connect(server_name.clone(), server_ep)?;
             let (mut h3_connection, send_request) =
-                h3::client::new(QuicConnection::new(quic_connection.clone()))
+                h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))
                     .await
                     .map_err(io::Error::other)?;
 
@@ -89,6 +78,8 @@ impl H3ConnectionPool {
                 quic: quic_connection.clone(),
                 h3: send_request.clone(),
             };
+
+            *entry = Some(conn.clone());
 
             tokio::spawn({
                 let h3_clients = self.h3_clients.clone();
@@ -99,22 +90,19 @@ impl H3ConnectionPool {
                 }
             });
 
-            let state = self.h3_clients.insert(
-                server_name.clone(),
-                ConnectionState::Connected(conn.clone()),
-            );
-            if let Some(ConnectionState::Connecting(notify)) = state {
-                notify.notify_waiters();
-            }
+            tracing::debug!("[Pool] Created connection to {server_name}");
+
             Ok(conn)
         };
 
         match connect_or_reuse.await {
-            Ok(conn) => Ok(conn),
+            Ok(send_request) => Ok(send_request),
             Err(error) => {
                 // clean up failed connections
-                self.h3_clients.remove_if(&server_name, |_, v| {
-                    matches!(v, ConnectionState::Connecting(_))
+                tracing::debug!("[Pool] Failed to connect to {server_name}: {error}");
+                tokio::task::spawn_blocking({
+                    let h3_clients = self.h3_clients.clone();
+                    move || h3_clients.remove_if(&server_name, |_, v| v.blocking_lock().is_none())
                 });
                 Err(error)
             }
