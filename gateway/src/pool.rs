@@ -113,13 +113,8 @@ impl H3ConnectionPool {
             Ok(conn) => Ok(conn),
             Err(error) => {
                 // clean up failed connections
-                tokio::task::spawn_blocking({
-                    let h3_clients = self.h3_clients.clone();
-                    move || {
-                        h3_clients.remove_if(&server_name, |_, v| {
-                            matches!(v, ConnectionState::Connecting(_))
-                        })
-                    }
+                self.h3_clients.remove_if(&server_name, |_, v| {
+                    matches!(v, ConnectionState::Connecting(_))
                 });
                 Err(error)
             }
