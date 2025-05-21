@@ -1,6 +1,7 @@
 use std::{str::FromStr, sync::Arc};
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
+use futures::TryStreamExt;
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, Response, Uri, Version};
@@ -10,13 +11,14 @@ use hyper::{
     client::conn::http1::Builder,
 };
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio_stream::StreamExt;
 use tracing::{debug, error, info};
 
 use crate::{
     command,
     error::{CustomError, Result},
+    h3::{H3Sink, H3Stream},
     parse::{Node, Value},
     reverse::build_error_response,
 };
@@ -51,20 +53,18 @@ pub async fn handle(
         .await?;
 
     debug!("[Response handling][{}] Sending response headers", uri);
-    // 流式发送响应体
-    let mut body_stream = body.into_data_stream();
-    while let Some(Ok(chunk)) = body_stream.next().await {
-        sender.send_data(chunk).await?;
+
+    let mut body_stream =
+        tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
+    let mut stream = H3Sink::new(sender);
+    match tokio::io::copy(&mut body_stream, &mut stream).await {
+        Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
+        Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
     }
-    debug!("sent response body completely");
-    // 结束流
-    sender.finish().await.inspect_err(|e| {
-        error!(
-            "[Response handling][{}] Error finishing response stream: {:?}",
-            uri, e
-        )
-    })?;
-    debug!("[Response handling][{}] Processing completed", uri);
+    match stream.shutdown().await {
+        Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
+        Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+    }
     Ok(())
 }
 
@@ -72,7 +72,7 @@ pub async fn handle(
 pub async fn pass(
     location: &Node,
     req: Request<()>,
-    mut receiver: RequestStream<RecvStream, Bytes>,
+    receiver: RequestStream<RecvStream, Bytes>,
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
@@ -130,31 +130,10 @@ pub async fn pass(
         }
     });
 
-    // 创建请求体通道
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<std::result::Result<Frame<Bytes>, hyper::Error>>(128);
-    let body = StreamBody::new(ReceiverStream::new(rx));
-
-    // 异步转发请求体数据
-    tokio::spawn(async move {
-        while let Ok(Some(chunk)) = receiver.recv_data().await.inspect_err(|e| {
-            error!("[Request processing] Request body reception error: {:?}", e);
-        }) {
-            let mut data = chunk.chunk();
-            debug!(
-                "[Request processing] Sending request body data_length: {}",
-                data.len()
-            );
-            let _ = tx
-                .send(Ok(Frame::data(data.copy_to_bytes(data.len()))))
-                .await
-                .inspect_err(|e| error!("[Request processing] Request body send error: {:?}", e));
-        }
-    });
-
+    let stream = H3Stream::new(receiver).map(|item| item.map(Frame::data));
     // 发送代理请求
     let response = sender
-        .send_request(Request::from_parts(new_parts, body))
+        .send_request(Request::from_parts(new_parts, StreamBody::new(stream)))
         .await
         .inspect_err(|e| error!("[Request processing] Request send error: {:?}", e))?;
 

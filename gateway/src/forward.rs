@@ -29,10 +29,7 @@ type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
 /// Start the QUIC proxy server
 ///
 /// # Arguments
-/// * `addr` - The listening address of the server
-/// * `resolver` - The address of the DNS resolver
-/// * `allow` - The list of allowed hosts
-/// * `deny` - The list of denied hosts
+/// * `node` - The configuration node
 ///
 /// # Returns
 /// * `Result<String>` - The address the server is listening on
@@ -66,7 +63,7 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     let acl = Arc::new(command::acl(&node));
 
     let quic_client = Arc::new(create_quic_client().await);
-    let pool = Arc::new(H3ConnectionPool::new(quic_client.clone()));
+    let pool = Arc::new(H3ConnectionPool::new(quic_client));
 
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await.inspect_err(|e| {

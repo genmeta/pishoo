@@ -4,12 +4,13 @@ use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::SendStream;
 use http::{Request, Response, StatusCode, Uri, header::CONTENT_LENGTH};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::{debug, error};
+use tokio::io::{AsyncWriteExt, BufReader};
+use tracing::{debug, error, info};
 
 use crate::{
     command::{self, content_type, index},
     error::Result,
+    h3::H3Sink,
     parse::{Node, Value},
     reverse::build_error_response,
 };
@@ -153,38 +154,15 @@ async fn serve_static_file(
     let response = Response::from_parts(parts, body);
     sender.send_response(response).await?;
 
-    // TODO H3StreamWriter 实现目前会卡住
-    // {
-    //     let mut reader = BufReader::new(file);
-    //     let mut stream = H3StreamWriter::new(&mut sender);
-    //     tokio::io::copy(&mut reader, &mut stream)
-    //         .await
-    //         .inspect_err(|e| error!("[Response handling][{}] Error sending file: {}", uri, e))?;
-    // }
     let mut reader = BufReader::new(file);
-    loop {
-        let buffer_slice = reader
-            .fill_buf()
-            .await
-            .inspect_err(|e| error!("[Response handling][{}] Error reading file: {}", uri, e))?;
-        if buffer_slice.is_empty() {
-            break;
-        }
-        let len = buffer_slice.len();
-        let data_to_send = Bytes::copy_from_slice(buffer_slice);
-        sender
-            .send_data(data_to_send)
-            .await
-            .inspect_err(|e| error!("[Response handling][{}] Error sending data: {}", uri, e))?;
-        reader.consume(len);
-    }
-
-    debug!("[Response handling][{}] File sent successfully", uri);
-
-    sender
-        .finish()
+    let mut stream = H3Sink::new(sender);
+    tokio::io::copy(&mut reader, &mut stream)
         .await
-        .inspect_err(|e| debug!("[Response handling][{}] Error sending response: {}", uri, e))?;
-    debug!("[Response handling][{}] Processing completed", uri);
+        .inspect_err(|e| error!("[Response handling][{}] Error sending file: {}", uri, e))?;
+
+    match stream.shutdown().await {
+        Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
+        Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+    }
     Ok(())
 }

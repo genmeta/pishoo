@@ -61,7 +61,7 @@ pub enum H3SendStream {
 
 /// A wrapper around a `h3::RequestStream<SendStream, Bytes>` that implements [`Sink`] and [`AsyncWrite`].
 ///
-/// Note that [`Sink`] api will always buffer a item, you should flush this or the item will not be sent.  
+/// Note that [`Sink`] api will always buffer a item, you should flush this or the item will not be sent.
 #[allow(clippy::large_enum_variant)]
 pub enum H3Sink {
     Send(BoxFuture<'static, (H3SendStream, io::Result<usize>)>),
