@@ -45,5 +45,6 @@ console-subscriber = { workspace = true, optional = true }
 [features]
 default = []
 sshd = ["gateway/sshd"]
+socks = ["gateway/socks"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
