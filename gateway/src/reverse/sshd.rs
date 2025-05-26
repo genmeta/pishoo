@@ -5,24 +5,18 @@ use futures::{TryStream, TryStreamExt};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, Response, StatusCode};
-use mux::{NewChannel, OpenChannel};
+use ssh3_proto::{cbor_codec, messages, mux};
 use tokio::{
-    io::{self, AsyncWriteExt},
+    io::{self},
     task::JoinSet,
 };
-use tokio_util::{
-    codec,
-    io::{CopyToBytes, SinkWriter, StreamReader},
-};
+use tokio_util::{codec, io::StreamReader};
 
 mod async_fd;
 mod auth;
-mod cbor_codec;
-mod mux;
-#[cfg(feature = "socks")]
+mod forward;
+mod session;
 mod socks;
-mod terminal;
-
 use crate::{
     h3::{H3Sink, H3Stream},
     parse::Node,
@@ -84,7 +78,7 @@ pub async fn login(
         return Err(e);
     }
 
-    let (_mux, incomings) = mux::Mux::new(
+    let (mux, incomings) = mux::Mux::new(
         mux::Role::Server,
         codec::FramedRead::new(
             StreamReader::new(H3Stream::new(recver)),
@@ -96,7 +90,7 @@ pub async fn login(
         ),
     );
 
-    if let Err(e) = run(location, incomings).await {
+    if let Err(e) = run(mux, location, incomings).await {
         tracing::error!(target: "sshd", "Server failed: {e:?}");
     }
 
@@ -104,8 +98,9 @@ pub async fn login(
 }
 
 async fn run(
+    mux: Arc<mux::Mux>,
     location: &Node,
-    mut incomings: impl TryStream<Ok = NewChannel, Error = Error> + Unpin,
+    mut incomings: impl TryStream<Ok = mux::NewChannel, Error = Error> + Unpin,
 ) -> Result<(), Error> {
     let user = {
         let open_auth = match incomings.try_next().await {
@@ -120,47 +115,63 @@ async fn run(
             }
         };
 
-        let OpenChannel::Auth { username } = open_auth.request() else {
-            return Err(format!("Expect Auth, not {:?}", open_auth.request()).into());
+        let messages::OpenChannel::Auth { username } = open_auth.request else {
+            return Err(format!("Expect Auth, not {:?}", open_auth.request).into());
         };
-        let username = username.to_owned();
 
-        let (recver, sender) = open_auth.assume();
-
-        auth::auth(&username, location, sender, recver).await?
+        auth::auth(
+            &username,
+            location,
+            open_auth.sender.framed(),
+            open_auth.recver.framed(),
+        )
+        .await?
     };
     let mut tasks = JoinSet::new();
-    while let Ok(Some(new_channel)) = incomings.try_next().await {
-        match new_channel.request() {
-            OpenChannel::Auth { .. } => {
+    while let Ok(Some(mux::NewChannel {
+        token,
+        request,
+        sender,
+        recver,
+    })) = incomings.try_next().await
+    {
+        match request {
+            messages::OpenChannel::Auth { .. } => {
                 return Err("Auth should only be preformed once".into());
             }
-            OpenChannel::Shell { pseudo } => {
+            messages::OpenChannel::Shell { pseudo } => {
                 let pseudo = pseudo.to_owned();
-                let (recver, sender) = new_channel.assume();
-                let shell = terminal::shell(&user, pseudo, recver, sender).await?;
+                let shell = session::shell(&user, pseudo, recver, sender).await?;
                 tasks.spawn(shell);
             }
-            OpenChannel::Exec { pseudo, command } => {
+            messages::OpenChannel::Exec { pseudo, command } => {
                 let pseudo = pseudo.to_owned();
                 let command = command.to_owned();
-                let (recver, sender) = new_channel.assume();
-                let exec = terminal::exec(&user, pseudo, Some(&command), recver, sender).await?;
+                let exec = session::exec(&user, pseudo, Some(&command), recver, sender).await?;
                 tasks.spawn(exec);
             }
-            OpenChannel::Socks {} => {
-                let (recver, sender) = new_channel.assume::<Bytes, Bytes>();
+            messages::OpenChannel::Direct { to: local } => {
+                let forward = forward::accepet_forward(sender, recver, local).await?;
                 tasks.spawn(async move {
-                    let mut reader = StreamReader::new(recver);
-                    let mut writer = SinkWriter::new(CopyToBytes::new(sender));
-                    // 除了io错误还可能是socks协议违背/不支持之类的。这些属于单个Channel，错误不扩散。
-                    if let Err(failed) = socks::accpet(&mut reader, &mut writer).await {
-                        tracing::error!(target: "sshd", "Failed to accept socks5 request: {failed:?}");
+                    if let Err(error) = forward.await {
+                        tracing::error!(target: "local_forward", "Failed to accept forward request: {error:?}");
                     }
-                    _ = writer.shutdown().await
                 });
             }
-            OpenChannel::Heartbeat {} => todo!(),
+            messages::OpenChannel::Forward { listen, socks } => {
+                let mux = mux.clone();
+                tasks.spawn(async move {
+                    let result = if !socks {
+                        forward::listen_remote_forward(mux, token, sender, recver, listen).await
+                    } else {
+                        socks::listen_remote_forward(mux, token, sender, recver, listen).await
+                    };
+                    if let Err(error) = result {
+                        tracing::error!(target: "remote_forward", "Failed to accept forward request: {error:?}");
+                    }
+                });
+            }
+            _ => return Err(format!("unexpected request {request:?} from Client").into()),
         }
     }
     _ = tasks.join_all().await;

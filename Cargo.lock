@@ -830,7 +830,6 @@ dependencies = [
  "nix",
  "pam",
  "parking_lot",
- "pin-project-lite",
  "pnet",
  "qconnection",
  "qdns",
@@ -842,14 +841,35 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "serde",
- "serde_cbor",
- "socks5-proto",
+ "ssh3-proto",
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "genmeta-common"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#8bfb8a6c311afff1f95a15b3a0d5bc2a4f5e3836"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "derive_more",
+ "futures",
+ "h3",
+ "h3-shim",
+ "pin-project-lite",
+ "qbase",
+ "qdns",
+ "qtraversal",
+ "serde",
+ "serde_cbor",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2929,6 +2949,28 @@ dependencies = [
  "bytes",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "ssh3-proto"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#8bfb8a6c311afff1f95a15b3a0d5bc2a4f5e3836"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "derive_more",
+ "either",
+ "futures",
+ "genmeta-common",
+ "pin-project-lite",
+ "serde",
+ "serde_cbor",
+ "socket2",
+ "socks5-proto",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

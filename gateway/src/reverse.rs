@@ -371,13 +371,13 @@ fn match_location<'l>(locations: &'l [Arc<Node>], path: &str) -> Option<(&'l Arc
             continue;
         }
 
-        if let Ok(Some(matched)) = pattern.try_match(path) {
-            if matched.len() >= matched_len {
-                location_matched = Some(location);
-                pattern_level = pattern.priority();
-                matched_len = matched.len();
-                final_pattern = matched;
-            }
+        if let Ok(Some(matched)) = pattern.try_match(path)
+            && matched.len() >= matched_len
+        {
+            location_matched = Some(location);
+            pattern_level = pattern.priority();
+            matched_len = matched.len();
+            final_pattern = matched;
         };
     }
 

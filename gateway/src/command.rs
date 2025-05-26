@@ -68,12 +68,12 @@ pub(crate) async fn index(
             let mut potential_path = base_dir_path.clone();
             potential_path.push_str(index_filename);
 
-            if let Ok(metadata) = tokio::fs::metadata(&*potential_path).await {
-                if metadata.is_file() {
-                    return File::open(&*potential_path)
-                        .await
-                        .map(|file| (file, metadata.len(), potential_path));
-                }
+            if let Ok(metadata) = tokio::fs::metadata(&*potential_path).await
+                && metadata.is_file()
+            {
+                return File::open(&*potential_path)
+                    .await
+                    .map(|file| (file, metadata.len(), potential_path));
             }
         }
     }
@@ -147,10 +147,10 @@ pub(crate) fn content_type(node: &Arc<Node>, parts: &mut Parts, file_path: &str)
         }
     });
 
-    if let Some(mime_types) = mime_types {
-        if let Some(content_type) = infer_content_type(file_path, mime_types, default_type) {
-            parts.headers.insert("Content-Type", content_type.clone());
-        }
+    if let Some(mime_types) = mime_types
+        && let Some(content_type) = infer_content_type(file_path, mime_types, default_type)
+    {
+        parts.headers.insert("Content-Type", content_type.clone());
     }
 }
 

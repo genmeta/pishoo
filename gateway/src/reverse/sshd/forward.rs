@@ -1,12 +1,13 @@
-use std::{io, sync::Arc};
+use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
+pub use ssh3_proto::forward::*;
 use ssh3_proto::{
     listener,
-    messages::BindAddress,
+    messages::{self, BindAddress},
     mux::{Mux, Recver, Sender, Token},
-    socks,
 };
+use tokio::io;
 
 use super::Error;
 
@@ -17,6 +18,13 @@ pub async fn listen_remote_forward(
     mut recver: Recver,
     listen: BindAddress,
 ) -> Result<(), Error> {
+    let remote_forwarder = Forwarder::new(
+        mux.clone(),
+        messages::OpenChannel::Forwarded {
+            listen: token,
+            to: None,
+        },
+    );
     let listener = match listener::Listener::bind(listen.clone()).await {
         Ok(listener) => {
             tracing::info!("Listening on {listen}");
@@ -31,14 +39,11 @@ pub async fn listen_remote_forward(
             return Ok(());
         }
     };
+    let listen_task =
+        listener.listen(move |reader, writer| remote_forwarder.forward(reader, writer).boxed());
     tokio::select! {
         _ = recver.next() => Ok(()),
-        error = listener.listen(move |reader, writer| {
-            let mux = mux.clone();
-            async move {
-                Ok(socks::accpet_forward(reader, writer, mux, token).await?)
-            }.boxed()
-        }) => Err(error),
+        error = listen_task => Err(error),
 
     }
 }

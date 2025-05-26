@@ -1,30 +1,19 @@
 use futures::{SinkExt, TryStreamExt, never::Never};
+use ssh3_proto::messages::auth::{ClientAuthMessage, ServerAuthMessage};
 use nix::unistd;
-use serde::{Deserialize, Serialize};
+use tokio::io;
 
 use super::{
     Error,
-    mux::{Recver, Sender},
+    mux::{FramedRecver, FramedSender},
 };
 use crate::parse::{Node, Value};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ClientAuthMessage {
-    Password(String),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ServerAuthMessage {
-    Accpet,
-    Password { prompt: String },
-    Reject { reason: String },
-}
 
 pub async fn auth(
     username: &str,
     location: &Node,
-    mut sender: Sender<ServerAuthMessage>,
-    recver: Recver<ClientAuthMessage>,
+    mut sender: FramedSender<ServerAuthMessage>,
+    recver: FramedRecver<ClientAuthMessage>,
 ) -> Result<unistd::User, Error> {
     reject_deny(username, location, &mut sender).await?;
 
@@ -36,9 +25,7 @@ pub async fn auth(
         Ok(None) | Err(_) => {
             let reason = format!("User {username} not found");
             sender
-                .send(ServerAuthMessage::Reject {
-                    reason: reason.clone(),
-                })
+                .cancel(io::Error::new(io::ErrorKind::NotFound, "User not found"))
                 .await?;
             return Err(reason.into());
         }
@@ -58,15 +45,13 @@ pub async fn auth(
 pub async fn reject_deny(
     username: &str,
     location: &Node,
-    sender: &mut Sender<ServerAuthMessage>,
+    sender: &mut FramedSender<ServerAuthMessage>,
 ) -> Result<(), Error> {
     if let Some(Value::StringVec(ssh_deny)) = location.get("ssh_deny")
         && ssh_deny.iter().any(|deny| &**deny == username)
     {
         sender
-            .send(ServerAuthMessage::Reject {
-                reason: format!("User {username} not found"),
-            })
+            .cancel(io::Error::new(io::ErrorKind::NotFound, "User not found"))
             .await?;
         return Err(format!("User {username} not allowed").into());
     }
@@ -75,8 +60,8 @@ pub async fn reject_deny(
 
 pub async fn auth_password(
     username: &str,
-    mut sender: Sender<ServerAuthMessage>,
-    mut recver: Recver<ClientAuthMessage>,
+    mut sender: FramedSender<ServerAuthMessage>,
+    mut recver: FramedRecver<ClientAuthMessage>,
 ) -> Result<(), Error> {
     sender
         .send(ServerAuthMessage::Password {
@@ -122,11 +107,12 @@ pub async fn auth_password(
     if auth_password.await? {
         sender.send(ServerAuthMessage::Accpet).await?;
     } else {
-        let reason = format!("Authentication failed for user {username}");
+        let reason = format!("Authentication failed for user {username}, too many retries.");
         sender
-            .send(ServerAuthMessage::Reject {
-                reason: reason.clone(),
-            })
+            .cancel(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                reason.clone(),
+            ))
             .await?;
         return Err(reason.into());
     }
@@ -145,11 +131,11 @@ fn verify_password(username: &str, password: &str) -> bool {
     false
 }
 
-async fn auth_ssl(mut sender: Sender<ServerAuthMessage>) -> Result<Never, Error> {
+async fn auth_ssl(mut sender: FramedSender<ServerAuthMessage>) -> Result<Never, Error> {
     sender
-        .send(ServerAuthMessage::Reject {
-            reason: "Server internal errror".to_owned(),
-        })
+        .cancel(io::Error::other(
+            "SSL authentication not implemented in this version of pishoo",
+        ))
         .await?;
 
     Err(Error::from("auth_ssl not implemented"))

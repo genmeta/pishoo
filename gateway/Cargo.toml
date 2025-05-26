@@ -46,6 +46,7 @@ qinterface = { workspace = true }
 qevent = { workspace = true, features = ["enabled"] }
 
 # --- Data Structures & Utilities ---
+dashmap = { workspace = true }
 misc-conf = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
@@ -60,17 +61,13 @@ nix = { workspace = true, optional = true, features = [
     "fs",
     "ioctl",
     "process",
+    "signal",
     "term",
     "user",
 ] }
 pam = { workspace = true, optional = true }
-serde_cbor = { workspace = true, optional = true }
-tokio-util = { workspace = true }
-
-# socks
-dashmap = { workspace = true }
-socks5-proto = { workspace = true, optional = true }
-pin-project-lite = { workspace = true, optional = true }
+ssh3-proto = { git = "ssh://git@github.com/genmeta/gmutils.git", optional = true }
+tokio-util = { workspace = true, optional = true, features = ["io", "rt"] }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -85,14 +82,6 @@ clap = { workspace = true }
 
 
 [features]
-default = []
-sshd = [
-    "dep:pam",
-    "dep:nix",
-    "dep:serde_cbor",
-    "tokio-util/codec",
-    "tokio-util/io",
-    "bytes/serde",
-]
-socks = ["sshd", "dep:socks5-proto", "tokio-util/rt", "dep:pin-project-lite"]
+default = ["sshd"]
+sshd = ["dep:nix", "dep:pam", "dep:ssh3-proto", "dep:tokio-util"]
 qlog = []
