@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 # --- Async Runtime & Utilities ---
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["io", "rt"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
@@ -67,7 +68,6 @@ nix = { workspace = true, optional = true, features = [
 ] }
 pam = { workspace = true, optional = true }
 ssh3-proto = { git = "ssh://git@github.com/genmeta/gmutils.git", optional = true }
-tokio-util = { workspace = true, optional = true, features = ["io", "rt"] }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -83,5 +83,5 @@ clap = { workspace = true }
 
 [features]
 default = ["sshd"]
-sshd = ["dep:nix", "dep:pam", "dep:ssh3-proto", "dep:tokio-util"]
+sshd = ["dep:nix", "dep:pam", "dep:ssh3-proto"]
 qlog = []
