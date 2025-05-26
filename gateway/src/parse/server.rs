@@ -4,8 +4,8 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    Node, ParseFn, Value, location::parse_location, parse_header_value, parse_listen, parse_path,
-    parse_resolver, parse_string_vec, parse_types,
+    Node, ParseFn, Resolver, Value, location::parse_location, parse_header_value, parse_listen,
+    parse_path, parse_resolver, parse_string_vec, parse_types,
 };
 
 pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
@@ -51,7 +51,12 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value> {
         return Err(anyhow!("server directive must have listen directive"));
     }
     if !values.contains_key("resolver") {
-        return Err(anyhow!("server directive must have resolver directive"));
+        values.insert(
+            "resolver".to_string(),
+            Value::Resolver(Resolver::Udp {
+                server_addr: "1.12.74.4:5300".parse().unwrap(),
+            }),
+        );
     }
     if !values.contains_key("ssl_certificate") {
         return Err(anyhow!(

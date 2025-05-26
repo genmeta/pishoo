@@ -57,7 +57,7 @@ impl HostMatch {
             HostMatch::AllAllow => true,
             HostMatch::HeaderFuzzy(remain) => {
                 // Only match if check_host had a '.' and the remaining part matches
-                check_remain_lower.is_some_and(|cr| remain == cr)
+                check_remain_lower.is_some_and(|cr| cr.ends_with(remain))
             }
             HostMatch::Exact(host) => {
                 // Direct comparison with the full lowercased host
