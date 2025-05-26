@@ -78,15 +78,22 @@ tar -czvf $AMD_ARCHIVE_PATH -C $AMD_ARCHIVES_DIR .
 AMD_ARCHIVE_SHA256=$(shasum -a 256 $AMD_ARCHIVE_PATH | cut -d ' ' -f 1)
 echo "AMD64 打包完成，SHA256: $AMD_ARCHIVE_SHA256 $AMD_ARCHIVE_PATH"
 
-# 确保homebrew-gateway目录存在
-if [ ! -d "../homebrew-gateway" ]; then
-    echo "错误: ../homebrew-gateway 目录不存在"
-    echo "请先创建或克隆该目录"
+echo "构建归档位于:"
+echo "ARM64: $ARM_ARCHIVE_PATH"
+echo "AMD64: $AMD_ARCHIVE_PATH"
+
+echo "上传文件到服务器:"
+rsync --rsync-path="sudo rsync" $ARM_ARCHIVE_PATH $AMD_ARCHIVE_PATH ubuntu@download.genmeta.net:/data/wwwroot/homebrew/
+
+# 确保homebrew-genmeta目录存在
+if [ ! -d "../homebrew-genmeta" ]; then
+    echo "错误: ../homebrew-genmeta 目录不存在"
+    echo "请先 git clone git@github.com:genmeta/homebrew-genmeta.git"
     exit 1
 fi
 
 echo "生成 Homebrew formula..."
-cat>../homebrew-gateway/pishoo.rb<<EOF
+cat>../homebrew-genmeta/pishoo.rb<<EOF
 class Pishoo < Formula
   desc "Pishoo (\"Prosperity Guardian Beast\") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely."
   version "${VERSION}"
@@ -141,18 +148,11 @@ class Pishoo < Formula
 end
 EOF
 
-echo "提交变更到 homebrew-gateway 仓库..."
-cd ../homebrew-gateway/
+echo "提交变更到 homebrew-genmeta 仓库..."
+cd ../homebrew-genmeta/
 git add pishoo.rb
 git commit -S -m "feat: release pishoo v${VERSION}"
 echo "打包完成！请检查并推送仓库更改。"
-
-echo "构建归档位于:"
-echo "ARM64: $ARM_ARCHIVE_PATH"
-echo "AMD64: $AMD_ARCHIVE_PATH"
-
-echo "上传文件到服务器:"
-rsync --rsync-path="sudo rsync" $ARM_ARCHIVE_PATH $AMD_ARCHIVE_PATH ubuntu@download.genmeta.net:/data/wwwroot/homebrew/
 
 echo "清理临时文件..."
 rm -r $ARM_WORKDIR $AMD_WORKDIR
