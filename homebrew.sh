@@ -3,7 +3,7 @@
 # 检查必需参数
 if [ $# -lt 1 ]; then
     echo "用法: $0 <版本号> [cargo附加参数...]"
-    echo "例如: $0 0.2.3 -F sshd,socks"
+    echo "例如: $0 0.2.3 -F sshd"
     exit 1
 fi
 
@@ -19,8 +19,6 @@ pishoo {
     server {
         listen all 6080;
         server_name your_domain;
-
-        resolver udp your_dns_server;
 
         ssl_certificate etc/pishoo/ssl/your_domain.crt;
         ssl_certificate_key etc/pishoo/ssl/your_domain.key;

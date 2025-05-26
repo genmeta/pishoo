@@ -4,7 +4,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://pishoo.genmeta.net"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 
 # --- Package Metadata (Debian) ---
@@ -45,6 +45,5 @@ console-subscriber = { workspace = true, optional = true }
 [features]
 default = []
 sshd = ["gateway/sshd"]
-socks = ["gateway/socks"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
