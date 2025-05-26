@@ -138,7 +138,8 @@ fn create_quic_server(
         server_total_binds.insert(server_name, binds);
     }
 
-    let binds: Vec<SocketAddr> = server_total_binds.values().flatten().cloned().collect();
+    let binds: HashSet<SocketAddr> = server_total_binds.values().flatten().cloned().collect();
+    let binds: Vec<SocketAddr> = binds.into_iter().collect();
 
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicServer::builder()
