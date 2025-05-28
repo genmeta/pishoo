@@ -34,14 +34,15 @@ pub async fn proxy(
 /// 处理普通 HTTP 请求
 pub async fn proxy_inner(
     pool: Arc<H3ConnectionPool>,
-    req: Request<hyper::body::Incoming>,
+    mut req: Request<hyper::body::Incoming>,
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
+    info!("[Forward] Request: {req:?}");
+
     let uri = req.uri().to_string();
-    info!("[Forward] Request: {}", uri);
 
     // 验证主机合法性
-    let host = match validate_host(&req) {
+    let host = match validate_host(&mut req) {
         Ok(host) => host,
         Err(reason) => {
             error!("[Forward][{}] Invalid host: {}", uri, reason);
@@ -50,7 +51,7 @@ pub async fn proxy_inner(
     };
 
     // 创建 QUIC 连接
-    let send_request = match create_quic_connection(pool, host, resolver).await {
+    let send_request = match create_quic_connection(pool, &host, resolver).await {
         Ok(conn) => conn,
         Err(msg) => {
             error!(
@@ -87,12 +88,6 @@ pub async fn connect(
     resolver: Arc<dyn Resolve + Send + Sync>,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
-
-    // 验证主机合法性
-    let _host = match validate_host(&req) {
-        Ok(host) => host,
-        Err(reason) => return Ok(build_error_response(reason)),
-    };
 
     info!("[CONNECT] Establishing tunnel to {}", uri);
 

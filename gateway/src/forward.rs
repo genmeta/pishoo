@@ -79,10 +79,10 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
             tokio::task::spawn({
                 async move {
                     // 为每个连接创建服务处理器
-                    let service = service_fn(move |req| {
-                        let host = validate_host(&req).unwrap();
+                    let service = service_fn(move |mut req| {
+                        let host = validate_host(&mut req).unwrap();
 
-                        if !acl.check(host) {
+                        if !acl.check(&host) {
                             return forward::normal::proxy(req).boxed();
                         }
 
@@ -208,16 +208,36 @@ fn configure_tls() -> rustls::ClientConfig {
 }
 
 /// 验证请求中的 Host 头合法性
-fn validate_host(req: &Request<hyper::body::Incoming>) -> Result<&str, String> {
-    // 从 URI 或 Header 获取 Host
-    req.uri()
-        .host()
-        .or_else(|| req.headers().get("host").and_then(|h| h.to_str().ok()))
-        .ok_or_else(|| {
+fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, String> {
+    let mut host = req.uri().host().map(String::from);
+    if host.is_none() {
+        host = req
+            .headers()
+            .get(http::header::HOST)
+            .and_then(|h| h.to_str().ok().map(String::from));
+    }
+
+    let mut host = match host {
+        Some(h) => h,
+        None => {
             let reason = format!("Invalid Host header: {req:?}");
             warn!("{}", reason);
-            reason
-        })
+            return Err(reason);
+        }
+    };
+
+    if host.ends_with("~") {
+        host = host.replacen("~", ".genmeta.net", 1);
+        req.headers_mut().insert(
+            http::header::HOST,
+            http::HeaderValue::from_str(&host).unwrap(),
+        );
+        let old_uri = req.uri().clone().to_string();
+        let new_uri = old_uri.replacen("~", ".genmeta.net", 1);
+        *req.uri_mut() = new_uri.parse().unwrap();
+    }
+
+    Ok(host)
 }
 
 /// 创建空响应
