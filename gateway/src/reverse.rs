@@ -10,7 +10,7 @@ use gm_quic::QuicServer;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
-use qdns::{Dns, Resolve};
+use qdns::{HttpResolver, MdnsResolver, Publisher, Resolve};
 use qtraversal::iface::TraversalFactory;
 use tracing::{debug, error, info};
 
@@ -28,7 +28,7 @@ mod sshd;
 const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
-type ServerResolverList<'a> = Vec<(String, &'a Resolver)>;
+type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
 
 /// Start the QUIC proxy server
 ///
@@ -40,28 +40,38 @@ type ServerResolverList<'a> = Vec<(String, &'a Resolver)>;
 /// * `Result<()>` - An empty result if successful, or an error if failed
 pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
     let (routers, server_resolvers) = init_routers(&servers)?;
-
     let (quic_server, binds) = create_quic_server(&servers)?;
 
-    // 复用resolvers表。对于http dns resolver尤其重要
-    let mut resolvers = HashMap::new();
-    for (server_name, resolver) in server_resolvers {
-        let resolver = resolvers
-            .entry(resolver)
-            .or_insert_with(|| Arc::<dyn Resolve + Send + Sync>::from(resolver))
-            .clone();
-        Dns::add_record(
-            server_name.clone(),
-            resolver,
-            binds
-                .get(&server_name)
-                .unwrap()
-                .clone()
-                .into_iter()
-                .collect(),
-        );
+    let mut resolver_map: HashMap<String, Arc<dyn Resolve + Send + Sync>> = HashMap::new();
+    let http_resovler = Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?);
+    let mdns_resovler = Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?);
+    // 提供默认 resovler
+    resolver_map.insert(http_resovler.server(), http_resovler.clone());
+    resolver_map.insert(mdns_resovler.server(), mdns_resovler.clone());
+    let publisher = Publisher::default();
+
+    for (server_name, resolvers) in server_resolvers {
+        let mut server_resolver = resolvers
+            .iter()
+            .map(|resolver| {
+                let name = resolver.server_name();
+                resolver_map
+                    .entry(name.clone())
+                    .or_insert_with(|| (*resolver).into())
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+
+        if server_resolver.is_empty() {
+            server_resolver.push(http_resovler.clone());
+            server_resolver.push(mdns_resovler.clone());
+        }
+        let server_binds = binds.get(&server_name).unwrap().iter().cloned().collect();
+        publisher.add_host(server_name, server_binds, server_resolver);
     }
 
+    // 启动 dns 上报
+    publisher.spawn_publish();
     handle_connections(quic_server, routers).await?;
     Ok("Server exited".to_string())
 }
@@ -70,22 +80,21 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
 fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ServerResolverList)> {
     let mut routers = HashMap::new();
     let mut resolvers = vec![];
+
     for server in servers {
-        let resolver = if let Some(Value::Resolver(resolver)) = server.get("resolver") {
-            resolver
-        } else {
-            unreachable!("Invalid resolver address");
+        let server_resolvers = match server.get("resolver") {
+            Some(Value::Resolver(resolver)) => vec![resolver],
+            _ => vec![], // 默认使用空 resolver
         };
 
-        let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
-            server_name.clone()
-        } else {
-            unreachable!("Invalid server name");
+        let server_name = match server.get("server_name") {
+            Some(Value::StringVec(names)) => names.clone(),
+            _ => unreachable!("Invalid server name"),
         };
 
         for name in server_name {
-            resolvers.push((name.to_string(), resolver));
-            routers.insert(name.to_string(), server.clone());
+            resolvers.push((name.clone(), server_resolvers.clone()));
+            routers.insert(name, Arc::clone(server));
         }
     }
 
@@ -98,8 +107,9 @@ fn create_quic_server(
     servers: &[Arc<Node>],
 ) -> Result<(Arc<QuicServer>, HashMap<String, HashSet<SocketAddr>>)> {
     let agents = [
-        "1.12.74.4:20004".parse()?,
-        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
+        "1.12.74.7:20004".parse()?,
+        // "1.12.74.4:20004".parse()?,
+        "[2402:4e00:c011:1700:8624:7e0:5c9a:9]:20004".parse()?,
     ];
 
     let factory = TraversalFactory::with(&agents[..]);
