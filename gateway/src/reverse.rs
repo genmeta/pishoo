@@ -275,7 +275,8 @@ async fn handle_connections(
                 {
                     let routers = routers_clone.clone();
                     let handle_request = async move {
-                        let (req, stream) = req_resolver.resolve_request().await?;
+                        let (mut req, stream) = req_resolver.resolve_request().await?;
+                        req.extensions_mut().insert(pathway.remote().addr());
                         handle_request(routers, req, stream).await
                     };
                     tokio::spawn(async move {

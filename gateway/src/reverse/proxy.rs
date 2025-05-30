@@ -30,7 +30,13 @@ pub async fn handle(
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let uri = req.uri().to_string();
-    // TODO 处理 proxy_set_header
+    // proxy_set_header
+    let req = command::proxy_set_header(location, req);
+    debug!(
+        "[Response handling][{uri}] Processing request headers: {:?}",
+        req.headers()
+    );
+
     let resp = match pass(location, req, receiver).await {
         Ok(resp) => resp,
         Err(e) => {
@@ -47,12 +53,12 @@ pub async fn handle(
     // 添加自定义响应头字段
     command::add_header(location, &mut parts);
 
+    debug!("[Response handling][{uri}] Sending response headers: {parts:?}");
+
     // 发送响应头
     sender
         .send_response(Response::from_parts(parts, ()))
         .await?;
-
-    debug!("[Response handling][{}] Sending response headers", uri);
 
     let mut body_stream =
         tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
@@ -76,16 +82,11 @@ pub async fn pass(
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
-    let proxy_pass = if let Some(Value::String(proxy_pass)) = location.get("proxy_pass") {
+    let proxy_pass = if let Some(Value::Uri(proxy_pass)) = location.get("proxy_pass") {
         proxy_pass
     } else {
-        return Err(CustomError::InvalidConfig(
-            "Invalid proxy_pass configuration".to_string(),
-        ));
+        unreachable!("proxy_pass is required for reverse proxy");
     };
-
-    let target_host = Uri::from_str(proxy_pass)
-        .map_err(|_| CustomError::InvalidConfig("Invalid proxy_pass URI".to_string()))?;
 
     let target_uri = Uri::from_str(
         &parts
@@ -101,8 +102,8 @@ pub async fn pass(
     new_parts.version = Version::HTTP_11;
 
     // 解析目标地址
-    let host = target_host.host().ok_or(CustomError::MissingHost)?;
-    let port = target_host.port().map(|p| p.as_u16()).unwrap_or(80);
+    let host = proxy_pass.host().ok_or(CustomError::MissingHost)?;
+    let port = proxy_pass.port().map(|p| p.as_u16()).unwrap_or(80);
 
     // 建立TCP连接
     let io = TokioIo::new(

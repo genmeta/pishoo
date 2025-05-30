@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
+use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
     ParseFn, Value, parse_header, parse_header_always, parse_path, parse_ssh_login,
-    parse_ssh_ssl_user, parse_string, parse_string_vec, parse_types, pattern::parse_pattern,
+    parse_ssh_ssl_user, parse_string_vec, parse_types, pattern::parse_pattern,
 };
+use crate::parse::parse_uri;
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
@@ -17,7 +19,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("index", Box::new(parse_string_vec));
     commands.insert("add_header", Box::new(parse_header_always));
     commands.insert("proxy_set_header", Box::new(parse_header));
-    commands.insert("proxy_pass", Box::new(parse_string));
+    commands.insert("proxy_pass", Box::new(parse_uri));
     commands.insert("ssh_login", Box::new(parse_ssh_login));
     commands.insert("ssh_ssl_user", Box::new(parse_ssh_ssl_user));
     commands.insert("ssh_deny", Box::new(parse_string_vec));
@@ -60,6 +62,34 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
             }
         }
     }
+
+    // 默认添加 CORS 相关的响应头
+    let cors_header = vec![
+        (
+            HeaderName::from_static("access-control-allow-origin"),
+            HeaderValue::from_static("*"),
+            true,
+        ),
+        (
+            HeaderName::from_static("access-control-allow-methods"),
+            HeaderValue::from_static("*"),
+            true,
+        ),
+        (
+            HeaderName::from_static("server"),
+            HeaderValue::from_static("pishoo"),
+            true,
+        ),
+    ];
+
+    values
+        .entry("add_header".to_string())
+        .and_modify(|value| {
+            if let Value::Header(exist_header) = value {
+                exist_header.extend(cors_header.clone());
+            }
+        })
+        .or_insert_with(|| Value::Header(cors_header));
 
     Ok(Value::Pattern(pattern, values))
 }

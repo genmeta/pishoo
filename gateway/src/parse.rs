@@ -29,6 +29,7 @@ type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
 #[derive(Debug)]
 pub enum Value {
     String(String),
+    Uri(Uri),
     Resolver(Resolver),
     StringVec(Vec<String>),
     StringMap(HashMap<String, String>),
@@ -230,9 +231,29 @@ fn parse_types(directive: Directive<Nginx>) -> Result<Value> {
     Ok(Value::ValueMap(HashMap::new()))
 }
 
+#[allow(dead_code)]
 fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => Ok(Value::String(string.to_string())),
+        _ => Err(anyhow!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        )),
+    }
+}
+
+fn parse_uri(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [uri] => {
+            let uri = uri.parse::<Uri>().map_err(|e| {
+                anyhow!(
+                    "Invalid URI while parsing directive {}: {}",
+                    directive.name,
+                    e
+                )
+            })?;
+            Ok(Value::Uri(uri))
+        }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",
             directive.name

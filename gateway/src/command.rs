@@ -1,12 +1,13 @@
 use std::{collections::HashMap, io, sync::Arc};
 
 use acl::Acl;
-use http::{HeaderValue, response::Parts};
+use http::{HeaderMap, HeaderValue, Request, header, response::Parts};
 use tokio::fs::File;
 
 use crate::parse::{Node, Value};
 
 pub(crate) mod acl;
+pub(crate) mod variables;
 
 /// Attempts to open a file directly or serve an index file if the path points to a directory.
 ///
@@ -82,6 +83,41 @@ pub(crate) async fn index(
         io::ErrorKind::NotFound,
         format!("File not found: {file_path}"),
     ))
+}
+
+pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<T> {
+    let (mut parts, body) = req.into_parts();
+    let mut new_headers = HeaderMap::new();
+
+    // 默认将 Host 变更为 proxy_pass target
+    if let Some(Value::Uri(uri)) = node.get("proxy_pass") {
+        new_headers.insert(
+            header::HOST,
+            uri.host()
+                .unwrap_or_default()
+                .to_string()
+                .parse()
+                .unwrap_or_else(|_| HeaderValue::from_static("localhost")),
+        );
+    };
+
+    // 默认将 Connection 变更为 close
+    new_headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+    // 遍历 proxy_set_header 中的记录, 匹配 Header, 设置支持的字段
+    let proxy_set_header = if let Some(Value::Header(header)) = node.get("proxy_set_header") {
+        header.clone()
+    } else {
+        Vec::new()
+    };
+
+    for (header, value, _) in proxy_set_header {
+        // 匹配变量进行转换
+        // TODO 变量拼接
+        new_headers.insert(header, variables::search(&parts, value));
+    }
+
+    parts.headers = new_headers;
+    Request::from_parts(parts, body)
 }
 
 /// Adds headers to the HTTP response parts based on configuration in the node.
