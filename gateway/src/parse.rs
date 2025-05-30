@@ -60,6 +60,17 @@ impl Value {
 pub enum Resolver {
     Udp { server_addr: SocketAddr },
     Http { base_url: Uri },
+    Mdns { service_name: String },
+}
+
+impl Resolver {
+    pub fn server_name(&self) -> String {
+        match self {
+            Self::Udp { server_addr } => server_addr.to_string(),
+            Self::Http { base_url } => base_url.to_string(),
+            Self::Mdns { service_name } => service_name.clone(),
+        }
+    }
 }
 
 impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
@@ -73,6 +84,9 @@ impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
                 HttpResolver::new(base_url.to_string())
                     .expect("HTTP dns server base_url has been checked"),
             ),
+            Resolver::Mdns { service_name } => {
+                Arc::new(MdnsResolver::new(service_name).expect("MDNS creat error"))
+            }
         }
     }
 }

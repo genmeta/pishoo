@@ -7,7 +7,6 @@ use gateway::{
     parse::{self, Value},
     reverse,
 };
-use qdns::Dns;
 use tokio::task::JoinSet;
 
 #[derive(Parser, Debug)]
@@ -93,8 +92,6 @@ async fn main() -> Result<()> {
     };
 
     // 启动自动 DNS 汇报
-    let dns = Dns::default();
-    dns.spawn_publish();
 
     let mut handler = JoinSet::new();
 

@@ -1,6 +1,6 @@
 use futures::{SinkExt, TryStreamExt, never::Never};
-use ssh3_proto::messages::auth::{ClientAuthMessage, ServerAuthMessage};
 use nix::unistd;
+use ssh3_proto::messages::auth::{ClientAuthMessage, ServerAuthMessage};
 use tokio::io;
 
 use super::{

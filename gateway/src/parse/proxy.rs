@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{
-    ParseFn, Resolver, Value, parse_address, parse_header_value, parse_resolver, parse_string_vec,
+    ParseFn, Value, parse_address, parse_header_value, parse_resolver, parse_string_vec,
     parse_types,
 };
 
@@ -33,14 +33,5 @@ pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
     if !values.contains_key("listen") {
         return Err(anyhow!("missing directive listen"));
     }
-    if !values.contains_key("resolver") {
-        values.insert(
-            "resolver".to_string(),
-            Value::Resolver(Resolver::Udp {
-                server_addr: "1.12.74.4:5300".parse().unwrap(),
-            }),
-        );
-    }
-
     Ok(Value::ValueMap(values))
 }

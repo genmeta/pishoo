@@ -84,6 +84,7 @@ qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", bran
 qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
 qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
 qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "main" }
 
 [profile.dev]
 panic = "abort"

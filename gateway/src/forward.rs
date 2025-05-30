@@ -7,8 +7,7 @@ use http::StatusCode;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
-use qdns::Resolve;
-use quic::mdns;
+use qdns::{HttpResolver, MdnsResolver, Resolvers, UdpResolver};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
@@ -53,13 +52,15 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
     })?;
 
     info!("Listening on: http://{}", local_addr);
-    let resolver: Arc<dyn Resolve + Send + Sync> =
-        if let Some(Value::Resolver(resolver)) = node.get("resolver") {
-            resolver.into()
-        } else {
-            unreachable!("Resolver address is required");
-        };
-    let _mdns = mdns();
+
+    let resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
+        Resolvers::default().with(resolver.into())
+    } else {
+        Resolvers::default()
+            .with(Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?))
+            .with(Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?))
+            .with(Arc::new(UdpResolver::new(qdns::UDP_DNS_SERVER)))
+    };
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
@@ -74,7 +75,7 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
             let io = TokioIo::new(stream);
             let pool = pool.clone();
             let acl = acl.clone();
-            let resolver = resolver.clone();
+            let resolvers = resolvers.clone();
 
             tokio::task::spawn({
                 async move {
@@ -88,12 +89,12 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
 
                         let is_connect = req.method() == "CONNECT";
                         let pool = pool.clone();
-                        let resolver = resolver.clone();
+                        let resolvers = resolvers.clone();
                         async move {
                             if is_connect {
-                                forward::quic::connect(pool, req, resolver).await
+                                forward::quic::connect(pool, req, resolvers).await
                             } else {
-                                forward::quic::proxy(pool, req, resolver).await
+                                forward::quic::proxy(pool, req, resolvers).await
                             }
                         }
                         .boxed()
