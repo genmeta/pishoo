@@ -64,10 +64,10 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     }
 
     // 默认添加 CORS 相关的响应头
-    let cors_header = vec![
+    let mut cors_header = vec![
         (
             HeaderName::from_static("access-control-allow-origin"),
-            HeaderValue::from_static("*"),
+            HeaderValue::from_static("tauri://localhost"),
             true,
         ),
         (
@@ -86,7 +86,8 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
         .entry("add_header".to_string())
         .and_modify(|value| {
             if let Value::Header(exist_header) = value {
-                exist_header.extend(cors_header.clone());
+                cors_header.extend_from_slice(exist_header);
+                *exist_header = cors_header.clone();
             }
         })
         .or_insert_with(|| Value::Header(cors_header));

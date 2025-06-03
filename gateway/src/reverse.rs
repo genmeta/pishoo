@@ -92,9 +92,12 @@ fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ServerResolverList)
             _ => unreachable!("Invalid server name"),
         };
 
-        for name in server_name {
-            resolvers.push((name.clone(), server_resolvers.clone()));
-            routers.insert(name, Arc::clone(server));
+        for mut domain in server_name {
+            if domain.ends_with('~') {
+                domain = domain.replace('~', ".genmeta.net");
+            }
+            resolvers.push((domain.clone(), server_resolvers.clone()));
+            routers.insert(domain, Arc::clone(server));
         }
     }
 
@@ -132,8 +135,11 @@ fn create_quic_server(
         let server_ifaces: HashSet<_> = list.iter().cloned().collect();
         ifaces.extend(server_ifaces.clone());
 
-        for name in server_name {
-            server_binds.insert(name, server_ifaces.clone());
+        for mut domain in server_name {
+            if domain.ends_with('~') {
+                domain = domain.replace('~', ".genmeta.net");
+            }
+            server_binds.insert(domain, server_ifaces.clone());
         }
     }
 
@@ -182,21 +188,24 @@ fn create_quic_server(
         };
 
         let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
-            server_name
+            server_name.clone()
         } else {
             unreachable!("Invalid server name");
         };
 
         let cert = std::fs::read(cert_path)?;
         let key = std::fs::read(key_path)?;
-        for domain in server_name {
+        for mut domain in server_name {
+            if domain.ends_with('~') {
+                domain = domain.replace('~', ".genmeta.net");
+            }
             builder = builder.add_host(domain, &*cert, &*key);
         }
     }
 
     info!("binds {:?}", binds);
     let server = builder
-        .with_alpns([ALPN])
+        .with_alpns([b"h3"])
         .listen(&*binds)
         .inspect_err(|e| {
             error!("listen err {:?}", e);
