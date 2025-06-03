@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io, sync::Arc};
 
 use acl::Acl;
-use http::{HeaderMap, HeaderValue, Request, header, response::Parts};
+use http::{HeaderMap, HeaderValue, Request, Uri, header, response::Parts};
 use tokio::fs::File;
 
 use crate::parse::{Node, Value};
@@ -90,10 +90,12 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
     let mut new_headers = HeaderMap::new();
 
     // 默认将 Host 变更为 proxy_pass target
-    if let Some(Value::Uri(uri)) = node.get("proxy_pass") {
+    if let Some(Value::String(uri)) = node.get("proxy_pass") {
         new_headers.insert(
             header::HOST,
-            uri.host()
+            uri.parse::<Uri>()
+                .unwrap()
+                .host()
                 .unwrap_or_default()
                 .to_string()
                 .parse()

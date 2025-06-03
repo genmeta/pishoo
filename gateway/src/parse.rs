@@ -258,15 +258,15 @@ fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
 
 fn parse_uri(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
-        [uri] => {
-            let uri = uri.parse::<Uri>().map_err(|e| {
+        [s] => {
+            let _uri = s.parse::<Uri>().map_err(|e| {
                 anyhow!(
                     "Invalid URI while parsing directive {}: {}",
                     directive.name,
                     e
                 )
             })?;
-            Ok(Value::Uri(uri))
+            Ok(Value::String(s.to_string()))
         }
         _ => Err(anyhow!(
             "Invalid number of arguments for directive: {}",

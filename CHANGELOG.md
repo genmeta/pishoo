@@ -10,8 +10,10 @@
         -   以 `$arg_` 开头的变量, 例如 `$arg_user_id`, 将匹配query字符串中的请求参数 `user_id`/`user-id`/`user.id` 值
         -   `$remote_addr` 变量, 匹配客户端 IP 地址
     -   目前仅支持单独设置变量, 或者直接设置为常量值, 不支持变量拼接
+-   proxy_pass 地址支持末尾斜杠
 -   代理响应默认添加 CORS 相关头部
 -   代理请求时, 默认将 `Host` 头部设置为目标地址, `Connection` 头部设置为 `close`, 去除其他 Header
+-   支持 https dns
 
 ## [0.2.4]
 

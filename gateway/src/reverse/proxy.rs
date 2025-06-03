@@ -25,6 +25,7 @@ use crate::{
 
 pub async fn handle(
     location: &Arc<Node>,
+    final_pattern: String,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
@@ -37,7 +38,7 @@ pub async fn handle(
         req.headers()
     );
 
-    let resp = match pass(location, req, receiver).await {
+    let resp = match pass(location, final_pattern, req, receiver).await {
         Ok(resp) => resp,
         Err(e) => {
             error!("[Response handling][{}] Proxy request error: {:?}", uri, e);
@@ -77,24 +78,38 @@ pub async fn handle(
 /// 代理请求
 pub async fn pass(
     location: &Node,
+    final_pattern: String,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
-    let proxy_pass = if let Some(Value::Uri(proxy_pass)) = location.get("proxy_pass") {
+    let proxy_pass = if let Some(Value::String(proxy_pass)) = location.get("proxy_pass") {
         proxy_pass
     } else {
         unreachable!("proxy_pass is required for reverse proxy");
     };
 
-    let target_uri = Uri::from_str(
-        &parts
-            .uri
-            .path_and_query()
-            .map(|p| p.to_string())
-            .unwrap_or_default(),
-    )?;
+    tracing::debug!("[Request processing] proxy_pass: {proxy_pass:?}");
+
+    let mut path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.to_string())
+        .unwrap_or_default();
+    tracing::debug!(
+        "[Request processing] Original request path and query: {}",
+        path_and_query
+    );
+    if proxy_pass.ends_with('/') {
+        // 将匹配到的路径部分替换掉原始请求路径
+        path_and_query = path_and_query.replace(final_pattern.as_str(), "");
+        if path_and_query.is_empty() {
+            path_and_query = "/".to_string();
+        }
+    }
+
+    let target_uri = Uri::from_str(&path_and_query)?;
 
     // 准备请求参数
     let mut new_parts = parts;
@@ -102,8 +117,14 @@ pub async fn pass(
     new_parts.version = Version::HTTP_11;
 
     // 解析目标地址
+    let proxy_pass = Uri::from_str(proxy_pass).map_err(|e| {
+        error!("[Request processing] Invalid proxy_pass URI: {}", e);
+        CustomError::InvalidConfig(format!("Invalid proxy_pass URI: {e}"))
+    })?;
     let host = proxy_pass.host().ok_or(CustomError::MissingHost)?;
     let port = proxy_pass.port().map(|p| p.as_u16()).unwrap_or(80);
+
+    info!("[Request processing] Preparing to proxy request: {new_parts:?}");
 
     // 建立TCP连接
     let io = TokioIo::new(

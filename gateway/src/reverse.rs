@@ -25,8 +25,6 @@ mod proxy;
 #[cfg(feature = "sshd")]
 mod sshd;
 
-const ALPN: &[u8] = b"h3"; // 应用层协议协商标识
-
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
 type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
 
@@ -346,7 +344,7 @@ async fn handle_request(
 
     match location_value {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, req, receiver, sender).await?;
+            reverse::proxy::handle(location, final_pattern, req, receiver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
             reverse::file::root(location, req, sender).await?;
