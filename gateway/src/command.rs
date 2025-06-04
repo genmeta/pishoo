@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io, sync::Arc};
 
 use acl::Acl;
-use http::{HeaderMap, HeaderValue, Request, Uri, header, response::Parts};
+use http::{HeaderValue, Request, Uri, header, response::Parts};
 use tokio::fs::File;
 
 use crate::parse::{Node, Value};
@@ -87,11 +87,10 @@ pub(crate) async fn index(
 
 pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<T> {
     let (mut parts, body) = req.into_parts();
-    let mut new_headers = HeaderMap::new();
 
     // 默认将 Host 变更为 proxy_pass target
     if let Some(Value::String(uri)) = node.get("proxy_pass") {
-        new_headers.insert(
+        parts.headers.insert(
             header::HOST,
             uri.parse::<Uri>()
                 .unwrap()
@@ -104,7 +103,9 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
     };
 
     // 默认将 Connection 变更为 close
-    new_headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+    parts
+        .headers
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
     // 遍历 proxy_set_header 中的记录, 匹配 Header, 设置支持的字段
     let proxy_set_header = if let Some(Value::Header(header)) = node.get("proxy_set_header") {
         header.clone()
@@ -115,10 +116,11 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
     for (header, value, _) in proxy_set_header {
         // 匹配变量进行转换
         // TODO 变量拼接
-        new_headers.insert(header, variables::search(&parts, value));
+        parts
+            .headers
+            .insert(header, variables::search(&parts, value));
     }
 
-    parts.headers = new_headers;
     Request::from_parts(parts, body)
 }
 
