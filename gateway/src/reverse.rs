@@ -64,6 +64,15 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
             server_resolver.push(http_resovler.clone());
             server_resolver.push(mdns_resovler.clone());
         }
+
+        let valid_suffixes = ["test.genmeta.net", "user.genmeta.net"];
+        if valid_suffixes
+            .iter()
+            .any(|suffix| server_name.ends_with(suffix))
+        {
+            server_resolver = vec![mdns_resovler.clone()];
+        }
+
         let server_binds = binds.get(&server_name).unwrap().iter().cloned().collect();
         publisher.add_host(server_name, server_binds, server_resolver);
     }

@@ -68,8 +68,9 @@ async fn main() -> Result<()> {
     tracing::info!("Tracing initialized.");
 
     let config_file = args.config_file;
-    let configure = std::fs::read(&config_file)?;
-    let config = parse::parse(&configure, config_file.parent())?;
+    let configure = std::fs::read(&config_file).expect("Failed to read configuration file");
+    let config =
+        parse::parse(&configure, config_file.parent()).expect("Failed to parse configuration file");
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
