@@ -1,4 +1,12 @@
 # Changelog
+## [0.2.7]
+
+### 更新
+
+- 不汇报`test`和`user`域dns
+- 更新依赖（traversal）
+- 在ssh3 auth 提示中回显uri（不包括.genemta.net）
+
 ## [0.2.6]
 ### 修复
 -   转发请求时, 删除了过多的 Header, 导致部分请求失败的问题
