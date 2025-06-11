@@ -11,7 +11,7 @@ use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
 use qdns::{HttpResolver, MdnsResolver, Publisher, Resolve};
-use qtraversal::iface::TraversalFactory;
+use qtraversal::iface::{TraversalFactory, traversal_factory};
 use tracing::{debug, error, info};
 
 use crate::{
@@ -84,7 +84,7 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
-fn init_routers(servers: &[Arc<Node>]) -> Result<(RouterMap, ServerResolverList)> {
+fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverList<'_>)> {
     let mut routers = HashMap::new();
     let mut resolvers = vec![];
 
@@ -121,7 +121,7 @@ fn create_quic_server(
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
     ];
 
-    let factory = TraversalFactory::with(&agents[..]);
+    let factory = traversal_factory(&agents[..]);
 
     let mut server_binds = HashMap::new();
     let mut ifaces = HashSet::new();
