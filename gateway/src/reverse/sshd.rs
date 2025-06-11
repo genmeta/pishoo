@@ -44,7 +44,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 ///     ssh_deny root;
 /// }
 /// ```
-async fn validate_request(request: Request<()>) -> (Response<()>, crate::error::Result<()>) {
+async fn validate_request(request: &Request<()>) -> (Response<()>, crate::error::Result<()>) {
     if request.method() != http::Method::PUT {
         let resp = http::Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -70,7 +70,7 @@ pub async fn login(
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> crate::error::Result<()> {
-    let (resp, result) = validate_request(request).await;
+    let (resp, result) = validate_request(&request).await;
     sender.send_response(resp).await?;
     if let Err(e) = result {
         sender.finish().await?;
@@ -90,7 +90,9 @@ pub async fn login(
         ),
     );
 
-    if let Err(e) = run(mux, location, incomings).await {
+    let localhost = request.uri().host().unwrap_or_default();
+    let localhost = localhost.strip_suffix(".genmeta.net").unwrap_or(localhost);
+    if let Err(e) = run(mux, localhost, location, incomings).await {
         tracing::error!(target: "sshd", "Server failed: {e:?}");
     }
 
@@ -99,6 +101,7 @@ pub async fn login(
 
 async fn run(
     mux: Arc<mux::Mux>,
+    localhost: &str,
     location: &Node,
     mut incomings: impl TryStream<Ok = mux::NewChannel, Error = Error> + Unpin,
 ) -> Result<(), Error> {
@@ -121,6 +124,7 @@ async fn run(
 
         auth::auth(
             &username,
+            localhost,
             location,
             open_auth.sender.framed(),
             open_auth.recver.framed(),

@@ -11,6 +11,7 @@ use crate::parse::{Node, Value};
 
 pub async fn auth(
     username: &str,
+    localhost: &str,
     location: &Node,
     mut sender: FramedSender<ServerAuthMessage>,
     recver: FramedRecver<ClientAuthMessage>,
@@ -35,7 +36,7 @@ pub async fn auth(
         unreachable!();
     };
     match &**ssh_login {
-        "basic" => auth_password(username, sender, recver).await?,
+        "basic" => auth_password(username, localhost, sender, recver).await?,
         "ssl" => _ = auth_ssl(sender).await?,
         _ => unreachable!("Unknown ssh_login type {ssh_login}"),
     }
@@ -60,12 +61,13 @@ pub async fn reject_deny(
 
 pub async fn auth_password(
     username: &str,
+    localhost: &str,
     mut sender: FramedSender<ServerAuthMessage>,
     mut recver: FramedRecver<ClientAuthMessage>,
 ) -> Result<(), Error> {
     sender
         .send(ServerAuthMessage::Password {
-            prompt: format!("{username}'s password: "),
+            prompt: format!("{username}@{localhost}'s password: "),
         })
         .await?;
 
@@ -91,7 +93,7 @@ pub async fn auth_password(
                             sender
                                 .send(ServerAuthMessage::Password {
                                     prompt: format!(
-                                        "Authentication failed, try again!\n{username}'s password: "
+                                        "Authentication failed, try again!\n{username}@{localhost}'s password: "
                                     ),
                                 })
                                 .await?;
