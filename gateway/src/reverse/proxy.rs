@@ -101,7 +101,7 @@ pub async fn pass(
         "[Request processing] Original request path and query: {}",
         path_and_query
     );
-    if proxy_pass.ends_with('/') {
+    if proxy_pass.ends_with('/') && !final_pattern.eq("/") {
         // 将匹配到的路径部分替换掉原始请求路径
         path_and_query = path_and_query.replace(final_pattern.as_str(), "");
         if path_and_query.is_empty() {
