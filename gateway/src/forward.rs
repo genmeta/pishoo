@@ -7,7 +7,7 @@ use http::StatusCode;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
-use qdns::{HttpResolver, MdnsResolver, Resolvers, UdpResolver};
+use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use qtraversal::iface::traversal_factory;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -60,7 +60,6 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
         Resolvers::default()
             .with(Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?))
             .with(Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?))
-            .with(Arc::new(UdpResolver::new(qdns::UDP_DNS_SERVER)))
     };
 
     // 访问权限控制
