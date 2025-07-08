@@ -1,13 +1,14 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use gm_quic::{ClientParameters, QuicClient};
+use gm_quic::{ClientParameters, ParameterId, QuicClient};
 use http::StatusCode;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::{HttpResolver, MdnsResolver, Resolvers, UdpResolver};
+use qtraversal::iface::traversal_factory;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
@@ -139,7 +140,7 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             return Ok(());
         }
         Err(_e) => {
-            gm_quic::resume().await;
+            // gm_quic::resume().await;
             error!("TCP listener binding failed: {:?}", _e);
         }
     }
@@ -155,12 +156,10 @@ async fn create_quic_client() -> QuicClient {
             .unwrap(),
     ];
 
-    // p2p 模式 client 无需绑定地址，自动扫描添加，client 也无需产生 iface， 因此不用设置 factory
-    // 关键要初始化网络，设置reuse_address
-    gm_quic::init_network(&agents);
+    let factory = traversal_factory(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
-        .reuse_address()
+        .with_iface_factory(factory.as_ref().clone())
         .with_alpns([ALPN]);
 
     #[cfg(feature = "qlog")]
@@ -180,15 +179,13 @@ fn create_client_params() -> ClientParameters {
     let mut params = ClientParameters::default();
 
     // 流控制参数
-    params.set_initial_max_streams_bidi(100u32);
-    params.set_initial_max_streams_uni(100u32);
-    params.set_initial_max_data(1u32 << 20);
-    params.set_initial_max_stream_data_uni(1u32 << 20);
-    params.set_initial_max_stream_data_bidi_local(1u32 << 20);
-    params.set_initial_max_stream_data_bidi_remote(1u32 << 20);
-    params.set_active_connection_id_limit(10u32);
-    params.set_max_idle_timeout(Duration::from_secs(30));
-
+    _ = params.set(ParameterId::ActiveConnectionIdLimit, 10u32);
+    _ = params.set(ParameterId::InitialMaxData, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataUni, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamsBidi, 100u32);
+    _ = params.set(ParameterId::InitialMaxStreamsUni, 100u32);
     params
 }
 

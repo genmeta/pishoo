@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::{StreamExt, TryStreamExt};
-use gm_quic::EndpointAddr;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
@@ -181,52 +180,27 @@ async fn create_quic_connection(
         "[Forward] Resolved host: {} -> {:?} src {} ",
         host, remote_endpoints, src
     );
-    for (index, endpoint) in remote_endpoints.iter().enumerate() {
-        // 创建 H3 客户端并设置超时
-        let t = match endpoint {
-            EndpointAddr::Direct { addr: _ } => 1000,
-            EndpointAddr::Agent { agent: _, outer: _ } => 5000,
-        };
-        match timeout(
-            Duration::from_millis(t * (index + 1) as u64),
-            pool.connect(host, *endpoint),
-        )
-        .await
-        {
-            Ok(result) => {
-                match result {
-                    Ok(conn) => {
-                        info!(
-                            "[Forward] H3 connection created successfully for: {}",
-                            endpoint
-                        );
-                        let origin_dcid = match conn.quic.origin_dcid() {
-                            Ok(dcid) => dcid,
-                            Err(e) => {
-                                error!("Failed to get origin DCID: {}", e);
-                                continue;
-                            }
-                        };
-                        tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
-                        return Ok(conn.h3.clone());
-                    }
+
+    match timeout(
+        Duration::from_millis(1000),
+        pool.connect(host, remote_endpoints),
+    )
+    .await
+    {
+        Ok(result) => match result {
+            Ok(conn) => {
+                let origin_dcid = match conn.quic.origin_dcid() {
+                    Ok(dcid) => dcid,
                     Err(e) => {
-                        error!(
-                            "[Forward] H3 connection creation failed: {}, retry: {} for {}",
-                            e, index, endpoint
-                        );
-                        continue;
+                        error!("Failed to get origin DCID: {}", e);
+                        return Err("Failed to get origin DCID".to_string());
                     }
                 };
+                tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
+                Ok(conn.h3.clone())
             }
-            Err(e) => {
-                error!(
-                    "[Forward] H3 client creation failed: {}, retry: {} of {}",
-                    e, index, endpoint
-                );
-            }
-        }
+            Err(e) => Err(format!("Failed to connect to host: {e}")),
+        },
+        Err(e) => Err(format!("Timeout to connect to host: {e}")),
     }
-
-    Err("Maximum retry attempts exceeded".to_string())
 }

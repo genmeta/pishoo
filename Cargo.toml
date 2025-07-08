@@ -77,14 +77,16 @@ nix = "0.30"
 pam = "0.7"
 
 [patch.crates-io]
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "develop" }
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "main" }
+h3-shim = { path = "../gm-quic-traversal/h3-shim"}
+gm-quic = { path = "../gm-quic-traversal/gm-quic"}
+qdns = { path = "../gm-quic-traversal/qdns"}
+qconnection = { path = "../gm-quic-traversal/qconnection"}
+qtraversal = { path = "../gm-quic-traversal/qtraversal"}
+qinterface = { path = "../gm-quic-traversal/qinterface"}
+qevent = { path = "../gm-quic-traversal/qevent"}
+gmdns = { path = "../gmdns"}
+
+
 
 [profile.dev]
 panic = "abort"

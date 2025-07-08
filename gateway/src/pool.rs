@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use gm_quic::QuicClient;
+use gm_quic::{EndpointAddr, QuicClient};
 use h3::client::SendRequest;
-use qconnection::prelude::ToEndpointAddr;
 use tokio::{io, sync::Mutex};
 
 #[derive(Clone)]
@@ -41,7 +40,7 @@ impl H3ConnectionPool {
     pub async fn connect(
         &self,
         server_name: impl Into<String>,
-        server_ep: impl ToEndpointAddr,
+        server_eps: impl IntoIterator<Item = impl Into<EndpointAddr>>,
     ) -> io::Result<ReusableConnection> {
         let server_name = server_name.into();
 
@@ -68,7 +67,7 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            let quic_connection = self.quic_client.connect(server_name.clone(), server_ep)?;
+            let quic_connection = self.quic_client.connect(server_name.clone(), server_eps)?;
             let (mut h3_connection, send_request) =
                 h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))
                     .await

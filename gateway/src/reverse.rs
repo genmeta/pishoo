@@ -2,11 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     sync::Arc,
-    time::Duration,
 };
 
 use bytes::Bytes;
-use gm_quic::QuicServer;
+use gm_quic::{ParameterId, QuicListeners};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
@@ -115,8 +114,8 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 #[allow(clippy::type_complexity)]
 fn create_quic_server(
     servers: &[Arc<Node>],
-) -> Result<(Arc<QuicServer>, HashMap<String, HashSet<SocketAddr>>)> {
-    let agents = [
+) -> Result<(Arc<QuicListeners>, HashMap<String, HashSet<SocketAddr>>)> {
+    let agents: [SocketAddr; 2] = [
         "1.12.74.4:20004".parse()?,
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
     ];
@@ -163,22 +162,21 @@ fn create_quic_server(
     let binds: HashSet<SocketAddr> = server_total_binds.values().flatten().cloned().collect();
     let binds: Vec<SocketAddr> = binds.into_iter().collect();
 
-    #[allow(unused_mut)]
-    let mut builder = gm_quic::QuicServer::builder()
-        .with_supported_versions([1u32]) // 支持QUIC版本1
-        .without_client_cert_verifier() // 禁用证书验证
-        .with_iface_factory(factory);
+    let factory = traversal_factory(&agents[..]);
+    let builder = gm_quic::QuicListeners::builder()?;
 
     #[cfg(feature = "qlog")]
     {
         use std::path::PathBuf;
 
         use qevent::telemetry::handy::DefaultSeqLogger;
-
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
-
-    let mut builder = builder.with_parameters(create_server_params()).enable_sni();
+    let listener = builder
+        .with_iface_factory(factory.as_ref().clone())
+        .with_parameters(create_server_params())
+        .without_client_cert_verifier()
+        .listen(1000);
 
     // 为每个服务器添加TLS证书
     for server in servers {
@@ -206,33 +204,33 @@ fn create_quic_server(
             if domain.ends_with('~') {
                 domain = domain.replace('~', ".genmeta.net");
             }
-            builder = builder.add_host(domain, &*cert, &*key);
+            // builder = builder.add_host(domain, &*cert, &*key);
+            let binds = server_total_binds.get(&domain).unwrap();
+            _ = listener.add_server(domain, &*cert, &*key, binds.iter(), None);
         }
     }
 
     info!("binds {:?}", binds);
-    let server = builder
-        .with_alpns([b"h3"])
-        .listen(&*binds)
-        .inspect_err(|e| {
-            error!("listen err {:?}", e);
-        })?;
+    // let server = builder
+    //     .with_alpns([b"h3"])
+    //     .listen(&*binds)
+    //     .inspect_err(|e| {
+    //         error!("listen err {:?}", e);
+    //     })?;
 
-    Ok((server, server_total_binds))
+    Ok((listener, server_total_binds))
 }
 
 /// 创建QUIC服务器参数配置
 fn create_server_params() -> gm_quic::ServerParameters {
     let mut params = gm_quic::ServerParameters::default();
-
-    params.set_initial_max_streams_bidi(100u32); // 双向流限制
-    params.set_initial_max_streams_uni(100u32); // 单向流限制
-    params.set_initial_max_data(1u32 << 20); // 连接总数据限制
-    params.set_initial_max_stream_data_uni(1u32 << 20);
-    params.set_initial_max_stream_data_bidi_local(1u32 << 20);
-    params.set_initial_max_stream_data_bidi_remote(1u32 << 20);
-    params.set_active_connection_id_limit(10u32);
-    params.set_max_idle_timeout(Duration::from_secs(30));
+    _ = params.set(ParameterId::ActiveConnectionIdLimit, 10u32);
+    _ = params.set(ParameterId::InitialMaxData, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamDataUni, 1u32 << 20);
+    _ = params.set(ParameterId::InitialMaxStreamsBidi, 100u32);
+    _ = params.set(ParameterId::InitialMaxStreamsUni, 100u32);
 
     params
 }
@@ -261,11 +259,11 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<SocketAddr> 
 
 /// 处理客户端连接
 async fn handle_connections(
-    quic_server: Arc<QuicServer>,
+    quic_server: Arc<QuicListeners>,
     routers: Arc<HashMap<String, Arc<Node>>>,
 ) -> Result<()> {
     // 持续接受新连接
-    while let Ok((conn, pathway)) = quic_server.accept().await {
+    while let Ok((conn, _name, pathway, ..)) = quic_server.accept().await {
         debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
 
         // 将QUIC连接包装为H3 QUIC连接
@@ -301,7 +299,15 @@ async fn handle_connections(
                     let routers = routers_clone.clone();
                     let handle_request = async move {
                         let (mut req, stream) = req_resolver.resolve_request().await?;
-                        req.extensions_mut().insert(pathway.remote().addr());
+                        let addr = match pathway.remote() {
+                            gm_quic::EndpointAddr::Socket(socket_endpoint_addr) => {
+                                socket_endpoint_addr.addr()
+                            }
+                            gm_quic::EndpointAddr::Ble(_) => {
+                                unreachable!("BLE endpoint not supported")
+                            }
+                        };
+                        req.extensions_mut().insert(addr);
                         handle_request(routers, req, stream).await
                     };
                     tokio::spawn(async move {
