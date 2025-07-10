@@ -168,18 +168,14 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, String> {
-    let (src, remote_endpoints) = resolvers
-        .lookup(host, false)
-        .await
-        .map_err(|e| format!("Failed to resolve host: {e}"))?
-        .first()
-        .cloned()
-        .unwrap();
-
-    info!(
-        "[Forward] Resolved host: {} -> {:?} src {} ",
-        host, remote_endpoints, src
-    );
+    let mut stream = resolvers.lookup(host);
+    let endpoints = stream.next().await;
+    let (_, remote_endpoints) = match endpoints {
+        Some(endpoints) => endpoints,
+        None => {
+            return Err(format!("Failed to resolve host: {host}"));
+        }
+    };
 
     match timeout(
         Duration::from_millis(1000),
@@ -189,6 +185,20 @@ async fn create_quic_connection(
     {
         Ok(result) => match result {
             Ok(conn) => {
+                tokio::spawn({
+                    let conn = conn.clone();
+                    async move {
+                        // TODO: 在这里添加地址可能有点晚了，应该在 quic client 创建之后马上添加
+                        while let Some((_, remote_endpoints)) = stream.next().await {
+                            remote_endpoints
+                                .into_iter()
+                                .map(|ep| ep.into())
+                                .for_each(|addr| {
+                                    _ = conn.quic.add_peer_endpoint(addr);
+                                });
+                        }
+                    }
+                });
                 let origin_dcid = match conn.quic.origin_dcid() {
                     Ok(dcid) => dcid,
                     Err(e) => {
