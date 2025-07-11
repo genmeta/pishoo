@@ -168,8 +168,8 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, String> {
-    let mut stream = resolvers.lookup(host);
-    let endpoints = stream.next().await;
+    let mut ns_resolver = resolvers.lookup(host);
+    let endpoints = tokio_stream::StreamExt::next(&mut ns_resolver).await;
     let (_, remote_endpoints) = match endpoints {
         Some(endpoints) => endpoints,
         None => {
@@ -189,7 +189,9 @@ async fn create_quic_connection(
                     let conn = conn.clone();
                     async move {
                         // TODO: 在这里添加地址可能有点晚了，应该在 quic client 创建之后马上添加
-                        while let Some((_, remote_endpoints)) = stream.next().await {
+                        while let Some((_, remote_endpoints)) =
+                            tokio_stream::StreamExt::next(&mut ns_resolver).await
+                        {
                             remote_endpoints
                                 .into_iter()
                                 .map(|ep| ep.into())

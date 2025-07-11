@@ -44,7 +44,7 @@ qdns = { workspace = true }
 qconnection = { workspace = true }
 qtraversal = { workspace = true }
 qinterface = { workspace = true }
-qevent = { workspace = true, features = ["enabled"] }
+qevent = { workspace = true, features = ["telemetry"] }
 
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }

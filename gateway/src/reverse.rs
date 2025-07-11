@@ -206,6 +206,7 @@ fn create_quic_server(
             }
             // builder = builder.add_host(domain, &*cert, &*key);
             let binds = server_total_binds.get(&domain).unwrap();
+            info!("Adding server {} with binds {:?}", domain, binds);
             _ = listener.add_server(domain, &*cert, &*key, binds.iter(), None);
         }
     }
