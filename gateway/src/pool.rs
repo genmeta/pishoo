@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures::StreamExt;
 use gm_quic::{EndpointAddr, QuicClient};
 use h3::client::SendRequest;
+use qdns::Resolvers;
 use tokio::{io, sync::Mutex};
 
 #[derive(Clone)]
@@ -40,10 +42,9 @@ impl H3ConnectionPool {
     pub async fn connect(
         &self,
         server_name: impl Into<String>,
-        server_eps: impl IntoIterator<Item = impl Into<EndpointAddr>>,
+        resolvers: Resolvers,
     ) -> io::Result<ReusableConnection> {
         let server_name = server_name.into();
-
         let mut entry = None;
 
         // Get a shared access so that multiple asynchronous tasks can asynchronously wait for other tasks
@@ -66,8 +67,32 @@ impl H3ConnectionPool {
             return io::Result::Ok(conn.clone());
         }
 
+        let mut server_eps = resolvers.lookup(&server_name);
+        let (_, eps) = match server_eps.next().await {
+            Some(endpoints) => endpoints,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("No endpoints found for server: {server_name}"),
+                ));
+            }
+        };
+
         let connect_or_reuse = async {
-            let quic_connection = self.quic_client.connect(server_name.clone(), server_eps)?;
+            let quic_connection = self.quic_client.connect(server_name.clone(), eps)?;
+            tokio::spawn({
+                let conn = quic_connection.clone();
+                async move {
+                    while let Some((_, eps)) = server_eps.next().await {
+                        for ep in eps {
+                            if conn.add_peer_endpoint(ep.into()).is_err() {
+                                tracing::warn!("[Pool] Connection closed");
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
             let (mut h3_connection, send_request) =
                 h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))
                     .await
