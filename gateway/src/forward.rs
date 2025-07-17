@@ -180,7 +180,6 @@ async fn create_quic_client() -> QuicClient {
     builder
         .with_parameters(create_client_params())
         .bind(binds)
-        .unwrap()
         .build()
 }
 
