@@ -4434,3 +4434,8 @@ dependencies = [
  "quote",
  "syn 2.0.104",
 ]
+
+[[patch.unused]]
+name = "gmdns"
+version = "0.1.0"
+source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=fix%2Fbind_ip#e074980235dae96a100211fd9c1898cbf00ab980"

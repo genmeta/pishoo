@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -159,8 +159,9 @@ async fn create_quic_client() -> QuicClient {
     let factory = traversal_factory(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
-        .with_iface_factory(factory.as_ref().clone())
-        .with_alpns([ALPN]);
+        .enable_sslkeylog()
+        .with_iface_factory(factory.as_ref().clone());
+    // .with_alpns([ALPN]);
 
     #[cfg(feature = "qlog")]
     {
@@ -171,7 +172,16 @@ async fn create_quic_client() -> QuicClient {
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
-    builder.with_parameters(create_client_params()).build()
+    let mut binds = Vec::new();
+    for ip in factory.devices().keys() {
+        let bind = SocketAddr::new(*ip, 5379);
+        binds.push(bind);
+    }
+    builder
+        .with_parameters(create_client_params())
+        .bind(binds)
+        .unwrap()
+        .build()
 }
 
 /// 配置 QUIC 协议参数
