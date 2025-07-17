@@ -84,7 +84,7 @@ qconnection = { path = "../gm-quic-traversal/qconnection"}
 qtraversal = { path = "../gm-quic-traversal/qtraversal"}
 qinterface = { path = "../gm-quic-traversal/qinterface"}
 qevent = { path = "../gm-quic-traversal/qevent"}
-gmdns = { path = "../gmdns"}
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "fix/bind_ip" }
 
 
 
