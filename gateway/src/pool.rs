@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
-use gm_quic::{EndpointAddr, QuicClient};
+use gm_quic::QuicClient;
 use h3::client::SendRequest;
 use qdns::Resolvers;
 use tokio::{io, sync::Mutex};

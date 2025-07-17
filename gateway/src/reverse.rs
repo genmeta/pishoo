@@ -163,7 +163,10 @@ fn create_quic_server(
     let binds: Vec<SocketAddr> = binds.into_iter().collect();
 
     let factory = traversal_factory(&agents[..]);
-    let builder = gm_quic::QuicListeners::builder()?;
+    let builder = gm_quic::QuicListeners::builder().map_err(|e| {
+        error!("Failed to create QUIC listener builder: {}", e);
+        CustomError::LocalhostNotInitialized
+    })?;
 
     #[cfg(feature = "qlog")]
     {
