@@ -23,6 +23,7 @@ use crate::{
 mod normal;
 mod quic;
 
+#[allow(dead_code)]
 static ALPN: &[u8] = b"h3";
 
 type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
@@ -179,7 +180,6 @@ async fn create_quic_client() -> QuicClient {
     builder
         .with_parameters(create_client_params())
         .bind(binds)
-        .unwrap()
         .build()
 }
 

@@ -25,6 +25,7 @@ Cargo.lock
 # Keychain files
 keychain/test.genmeta.net
 keychain/mcp.test.genmeta.net
+keychain/borber.pilot.genmeta.net
 
 # Scripts
 scripts/*

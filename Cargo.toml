@@ -77,15 +77,13 @@ nix = "0.30"
 pam = "0.7"
 
 [patch.crates-io]
-h3-shim = { path = "../gm-quic-traversal/h3-shim"}
-gm-quic = { path = "../gm-quic-traversal/gm-quic"}
-qdns = { path = "../gm-quic-traversal/qdns"}
-qconnection = { path = "../gm-quic-traversal/qconnection"}
-qtraversal = { path = "../gm-quic-traversal/qtraversal"}
-qinterface = { path = "../gm-quic-traversal/qinterface"}
-qevent = { path = "../gm-quic-traversal/qevent"}
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "fix/bind_ip" }
-
+h3-shim = { path = "../gm-quic-traversal/h3-shim" }
+gm-quic = { path = "../gm-quic-traversal/gm-quic" }
+qdns = { path = "../gm-quic-traversal/qdns" }
+qconnection = { path = "../gm-quic-traversal/qconnection" }
+qtraversal = { path = "../gm-quic-traversal/qtraversal" }
+qinterface = { path = "../gm-quic-traversal/qinterface" }
+qevent = { path = "../gm-quic-traversal/qevent" }
 
 
 [profile.dev]

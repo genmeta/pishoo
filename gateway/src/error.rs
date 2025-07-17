@@ -8,6 +8,8 @@ pub type Result<T> = std::result::Result<T, CustomError>;
 pub enum CustomError {
     #[error("invalid directive: `{0}`")]
     InvalidDirective(String),
+    #[error("build failed: `{0}`")]
+    BuildServerError(#[from] gm_quic::BuildServerError),
     #[error("invalid config: `{0}`")]
     ConfigError(String),
     #[error("unknown directive: `{0}`")]
