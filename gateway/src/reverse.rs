@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use gm_quic::{ParameterId, QuicListeners};
+use gm_quic::{BindUri, ParameterId, QuicListeners};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
@@ -72,7 +72,12 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
             server_resolver = vec![mdns_resovler.clone()];
         }
 
-        let server_binds = binds.get(&server_name).unwrap().iter().cloned().collect();
+        let server_binds = binds
+            .get(&server_name)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         publisher.add_host(server_name, server_binds, server_resolver);
     }
 
@@ -114,7 +119,7 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 #[allow(clippy::type_complexity)]
 fn create_quic_server(
     servers: &[Arc<Node>],
-) -> Result<(Arc<QuicListeners>, HashMap<String, HashSet<SocketAddr>>)> {
+) -> Result<(Arc<QuicListeners>, HashMap<String, HashSet<BindUri>>)> {
     let agents: [SocketAddr; 2] = [
         "1.12.74.4:20004".parse()?,
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
@@ -155,13 +160,12 @@ fn create_quic_server(
         let binds = server_listen
             .iter()
             .flat_map(|iface| resolve_binds(&factory, iface))
+            .map(BindUri::from)
             .collect::<HashSet<_>>();
         server_total_binds.insert(server_name, binds);
     }
 
-    let binds: HashSet<SocketAddr> = server_total_binds.values().flatten().cloned().collect();
-    let binds: Vec<SocketAddr> = binds.into_iter().collect();
-
+    let binds: Vec<BindUri> = server_total_binds.values().flatten().cloned().collect();
     let factory = traversal_factory(&agents[..]);
     let builder = gm_quic::QuicListeners::builder().map_err(|e| {
         error!("Failed to create QUIC listener builder: {}", e);
@@ -210,18 +214,12 @@ fn create_quic_server(
             // builder = builder.add_host(domain, &*cert, &*key);
             let binds = server_total_binds.get(&domain).unwrap();
             info!("Adding server {} with binds {:?}", domain, binds);
-            _ = listener.add_server(domain, &*cert, &*key, binds.iter(), None);
+            let binds: Vec<BindUri> = binds.iter().cloned().collect();
+            _ = listener.add_server(domain, &*cert, &*key, binds, None);
         }
     }
 
     info!("binds {:?}", binds);
-    // let server = builder
-    //     .with_alpns([b"h3"])
-    //     .listen(&*binds)
-    //     .inspect_err(|e| {
-    //         error!("listen err {:?}", e);
-    //     })?;
-
     Ok((listener, server_total_binds))
 }
 
@@ -239,9 +237,9 @@ fn create_server_params() -> gm_quic::ServerParameters {
     params
 }
 
-fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<SocketAddr> {
+fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
     let mut binds = Vec::new();
-    for device_ip in factory.devices().keys() {
+    for (device_ip, device_name) in factory.devices() {
         let is_match = match (&iface.typ, device_ip) {
             (IfaceType::All, _) => true,
             (IfaceType::External, IpAddr::V4(ip)) => !ip.is_loopback(),
@@ -255,7 +253,12 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<SocketAddr> 
             IpAddr::V6(_) => matches!(iface.version, IPVersion::V6 | IPVersion::Dual),
         };
         if is_match && version_match {
-            binds.push(SocketAddr::new(*device_ip, iface.port));
+            let family = match device_ip {
+                IpAddr::V4(_) => "v4",
+                IpAddr::V6(_) => "v6",
+            };
+            let bind_uri = format!("iface://{family}.{device_name}:5387");
+            binds.push(bind_uri);
         }
     }
     binds
