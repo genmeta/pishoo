@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{io, net::IpAddr, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -173,9 +173,13 @@ async fn create_quic_client() -> QuicClient {
     }
 
     let mut binds = Vec::new();
-    for ip in factory.devices().keys() {
-        let bind = SocketAddr::new(*ip, 5379);
-        binds.push(bind);
+    for (ip, device) in factory.devices() {
+        let family = match ip {
+            IpAddr::V4(_) => "v4",
+            IpAddr::V6(_) => "v6",
+        };
+        let bind_uri = format!("iface://{family}.{device}:5387");
+        binds.push(bind_uri);
     }
     builder
         .with_parameters(create_client_params())
@@ -189,6 +193,7 @@ fn create_client_params() -> ClientParameters {
 
     // 流控制参数
     _ = params.set(ParameterId::ActiveConnectionIdLimit, 10u32);
+    _ = params.set(ParameterId::MaxIdleTimeout, 20000);
     _ = params.set(ParameterId::InitialMaxData, 1u32 << 20);
     _ = params.set(ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20);
     _ = params.set(ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20);
