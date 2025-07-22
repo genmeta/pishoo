@@ -1,8 +1,8 @@
-use std::{io, net::IpAddr, sync::Arc};
+use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use gm_quic::{ClientParameters, ParameterId, QuicClient};
+use gm_quic::{QuicClient, handy::client_parameters};
 use http::StatusCode;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
@@ -186,25 +186,9 @@ async fn create_quic_client() -> QuicClient {
         .collect();
 
     builder
-        .with_parameters(create_client_params())
+        .with_parameters(client_parameters())
         .bind(binds)
         .build()
-}
-
-/// 配置 QUIC 协议参数
-fn create_client_params() -> ClientParameters {
-    let mut params = ClientParameters::default();
-
-    // 流控制参数
-    _ = params.set(ParameterId::ActiveConnectionIdLimit, 10u32);
-    _ = params.set(ParameterId::MaxIdleTimeout, 20000);
-    _ = params.set(ParameterId::InitialMaxData, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataUni, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamsBidi, 100u32);
-    _ = params.set(ParameterId::InitialMaxStreamsUni, 100u32);
-    params
 }
 
 /// 配置 TLS 客户端参数

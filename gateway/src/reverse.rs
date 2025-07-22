@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use gm_quic::{BindUri, ParameterId, QuicListeners};
+use gm_quic::{BindUri, QuicListeners, handy::server_parameters};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
@@ -181,7 +181,7 @@ fn create_quic_server(
     }
     let listener = builder
         .with_iface_factory(factory.as_ref().clone())
-        .with_parameters(create_server_params())
+        .with_parameters(server_parameters())
         .without_client_cert_verifier()
         .listen(1000);
 
@@ -221,20 +221,6 @@ fn create_quic_server(
 
     info!("binds {:?}", binds);
     Ok((listener, server_total_binds))
-}
-
-/// 创建QUIC服务器参数配置
-fn create_server_params() -> gm_quic::ServerParameters {
-    let mut params = gm_quic::ServerParameters::default();
-    _ = params.set(ParameterId::ActiveConnectionIdLimit, 10u32);
-    _ = params.set(ParameterId::InitialMaxData, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataBidiLocal, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataBidiRemote, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamDataUni, 1u32 << 20);
-    _ = params.set(ParameterId::InitialMaxStreamsBidi, 100u32);
-    _ = params.set(ParameterId::InitialMaxStreamsUni, 100u32);
-
-    params
 }
 
 fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
