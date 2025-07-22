@@ -168,7 +168,7 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, String> {
-    match timeout(Duration::from_millis(1000), pool.connect(host, resolvers)).await {
+    match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
         Ok(result) => match result {
             Ok(conn) => {
                 let origin_dcid = match conn.quic.origin_dcid() {

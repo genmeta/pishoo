@@ -45,6 +45,7 @@ impl H3ConnectionPool {
         resolvers: Resolvers,
     ) -> io::Result<ReusableConnection> {
         let server_name = server_name.into();
+        // FIXME: 配合gm_quic的超时策略好了再使用连接池
         let mut entry = None;
 
         // Get a shared access so that multiple asynchronous tasks can asynchronously wait for other tasks

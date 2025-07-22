@@ -140,7 +140,7 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             return Ok(());
         }
         Err(_e) => {
-            // gm_quic::resume().await;
+            qinterface::iface::QuicInterfaces::resume();
             error!("TCP listener binding failed: {:?}", _e);
         }
     }
@@ -156,6 +156,7 @@ async fn create_quic_client() -> QuicClient {
             .unwrap(),
     ];
 
+    info!("[Forward] Creating QUIC client with agents: {:?}", agents);
     let factory = traversal_factory(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
@@ -172,15 +173,18 @@ async fn create_quic_client() -> QuicClient {
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
-    let mut binds = Vec::new();
-    for (ip, device) in factory.devices() {
-        let family = match ip {
-            IpAddr::V4(_) => "v4",
-            IpAddr::V6(_) => "v6",
-        };
-        let bind_uri = format!("iface://{family}.{device}:5387");
-        binds.push(bind_uri);
-    }
+    let binds: Vec<_> = factory
+        .devices()
+        .iter()
+        .map(|(ip, device)| {
+            format!(
+                "iface://{}.{}:0",
+                if ip.is_ipv4() { "v4" } else { "v6" },
+                device
+            )
+        })
+        .collect();
+
     builder
         .with_parameters(create_client_params())
         .bind(binds)
