@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -187,6 +187,7 @@ async fn create_quic_client() -> QuicClient {
 
     builder
         .with_parameters(client_parameters())
+        .defer_idle_timeout(Duration::from_secs(60))
         .bind(binds)
         .build()
 }
