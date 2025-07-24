@@ -890,9 +890,9 @@ dependencies = [
  "futures",
  "getifs",
  "getrandom 0.3.3",
- "gm-quic 0.2.3",
+ "gm-quic",
  "h3",
- "h3-shim 0.2.3",
+ "h3-shim",
  "http",
  "http-body-util",
  "hyper",
@@ -902,11 +902,11 @@ dependencies = [
  "pam",
  "parking_lot",
  "pnet",
- "qconnection 0.2.3",
- "qdns 0.2.2",
- "qevent 0.2.3",
- "qinterface 0.2.3",
- "qtraversal 0.2.3",
+ "qconnection",
+ "qdns",
+ "qevent",
+ "qinterface",
+ "qtraversal",
  "regex",
  "rpassword",
  "rustls",
@@ -924,7 +924,7 @@ dependencies = [
 [[package]]
 name = "genmeta-common"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#39d3222414a38cf370671687c4a61d3ede6b791c"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#fa2a2bcad85547c9ac6066c0e90d72ba3e3f6c20"
 dependencies = [
  "async-trait",
  "bytes",
@@ -932,11 +932,11 @@ dependencies = [
  "derive_more",
  "futures",
  "h3",
- "h3-shim 0.2.2",
+ "h3-shim",
  "pin-project-lite",
- "qbase 0.2.2",
- "qdns 0.2.2 (git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop)",
- "qtraversal 0.2.2",
+ "qbase",
+ "qdns",
+ "qtraversal",
  "serde",
  "serde_cbor",
  "tokio",
@@ -1031,43 +1031,21 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "gm-quic"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "dashmap",
- "derive_more",
- "futures",
- "qbase 0.2.2",
- "qcongestion 0.2.2",
- "qconnection 0.2.2",
- "qevent 0.2.2",
- "qinterface 0.2.2",
- "qrecovery 0.2.2",
- "qtraversal 0.2.2",
- "qunreliable 0.2.2",
- "rustls",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "gm-quic"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "dashmap",
  "derive_more",
  "futures",
- "qbase 0.2.3",
- "qcongestion 0.2.3",
- "qconnection 0.2.3",
- "qevent 0.2.3",
- "qinterface 0.2.3",
- "qrecovery 0.2.3",
- "qtraversal 0.2.3",
- "qunreliable 0.2.3",
+ "qbase",
+ "qcongestion",
+ "qconnection",
+ "qevent",
+ "qinterface",
+ "qrecovery",
+ "qtraversal",
+ "qunreliable",
  "rustls",
  "thiserror 2.0.12",
  "tokio",
@@ -1077,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "gmdns"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=fix%2Fasync_deque#416ef0383780bcee4da725a2e3514bb1dc019b9c"
+source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=main#a7ec2b2c9b6fff7ac6d45587b3a4c2f485673e29"
 dependencies = [
  "bitfield-struct",
  "bytes",
@@ -1091,27 +1069,6 @@ dependencies = [
  "rand 0.9.2",
  "socket2 0.5.10",
  "thiserror 2.0.12",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "gmdns"
-version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=main#ee3d61465455684fdd513d7d9a66ce5de0b42288"
-dependencies = [
- "bitfield-struct",
- "bytes",
- "clap",
- "dashmap",
- "futures",
- "getifs",
- "nom 8.0.0",
- "pnet",
- "rand 0.9.2",
- "socket2 0.5.10",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -1154,30 +1111,16 @@ dependencies = [
 
 [[package]]
 name = "h3-shim"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "dashmap",
- "futures",
- "gm-quic 0.2.2",
- "h3",
- "qbase 0.2.2",
- "qconnection 0.2.2",
- "tokio",
-]
-
-[[package]]
-name = "h3-shim"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "dashmap",
  "futures",
- "gm-quic 0.2.3",
+ "gm-quic",
  "h3",
- "qbase 0.2.3",
- "qconnection 0.2.3",
+ "qbase",
+ "qconnection",
  "tokio",
 ]
 
@@ -1351,9 +1294,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66d5bd4c6f02bf0542fad85d626775bab9258cf795a4256dcaf3161114d1df"
+checksum = "8d9b05277c7e8da2c93a568989bb6207bef0112e8d17df7a6eda4a3cf143bc5e"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1367,7 +1310,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -1536,9 +1479,9 @@ dependencies = [
 
 [[package]]
 name = "io-uring"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b86e202f00093dcba4275d4636b93ef9dd75d025ae560d2521b45ea28ab49013"
+checksum = "d93587f37623a1a17d94ef2bc9ada592f5465fe7732084ab7beefabe5c77c0c4"
 dependencies = [
  "bitflags 2.9.1",
  "cfg-if",
@@ -2115,7 +2058,7 @@ dependencies = [
  "clap",
  "console-subscriber",
  "gateway",
- "qdns 0.2.2",
+ "qdns",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2327,26 +2270,8 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bitflags 2.9.1",
- "bytes",
- "derive_more",
- "enum_dispatch",
- "futures",
- "getset",
- "nom 8.0.0",
- "rand 0.9.2",
- "rustls",
- "serde",
- "thiserror 2.0.12",
- "tracing",
-]
-
-[[package]]
-name = "qbase"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bitflags 2.9.1",
  "bytes",
@@ -2367,22 +2292,11 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "qbase 0.2.2",
- "qevent 0.2.2",
- "rand 0.9.2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qcongestion"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
- "qbase 0.2.3",
- "qevent 0.2.3",
+ "qbase",
+ "qevent",
  "rand 0.9.2",
  "thiserror 2.0.12",
  "tokio",
@@ -2391,43 +2305,21 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "dashmap",
- "derive_more",
- "enum_dispatch",
- "futures",
- "qbase 0.2.2",
- "qcongestion 0.2.2",
- "qevent 0.2.2",
- "qinterface 0.2.2",
- "qrecovery 0.2.2",
- "qtraversal 0.2.2",
- "qunreliable 0.2.2",
- "rand 0.9.2",
- "rustls",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qconnection"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "dashmap",
  "derive_more",
  "enum_dispatch",
  "futures",
- "qbase 0.2.3",
- "qcongestion 0.2.3",
- "qevent 0.2.3",
- "qinterface 0.2.3",
- "qrecovery 0.2.3",
- "qtraversal 0.2.3",
- "qunreliable 0.2.3",
+ "qbase",
+ "qcongestion",
+ "qevent",
+ "qinterface",
+ "qrecovery",
+ "qtraversal",
+ "qunreliable",
  "rand 0.9.2",
  "rustls",
  "thiserror 2.0.12",
@@ -2438,33 +2330,15 @@ dependencies = [
 [[package]]
 name = "qdns"
 version = "0.2.2"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
  "futures",
- "gmdns 0.1.0 (git+ssh://git@github.com/genmeta/gmdns.git?branch=fix%2Fasync_deque)",
- "qbase 0.2.3",
- "qtraversal 0.2.3",
- "reqwest",
- "serde",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "qdns"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "futures",
- "gmdns 0.1.0 (git+ssh://git@github.com/genmeta/gmdns.git?branch=main)",
- "qbase 0.2.2",
- "qtraversal 0.2.2",
+ "gmdns",
+ "qbase",
+ "qtraversal",
  "reqwest",
  "serde",
  "tokio",
@@ -2474,32 +2348,15 @@ dependencies = [
 
 [[package]]
 name = "qevent"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "derive_builder",
- "derive_more",
- "enum_dispatch",
- "pin-project-lite",
- "qbase 0.2.2",
- "serde",
- "serde_json",
- "serde_with",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qevent"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "derive_builder",
  "derive_more",
  "enum_dispatch",
  "pin-project-lite",
- "qbase 0.2.3",
+ "qbase",
  "serde",
  "serde_json",
  "serde_with",
@@ -2509,27 +2366,8 @@ dependencies = [
 
 [[package]]
 name = "qinterface"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "derive_more",
- "futures",
- "qbase 0.2.2",
- "qevent 0.2.2",
- "qudp 0.2.2",
- "rustls",
- "serde",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qinterface"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2537,9 +2375,9 @@ dependencies = [
  "derive_more",
  "futures",
  "netdev",
- "qbase 0.2.3",
- "qevent 0.2.3",
- "qudp 0.2.3",
+ "qbase",
+ "qevent",
+ "qudp",
  "rustls",
  "serde",
  "thiserror 2.0.12",
@@ -2550,6 +2388,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "darling 0.21.0",
  "proc-macro2",
@@ -2559,32 +2398,15 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "derive_more",
- "enum_dispatch",
- "futures",
- "qbase 0.2.2",
- "qevent 0.2.2",
- "rand 0.9.2",
- "rustls",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qrecovery"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "derive_more",
  "enum_dispatch",
  "futures",
- "qbase 0.2.3",
- "qevent 0.2.3",
+ "qbase",
+ "qevent",
  "rand 0.9.2",
  "rustls",
  "thiserror 2.0.12",
@@ -2594,8 +2416,8 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
+version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2607,35 +2429,10 @@ dependencies = [
  "getifs",
  "nom 8.0.0",
  "pnet",
- "qbase 0.2.2",
- "qevent 0.2.2",
- "qinterface 0.2.2",
- "qudp 0.2.2",
- "rand 0.9.2",
- "rustls",
- "thiserror 2.0.12",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qtraversal"
-version = "0.2.3"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "derive_more",
- "enum_dispatch",
- "flagset",
- "futures",
- "getifs",
- "nom 8.0.0",
- "pnet",
- "qbase 0.2.3",
- "qevent 0.2.3",
- "qinterface 0.2.3",
- "qudp 0.2.3",
+ "qbase",
+ "qevent",
+ "qinterface",
+ "qudp",
  "rand 0.9.2",
  "rustls",
  "thiserror 2.0.12",
@@ -2645,22 +2442,8 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "cfg-if",
- "libc",
- "nix",
- "socket2 0.5.10",
- "tokio",
- "tracing",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "qudp"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -2729,23 +2512,12 @@ dependencies = [
 
 [[package]]
 name = "qunreliable"
-version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=develop#bb62ae4b0523195f2a8df190426006ffadacb7c0"
-dependencies = [
- "bytes",
- "futures",
- "qbase 0.2.2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qunreliable"
 version = "0.2.3"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3#b6bf0753b4abe763726fc62505873103c5d75034"
 dependencies = [
  "bytes",
  "futures",
- "qbase 0.2.3",
+ "qbase",
  "tokio",
  "tracing",
 ]
@@ -2886,9 +2658,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.14"
+version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de3a5d9f0aba1dbcec1cc47f0ff94a4b778fe55bca98a6dfa92e4e094e57b1c4"
+checksum = "7e8af0dde094006011e6a740d4879319439489813bd0bcdc7d821beaeeff48ec"
 dependencies = [
  "bitflags 2.9.1",
 ]
@@ -3440,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "ssh3-proto"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#39d3222414a38cf370671687c4a61d3ede6b791c"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#fa2a2bcad85547c9ac6066c0e90d72ba3e3f6c20"
 dependencies = [
  "bytes",
  "dashmap",

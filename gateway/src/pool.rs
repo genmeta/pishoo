@@ -7,6 +7,7 @@ use gm_quic::QuicClient;
 use h3::client::SendRequest;
 use qdns::Resolvers;
 use tokio::{io, sync::Mutex};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct ReusableConnection {
@@ -79,6 +80,7 @@ impl H3ConnectionPool {
             }
         };
 
+        info!("[DNS] Resolved endpoints for {server_name}: {eps:?}");
         let connect_or_reuse = async {
             let quic_connection = self.quic_client.connect(server_name.clone(), eps)?;
             tokio::spawn({
