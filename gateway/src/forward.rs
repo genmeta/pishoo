@@ -134,6 +134,7 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
     };
     match TcpListener::bind(addr).await {
         Ok(_) => {
+            qinterface::iface::QuicInterfaces::global().clear();
             let _ = serve(node).await.inspect_err(|e| {
                 error!("TCP listener binding failed: {:?}", e);
             });
