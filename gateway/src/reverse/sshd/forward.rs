@@ -18,7 +18,7 @@ pub async fn listen_remote_forward(
     mut recver: Recver,
     listen: BindAddress,
 ) -> Result<(), Error> {
-    let remote_forwarder = Forwarder::new(
+    let remote_forwarder = LocalForwarder::new(
         mux.clone(),
         messages::OpenChannel::Forwarded {
             listen: token,
@@ -43,7 +43,7 @@ pub async fn listen_remote_forward(
         listener.listen(move |reader, writer| remote_forwarder.forward(reader, writer).boxed());
     tokio::select! {
         _ = recver.next() => Ok(()),
-        error = listen_task => Err(error),
+        error = listen_task => Err(error)?,
 
     }
 }

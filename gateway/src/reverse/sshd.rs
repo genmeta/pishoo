@@ -1,15 +1,13 @@
+//! WIP: error handling
 use std::{self, sync::Arc};
 
 use bytes::Bytes;
-use futures::{TryStream, TryStreamExt};
+use futures::StreamExt;
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, Response, StatusCode};
 use ssh3_proto::{cbor_codec, messages, mux};
-use tokio::{
-    io::{self},
-    task::JoinSet,
-};
+use tokio::{io, task::JoinSet};
 use tokio_util::{codec, io::StreamReader};
 
 mod async_fd;
@@ -103,14 +101,14 @@ async fn run(
     mux: Arc<mux::Mux>,
     localhost: &str,
     location: &Node,
-    mut incomings: impl TryStream<Ok = mux::NewChannel, Error = Error> + Unpin,
+    mut incomings: mux::Incomings,
 ) -> Result<(), Error> {
     let user = {
-        let open_auth = match incomings.try_next().await {
+        let open_auth = match incomings.next().await.transpose() {
             Ok(Some(new_channel)) => new_channel,
             Err(e) => {
                 tracing::error!(target: "sshd", "Failed to accept channel: {e:?}");
-                return Err(e);
+                return Err(e.into());
             }
             Ok(None) => {
                 tracing::error!(target: "sshd", "Failed to auth: no channel");
@@ -137,7 +135,7 @@ async fn run(
         request,
         sender,
         recver,
-    })) = incomings.try_next().await
+    })) = incomings.next().await.transpose()
     {
         match request {
             messages::OpenChannel::Auth { .. } => {
@@ -155,7 +153,7 @@ async fn run(
                 tasks.spawn(exec);
             }
             messages::OpenChannel::Direct { to: local } => {
-                let forward = forward::accepet_forward(sender, recver, local).await?;
+                let forward = forward::accept_forward(sender, recver, local).await?;
                 tasks.spawn(async move {
                     if let Err(error) = forward.await {
                         tracing::error!(target: "local_forward", "Failed to accept forward request: {error:?}");

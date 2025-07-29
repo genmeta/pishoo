@@ -43,13 +43,13 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 h3 = { version = "0.0.8", features = ["tracing"] }
 
 # --- QUIC Implementation ---
-gm-quic = "0.2.3"
-h3-shim = "0.2.3"
+gm-quic = "0.3.0"
+h3-shim = "0.3.0"
 qdns = "0.2.2"
-qconnection = "0.2.3"
-qtraversal = "0.2.3"
-qinterface = "0.2.3"
-qevent = "0.2.3"
+qconnection = "0.3.0"
+qtraversal = "0.3.0"
+qinterface = "0.3.0"
+qevent = "0.3.0"
 
 # --- Security & TLS ---
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

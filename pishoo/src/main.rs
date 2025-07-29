@@ -49,6 +49,7 @@ struct Args {
     // log: bool,
 }
 
+// TODO: multi-thread async runtime
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();

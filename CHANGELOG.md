@@ -1,4 +1,12 @@
 # Changelog
+
+## [0.3.0]
+
+- 适配使用gm-quic 0.3
+- 改进超时机制
+- 改进resume(restart)处理
+- 不再使用udp resolver
+
 ## [0.2.8]
 
 ### 修复

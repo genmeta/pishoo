@@ -107,7 +107,7 @@ pub async fn auth_password(
     };
 
     if auth_password.await? {
-        sender.send(ServerAuthMessage::Accpet).await?;
+        sender.send(ServerAuthMessage::Accept).await?;
     } else {
         let reason = format!("Authentication failed for user {username}, too many retries.");
         sender

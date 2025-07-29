@@ -36,9 +36,9 @@ pub async fn listen_remote_forward(
         error = listener.listen(move |reader, writer| {
             let mux = mux.clone();
             async move {
-                Ok(socks::accpet_forward(reader, writer, mux, token).await?)
+                socks::accept_forward(reader, writer, mux, token).await
             }.boxed()
-        }) => Err(error),
+        }) => Err(error.into()),
 
     }
 }
