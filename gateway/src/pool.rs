@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -8,6 +8,8 @@ use h3::client::SendRequest;
 use qdns::Resolvers;
 use tokio::{io, sync::Mutex};
 use tracing::info;
+
+use crate::forward::create_quic_client;
 
 #[derive(Clone)]
 pub struct ReusableConnection {
@@ -23,14 +25,40 @@ pub struct H3ConnectionPool {
 }
 
 impl H3ConnectionPool {
+    /// 获取全局连接池实例
+    pub fn global() -> Arc<Self> {
+        static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
+        if let Ok(guard) = GLOBAL.read()
+            && let Some(pool) = guard.as_ref()
+        {
+            return pool.clone();
+        }
+        let mut guard = GLOBAL.write().unwrap();
+        if let Some(pool) = guard.as_ref() {
+            return pool.clone();
+        }
+        let pool = Arc::new(H3ConnectionPool::new());
+        *guard = Some(pool.clone());
+        pool
+    }
+
+    /// 重新初始化全局连接池
+    pub fn reinitialize() -> Arc<Self> {
+        static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
+        info!("[Pool] Reinitializing H3ConnectionPool");
+        let mut guard = GLOBAL.write().unwrap();
+        let pool = Arc::new(H3ConnectionPool::new());
+        *guard = Some(pool.clone());
+        pool
+    }
     /// Creates a new reuse pool, using the given client to create the underlying quic connection.
     ///
     /// If this client is used by multiple [`H3ConnectionPool`] and the client enables [`reuse_connection`], it may cause some problems.
     ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
-    pub fn new(quic_client: Arc<QuicClient>) -> Self {
+    pub fn new() -> Self {
         Self {
-            quic_client,
+            quic_client: Arc::new(create_quic_client()),
             h3_clients: Arc::new(DashMap::new()),
         }
     }
@@ -46,7 +74,6 @@ impl H3ConnectionPool {
         resolvers: Resolvers,
     ) -> io::Result<ReusableConnection> {
         let server_name = server_name.into();
-        // FIXME: 配合gm_quic的超时策略好了再使用连接池
         let mut entry = None;
 
         // Get a shared access so that multiple asynchronous tasks can asynchronously wait for other tasks
@@ -134,5 +161,9 @@ impl H3ConnectionPool {
                 Err(error)
             }
         }
+    }
+
+    pub fn clear_connections(&self) {
+        self.h3_clients.clear();
     }
 }

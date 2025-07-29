@@ -63,18 +63,15 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
             .with(Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?))
     };
 
+    H3ConnectionPool::reinitialize();
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
-
-    let quic_client = Arc::new(create_quic_client().await);
-    let pool = Arc::new(H3ConnectionPool::new(quic_client));
 
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await.inspect_err(|e| {
             error!("TCP listener accept failed: {:?}", e);
         }) {
             let io = TokioIo::new(stream);
-            let pool = pool.clone();
             let acl = acl.clone();
             let resolvers = resolvers.clone();
 
@@ -89,13 +86,12 @@ pub async fn serve(node: Arc<Node>) -> crate::error::Result<String> {
                         }
 
                         let is_connect = req.method() == "CONNECT";
-                        let pool = pool.clone();
                         let resolvers = resolvers.clone();
                         async move {
                             if is_connect {
-                                forward::quic::connect(pool, req, resolvers).await
+                                forward::quic::connect(req, resolvers).await
                             } else {
-                                forward::quic::proxy(pool, req, resolvers).await
+                                forward::quic::proxy(req, resolvers).await
                             }
                         }
                         .boxed()
@@ -141,15 +137,19 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             return Ok(());
         }
         Err(_e) => {
+            H3ConnectionPool::global().clear_connections();
             qinterface::iface::QuicInterfaces::resume();
-            error!("TCP listener binding failed: {:?}", _e);
+            error!(
+                "TCP listener binding failed: {:?} restart all interfaces",
+                _e
+            );
         }
     }
     Ok(())
 }
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
-async fn create_quic_client() -> QuicClient {
+pub(crate) fn create_quic_client() -> QuicClient {
     let agents = [
         "1.12.74.4:20004".parse().unwrap(),
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004"

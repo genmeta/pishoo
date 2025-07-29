@@ -16,18 +16,16 @@ use crate::{
 };
 
 pub async fn proxy(
-    pool: Arc<H3ConnectionPool>,
     req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
-    proxy_inner(pool, req, resolvers)
+    proxy_inner(req, resolvers)
         .instrument(tracing::info_span!("proxy", odcid = tracing::field::Empty))
         .await
 }
 
 /// 处理普通 HTTP 请求
 pub async fn proxy_inner(
-    pool: Arc<H3ConnectionPool>,
     mut req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
@@ -43,9 +41,9 @@ pub async fn proxy_inner(
             return Ok(build_error_response(reason));
         }
     };
-
+    let pool = H3ConnectionPool::global();
     // 创建 QUIC 连接
-    let send_request = match create_quic_connection(pool, &host, resolvers).await {
+    let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
         Ok(conn) => conn,
         Err(msg) => {
             error!(
@@ -77,20 +75,18 @@ pub async fn proxy_inner(
 
 /// 处理 CONNECT 隧道请求
 pub async fn connect(
-    pool: Arc<H3ConnectionPool>,
     req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
     let uri = req.uri().to_string();
 
     info!("[CONNECT] Establishing tunnel to {}", uri);
-
     // 升级连接并处理后续请求
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!("[CONNECT]: tunnel established to {}", uri);
-                let service = service_fn(move |req| proxy(pool.clone(), req, resolvers.clone()));
+                let service = service_fn(move |req| proxy(req, resolvers.clone()));
                 if let Err(err) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -168,21 +164,26 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, String> {
-    match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
-        Ok(result) => match result {
-            Ok(conn) => {
-                let origin_dcid = match conn.quic.origin_dcid() {
-                    Ok(dcid) => dcid,
-                    Err(e) => {
-                        error!("Failed to get origin DCID: {}", e);
-                        return Err("Failed to get origin DCID".to_string());
-                    }
-                };
-                tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
-                Ok(conn.h3.clone())
-            }
-            Err(e) => Err(format!("Failed to connect to host: {e}")),
-        },
-        Err(e) => Err(format!("Timeout to connect to host: {e}")),
-    }
+    let handle_connection_error = || {
+        H3ConnectionPool::global().clear_connections();
+        qinterface::iface::QuicInterfaces::resume();
+    };
+    let conn = match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
+            handle_connection_error();
+            return Err(format!("Failed to connect to host: {e}"));
+        }
+        Err(e) => {
+            handle_connection_error();
+            return Err(format!("Timeout to connect to host: {e}"));
+        }
+    };
+
+    let origin_dcid = conn.quic.origin_dcid().map_err(|e| {
+        error!("Failed to get origin DCID: {}", e);
+        "Failed to get origin DCID".to_string()
+    })?;
+    tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
+    Ok(conn.h3.clone())
 }
