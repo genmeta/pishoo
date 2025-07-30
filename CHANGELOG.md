@@ -1,5 +1,10 @@
 # Changelog
 
+
+## [0.3.1]
+
+- 更新gm-quic-traversal依赖，适配windows
+
 ## [0.3.0]
 
 - 适配使用gm-quic 0.3
