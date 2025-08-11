@@ -5,7 +5,7 @@ use gateway::{
     forward,
     parse::{self, Value},
 };
-use tokio::task::JoinSet;
+use tokio::{sync::broadcast, task::JoinSet};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,8 +45,10 @@ async fn main() -> Result<()> {
     };
 
     let mut handler = JoinSet::new();
+
+    let (_shutdown_tx, _) = broadcast::channel::<()>(1);
     for proxy in proxys {
-        handler.spawn(forward::serve(Arc::clone(proxy)));
+        handler.spawn(forward::serve(Arc::clone(proxy), None));
     }
     handler.join_all().await;
 

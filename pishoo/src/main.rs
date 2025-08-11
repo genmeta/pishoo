@@ -2,12 +2,13 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::{Parser, command};
-use gateway::{
-    forward,
-    parse::{self, Value},
-    reverse,
-};
-use tokio::task::JoinSet;
+use gateway::parse::{self, Value};
+use tokio::{sync::broadcast, task::JoinSet};
+
+use crate::service::start_services;
+
+mod service;
+mod signal;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -28,31 +29,34 @@ struct Args {
         short,
         default_value = None,
         value_parser = clap::builder::PossibleValuesParser::new(["stop", "quit", "reopen", "reload"]),
-        help = "send signal to a master process"
+        help = "send signal to a master process (-s only on Linux/macOS)"
     )]
     signal: Option<String>,
     #[arg(short, default_value_t = false, help = "test configuration and exit")]
     test_config: bool,
-    #[arg(
-        short,
-        default_value_t = false,
-        help = "suppress non-error messages during configuration testing"
-    )]
-    quiet: bool,
     #[arg(short = 'g', help = "set global directives out of configuration file")]
     directives: Vec<String>,
-    // TODO
-    // #[arg(
-    //     default_value_t = false,
-    //     help = "enable logging, write to /var/pishoo/pishoo.log"
-    // )]
-    // log: bool,
 }
 
 // TODO: multi-thread async runtime
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // 写入 PID 文件 (仅 Unix 使用，Windows 屏蔽不写入)
+    // TODO 从配置文件读取 pid 文件路径
+    #[cfg(unix)]
+    let pid_file: &str = "/var/run/pishoo.pid";
+    #[cfg(windows)]
+    let pid_file: &str = "NUL"; // 占位，后续被 cfg(windows) 路径屏蔽，不会使用
+
+    // 处理信号发送
+    if let Some(signal_type) = &args.signal {
+        return signal::send_signal(pid_file, signal_type);
+    }
+
+    #[cfg(unix)]
+    signal::init_pid_file(pid_file)?;
 
     // TODO 将日志存储到 /var/pishoo/pishoo.log
 
@@ -73,8 +77,6 @@ async fn main() -> Result<()> {
     let config =
         parse::parse(&configure, config_file.parent()).expect("Failed to parse configuration file");
 
-    // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
-
     let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
         Arc::clone(pishoo.first().unwrap())
     } else {
@@ -93,27 +95,26 @@ async fn main() -> Result<()> {
         &Vec::new()
     };
 
-    // 启动自动 DNS 汇报
+    // If in test configuration mode, return after validating the configuration
+    if args.test_config {
+        println!("Configuration test successful");
+        println!("Configuration file: {}", config_file.display());
 
-    let mut handler = JoinSet::new();
+        println!("Number of servers: {}", servers.len());
+        println!("Number of proxies: {}", proxys.len());
 
-    let reverse_server = reverse::serve(servers.clone());
-    handler.spawn(async move {
-        reverse_server.await.inspect_err(|e| {
-            tracing::error!("reverse server error: {}", e);
-        })
-    });
-
-    for proxy in proxys {
-        let forward_server = forward::serve(Arc::clone(proxy));
-        handler.spawn(async move {
-            forward_server.await.inspect_err(|e| {
-                tracing::error!("reverse server error: {}", e);
-            })
-        });
+        return Ok(());
     }
 
-    handler.join_all().await;
+    // 将 JoinSet、配置路径、停止通道等编排到可在 SIGHUP 中访问的结构中
+    let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
+    let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
-    Ok(())
+    // 启动初始服务
+    {
+        let mut h = handler.lock().await;
+        start_services(&mut h, servers, proxys, Some(shutdown_tx.subscribe()));
+    }
+
+    signal::handle_signal(&shutdown_tx, config_file, &handler).await
 }

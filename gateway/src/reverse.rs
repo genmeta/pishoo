@@ -35,7 +35,10 @@ type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
 ///
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
-pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
+pub async fn serve(
+    servers: Vec<Arc<Node>>,
+    mut stop_rx: Option<tokio::sync::broadcast::Receiver<()>>,
+) -> Result<String> {
     let (routers, server_resolvers) = init_routers(&servers)?;
     let (quic_server, binds) = create_quic_server(&servers)?;
 
@@ -83,7 +86,24 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<String> {
 
     // 启动 dns 上报
     publisher.spawn_publish();
-    handle_connections(quic_server, routers).await?;
+
+    // 主接受循环与停止信号并行监听
+    tokio::select! {
+        res = handle_connections(Arc::clone(&quic_server), routers) => {
+            res?;
+        }
+        _ = async {
+            if let Some(rx) = stop_rx.as_mut() {
+                let _ = rx.recv().await;
+            } else {
+                futures::future::pending::<()>().await;
+            }
+        } => {
+            quic_server.shutdown();
+            info!("reverse::serve stop signal received, exiting accept loop");
+        }
+    }
+
     Ok("Server exited".to_string())
 }
 
