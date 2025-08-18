@@ -10,6 +10,11 @@ use crate::service::start_services;
 mod service;
 mod signal;
 
+#[cfg(unix)]
+const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
+#[cfg(windows)]
+const PID_FILE_DEFAULT: &str = "NUL"; // 占位，后续被 cfg(windows) 路径屏蔽，不会使用
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -43,21 +48,6 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // 写入 PID 文件 (仅 Unix 使用，Windows 屏蔽不写入)
-    // TODO 从配置文件读取 pid 文件路径
-    #[cfg(unix)]
-    let pid_file: &str = "/var/run/pishoo.pid";
-    #[cfg(windows)]
-    let pid_file: &str = "NUL"; // 占位，后续被 cfg(windows) 路径屏蔽，不会使用
-
-    // 处理信号发送
-    if let Some(signal_type) = &args.signal {
-        return signal::send_signal(pid_file, signal_type);
-    }
-
-    #[cfg(unix)]
-    signal::init_pid_file(pid_file)?;
-
     // TODO 将日志存储到 /var/pishoo/pishoo.log
 
     #[cfg(not(feature = "console_subscriber"))]
@@ -70,12 +60,25 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
-    tracing::info!("Tracing initialized.");
 
     let config_file = args.config_file;
     let configure = std::fs::read(&config_file).expect("Failed to read configuration file");
     let config =
         parse::parse(&configure, config_file.parent()).expect("Failed to parse configuration file");
+
+    let pid_file = if let Some(Value::String(pid)) = config.get("pid") {
+        pid
+    } else {
+        PID_FILE_DEFAULT
+    };
+
+    // 处理信号发送
+    if let Some(signal_type) = &args.signal {
+        return signal::send_signal(pid_file, signal_type);
+    }
+
+    #[cfg(unix)]
+    signal::init_pid_file(pid_file)?;
 
     let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
         Arc::clone(pishoo.first().unwrap())

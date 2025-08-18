@@ -4,11 +4,13 @@ use anyhow::{Result, anyhow};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use super::{Node, ParseFn, Value, pishoo::parse_pishoo};
+use crate::parse::parse_string;
 
 pub fn parse_conf(directives: Vec<Directive<Nginx>>) -> Result<Arc<Node>> {
     let mut commands: HashMap<&'static str, ParseFn> = HashMap::new();
 
     commands.insert("pishoo", Box::new(parse_pishoo));
+    commands.insert("pid", Box::new(parse_string));
 
     let mut values = HashMap::new();
     for directive in directives {

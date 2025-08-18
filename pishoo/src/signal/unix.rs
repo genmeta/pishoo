@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process, sync::Arc};
+use std::{fs, io, path::PathBuf, process, sync::Arc};
 
 use anyhow::{Context, Result};
 use nix::{sys::signal::Signal, unistd::Pid};
@@ -81,8 +81,17 @@ pub async fn handle_signal(
 // 写入 PID 文件（仅 Unix）
 pub fn init_pid_file(pid_file: &str) -> Result<()> {
     let pid = process::id().to_string();
-    fs::write(pid_file, pid).with_context(|| format!("Failed to write PID file: {}", pid_file))?;
-    Ok(())
+    match fs::write(pid_file, &pid) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
+            "Failed to write PID file due to insufficient permissions: {}\n\
+                Please either:\n\
+                1. Run as root user, or\n\
+                2. Change the 'pid' path in your config to a writable location",
+            pid_file
+        )),
+        Err(e) => Err(e).with_context(|| format!("Failed to write PID file: {}", pid_file)),
+    }
 }
 
 #[cfg(unix)]
