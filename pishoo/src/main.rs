@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Result;
 use clap::{Parser, command};
 use gateway::parse::{self, Value};
-use tokio::{sync::broadcast, task::JoinSet};
+use tokio::task::JoinSet;
 
 use crate::service::start_services;
 
@@ -111,13 +111,12 @@ async fn main() -> Result<()> {
 
     // 将 JoinSet、配置路径、停止通道等编排到可在 SIGHUP 中访问的结构中
     let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
-    let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
     // 启动初始服务
     {
         let mut h = handler.lock().await;
-        start_services(&mut h, servers, proxys, Some(shutdown_tx.subscribe()));
+        start_services(&mut h, servers, proxys);
     }
 
-    signal::handle_signal(&shutdown_tx, config_file, &handler).await
+    signal::handle_signal(config_file, &handler).await
 }

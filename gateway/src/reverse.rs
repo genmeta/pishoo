@@ -5,17 +5,18 @@ use std::{
 };
 
 use bytes::Bytes;
-use gm_quic::{BindUri, QuicListeners, handy::server_parameters};
+use gm_quic::{BindUri, Connection, QuicListeners, handy::server_parameters};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
-use qdns::{HttpResolver, MdnsResolver, Publisher, Resolve};
+use qdns::{HttpResolver, MdnsResolver, Resolve};
 use qtraversal::iface::{TraversalFactory, traversal_factory};
-use tracing::{debug, error, info};
+use tracing::{Instrument, debug, error, info};
 
 use crate::{
     error::{CustomError, Result},
     parse::{IPVersion, IfaceType, Listen, Node, Resolver, Value},
+    publisher::Publisher,
     reverse,
 };
 
@@ -35,10 +36,7 @@ type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
 ///
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
-pub async fn serve(
-    servers: Vec<Arc<Node>>,
-    mut stop_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-) -> Result<String> {
+pub async fn serve(servers: Vec<Arc<Node>>) -> Result<()> {
     let (routers, server_resolvers) = init_routers(&servers)?;
     let quic_listners = create_quic_server(&servers)?;
 
@@ -79,24 +77,8 @@ pub async fn serve(
     // 启动 dns 上报
     let _publisher = Publisher::spawn(quic_listners.clone(), server_resolvers);
 
-    // 主接受循环与停止信号并行监听
-    tokio::select! {
-        res = handle_connections(Arc::clone(&quic_server), routers) => {
-            res?;
-        }
-        _ = async {
-            if let Some(rx) = stop_rx.as_mut() {
-                let _ = rx.recv().await;
-            } else {
-                futures::future::pending::<()>().await;
-            }
-        } => {
-            quic_server.shutdown();
-            info!("reverse::serve stop signal received, exiting accept loop");
-        }
-    }
-
-    Ok("Server exited".to_string())
+    // 主接受循环
+    handle_connections(quic_listners.clone(), routers).await
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
@@ -157,7 +139,7 @@ fn create_quic_server(servers: &[Arc<Node>]) -> Result<Arc<QuicListeners>> {
         }
     }
 
-    let srever_binds = server_binds
+    let server_binds = server_binds
         .into_iter()
         .map(|(server_name, server_listen)| {
             let binds = server_listen
@@ -170,7 +152,7 @@ fn create_quic_server(servers: &[Arc<Node>]) -> Result<Arc<QuicListeners>> {
         .collect::<HashMap<_, _>>();
 
     // collect & dedup
-    let binds: HashSet<_> = srever_binds.values().flatten().cloned().collect();
+    let binds: HashSet<_> = server_binds.values().flatten().cloned().collect();
     let factory = traversal_factory(&agents[..]);
     let builder = gm_quic::QuicListeners::builder().map_err(|e| {
         error!("Failed to create QUIC listener builder: {}", e);
@@ -253,62 +235,62 @@ async fn handle_connections(
     quic_server: Arc<QuicListeners>,
     routers: Arc<HashMap<String, Arc<Node>>>,
 ) -> Result<()> {
-    // 持续接受新连接
-    while let Ok((conn, _name, pathway, ..)) = quic_server.accept().await {
-        debug!(src_addr = ?pathway.local(), dst_addr = ?pathway.remote(), "accepted connection");
-
+    let handle_connection = async |conn: Arc<Connection>| {
         // 将QUIC连接包装为H3 QUIC连接
-        let h3_quic_conn = h3_shim::QuicConnection::new(conn);
+        let h3_quic_conn = h3_shim::QuicConnection::new(conn.clone());
 
-        debug!("QUIC connection wrapped as H3 QUIC connection");
+        debug!(target: "connect", "QUIC connection wrapped as H3 QUIC connection");
 
         // 建立H3连接
         let mut h3_conn = match h3::server::Connection::new(h3_quic_conn).await {
             Ok(conn) => {
-                info!("[Handle Conn] H3 connection established");
+                info!(target: "connect", "H3 connection established");
                 conn
             }
             Err(e) => {
-                error!("[Handle Conn] Failed to establish H3 connection: {}", e);
-                continue;
+                error!(target: "connect", "Failed to establish H3 connection: {}", e);
+                return;
             }
         };
 
-        debug!("[Handle Conn] H3 connection established");
-
-        debug!("RouterMap: {:?}", routers);
+        debug!(target: "connect", "H3 connection established");
+        debug!(target: "connect", "RouterMap: {:?}", routers);
 
         // 为每个连接创建异步任务
         tokio::spawn({
-            let routers_clone = routers.clone();
+            let routers = routers.clone();
+            let conn = conn.clone();
             async move {
-                while let Ok(Some(req_resolver)) = h3_conn
-                    .accept()
-                    .await
-                    .inspect_err(|e| error!("Connection acceptance error: {:?}", e))
-                {
-                    let routers = routers_clone.clone();
+                while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(
+                    |e| error!(target: "connect", "Connection acceptance error: {:?}", e),
+                ) {
+                    let routers = routers.clone();
+                    let conn = conn.clone();
                     let handle_request = async move {
-                        let (mut req, stream) = req_resolver.resolve_request().await?;
-                        let addr = match pathway.remote() {
-                            gm_quic::EndpointAddr::Socket(socket_endpoint_addr) => {
-                                socket_endpoint_addr.addr()
-                            }
-                            gm_quic::EndpointAddr::Ble(_) => {
-                                unreachable!("BLE endpoint not supported")
-                            }
-                        };
-                        req.extensions_mut().insert(addr);
-                        handle_request(routers, req, stream).await
+                        let (req, stream) = req_resolver.resolve_request().await?;
+                        handle_request(routers, conn, req, stream).await
                     };
                     tokio::spawn(async move {
                         if let Err(e) = handle_request.await {
-                            error!("Request processing error: {}", e);
+                            error!(target: "request", "Request processing error: {e:?}");
                         }
                     });
                 }
             }
         });
+    };
+
+    // 持续接受新连接
+    while let Ok((conn, server_name, pathway, link)) = quic_server.accept().await {
+        info!(target: "connect", %server_name, %pathway, %link, "Accepted connection");
+        handle_connection(conn)
+            .instrument(tracing::info_span!(
+                "handle_connection",
+                %server_name,
+                %pathway,
+                %link
+            ))
+            .await;
     }
     Ok(())
 }
@@ -316,6 +298,7 @@ async fn handle_connections(
 /// 处理单个HTTP请求
 async fn handle_request(
     servers: Arc<HashMap<String, Arc<Node>>>,
+    conn: Arc<Connection>,
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
@@ -339,6 +322,7 @@ async fn handle_request(
 
     let (location, final_pattern) = match_location(locations, req.uri().path())
         .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
+    let final_pattern = final_pattern.to_string();
 
     let (mut sender, receiver) = stream.split();
 
@@ -358,7 +342,8 @@ async fn handle_request(
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
-            reverse::sshd::login(location, req, receiver, sender).await?;
+            // TODO: username in path
+            reverse::sshd::login(location, conn, req, receiver, sender).await?;
         }
         _ => {
             let response = Response::builder()

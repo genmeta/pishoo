@@ -1,4 +1,4 @@
-use std::{io, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -9,12 +9,12 @@ use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use qtraversal::iface::traversal_factory;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::{
     command,
-    error::CustomError,
+    error::{CustomError, Result},
     forward,
     parse::{Node, Value},
     pool::H3ConnectionPool,
@@ -37,19 +37,18 @@ type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
 /// * `Result<String>` - The address the server is listening on
 pub async fn serve(
     node: Arc<Node>,
-    mut stop_rx: Option<tokio::sync::broadcast::Receiver<()>>,
-) -> crate::error::Result<String> {
-    let addr = if let Some(Value::Addr(addr)) = node.get("listen") {
-        *addr
-    } else {
+) -> Result<(
+    SocketAddr,
+    impl Future<Output = Result<()>> + Send + 'static,
+)> {
+    let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
         return Err(CustomError::InvalidConfig(
             "Invalid listen address".to_string(),
         ));
     };
 
-    let listener = TcpListener::bind(addr).await.map_err(|e| {
+    let listener = TcpListener::bind(addr).await.inspect_err(|e| {
         error!("TCP listener binding failed: {:?}", e);
-        e
     })?;
 
     let local_addr = listener.local_addr().inspect_err(|e| {
@@ -70,100 +69,75 @@ pub async fn serve(
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
 
-    // 接受循环与停止信号并行监听
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                // 收到停止信号，退出任务
-                _ = async {
-                    if let Some(rx) = stop_rx.as_mut() {
-                        let _ = rx.recv().await;
-                    } else {
-                        futures::future::pending::<()>().await;
+    let accept_tcp_stream = async move |stream: TcpStream| {
+        let io = TokioIo::new(stream);
+        let acl = acl.clone();
+        let resolvers = resolvers.clone();
+
+        tokio::task::spawn({
+            async move {
+                // 为每个连接创建服务处理器
+                let service = service_fn(move |mut req| {
+                    let host = validate_host(&mut req).unwrap();
+
+                    if !acl.check(&host) {
+                        return forward::normal::proxy(req).boxed();
                     }
-                } => {
-                    info!("[Forward] stop signal received, shutting down listener accept loop");
-                    break;
+
+                    let is_connect = req.method() == "CONNECT";
+                    let resolvers = resolvers.clone();
+                    async move {
+                        if is_connect {
+                            forward::quic::connect(req, resolvers).await
+                        } else {
+                            forward::quic::proxy(req, resolvers).await
+                        }
+                    }
+                    .boxed()
+                });
+
+                // 启动 HTTP/1.1 服务
+                if let Err(err) = http1::Builder::new()
+                    .preserve_header_case(true)
+                    .title_case_headers(true)
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await
+                {
+                    error!("Connection handling failed: {err:?}");
                 }
+            }
+        });
+    };
 
-                // 接受新连接
-                accept_res = listener.accept() => {
-                    match accept_res.inspect_err(|e| {
-                        error!("TCP listener accept failed: {:?}", e);
-                    }) {
-                        Ok((stream, _)) => {
-                            let io = TokioIo::new(stream);
-                            let acl = acl.clone();
-                            let resolvers = resolvers.clone();
-
-                            tokio::task::spawn({
-                                async move {
-                                    // 为每个连接创建服务处理器
-                                    let service = service_fn(move |mut req| {
-                                        let host = validate_host(&mut req).unwrap();
-
-                                        if !acl.check(&host) {
-                                            return forward::normal::proxy(req).boxed();
-                                        }
-
-                                        let is_connect = req.method() == "CONNECT";
-                                        let resolvers = resolvers.clone();
-                                        async move {
-                                            if is_connect {
-                                                forward::quic::connect(req, resolvers).await
-                                            } else {
-                                                forward::quic::proxy(req, resolvers).await
-                                            }
-                                        }
-                                        .boxed()
-                                    });
-
-                                    // 启动 HTTP/1.1 服务
-                                    if let Err(err) = http1::Builder::new()
-                                        .preserve_header_case(true)
-                                        .title_case_headers(true)
-                                        .serve_connection(io, service)
-                                        .with_upgrades()
-                                        .await
-                                    {
-                                        error!("Connection handling failed: {err:?}");
-                                    }
-                                }
-                            });
-                        }
-                        Err(_) => {
-                            // 出错时，继续循环以便可响应停止信号
-                        }
-                    }
+    let task = async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _from)) => accept_tcp_stream(stream).await,
+                Err(_) => {
+                    // 出错时，继续循环以便可响应停止信号
                 }
             }
         }
-        info!("[Forward] accept loop exited");
-    });
+    };
 
-    Ok(local_addr.to_string())
+    Ok((local_addr, task))
 }
 
 /// Resume the network
 ///
 /// # Returns
 /// * `Result<()>` - The result of resuming the network
-pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
-    // 获取绑定地址
-    let addr = if let Some(Value::Addr(addr)) = node.get("listen") {
-        *addr
-    } else {
-        return Err(CustomError::InvalidConfig(
-            "Invalid listen address".to_string(),
-        ));
-    };
-    match TcpListener::bind(addr).await {
-        Ok(_) => {
+pub async fn resume(node: Arc<Node>) -> Result<()> {
+    match serve(node).await {
+        Ok((_local_addr, forward_proxy)) => {
             qinterface::iface::QuicInterfaces::global().clear();
-            let _ = serve(node, None).await.inspect_err(|e| {
-                error!("TCP listener binding failed: {:?}", e);
+            tokio::spawn(async move {
+                if let Err(error) = forward_proxy.await {
+                    error!(target: "forward", "Forward proxy failed: {error:?}");
+                }
             });
-            return Ok(());
+            Ok(())
         }
         Err(launch_error) => {
             H3ConnectionPool::global().clear_connections();
@@ -172,7 +146,6 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             Err(launch_error)
         }
     }
-    Ok(())
 }
 
 /// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use gateway::{
     forward,
     parse::{self, Value},
 };
-use tokio::{sync::broadcast, task::JoinSet};
+use tokio::task::JoinSet;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,20 +35,29 @@ async fn main() -> Result<()> {
     let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
         Arc::clone(pishoo.first().unwrap())
     } else {
-        return Err(anyhow::anyhow!("Invalid pishoo"));
+        bail!("Invalid pishoo");
     };
 
-    let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
-        pishoo
-    } else {
-        &Vec::new()
+    let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {
+        bail!("No proxy found in pishoo configuration");
     };
 
     let mut handler = JoinSet::new();
 
-    let (_shutdown_tx, _) = broadcast::channel::<()>(1);
-    for proxy in proxys {
-        handler.spawn(forward::serve(Arc::clone(proxy), None));
+    for proxy in proxies {
+        handler.spawn(async move {
+            match forward::serve(proxy).await {
+                Ok((bind_addr, forward_proxy)) => {
+                    tracing::info!(target: "forward", "Forward proxy started at {bind_addr}", );
+                    if let Err(error) = forward_proxy.await {
+                        tracing::error!(target: "forward", "Forward proxy error: {error:?}", );
+                    }
+                }
+                Err(launch_error) => {
+                    tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}", );
+                }
+            };
+        });
     }
     handler.join_all().await;
 

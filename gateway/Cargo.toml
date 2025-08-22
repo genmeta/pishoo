@@ -11,6 +11,7 @@ path = "examples/forward.rs"
 [dependencies]
 # --- Core & Error Handling ---
 anyhow = { workspace = true }
+snafu = { workspace = true }
 thiserror = { workspace = true }
 
 # --- Async Runtime & Utilities ---
@@ -57,6 +58,7 @@ rpassword = { workspace = true }
 base64 = { workspace = true }
 derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
+x509-parser = { workspace = true }
 
 # sshd
 nix = { workspace = true, optional = true, features = [

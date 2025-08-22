@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use tokio::{sync::broadcast, task::JoinSet};
+use tokio::task::JoinSet;
 
 #[cfg(unix)]
 mod unix;
@@ -23,13 +23,12 @@ pub fn send_signal(pid_file: &str, signal_type: &str) -> Result<()> {
 }
 
 pub async fn handle_signal(
-    shutdown_tx: &broadcast::Sender<()>,
     config_file: PathBuf,
-    handler: &Arc<tokio::sync::Mutex<JoinSet<anyhow::Result<()>>>>,
+    handler: &Arc<tokio::sync::Mutex<JoinSet<()>>>,
 ) -> Result<()> {
     #[cfg(unix)]
     {
-        unix::handle_signal(shutdown_tx, config_file, handler).await
+        unix::handle_signal(config_file, handler).await
     }
 
     #[cfg(not(unix))]

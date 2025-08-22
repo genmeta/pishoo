@@ -1,73 +1,74 @@
 use std::sync::Arc;
 
 use gateway::{forward, reverse};
-use tokio::{sync::broadcast, task::JoinSet};
+use tokio::{sync::Mutex, task::JoinSet};
 
 // 启动所有服务：reverse 与多个 forward
 pub fn start_services(
-    handler: &mut JoinSet<anyhow::Result<()>>,
+    handler: &mut JoinSet<()>,
     servers: &[Arc<gateway::parse::Node>],
     proxys: &[Arc<gateway::parse::Node>],
-    mut stop_rx: Option<broadcast::Receiver<()>>,
 ) {
     // reverse
     {
         let servers_cloned = servers.to_vec();
-        let rx_for_reverse = stop_rx.take();
-        let reverse_fut = reverse::serve(servers_cloned, rx_for_reverse);
-        handler.spawn(async move {
-            reverse_fut
-                .await
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
-        });
+        let task = async move {
+            if let Err(error) = reverse::serve(servers_cloned).await {
+                tracing::error!(target: "reverse", "Reverse proxy failed: {error:?}")
+            }
+        };
+        handler.spawn(task);
     }
 
     // forwards
-    for proxy in proxys {
-        let proxy_node = Arc::clone(proxy);
-        let rx_for_forward = stop_rx.take();
-        let forward_fut = forward::serve(proxy_node, rx_for_forward);
-        handler.spawn(async move {
-            forward_fut
-                .await
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
-        });
+    for proxy in proxys.iter().cloned() {
+        let task = async move {
+            match forward::serve(proxy).await {
+                Ok((_bind_addr, forward_proxy)) => {
+                    if let Err(error) = forward_proxy.await {
+                        tracing::error!(target: "forward", "Forward proxy error: {error:?}");
+                    }
+                }
+                Err(launch_error) => {
+                    tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}");
+                }
+            };
+        };
+        handler.spawn(task);
     }
 }
 
 // 停止所有服务并等待退出
-pub async fn stop_services(
-    shutdown_tx: &broadcast::Sender<()>,
-    handler: &Arc<tokio::sync::Mutex<JoinSet<anyhow::Result<()>>>>,
-) -> anyhow::Result<()> {
+pub async fn stop_services(handler: &Arc<Mutex<JoinSet<()>>>) -> anyhow::Result<()> {
     use tokio::time::{Duration, timeout};
 
-    tracing::info!("stopping services...");
-    let _ = shutdown_tx.send(());
+    tracing::info!(target: "services", "Stopping services...");
 
     let mut h = handler.lock().await;
 
+    h.abort_all();
+
     // 设置一个合理的超时，避免无限等待
-    let res = timeout(Duration::from_secs(5), async {
+    let join_all = async {
         while let Some(res) = h.join_next().await {
             if let Err(e) = res {
-                tracing::error!("service task error: {}", e);
+                if e.is_cancelled() {
+                    continue;
+                }
+                tracing::error!(target: "services", "Service task error: {}", e);
             }
         }
-    })
-    .await;
-
-    match res {
+    };
+    match timeout(Duration::from_secs(5), join_all).await {
         Ok(_) => {
-            tracing::info!("services stopped");
+            tracing::info!(target: "services", "Services stopped");
             *h = JoinSet::new();
             Ok(())
         }
         Err(_) => {
-            tracing::error!("stop services timeout");
-            Err(anyhow::anyhow!("stop services timeout"))
+            tracing::error!(target: "services", "Stop services timeout");
+            *h = JoinSet::new();
+            Err(anyhow::anyhow!("Stop services timeout"))
         }
     }
 }
