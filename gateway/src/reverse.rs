@@ -364,21 +364,19 @@ async fn handle_request(
 
     let (mut sender, receiver) = stream.split();
 
-    let location_value = if let Value::Pattern(_, map) = location.value() {
-        map
-    } else {
+    let Value::Pattern(_, location_value) = location.value() else {
         unreachable!("Invalid location value");
     };
 
     match location_value {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, final_pattern, req, receiver, sender).await?;
+            reverse::proxy::handle(location, &final_pattern, req, receiver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
             reverse::file::root(location, req, sender).await?;
         }
         location_value if location_value.contains_key("alias") => {
-            reverse::file::alias(location, final_pattern, req, sender).await?;
+            reverse::file::alias(location, &final_pattern, req, sender).await?;
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
@@ -397,14 +395,17 @@ async fn handle_request(
     Ok(())
 }
 
-fn match_location<'l>(locations: &'l [Arc<Node>], path: &str) -> Option<(&'l Arc<Node>, String)> {
+fn match_location<'l: 's, 's>(
+    locations: &'l [Arc<Node>],
+    path: &'s str,
+) -> Option<(&'l Arc<Node>, &'s str)> {
     debug!("all locations {:#?}, path: {:?}", locations, path);
 
     // 遍历所有location 匹配最高优先级的最长匹配
     let mut location_matched = None;
     let mut pattern_level = 0;
     let mut matched_len = 0;
-    let mut final_pattern = String::new();
+    let mut final_pattern = "";
 
     for location in locations {
         let pattern = if let Value::Pattern(pattern, _) = location.value() {

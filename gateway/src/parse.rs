@@ -1,11 +1,12 @@
 use std::{
+    any::Any,
     collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Weak},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use conf::parse_conf;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -24,9 +25,9 @@ mod pishoo;
 mod proxy;
 mod server;
 
-type ParseFn = Box<dyn Fn(Directive<Nginx>) -> Result<Value>>;
+type ParseFn = fn(Directive<Nginx>) -> Result<Value>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Value {
     String(String),
     Uri(Uri),
@@ -56,7 +57,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resolver {
     Udp { server_addr: SocketAddr },
     Http { base_url: Uri },
@@ -193,14 +194,74 @@ impl Node {
 pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
     let mut directives = Directive::<Nginx>::parse(configure)?;
 
+    // 预处理
     if let Some(root) = root {
         directives = directives
             .into_iter()
             .map(|mut directive| directive.resolve_include(root).map(|_| directive))
             .collect::<Result<Vec<_>>>()?;
+    } else {
+        tracing::warn!(target:"config", "Config file has no parent, unable to resolve includes");
     }
 
-    parse_conf(directives).inspect_err(|e| error!("Error parsing directives: {}", e))
+    // 解析配置
+    parse_conf(directives)
+        .inspect_err(|e| error!(target:"config", "Error parsing directives: {}", e))
+}
+
+#[derive(Default, Debug, Clone)]
+struct Commands(HashMap<&'static str, ParseFn>);
+
+impl Commands {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn insert(&mut self, name: &'static str, command: ParseFn) {
+        self.0.insert(name, command);
+    }
+
+    fn parse(
+        &self,
+        directives: impl IntoIterator<Item = Directive<Nginx>>,
+    ) -> Result<HashMap<String, Value>> {
+        let mut values = HashMap::new();
+        for directive in directives {
+            let name = directive.name.clone();
+            let Some(command) = self.0.get(name.as_str()) else {
+                bail!("Unknown directive {name}");
+            };
+
+            match command(directive)? {
+                value @ (Value::ValueMap(..) | Value::Pattern(..)) => {
+                    let Value::Nodes(nodes) =
+                        values.entry(name).or_insert_with(|| Value::Nodes(vec![]))
+                    else {
+                        unreachable!("Unexpected value type, should be `Nodes`");
+                    };
+                    nodes.push(Arc::new(Node::new(value)));
+                }
+                Value::Header(headers) => {
+                    let Value::Header(exist_headers) =
+                        values.entry(name).or_insert_with(|| Value::Header(vec![]))
+                    else {
+                        unreachable!("Unexpected value type, should be `Header`");
+                    };
+                    exist_headers.extend(headers);
+                }
+                Value::SshSslUser(users) => {
+                    let Value::SshSslUser(exist_users) =
+                        values.entry(name).or_insert_with(|| Value::Header(vec![]))
+                    else {
+                        unreachable!("Unexpected value type, should be `Header`");
+                    };
+                    exist_users.extend(users);
+                }
+                value => _ = values.insert(name, value),
+            }
+        }
+        Ok(values)
+    }
 }
 
 #[allow(dead_code)]

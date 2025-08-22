@@ -35,14 +35,14 @@ impl Pattern {
     }
 
     /// 统一匹配逻辑
-    pub fn try_match(&self, path: &str) -> Result<Option<String>> {
+    pub fn try_match<'s>(&'s self, path: &'s str) -> Result<Option<&'s str>> {
         match self {
-            Self::Exact(p) => Ok((path == p).then(|| p.clone())),
-            Self::Prefix(p) => Ok(path.starts_with(p).then(|| p.clone())),
-            Self::Regex(re) => Ok(re.find(path).map(|m| m.as_str().to_string())),
-            Self::CRegex(re) => Ok(re.find(path).map(|m| m.as_str().to_string())),
-            Self::NormalPrefix(p) => Ok(path.starts_with(p).then(|| p.clone())),
-            Self::Common => Ok(Some("/".to_string())),
+            Self::Exact(p) => Ok((path == p).then_some(p.as_str())),
+            Self::Prefix(p) => Ok(path.starts_with(p).then_some(p.as_str())),
+            Self::Regex(re) => Ok(re.find(path).map(|m| m.as_str())),
+            Self::CRegex(re) => Ok(re.find(path).map(|m| m.as_str())),
+            Self::NormalPrefix(p) => Ok(path.starts_with(p).then_some(p.as_str())),
+            Self::Common => Ok(Some("/")),
         }
     }
 }
@@ -83,7 +83,7 @@ mod tests {
         let pattern = Pattern::Exact("/login".to_string());
         assert_eq!(
             pattern.try_match("/login").unwrap(),
-            Some("/login".to_string()),
+            Some("/login"),
             "Exact match positive"
         );
         assert_eq!(
@@ -109,12 +109,12 @@ mod tests {
         let pattern = Pattern::Prefix("/api/v1".to_string());
         assert_eq!(
             pattern.try_match("/api/v1/users").unwrap(),
-            Some("/api/v1".to_string()),
+            Some("/api/v1"),
             "Prefix match positive"
         );
         assert_eq!(
             pattern.try_match("/api/v1").unwrap(),
-            Some("/api/v1".to_string()),
+            Some("/api/v1"),
             "Prefix match exact"
         );
         assert_eq!(
@@ -140,12 +140,12 @@ mod tests {
         let pattern = Pattern::Regex(Regex::new(r"\.(jpg|gif)$").unwrap());
         assert_eq!(
             pattern.try_match("/images/cat.jpg").unwrap(),
-            Some(".jpg".to_string()),
+            Some(".jpg"),
             "Regex match positive (jpg)"
         );
         assert_eq!(
             pattern.try_match("/images/dog.gif").unwrap(),
-            Some(".gif".to_string()),
+            Some(".gif"),
             "Regex match positive (gif)"
         );
         assert_eq!(
@@ -172,17 +172,17 @@ mod tests {
         let pattern = Pattern::CRegex(Regex::new(r"(?i)\.(jpg|gif)$").unwrap());
         assert_eq!(
             pattern.try_match("/images/cat.jpg").unwrap(),
-            Some(".jpg".to_string()),
+            Some(".jpg"),
             "CRegex match positive (jpg)"
         );
         assert_eq!(
             pattern.try_match("/images/cat.JPG").unwrap(),
-            Some(".JPG".to_string()),
+            Some(".JPG"),
             "CRegex match positive (JPG)"
         );
         assert_eq!(
             pattern.try_match("/images/DOG.gif").unwrap(),
-            Some(".gif".to_string()),
+            Some(".gif"),
             "CRegex match positive (DOG.gif)"
         );
         assert_eq!(
@@ -203,12 +203,12 @@ mod tests {
         let pattern = Pattern::NormalPrefix("/static/".to_string());
         assert_eq!(
             pattern.try_match("/static/css/style.css").unwrap(),
-            Some("/static/".to_string()),
+            Some("/static/"),
             "NormalPrefix match positive"
         );
         assert_eq!(
             pattern.try_match("/static/").unwrap(),
-            Some("/static/".to_string()),
+            Some("/static/"),
             "NormalPrefix match exact"
         );
         assert_eq!(
@@ -234,17 +234,17 @@ mod tests {
         let pattern = Pattern::Common;
         assert_eq!(
             pattern.try_match("/anything").unwrap(),
-            Some("/".to_string()),
+            Some("/"),
             "Common match any path"
         );
         assert_eq!(
             pattern.try_match("/").unwrap(),
-            Some("/".to_string()),
+            Some("/"),
             "Common match root path"
         );
         assert_eq!(
             pattern.try_match("").unwrap(),
-            Some("/".to_string()),
+            Some("/"),
             "Common match empty path"
         ); // Assuming Common should match empty path too
         println!("✅ Common match tests passed!");
@@ -311,14 +311,14 @@ mod tests {
         }
     }
     // match_location 的独立版本，用于测试，避免依赖外部 crate 结构
-    fn match_location_test<'l>(
+    fn match_location_test<'l: 's, 's>(
         locations: &'l [MockNode],
-        path: &str,
-    ) -> Option<(&'l MockNode, String)> {
+        path: &'s str,
+    ) -> Option<(&'l MockNode, &'s str)> {
         let mut location_matched = None;
         let mut pattern_level = 0; // 注意：初始值应小于最低优先级
         let mut matched_len = 0;
-        let mut final_pattern = String::new();
+        let mut final_pattern = "";
         let mut found_match_at_level = false; // 标记是否在当前最高 level 找到过匹配
         for location in locations {
             let MockValue::Pattern(pattern, _) = location.value();
@@ -355,7 +355,7 @@ mod tests {
                 }
             }
         }
-        location_matched.map(|loc| (loc, final_pattern))
+        location_matched.map(move |loc| (loc, final_pattern))
     }
 
     #[test]

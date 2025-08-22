@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, CustomError>;
+pub type Result<T, E = CustomError> = std::result::Result<T, E>;
 
 #[derive(Error, Debug)]
 pub enum CustomError {

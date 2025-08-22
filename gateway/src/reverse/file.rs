@@ -80,7 +80,7 @@ pub async fn root(
 /// * `Err` if an error occurred during the process of sending the response (e.g., I/O error in `serve_static_file`).
 pub async fn alias(
     location: &Arc<Node>,
-    pattern: String,
+    pattern: &str,
     req: Request<()>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
