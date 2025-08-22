@@ -1,15 +1,35 @@
-use futures::{SinkExt, TryStreamExt, never::Never};
+use futures::{SinkExt, TryStreamExt};
+use gm_quic::Connection;
 use nix::unistd;
+use snafu::{OptionExt, ResultExt};
 use ssh3_proto::messages::auth::{ClientAuthMessage, ServerAuthMessage};
-use tokio::io;
+use tokio::{io, task};
 
-use super::{
-    Error,
-    mux::{FramedRecver, FramedSender},
-};
+use super::mux::{FramedRecver, FramedSender};
 use crate::parse::{Node, Value};
 
+#[derive(snafu::Snafu, Debug)]
+#[snafu(visibility(pub(in crate::reverse::sshd)))]
+pub enum Error {
+    #[snafu(display("User deny"))]
+    Deny {},
+    #[snafu(display("User not found"))]
+    NotFound {},
+    #[snafu(display("Too many attempts in password auth"))]
+    TooManyAttempts {},
+    // TODO: merge send error into channel error?
+    #[snafu(display("Send message failed: {source}"))]
+    Send { source: io::Error },
+    #[snafu(display("Recv message failed: {source}"))]
+    Recv { source: io::Error },
+    #[snafu(display("Auth channel closed before auth completed"))]
+    ChannelClosed {},
+    #[snafu(display("Stream closed before received request"))]
+    StreamClosed {},
+}
+
 pub async fn auth(
+    quic_conn: &Connection,
     username: &str,
     localhost: &str,
     location: &Node,
@@ -24,11 +44,10 @@ pub async fn auth(
             user
         }
         Ok(None) | Err(_) => {
-            let reason = format!("User {username} not found");
-            sender
+            _ = sender
                 .cancel(io::Error::new(io::ErrorKind::NotFound, "User not found"))
-                .await?;
-            return Err(reason.into());
+                .await;
+            return NotFoundSnafu.fail();
         }
     };
 
@@ -37,7 +56,7 @@ pub async fn auth(
     };
     match &**ssh_login {
         "basic" => auth_password(username, localhost, sender, recver).await?,
-        "ssl" => _ = auth_ssl(sender).await?,
+        "ssl" => unimplemented!(),
         _ => unreachable!("Unknown ssh_login type {ssh_login}"),
     }
     Ok(user)
@@ -51,10 +70,10 @@ pub async fn reject_deny(
     if let Some(Value::StringVec(ssh_deny)) = location.get("ssh_deny")
         && ssh_deny.iter().any(|deny| &**deny == username)
     {
-        sender
+        _ = sender
             .cancel(io::Error::new(io::ErrorKind::NotFound, "User not found"))
-            .await?;
-        return Err(format!("User {username} not allowed").into());
+            .await;
+        return DenySnafu.fail();
     }
     Ok(())
 }
@@ -65,22 +84,26 @@ pub async fn auth_password(
     mut sender: FramedSender<ServerAuthMessage>,
     mut recver: FramedRecver<ClientAuthMessage>,
 ) -> Result<(), Error> {
+    let base_prompt = format!("{username}@{localhost}'s password: ");
     sender
         .send(ServerAuthMessage::Password {
-            prompt: format!("{username}@{localhost}'s password: "),
+            prompt: base_prompt.clone(),
         })
-        .await?;
+        .await
+        .context(SendSnafu)?;
 
     let auth_password = async {
         const MAX_RETRIES: usize = 3;
         for i in 0..MAX_RETRIES {
-            tracing::debug!(target: "sshd", times=i, "Waiting for password from client");
-            let Some(message) = recver.try_next().await? else {
-                return Err(Error::from("Failed to receive password from client"));
-            };
+            tracing::debug!(target: "auth", times=i, "Waiting for password from client");
+            let message = recver
+                .try_next()
+                .await
+                .context(RecvSnafu)?
+                .context(ChannelClosedSnafu)?;
             match message {
                 ClientAuthMessage::Password(password) => {
-                    let verify = tokio::task::spawn_blocking({
+                    let verify = task::spawn_blocking({
                         let username = username.to_owned();
                         move || verify_password(&username, &password)
                     });
@@ -89,15 +112,12 @@ pub async fn auth_password(
                         false if i == MAX_RETRIES - 1 => {
                             return Ok(false);
                         }
-                        false => {
-                            sender
-                                .send(ServerAuthMessage::Password {
-                                    prompt: format!(
-                                        "Authentication failed, try again!\n{username}@{localhost}'s password: "
-                                    ),
-                                })
-                                .await?;
-                        }
+                        false => sender
+                            .send(ServerAuthMessage::Password {
+                                prompt: format!("Authentication failed, try again!\n{base_prompt}"),
+                            })
+                            .await
+                            .context(SendSnafu)?,
                     }
                 }
             }
@@ -107,16 +127,18 @@ pub async fn auth_password(
     };
 
     if auth_password.await? {
-        sender.send(ServerAuthMessage::Accept).await?;
-    } else {
-        let reason = format!("Authentication failed for user {username}, too many retries.");
         sender
+            .send(ServerAuthMessage::Accept)
+            .await
+            .context(SendSnafu)?;
+    } else {
+        _ = sender
             .cancel(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                reason.clone(),
+                format!("Authentication failed for user {username}, too many attempts."),
             ))
-            .await?;
-        return Err(reason.into());
+            .await;
+        return TooManyAttemptsSnafu.fail();
     }
     Ok(())
 }
@@ -131,14 +153,4 @@ fn verify_password(username: &str, password: &str) -> bool {
 
     #[allow(unreachable_code)]
     false
-}
-
-async fn auth_ssl(mut sender: FramedSender<ServerAuthMessage>) -> Result<Never, Error> {
-    sender
-        .cancel(io::Error::other(
-            "SSL authentication not implemented in this version of pishoo",
-        ))
-        .await?;
-
-    Err(Error::from("auth_ssl not implemented"))
 }

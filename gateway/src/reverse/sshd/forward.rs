@@ -9,15 +9,13 @@ use ssh3_proto::{
 };
 use tokio::io;
 
-use super::Error;
-
 pub async fn listen_remote_forward(
     mux: Arc<Mux>,
     token: Token,
     mut sender: Sender,
     mut recver: Recver,
     listen: BindAddress,
-) -> Result<(), Error> {
+) -> io::Result<impl Future<Output = io::Result<()>>> {
     let remote_forwarder = LocalForwarder::new(
         mux.clone(),
         messages::OpenChannel::Forwarded {
@@ -27,7 +25,7 @@ pub async fn listen_remote_forward(
     );
     let listener = match listener::Listener::bind(listen.clone()).await {
         Ok(listener) => {
-            tracing::info!("Listening on {listen}");
+            tracing::info!(target: "remote_forward", "Listening on {listen}");
             listener
         }
         Err(error) => {
@@ -36,14 +34,14 @@ pub async fn listen_remote_forward(
                     "Peer failed to bind {listen}: {error:?}"
                 )))
                 .await;
-            return Ok(());
+            return Err(error);
         }
     };
-    let listen_task =
-        listener.listen(move |reader, writer| remote_forwarder.forward(reader, writer).boxed());
-    tokio::select! {
-        _ = recver.next() => Ok(()),
-        error = listen_task => Err(error)?,
-
-    }
+    let fut = async move {
+        tokio::select! {
+            _ = recver.next() => Ok(()),
+            error = listener.listen(move |reader, writer| remote_forwarder.forward(reader, writer).boxed()) => Err(error)
+        }
+    };
+    Ok(fut)
 }
