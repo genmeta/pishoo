@@ -166,7 +166,7 @@ async fn create_quic_connection(
 ) -> Result<H3SendRequest, String> {
     let handle_connection_error = || {
         H3ConnectionPool::global().clear_connections();
-        qinterface::iface::QuicInterfaces::resume();
+        qinterface::iface::QuicInterfaces::global();
     };
     let conn = match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
         Ok(Ok(conn)) => conn,

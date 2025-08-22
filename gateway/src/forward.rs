@@ -165,13 +165,11 @@ pub async fn resume(node: Arc<Node>) -> crate::error::Result<()> {
             });
             return Ok(());
         }
-        Err(_e) => {
+        Err(launch_error) => {
             H3ConnectionPool::global().clear_connections();
-            qinterface::iface::QuicInterfaces::resume();
-            error!(
-                "TCP listener binding failed: {:?} restart all interfaces",
-                _e
-            );
+            qinterface::iface::QuicInterfaces::global().restart();
+            tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}. Restart all interfaces");
+            Err(launch_error)
         }
     }
     Ok(())

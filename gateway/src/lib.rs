@@ -7,6 +7,7 @@ pub mod forward;
 mod h3;
 pub mod parse;
 mod pool;
+mod publisher;
 pub mod reverse;
 
 pub use gm_quic::EndpointAddr;

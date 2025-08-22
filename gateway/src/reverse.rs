@@ -40,52 +40,44 @@ pub async fn serve(
     mut stop_rx: Option<tokio::sync::broadcast::Receiver<()>>,
 ) -> Result<String> {
     let (routers, server_resolvers) = init_routers(&servers)?;
-    let (quic_server, binds) = create_quic_server(&servers)?;
+    let quic_listners = create_quic_server(&servers)?;
 
-    let mut resolver_map: HashMap<String, Arc<dyn Resolve + Send + Sync>> = HashMap::new();
     let http_resovler = Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?);
     let mdns_resovler = Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?);
-    // 提供默认 resovler
-    resolver_map.insert(http_resovler.server(), http_resovler.clone());
-    resolver_map.insert(mdns_resovler.server(), mdns_resovler.clone());
-    let publisher = Publisher::default();
-
-    for (server_name, resolvers) in server_resolvers {
-        let mut server_resolver = resolvers
-            .iter()
-            .map(|resolver| {
-                let name = resolver.server_name();
-                resolver_map
-                    .entry(name.clone())
-                    .or_insert_with(|| (*resolver).into())
-                    .clone()
-            })
-            .collect::<Vec<_>>();
-
-        if server_resolver.is_empty() {
-            server_resolver.push(http_resovler.clone());
-            server_resolver.push(mdns_resovler.clone());
-        }
-
-        let valid_suffixes = ["test.genmeta.net", "user.genmeta.net"];
-        if valid_suffixes
-            .iter()
-            .any(|suffix| server_name.ends_with(suffix))
-        {
-            server_resolver = vec![mdns_resovler.clone()];
-        }
-
-        let server_binds = binds
-            .get(&server_name)
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        publisher.add_host(server_name, server_binds, server_resolver);
-    }
+    let server_resolvers: HashMap<String, Vec<Arc<dyn Resolve + Send + Sync>>> = server_resolvers
+        .into_iter()
+        .map(|(server_name, resolvers)| {
+            let server_resolvers: Vec<Arc<dyn Resolve + Send + Sync>> =
+                if ["test.genmeta.net", "user.genmeta.net"]
+                    .iter()
+                    .any(|suffix| server_name.ends_with(suffix))
+                {
+                    vec![mdns_resovler.clone()]
+                } else if resolvers.is_empty() {
+                    vec![mdns_resovler.clone(), http_resovler.clone()]
+                } else {
+                    debug_assert!(!resolvers.is_empty());
+                    let mut resolver_map: HashMap<String, Arc<dyn Resolve + Send + Sync>> =
+                        HashMap::new();
+                    // 提供默认 resovler
+                    resolver_map.insert(http_resovler.server(), http_resovler.clone());
+                    resolver_map.insert(mdns_resovler.server(), mdns_resovler.clone());
+                    resolvers
+                        .iter()
+                        .map(|resolver| {
+                            resolver_map
+                                .entry(resolver.server_name())
+                                .or_insert_with(|| (*resolver).into())
+                                .clone()
+                        })
+                        .collect()
+                };
+            (server_name, server_resolvers)
+        })
+        .collect();
 
     // 启动 dns 上报
-    publisher.spawn_publish();
+    let _publisher = Publisher::spawn(quic_listners.clone(), server_resolvers);
 
     // 主接受循环与停止信号并行监听
     tokio::select! {
@@ -136,10 +128,7 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 }
 
 /// 创建QUIC服务器实例
-#[allow(clippy::type_complexity)]
-fn create_quic_server(
-    servers: &[Arc<Node>],
-) -> Result<(Arc<QuicListeners>, HashMap<String, HashSet<BindUri>>)> {
+fn create_quic_server(servers: &[Arc<Node>]) -> Result<Arc<QuicListeners>> {
     let agents: [SocketAddr; 2] = [
         "1.12.74.4:20004".parse()?,
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
@@ -148,25 +137,19 @@ fn create_quic_server(
     let factory = traversal_factory(&agents[..]);
 
     let mut server_binds = HashMap::new();
-    let mut ifaces = HashSet::new();
 
     for server in servers {
-        let list = if let Some(Value::Listen(list)) = server.get("listen") {
-            list
-        } else {
+        let Some(Value::Listen(server_ifaces)) = server.get("listen") else {
             unreachable!("Invalid listen address");
         };
 
-        let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
-            server_name.clone()
-        } else {
+        let Some(Value::StringVec(server_names)) = server.get("server_name").cloned() else {
             unreachable!("Invalid server name");
         };
 
-        let server_ifaces: HashSet<_> = list.iter().cloned().collect();
-        ifaces.extend(server_ifaces.clone());
+        let server_ifaces: HashSet<_> = server_ifaces.iter().cloned().collect();
 
-        for mut domain in server_name {
+        for mut domain in server_names {
             if domain.ends_with('~') {
                 domain = domain.replace('~', ".genmeta.net");
             }
@@ -174,18 +157,20 @@ fn create_quic_server(
         }
     }
 
-    let mut server_total_binds = HashMap::new();
+    let srever_binds = server_binds
+        .into_iter()
+        .map(|(server_name, server_listen)| {
+            let binds = server_listen
+                .iter()
+                .flat_map(|iface| resolve_binds(&factory, iface))
+                .map(BindUri::from)
+                .collect::<HashSet<_>>();
+            (server_name, binds)
+        })
+        .collect::<HashMap<_, _>>();
 
-    for (server_name, server_listen) in server_binds {
-        let binds = server_listen
-            .iter()
-            .flat_map(|iface| resolve_binds(&factory, iface))
-            .map(BindUri::from)
-            .collect::<HashSet<_>>();
-        server_total_binds.insert(server_name, binds);
-    }
-
-    let binds: Vec<BindUri> = server_total_binds.values().flatten().cloned().collect();
+    // collect & dedup
+    let binds: HashSet<_> = srever_binds.values().flatten().cloned().collect();
     let factory = traversal_factory(&agents[..]);
     let builder = gm_quic::QuicListeners::builder().map_err(|e| {
         error!("Failed to create QUIC listener builder: {}", e);
@@ -207,21 +192,15 @@ fn create_quic_server(
 
     // 为每个服务器添加TLS证书
     for server in servers {
-        let cert_path = if let Some(Value::Path(cert_path)) = server.get("ssl_certificate") {
-            cert_path
-        } else {
+        let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
             unreachable!("Invalid ssl_certificate path");
         };
 
-        let key_path = if let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") {
-            key_path
-        } else {
+        let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
             unreachable!("Invalid ssl_certificate_key path");
         };
 
-        let server_name = if let Some(Value::StringVec(server_name)) = server.get("server_name") {
-            server_name.clone()
-        } else {
+        let Some(Value::StringVec(server_name)) = server.get("server_name").cloned() else {
             unreachable!("Invalid server name");
         };
 
@@ -232,15 +211,14 @@ fn create_quic_server(
                 domain = domain.replace('~', ".genmeta.net");
             }
             // builder = builder.add_host(domain, &*cert, &*key);
-            let binds = server_total_binds.get(&domain).unwrap();
+            let binds = server_binds.get(&domain).unwrap();
             info!("Adding server {} with binds {:?}", domain, binds);
-            let binds: Vec<BindUri> = binds.iter().cloned().collect();
-            _ = listener.add_server(domain, &*cert, &*key, binds, None);
+            _ = listener.add_server(domain, &*cert, &*key, binds.clone(), None);
         }
     }
 
     info!("binds {:?}", binds);
-    Ok((listener, server_total_binds))
+    Ok(listener)
 }
 
 fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
