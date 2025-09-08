@@ -32,6 +32,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+firewall-base = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---
 rustls = { workspace = true }

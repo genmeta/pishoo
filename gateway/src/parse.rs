@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},

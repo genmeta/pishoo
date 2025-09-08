@@ -5,12 +5,18 @@ use std::{
 };
 
 use bytes::Bytes;
-use gm_quic::{BindUri, Connection, QuicListeners, handy::server_parameters};
+use firewall_base::{
+    action::RequestAction,
+    expr::atomics::HttpRequest,
+    matcher::{DomainRulesMatcher, LocationRulesMatcher, MatchRuleFailed},
+};
+use gm_quic::{BindUri, Connection, QuicListeners, ToCertificate, handy::server_parameters};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
 use qdns::{HttpResolver, MdnsResolver, Resolve};
 use qtraversal::iface::{TraversalFactory, traversal_factory};
+use rustls::server::WebPkiClientVerifier;
 use tracing::{Instrument, debug, error, info};
 
 use crate::{
@@ -20,6 +26,7 @@ use crate::{
     reverse,
 };
 
+mod auth;
 mod file;
 mod proxy;
 #[cfg(feature = "sshd")]
@@ -36,9 +43,12 @@ type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
 ///
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
-pub async fn serve(servers: Vec<Arc<Node>>) -> Result<()> {
+pub async fn serve(
+    access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
+    servers: Vec<Arc<Node>>,
+) -> Result<()> {
     let (routers, server_resolvers) = init_routers(&servers)?;
-    let quic_listners = create_quic_server(&servers)?;
+    let quic_listners = create_quic_server(access_rules.0, &servers)?;
 
     let http_resovler = Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?);
     let mdns_resovler = Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?);
@@ -78,7 +88,7 @@ pub async fn serve(servers: Vec<Arc<Node>>) -> Result<()> {
     let _publisher = Publisher::spawn(quic_listners.clone(), server_resolvers);
 
     // 主接受循环
-    handle_connections(quic_listners.clone(), routers).await
+    handle_connections(quic_listners.clone(), access_rules.1, routers).await
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
@@ -110,7 +120,10 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 }
 
 /// 创建QUIC服务器实例
-fn create_quic_server(servers: &[Arc<Node>]) -> Result<Arc<QuicListeners>> {
+fn create_quic_server(
+    domain_access_rules: Arc<DomainRulesMatcher>,
+    servers: &[Arc<Node>],
+) -> Result<Arc<QuicListeners>> {
     let agents: [SocketAddr; 2] = [
         "1.12.74.4:20004".parse()?,
         "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
@@ -166,10 +179,21 @@ fn create_quic_server(servers: &[Arc<Node>]) -> Result<Arc<QuicListeners>> {
         use qevent::telemetry::handy::DefaultSeqLogger;
         builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(include_bytes!("../../root.crt").to_certificate());
+
+    let tls_client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        // 允许client不带证书
+        .allow_unauthenticated()
+        .build()
+        .unwrap();
+
     let listener = builder
         .with_iface_factory(factory.as_ref().clone())
         .with_parameters(server_parameters())
-        .without_client_cert_verifier()
+        .with_client_cert_verifier(tls_client_cert_verifier)
+        .with_client_auther(auth::ClientAuther::from(domain_access_rules))
         .listen(1000);
 
     // 为每个服务器添加TLS证书
@@ -233,6 +257,7 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
 /// 处理客户端连接
 async fn handle_connections(
     quic_server: Arc<QuicListeners>,
+    access_rules: Arc<LocationRulesMatcher>,
     routers: Arc<HashMap<String, Arc<Node>>>,
 ) -> Result<()> {
     let handle_connection = async |conn: Arc<Connection>| {
@@ -260,15 +285,17 @@ async fn handle_connections(
         tokio::spawn({
             let routers = routers.clone();
             let conn = conn.clone();
+            let access_rules = access_rules.clone();
             async move {
                 while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(
                     |e| error!(target: "connect", "Connection acceptance error: {:?}", e),
                 ) {
                     let routers = routers.clone();
                     let conn = conn.clone();
+                    let access_rules = access_rules.clone();
                     let handle_request = async move {
                         let (req, stream) = req_resolver.resolve_request().await?;
-                        handle_request(routers, conn, req, stream).await
+                        handle_request(routers, conn, access_rules, req, stream).await
                     };
                     tokio::spawn(async move {
                         if let Err(e) = handle_request.await {
@@ -299,6 +326,7 @@ async fn handle_connections(
 async fn handle_request(
     servers: Arc<HashMap<String, Arc<Node>>>,
     conn: Arc<Connection>,
+    access_rules: Arc<LocationRulesMatcher>,
     req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
@@ -324,13 +352,38 @@ async fn handle_request(
         .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
     let final_pattern = final_pattern.to_string();
 
+    let client_name = conn.client_name().await.unwrap_or_default();
+    let client_name = client_name.as_deref().unwrap_or_default();
+    let server_name = conn.server_name().await.unwrap_or_default();
+
+    let action = match access_rules.match_rule(
+        &server_name,
+        req.uri().path(),
+        &HttpRequest::new(client_name, &req),
+    ) {
+        Ok(action) => action,
+        Err(MatchRuleFailed::MatchSet { .. }) => RequestAction::Allow,
+        Err(MatchRuleFailed::MatchRuleInSet) => RequestAction::Deny,
+    };
+
     let (mut sender, receiver) = stream.split();
 
-    let Value::Pattern(_, location_value) = location.value() else {
+    if action == RequestAction::Deny {
+        let response = Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(())
+            .expect("Failed to build response");
+
+        sender.send_response(response).await?;
+        sender.finish().await?;
+        return Ok(());
+    }
+
+    let Value::Pattern(_, location_values) = location.value() else {
         unreachable!("Invalid location value");
     };
 
-    match location_value {
+    match location_values {
         location_value if location_value.contains_key("proxy_pass") => {
             reverse::proxy::handle(location, &final_pattern, req, receiver, sender).await?;
         }

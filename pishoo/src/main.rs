@@ -1,12 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, command};
-use gateway::parse::{self, Value};
-use tokio::task::JoinSet;
+use gateway::parse::Value;
+use tokio::{fs, task::JoinSet};
 
-use crate::service::start_services;
+use crate::service::start_services_from_pishoo_block;
 
+mod config;
 mod service;
 mod signal;
 
@@ -36,11 +37,20 @@ struct Args {
         value_parser = clap::builder::PossibleValuesParser::new(["stop", "quit", "reopen", "reload"]),
         help = "send signal to a master process (-s only on Linux/macOS)"
     )]
-    signal: Option<String>,
+    signal: Option<SignalType>,
     #[arg(short, default_value_t = false, help = "test configuration and exit")]
     test_config: bool,
     #[arg(short = 'g', help = "set global directives out of configuration file")]
     directives: Vec<String>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum SignalType {
+    #[clap(alias = "TERM")]
+    Stop,
+    Quit,
+    Reopen,
+    Reload,
 }
 
 // TODO: multi-thread async runtime
@@ -62,61 +72,34 @@ async fn main() -> Result<()> {
     console_subscriber::init();
 
     let config_file = args.config_file;
-    let configure = std::fs::read(&config_file).expect("Failed to read configuration file");
-    let config =
-        parse::parse(&configure, config_file.parent()).expect("Failed to parse configuration file");
 
-    let pid_file = if let Some(Value::String(pid)) = config.get("pid") {
-        pid
-    } else {
-        PID_FILE_DEFAULT
-    };
+    let config = fs::read(&config_file)
+        .await
+        .context("Failed to read configuration file")?;
+    let config = gateway::parse::parse(&config, config_file.parent())
+        .context("Failed to parse configuration file")?;
 
-    // 处理信号发送
-    if let Some(signal_type) = &args.signal {
-        return signal::send_signal(pid_file, signal_type);
-    }
-
-    #[cfg(unix)]
-    signal::init_pid_file(pid_file)?;
-
-    let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
-        Arc::clone(pishoo.first().unwrap())
-    } else {
-        return Err(anyhow::anyhow!("pishoo block not found"));
-    };
-
-    let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
-        pishoo
-    } else {
-        &Vec::new()
-    };
-
-    let servers = if let Some(Value::Nodes(servers)) = pishoo.get("server") {
-        servers
-    } else {
-        &Vec::new()
-    };
-
-    // If in test configuration mode, return after validating the configuration
-    if args.test_config {
-        println!("Configuration test successful");
-        println!("Configuration file: {}", config_file.display());
-
-        println!("Number of servers: {}", servers.len());
-        println!("Number of proxies: {}", proxys.len());
-
-        return Ok(());
-    }
-
-    // 将 JoinSet、配置路径、停止通道等编排到可在 SIGHUP 中访问的结构中
-    let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
-
-    // 启动初始服务
+    let pishoo = if let Value::Nodes(pishoo) = config
+        .get("pishoo")
+        .context("Pishoo block not found in configuration")?
     {
-        let mut h = handler.lock().await;
-        start_services(&mut h, servers, proxys);
+        pishoo
+            .first()
+            .expect("No pishoo block found, but pishoo key exists")
+    } else {
+        unreachable!("Parse error")
+    };
+
+    if let Some(signal) = args.signal {
+        let pid_file = if let Some(Value::String(pid_file)) = config.get("pid") {
+            pid_file
+        } else {
+            PID_FILE_DEFAULT
+        };
+        return signal::send_signal(pid_file, signal).await;
     }
 
+    let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
+    start_services_from_pishoo_block(&handler, pishoo).await?;
     signal::handle_signal(config_file, &handler).await
 }

@@ -85,7 +85,7 @@ pub async fn alias(
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     // In the case of an `alias`, it is necessary to remove the matched prefix from the URL.
-    let relative_path = req.uri().path().trim_start_matches(&pattern);
+    let relative_path = req.uri().path().trim_start_matches(pattern);
 
     let alias = if let Some(Value::Path(alias)) = location.get("alias") {
         alias
