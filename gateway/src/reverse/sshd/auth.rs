@@ -18,9 +18,9 @@ pub enum Error {
     #[snafu(display("Too many attempts in password auth"))]
     TooManyAttempts {},
     // TODO: merge send error into channel error?
-    #[snafu(display("Send message failed: {source}"))]
+    #[snafu(display("Send message failed"))]
     Send { source: io::Error },
-    #[snafu(display("Recv message failed: {source}"))]
+    #[snafu(display("Recv message failed"))]
     Recv { source: io::Error },
     #[snafu(display("Auth channel closed before auth completed"))]
     ChannelClosed {},

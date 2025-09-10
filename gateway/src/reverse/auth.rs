@@ -9,6 +9,16 @@ use firewall_base::{
 use gm_quic::{AuthClient, ClientCertsVerifyResult, ClientNameVerifyResult};
 use x509_parser::prelude::*;
 
+pub const SUFFIX: &str = ".genmeta.net";
+
+pub fn trim_suffix_once<'s>(s: &'s str, suffix: &str) -> &'s str {
+    if let Some(pos) = s.rfind(suffix)
+        && pos + suffix.len() == s.len()
+    {
+        return &s[..pos];
+    }
+    s
+}
 #[derive(Debug, From, Clone)]
 pub struct ClientAuther {
     firewall: Arc<DomainRulesMatcher>,
@@ -16,10 +26,10 @@ pub struct ClientAuther {
 
 impl AuthClient for ClientAuther {
     fn verify_client_name(&self, host: &str, client_name: Option<&str>) -> ClientNameVerifyResult {
-        match self
-            .firewall
-            .match_rule(host, &ConnectRequest::new(client_name.unwrap_or_default()))
-        {
+        match self.firewall.match_rule(
+            trim_suffix_once(host, SUFFIX),
+            &ConnectRequest::new(trim_suffix_once(client_name.unwrap_or_default(), SUFFIX)),
+        ) {
             Ok(action) => match action {
                 ConnectionAction::Allow => ClientNameVerifyResult::Accept,
                 ConnectionAction::DenySilently => {

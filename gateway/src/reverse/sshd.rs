@@ -102,12 +102,12 @@ pub async fn login(
 
 #[derive(snafu::Snafu, Debug)]
 enum SshdError {
-    #[snafu(display("Auth for {} failed: {source}", username.as_deref().unwrap_or("<unknown>")))]
+    #[snafu(display("Auth for {} failed", username.as_deref().unwrap_or("<unknown>")))]
     Auth {
         source: auth::Error,
         username: Option<String>,
     },
-    #[snafu(display("Failed to handle {request:?}: {source}"))]
+    #[snafu(display("Failed to handle {request:?}"))]
     HandleRequest {
         request: messages::OpenChannel,
         source: Error,
@@ -117,7 +117,7 @@ enum SshdError {
         expect: &'static str,
         request: messages::OpenChannel,
     },
-    #[snafu(display("Failed to receive message: {source}"))]
+    #[snafu(display("Failed to receive message"))]
     ReceiveMessage {
         source: mux::ForwardError<io::Error>,
     },

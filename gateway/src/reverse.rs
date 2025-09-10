@@ -23,7 +23,7 @@ use crate::{
     error::{CustomError, Result},
     parse::{IPVersion, IfaceType, Listen, Node, Resolver, Value},
     publisher::Publisher,
-    reverse,
+    reverse::{self, auth::trim_suffix_once},
 };
 
 mod auth;
@@ -354,13 +354,12 @@ async fn handle_request(
 
     let client_name = conn.client_name().await.unwrap_or_default();
     let client_name = client_name.as_deref().unwrap_or_default();
+    let client_name = trim_suffix_once(client_name, auth::SUFFIX);
+    let http_request = HttpRequest::new(client_name, &req);
     let server_name = conn.server_name().await.unwrap_or_default();
+    let server_name = trim_suffix_once(&server_name, auth::SUFFIX);
 
-    let action = match access_rules.match_rule(
-        &server_name,
-        req.uri().path(),
-        &HttpRequest::new(client_name, &req),
-    ) {
+    let action = match access_rules.match_rule(server_name, req.uri().path(), &http_request) {
         Ok(action) => action,
         Err(MatchRuleFailed::MatchSet { .. }) => RequestAction::Allow,
         Err(MatchRuleFailed::MatchRuleInSet) => RequestAction::Deny,
