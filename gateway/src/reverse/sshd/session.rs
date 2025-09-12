@@ -6,23 +6,23 @@ use nix::{
     sys::{self, socket},
     unistd,
 };
+use snafu::ResultExt;
 use tokio::io::{self, AsyncWriteExt};
 use tokio_util::{io::ReaderStream, task::AbortOnDropHandle};
 
 use super::{
-    Error,
     async_fd::{AsyncFd, OwnedReadHalf, OwnedWriteHalf},
-    map_errno,
     messages::session::{ClientSessionMessage, ServerSessionMessage},
     mux::{FramedRecver, FramedSender, Recver, Sender},
 };
+use crate::error::Whatever;
 
 pub async fn shell(
     user: &unistd::User,
     pseudo: bool,
     recver: Recver,
     sender: Sender,
-) -> Result<impl Future<Output = ()> + use<>, Error> {
+) -> Result<impl Future<Output = ()> + use<>, Whatever> {
     exec(user, pseudo, None, recver, sender).await
 }
 
@@ -32,11 +32,17 @@ pub async fn exec(
     command: Option<&str>,
     recver: Recver,
     sender: Sender,
-) -> Result<impl Future<Output = ()> + use<>, Error> {
+) -> Result<impl Future<Output = ()> + use<>, Whatever> {
     // TOOD: do_exec_no_pty
     let (child, child_io) = match pseudo {
-        true => do_exec_pty(user, command).map_err(|e| format!("Failed to exec: {e:?}"))?,
-        false => do_exec_no_pty(user, command).map_err(|e| format!("Failed to exec: {e:?}"))?,
+        true => do_exec_pty(user, command).whatever_context(format!(
+            "Failed to exec `{}` pty",
+            command.unwrap_or("<no command>")
+        ))?,
+        false => do_exec_no_pty(user, command).whatever_context(format!(
+            "Failed to exec `{}` without pty",
+            command.unwrap_or("<no command>")
+        ))?,
     };
     tracing::info!(target: "session", "Child process {child} started");
     let (mut child_read_half, mut child_write_half) = child_io.split();
@@ -141,12 +147,17 @@ fn wait_child_exit(child: unistd::Pid) -> io::Result<i32> {
         }
     }
 }
-fn do_exec_pty(user: &unistd::User, command: Option<&str>) -> io::Result<(unistd::Pid, AsyncFd)> {
+
+fn do_exec_pty(
+    user: &unistd::User,
+    command: Option<&str>,
+) -> Result<(unistd::Pid, AsyncFd), Whatever> {
     // 创建一个伪终端，frok子进程，设置终端为登录终端
-    match unsafe { pty::forkpty(None, None) }
-        .map_err(|errno| map_errno(errno, "Failed to forkpty"))?
-    {
-        pty::ForkptyResult::Parent { child, master } => Ok((child, AsyncFd::new(master)?)),
+    match unsafe { pty::forkpty(None, None) }.whatever_context("Failed to fork pty")? {
+        pty::ForkptyResult::Parent { child, master } => Ok((
+            child,
+            AsyncFd::new(master).whatever_context("Failed to create async file descriptor")?,
+        )),
         pty::ForkptyResult::Child => do_child(user, command),
     }
 }
@@ -155,20 +166,24 @@ fn do_exec_pty(user: &unistd::User, command: Option<&str>) -> io::Result<(unistd
 fn do_exec_no_pty(
     user: &unistd::User,
     command: Option<&str>,
-) -> io::Result<(unistd::Pid, AsyncFd)> {
+) -> Result<(unistd::Pid, AsyncFd), Whatever> {
     let (parent_sock, child_sock) = socket::socketpair(
         socket::AddressFamily::Unix,
         socket::SockType::Stream,
         None,
         socket::SockFlag::empty(),
     )
-    .map_err(|errno| map_errno(errno, "Failed to create socketpair"))?;
+    .whatever_context("Failed to create socket pair for terminal IO IPC")?;
 
-    match unsafe { unistd::fork() }.map_err(|errno| map_errno(errno, "Failed to fork"))? {
+    match unsafe { unistd::fork() }.whatever_context("Failed to fork subprocess")? {
         unistd::ForkResult::Parent { child } => {
             // 父进程关闭读端，将写端转换为AsyncFd
             drop(child_sock);
-            Ok((child, AsyncFd::new(parent_sock)?))
+            Ok((
+                child,
+                AsyncFd::new(parent_sock)
+                    .whatever_context("Failed to create async file descriptor")?,
+            ))
         }
         unistd::ForkResult::Child => {
             drop(parent_sock);

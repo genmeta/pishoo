@@ -1,5 +1,4 @@
 use futures::{SinkExt, TryStreamExt};
-use gm_quic::Connection;
 use nix::unistd;
 use snafu::{OptionExt, ResultExt};
 use ssh3_proto::messages::auth::{ClientAuthMessage, ServerAuthMessage};
@@ -15,6 +14,8 @@ pub enum Error {
     Deny {},
     #[snafu(display("User not found"))]
     NotFound {},
+    #[snafu(display("Cannot found user"))]
+    CannotFoundUser { source: nix::errno::Errno },
     #[snafu(display("Too many attempts in password auth"))]
     TooManyAttempts {},
     // TODO: merge send error into channel error?
@@ -26,40 +27,18 @@ pub enum Error {
     ChannelClosed {},
     #[snafu(display("Stream closed before received request"))]
     StreamClosed {},
+    #[snafu(display("No suitable auth method found"))]
+    NoMethod {},
 }
 
-pub async fn auth(
-    quic_conn: &Connection,
-    username: &str,
-    localhost: &str,
-    location: &Node,
-    mut sender: FramedSender<ServerAuthMessage>,
-    recver: FramedRecver<ClientAuthMessage>,
-) -> Result<unistd::User, Error> {
-    reject_deny(username, location, &mut sender).await?;
-
-    let user = match unistd::User::from_name(username) {
-        Ok(Some(user)) => {
+pub async fn find_user(username: &str) -> Result<unistd::User, Error> {
+    match unistd::User::from_name(username).context(CannotFoundUserSnafu)? {
+        Some(user) => {
             tracing::debug!(target: "sshd", ?user, "User found");
-            user
+            Ok(user)
         }
-        Ok(None) | Err(_) => {
-            _ = sender
-                .cancel(io::Error::new(io::ErrorKind::NotFound, "User not found"))
-                .await;
-            return NotFoundSnafu.fail();
-        }
-    };
-
-    let Some(Value::String(ssh_login)) = location.get("ssh_login") else {
-        unreachable!();
-    };
-    match &**ssh_login {
-        "basic" => auth_password(username, localhost, sender, recver).await?,
-        "ssl" => unimplemented!(),
-        _ => unreachable!("Unknown ssh_login type {ssh_login}"),
+        None => NotFoundSnafu.fail(),
     }
-    Ok(user)
 }
 
 pub async fn reject_deny(
@@ -81,8 +60,8 @@ pub async fn reject_deny(
 pub async fn auth_password(
     username: &str,
     localhost: &str,
-    mut sender: FramedSender<ServerAuthMessage>,
-    mut recver: FramedRecver<ClientAuthMessage>,
+    sender: &mut FramedSender<ServerAuthMessage>,
+    recver: &mut FramedRecver<ClientAuthMessage>,
 ) -> Result<(), Error> {
     let base_prompt = format!("{username}@{localhost}'s password: ");
     sender
