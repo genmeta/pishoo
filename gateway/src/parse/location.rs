@@ -2,11 +2,10 @@ use anyhow::Result;
 use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use super::{
-    Value, parse_header, parse_header_always, parse_path, parse_ssh_login, parse_ssh_ssl_user,
-    parse_string_vec, parse_types, pattern::parse_pattern,
+use crate::parse::{
+    Commands, Value, parse_header, parse_header_always, parse_path, parse_ssh_login,
+    parse_ssh_ssl_user, parse_string_vec, parse_types, parse_uri, pattern::parse_pattern,
 };
-use crate::parse::{Commands, parse_uri};
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands = Commands::new();

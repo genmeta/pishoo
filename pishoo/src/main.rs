@@ -34,7 +34,6 @@ struct Args {
     #[arg(
         short,
         default_value = None,
-        value_parser = clap::builder::PossibleValuesParser::new(["stop", "quit", "reopen", "reload"]),
         help = "send signal to a master process (-s only on Linux/macOS)"
     )]
     signal: Option<SignalType>,
@@ -46,7 +45,6 @@ struct Args {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 pub enum SignalType {
-    #[clap(alias = "TERM")]
     Stop,
     Quit,
     Reopen,
@@ -61,28 +59,36 @@ async fn main() -> Result<()> {
     // TODO 将日志存储到 /var/pishoo/pishoo.log
 
     #[cfg(not(feature = "console_subscriber"))]
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_file(true)
-        .with_line_number(true)
-        .with_ansi(false)
-        .init();
+    {
+        let subscriber = tracing_subscriber::fmt().with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::INFO.into())
+                .from_env_lossy(),
+        );
+        #[cfg(debug_assertions)]
+        let subscriber = subscriber.with_file(true).with_line_number(true);
+        // .with_ansi(false)
+        subscriber.init();
+    }
 
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
 
     let config_file = args.config_file;
 
-    let config = fs::read(&config_file)
-        .await
-        .context("Failed to read configuration file")?;
-    let config = gateway::parse::parse(&config, config_file.parent())
-        .context("Failed to parse configuration file")?;
+    let config = fs::read(&config_file).await.context(format!(
+        "Failed to read configuration file at `{}`",
+        config_file.display()
+    ))?;
+    let config = gateway::parse::parse(&config, config_file.parent()).context(format!(
+        "Failed to parse configuration file at `{}`",
+        config_file.display()
+    ))?;
 
-    let pishoo = if let Value::Nodes(pishoo) = config
-        .get("pishoo")
-        .context("Pishoo block not found in configuration")?
-    {
+    let pishoo = if let Value::Nodes(pishoo) = config.get("pishoo").context(format!(
+        "Pishoo block not found in configuration file `{}`",
+        config_file.display()
+    ))? {
         pishoo
             .first()
             .expect("No pishoo block found, but pishoo key exists")

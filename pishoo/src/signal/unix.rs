@@ -119,6 +119,7 @@ async fn handle_sighup(
         hup_signal.recv().await;
         let start_at = std::time::Instant::now();
         tracing::info!(target: "signal", "Received SIGHUP signal, restarting services...");
+
         stop_services(&handler).await;
 
         if let Err(restart_error) = try_restart().await {
@@ -127,7 +128,8 @@ async fn handle_sighup(
         }
 
         tracing::info!(
-            "Configuration reloaded in {:?}",
+            target: "signal",
+            "Reloaded in {:?}",
             std::time::Instant::now().duration_since(start_at)
         );
     }

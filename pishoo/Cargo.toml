@@ -38,7 +38,7 @@ clap = { workspace = true }
 
 
 # --- Firewall ---
-firewall-db = { workspace = true }
+firewall-db = { workspace = true, features = ["sqlx-sqlite"] }
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }

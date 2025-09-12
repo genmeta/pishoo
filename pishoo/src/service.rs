@@ -53,12 +53,6 @@ pub async fn start_services_from_pishoo_block(
     #[cfg(unix)]
     signal::init_pid_file(pid_file).await?;
 
-    let pishoo = if let Some(Value::Nodes(pishoo)) = pishoo.get("pishoo") {
-        Arc::clone(pishoo.first().unwrap())
-    } else {
-        return Err(anyhow::anyhow!("pishoo block not found"));
-    };
-
     let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
         pishoo
     } else {
@@ -111,6 +105,7 @@ pub fn start_services(
         };
         handler.spawn(task);
     }
+    tracing::info!(target: "services", "Services started");
 }
 
 // 停止所有服务并等待退出

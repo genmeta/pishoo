@@ -26,44 +26,65 @@ pub struct ClientAuther {
 
 impl AuthClient for ClientAuther {
     fn verify_client_name(&self, host: &str, client_name: Option<&str>) -> ClientNameVerifyResult {
-        match self.firewall.match_rule(
+        let result = match self.firewall.match_rule(
             trim_suffix_once(host, SUFFIX),
             &ConnectRequest::new(trim_suffix_once(client_name.unwrap_or_default(), SUFFIX)),
         ) {
-            Ok(action) => match action {
+            Ok((_rule_matched_domain, action)) => match action {
                 ConnectionAction::Allow => ClientNameVerifyResult::Accept,
                 ConnectionAction::DenySilently => {
-                    ClientNameVerifyResult::SilentRefuse("rule matched".to_owned())
+                    ClientNameVerifyResult::SilentRefuse("access firewall rules".to_owned())
                 }
                 ConnectionAction::Deny => ClientNameVerifyResult::Refuse("".to_owned()),
             },
             Err(MatchRuleFailed::MatchSet { .. }) => ClientNameVerifyResult::Accept,
             Err(MatchRuleFailed::MatchRuleInSet) => ClientNameVerifyResult::SilentRefuse(
-                "rule set matched, but no rule matched".to_owned(),
+                "access firewall rule set matched, but no rule in set matched".to_owned(),
             ),
-        }
+        };
+
+        match &result {
+            ClientNameVerifyResult::Accept => {}
+            ClientNameVerifyResult::Refuse(reason) => {
+                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to `{host}`: {reason}", client_name = client_name.unwrap_or_default());
+            }
+            ClientNameVerifyResult::SilentRefuse(reason) => {
+                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to `{host}` silently: {reason}", client_name = client_name.unwrap_or_default());
+            }
+        };
+        result
     }
 
     fn verify_client_certs(
         &self,
-        _host: &str,
+        host: &str,
         client_name: Option<&str>,
         client_certs: &[u8],
     ) -> ClientCertsVerifyResult {
         let Some(client_name) = client_name else {
             return ClientCertsVerifyResult::Accept; // No client name, cannot verify
         };
-        match parse_client_certs(client_certs).any(|cert| {
-            extra_client_names(&cert)
-                .filter_map(|name| name.replace('*', "\\w+").parse::<regex::Regex>().ok())
-                .any(|regex| regex.is_match(client_name))
-        }) {
-            true => ClientCertsVerifyResult::Accept,
-            false => ClientCertsVerifyResult::Refuse(format!(
-                "Client name '{}' does not match any names in the provided certificates",
-                client_name
-            )),
+        let result = {
+            match parse_client_certs(client_certs).any(|cert| {
+                extract_client_names(&cert)
+                    .filter_map(|name| name.replace('*', "\\w+").parse::<regex::Regex>().ok())
+                    .any(|regex| regex.is_match(client_name))
+            }) {
+                true => ClientCertsVerifyResult::Accept,
+                false => ClientCertsVerifyResult::Refuse(format!(
+                    "Client name `{}` does not match any names in the provided client certificates",
+                    client_name
+                )),
+            }
+        };
+
+        match &result {
+            ClientCertsVerifyResult::Accept => {}
+            ClientCertsVerifyResult::Refuse(reason) => {
+                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to {host}: {reason}" );
+            }
         }
+        result
     }
 }
 
@@ -83,7 +104,7 @@ fn parse_client_certs(cert: &'_ [u8]) -> impl Iterator<Item = X509Certificate<'_
     })
 }
 
-fn extra_client_names<'c>(cert: &'c X509Certificate<'c>) -> impl Iterator<Item = &'c str> {
+fn extract_client_names<'c>(cert: &'c X509Certificate<'c>) -> impl Iterator<Item = &'c str> {
     let common_names = cert
         .subject()
         .iter_common_name()

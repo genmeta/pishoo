@@ -11,6 +11,7 @@ use hyper::{
     client::conn::http1::Builder,
 };
 use hyper_util::rt::TokioIo;
+use snafu::Report;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info};
@@ -27,7 +28,7 @@ pub async fn handle(
     location: &Arc<Node>,
     final_pattern: &str,
     req: Request<()>,
-    receiver: RequestStream<RecvStream, Bytes>,
+    recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     let uri = req.uri().to_string();
@@ -38,10 +39,14 @@ pub async fn handle(
         req.headers()
     );
 
-    let resp = match pass(location, final_pattern, req, receiver).await {
+    let resp = match pass(location, final_pattern, req, recver).await {
         Ok(resp) => resp,
         Err(e) => {
-            error!("[Response handling][{}] Proxy request error: {:?}", uri, e);
+            error!(
+                "[Response handling][{}] Proxy request error: {:?}",
+                uri,
+                Report::from_error(e)
+            );
             sender.send_response(build_error_response()).await?;
             sender.finish().await?;
             return Ok(());
@@ -66,11 +71,16 @@ pub async fn handle(
     let mut stream = H3Sink::new(sender);
     match tokio::io::copy(&mut body_stream, &mut stream).await {
         Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
-        Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
+        Err(e) => error!(
+            "[Proxy][{uri}] Error sending request body: {}",
+            Report::from_error(e)
+        ),
     }
     match stream.shutdown().await {
-        Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
-        Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+        Ok(()) => info!(target: "proxy","[Proxy][{}] Request finished sent", uri),
+        Err(e) => {
+            error!(target: "proxy","[Proxy][{}] Error sending request data end: {}", uri, Report::from_error(e))
+        }
     }
     Ok(())
 }
@@ -118,7 +128,10 @@ pub async fn pass(
 
     // 解析目标地址
     let proxy_pass = Uri::from_str(proxy_pass).map_err(|e| {
-        error!("[Request processing] Invalid proxy_pass URI: {}", e);
+        error!(
+            "[Request processing] Invalid proxy_pass URI: {}",
+            Report::from_error(&e)
+        );
         CustomError::InvalidConfig(format!("Invalid proxy_pass URI: {e}"))
     })?;
     let host = proxy_pass.host().ok_or(CustomError::MissingHost)?;
@@ -127,11 +140,12 @@ pub async fn pass(
     info!("[Request processing] Preparing to proxy request: {new_parts:?}");
 
     // 建立TCP连接
-    let io = TokioIo::new(
-        TcpStream::connect((host, port))
-            .await
-            .inspect_err(|e| error!("TCP connection error: {}:{} : {:?}", host, port, e))?,
-    );
+    let io = TokioIo::new(TcpStream::connect((host, port)).await.inspect_err(|e| {
+        error!(
+            "TCP connection error: {host}:{port} : {}",
+            Report::from_error(e)
+        )
+    })?);
 
     // 创建HTTP客户端连接
     let (mut sender, conn) = Builder::new()
@@ -148,7 +162,10 @@ pub async fn pass(
     // 启动连接维护任务
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            error!("[Proxy connection] Maintenance failed: {:?}", e);
+            error!(
+                "[Proxy connection] Maintenance failed: {}",
+                Report::from_error(e)
+            );
         }
     });
 
@@ -157,7 +174,12 @@ pub async fn pass(
     let response = sender
         .send_request(Request::from_parts(new_parts, StreamBody::new(stream)))
         .await
-        .inspect_err(|e| error!("[Request processing] Request send error: {:?}", e))?;
+        .inspect_err(|e| {
+            error!(
+                "[Request processing] Request send error: {:?}",
+                Report::from_error(e)
+            )
+        })?;
 
     debug!("[Request processing] Finished sending request body");
     Ok(response)

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use conf::parse_conf;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -488,16 +488,19 @@ fn parse_header_always(directive: Directive<Nginx>) -> Result<Value> {
 }
 
 fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
-    match &directive.args[..] {
-        [auth] => {
-            if auth != "basic" && auth != "ssl" {
-                Err(anyhow!("Invalid value for directive: {}", directive.name))
-            } else {
-                Ok(Value::String(auth.to_string()))
-            }
-        }
-        _ => Err(anyhow!("Invalid value for directive: {}", directive.name)),
-    }
+    let auths = directive
+        .args
+        .iter()
+        .map(|auth| {
+            ensure!(
+                auth == "basic" || auth == "ssl",
+                "Invalid value for directive: {}",
+                directive.name
+            );
+            Ok(auth.to_string())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Value::StringVec(auths))
 }
 
 fn parse_ssh_ssl_user(directive: Directive<Nginx>) -> Result<Value> {

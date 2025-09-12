@@ -5,6 +5,7 @@ use gm_quic::QuicListeners;
 use qconnection::prelude::SocketEndpointAddr;
 use qdns::Resolve;
 use qinterface::{QuicIoExt, iface::monitor::InterfacesMonitor};
+use snafu::Report;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -27,12 +28,13 @@ impl Publisher {
                     _ = interval.tick() => {}
                 }
                 for (server, resolvers) in &resolvers {
-                    tracing::info!(target: "dns", "Try to publish dns for {server}");
+                    tracing::debug!(target: "dns", "Try to publish dns for {server}");
                     let Some(interfaces) = listeners
                         .get_server(server)
                         .map(|server| server.bind_interfaces())
                     else {
-                        tracing::info!(target: "dns", "Publish dns for {server} failed: No such server in listeners");
+                        // 内部错误，不展示
+                        tracing::debug!(target: "dns", "Publish dns for {server} failed: No such server in listeners");
                         continue;
                     };
 
@@ -54,12 +56,23 @@ impl Publisher {
                         } else {
                             &endpoint_addrs
                         };
-                        if let Err(error) = resolver.publish(server, addresses).await {
-                            tracing::error!(
+                        match resolver.publish(server, addresses).await {
+                            Ok(..) => tracing::debug!(
                                 target: "dns",
-                                "Publish dns {addresses:?} for {server} to {} failed: {error:?}",
+                                "Publish dns {addresses:?} for {server} to {} success",
                                 resolver.server()
-                            );
+                            ),
+                            Err(error) => {
+                                let addresses = addresses
+                                    .iter()
+                                    .map(|addr| addr.to_string())
+                                    .collect::<Vec<_>>();
+                                tracing::error!(
+                                    target: "dns",
+                                    "Publish dns {addresses:?} for {server} to {} failed: {}",
+                                    resolver.server(), Report::from_error(error),
+                                );
+                            }
                         }
                     }
                 }

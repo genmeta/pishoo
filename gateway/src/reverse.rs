@@ -8,7 +8,7 @@ use bytes::Bytes;
 use firewall_base::{
     action::RequestAction,
     expr::atomics::HttpRequest,
-    matcher::{DomainRulesMatcher, LocationRulesMatcher, MatchRuleFailed},
+    matcher::{DomainRulesMatcher, LocationRulesMatcher},
 };
 use gm_quic::{BindUri, Connection, QuicListeners, ToCertificate, handy::server_parameters};
 use h3::server::RequestStream;
@@ -17,6 +17,7 @@ use http::{Request, Response, StatusCode};
 use qdns::{HttpResolver, MdnsResolver, Resolve};
 use qtraversal::iface::{TraversalFactory, traversal_factory};
 use rustls::server::WebPkiClientVerifier;
+use snafu::Report;
 use tracing::{Instrument, debug, error, info};
 
 use crate::{
@@ -86,9 +87,10 @@ pub async fn serve(
 
     // 启动 dns 上报
     let _publisher = Publisher::spawn(quic_listners.clone(), server_resolvers);
+    let _guard = ShutdownListenersOnDrop(quic_listners.clone());
 
     // 主接受循环
-    handle_connections(quic_listners.clone(), access_rules.1, routers).await
+    handle_connections(quic_listners, access_rules.1, routers).await
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
@@ -158,7 +160,6 @@ fn create_quic_server(
             let binds = server_listen
                 .iter()
                 .flat_map(|iface| resolve_binds(&factory, iface))
-                .map(BindUri::from)
                 .collect::<HashSet<_>>();
             (server_name, binds)
         })
@@ -189,7 +190,7 @@ fn create_quic_server(
         .build()
         .unwrap();
 
-    let listener = builder
+    let listeners = builder
         .with_iface_factory(factory.as_ref().clone())
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
@@ -218,16 +219,16 @@ fn create_quic_server(
             }
             // builder = builder.add_host(domain, &*cert, &*key);
             let binds = server_binds.get(&domain).unwrap();
-            info!("Adding server {} with binds {:?}", domain, binds);
-            _ = listener.add_server(domain, &*cert, &*key, binds.clone(), None);
+            debug!(domain, ?binds, "Adding server");
+            _ = listeners.add_server(domain, &*cert, &*key, binds.clone(), None);
         }
     }
 
-    info!("binds {:?}", binds);
-    Ok(listener)
+    debug!(?binds, "Binds");
+    Ok(listeners)
 }
 
-fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
+fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<BindUri> {
     let mut binds = Vec::new();
     for (device_ip, device_name) in factory.devices() {
         let is_match = match (&iface.typ, device_ip) {
@@ -247,8 +248,8 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<String> {
                 IpAddr::V4(_) => "v4",
                 IpAddr::V6(_) => "v6",
             };
-            let bind_uri = format!("iface://{family}.{device_name}:5387");
-            binds.push(bind_uri);
+            let bind_uri = format!("iface://{family}.{device_name}:0");
+            binds.push(BindUri::from(bind_uri).alloc_port());
         }
     }
     binds
@@ -261,6 +262,7 @@ async fn handle_connections(
     routers: Arc<HashMap<String, Arc<Node>>>,
 ) -> Result<()> {
     let handle_connection = async |conn: Arc<Connection>| {
+        info!(target: "connect", "Accepted connection");
         // 将QUIC连接包装为H3 QUIC连接
         let h3_quic_conn = h3_shim::QuicConnection::new(conn.clone());
 
@@ -269,7 +271,7 @@ async fn handle_connections(
         // 建立H3连接
         let mut h3_conn = match h3::server::Connection::new(h3_quic_conn).await {
             Ok(conn) => {
-                info!(target: "connect", "H3 connection established");
+                debug!(target: "connect", "H3 connection established");
                 conn
             }
             Err(e) => {
@@ -288,7 +290,7 @@ async fn handle_connections(
             let access_rules = access_rules.clone();
             async move {
                 while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(
-                    |e| error!(target: "connect", "Connection acceptance error: {:?}", e),
+                    |error| error!(target: "connect", "Connection acceptance error: {}", Report::from_error(error)),
                 ) {
                     let routers = routers.clone();
                     let conn = conn.clone();
@@ -299,7 +301,7 @@ async fn handle_connections(
                     };
                     tokio::spawn(async move {
                         if let Err(e) = handle_request.await {
-                            error!(target: "request", "Request processing error: {e:?}");
+                            error!(target: "request", "Request processing error: {}", Report::from_error(e));
                         }
                     });
                 }
@@ -309,7 +311,6 @@ async fn handle_connections(
 
     // 持续接受新连接
     while let Ok((conn, server_name, pathway, link)) = quic_server.accept().await {
-        info!(target: "connect", %server_name, %pathway, %link, "Accepted connection");
         handle_connection(conn)
             .instrument(tracing::info_span!(
                 "handle_connection",
@@ -359,20 +360,25 @@ async fn handle_request(
     let server_name = conn.server_name().await.unwrap_or_default();
     let server_name = trim_suffix_once(&server_name, auth::SUFFIX);
 
-    let action = match access_rules.match_rule(server_name, req.uri().path(), &http_request) {
-        Ok(action) => action,
-        Err(MatchRuleFailed::MatchSet { .. }) => RequestAction::Allow,
-        Err(MatchRuleFailed::MatchRuleInSet) => RequestAction::Deny,
-    };
+    let (_firewall_matched_domain, firewall_matched_location, firewall_action) =
+        match access_rules.match_rule(server_name, req.uri().path(), &http_request) {
+            Ok((domain, location, action)) => (Some(domain), Some(location), action),
+            Err(..) => (None, None, RequestAction::Allow),
+        };
 
-    let (mut sender, receiver) = stream.split();
+    let (mut sender, recver) = stream.split();
 
-    if action == RequestAction::Deny {
+    if firewall_action == RequestAction::Deny {
         let response = Response::builder()
             .status(StatusCode::FORBIDDEN)
             .body(())
             .expect("Failed to build response");
 
+        let client_name = match client_name {
+            "" => "<unknown client>",
+            name => name,
+        };
+        tracing::info!(target: "request", "Firewall rules deny request from {client_name} to {server_name} with uri {}", req.uri());
         sender.send_response(response).await?;
         sender.finish().await?;
         return Ok(());
@@ -384,7 +390,7 @@ async fn handle_request(
 
     match location_values {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, &final_pattern, req, receiver, sender).await?;
+            reverse::proxy::handle(location, &final_pattern, req, recver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
             reverse::file::root(location, req, sender).await?;
@@ -394,8 +400,8 @@ async fn handle_request(
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
-            // TODO: username in path
-            reverse::sshd::login(location, conn, req, receiver, sender).await?;
+            let l = firewall_matched_location;
+            reverse::sshd::login(location, &final_pattern, l, req, recver, sender).await?;
         }
         _ => {
             let response = Response::builder()
@@ -452,4 +458,12 @@ fn build_error_response() -> Response<()> {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(())
         .unwrap()
+}
+
+struct ShutdownListenersOnDrop(Arc<QuicListeners>);
+
+impl Drop for ShutdownListenersOnDrop {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
 }
