@@ -1,8 +1,9 @@
-use anyhow::Result;
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use super::{Value, parse_header_value, parse_types, proxy::parse_proxy, server::parse_server};
-use crate::parse::{Commands, parse_string};
+use crate::parse::{
+    Commands, Result, Value, parse_header_value, parse_string, parse_types, proxy::parse_proxy,
+    server::parse_server,
+};
 
 pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands = Commands::new();

@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process, sync::Arc};
 
-use anyhow::{Context, Result};
-use gateway::parse;
+use gateway::{error::Whatever, parse};
+use snafu::{OptionExt, ResultExt, whatever};
 use tokio::{
     fs, io,
     signal::unix::{Signal, SignalKind, signal},
@@ -14,17 +14,17 @@ use crate::{
     service::{start_services_from_pishoo_block, stop_services},
 };
 
-pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<()> {
+pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
     use nix::{sys::signal::Signal, unistd::Pid};
     // 读取 PID 文件
     let pid_str = fs::read_to_string(pid_file)
         .await
-        .with_context(|| format!("Failed to read PID file: {}", pid_file))?;
+        .whatever_context(format!("Failed to read PID file at `{pid_file}`",))?;
 
     let pid = pid_str
         .trim()
         .parse::<i32>()
-        .with_context(|| format!("Invalid PID in file: {}", pid_str))?;
+        .whatever_context(format!("Invalid PID in file `{pid_str}`"))?;
 
     // 根据信号类型发送对应的系统信号
     let signal = match signal_type {
@@ -36,18 +36,25 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<()> 
 
     // 发送信号
     nix::sys::signal::kill(Pid::from_raw(pid), signal)
-        .with_context(|| format!("Failed to send {signal} signal to process {pid}"))?;
+        .whatever_context(format!("Failed to send {signal} signal to process {pid}"))?;
 
     println!("Sent {signal} signal to process {pid}");
     Ok(())
 }
 
-pub async fn handle_signal(config_file: PathBuf, handler: &Arc<Mutex<JoinSet<()>>>) -> Result<()> {
+pub async fn handle_signal(
+    config_file: PathBuf,
+    handler: &Arc<Mutex<JoinSet<()>>>,
+) -> Result<(), Whatever> {
     // 设置信号处理器（仅 Unix 可用）
-    let mut term_signal = signal(SignalKind::terminate())?;
-    let quit_signal = signal(SignalKind::quit())?;
-    let hup_signal = signal(SignalKind::hangup())?;
-    let usr1_signal = signal(SignalKind::user_defined1())?;
+    let mut term_signal =
+        signal(SignalKind::terminate()).whatever_context("Failed to create SINTERM listener")?;
+    let quit_signal =
+        signal(SignalKind::quit()).whatever_context("Failed to create SIGQUIT listener")?;
+    let hup_signal =
+        signal(SignalKind::hangup()).whatever_context("Failed to create SIGHUP listener")?;
+    let usr1_signal = signal(SignalKind::user_defined1())
+        .whatever_context("Failed to create SIGUSR1 listener")?;
 
     tokio::spawn(handle_sigquit(quit_signal, handler.clone()));
 
@@ -67,18 +74,18 @@ pub async fn handle_signal(config_file: PathBuf, handler: &Arc<Mutex<JoinSet<()>
 }
 
 // 写入 PID 文件（仅 Unix）
-pub async fn init_pid_file(pid_file: &str) -> Result<()> {
+pub async fn init_pid_file(pid_file: &str) -> Result<(), Whatever> {
     let pid = process::id().to_string();
     match fs::write(pid_file, &pid).await {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => whatever!(
             "Failed to write PID file due to insufficient permissions: {}\n\
                 Please either:\n\
                 1. Run as root user, or\n\
                 2. Change the 'pid' path in your config to a writable location",
             pid_file
-        )),
-        Err(e) => Err(e).with_context(|| format!("Failed to write PID file: {}", pid_file)),
+        ),
+        Err(e) => Err(e).whatever_context(format!("Failed to write PID file to `{pid_file}`")),
     }
 }
 
@@ -98,12 +105,14 @@ async fn handle_sighup(
     handler: Arc<Mutex<JoinSet<()>>>,
 ) {
     let try_restart = async || {
-        let configure = fs::read(&config_file).await.context("Read config failed")?;
-        let new_config =
-            parse::parse(&configure, config_file.parent()).context("Parse config failed")?;
+        let configure = fs::read(&config_file)
+            .await
+            .whatever_context("Read config failed")?;
+        let new_config = parse::parse(&configure, config_file.parent())
+            .whatever_context("Parse config failed")?;
         let parse::Value::Nodes(pishoos) = new_config
             .get("pishoo")
-            .context("Pishoo block not exists")?
+            .whatever_context("Pishoo block not exists")?
         else {
             unreachable!("Parse error");
         };
@@ -112,7 +121,7 @@ async fn handle_sighup(
             .expect("No pishoo block found, but pishoo key exists");
         start_services_from_pishoo_block(&handler, pishoo).await?;
 
-        anyhow::Result::<_>::Ok(())
+        Result::<_, Whatever>::Ok(())
     };
 
     loop {

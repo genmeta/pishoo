@@ -10,7 +10,6 @@ path = "examples/forward.rs"
 
 [dependencies]
 # --- Core & Error Handling ---
-anyhow = { workspace = true }
 snafu = { workspace = true }
 thiserror = { workspace = true }
 

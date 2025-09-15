@@ -49,11 +49,10 @@ pub(crate) async fn index(
 
         let node_found = node.backtrack_node("index");
         let index_files = node_found.as_ref().map(|node| {
-            if let Some(Value::StringVec(index_files)) = node.get("index") {
-                index_files
-            } else {
+            let Some(Value::StringVec(index_files)) = node.get("index") else {
                 unreachable!("Invalid index value")
-            }
+            };
+            index_files
         });
 
         let index_files = if let Some(index_files) = index_files {

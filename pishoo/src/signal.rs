@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use gateway::error::Whatever;
 use tokio::task::JoinSet;
 
 use crate::SignalType;
@@ -11,7 +11,7 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
-pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<()> {
+pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
     #[cfg(unix)]
     {
         unix::send_signal(pid_file, signal_type).await
@@ -27,7 +27,7 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<()> 
 pub async fn handle_signal(
     config_file: PathBuf,
     handler: &Arc<tokio::sync::Mutex<JoinSet<()>>>,
-) -> Result<()> {
+) -> Result<(), Whatever> {
     #[cfg(unix)]
     {
         unix::handle_signal(config_file, handler).await
@@ -40,7 +40,7 @@ pub async fn handle_signal(
     }
 }
 
-pub async fn init_pid_file(pid_file: &str) -> Result<()> {
+pub async fn init_pid_file(pid_file: &str) -> Result<(), Whatever> {
     #[cfg(unix)]
     {
         unix::init_pid_file(pid_file).await

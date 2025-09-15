@@ -5,6 +5,7 @@ use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use qdns::Resolvers;
+use snafu::{Report, ResultExt, Whatever, whatever};
 use tokio::{io::AsyncWriteExt, time::timeout};
 use tracing::{Instrument, error, info};
 
@@ -45,12 +46,10 @@ pub async fn proxy_inner(
     // 创建 QUIC 连接
     let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
         Ok(conn) => conn,
-        Err(msg) => {
-            error!(
-                "[Forward][{}] Failed to create QUIC connection: {}",
-                uri, msg
-            );
-            return Ok(build_error_response(msg));
+        Err(error) => {
+            let report = Report::from_error(error);
+            error!("[Forward][{uri}] Failed to create QUIC connection: {report}");
+            return Ok(build_error_response(report.to_string()));
         }
     };
 
@@ -163,7 +162,7 @@ async fn create_quic_connection(
     pool: Arc<H3ConnectionPool>,
     host: &str,
     resolvers: Resolvers,
-) -> Result<H3SendRequest, String> {
+) -> Result<H3SendRequest, Whatever> {
     let handle_connection_error = || {
         H3ConnectionPool::global().clear_connections();
         qinterface::iface::QuicInterfaces::global();
@@ -172,18 +171,18 @@ async fn create_quic_connection(
         Ok(Ok(conn)) => conn,
         Ok(Err(e)) => {
             handle_connection_error();
-            return Err(format!("Failed to connect to host: {e}"));
+            return Err(e).whatever_context(format!("Connect to {host} failed"));
         }
-        Err(e) => {
+        Err(_e) => {
             handle_connection_error();
-            return Err(format!("Timeout to connect to host: {e}"));
+            whatever!("Connect {host} timeout")
         }
     };
 
-    let origin_dcid = conn.quic.origin_dcid().map_err(|e| {
-        error!("Failed to get origin DCID: {}", e);
-        "Failed to get origin DCID".to_string()
-    })?;
+    let origin_dcid = conn
+        .quic
+        .origin_dcid()
+        .whatever_context("Get quic connection ODCID failed")?;
     tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
     Ok(conn.h3.clone())
 }

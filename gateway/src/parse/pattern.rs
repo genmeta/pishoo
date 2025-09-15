@@ -4,8 +4,9 @@
 //! based on nginx location matching semantics
 
 use regex::Regex;
+use snafu::ResultExt;
 
-use crate::error::{CustomError, Result};
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
@@ -47,26 +48,34 @@ impl Pattern {
     }
 }
 
-pub fn parse_pattern(args: &[String]) -> Result<Pattern> {
+#[derive(snafu::Snafu, Debug)]
+pub enum ParsePatternError {
+    #[snafu(display("Unsupported location symbol `{symbol}`"))]
+    UnsupportedSymbol { symbol: String },
+    #[snafu(display("Invalid regex `{pattern}`"))]
+    RegexError {
+        source: regex::Error,
+        pattern: String,
+    },
+    #[snafu(display("Number of location args must be 1 or 2, got {nargs}"))]
+    UnexpectedArgs { nargs: usize },
+}
+
+pub fn parse_pattern(args: &[String]) -> Result<Pattern, ParsePatternError> {
     let pattern = match args {
         [pattern] if pattern == "/" => Pattern::Common,
         [pattern] if pattern.starts_with('/') => Pattern::NormalPrefix(pattern.clone()),
         [symbol, pattern] => match symbol.as_str() {
             "=" => Pattern::Exact(pattern.clone()),
             "^~" => Pattern::Prefix(pattern.clone()),
-            "~" => Pattern::Regex(Regex::new(pattern)?),
-            "~*" => Pattern::CRegex(Regex::new(&format!("(?i){pattern}"))?),
-            _ => {
-                return Err(CustomError::UnsupportedConfig(format!(
-                    "unsupported location symbol: {symbol}"
-                )));
+            "~" => Pattern::Regex(Regex::new(pattern).context(RegexSnafu { pattern })?),
+            "~*" => {
+                let regex = format!("(?i){pattern}");
+                Pattern::CRegex(Regex::new(&regex).context(RegexSnafu { pattern: regex })?)
             }
+            symbol => return UnsupportedSymbolSnafu { symbol }.fail(),
         },
-        _ => {
-            return Err(CustomError::UnsupportedConfig(
-                "The number of location args must be 1 or 2".to_string(),
-            ));
-        }
+        args => return UnexpectedArgsSnafu { nargs: args.len() }.fail(),
     };
     Ok(pattern)
 }
@@ -76,7 +85,6 @@ mod tests {
     use regex::Regex;
 
     use super::*;
-    use crate::error::CustomError; // 引入错误类型方便断言
 
     #[test]
     fn test_try_match_exact() {
@@ -254,10 +262,10 @@ mod tests {
     fn test_parse_pattern_invalid_symbol() {
         let args = vec!["??".to_string(), "/path".to_string()];
         let result = parse_pattern(&args);
-        assert!(matches!(result, Err(CustomError::UnsupportedConfig(_))));
-        if let Err(CustomError::UnsupportedConfig(msg)) = result {
-            assert!(msg.contains("unsupported location symbol: ??"));
-        }
+        assert!(matches!(
+            result,
+            Err(ParsePatternError::UnsupportedSymbol { .. })
+        ));
         println!("✅ Invalid symbol parsing test passed!");
     }
 
@@ -265,16 +273,16 @@ mod tests {
     fn test_parse_pattern_invalid_args_count() {
         let args0: Vec<String> = vec![];
         let result0 = parse_pattern(&args0);
-        assert!(matches!(result0, Err(CustomError::UnsupportedConfig(_))));
-        if let Err(CustomError::UnsupportedConfig(msg)) = result0 {
-            assert!(msg.contains("number of location args must be 1 or 2"));
-        }
+        assert!(matches!(
+            result0,
+            Err(ParsePatternError::UnexpectedArgs { .. })
+        ));
         let args3 = vec!["~".to_string(), "pattern".to_string(), "extra".to_string()];
         let result3 = parse_pattern(&args3);
-        assert!(matches!(result3, Err(CustomError::UnsupportedConfig(_))));
-        if let Err(CustomError::UnsupportedConfig(msg)) = result3 {
-            assert!(msg.contains("number of location args must be 1 or 2"));
-        }
+        assert!(matches!(
+            result3,
+            Err(ParsePatternError::UnexpectedArgs { .. })
+        ));
         println!("✅ Invalid argument count parsing test passed!");
     }
 
@@ -284,14 +292,14 @@ mod tests {
         let args_regex = vec!["~".to_string(), "[invalid".to_string()];
         let result_regex = parse_pattern(&args_regex);
         assert!(
-            matches!(result_regex, Err(CustomError::RegexError(_))),
+            matches!(result_regex, Err(ParsePatternError::RegexError { .. })),
             "Expected RegexError for ~"
         );
         // Test invalid regex for '~*'
         let args_cregex = vec!["~*".to_string(), "(?invalid".to_string()];
         let result_cregex = parse_pattern(&args_cregex);
         assert!(
-            matches!(result_cregex, Err(CustomError::RegexError(_))),
+            matches!(result_cregex, Err(ParsePatternError::RegexError { .. })),
             "Expected RegexError for ~*"
         );
         println!("✅ Invalid regex parsing tests passed!");

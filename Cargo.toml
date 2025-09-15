@@ -5,7 +5,6 @@ members = ["gateway", "pishoo"]
 
 [workspace.dependencies]
 # --- Core & Error Handling ---
-anyhow = "1"
 snafu = "0.8"
 thiserror = "2"
 

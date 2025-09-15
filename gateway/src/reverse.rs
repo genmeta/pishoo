@@ -17,14 +17,15 @@ use http::{Request, Response, StatusCode};
 use qdns::{HttpResolver, MdnsResolver, Resolve};
 use qtraversal::iface::{TraversalFactory, traversal_factory};
 use rustls::server::WebPkiClientVerifier;
-use snafu::Report;
-use tracing::{Instrument, debug, error, info};
+use snafu::{OptionExt, Report, ResultExt};
+use tokio::fs;
+use tracing::{Instrument, debug, error, info, info_span};
 
 use crate::{
-    error::{CustomError, Result},
+    error::{Result, StreamSnafu, Whatever},
     parse::{IPVersion, IfaceType, Listen, Node, Resolver, Value},
     publisher::Publisher,
-    reverse::{self, auth::trim_suffix_once},
+    reverse::{self},
 };
 
 mod auth;
@@ -49,10 +50,16 @@ pub async fn serve(
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
     let (routers, server_resolvers) = init_routers(&servers)?;
-    let quic_listners = create_quic_server(access_rules.0, &servers)?;
+    let quic_listners = create_quic_server(access_rules.0, &servers).await?;
 
-    let http_resovler = Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?);
-    let mdns_resovler = Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?);
+    let http_resovler = Arc::new(
+        HttpResolver::new(qdns::HTTP_DNS_SERVER)
+            .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
+    );
+    let mdns_resovler = Arc::new(
+        MdnsResolver::new(qdns::MDNS_SERVICE)
+            .whatever_context::<_, Whatever>("Failed to create mDNS resolver")?,
+    );
     let server_resolvers: HashMap<String, Vec<Arc<dyn Resolve + Send + Sync>>> = server_resolvers
         .into_iter()
         .map(|(server_name, resolvers)| {
@@ -122,13 +129,15 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 }
 
 /// 创建QUIC服务器实例
-fn create_quic_server(
+async fn create_quic_server(
     domain_access_rules: Arc<DomainRulesMatcher>,
     servers: &[Arc<Node>],
 ) -> Result<Arc<QuicListeners>> {
     let agents: [SocketAddr; 2] = [
-        "1.12.74.4:20004".parse()?,
-        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004".parse()?,
+        "1.12.74.4:20004".parse().unwrap(),
+        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004"
+            .parse()
+            .unwrap(),
     ];
 
     let factory = traversal_factory(&agents[..]);
@@ -168,10 +177,8 @@ fn create_quic_server(
     // collect & dedup
     let binds: HashSet<_> = server_binds.values().flatten().cloned().collect();
     let factory = traversal_factory(&agents[..]);
-    let builder = gm_quic::QuicListeners::builder().map_err(|e| {
-        error!("Failed to create QUIC listener builder: {}", e);
-        CustomError::LocalhostNotInitialized
-    })?;
+    let builder = gm_quic::QuicListeners::builder()
+        .whatever_context::<_, Whatever>("Failed to create QUIC listeners")?;
 
     #[cfg(feature = "qlog")]
     {
@@ -211,8 +218,18 @@ fn create_quic_server(
             unreachable!("Invalid server name");
         };
 
-        let cert = std::fs::read(cert_path)?;
-        let key = std::fs::read(key_path)?;
+        let cert = fs::read(cert_path)
+            .await
+            .whatever_context::<_, Whatever>(format!(
+                "Failed to read certificate file `{}`",
+                cert_path.display()
+            ))?;
+        let key = fs::read(key_path)
+            .await
+            .whatever_context::<_, Whatever>(format!(
+                "Failed to read private key file `{}`",
+                key_path.display()
+            ))?;
         for mut domain in server_name {
             if domain.ends_with('~') {
                 domain = domain.replace('~', ".genmeta.net");
@@ -259,9 +276,9 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<BindUri> {
 async fn handle_connections(
     quic_server: Arc<QuicListeners>,
     access_rules: Arc<LocationRulesMatcher>,
-    routers: Arc<HashMap<String, Arc<Node>>>,
+    router: Arc<HashMap<String, Arc<Node>>>,
 ) -> Result<()> {
-    let handle_connection = async |conn: Arc<Connection>| {
+    let handle_connection = async |conn: Arc<Connection>, server_name: String| {
         info!(target: "connect", "Accepted connection");
         // 将QUIC连接包装为H3 QUIC连接
         let h3_quic_conn = h3_shim::QuicConnection::new(conn.clone());
@@ -269,79 +286,106 @@ async fn handle_connections(
         debug!(target: "connect", "QUIC connection wrapped as H3 QUIC connection");
 
         // 建立H3连接
-        let mut h3_conn = match h3::server::Connection::new(h3_quic_conn).await {
-            Ok(conn) => {
-                debug!(target: "connect", "H3 connection established");
-                conn
-            }
-            Err(e) => {
-                error!(target: "connect", "Failed to establish H3 connection: {}", e);
-                return;
-            }
-        };
+        let mut h3_conn = h3::server::Connection::<_, Bytes>::new(h3_quic_conn)
+            .await
+            .whatever_context::<_, Whatever>("Failed to establish H3 connection")?;
 
         debug!(target: "connect", "H3 connection established");
-        debug!(target: "connect", "RouterMap: {:?}", routers);
+        debug!(target: "connect", "RouterMap: {:?}", router);
 
-        // 为每个连接创建异步任务
-        tokio::spawn({
-            let routers = routers.clone();
-            let conn = conn.clone();
-            let access_rules = access_rules.clone();
+        let router = router.clone();
+        let access_rules = access_rules.clone();
+
+        let handle_request = Arc::new(async move |request, stream| {
+            let span = info_span!("handle_request", ?request,);
+            let handle_request = handle_request(
+                server_name.clone(),
+                router.clone(),
+                access_rules.clone(),
+                conn.clone(),
+                request,
+                stream,
+            )
+            .await;
+
             async move {
-                while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(
-                    |error| error!(target: "connect", "Connection acceptance error: {}", Report::from_error(error)),
-                ) {
-                    let routers = routers.clone();
-                    let conn = conn.clone();
-                    let access_rules = access_rules.clone();
-                    let handle_request = async move {
-                        let (req, stream) = req_resolver.resolve_request().await?;
-                        handle_request(routers, conn, access_rules, req, stream).await
-                    };
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_request.await {
-                            error!(target: "request", "Request processing error: {}", Report::from_error(e));
-                        }
-                    });
+                info!(target: "request", "Resolved request");
+
+                if let Err(handle_request_error) = handle_request {
+                    error!(
+                        target: "request", "Failed to handle request: {}",
+                        Report::from_error(handle_request_error)
+                    );
                 }
             }
+            .instrument(span)
+            .await
         });
+
+        // 为每个连接创建异步任务
+        let accept_requests = async move {
+            while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(|error| {
+                error!(
+                    target: "connect", "Failed to accept request: {}",
+                    Report::from_error(error.clone())
+                )
+            }) {
+                let handle_request = handle_request.clone();
+                let handle_and_resolve_request = async move {
+                    match req_resolver.resolve_request().await {
+                        Ok((request, stream)) => {
+                            handle_request(request, stream).await;
+                        }
+                        Err(e) => error!(
+                            target: "request", "Failed to resolve request: {}",
+                            Report::from_error(e)
+                        ),
+                    }
+                };
+                tokio::spawn(handle_and_resolve_request.in_current_span());
+            }
+        };
+        Result::<_, Whatever>::Ok(tokio::spawn(accept_requests.in_current_span()))
     };
 
     // 持续接受新连接
     while let Ok((conn, server_name, pathway, link)) = quic_server.accept().await {
-        handle_connection(conn)
-            .instrument(tracing::info_span!(
-                "handle_connection",
-                %server_name,
-                %pathway,
-                %link
-            ))
-            .await;
+        let span = info_span!(
+            "handle_connection",
+            %server_name,
+            %pathway,
+            %link
+        );
+        async move {
+            if let Err(error) = handle_connection(conn, server_name).await {
+                error!(
+                    target: "connect", "Failed to handle connection: {}",
+                    Report::from_error(error)
+                );
+            }
+        }
+        .instrument(span)
+        .await;
     }
     Ok(())
 }
 
 /// 处理单个HTTP请求
 async fn handle_request(
+    server_name: String,
     servers: Arc<HashMap<String, Arc<Node>>>,
-    conn: Arc<Connection>,
     access_rules: Arc<LocationRulesMatcher>,
-    req: Request<()>,
+    conn: Arc<Connection>,
+    request: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    let host = req
-        .uri()
-        .authority()
-        .ok_or(CustomError::MissingHost)?
-        .host();
-
     // 查找匹配的路由规则
     // TODO 支持 泛域名匹配
     let server = servers
-        .get(host)
-        .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
+        .get(&server_name)
+        .whatever_context::<_, Whatever>(format!(
+            "No matched server for request's host `{server_name}`",
+        ))?;
 
     let locations = if let Some(Value::Nodes(locations)) = server.get("location") {
         locations
@@ -349,19 +393,19 @@ async fn handle_request(
         &Vec::new()
     };
 
-    let (location, final_pattern) = match_location(locations, req.uri().path())
-        .ok_or_else(|| CustomError::RouterNotFound(host.to_string()))?;
+    let (location, final_pattern) = match_location(locations, request.uri().path())
+        .whatever_context::<_, Whatever>(format!(
+            "No matched location for path `{}` in server `{}`",
+            request.uri().path(),
+            server_name
+        ))?;
     let final_pattern = final_pattern.to_string();
 
     let client_name = conn.client_name().await.unwrap_or_default();
-    let client_name = client_name.as_deref().unwrap_or_default();
-    let client_name = trim_suffix_once(client_name, auth::SUFFIX);
-    let http_request = HttpRequest::new(client_name, &req);
-    let server_name = conn.server_name().await.unwrap_or_default();
-    let server_name = trim_suffix_once(&server_name, auth::SUFFIX);
+    let http_request = HttpRequest::new(client_name.as_deref(), &request);
 
     let (_firewall_matched_domain, firewall_matched_location, firewall_action) =
-        match access_rules.match_rule(server_name, req.uri().path(), &http_request) {
+        match access_rules.match_rule(&server_name, request.uri().path(), &http_request) {
             Ok((domain, location, action)) => (Some(domain), Some(location), action),
             Err(..) => (None, None, RequestAction::Allow),
         };
@@ -374,13 +418,13 @@ async fn handle_request(
             .body(())
             .expect("Failed to build response");
 
-        let client_name = match client_name {
-            "" => "<unknown client>",
-            name => name,
+        let client_name = match &client_name {
+            None => "<unknown client>",
+            Some(name) => name,
         };
-        tracing::info!(target: "request", "Firewall rules deny request from {client_name} to {server_name} with uri {}", req.uri());
-        sender.send_response(response).await?;
-        sender.finish().await?;
+        info!(target: "request", "Firewall rules deny request from {client_name} to {server_name} with uri {}", request.uri());
+        sender.send_response(response).await.context(StreamSnafu)?;
+        sender.finish().await.context(StreamSnafu)?;
         return Ok(());
     }
 
@@ -390,18 +434,18 @@ async fn handle_request(
 
     match location_values {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, &final_pattern, req, recver, sender).await?;
+            reverse::proxy::handle(location, &final_pattern, request, recver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
-            reverse::file::root(location, req, sender).await?;
+            reverse::file::root(location, request, sender).await?;
         }
         location_value if location_value.contains_key("alias") => {
-            reverse::file::alias(location, &final_pattern, req, sender).await?;
+            reverse::file::alias(location, &final_pattern, request, sender).await?;
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
             let l = firewall_matched_location;
-            reverse::sshd::login(location, &final_pattern, l, req, recver, sender).await?;
+            reverse::sshd::login(location, &final_pattern, l, request, recver, sender).await?;
         }
         _ => {
             let response = Response::builder()
@@ -409,8 +453,8 @@ async fn handle_request(
                 .body(())
                 .expect("Failed to build response");
 
-            sender.send_response(response).await?;
-            sender.finish().await?;
+            sender.send_response(response).await.context(StreamSnafu)?;
+            sender.finish().await.context(StreamSnafu)?;
         }
     }
     Ok(())

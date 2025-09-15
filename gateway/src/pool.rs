@@ -1,15 +1,64 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    error::Error,
+    fmt::Display,
+    sync::{Arc, RwLock},
+};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::{Stream, StreamExt, stream};
 use gm_quic::QuicClient;
 use h3::client::SendRequest;
+use qconnection::prelude::{EndpointAddr, SocketEndpointAddr};
 use qdns::Resolvers;
+use snafu::{OptionExt, Report, ResultExt};
 use tokio::{io, sync::Mutex};
 use tracing::info;
 
-use crate::forward::create_quic_client;
+use crate::{error::Whatever, forward::create_quic_client};
+
+#[derive(Debug)]
+struct DnsErrors {
+    errors: Vec<(String, io::Error)>,
+}
+
+impl Display for DnsErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (source, error) in &self.errors {
+            writeln!(f, "Resolver {source} failed: {}", Report::from_error(error))?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for DnsErrors {}
+
+async fn lookup(
+    resolvers: &Resolvers,
+    server_name: &str,
+) -> Result<impl Stream<Item = SocketEndpointAddr> + use<>, DnsErrors> {
+    let mut errors = vec![];
+
+    let mut lookup_stream = resolvers.lookup(server_name);
+    let endpoints = loop {
+        match lookup_stream.next().await {
+            // 多余？
+            Some((source, Ok(endpoints))) if endpoints.is_empty() => {
+                errors.push((
+                    source,
+                    io::Error::new(io::ErrorKind::NotFound, "No endpoints found"),
+                ));
+            }
+            Some((source, Err(error))) => {
+                errors.push((source, error));
+            }
+            Some((_source, Ok(endpoints))) => break endpoints,
+            None => return Err(DnsErrors { errors }),
+        }
+    };
+    Ok(stream::iter(endpoints)
+        .chain(lookup_stream.flat_map(|(_, eps)| stream::iter(eps.unwrap_or_default()))))
+}
 
 #[derive(Clone)]
 pub struct ReusableConnection {
@@ -45,7 +94,7 @@ impl H3ConnectionPool {
     /// 重新初始化全局连接池
     pub fn reinitialize() -> Arc<Self> {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
-        info!("[Pool] Reinitializing H3ConnectionPool");
+        info!(target: "pool", "Reinitializing H3ConnectionPool");
         let mut guard = GLOBAL.write().unwrap();
         let pool = Arc::new(H3ConnectionPool::new());
         *guard = Some(pool.clone());
@@ -72,8 +121,8 @@ impl H3ConnectionPool {
         &self,
         server_name: impl Into<String>,
         resolvers: Resolvers,
-    ) -> io::Result<ReusableConnection> {
-        let server_name = server_name.into();
+    ) -> Result<ReusableConnection, Whatever> {
+        let server_name: String = server_name.into();
         let mut entry = None;
 
         // Get a shared access so that multiple asynchronous tasks can asynchronously wait for other tasks
@@ -92,41 +141,38 @@ impl H3ConnectionPool {
 
         if let Some(conn) = entry.as_ref() {
             // todo: fresh quic conenc
-            tracing::debug!("[pool] Reusing connection to {server_name}");
-            return io::Result::Ok(conn.clone());
+            tracing::debug!(target: "pool", "Reusing connection to {server_name}");
+            return Ok(conn.clone());
         }
 
-        let mut server_eps = resolvers.lookup(&server_name);
-        let (_, eps) = match server_eps.next().await {
-            Some(endpoints) => endpoints,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("No endpoints found for server: {server_name}"),
-                ));
-            }
-        };
-
-        info!("[DNS] Resolved endpoints for {server_name}: {eps:?}");
         let connect_or_reuse = async {
-            let quic_connection = self.quic_client.connect(server_name.clone(), eps)?;
+            let mut server_eps = lookup(&resolvers, &server_name)
+                .await
+                .whatever_context("DNS lookup failed")?;
+
+            let server_ep = server_eps
+                .next()
+                .await
+                .whatever_context("No endpoint found for server")?;
+
+            let quic_connection = self
+                .quic_client
+                .connect(server_name.clone(), [] as [EndpointAddr; 0])
+                .unwrap();
+
             tokio::spawn({
                 let conn = quic_connection.clone();
                 async move {
-                    while let Some((_, eps)) = server_eps.next().await {
-                        for ep in eps {
-                            if conn.add_peer_endpoint(ep.into()).is_err() {
-                                tracing::warn!("[Pool] Connection closed");
-                                return;
-                            }
-                        }
+                    _ = conn.add_peer_endpoint(server_ep.into());
+                    while let Some(ep) = server_eps.next().await {
+                        _ = conn.add_peer_endpoint(ep.into());
                     }
                 }
             });
             let (mut h3_connection, send_request) =
                 h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))
                     .await
-                    .map_err(io::Error::other)?;
+                    .whatever_context("Failed to establish h3 connection")?;
 
             let conn = ReusableConnection {
                 quic: quic_connection.clone(),
@@ -153,7 +199,10 @@ impl H3ConnectionPool {
             Ok(send_request) => Ok(send_request),
             Err(error) => {
                 // clean up failed connections
-                tracing::debug!("[Pool] Failed to connect to {server_name}: {error}");
+                tracing::debug!(
+                    "[Pool] Failed to connect to {server_name}: {}",
+                    Report::from_error(&error)
+                );
                 tokio::task::spawn_blocking({
                     let h3_clients = self.h3_clients.clone();
                     move || h3_clients.remove_if(&server_name, |_, v| v.blocking_lock().is_none())

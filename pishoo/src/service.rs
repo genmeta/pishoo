@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use firewall_db::{
     base::matcher::{DomainRulesMatcher, LocationRulesMatcher},
     sea_orm::Database,
     service::{domain_service::DomainService, location_service::LocationService},
 };
 use gateway::{
+    error::Whatever,
     forward,
     parse::{Node, Value},
     reverse,
 };
+use snafu::ResultExt;
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{PID_FILE_DEFAULT, signal};
@@ -18,7 +19,7 @@ use crate::{PID_FILE_DEFAULT, signal};
 pub async fn start_services_from_pishoo_block(
     handler: &Mutex<JoinSet<()>>,
     pishoo: &Node, // Pishoo block
-) -> anyhow::Result<()> {
+) -> Result<(), Whatever> {
     let pid_file = if let Some(Value::String(pid)) = pishoo.get("pid") {
         pid
     } else {
@@ -31,24 +32,28 @@ pub async fn start_services_from_pishoo_block(
         firewall_db::DEFAULT_DB_URI
     };
 
-    let db = Database::connect(access_rules)
-        .await
-        .context("Failed to connect to firewall database")?;
-    firewall_db::initial_db(&db)
-        .await
-        .context("Failed to initialize firewall database")?;
-    let domain_rules = DomainService::new(&db)
-        .list_all_rules()
-        .await
-        .context("Failed to load domain rules from firewall database")?;
-    let location_rules = LocationService::new(&db)
-        .list_all_rules()
-        .await
-        .context("Failed to load location rules from firewall database")?;
-    let access_rules = (
-        Arc::new(DomainRulesMatcher::from(domain_rules)),
-        Arc::new(LocationRulesMatcher::from(location_rules)),
-    );
+    let access_rules = async {
+        let db = Database::connect(access_rules)
+            .await
+            .whatever_context("Failed to connect to firewall database")?;
+        firewall_db::initial_db(&db)
+            .await
+            .whatever_context("Failed to initialize firewall database")?;
+        let domain_rules = DomainService::new(&db)
+            .list_all_rules()
+            .await
+            .whatever_context("Failed to load domain rules from firewall database")?;
+        let location_rules = LocationService::new(&db)
+            .list_all_rules()
+            .await
+            .whatever_context("Failed to load location rules from firewall database")?;
+        Result::<_, Whatever>::Ok((
+            Arc::new(DomainRulesMatcher::from(domain_rules)),
+            Arc::new(LocationRulesMatcher::from(location_rules)),
+        ))
+    }
+    .await
+    .whatever_context(format!("Failed to load access rules `{}`", access_rules))?;
 
     #[cfg(unix)]
     signal::init_pid_file(pid_file).await?;

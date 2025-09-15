@@ -1,14 +1,13 @@
-use std::sync::Arc;
-
-use anyhow::{Result, bail};
 use gateway::{
     forward,
     parse::{self, Value},
 };
+use snafu::{ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+#[snafu::report]
+async fn main() -> Result<(), Whatever> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_file(true)
@@ -28,18 +27,21 @@ async fn main() -> Result<()> {
     };
     let config_file = std::path::Path::new(config_file);
     let configure = std::fs::read(config_file).unwrap();
-    let config = parse::parse(&configure, config_file.parent())?;
+    let config =
+        parse::parse(&configure, config_file.parent()).whatever_context("Parse config failed")?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
     let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
-        Arc::clone(pishoo.first().unwrap())
+        pishoo
+            .first()
+            .expect("No pishoo block found, but pishoo key exists")
     } else {
-        bail!("Invalid pishoo");
+        unreachable!("Parse error")
     };
 
     let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {
-        bail!("No proxy found in pishoo configuration");
+        whatever!("No proxy found in pishoo configuration");
     };
 
     let mut handler = JoinSet::new();

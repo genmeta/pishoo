@@ -4,15 +4,15 @@ use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::SendStream;
 use http::{Request, Response, StatusCode, Uri, header::CONTENT_LENGTH};
+use snafu::ResultExt;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info};
 
 use crate::{
     command::{self, content_type, index},
-    error::Result,
+    error::{Result, StreamSnafu, Whatever},
     h3::H3Sink,
     parse::{Node, Value},
-    reverse::build_error_response,
 };
 
 /// Handles incoming HTTP requests, attempting to serve a static file based on a configured root directory.
@@ -38,14 +38,10 @@ use crate::{
 pub async fn root(
     location: &Arc<Node>,
     req: Request<()>,
-    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
+    sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    let root = if let Some(Value::Path(root)) = location.get("root") {
-        root
-    } else {
-        sender.send_response(build_error_response()).await?;
-        sender.finish().await?;
-        return Ok(());
+    let Some(Value::Path(root)) = location.get("root") else {
+        unreachable!()
     };
 
     let file_path = format!("{}{}", root.display(), req.uri().path());
@@ -82,17 +78,13 @@ pub async fn alias(
     location: &Arc<Node>,
     pattern: &str,
     req: Request<()>,
-    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
+    sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
     // In the case of an `alias`, it is necessary to remove the matched prefix from the URL.
     let relative_path = req.uri().path().trim_start_matches(pattern);
 
-    let alias = if let Some(Value::Path(alias)) = location.get("alias") {
-        alias
-    } else {
-        sender.send_response(build_error_response()).await?;
-        sender.finish().await?;
-        return Ok(());
+    let Some(Value::Path(alias)) = location.get("alias") else {
+        unreachable!()
     };
 
     let file_path = format!("{}{}", alias.display(), relative_path);
@@ -124,18 +116,19 @@ async fn serve_static_file(
     uri: &Uri,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    debug!("[Response handling][{}] Processing static file", uri);
+    debug!(target: "static_file", "[Response handling][{}] Processing static file", uri);
 
     let (file, file_size, file_path) = match index(location, file_path).await {
         Ok(result) => result,
-        _ => {
+        Err(index_error) => {
             let response = Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(())
                 .expect("Failed to build response");
 
-            sender.send_response(response).await?;
-            sender.finish().await?;
+            tracing::info!(target: "static_file", "[Proxy][{}] File not found: {}, error: {}", uri, file_path, index_error);
+            sender.send_response(response).await.context(StreamSnafu)?;
+            sender.finish().await.context(StreamSnafu)?;
             return Ok(());
         }
     };
@@ -152,17 +145,19 @@ async fn serve_static_file(
     content_type(location, &mut parts, &file_path);
 
     let response = Response::from_parts(parts, body);
-    sender.send_response(response).await?;
+    sender.send_response(response).await.context(StreamSnafu)?;
 
     let mut reader = BufReader::new(file);
     let mut stream = H3Sink::new(sender);
     tokio::io::copy(&mut reader, &mut stream)
         .await
-        .inspect_err(|e| error!("[Response handling][{}] Error sending file: {}", uri, e))?;
+        .whatever_context::<_, Whatever>("Failed to send file content")?;
 
     match stream.shutdown().await {
-        Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
-        Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+        Ok(()) => info!(target: "static_file", "[Proxy][{}] Request finished sent", uri),
+        Err(e) => {
+            error!(target: "static_file", "[Proxy][{}] Error sending request data end: {}", uri, e)
+        }
     }
     Ok(())
 }

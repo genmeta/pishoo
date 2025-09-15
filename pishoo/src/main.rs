@@ -1,8 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
-use anyhow::{Context, Result};
 use clap::{Parser, command};
-use gateway::parse::Value;
+use gateway::{error::Whatever, parse::Value};
+use snafu::{OptionExt, ResultExt};
 use tokio::{fs, task::JoinSet};
 
 use crate::service::start_services_from_pishoo_block;
@@ -51,9 +51,9 @@ pub enum SignalType {
     Reload,
 }
 
-// TODO: multi-thread async runtime
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+#[tokio::main]
+#[snafu::report]
+async fn main() -> Result<(), Whatever> {
     let args = Args::parse();
 
     // TODO 将日志存储到 /var/pishoo/pishoo.log
@@ -76,16 +76,16 @@ async fn main() -> Result<()> {
 
     let config_file = args.config_file;
 
-    let config = fs::read(&config_file).await.context(format!(
+    let config = fs::read(&config_file).await.whatever_context(format!(
         "Failed to read configuration file at `{}`",
         config_file.display()
     ))?;
-    let config = gateway::parse::parse(&config, config_file.parent()).context(format!(
+    let config = gateway::parse::parse(&config, config_file.parent()).whatever_context(format!(
         "Failed to parse configuration file at `{}`",
         config_file.display()
     ))?;
 
-    let pishoo = if let Value::Nodes(pishoo) = config.get("pishoo").context(format!(
+    let pishoo = if let Value::Nodes(pishoo) = config.get("pishoo").whatever_context(format!(
         "Pishoo block not found in configuration file `{}`",
         config_file.display()
     ))? {

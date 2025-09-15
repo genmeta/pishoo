@@ -1046,7 +1046,7 @@ checksum = "7fd99930f64d146689264c637b5af2f0233a933bef0d8570e2526bf9e083192d"
 [[package]]
 name = "firewall-base"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#5e8d951430a9083185d97d38ea5a09ee4d9903aa"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#47e006b990655e36146572c101fa8b108d661d2f"
 dependencies = [
  "derive_more",
  "globset",
@@ -1063,7 +1063,7 @@ dependencies = [
 [[package]]
 name = "firewall-db"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#5e8d951430a9083185d97d38ea5a09ee4d9903aa"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#47e006b990655e36146572c101fa8b108d661d2f"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1235,7 +1235,6 @@ dependencies = [
 name = "gateway"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -1414,7 +1413,7 @@ dependencies = [
 [[package]]
 name = "gm-quic"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1494,7 +1493,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "dashmap",
@@ -2043,9 +2042,9 @@ checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "libredox"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "391290121bad3d37fbddad76d8f5d1c1c314cfc646d143d7e07a3086ddff0ce3"
+checksum = "416f7e718bdb06000964960ffa43b4335ad4012ae8b99060261aa4a8088d5ccb"
 dependencies = [
  "bitflags 2.9.4",
  "libc",
@@ -2674,13 +2673,13 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 name = "pishoo"
 version = "0.3.1"
 dependencies = [
- "anyhow",
  "clap",
  "console-subscriber",
  "firewall-db",
  "gateway",
  "nix",
  "qdns",
+ "snafu",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2962,7 +2961,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bitflags 2.9.4",
  "bytes",
@@ -2985,7 +2984,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "qbase",
  "qevent",
@@ -2998,7 +2997,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3023,7 +3022,7 @@ dependencies = [
 [[package]]
 name = "qdns"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3036,7 +3035,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.16",
  "tokio",
- "tokio-stream",
  "tracing",
  "url",
 ]
@@ -3044,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3062,7 +3060,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3084,7 +3082,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "darling 0.21.3",
  "proc-macro2",
@@ -3095,7 +3093,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3113,7 +3111,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3139,7 +3137,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3209,7 +3207,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#4113b6c50e38636e514320e2592f42ea4329c6e6"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=feat%2Fv0.3.1#5815ea7ba0e8ccf236ca43de5013f342f0d12bcb"
 dependencies = [
  "bytes",
  "futures",
@@ -3592,9 +3590,9 @@ dependencies = [
 
 [[package]]
 name = "rust_decimal"
-version = "1.37.2"
+version = "1.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b203a6425500a03e0919c42d3c47caca51e79f1132046626d2c8871c5092035d"
+checksum = "c8975fc98059f365204d635119cf9c5a60ae67b841ed49b5422a9a7e56cdfac0"
 dependencies = [
  "arrayvec",
  "borsh",
@@ -3932,10 +3930,11 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.219"
+version = "1.0.223"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
+checksum = "a505d71960adde88e293da5cb5eda57093379f64e61cf77bf0e6a63af07a7bac"
 dependencies = [
+ "serde_core",
  "serde_derive",
 ]
 
@@ -3950,10 +3949,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_derive"
-version = "1.0.219"
+name = "serde_core"
+version = "1.0.223"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
+checksum = "20f57cbd357666aa7b3ac84a90b4ea328f1d4ddb6772b430caa5d9e1309bb9e9"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.223"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d428d07faf17e306e699ec1e91996e5a165ba5d6bce5b5155173e91a8a01a56"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3962,14 +3970,15 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.143"
+version = "1.0.145"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d401abef1d108fbd9cbaebc3e46611f4b1021f714a0597a71f41ee463f5f4a5a"
+checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
 dependencies = [
  "itoa",
  "memchr",
  "ryu",
  "serde",
+ "serde_core",
 ]
 
 [[package]]

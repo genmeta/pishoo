@@ -9,12 +9,13 @@ use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
 use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use qtraversal::iface::traversal_factory;
+use snafu::{Report, ResultExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
     command,
-    error::{CustomError, Result},
+    error::{Result, Whatever},
     forward,
     parse::{Node, Value},
     pool::H3ConnectionPool,
@@ -42,27 +43,31 @@ pub async fn serve(
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
     let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
-        return Err(CustomError::InvalidConfig(
-            "Invalid listen address".to_string(),
-        ));
+        unreachable!()
     };
 
-    let listener = TcpListener::bind(addr).await.inspect_err(|e| {
-        error!("TCP listener binding failed: {:?}", e);
-    })?;
+    let (listener, local_addr) = async {
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+        io::Result::Ok((listener, local_addr))
+    }
+    .await
+    .whatever_context::<_, Whatever>(format!("Failed to listen to TCP address: {}", addr))?;
 
-    let local_addr = listener.local_addr().inspect_err(|e| {
-        error!("TCP listener inspect failed: {:?}", e);
-    })?;
-
-    info!("Listening on: http://{}", local_addr);
+    info!(target: "forward", "Listening on: http://{}", local_addr);
 
     let resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
         Resolvers::default().with(resolver.into())
     } else {
         Resolvers::default()
-            .with(Arc::new(HttpResolver::new(qdns::HTTP_DNS_SERVER)?))
-            .with(Arc::new(MdnsResolver::new(qdns::MDNS_SERVICE)?))
+            .with(Arc::new(
+                HttpResolver::new(qdns::HTTP_DNS_SERVER)
+                    .whatever_context::<_, Whatever>("Failed to create http dns resolver")?,
+            ))
+            .with(Arc::new(
+                MdnsResolver::new(qdns::MDNS_SERVICE)
+                    .whatever_context::<_, Whatever>("Failed to create mdns resolver")?,
+            ))
     };
 
     H3ConnectionPool::reinitialize();
@@ -74,38 +79,36 @@ pub async fn serve(
         let acl = acl.clone();
         let resolvers = resolvers.clone();
 
-        tokio::task::spawn({
+        // 为每个连接创建服务处理器
+        let service = service_fn(move |mut req| {
+            let host = validate_host(&mut req).unwrap();
+
+            if !acl.check(&host) {
+                return forward::normal::proxy(req).boxed();
+            }
+
+            let is_connect = req.method() == "CONNECT";
+            let resolvers = resolvers.clone();
             async move {
-                // 为每个连接创建服务处理器
-                let service = service_fn(move |mut req| {
-                    let host = validate_host(&mut req).unwrap();
-
-                    if !acl.check(&host) {
-                        return forward::normal::proxy(req).boxed();
-                    }
-
-                    let is_connect = req.method() == "CONNECT";
-                    let resolvers = resolvers.clone();
-                    async move {
-                        if is_connect {
-                            forward::quic::connect(req, resolvers).await
-                        } else {
-                            forward::quic::proxy(req, resolvers).await
-                        }
-                    }
-                    .boxed()
-                });
-
-                // 启动 HTTP/1.1 服务
-                if let Err(err) = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(io, service)
-                    .with_upgrades()
-                    .await
-                {
-                    error!("Connection handling failed: {err:?}");
+                if is_connect {
+                    forward::quic::connect(req, resolvers).await
+                } else {
+                    forward::quic::proxy(req, resolvers).await
                 }
+            }
+            .boxed()
+        });
+
+        tokio::task::spawn(async move {
+            // 启动 HTTP/1.1 服务
+            if let Err(error) = http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+            {
+                error!(target: "forward", "Connection handling failed: {}", Report::from_error(&error));
             }
         });
     };
@@ -113,7 +116,11 @@ pub async fn serve(
     let task = async move {
         loop {
             match listener.accept().await {
-                Ok((stream, _from)) => accept_tcp_stream(stream).await,
+                Ok((stream, from)) => {
+                    accept_tcp_stream(stream)
+                        .instrument(info_span!(target: "forward", "accept", %from))
+                        .await
+                }
                 Err(_) => {
                     // 出错时，继续循环以便可响应停止信号
                 }
@@ -134,7 +141,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             qinterface::iface::QuicInterfaces::global().clear();
             tokio::spawn(async move {
                 if let Err(error) = forward_proxy.await {
-                    error!(target: "forward", "Forward proxy failed: {error:?}");
+                    error!(target: "forward", "Forward proxy failed: {}", Report::from_error(&error));
                 }
             });
             Ok(())
@@ -142,7 +149,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
         Err(launch_error) => {
             H3ConnectionPool::global().clear_connections();
             qinterface::iface::QuicInterfaces::global().restart();
-            tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}. Restart all interfaces");
+            tracing::error!(target: "forward", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }
     }
@@ -157,7 +164,7 @@ pub(crate) fn create_quic_client() -> QuicClient {
             .unwrap(),
     ];
 
-    info!("[Forward] Creating QUIC client with agents: {:?}", agents);
+    info!(target: "forward", "Creating QUIC client with agents: {:?}", agents);
     let factory = traversal_factory(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
@@ -223,7 +230,7 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Str
         Some(h) => h,
         None => {
             let reason = format!("Invalid Host header: {req:?}");
-            warn!("{}", reason);
+            warn!(target: "forward", "{}", reason);
             return Err(reason);
         }
     };

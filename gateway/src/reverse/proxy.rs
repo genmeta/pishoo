@@ -6,19 +6,16 @@ use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, Response, Uri, Version};
 use http_body_util::{BodyExt, StreamBody};
-use hyper::{
-    body::{Frame, Incoming},
-    client::conn::http1::Builder,
-};
+use hyper::body::{Frame, Incoming};
 use hyper_util::rt::TokioIo;
-use snafu::Report;
+use snafu::{OptionExt, Report, ResultExt};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info};
 
 use crate::{
     command,
-    error::{CustomError, Result},
+    error::{InvalidConfigSnafu, Result, StreamSnafu, Whatever},
     h3::{H3Sink, H3Stream},
     parse::{Node, Value},
     reverse::build_error_response,
@@ -47,8 +44,9 @@ pub async fn handle(
                 uri,
                 Report::from_error(e)
             );
-            sender.send_response(build_error_response()).await?;
-            sender.finish().await?;
+            let resp = build_error_response();
+            sender.send_response(resp).await.context(StreamSnafu)?;
+            sender.finish().await.context(StreamSnafu)?;
             return Ok(());
         }
     };
@@ -62,9 +60,8 @@ pub async fn handle(
     debug!("[Response handling][{uri}] Sending response headers: {parts:?}");
 
     // 发送响应头
-    sender
-        .send_response(Response::from_parts(parts, ()))
-        .await?;
+    let resp1 = Response::from_parts(parts, ());
+    sender.send_response(resp1).await.context(StreamSnafu)?;
 
     let mut body_stream =
         tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
@@ -94,13 +91,11 @@ pub async fn pass(
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
-    let proxy_pass = if let Some(Value::String(proxy_pass)) = location.get("proxy_pass") {
-        proxy_pass
-    } else {
+    let Some(Value::Uri(proxy_pass)) = location.get("proxy_pass") else {
         unreachable!("proxy_pass is required for reverse proxy");
     };
 
-    tracing::debug!("[Request processing] proxy_pass: {proxy_pass:?}");
+    tracing::debug!("[Request processing] proxy_pass: {proxy_pass}");
 
     let mut path_and_query = parts
         .uri
@@ -111,7 +106,8 @@ pub async fn pass(
         "[Request processing] Original request path and query: {}",
         path_and_query
     );
-    if proxy_pass.ends_with('/') && !final_pattern.eq("/") {
+
+    if proxy_pass.path().ends_with('/') && !final_pattern.eq("/") {
         // 将匹配到的路径部分替换掉原始请求路径
         path_and_query = path_and_query.replace(final_pattern, "");
         if path_and_query.is_empty() {
@@ -119,40 +115,41 @@ pub async fn pass(
         }
     }
 
-    let target_uri = Uri::from_str(&path_and_query)?;
+    let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
+        "Failed to generate target URI from `{path_and_query}`"
+    ))?;
 
     // 准备请求参数
     let mut new_parts = parts;
     new_parts.uri = target_uri.clone();
     new_parts.version = Version::HTTP_11;
 
-    // 解析目标地址
-    let proxy_pass = Uri::from_str(proxy_pass).map_err(|e| {
-        error!(
-            "[Request processing] Invalid proxy_pass URI: {}",
-            Report::from_error(&e)
-        );
-        CustomError::InvalidConfig(format!("Invalid proxy_pass URI: {e}"))
-    })?;
-    let host = proxy_pass.host().ok_or(CustomError::MissingHost)?;
-    let port = proxy_pass.port().map(|p| p.as_u16()).unwrap_or(80);
-
     info!("[Request processing] Preparing to proxy request: {new_parts:?}");
 
+    // 解析目标地址
+    let host = proxy_pass
+        .host()
+        .whatever_context::<_, Whatever>("Missing host in proxy_pass URI")
+        .boxed()
+        .context(InvalidConfigSnafu)?;
+    let port = proxy_pass.port_u16().unwrap_or(80);
+
     // 建立TCP连接
-    let io = TokioIo::new(TcpStream::connect((host, port)).await.inspect_err(|e| {
-        error!(
-            "TCP connection error: {host}:{port} : {}",
-            Report::from_error(e)
-        )
-    })?);
+    let io = TokioIo::new(
+        TcpStream::connect((host, port))
+            .await
+            .whatever_context::<_, Whatever>(format!(
+                "Cannot connect to target server {host}:{port}"
+            ))?,
+    );
 
     // 创建HTTP客户端连接
-    let (mut sender, conn) = Builder::new()
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true) // 保持首字母大小写
         .title_case_headers(true) // 标题首字母大写
         .handshake(io)
-        .await?;
+        .await
+        .whatever_context::<_, Whatever>("Failed to establish HTTP/1.1 client connection")?;
 
     info!(
         "[Request processing] HTTP client connection established: {:?}",
@@ -174,12 +171,7 @@ pub async fn pass(
     let response = sender
         .send_request(Request::from_parts(new_parts, StreamBody::new(stream)))
         .await
-        .inspect_err(|e| {
-            error!(
-                "[Request processing] Request send error: {:?}",
-                Report::from_error(e)
-            )
-        })?;
+        .whatever_context::<_, Whatever>("Failed to send request to target")?;
 
     debug!("[Request processing] Finished sending request body");
     Ok(response)

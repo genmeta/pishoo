@@ -5,7 +5,6 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use anyhow::{Result, anyhow, bail, ensure};
 use conf::parse_conf;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -14,8 +13,10 @@ use misc_conf::{
 };
 use pattern::Pattern;
 use qdns::Resolve;
+use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
-use tracing::error;
+
+use crate::error::Whatever;
 
 pub mod conf;
 mod location;
@@ -23,6 +24,8 @@ mod pattern;
 mod pishoo;
 mod proxy;
 mod server;
+
+type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 type ParseFn = fn(Directive<Nginx>) -> Result<Value>;
 
@@ -100,14 +103,14 @@ pub enum IPVersion {
 }
 
 impl TryFrom<&str> for IPVersion {
-    type Error = anyhow::Error;
+    type Error = Whatever;
 
     fn try_from(value: &str) -> Result<Self> {
         match value {
             "v4only" => Ok(IPVersion::V4),
             "v6only" => Ok(IPVersion::V6),
             "dual" => Ok(IPVersion::Dual),
-            _ => Err(anyhow!("Invalid IP version: {}", value)),
+            _ => whatever!("Invalid IP version: {value}"),
         }
     }
 }
@@ -191,21 +194,22 @@ impl Node {
 }
 
 pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
-    let mut directives = Directive::<Nginx>::parse(configure)?;
+    let mut directives =
+        Directive::<Nginx>::parse(configure).whatever_context("Cannot parse configuration")?;
 
     // 预处理
     if let Some(root) = root {
         directives = directives
             .into_iter()
             .map(|mut directive| directive.resolve_include(root).map(|_| directive))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .whatever_context("Cannot resolve include in configuration")?;
     } else {
         tracing::warn!(target:"config", "Config file has no parent, unable to resolve includes");
     }
 
     // 解析配置
     parse_conf(directives)
-        .inspect_err(|e| error!(target:"config", "Error parsing directives: {}", e))
 }
 
 #[derive(Default, Debug, Clone)]
@@ -228,7 +232,7 @@ impl Commands {
         for directive in directives {
             let name = directive.name.clone();
             let Some(command) = self.0.get(name.as_str()) else {
-                bail!("Unknown directive {name}");
+                whatever!("Unknown directive `{name}`",);
             };
 
             match command(directive)? {
@@ -281,13 +285,14 @@ fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_header_value(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [value] => {
-            let header_value = HeaderValue::from_str(value)?;
+            let header_value = HeaderValue::from_str(value)
+                .whatever_context(format!("Failed to parse `{value}` to header value"))?;
             Ok(Value::HeaderValue(header_value))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -295,7 +300,9 @@ fn parse_types(directive: Directive<Nginx>) -> Result<Value> {
     if let Some(children) = directive.children {
         let mut map = HashMap::new();
         for directive in children {
-            let value = HeaderValue::from_str(directive.name.as_str())?;
+            let value = directive.name.as_str();
+            let value = HeaderValue::from_str(value)
+                .whatever_context(format!("Failed to parse `{value}` to header value"))?;
             for arg in directive.args {
                 map.insert(arg, value.clone());
             }
@@ -309,29 +316,51 @@ fn parse_types(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => Ok(Value::String(string.to_string())),
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
-fn parse_uri(directive: Directive<Nginx>) -> Result<Value> {
+// fn parse_uri(directive: Directive<Nginx>) -> Result<Value> {
+//     match &directive.args[..] {
+//         [s] => {
+//             let uri = s.parse::<Uri>().whatever_context(format!(
+//                 "Invalid URI `{s}` while parsing directive {}",
+//                 directive.name
+//             ))?;
+
+//             Ok(Value::Uri(uri))
+//         }
+//         _ => whatever!(
+//             "Invalid number of arguments for directive: {}",
+//             directive.name
+//         ),
+//     }
+// }
+
+fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [s] => {
-            let _uri = s.parse::<Uri>().map_err(|e| {
-                anyhow!(
-                    "Invalid URI while parsing directive {}: {}",
-                    directive.name,
-                    e
-                )
-            })?;
-            Ok(Value::String(s.to_string()))
+            let uri = s.parse::<Uri>().whatever_context(format!(
+                "Invalid URI `{s}` while parsing directive {}",
+                directive.name
+            ))?;
+
+            uri.host()
+                .whatever_context::<_, Whatever>("Missing host in proxy_pass URI")
+                .whatever_context(format!(
+                    "Invalid URI `{s}` while parsing directive {}",
+                    directive.name
+                ))?;
+
+            Ok(Value::Uri(uri))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -359,11 +388,11 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
                 None
             };
             if version.is_none() && port.is_none() {
-                return Err(anyhow!(
+                whatever!(
                     "Invalid argument for directive: {}:{}",
                     directive.name,
                     param
-                ));
+                );
             }
 
             Ok(Value::Listen(vec![Listen {
@@ -376,32 +405,32 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
             // 三个参数, 只能是 网卡名和 v6only|v4only|dual 和端口
             let typ = IfaceType::from(iface.as_str());
             let version = IPVersion::try_from(version.as_str())?;
-            let port = port.parse::<u16>().map_err(|e| {
-                anyhow!(
-                    "Invalid port while parsing listen directive: {}:{}",
-                    directive.name,
-                    e
-                )
-            })?;
+            let port = port.parse::<u16>().whatever_context(format!(
+                "Invalid port number `{port}` while parsing directive {}",
+                directive.name
+            ))?;
             Ok(Value::Listen(vec![Listen { typ, version, port }]))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
 fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
-            let addr = string.parse::<SocketAddr>()?;
+            let addr = string.parse::<SocketAddr>().whatever_context(format!(
+                "Invalid socket address `{string}` while parsing directive {}",
+                directive.name
+            ))?;
             Ok(Value::Addr(addr))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -409,25 +438,23 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [kind, resolver] => match kind.as_str() {
             "udp" => {
-                let server_addr = resolver
-                    .parse::<SocketAddr>()
-                    .map_err(|e| anyhow!("Invalid address whiling parsing udp resolver: {e:?}",))?;
+                let server_addr = resolver.parse::<SocketAddr>().whatever_context(format!(
+                    "Invalid socket address `{resolver}` whiling parsing udp resolver",
+                ))?;
                 Ok(Value::Resolver(Resolver::Udp { server_addr }))
             }
             "http" => {
-                let base_url = resolver.parse::<Uri>().map_err(|e| {
-                    anyhow!("Invalid address whiling parsing http resolver: {e:?}",)
-                })?;
+                let base_url = resolver.parse::<Uri>().whatever_context(format!(
+                    "Invalid base URL `{resolver}` whiling parsing http resolver",
+                ))?;
                 Ok(Value::Resolver(Resolver::Http { base_url }))
             }
-            _ => Err(anyhow!(
-                "Unknown resolver kind: {kind}, expected `udp` or `http`"
-            )),
+            _ => whatever!("Unknown resolver kind: {kind}, expected `udp` or `http`"),
         },
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -435,15 +462,13 @@ fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
             let path = PathBuf::from(string);
-            if !path.exists() {
-                return Err(anyhow!("Path does not exist: {}", string));
-            }
+            ensure_whatever!(path.exists(), "Path `{}` does not exist", path.display());
             Ok(Value::Path(path))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -454,36 +479,59 @@ fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_header(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [name, value] => {
-            let header_name = HeaderName::from_bytes(name.as_bytes())?;
-            let header_value = HeaderValue::from_bytes(value.as_bytes())?;
+            let header_name = HeaderName::from_bytes(name.as_bytes()).whatever_context(format!(
+                "Invalid header name `{name}` while parsing directive {}",
+                directive.name
+            ))?;
+            let header_value =
+                HeaderValue::from_bytes(value.as_bytes()).whatever_context(format!(
+                    "Invalid header value `{value}` while parsing directive {}",
+                    directive.name
+                ))?;
             Ok(Value::Header(vec![(header_name, header_value, true)]))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
 fn parse_header_always(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [name, value] => {
-            let header_name = HeaderName::from_bytes(name.as_bytes())?;
-            let header_value = HeaderValue::from_bytes(value.as_bytes())?;
+            let header_name = HeaderName::from_bytes(name.as_bytes()).whatever_context(format!(
+                "Invalid header name `{name}` while parsing directive {}",
+                directive.name
+            ))?;
+            let header_value =
+                HeaderValue::from_bytes(value.as_bytes()).whatever_context(format!(
+                    "Invalid header value `{value}` while parsing directive {}",
+                    directive.name
+                ))?;
             Ok(Value::Header(vec![(header_name, header_value, false)]))
         }
         [name, value, always] => {
-            if always.as_str() != "always" {
-                return Err(anyhow!("Invalid argument for always: {}", always));
-            }
-            let header_name = HeaderName::from_bytes(name.as_bytes())?;
-            let header_value = HeaderValue::from_bytes(value.as_bytes())?;
+            ensure_whatever!(
+                always == "always",
+                "The third argument of directive {} must be `always`",
+                directive.name
+            );
+            let header_name = HeaderName::from_bytes(name.as_bytes()).whatever_context(format!(
+                "Invalid header name `{name}` while parsing directive {}",
+                directive.name
+            ))?;
+            let header_value =
+                HeaderValue::from_bytes(value.as_bytes()).whatever_context(format!(
+                    "Invalid header value `{value}` while parsing directive {}",
+                    directive.name
+                ))?;
             Ok(Value::Header(vec![(header_name, header_value, true)]))
         }
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }
 
@@ -492,7 +540,7 @@ fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
         .args
         .iter()
         .map(|auth| {
-            ensure!(
+            ensure_whatever!(
                 auth == "basic" || auth == "ssl",
                 "Invalid value for directive: {}",
                 directive.name
@@ -509,9 +557,9 @@ fn parse_ssh_ssl_user(directive: Directive<Nginx>) -> Result<Value> {
             name.to_string(),
             user.to_string(),
         )])),
-        _ => Err(anyhow!(
+        _ => whatever!(
             "Invalid number of arguments for directive: {}",
             directive.name
-        )),
+        ),
     }
 }

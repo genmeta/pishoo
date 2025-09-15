@@ -1,10 +1,10 @@
-use anyhow::Result;
 use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
+use snafu::ResultExt;
 
 use crate::parse::{
-    Commands, Value, parse_header, parse_header_always, parse_path, parse_ssh_login,
-    parse_ssh_ssl_user, parse_string_vec, parse_types, parse_uri, pattern::parse_pattern,
+    Commands, Result, Value, parse_header, parse_header_always, parse_path, parse_proxy_pass,
+    parse_ssh_login, parse_ssh_ssl_user, parse_string_vec, parse_types, pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
@@ -16,12 +16,13 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("index", parse_string_vec);
     commands.insert("add_header", parse_header_always);
     commands.insert("proxy_set_header", parse_header);
-    commands.insert("proxy_pass", parse_uri);
+    commands.insert("proxy_pass", parse_proxy_pass);
     commands.insert("ssh_login", parse_ssh_login);
     commands.insert("ssh_ssl_user", parse_ssh_ssl_user);
     commands.insert("ssh_deny", parse_string_vec);
 
-    let pattern = parse_pattern(&directive.args)?;
+    let pattern =
+        parse_pattern(&directive.args).whatever_context("Failed to parse location pattern")?;
     let mut values = commands.parse(directive.children.into_iter().flatten())?;
 
     // 默认添加 CORS 相关的响应头

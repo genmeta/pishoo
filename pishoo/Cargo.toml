@@ -28,7 +28,7 @@ gateway = { path = "../gateway" }
 qdns = { workspace = true }
 
 # --- Core & Error Handling ---
-anyhow = { workspace = true }
+snafu = { workspace = true }
 
 # --- Async Runtime ---
 tokio = { workspace = true }

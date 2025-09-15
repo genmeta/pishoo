@@ -1,10 +1,10 @@
-use anyhow::{Result, bail};
 use misc_conf::{ast::Directive, nginx::Nginx};
+use snafu::ensure_whatever;
 
-use super::{
-    Value, parse_address, parse_header_value, parse_resolver, parse_string_vec, parse_types,
+use crate::parse::{
+    Commands, Result, Value, parse_address, parse_header_value, parse_resolver, parse_string_vec,
+    parse_types,
 };
-use crate::parse::Commands;
 
 pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands = Commands::new();
@@ -18,8 +18,10 @@ pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
 
     let values = commands.parse(directive.children.into_iter().flatten())?;
 
-    if !values.contains_key("listen") {
-        bail!("Missing directive listen")
-    }
+    ensure_whatever!(
+        values.contains_key("listen"),
+        "Missing directive listen in proxy block"
+    );
+
     Ok(Value::ValueMap(values))
 }
