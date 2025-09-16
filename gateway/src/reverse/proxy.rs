@@ -8,14 +8,14 @@ use http::{Request, Response, Uri, Version};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::TokioIo;
-use snafu::{OptionExt, Report, ResultExt};
+use snafu::{Report, ResultExt};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info};
 
 use crate::{
     command,
-    error::{InvalidConfigSnafu, Result, StreamSnafu, Whatever},
+    error::{Result, StreamSnafu, Whatever},
     h3::{H3Sink, H3Stream},
     parse::{Node, Value},
     reverse::build_error_response,
@@ -127,11 +127,8 @@ pub async fn pass(
     info!("[Request processing] Preparing to proxy request: {new_parts:?}");
 
     // 解析目标地址
-    let host = proxy_pass
-        .host()
-        .whatever_context::<_, Whatever>("Missing host in proxy_pass URI")
-        .boxed()
-        .context(InvalidConfigSnafu)?;
+    // Checked in configuration parsing phase
+    let host = proxy_pass.host().expect("Missing host in proxy_pass URI");
     let port = proxy_pass.port_u16().unwrap_or(80);
 
     // 建立TCP连接

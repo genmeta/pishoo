@@ -548,6 +548,12 @@ fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
             Ok(auth.to_string())
         })
         .collect::<Result<Vec<_>>>()?;
+    if auths.is_empty() {
+        whatever!(
+            "At least one authentication method is required for directive: {}",
+            directive.name
+        );
+    }
     Ok(Value::StringVec(auths))
 }
 

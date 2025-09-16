@@ -444,8 +444,9 @@ async fn handle_request(
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
-            let l = firewall_matched_location;
-            reverse::sshd::login(location, &final_pattern, l, request, recver, sender).await?;
+            let rule_set = firewall_matched_location;
+            reverse::sshd::login(location, &final_pattern, rule_set, request, recver, sender)
+                .await?;
         }
         _ => {
             let response = Response::builder()
@@ -496,12 +497,16 @@ fn match_location<'l: 's, 's>(
     Some((location_matched?, final_pattern))
 }
 
+fn build_response(status: StatusCode) -> Response<()> {
+    Response::builder()
+        .status(status)
+        .body(())
+        .expect("Failed to build response")
+}
+
 /// 构造错误响应
 fn build_error_response() -> Response<()> {
-    Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .body(())
-        .unwrap()
+    build_response(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 struct ShutdownListenersOnDrop(Arc<QuicListeners>);

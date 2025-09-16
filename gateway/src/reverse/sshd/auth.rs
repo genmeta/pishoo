@@ -106,10 +106,7 @@ pub async fn auth_password(
     };
 
     if auth_password.await? {
-        sender
-            .send(ServerAuthMessage::Accept)
-            .await
-            .context(SendSnafu)?;
+        accept(sender).await?;
     } else {
         _ = sender
             .cancel(io::Error::new(
@@ -119,6 +116,14 @@ pub async fn auth_password(
             .await;
         return TooManyAttemptsSnafu.fail();
     }
+    Ok(())
+}
+
+pub async fn accept(sender: &mut FramedSender<ServerAuthMessage>) -> Result<(), Error> {
+    sender
+        .send(ServerAuthMessage::Accept)
+        .await
+        .context(SendSnafu)?;
     Ok(())
 }
 

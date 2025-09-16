@@ -6,10 +6,9 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{Stream, StreamExt, stream};
-use gm_quic::QuicClient;
+use futures::{Stream, StreamExt, future, stream};
+use gm_quic::{QuicClient, SocketEndpointAddr};
 use h3::client::SendRequest;
-use qconnection::prelude::{EndpointAddr, SocketEndpointAddr};
 use qdns::Resolvers;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::{io, sync::Mutex};
@@ -18,14 +17,18 @@ use tracing::info;
 use crate::{error::Whatever, forward::create_quic_client};
 
 #[derive(Debug)]
-struct DnsErrors {
+pub struct DnsErrors {
     errors: Vec<(String, io::Error)>,
 }
 
 impl Display for DnsErrors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (source, error) in &self.errors {
-            writeln!(f, "Resolver {source} failed: {}", Report::from_error(error))?;
+            writeln!(
+                f,
+                "Resolver `{source}` failed: {}",
+                Report::from_error(error)
+            )?;
         }
         Ok(())
     }
@@ -33,10 +36,10 @@ impl Display for DnsErrors {
 
 impl Error for DnsErrors {}
 
-async fn lookup(
+pub async fn lookup(
     resolvers: &Resolvers,
     server_name: &str,
-) -> Result<impl Stream<Item = SocketEndpointAddr> + use<>, DnsErrors> {
+) -> Result<impl Stream<Item = Vec<SocketEndpointAddr>> + use<>, DnsErrors> {
     let mut errors = vec![];
 
     let mut lookup_stream = resolvers.lookup(server_name);
@@ -46,7 +49,7 @@ async fn lookup(
             Some((source, Ok(endpoints))) if endpoints.is_empty() => {
                 errors.push((
                     source,
-                    io::Error::new(io::ErrorKind::NotFound, "No endpoints found"),
+                    io::Error::new(io::ErrorKind::NotFound, "No endpoints addresses found"),
                 ));
             }
             Some((source, Err(error))) => {
@@ -56,8 +59,8 @@ async fn lookup(
             None => return Err(DnsErrors { errors }),
         }
     };
-    Ok(stream::iter(endpoints)
-        .chain(lookup_stream.flat_map(|(_, eps)| stream::iter(eps.unwrap_or_default()))))
+    Ok(stream::once(future::ready(endpoints))
+        .chain(lookup_stream.filter_map(|(_, endpoints)| future::ready(endpoints.ok()))))
 }
 
 #[derive(Clone)]
@@ -146,26 +149,27 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            let mut server_eps = lookup(&resolvers, &server_name)
+            let mut lookup = lookup(&resolvers, &server_name)
                 .await
                 .whatever_context("DNS lookup failed")?;
 
-            let server_ep = server_eps
+            let server_eps = lookup
                 .next()
                 .await
                 .whatever_context("No endpoint found for server")?;
 
             let quic_connection = self
                 .quic_client
-                .connect(server_name.clone(), [] as [EndpointAddr; 0])
+                .connect(server_name.clone(), server_eps)
                 .unwrap();
 
             tokio::spawn({
                 let conn = quic_connection.clone();
                 async move {
-                    _ = conn.add_peer_endpoint(server_ep.into());
-                    while let Some(ep) = server_eps.next().await {
-                        _ = conn.add_peer_endpoint(ep.into());
+                    while let Some(endpoints) = lookup.next().await {
+                        for endpoint in endpoints {
+                            _ = conn.add_peer_endpoint(endpoint.into());
+                        }
                     }
                 }
             });

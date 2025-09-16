@@ -2,28 +2,29 @@
 use std::{self, sync::Arc};
 
 use bytes::Bytes;
-use firewall_base::pattern::{LocationPattern, LocationPatternKind};
+use firewall_base::pattern::{LocationPattern, LocationPatternKind, SUFFIX, trim_suffix_once};
 use futures::{StreamExt, future::Either};
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
 use http::{Request, StatusCode};
 use nix::unistd;
-use snafu::{OptionExt, Report, ResultExt, ensure_whatever, whatever};
+use snafu::{OptionExt, Report, ResultExt, whatever};
 use ssh3_proto::{cbor_codec, messages, mux};
 use tokio::{io, task::JoinSet};
 use tokio_util::{codec, io::StreamReader};
 
-use crate::error::Whatever;
+use crate::{
+    error::{Result, StreamSnafu},
+    h3::{H3Sink, H3Stream},
+    parse::Node,
+    reverse::build_response,
+};
 
 mod async_fd;
 mod auth;
 mod forward;
 mod session;
 mod socks;
-use crate::{
-    h3::{H3Sink, H3Stream},
-    parse::Node,
-};
 
 /// ``` conf
 /// location /ssh {
@@ -39,37 +40,38 @@ use crate::{
 pub async fn login(
     location: &Arc<Node>,
     final_pattern: &str,
-    firewall_matched_location: Option<&LocationPattern>,
+    rule_set: Option<&LocationPattern>,
     request: Request<()>,
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
-) -> Result<(), Whatever> {
-    let mut response_with_status = async |status: StatusCode| {
-        let resp = http::Response::builder().status(status).body(()).unwrap();
-        sender.send_response(resp).await?;
-        sender.finish().await
-    };
-
+) -> Result<()> {
     if request.method() != http::Method::PUT {
-        response_with_status(StatusCode::METHOD_NOT_ALLOWED)
-            .await
-            .whatever_context("http error")?;
+        let resp = build_response(StatusCode::METHOD_NOT_ALLOWED);
+        sender.send_response(resp).await.context(StreamSnafu)?;
+        sender.finish().await.context(StreamSnafu)?;
         whatever!("Only PUT method is allowed");
+    }
+
+    let path = request.uri().path();
+    if !path.starts_with(final_pattern) {
+        let resp = build_response(StatusCode::BAD_REQUEST);
+        sender.send_response(resp).await.context(StreamSnafu)?;
+        sender.finish().await.context(StreamSnafu)?;
+        whatever!("Request path {path} does not start with final pattern {final_pattern}");
     }
 
     let Some(crate::parse::Value::StringVec(auths)) = location.get("ssh_login") else {
         unreachable!()
     };
 
-    ensure_whatever!(!auths.is_empty(), "No auth method configured");
+    assert!(!auths.is_empty(), "Checked in configuration parsing phase");
+
+    let resp = build_response(StatusCode::OK);
+    sender.send_response(resp).await.context(StreamSnafu)?;
 
     let localhost = request.uri().host().unwrap_or_default();
-    let localhost = localhost.strip_suffix(".genmeta.net").unwrap_or(localhost);
-    let path = request.uri().path();
-    ensure_whatever!(
-        path.starts_with(final_pattern),
-        "Request path {path} does not start with final pattern {final_pattern}, this should not happen"
-    );
+    // Server不是.genemta.net?
+    let localhost = trim_suffix_once(localhost, SUFFIX).unwrap_or(localhost);
 
     let (mux, mut incomings) = mux::Mux::new(
         mux::Role::Server,
@@ -84,14 +86,8 @@ pub async fn login(
     );
 
     let run = async {
-        let user = auth(
-            location,
-            path[final_pattern.len()..].trim_start_matches('/'),
-            localhost,
-            firewall_matched_location,
-            &mut incomings,
-        )
-        .await?;
+        let username = path[final_pattern.len()..].trim_start_matches('/');
+        let user = auth(location, username, localhost, rule_set, &mut incomings).await?;
 
         serve(user, mux, incomings).await
     };
@@ -107,7 +103,7 @@ async fn auth(
     location: &Arc<Node>,
     path_username: &str,
     localhost: &str,
-    firewall_matched_location: Option<&LocationPattern>,
+    rule_set: Option<&LocationPattern>,
     incomings: &mut mux::Incomings,
 ) -> Result<unistd::User, SshdError> {
     let Some(crate::parse::Value::StringVec(auths)) = location.get("ssh_login") else {
@@ -132,14 +128,13 @@ async fn auth(
     let mut auth_recver = auth_channel.recver.framed();
     let user: unistd::User = async {
         auth::reject_deny(&username, location, &mut auth_sender).await?;
-
         let user = auth::find_user(&username).await?;
 
         if auths.iter().any(|auth| auth == "ssl")
-            && firewall_matched_location
-                .is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact))
+            && rule_set.is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact))
             && path_username == username
         {
+            auth::accept(&mut auth_sender).await?;
             return Ok(user);
         }
 
