@@ -12,7 +12,7 @@ use h3::client::SendRequest;
 use qdns::Resolvers;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::{io, sync::Mutex};
-use tracing::info;
+use tracing::debug;
 
 use crate::{error::Whatever, forward::create_quic_client};
 
@@ -97,7 +97,7 @@ impl H3ConnectionPool {
     /// 重新初始化全局连接池
     pub fn reinitialize() -> Arc<Self> {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
-        info!(target: "pool", "Reinitializing H3ConnectionPool");
+        debug!(target: "pool", "Reinitializing H3ConnectionPool");
         let mut guard = GLOBAL.write().unwrap();
         let pool = Arc::new(H3ConnectionPool::new());
         *guard = Some(pool.clone());

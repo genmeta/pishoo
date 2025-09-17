@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use firewall_db::{
     base::matcher::{DomainRulesMatcher, LocationRulesMatcher},
-    sea_orm::Database,
+    sea_orm::{ConnectOptions, Database},
     service::{domain_service::DomainService, location_service::LocationService},
 };
 use gateway::{
@@ -33,7 +33,9 @@ pub async fn start_services_from_pishoo_block(
     };
 
     let access_rules = async {
-        let db = Database::connect(access_rules)
+        let mut connect_options = ConnectOptions::new(access_rules);
+        connect_options.sqlx_logging_level("debug".parse().unwrap());
+        let db = Database::connect(connect_options)
             .await
             .whatever_context("Failed to connect to firewall database")?;
         firewall_db::initial_db(&db)

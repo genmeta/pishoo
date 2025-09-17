@@ -296,8 +296,8 @@ async fn handle_connections(
         let router = router.clone();
         let access_rules = access_rules.clone();
 
-        let handle_request = Arc::new(async move |request, stream| {
-            let span = info_span!("handle_request", ?request,);
+        let handle_request = Arc::new(async move |request: Request<()>, stream| {
+            let span = info_span!("handle_request", uri=%request.uri());
             let handle_request = handle_request(
                 server_name.clone(),
                 router.clone(),
@@ -313,7 +313,7 @@ async fn handle_connections(
 
                 if let Err(handle_request_error) = handle_request {
                     error!(
-                        target: "request", "Failed to handle request: {}",
+                        target: "request", "Failed to handle resolved request: {}",
                         Report::from_error(handle_request_error)
                     );
                 }
@@ -326,7 +326,7 @@ async fn handle_connections(
         let accept_requests = async move {
             while let Ok(Some(req_resolver)) = h3_conn.accept().await.inspect_err(|error| {
                 error!(
-                    target: "connect", "Failed to accept request: {}",
+                    target: "connect", "Failed to accept more request: {}",
                     Report::from_error(error.clone())
                 )
             }) {
@@ -379,6 +379,7 @@ async fn handle_request(
     request: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    tracing::debug!(target: "request", ?request);
     // 查找匹配的路由规则
     // TODO 支持 泛域名匹配
     let server = servers
@@ -422,7 +423,7 @@ async fn handle_request(
             None => "<unknown client>",
             Some(name) => name,
         };
-        info!(target: "request", "Firewall rules deny request from {client_name} to {server_name} with uri {}", request.uri());
+        info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", request.uri());
         sender.send_response(response).await.context(StreamSnafu)?;
         sender.finish().await.context(StreamSnafu)?;
         return Ok(());

@@ -6,8 +6,11 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use qdns::Resolvers;
 use snafu::{Report, ResultExt, Whatever, whatever};
-use tokio::{io::AsyncWriteExt, time::timeout};
-use tracing::{Instrument, error, info};
+use tokio::{
+    io::{self, AsyncWriteExt},
+    time::timeout,
+};
+use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
 use crate::{
@@ -16,29 +19,17 @@ use crate::{
     pool::H3ConnectionPool,
 };
 
-pub async fn proxy(
-    req: Request<hyper::body::Incoming>,
-    resolvers: Resolvers,
-) -> Result<BoxResponse, hyper::Error> {
-    proxy_inner(req, resolvers)
-        .instrument(tracing::info_span!("proxy", odcid = tracing::field::Empty))
-        .await
-}
-
 /// 处理普通 HTTP 请求
-pub async fn proxy_inner(
+#[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
+pub async fn proxy(
     mut req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
-    info!("[Forward] Request: {req:?}");
-
-    let uri = req.uri().to_string();
-
     // 验证主机合法性
     let host = match validate_host(&mut req) {
         Ok(host) => host,
         Err(reason) => {
-            error!("[Forward][{}] Invalid host: {}", uri, reason);
+            error!(target: "forward_proxy", "Invalid host: {reason}");
             return Ok(build_error_response(reason));
         }
     };
@@ -47,26 +38,23 @@ pub async fn proxy_inner(
     let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
         Ok(conn) => conn,
         Err(error) => {
-            let report = Report::from_error(error);
-            error!("[Forward][{uri}] Failed to create QUIC connection: {report}");
-            return Ok(build_error_response(report.to_string()));
+            let report = Report::from_error(error).to_string();
+            error!(target: "forward_proxy", "Failed to create QUIC connection: {report}");
+            return Ok(build_error_response(report));
         }
     };
 
-    info!("[Forward][{}]: quic connection established", uri);
+    debug!(target: "forward_proxy", "Quic connection established");
 
     // 代理请求并返回响应
     match send(send_request, req).await {
         Ok(response) => {
-            info!(
-                "[Forward][{}] Request proxied successfully: {:?}",
-                uri, response
-            );
+            info!(target: "forward_proxy", "Request proxied successfully: {:?}", response);
             Ok(response)
         }
-        Err(err) => {
-            let reason = format!("[Forward][{uri}] Request proxy failed: {err}");
-            error!("{}", reason);
+        Err(error) => {
+            let reason = Report::from_error(io::Error::other(error)).to_string();
+            error!(target: "forward_proxy", "Request proxy failed {reason}");
             Ok(build_error_response(reason))
         }
     }
@@ -77,25 +65,22 @@ pub async fn connect(
     req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
-    let uri = req.uri().to_string();
-
-    info!("[CONNECT] Establishing tunnel to {}", uri);
     // 升级连接并处理后续请求
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                info!("[CONNECT]: tunnel established to {}", uri);
+                info!(target: "forward_proxy", "Establishing tunnel to the request uri");
                 let service = service_fn(move |req| proxy(req, resolvers.clone()));
-                if let Err(err) = http1::Builder::new()
+                if let Err(error) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
                     .serve_connection(upgraded, service)
                     .await
                 {
-                    error!("[CONNECT][{uri}] Connection handling failed: {err:?}");
+                    error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
                 }
             }
-            Err(err) => error!("Connection upgrade failed {uri}: {err:?}"),
+            Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
         }
     });
 
@@ -110,7 +95,7 @@ async fn send(
     let uri = req.uri().to_string();
     let (parts, body) = req.into_parts();
 
-    info!("[Proxy][{}] Sending request", uri);
+    debug!(target: "forward_proxy", "Sending request");
 
     // 发送请求头
     let req = http::Request::from_parts(parts, ());
@@ -118,26 +103,25 @@ async fn send(
     let (sender, mut recver) = stream.split();
 
     // 发送请求体
-    tokio::spawn({
-        let uri = uri.clone();
+    tokio::spawn(
         async move {
             let mut body_stream = tokio_util::io::StreamReader::new(
                 body.into_data_stream().map_err(std::io::Error::other),
             );
             let mut stream = H3Sink::new(sender);
             match tokio::io::copy(&mut body_stream, &mut stream).await {
-                Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
-                Err(e) => error!("[Proxy][{uri}] Error sending request body: {e}"),
+                Ok(size) => debug!(target: "forward_proxy", "Request body sent: size={size}"),
+                Err(error) => error!(target: "forward_proxy", "Error sending request body: {}", Report::from_error(error)),
             }
             match stream.shutdown().await {
-                Ok(()) => info!("[Proxy][{}] Request finished sent", uri),
-                Err(e) => error!("[Proxy][{}] Error sending request data end: {}", uri, e),
+                Ok(()) => info!(target: "forward_proxy", "Request finished sent"),
+                    Err(error) => error!(target: "forward_proxy", "Error sending request data end: {}",Report::from_error(error)),
             }
         }
         .in_current_span()
-    });
+    );
 
-    info!("[Forward][{}] Request body sent", uri);
+    debug!(target: "forward_proxy", "Request body sent");
 
     // 接收响应头
     let (mut parts, _) = recver
@@ -147,12 +131,12 @@ async fn send(
             error!("[Forward][{}] Failed to receive response: {}", uri, e);
         })?
         .into_parts();
-    info!("[Forward] Received response headers: {:?}", parts);
+    debug!(target: "forward_proxy", "Received response headers: {parts:?}");
     parts.version = http::Version::HTTP_11;
 
     let recver_stream = H3Stream::new(recver);
     let body = BodyExt::boxed(StreamBody::new(recver_stream.map(|b| b.map(Frame::data))));
-    info!("[Forward] Response body receiver started");
+    debug!(target: "forward_proxy", "Response body receiver started");
 
     Ok(Response::from_parts(parts, body))
 }

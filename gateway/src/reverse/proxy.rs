@@ -11,7 +11,7 @@ use hyper_util::rt::TokioIo;
 use snafu::{Report, ResultExt};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::{
     command,
@@ -28,11 +28,11 @@ pub async fn handle(
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    let uri = req.uri().to_string();
     // proxy_set_header
     let req = command::proxy_set_header(location, req);
     debug!(
-        "[Response handling][{uri}] Processing request headers: {:?}",
+        target: "reverse_proxy",
+        "Processing request headers: {:?}",
         req.headers()
     );
 
@@ -40,8 +40,8 @@ pub async fn handle(
         Ok(resp) => resp,
         Err(e) => {
             error!(
-                "[Response handling][{}] Proxy request error: {:?}",
-                uri,
+                target: "reverse_proxy",
+                "Proxy request error: {}",
                 Report::from_error(e)
             );
             let resp = build_error_response();
@@ -51,13 +51,13 @@ pub async fn handle(
         }
     };
 
-    debug!("[Response handling][{}] Sending response", uri);
+    debug!(target: "reverse_proxy", "Sending response");
     let (mut parts, body) = resp.into_parts();
 
     // 添加自定义响应头字段
     command::add_header(location, &mut parts);
 
-    debug!("[Response handling][{uri}] Sending response headers: {parts:?}");
+    debug!(target: "reverse_proxy", "Sending response headers: {parts:?}");
 
     // 发送响应头
     let resp1 = Response::from_parts(parts, ());
@@ -67,16 +67,17 @@ pub async fn handle(
         tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
     let mut stream = H3Sink::new(sender);
     match tokio::io::copy(&mut body_stream, &mut stream).await {
-        Ok(size) => info!("[Proxy][{uri}] Request body sent: size={size}"),
+        Ok(size) => debug!(target: "reverse_proxy", "Request body sent: size={size}"),
         Err(e) => error!(
-            "[Proxy][{uri}] Error sending request body: {}",
+            target: "reverse_proxy",
+            "Error sending request body: {}",
             Report::from_error(e)
         ),
     }
     match stream.shutdown().await {
-        Ok(()) => info!(target: "proxy","[Proxy][{}] Request finished sent", uri),
+        Ok(()) => debug!(target: "reverse_proxy", "Request finished sent"),
         Err(e) => {
-            error!(target: "proxy","[Proxy][{}] Error sending request data end: {}", uri, Report::from_error(e))
+            error!(target: "reverse_proxy", "Error sending request data end: {}", Report::from_error(e))
         }
     }
     Ok(())
@@ -95,7 +96,7 @@ pub async fn pass(
         unreachable!("proxy_pass is required for reverse proxy");
     };
 
-    tracing::debug!("[Request processing] proxy_pass: {proxy_pass}");
+    tracing::debug!(target: "reverse_proxy", "proxy_pass: {proxy_pass}");
 
     let mut path_and_query = parts
         .uri
@@ -103,7 +104,8 @@ pub async fn pass(
         .map(|p| p.to_string())
         .unwrap_or_default();
     tracing::debug!(
-        "[Request processing] Original request path and query: {}",
+        target: "reverse_proxy",
+        "Original request path and query: {}",
         path_and_query
     );
 
@@ -124,7 +126,7 @@ pub async fn pass(
     new_parts.uri = target_uri.clone();
     new_parts.version = Version::HTTP_11;
 
-    info!("[Request processing] Preparing to proxy request: {new_parts:?}");
+    debug!(target: "reverse_proxy", "Preparing to proxy request: {new_parts:?}");
 
     // 解析目标地址
     // Checked in configuration parsing phase
@@ -148,8 +150,9 @@ pub async fn pass(
         .await
         .whatever_context::<_, Whatever>("Failed to establish HTTP/1.1 client connection")?;
 
-    info!(
-        "[Request processing] HTTP client connection established: {:?}",
+    debug!(
+        target: "reverse_proxy",
+        "HTTP client connection established: {:?}",
         target_uri
     );
 
@@ -157,7 +160,8 @@ pub async fn pass(
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             error!(
-                "[Proxy connection] Maintenance failed: {}",
+                target: "reverse_proxy",
+                "Maintenance failed: {}",
                 Report::from_error(e)
             );
         }
@@ -170,6 +174,6 @@ pub async fn pass(
         .await
         .whatever_context::<_, Whatever>("Failed to send request to target")?;
 
-    debug!("[Request processing] Finished sending request body");
+    debug!(target: "reverse_proxy", "Finished sending request body");
     Ok(response)
 }

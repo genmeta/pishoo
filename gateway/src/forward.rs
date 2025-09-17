@@ -11,7 +11,7 @@ use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use qtraversal::iface::traversal_factory;
 use snafu::{Report, ResultExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     command,
@@ -54,7 +54,7 @@ pub async fn serve(
     .await
     .whatever_context::<_, Whatever>(format!("Failed to listen to TCP address: {}", addr))?;
 
-    info!(target: "forward", "Listening on: http://{}", local_addr);
+    info!(target: "forward", "Listening on: http://{local_addr}");
 
     let resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
         Resolvers::default().with(resolver.into())
@@ -89,6 +89,8 @@ pub async fn serve(
 
             let is_connect = req.method() == "CONNECT";
             let resolvers = resolvers.clone();
+            let span =
+                info_span!(target: "forward_proxy", "serve", uri=%req.uri(), method=%req.method());
             async move {
                 if is_connect {
                     forward::quic::connect(req, resolvers).await
@@ -96,6 +98,7 @@ pub async fn serve(
                     forward::quic::proxy(req, resolvers).await
                 }
             }
+            .instrument(span)
             .boxed()
         });
 
@@ -164,7 +167,7 @@ pub(crate) fn create_quic_client() -> QuicClient {
             .unwrap(),
     ];
 
-    info!(target: "forward", "Creating QUIC client with agents: {:?}", agents);
+    debug!(target: "forward", "Creating QUIC client with agents: {:?}", agents);
     let factory = traversal_factory(&agents);
     #[allow(unused_mut)]
     let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
