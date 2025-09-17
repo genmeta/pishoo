@@ -60,14 +60,15 @@ async fn main() -> Result<(), Whatever> {
 
     #[cfg(not(feature = "console_subscriber"))]
     {
-        let subscriber = tracing_subscriber::fmt().with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing::Level::INFO.into())
-                .from_env_lossy(),
-        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(tracing::Level::INFO.into())
+                    .from_env_lossy(),
+            )
+            .with_ansi(atty::is(atty::Stream::Stdout));
         #[cfg(debug_assertions)]
         let subscriber = subscriber.with_file(true).with_line_number(true);
-        // .with_ansi(false)
         subscriber.init();
     }
 

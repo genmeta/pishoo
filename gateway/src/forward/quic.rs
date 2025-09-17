@@ -92,7 +92,6 @@ async fn send(
     mut send_request: H3SendRequest,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let uri = req.uri().to_string();
     let (parts, body) = req.into_parts();
 
     debug!(target: "forward_proxy", "Sending request");
@@ -127,8 +126,8 @@ async fn send(
     let (mut parts, _) = recver
         .recv_response()
         .await
-        .inspect_err(|e| {
-            error!("[Forward][{}] Failed to receive response: {}", uri, e);
+        .inspect_err(|error| {
+            error!(target: "forward_proxy", "Failed to receive response: {}", Report::from_error(error));
         })?
         .into_parts();
     debug!(target: "forward_proxy", "Received response headers: {parts:?}");

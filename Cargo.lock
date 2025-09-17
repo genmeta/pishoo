@@ -208,6 +208,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "atty"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
+dependencies = [
+ "hermit-abi 0.1.19",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1046,7 +1057,7 @@ checksum = "7fd99930f64d146689264c637b5af2f0233a933bef0d8570e2526bf9e083192d"
 [[package]]
 name = "firewall-base"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#c3f47ee6bb98a14976815e23f7f7fe7e4010cd0f"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#95c2d692ba7f279774d59d433a537c31cfadb4c4"
 dependencies = [
  "derive_more",
  "globset",
@@ -1063,7 +1074,7 @@ dependencies = [
 [[package]]
 name = "firewall-db"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#c3f47ee6bb98a14976815e23f7f7fe7e4010cd0f"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#95c2d692ba7f279774d59d433a537c31cfadb4c4"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1293,22 +1304,26 @@ dependencies = [
 [[package]]
 name = "genmeta-common"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#86ff53f6e8d3292d5204da16bd4407dffcc0d2fa"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#00e6e58bdb2a17230a505ee5d4afc0b3db83077c"
 dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
  "derive_more",
  "futures",
+ "gm-quic",
  "h3",
  "h3-shim",
  "pin-project-lite",
  "qbase",
+ "qdns",
  "qtraversal",
  "serde",
  "serde_cbor",
+ "snafu",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1580,6 +1595,15 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hermit-abi"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -1984,7 +2008,7 @@ version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
 dependencies = [
- "hermit-abi",
+ "hermit-abi 0.5.2",
  "libc",
  "windows-sys 0.59.0",
 ]
@@ -2674,6 +2698,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 name = "pishoo"
 version = "0.3.1"
 dependencies = [
+ "atty",
  "clap",
  "console-subscriber",
  "firewall-db",
@@ -4436,7 +4461,7 @@ dependencies = [
 [[package]]
 name = "ssh3-proto"
 version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#86ff53f6e8d3292d5204da16bd4407dffcc0d2fa"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#00e6e58bdb2a17230a505ee5d4afc0b3db83077c"
 dependencies = [
  "bytes",
  "dashmap",

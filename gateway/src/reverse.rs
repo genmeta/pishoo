@@ -309,7 +309,7 @@ async fn handle_connections(
             .await;
 
             async move {
-                info!(target: "request", "Resolved request");
+                info!(target: "request", "Resolved new request");
 
                 if let Err(handle_request_error) = handle_request {
                     error!(

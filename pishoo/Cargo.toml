@@ -45,8 +45,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
 
-# --- Signal Handling ---
+# --- Terminal Detection ---
+atty = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
+# --- Signal Handling ---
 nix = { workspace = true }
 
 [features]
