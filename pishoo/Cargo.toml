@@ -10,8 +10,8 @@ edition = "2024"
 # --- Package Metadata (Debian) ---
 [package.metadata.deb]
 name = "pishoo"
-maintainer = "Genmeta QUIC Team <quic_team@genmeta.net>"
-copyright = "Copyright © 2025 Genmeta QUIC Team"
+maintainer = "Genmeta Tech Limited <support@genmeta.net>"
+copyright = "Copyright © 2025 Genmeta Tech Limited"
 extended-description = """
 Pishoo (\"Prosperity Guardian Beast\") is a powerful proxy server optimized for HTTP/3 and end-to-end encrypted communication. Built for privacy and security scenarios, it seamlessly functions as both a forward proxy for client privacy and a reverse proxy to streamline traffic between edge networks and backend services. Its architecture is designed to safeguard your data from infringement and ensures that it can be accessed and utilized securely.
 """
