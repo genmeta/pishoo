@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+mkdir -p /etc/pishoo/ssl
+mkdir -p /etc/pishoo/acl
+touch /etc/pishoo/acl/rules.db
+mkdir -p /var/log/pishoo
+
+#DEBHELPER#
