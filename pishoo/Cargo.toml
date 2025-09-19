@@ -4,7 +4,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://pishoo.genmeta.net"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 
 # --- Package Metadata (Debian) ---
@@ -22,7 +22,7 @@ assets = [["target/release/pishoo", "usr/bin/", "755"]]
 
 [dependencies]
 # --- Workspace Member ---
-gateway = { path = "../gateway" }
+gateway = { workspace = true }
 
 # --- DNS Publishing & Resolution 
 qdns = { workspace = true }
@@ -38,7 +38,11 @@ clap = { workspace = true }
 
 
 # --- Firewall ---
-firewall-db = { workspace = true, features = ["sqlx-sqlite"] }
+firewall-db = { workspace = true }
+
+# --- Database & ORM ---
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }
@@ -50,10 +54,11 @@ atty = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # --- Signal Handling ---
-nix = { workspace = true }
+nix = { workspace = true, features = ["signal"] }
 
 [features]
-default = []
+default = ["sqlx-sqlite"]
 sshd = ["gateway/sshd"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
+sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]

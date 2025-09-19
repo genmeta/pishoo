@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use firewall_db::{
     base::matcher::{DomainRulesMatcher, LocationRulesMatcher},
-    sea_orm::{ConnectOptions, Database},
     service::{domain_service::DomainService, location_service::LocationService},
 };
 use gateway::{
@@ -11,6 +10,7 @@ use gateway::{
     parse::{Node, Value},
     reverse,
 };
+use sea_orm::{ConnectOptions, Database};
 use snafu::ResultExt;
 use tokio::{sync::Mutex, task::JoinSet};
 
@@ -38,7 +38,7 @@ pub async fn start_services_from_pishoo_block(
         let db = Database::connect(connect_options)
             .await
             .whatever_context("Failed to connect to firewall database")?;
-        firewall_db::initial_db(&db)
+        firewall_db::initial_database(&db)
             .await
             .whatever_context("Failed to initialize firewall database")?;
         let domain_rules = DomainService::new(&db)

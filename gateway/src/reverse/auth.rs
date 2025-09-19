@@ -16,33 +16,25 @@ pub struct ClientAuther {
 
 impl AuthClient for ClientAuther {
     fn verify_client_name(&self, host: &str, client_name: Option<&str>) -> ClientNameVerifyResult {
-        let result = match self
+        match self
             .firewall
             .match_rule(host, &ConnectRequest::new(client_name))
         {
-            Ok((_rule_matched_domain, action)) => match action {
+            Ok((rule_matched_domain, action)) => match action {
                 ConnectionAction::Allow => ClientNameVerifyResult::Accept,
-                ConnectionAction::DenySilently => {
+                ConnectionAction::Deny => {
+                    tracing::info!(
+                        target: "connect",
+                        "Refuse client `{client_name}` connection to `{host}` silently: matched access rule for domain `{rule_matched_domain}`",
+                        client_name = client_name.unwrap_or("<anonymous>")
+                    );
                     ClientNameVerifyResult::SilentRefuse("access firewall rules".to_owned())
                 }
-                ConnectionAction::Deny => ClientNameVerifyResult::Refuse("".to_owned()),
             },
-            Err(MatchRuleFailed::MatchSet { .. }) => ClientNameVerifyResult::Accept,
-            Err(MatchRuleFailed::MatchRuleInSet) => ClientNameVerifyResult::SilentRefuse(
-                "access firewall rule set matched, but no rule in set matched".to_owned(),
-            ),
-        };
-
-        match &result {
-            ClientNameVerifyResult::Accept => {}
-            ClientNameVerifyResult::Refuse(reason) => {
-                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to `{host}`: {reason}", client_name = client_name.unwrap_or_default());
+            Err(MatchRuleFailed::MatchRuleInSet) | Err(MatchRuleFailed::MatchSet { .. }) => {
+                ClientNameVerifyResult::Accept
             }
-            ClientNameVerifyResult::SilentRefuse(reason) => {
-                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to `{host}` silently: {reason}", client_name = client_name.unwrap_or_default());
-            }
-        };
-        result
+        }
     }
 
     fn verify_client_certs(
@@ -52,29 +44,22 @@ impl AuthClient for ClientAuther {
         client_certs: &[u8],
     ) -> ClientCertsVerifyResult {
         let Some(client_name) = client_name else {
-            return ClientCertsVerifyResult::Accept; // No client name, cannot verify
+            return ClientCertsVerifyResult::Accept; // 不需要验证client name和证书是否匹配
         };
-        let result = {
-            match parse_client_certs(client_certs).any(|cert| {
-                extract_client_names(&cert)
-                    .filter_map(|name| name.replace('*', "\\w+").parse::<regex::Regex>().ok())
-                    .any(|regex| regex.is_match(client_name))
-            }) {
-                true => ClientCertsVerifyResult::Accept,
-                false => ClientCertsVerifyResult::Refuse(format!(
-                    "Client name `{}` does not match any names in the provided client certificates",
-                    client_name
-                )),
-            }
-        };
-
-        match &result {
-            ClientCertsVerifyResult::Accept => {}
-            ClientCertsVerifyResult::Refuse(reason) => {
+        match parse_client_certs(client_certs).any(|cert| {
+            extract_client_names(&cert)
+                .filter_map(|name| name.replace('*', "\\w+").parse::<regex::Regex>().ok())
+                .any(|regex| regex.is_match(client_name))
+        }) {
+            true => ClientCertsVerifyResult::Accept,
+            false => {
+                let reason = format!(
+                    "Client name `{client_name}` does not match any names in the provided client certificates",
+                );
                 tracing::info!(target: "connect", "Refuse client `{client_name}` connection to {host}: {reason}" );
+                ClientCertsVerifyResult::Refuse(reason)
             }
         }
-        result
     }
 }
 

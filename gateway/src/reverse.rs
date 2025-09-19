@@ -405,7 +405,8 @@ async fn handle_request(
     let client_name = conn.client_name().await.unwrap_or_default();
     let http_request = HttpRequest::new(client_name.as_deref(), &request);
 
-    let (_firewall_matched_domain, firewall_matched_location, firewall_action) =
+    #[allow(unused_variables)]
+    let (firewall_matched_domain, firewall_matched_location, firewall_action) =
         match access_rules.match_rule(&server_name, request.uri().path(), &http_request) {
             Ok((domain, location, action)) => (Some(domain), Some(location), action),
             Err(..) => (None, None, RequestAction::Allow),
@@ -420,7 +421,7 @@ async fn handle_request(
             .expect("Failed to build response");
 
         let client_name = match &client_name {
-            None => "<unknown client>",
+            None => "<anonymous>",
             Some(name) => name,
         };
         info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", request.uri());

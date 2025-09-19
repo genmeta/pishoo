@@ -1,12 +1,11 @@
 [package]
 name = "gateway"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [[example]]
 name = "forward"
 path = "examples/forward.rs"
-
 
 [dependencies]
 # --- Core & Error Handling ---
@@ -85,6 +84,6 @@ clap = { workspace = true }
 
 
 [features]
-default = ["sshd"]
+default = []
 sshd = ["dep:nix", "dep:pam", "dep:ssh3-proto"]
 qlog = []

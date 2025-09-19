@@ -80,6 +80,13 @@ libc = "0.2"
 nix = "0.30"
 pam = "0.7"
 
+# --- Database ORM ---
+sea-orm = { version = "1", features = ["runtime-tokio-rustls"] }
+sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
+
+# --- workspace ---
+gateway = { path = "gateway", default-features = false }
+
 [patch.crates-io]
 gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
 h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
