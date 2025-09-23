@@ -88,14 +88,14 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 gateway = { path = "gateway", default-features = false }
 
 [patch.crates-io]
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qbase = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "feat/v0.3.1" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qbase = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
 
 
 [profile.dev]
