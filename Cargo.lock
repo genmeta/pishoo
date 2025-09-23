@@ -1211,7 +1211,7 @@ checksum = "1ced73b1dacfc750a6db6c0a0c3a3853c8b41997e2e2c563dc90804ae6867959"
 [[package]]
 name = "firewall-base"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b8c58ce91594bfa397ba8dcb9e9be583690dde26"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b19e482382a747d4ece95f207b4bb1b14c772beb"
 dependencies = [
  "derive_more",
  "globset",
@@ -1228,7 +1228,7 @@ dependencies = [
 [[package]]
 name = "firewall-db"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b8c58ce91594bfa397ba8dcb9e9be583690dde26"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b19e482382a747d4ece95f207b4bb1b14c772beb"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1246,7 +1246,7 @@ dependencies = [
 [[package]]
 name = "firewall-migration"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b8c58ce91594bfa397ba8dcb9e9be583690dde26"
+source = "git+ssh://git@github.com/genmeta/firewall.git?branch=main#b19e482382a747d4ece95f207b4bb1b14c772beb"
 dependencies = [
  "async-std",
  "sea-orm-migration",
@@ -1476,7 +1476,7 @@ dependencies = [
 [[package]]
 name = "genmeta-common"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#5dd31d177ebd933a6b3a01f99314a181de26a9e6"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#c11e6a6671c91c41544167a13ef827224d7c74d6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2254,9 +2254,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.175"
+version = "0.2.176"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a82ae493e598baaea5209805c49bbf2ea7de956d50d7da0da1164f9c6d28543"
+checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
 
 [[package]]
 name = "libm"
@@ -4690,7 +4690,7 @@ dependencies = [
 [[package]]
 name = "ssh3-proto"
 version = "0.2.0"
-source = "git+ssh://git@github.com/genmeta/gmutils.git#5dd31d177ebd933a6b3a01f99314a181de26a9e6"
+source = "git+ssh://git@github.com/genmeta/gmutils.git#c11e6a6671c91c41544167a13ef827224d7c74d6"
 dependencies = [
  "bytes",
  "dashmap",

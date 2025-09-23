@@ -97,6 +97,15 @@ async fn main() -> Result<(), Whatever> {
         unreachable!("Parse error")
     };
 
+    if args.test_config {
+        tracing::info!(
+            target: "config",
+            "Configuration file `{}` syntax is ok",
+            config_file.display()
+        );
+        return Ok(());
+    }
+
     if let Some(signal) = args.signal {
         let pid_file = if let Some(Value::String(pid_file)) = config.get("pid") {
             pid_file
