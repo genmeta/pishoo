@@ -3,7 +3,8 @@ use std::{path::PathBuf, process, sync::Arc};
 use gateway::{error::Whatever, parse};
 use snafu::{OptionExt, ResultExt, whatever};
 use tokio::{
-    fs, io,
+    fs,
+    io::{self, AsyncWriteExt},
     signal::unix::{Signal, SignalKind, signal},
     sync::Mutex,
     task::JoinSet,
@@ -74,19 +75,36 @@ pub async fn handle_signal(
 }
 
 // 写入 PID 文件（仅 Unix）
-pub async fn init_pid_file(pid_file: &str) -> Result<(), Whatever> {
+pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
     let pid = process::id().to_string();
-    match fs::write(pid_file, &pid).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => whatever!(
-            "Failed to write PID file due to insufficient permissions: {}\n\
-                Please either:\n\
-                1. Run as root user, or\n\
-                2. Change the 'pid' path in your config to a writable location",
-            pid_file
-        ),
-        Err(e) => Err(e).whatever_context(format!("Failed to write PID file to `{pid_file}`")),
+    let mut pid_file = match fs::File::create_new(pid_file_path).await {
+        Ok(pid_file) => pid_file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return whatever!(
+                Err(error),
+                "PID file `{pid_file_path}` already exists. Is Pishoo already running?\n\
+- If not, please remove the file and try again.\n\
+- If you want to start multiple instances, please change the `pid_file`\
+ directive in your config to a different location.",
+            );
+        }
+        Err(error) => {
+            return whatever!(
+                Err(error),
+                "Failed to create new PID file at `{pid_file_path}`\n\
+Please either:\n\
+- Run as root user, or\n\
+- Change the `pid_file` directive in your config to a writable path.",
+            );
+        }
+    };
+
+    async {
+        pid_file.write_all(pid.as_bytes()).await?;
+        pid_file.shutdown().await
     }
+    .await
+    .whatever_context(format!("Failed to write PID to file `{pid_file_path}`",))
 }
 
 // 处理 SIGQUIT 信号（仅 Unix）
