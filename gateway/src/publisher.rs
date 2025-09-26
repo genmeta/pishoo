@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use gm_quic::QuicListeners;
+use gm_quic::{QuicIO, QuicListeners};
 use qconnection::prelude::SocketEndpointAddr;
 use qdns::Resolve;
 use qinterface::{QuicIoExt, iface::monitor::InterfacesMonitor};
@@ -45,9 +45,13 @@ pub async fn publish_server(
         local_endpoint_addrs
             .get_or_init(async || {
                 interfaces
-                    .keys()
-                    .filter_map(|bind_uri| SocketAddr::try_from(bind_uri).ok())
-                    .map(SocketEndpointAddr::direct)
+                    .values()
+                    .filter_map(|iface| iface.borrow().ok())
+                    .filter_map(|iface_ref| iface_ref.real_addr().ok())
+                    .filter_map(|real_addr| match real_addr {
+                        gm_quic::RealAddr::Internet(addr) => Some(SocketEndpointAddr::direct(addr)),
+                        _ => None,
+                    })
                     .collect::<Vec<_>>()
             })
             .await
