@@ -1,10 +1,11 @@
 # Stop dance for pishoo
 # =======================
 #
+# ExecReload sends SIGHUP (reload config) to the pishoo process.
 # ExecStop sends SIGQUIT (graceful stop) to the pishoo process.
-# If, after 5s (--retry QUIT/5) nginx is still running, systemd takes control
+# If, after 5s (--retry QUIT/5) pishoo is still running, systemd takes control
 # and sends SIGTERM (fast shutdown) to the main process.
-# After another 5s (TimeoutStopSec=5), and if nginx is alive, systemd sends
+# After another 5s (TimeoutStopSec=5), and if pishoo is alive, systemd sends
 # SIGKILL to all the remaining processes in the process group (KillMode=mixed).
 #
 # pishoo signals reference doc:
@@ -18,11 +19,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 PIDFile=/run/pishoo.pid
+ExecStartPre=/usr/bin/pishoo -t
 ExecStart=/usr/bin/pishoo
-ExecStop=-/sbin/start-stop-daemon --quiet --stop --retry QUIT/5 --pidfile /run/pishoo.pid
+ExecReload=/usr/bin/pishoo -s reload
 TimeoutStopSec=5
 KillMode=mixed
-# Restart=always
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
