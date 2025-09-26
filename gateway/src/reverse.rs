@@ -265,8 +265,13 @@ fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<BindUri> {
                 IpAddr::V4(_) => "v4",
                 IpAddr::V6(_) => "v6",
             };
-            let bind_uri = format!("iface://{family}.{device_name}:0");
-            binds.push(BindUri::from(bind_uri).alloc_port());
+            let port = iface.port;
+            let base_bind_uri = BindUri::from(format!("iface://{family}.{device_name}:{port}"));
+            binds.push(if port == 0 {
+                base_bind_uri.alloc_port()
+            } else {
+                base_bind_uri
+            });
         }
     }
     binds
