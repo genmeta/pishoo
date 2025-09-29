@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 [[example]]
@@ -59,17 +59,7 @@ derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
 x509-parser = { workspace = true }
 
-# sshd
-nix = { workspace = true, optional = true, features = [
-    "fs",
-    "ioctl",
-    "process",
-    "signal",
-    "term",
-    "user",
-] }
-pam = { workspace = true, optional = true }
-ssh3-proto = { git = "ssh://git@github.com/genmeta/gmutils.git", optional = true }
+genmeta-ssh3-server = { git = "ssh://git@github.com/genmeta/genmeta-ssh3.git", optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -84,6 +74,6 @@ clap = { workspace = true }
 
 
 [features]
-default = []
-sshd = ["dep:nix", "dep:pam", "dep:ssh3-proto"]
+sshd = ["dep:genmeta-ssh3-server"]
+sshd-pam = ["genmeta-ssh3-server/pam"]
 qlog = []

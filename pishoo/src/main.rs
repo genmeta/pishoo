@@ -19,28 +19,21 @@ const PID_FILE_DEFAULT: &str = "NUL"; // 占位，后续被 cfg(windows) 路径�
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(
-        short,
-        default_value = "/etc/pishoo/pishoo.conf",
-        help = "set configuration file (default: /etc/pishoo/pishoo.conf)"
-    )]
+    /// Set configuration file
+    #[arg(short, default_value = "/etc/pishoo/pishoo.conf")]
     config_file: PathBuf,
-    #[arg(
-        short,
-        default_value = None,
-        help = "set configuration file (default: stderr)"
-    )]
-    error_output: Option<PathBuf>,
-    #[arg(
-        short,
-        default_value = None,
-        help = "send signal to a master process (-s only on Linux/macOS)"
-    )]
+    // /// Set error log file [default: stderr]
+    // #[arg(short, default_value = None)]
+    // error_output: Option<PathBuf>,
+    /// Send signal to a master process (only on Linux/MacOS)
+    #[arg(short, default_value = None)]
     signal: Option<SignalType>,
-    #[arg(short, default_value_t = false, help = "test configuration and exit")]
+    /// Test configuration and exit
+    #[arg(short, default_value_t = false)]
     test_config: bool,
-    #[arg(short = 'g', help = "set global directives out of configuration file")]
-    directives: Vec<String>,
+    // /// Set global directives out of configuration file
+    // #[arg(short = 'g')]
+    // directives: Vec<String>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -106,16 +99,19 @@ async fn main() -> Result<(), Whatever> {
         return Ok(());
     }
 
+    let pid_file = if let Some(Value::String(pid_file)) = config.get("pid") {
+        pid_file
+    } else {
+        PID_FILE_DEFAULT
+    };
+
     if let Some(signal) = args.signal {
-        let pid_file = if let Some(Value::String(pid_file)) = config.get("pid") {
-            pid_file
-        } else {
-            PID_FILE_DEFAULT
-        };
         return signal::send_signal(pid_file, signal).await;
     }
 
     let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
     start_services_from_pishoo_block(&handler, pishoo).await?;
-    signal::handle_signal(config_file, &handler).await
+    signal::handle_signal(config_file, &handler).await?;
+    _ = fs::remove_file(pid_file).await;
+    Ok(())
 }

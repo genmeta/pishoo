@@ -381,10 +381,10 @@ async fn handle_request(
     servers: Arc<HashMap<String, Arc<Node>>>,
     access_rules: Arc<LocationRulesMatcher>,
     conn: Arc<Connection>,
-    request: Request<()>,
+    req: Request<()>,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    tracing::debug!(target: "request", ?request);
+    tracing::debug!(target: "request", ?req);
     // 查找匹配的路由规则
     // TODO 支持 泛域名匹配
     let server = servers
@@ -399,20 +399,20 @@ async fn handle_request(
         &Vec::new()
     };
 
-    let (location, final_pattern) = match_location(locations, request.uri().path())
+    let (location, final_pattern) = match_location(locations, req.uri().path())
         .whatever_context::<_, Whatever>(format!(
             "No matched location for path `{}` in server `{}`",
-            request.uri().path(),
+            req.uri().path(),
             server_name
         ))?;
     let final_pattern = final_pattern.to_string();
 
     let client_name = conn.client_name().await.unwrap_or_default();
-    let http_request = HttpRequest::new(client_name.as_deref(), &request);
+    let http_request = HttpRequest::new(client_name.as_deref(), &req);
 
     #[allow(unused_variables)]
     let (firewall_matched_domain, firewall_matched_location, firewall_action) =
-        match access_rules.match_rule(&server_name, request.uri().path(), &http_request) {
+        match access_rules.match_rule(&server_name, req.uri().path(), &http_request) {
             Ok((domain, location, action)) => (Some(domain), Some(location), action),
             Err(..) => (None, None, RequestAction::Allow),
         };
@@ -429,7 +429,7 @@ async fn handle_request(
             None => "<anonymous>",
             Some(name) => name,
         };
-        info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", request.uri());
+        info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", req.uri());
         sender.send_response(response).await.context(StreamSnafu)?;
         sender.finish().await.context(StreamSnafu)?;
         return Ok(());
@@ -441,18 +441,19 @@ async fn handle_request(
 
     match location_values {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, &final_pattern, request, recver, sender).await?;
+            reverse::proxy::handle(location, &final_pattern, req, recver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
-            reverse::file::root(location, request, sender).await?;
+            reverse::file::root(location, req, sender).await?;
         }
         location_value if location_value.contains_key("alias") => {
-            reverse::file::alias(location, &final_pattern, request, sender).await?;
+            reverse::file::alias(location, &final_pattern, req, sender).await?;
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
+            let cn = client_name.unwrap_or_else(|| "<anonymous>".to_string());
             let rule_set = firewall_matched_location;
-            reverse::sshd::login(location, &final_pattern, rule_set, request, recver, sender)
+            reverse::sshd::serve(location, final_pattern, rule_set, req, cn, recver, sender)
                 .await?;
         }
         _ => {

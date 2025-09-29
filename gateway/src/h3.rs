@@ -26,6 +26,22 @@ pub struct H3Stream {
     stream: H3RecvStream,
 }
 
+impl From<h3::client::RequestStream<h3_shim::RecvStream, Bytes>> for H3Stream {
+    fn from(stream: h3::client::RequestStream<h3_shim::RecvStream, Bytes>) -> Self {
+        Self {
+            stream: H3RecvStream::Client(stream),
+        }
+    }
+}
+
+impl From<h3::server::RequestStream<h3_shim::RecvStream, Bytes>> for H3Stream {
+    fn from(stream: h3::server::RequestStream<h3_shim::RecvStream, Bytes>) -> Self {
+        Self {
+            stream: H3RecvStream::Server(stream),
+        }
+    }
+}
+
 impl H3Stream {
     pub fn new(stream: impl Into<H3RecvStream>) -> H3Stream {
         H3Stream {
@@ -68,6 +84,18 @@ pub enum H3Sink {
     Close(BoxFuture<'static, (H3SendStream, io::Result<()>)>),
     Idle(H3SendStream),
     Invalid,
+}
+
+impl From<h3::client::RequestStream<h3_shim::SendStream<Bytes>, Bytes>> for H3Sink {
+    fn from(stream: h3::client::RequestStream<h3_shim::SendStream<Bytes>, Bytes>) -> Self {
+        Self::Idle(H3SendStream::Client(stream))
+    }
+}
+
+impl From<h3::server::RequestStream<h3_shim::SendStream<Bytes>, Bytes>> for H3Sink {
+    fn from(stream: h3::server::RequestStream<h3_shim::SendStream<Bytes>, Bytes>) -> Self {
+        Self::Idle(H3SendStream::Server(stream))
+    }
 }
 
 impl H3Sink {
