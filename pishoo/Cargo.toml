@@ -4,7 +4,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://pishoo.genmeta.net"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 [[package.metadata.genmeta-buildx.deb.packages]]
@@ -25,7 +25,7 @@ name = "pishoo-common"
 upload.remote = "ubuntu@download.genmeta.net:/data/wwwroot/ppa/deb/main"
 
 package.commands = [
-  "export PISHOO_COMMON_VERSION=0.2.0",
+  "export PISHOO_COMMON_VERSION=0.2.1",
   "export DEBIAN_FILE=pishoo-common_$PISHOO_COMMON_VERSION-1_all.deb",
   # 检查文件是否存在，如果存在则跳过
   """

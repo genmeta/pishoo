@@ -9,6 +9,8 @@
 - 修复pishoo-common更新会覆盖原有配置文件
 - 修复pid文件会被覆盖的问题
 - 更新了systemd服务文件，支持reload，修复注释错误
+- 分离了sshd3的实现到单独仓库单独crate
+- sshd正确使用pam，设置进程组ID，创建和结束session
 - 其他诸多琐碎问题...
 
 ## [0.4.0]
