@@ -13,7 +13,7 @@ upload.remote = "ubuntu@download.genmeta.net:/data/wwwroot/ppa/deb/main"
 
 build.builder = "zigbuild"
 build.dependencies.always = ["$arch:libc-dev"]
-build.dependencies.features.sshd = ["$arch:libpam-dev"]
+build.dependencies.features.sshd = ["$arch:libpam0g-dev"]
 
 package.commands = [
   "cargo deb --target $target --no-build --no-strip",
@@ -72,7 +72,11 @@ content = """
 
     (etc/"pishoo/acl").mkpath
     chmod 0700, etc/"pishoo/acl"
-    touch etc/"pishoo/acl/rules.db"
+    begin
+      touch etc/"pishoo/acl/rules.db"
+    rescue
+      opoo "Failed to initial access rule database at #{etc}/pishoo/acl/rules.db. If this is not the first installation, this warning can be ignored."
+    end
   end
 
   def caveats
@@ -83,7 +87,7 @@ content = """
       The SSL certificates should be placed in:
         #{etc}/pishoo/ssl/
     
-      Empty access rule database file created at:
+      For the firest install, empty access rule database file created at:
         #{etc}/pishoo/acl/rules.db
       You can install `access` to configure firewall rules
     EOS

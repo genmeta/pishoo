@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use clap::{Parser, command};
+use clap::Parser;
 use gateway::{error::Whatever, parse::Value};
 use snafu::{OptionExt, ResultExt};
 use tokio::{fs, task::JoinSet};
