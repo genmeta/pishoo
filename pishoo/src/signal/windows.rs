@@ -1,13 +1,6 @@
-use std::fs;
+use gateway::error::Whatever;
+use snafu::whatever;
 
-use anyhow::{Context, Result};
-use nix::{
-    sys::signal::{self, Signal},
-    unistd::Pid,
-};
-
-pub fn send_signal(pid_file: &str, signal_type: &str) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "the -s option is only supported on Linux and macOS"
-    ))
+pub fn send_signal(_pid_file: &str, _signal_type: &str) -> Result<(), Whatever> {
+    whatever!("Signal handling is only supported on Unix-like systems.")
 }

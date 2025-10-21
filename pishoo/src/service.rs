@@ -14,16 +14,15 @@ use sea_orm::{ConnectOptions, Database};
 use snafu::ResultExt;
 use tokio::{sync::Mutex, task::JoinSet};
 
-use crate::{PID_FILE_DEFAULT, signal};
-
 pub async fn start_services_from_pishoo_block(
     handler: &Mutex<JoinSet<()>>,
     pishoo: &Node, // Pishoo block
 ) -> Result<(), Whatever> {
+    #[cfg(unix)]
     let pid_file = if let Some(Value::String(pid)) = pishoo.get("pid") {
         pid
     } else {
-        PID_FILE_DEFAULT
+        crate::PID_FILE_DEFAULT
     };
 
     let access_rules = if let Some(Value::String(db_uri)) = pishoo.get("access_rules") {
@@ -58,7 +57,7 @@ pub async fn start_services_from_pishoo_block(
     .whatever_context(format!("Failed to load access rules `{}`", access_rules))?;
 
     #[cfg(unix)]
-    signal::init_pid_file(pid_file).await?;
+    crate::signal::init_pid_file(pid_file).await?;
 
     let proxys = if let Some(Value::Nodes(pishoo)) = pishoo.get("proxy") {
         pishoo
