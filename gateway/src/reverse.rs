@@ -441,7 +441,7 @@ async fn handle_request(
 
     match location_values {
         location_value if location_value.contains_key("proxy_pass") => {
-            reverse::proxy::handle(location, &final_pattern, req, recver, sender).await?;
+            reverse::proxy::handle(location, req, recver, sender).await?;
         }
         location_value if location_value.contains_key("root") => {
             reverse::file::root(location, req, sender).await?;

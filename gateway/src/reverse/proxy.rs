@@ -17,13 +17,12 @@ use crate::{
     command,
     error::{Result, StreamSnafu, Whatever},
     h3::{H3Sink, H3Stream},
-    parse::{Node, Value},
+    parse::{Node, Value, pattern::Pattern},
     reverse::build_error_response,
 };
 
 pub async fn handle(
     location: &Arc<Node>,
-    final_pattern: &str,
     req: Request<()>,
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
@@ -36,7 +35,7 @@ pub async fn handle(
         req.headers()
     );
 
-    let resp = match pass(location, final_pattern, req, recver).await {
+    let resp = match pass(location, req, recver).await {
         Ok(resp) => resp,
         Err(e) => {
             error!(
@@ -86,7 +85,6 @@ pub async fn handle(
 /// 代理请求
 pub async fn pass(
     location: &Node,
-    final_pattern: &str,
     req: Request<()>,
     receiver: RequestStream<RecvStream, Bytes>,
 ) -> Result<Response<Incoming>> {
@@ -103,17 +101,35 @@ pub async fn pass(
         .path_and_query()
         .map(|p| p.to_string())
         .unwrap_or_default();
+
     tracing::debug!(
         target: "reverse_proxy",
         "Original request path and query: {}",
         path_and_query
     );
 
-    if proxy_pass.path().ends_with('/') && !final_pattern.eq("/") {
+    if proxy_pass.path().ends_with('/') {
         // 将匹配到的路径部分替换掉原始请求路径
-        path_and_query = path_and_query.replace(final_pattern, "");
-        if path_and_query.is_empty() {
-            path_and_query = "/".to_string();
+        let pattern = if let Value::Pattern(pattern, _) = location.value() {
+            pattern
+        } else {
+            unreachable!("Invalid location pattern");
+        };
+
+        match pattern {
+            Pattern::Exact(_) | Pattern::Regex(_) | Pattern::CRegex(_) => {
+                // 精确匹配时, 直接替换整个路径, 不需要额外处理
+                // 正则匹配时, 忽略 proxy_pass 的 path 部分
+            }
+            Pattern::Prefix(p) => {
+                path_and_query = path_and_query.replace(p, proxy_pass.path());
+            }
+            Pattern::NormalPrefix(p) => {
+                path_and_query = path_and_query.replace(p, proxy_pass.path());
+            }
+            Pattern::Common => {
+                path_and_query = format!("{}{}", proxy_pass.path(), path_and_query);
+            }
         }
     }
 

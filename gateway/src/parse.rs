@@ -20,7 +20,7 @@ use crate::error::Whatever;
 
 pub mod conf;
 mod location;
-mod pattern;
+pub mod pattern;
 mod pishoo;
 mod proxy;
 mod server;
