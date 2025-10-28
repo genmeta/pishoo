@@ -1,17 +1,17 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use futures::FutureExt;
-use gm_quic::{QuicClient, handy::client_parameters};
 use http::StatusCode;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::tokio::TokioIo;
+use qconnection::prelude::BindUri;
 use qdns::{HttpResolver, MdnsResolver, Resolvers};
-use qtraversal::iface::traversal_factory;
+use qinterface::iface::physical::PhysicalInterfaces;
 use snafu::{Report, ResultExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
     command,
@@ -56,19 +56,38 @@ pub async fn serve(
 
     info!(target: "forward", "Listening on: http://{local_addr}");
 
-    let resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
+    let mut resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
         Resolvers::default().with(resolver.into())
     } else {
-        Resolvers::default()
-            .with(Arc::new(
-                HttpResolver::new(qdns::HTTP_DNS_SERVER)
-                    .whatever_context::<_, Whatever>("Failed to create http dns resolver")?,
-            ))
-            .with(Arc::new(
-                MdnsResolver::new(qdns::MDNS_SERVICE)
-                    .whatever_context::<_, Whatever>("Failed to create mdns resolver")?,
-            ))
+        Resolvers::default().with(Arc::new(
+            HttpResolver::new(qdns::HTTP_DNS_SERVER)
+                .whatever_context::<_, Whatever>("Failed to create http dns resolver")?,
+        ))
     };
+
+    for (device, ..) in PhysicalInterfaces::global().interfaces() {
+        let socket_addr = match SocketAddr::try_from(&BindUri::from(format!(
+            "iface://v4.{device}:0"
+        ))) {
+            Ok(socket_addr) => socket_addr,
+            Err(error) => {
+                tracing::warn!(target: "forward", "Failed to create mDNS resolver for device {device}: {error}" );
+                continue;
+            }
+        };
+        let SocketAddr::V4(socket_addr) = socket_addr else {
+            unreachable!()
+        };
+        let mdns_resolver = match MdnsResolver::new(qdns::MDNS_SERVICE, *socket_addr.ip(), &device)
+        {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                tracing::warn!(target: "forward", "Failed to create mDNS resolver for device {device}: {error}" );
+                continue;
+            }
+        };
+        resolvers = resolvers.with(Arc::new(mdns_resolver));
+    }
 
     H3ConnectionPool::reinitialize();
     // 访问权限控制
@@ -156,67 +175,6 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             Err(launch_error)
         }
     }
-}
-
-/// 创建并配置 QUIC 客户端，包含 TLS 配置和网络接口绑定
-pub(crate) fn create_quic_client() -> QuicClient {
-    let agents = [
-        "1.12.74.4:20004".parse().unwrap(),
-        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004"
-            .parse()
-            .unwrap(),
-    ];
-
-    debug!(target: "forward", "Creating QUIC client with agents: {:?}", agents);
-    let factory = traversal_factory(&agents);
-    #[allow(unused_mut)]
-    let mut builder = gm_quic::QuicClient::builder_with_tls(configure_tls())
-        .enable_sslkeylog()
-        .with_iface_factory(factory.as_ref().clone());
-    // .with_alpns([ALPN]);
-
-    #[cfg(feature = "qlog")]
-    {
-        use std::path::PathBuf;
-
-        use qevent::telemetry::handy::DefaultSeqLogger;
-
-        builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
-    }
-
-    let binds: Vec<_> = factory
-        .devices()
-        .iter()
-        .map(|(ip, device)| {
-            format!(
-                "iface://{}.{}:0",
-                if ip.is_ipv4() { "v4" } else { "v6" },
-                device
-            )
-        })
-        .collect();
-
-    builder
-        .with_parameters(client_parameters())
-        .defer_idle_timeout(Duration::from_secs(60))
-        .bind(binds)
-        .build()
-}
-
-/// 配置 TLS 客户端参数
-fn configure_tls() -> rustls::ClientConfig {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(crate::common::root_cert())
-        .with_no_client_auth();
-
-    // TLS 特性配置
-    config.resumption = rustls::client::Resumption::disabled();
-    config.key_log = Arc::new(rustls::KeyLogFile::new());
-
-    config
 }
 
 /// 验证请求中的 Host 头合法性

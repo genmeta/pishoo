@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    fmt::Display,
     net::SocketAddr,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{Arc, Weak},
 };
 
@@ -12,6 +14,7 @@ use misc_conf::{
     nginx::Nginx,
 };
 use pattern::Pattern;
+use qconnection::prelude::BindUri;
 use qdns::Resolve;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
@@ -42,7 +45,7 @@ pub enum Value {
     Header(Vec<(HeaderName, HeaderValue, bool)>),
     Types(HashMap<String, HeaderValue>),
     HeaderValue(HeaderValue),
-    Listen(Vec<Listen>),
+    Listen(Vec<Listens>),
     Pattern(Pattern, HashMap<String, Value>),
     SshSslUser(Vec<(String, String)>),
     ValueMap(HashMap<String, Value>),
@@ -61,17 +64,13 @@ impl Value {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resolver {
-    Udp { server_addr: SocketAddr },
     Http { base_url: Uri },
-    Mdns { service_name: String },
 }
 
-impl Resolver {
-    pub fn server_name(&self) -> String {
+impl Display for Resolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Udp { server_addr } => server_addr.to_string(),
-            Self::Http { base_url } => base_url.to_string(),
-            Self::Mdns { service_name } => service_name.clone(),
+            Resolver::Http { base_url } => write!(f, "http {} ", base_url),
         }
     }
 }
@@ -80,65 +79,116 @@ impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
     fn from(resolver: &Resolver) -> Self {
         use qdns::*;
         match resolver {
-            Resolver::Udp { server_addr } => {
-                Arc::new(UdpResolver::new(*server_addr)) as Arc<dyn Resolve + Send + Sync>
-            }
             Resolver::Http { base_url } => Arc::new(
                 HttpResolver::new(base_url.to_string())
                     .expect("HTTP dns server base_url has been checked"),
             ),
-            Resolver::Mdns { service_name } => {
-                Arc::new(MdnsResolver::new(service_name).expect("MDNS creat error"))
-            }
         }
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum IPVersion {
+pub enum IpFamilies {
     V4,
     V6,
     #[default]
     Dual,
 }
 
-impl TryFrom<&str> for IPVersion {
-    type Error = Whatever;
+impl FromStr for IpFamilies {
+    type Err = Whatever;
 
-    fn try_from(value: &str) -> Result<Self> {
-        match value {
-            "v4only" => Ok(IPVersion::V4),
-            "v6only" => Ok(IPVersion::V6),
-            "dual" => Ok(IPVersion::Dual),
-            _ => whatever!("Invalid IP version: {value}"),
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "v4only" => Ok(IpFamilies::V4),
+            "v6only" => Ok(IpFamilies::V6),
+            "dual" => Ok(IpFamilies::Dual),
+            _ => whatever!("Invalid IP families: {s}, expected `v4only`, `v6only` or `dual`"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum IfaceType {
+pub enum IfaceRange {
     All,
     External,
     Internal,
     Exact(String),
 }
 
-impl From<&str> for IfaceType {
+impl IfaceRange {
+    pub fn contains(&self, iface_name: &str) -> bool {
+        match self {
+            IfaceRange::All => true,
+            IfaceRange::Exact(name) => name == iface_name,
+            IfaceRange::External | IfaceRange::Internal => unimplemented!(),
+        }
+    }
+}
+
+impl From<&str> for IfaceRange {
     fn from(value: &str) -> Self {
         match value {
-            "all" => IfaceType::All,
-            "external" => IfaceType::External,
-            "internal" => IfaceType::Internal,
-            _ => IfaceType::Exact(value.to_string()),
+            "all" => IfaceRange::All,
+            "external" => IfaceRange::External,
+            "internal" => IfaceRange::Internal,
+            _ => IfaceRange::Exact(value.to_string()),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Listen {
-    pub typ: IfaceType,
-    pub version: IPVersion,
+pub struct Listens {
+    pub range: IfaceRange,
+    pub families: IpFamilies,
     pub port: u16,
+}
+
+impl Listens {
+    pub fn new(range: IfaceRange, families: IpFamilies, port: u16) -> Self {
+        Self {
+            range,
+            families,
+            port,
+        }
+    }
+
+    pub fn contains(&self, bind_uri: &BindUri) -> bool {
+        use qbase::net::*;
+        let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
+            return false;
+        };
+
+        (matches!(self.families, IpFamilies::Dual)
+            || (matches!(self.families, IpFamilies::V4) && matches!(ip_family, Family::V4))
+            || (matches!(self.families, IpFamilies::V6) && matches!(ip_family, Family::V6)))
+            && self.range.contains(device)
+            && self.port == port
+    }
+
+    pub fn resolve<'i>(
+        &self,
+        devices: impl IntoIterator<Item = &'i str>,
+    ) -> impl Iterator<Item = BindUri> {
+        devices.into_iter().filter(|name| {
+            (matches!(self.range, IfaceRange::All)
+                || matches!(self.range, IfaceRange::Exact(ref iface_name) if iface_name == name))
+        })
+        .flat_map(move |name| {
+            let mut ipv4_bind_uri = BindUri::from( format!("iface://v4.{name}:{}",self.port));
+            let mut ipv6_bind_uri = BindUri::from( format!("iface://v6.{name}:{}",self.port));
+            if self.port == 0 {
+                ipv4_bind_uri = ipv4_bind_uri.alloc_port();
+                ipv6_bind_uri = ipv6_bind_uri.alloc_port();
+            }
+
+            match self.families {
+                IpFamilies::V4 => [Some(ipv4_bind_uri),None],
+                IpFamilies::V6 => [None,Some(ipv6_bind_uri)],
+                IpFamilies::Dual => [Some(ipv4_bind_uri),Some(ipv6_bind_uri)],
+            }.into_iter().flatten()
+        })
+    }
 }
 
 // 包含数据和父链接的节点结构
@@ -368,10 +418,10 @@ fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [iface] => {
-            // 单个参数 只能是网卡名, 省略了 version 和端口的情况
-            Ok(Value::Listen(vec![Listen {
-                typ: IfaceType::from(iface.as_str()),
-                version: IPVersion::default(),
+            // 单个参数 只能是网卡名, 省略了 families 和端口的情况
+            Ok(Value::Listen(vec![Listens {
+                range: IfaceRange::from(iface.as_str()),
+                families: IpFamilies::default(),
                 port: 0,
             }]))
         }
@@ -380,36 +430,44 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
             // 1. 网卡名和 v6only|v4only|dual
             // 2. 网卡名和端口
 
-            let typ = IfaceType::from(iface.as_str());
-            let version = IPVersion::try_from(param.as_str()).ok();
-            let port = if version.is_none() {
-                param.parse::<u16>().ok()
-            } else {
-                None
-            };
-            if version.is_none() && port.is_none() {
-                whatever!(
-                    "Invalid argument for directive: {}:{}",
-                    directive.name,
-                    param
-                );
+            let range = IfaceRange::from(iface.as_str());
+            match IpFamilies::from_str(param) {
+                Ok(families) => Ok(Value::Listen(vec![Listens {
+                    range,
+                    families,
+                    port: 0,
+                }])),
+                Err(error) => {
+                    let port = param
+                        .parse::<u16>()
+                        .map_err(|int_error| {
+                            format!("`{param}` is neither valid IP families({error}) nor port number({int_error})")
+                        })
+                        .whatever_context(format!(
+                            "Invalid argument for directive: {}:{}",
+                            directive.name, param
+                        ))?;
+                    Ok(Value::Listen(vec![Listens {
+                        range,
+                        families: IpFamilies::default(),
+                        port,
+                    }]))
+                }
             }
-
-            Ok(Value::Listen(vec![Listen {
-                typ,
-                version: version.unwrap_or_default(),
-                port: port.unwrap_or_default(),
-            }]))
         }
         [iface, version, port] => {
             // 三个参数, 只能是 网卡名和 v6only|v4only|dual 和端口
-            let typ = IfaceType::from(iface.as_str());
-            let version = IPVersion::try_from(version.as_str())?;
+            let range = IfaceRange::from(iface.as_str());
+            let families = IpFamilies::from_str(version.as_str())?;
             let port = port.parse::<u16>().whatever_context(format!(
                 "Invalid port number `{port}` while parsing directive {}",
                 directive.name
             ))?;
-            Ok(Value::Listen(vec![Listen { typ, version, port }]))
+            Ok(Value::Listen(vec![Listens {
+                range,
+                families,
+                port,
+            }]))
         }
         _ => whatever!(
             "Invalid number of arguments for directive: {}",
@@ -434,14 +492,17 @@ fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
+// resolver udp
+// resolver http
 fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [kind, resolver] => match kind.as_str() {
             "udp" => {
-                let server_addr = resolver.parse::<SocketAddr>().whatever_context(format!(
-                    "Invalid socket address `{resolver}` whiling parsing udp resolver",
-                ))?;
-                Ok(Value::Resolver(Resolver::Udp { server_addr }))
+                whatever!("`udp` resolver is deprecated, please use `http` instead",);
+                // let server_addr = resolver.parse::<SocketAddr>().whatever_context(format!(
+                //     "Invalid socket address `{resolver}` whiling parsing udp resolver",
+                // ))?;
+                // Ok(Value::Resolver(Resolver::Udp { server_addr }))
             }
             "http" => {
                 let base_url = resolver.parse::<Uri>().whatever_context(format!(

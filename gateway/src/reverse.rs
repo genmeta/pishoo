@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
@@ -10,12 +9,15 @@ use firewall_base::{
     expr::atomics::HttpRequest,
     matcher::{DomainRulesMatcher, LocationRulesMatcher},
 };
-use gm_quic::{BindUri, Connection, QuicListeners, ToCertificate, handy::server_parameters};
+use gm_quic::{Connection, QuicListeners, ToCertificate, handy::server_parameters};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{Request, Response, StatusCode};
-use qdns::{HttpResolver, MdnsResolver, Resolve};
-use qtraversal::iface::{TraversalFactory, traversal_factory};
+use qdns::{HttpResolver, Resolve};
+use qinterface::iface::{
+    QuicInterfaces,
+    physical::{Interface, InterfaceEvent, InterfacesMonitor, PhysicalInterfaces},
+};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
@@ -23,9 +25,10 @@ use tracing::{Instrument, debug, error, info, info_span};
 
 use crate::{
     error::{Result, StreamSnafu, Whatever},
-    parse::{IPVersion, IfaceType, Listen, Node, Resolver, Value},
+    parse::{Listens, Node, Resolver, Value},
     publisher::Publisher,
     reverse::{self},
+    traversal_factory,
 };
 
 mod auth;
@@ -33,6 +36,31 @@ mod file;
 mod proxy;
 #[cfg(feature = "sshd")]
 mod sshd;
+
+/*
+ - PhysicalInterfaces:
+    - 监听网络设备变化
+    - 自动触发Interface的rebind
+    - 发布InterfaceEvents供其他模块订阅网络变化，来添加/移除监听地址等
+
+ - QuicListeners：
+    - 初始化时
+     - 根据listen配置，进行第一次绑定
+    - 订阅Locations监听变化
+     - 根据server的listen配置，响应变化（移除/添加bind地址）
+
+ - DNS发布任务
+    - 订阅Locations监听变化
+     - 根据server的listen和resolver配置
+    - 响应变化（移除/添加mDNS Resolver）
+     - 进行重新发布
+
+ - QuicClient：
+    - 初始化时
+     - 根据listen配置，进行第一次绑定
+    - 订阅Locations监听变化
+     - 根据client的listen配置，响应变化（移除/添加bind地址）
+*/
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
 type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
@@ -49,16 +77,15 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
-    let (routers, server_resolvers) = init_routers(&servers)?;
-    let quic_listners = create_quic_server(access_rules.0, &servers).await?;
+    let monitor = PhysicalInterfaces::global().monitor();
+    let current_interfaces = monitor.interfaces();
+    let (router, server_resolvers) = init_router(&servers)?;
+    let (quic_listeners, server_listens) =
+        create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
 
-    let http_resovler = Arc::new(
+    let default_http_resolver = Arc::new(
         HttpResolver::new(qdns::HTTP_DNS_SERVER)
             .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
-    );
-    let mdns_resovler = Arc::new(
-        MdnsResolver::new(qdns::MDNS_SERVICE)
-            .whatever_context::<_, Whatever>("Failed to create mDNS resolver")?,
     );
     let server_resolvers: HashMap<String, Vec<Arc<dyn Resolve + Send + Sync>>> = server_resolvers
         .into_iter()
@@ -68,40 +95,32 @@ pub async fn serve(
                     .iter()
                     .any(|suffix| server_name.ends_with(suffix))
                 {
-                    vec![mdns_resovler.clone()]
+                    vec![]
                 } else if resolvers.is_empty() {
-                    vec![mdns_resovler.clone(), http_resovler.clone()]
+                    vec![default_http_resolver.clone()]
                 } else {
                     debug_assert!(!resolvers.is_empty());
-                    let mut resolver_map: HashMap<String, Arc<dyn Resolve + Send + Sync>> =
-                        HashMap::new();
-                    // 提供默认 resovler
-                    resolver_map.insert(http_resovler.server(), http_resovler.clone());
-                    resolver_map.insert(mdns_resovler.server(), mdns_resovler.clone());
-                    resolvers
-                        .iter()
-                        .map(|resolver| {
-                            resolver_map
-                                .entry(resolver.server_name())
-                                .or_insert_with(|| (*resolver).into())
-                                .clone()
-                        })
-                        .collect()
+                    resolvers.iter().map(|r| (*r).into()).collect()
                 };
             (server_name, server_resolvers)
         })
         .collect();
 
     // 启动 dns 上报
-    let _publisher = Publisher::spawn(quic_listners.clone(), server_resolvers);
-    let _guard = ShutdownListenersOnDrop(quic_listners.clone());
+    let _publisher = Publisher::spawn(quic_listeners.clone(), server_resolvers);
+    let _guard = ShutdownListenersOnDrop(quic_listeners.clone());
+    let _maintain_binding = tokio::spawn(maintain_binding(
+        monitor,
+        quic_listeners.clone(),
+        server_listens,
+    ));
 
     // 主接受循环
-    handle_connections(quic_listners, access_rules.1, routers).await
+    handle_connections(quic_listeners, access_rules.1, router).await
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
-fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverList<'_>)> {
+fn init_router(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverList<'_>)> {
     let mut routers = HashMap::new();
     let mut resolvers = vec![];
 
@@ -129,23 +148,15 @@ fn init_routers(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLi
 }
 
 /// 创建QUIC服务器实例
-async fn create_quic_server(
+async fn create_quic_listeners(
     domain_access_rules: Arc<DomainRulesMatcher>,
+    current_interfaces: &HashMap<String, Interface>,
     servers: &[Arc<Node>],
-) -> Result<Arc<QuicListeners>> {
-    let agents: [SocketAddr; 2] = [
-        "1.12.74.4:20004".parse().unwrap(),
-        "[2402:4e00:c011:1700:8624:7e0:5c9a:2]:20004"
-            .parse()
-            .unwrap(),
-    ];
-
-    let factory = traversal_factory(&agents[..]);
-
-    let mut server_binds = HashMap::new();
+) -> Result<(Arc<QuicListeners>, HashMap<String, Vec<Listens>>)> {
+    let mut server_listens = HashMap::new();
 
     for server in servers {
-        let Some(Value::Listen(server_ifaces)) = server.get("listen") else {
+        let Some(Value::Listen(listens)) = server.get("listen") else {
             unreachable!("Invalid listen address");
         };
 
@@ -153,30 +164,29 @@ async fn create_quic_server(
             unreachable!("Invalid server name");
         };
 
-        let server_ifaces: HashSet<_> = server_ifaces.iter().cloned().collect();
-
-        for mut domain in server_names {
-            if domain.ends_with('~') {
-                domain = domain.replace('~', ".genmeta.net");
+        for mut server_name in server_names {
+            if server_name.ends_with('~') {
+                server_name = server_name.replace('~', ".genmeta.net");
             }
-            server_binds.insert(domain, server_ifaces.clone());
+            server_listens.insert(server_name, listens.clone());
         }
     }
 
-    let server_binds = server_binds
-        .into_iter()
+    let server_bind_uris = server_listens
+        .iter()
         .map(|(server_name, server_listen)| {
-            let binds = server_listen
+            let bind_uris = server_listen
                 .iter()
-                .flat_map(|iface| resolve_binds(&factory, iface))
+                .flat_map(|listens| listens.resolve(current_interfaces.keys().map(|s| s.as_str())))
                 .collect::<HashSet<_>>();
-            (server_name, binds)
+            (server_name, bind_uris)
         })
         .collect::<HashMap<_, _>>();
 
     // collect & dedup
-    let binds: HashSet<_> = server_binds.values().flatten().cloned().collect();
-    let factory = traversal_factory(&agents[..]);
+    let initial_bind_uris: HashSet<_> = server_bind_uris.values().flatten().cloned().collect();
+    debug!(?initial_bind_uris, "Binds");
+
     let builder = gm_quic::QuicListeners::builder()
         .whatever_context::<_, Whatever>("Failed to create QUIC listeners")?;
 
@@ -198,11 +208,11 @@ async fn create_quic_server(
         .unwrap();
 
     let listeners = builder
-        .with_iface_factory(factory.as_ref().clone())
+        .with_iface_factory(traversal_factory().as_ref().clone())
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_client_auther(auth::ClientAuther::from(domain_access_rules))
-        .listen(1000);
+        .listen(1024);
 
     // 为每个服务器添加TLS证书
     for server in servers {
@@ -214,7 +224,7 @@ async fn create_quic_server(
             unreachable!("Invalid ssl_certificate_key path");
         };
 
-        let Some(Value::StringVec(server_name)) = server.get("server_name").cloned() else {
+        let Some(Value::StringVec(server_names)) = server.get("server_name").cloned() else {
             unreachable!("Invalid server name");
         };
 
@@ -230,51 +240,71 @@ async fn create_quic_server(
                 "Failed to read private key file `{}`",
                 key_path.display()
             ))?;
-        for mut domain in server_name {
-            if domain.ends_with('~') {
-                domain = domain.replace('~', ".genmeta.net");
+        for mut server_name in server_names {
+            if server_name.ends_with('~') {
+                server_name = server_name.replace('~', ".genmeta.net");
             }
-            // builder = builder.add_host(domain, &*cert, &*key);
-            let binds = server_binds.get(&domain).unwrap();
-            debug!(domain, ?binds, "Adding server");
-            _ = listeners.add_server(domain, &*cert, &*key, binds.clone(), None);
+            let bind_uris = server_bind_uris.get(&server_name).unwrap();
+            debug!(server_name, ?bind_uris, "Adding server");
+            listeners
+                .add_server(server_name, &*cert, &*key, bind_uris.clone(), None)
+                .whatever_context::<_, Whatever>("Failed to initial quic listeners")?;
         }
     }
 
-    debug!(?binds, "Binds");
-    Ok(listeners)
+    Ok((listeners, server_listens))
 }
 
-fn resolve_binds(factory: &TraversalFactory, iface: &Listen) -> Vec<BindUri> {
-    let mut binds = Vec::new();
-    for (device_ip, device_name) in factory.devices() {
-        let is_match = match (&iface.typ, device_ip) {
-            (IfaceType::All, _) => true,
-            (IfaceType::External, IpAddr::V4(ip)) => !ip.is_loopback(),
-            (IfaceType::External, IpAddr::V6(ip)) => !ip.is_loopback(),
-            (IfaceType::Internal, IpAddr::V4(ip)) => ip.is_loopback(),
-            (IfaceType::Internal, IpAddr::V6(ip)) => ip.is_loopback(),
-            (IfaceType::Exact(name), _) => factory.devices().get(device_ip) == Some(name),
-        };
-        let version_match = match device_ip {
-            IpAddr::V4(_) => matches!(iface.version, IPVersion::V4 | IPVersion::Dual),
-            IpAddr::V6(_) => matches!(iface.version, IPVersion::V6 | IPVersion::Dual),
-        };
-        if is_match && version_match {
-            let family = match device_ip {
-                IpAddr::V4(_) => "v4",
-                IpAddr::V6(_) => "v6",
-            };
-            let port = iface.port;
-            let base_bind_uri = BindUri::from(format!("iface://{family}.{device_name}:{port}"));
-            binds.push(if port == 0 {
-                base_bind_uri.alloc_port()
-            } else {
-                base_bind_uri
-            });
+#[tracing::instrument(name = "maintain_binding", skip_all)]
+async fn maintain_binding(
+    mut monitor: InterfacesMonitor,
+    quic_listeners: Arc<QuicListeners>,
+    server_listens: HashMap<String, Vec<Listens>>,
+) {
+    while let Some((_currnet_interfaces, event)) = monitor.update().await {
+        tracing::debug!(target: "listen", ?event, "Interface event received");
+        match event.as_ref() {
+            InterfaceEvent::Added { device, .. } => {
+                for (server, listens) in &server_listens {
+                    let bind_uris = listens
+                        .iter()
+                        .flat_map(|listens| listens.resolve([device.as_str()]))
+                        .collect::<HashSet<_>>();
+                    if bind_uris.is_empty() {
+                        continue;
+                    }
+                    debug!(target: "listen", server, ?bind_uris, "Add interfaces to server binding");
+                    let Some(server) = quic_listeners.get_server(server) else {
+                        unreachable!()
+                    };
+                    for bind_uri in bind_uris {
+                        let bind_interface =
+                            QuicInterfaces::global().bind(bind_uri, traversal_factory().clone());
+                        server.add_interface(bind_interface);
+                    }
+                }
+            }
+            InterfaceEvent::Removed { device, .. } => {
+                for (server, listens) in &server_listens {
+                    let bind_uris = listens
+                        .iter()
+                        .flat_map(|listens| listens.resolve([device.as_str()]))
+                        .collect::<HashSet<_>>();
+                    if bind_uris.is_empty() {
+                        continue;
+                    }
+                    debug!(target: "listen", server, ?bind_uris, "Remove those interface from server binding");
+                    let Some(server) = quic_listeners.get_server(server) else {
+                        unreachable!()
+                    };
+                    for bind_uri in bind_uris {
+                        server.remove_interface(&bind_uri);
+                    }
+                }
+            }
+            InterfaceEvent::Changed { .. } => { /* Ignore changes */ }
         }
     }
-    binds
 }
 
 /// 处理客户端连接

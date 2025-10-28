@@ -1,67 +1,29 @@
 use std::{
-    error::Error,
-    fmt::Display,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::{Stream, StreamExt, future, stream};
-use gm_quic::{QuicClient, SocketEndpointAddr};
+use futures::StreamExt;
+use gm_quic::QuicClient;
 use h3::client::SendRequest;
+use qconnection::prelude::handy::client_parameters;
 use qdns::Resolvers;
+use qinterface::iface::{
+    QuicInterfaces,
+    physical::{InterfaceEvent, PhysicalInterfaces},
+};
 use snafu::{OptionExt, Report, ResultExt};
-use tokio::{io, sync::Mutex};
+use tokio::sync::Mutex;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
-use crate::{error::Whatever, forward::create_quic_client};
-
-#[derive(Debug)]
-pub struct DnsErrors {
-    errors: Vec<(String, io::Error)>,
-}
-
-impl Display for DnsErrors {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (source, error) in &self.errors {
-            writeln!(
-                f,
-                "Resolver `{source}` failed: {}",
-                Report::from_error(error)
-            )?;
-        }
-        Ok(())
-    }
-}
-
-impl Error for DnsErrors {}
-
-pub async fn lookup(
-    resolvers: &Resolvers,
-    server_name: &str,
-) -> Result<impl Stream<Item = Vec<SocketEndpointAddr>> + use<>, DnsErrors> {
-    let mut errors = vec![];
-
-    let mut lookup_stream = resolvers.lookup(server_name);
-    let endpoints = loop {
-        match lookup_stream.next().await {
-            // 多余？
-            Some((source, Ok(endpoints))) if endpoints.is_empty() => {
-                errors.push((
-                    source,
-                    io::Error::new(io::ErrorKind::NotFound, "No endpoints addresses found"),
-                ));
-            }
-            Some((source, Err(error))) => {
-                errors.push((source, error));
-            }
-            Some((_source, Ok(endpoints))) => break endpoints,
-            None => return Err(DnsErrors { errors }),
-        }
-    };
-    Ok(stream::once(future::ready(endpoints))
-        .chain(lookup_stream.filter_map(|(_, endpoints)| future::ready(endpoints.ok()))))
-}
+use crate::{
+    error::Whatever,
+    parse::{IfaceRange, IpFamilies, Listens},
+    traversal_factory,
+};
 
 #[derive(Clone)]
 pub struct ReusableConnection {
@@ -73,6 +35,7 @@ pub struct ReusableConnection {
 /// H3 Connection reuse pool
 pub struct H3ConnectionPool {
     quic_client: Arc<QuicClient>,
+    _maintain_binding: AbortOnDropHandle<()>,
     h3_clients: Arc<DashMap<String, Arc<Mutex<Option<ReusableConnection>>>>>,
 }
 
@@ -109,8 +72,72 @@ impl H3ConnectionPool {
     ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
     pub fn new() -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut tls_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(crate::common::root_cert())
+            .with_no_client_auth();
+
+        // TLS 特性配置
+        tls_config.resumption = rustls::client::Resumption::disabled();
+        tls_config.key_log = Arc::new(rustls::KeyLogFile::new());
+
+        #[cfg_attr(not(feature = "qlog"), allow(unused_mut))]
+        let mut builder = gm_quic::QuicClient::builder_with_tls(tls_config)
+            .enable_sslkeylog()
+            .with_iface_factory(traversal_factory().as_ref().clone());
+        // .with_alpns([ALPN]);
+
+        #[cfg(feature = "qlog")]
+        {
+            use std::path::PathBuf;
+
+            use qevent::telemetry::handy::DefaultSeqLogger;
+
+            builder =
+                builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+        }
+
+        let mut monitor = PhysicalInterfaces::global().monitor();
+
+        let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);
+
+        let client = Arc::new(
+            builder
+                .with_parameters(client_parameters())
+                .defer_idle_timeout(Duration::from_secs(60))
+                .bind(listen_all.resolve(monitor.interfaces().keys().map(|d| d.as_str())))
+                .build(),
+        );
+
+        let quic_client = client.clone();
+        let maintain_binding = AbortOnDropHandle::new(tokio::spawn(async move {
+            while let Some((_currnet_interfaces, event)) = monitor.update().await {
+                tracing::debug!(target: "listen", ?event, "Interface event received");
+                match event.as_ref() {
+                    InterfaceEvent::Added { device, .. } => {
+                        for bind_uri in listen_all.resolve([device.as_str()]) {
+                            debug!(target: "listen", ?bind_uri, "Add interface to client binding");
+                            let bind_interface = QuicInterfaces::global()
+                                .bind(bind_uri, traversal_factory().clone());
+                            quic_client.add_interface(bind_interface);
+                        }
+                    }
+                    InterfaceEvent::Removed { device, .. } => {
+                        for bind_uri in listen_all.resolve([device.as_str()]) {
+                            debug!(target: "listen", ?bind_uri, "Remove interface from client binding");
+                            quic_client.remove_interface(&bind_uri);
+                        }
+                    }
+                    InterfaceEvent::Changed { .. } => { /* Ignore changes */ }
+                }
+            }
+        }));
+
         Self {
-            quic_client: Arc::new(create_quic_client()),
+            quic_client: client,
+            _maintain_binding: maintain_binding,
             h3_clients: Arc::new(DashMap::new()),
         }
     }
@@ -149,11 +176,12 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            let mut lookup = lookup(&resolvers, &server_name)
+            let mut lookup = resolvers
+                .lookup(&server_name)
                 .await
                 .whatever_context("DNS lookup failed")?;
 
-            let server_eps = lookup
+            let (_resolver, server_eps) = lookup
                 .next()
                 .await
                 .whatever_context("No endpoint found for server")?;
@@ -166,7 +194,7 @@ impl H3ConnectionPool {
             tokio::spawn({
                 let conn = quic_connection.clone();
                 async move {
-                    while let Some(endpoints) = lookup.next().await {
+                    while let Some((_resolver, endpoints)) = lookup.next().await {
                         for endpoint in endpoints {
                             _ = conn.add_peer_endpoint(endpoint.into());
                         }

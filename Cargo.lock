@@ -41,6 +41,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android-build"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cac4c64175d504608cf239756339c07f6384a476f97f20a7043f92920b0b8fd"
+dependencies = [
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,6 +598,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cesu8"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -669,6 +684,16 @@ dependencies = [
  "is-terminal",
  "lazy_static",
  "winapi",
+]
+
+[[package]]
+name = "combine"
+version = "4.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+dependencies = [
+ "bytes",
+ "memchr",
 ]
 
 [[package]]
@@ -1069,9 +1094,9 @@ dependencies = [
 
 [[package]]
 name = "document-features"
-version = "0.2.11"
+version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95249b50c6c185bee49034bcb378a49dc2b5dff0be90ff6616d31d64febab05d"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
 ]
@@ -1392,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1417,6 +1442,7 @@ dependencies = [
  "misc-conf",
  "parking_lot",
  "pnet",
+ "qbase",
  "qconnection",
  "qdns",
  "qevent",
@@ -1479,7 +1505,7 @@ dependencies = [
  "futures",
  "genmeta-ssh3-proto",
  "http",
- "nix",
+ "nix 0.30.1",
  "pam-client2",
  "snafu",
  "tokio",
@@ -1595,7 +1621,7 @@ dependencies = [
 [[package]]
 name = "gm-quic"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1618,24 +1644,20 @@ dependencies = [
 [[package]]
 name = "gmdns"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=main#f03644deec0b277e43e56969e82bdd202d16d04a"
+source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=main#e4db0480584fe46802b20c92ece1416aa7fbf09b"
 dependencies = [
  "bitfield-struct",
  "bytes",
- "clap",
  "dashmap",
  "flume",
  "futures",
- "getifs",
  "nom 8.0.0",
- "pnet",
  "rand 0.9.2",
  "socket2 0.5.10",
  "thiserror 2.0.17",
  "tokio",
- "tokio-stream",
+ "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1675,7 +1697,7 @@ dependencies = [
 [[package]]
 name = "h3-shim"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1810,11 +1832,11 @@ dependencies = [
 
 [[package]]
 name = "home"
-version = "0.5.11"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1960,7 +1982,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -2166,20 +2188,20 @@ dependencies = [
 
 [[package]]
 name = "is-terminal"
-version = "0.4.16"
+version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
+checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "is_terminal_polyfill"
-version = "1.70.1"
+version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf"
+checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
@@ -2195,6 +2217,28 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+
+[[package]]
+name = "jni"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a87aa2bb7d2af34197c04845522473242e1aa17c12f4935d5856491a7fb8c97"
+dependencies = [
+ "cesu8",
+ "cfg-if",
+ "combine",
+ "jni-sys",
+ "log",
+ "thiserror 1.0.69",
+ "walkdir",
+ "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "jni-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
 
 [[package]]
 name = "js-sys"
@@ -2278,9 +2322,9 @@ checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
 
 [[package]]
 name = "litrs"
-version = "0.4.2"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e54036fe321fd421e10d732f155734c4e4afd610dd556d9a82833ab3ee0bed"
+checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lock_api"
@@ -2434,6 +2478,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
 name = "netdev"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2496,6 +2546,32 @@ dependencies = [
  "bytes",
  "libc",
  "log",
+]
+
+[[package]]
+name = "netwatcher"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9feecf636b708f9af13ae49dfaa065997a4d9e1da60b59343a3825b99e4392a1"
+dependencies = [
+ "android-build",
+ "jni",
+ "ndk-context",
+ "nix 0.29.0",
+ "windows",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -2634,9 +2710,9 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "once_cell_polyfill"
-version = "1.70.1"
+version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
+checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openssl-probe"
@@ -2872,14 +2948,14 @@ dependencies = [
 
 [[package]]
 name = "pishoo"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "atty",
  "clap",
  "console-subscriber",
  "firewall-db",
  "gateway",
- "nix",
+ "nix 0.30.1",
  "qdns",
  "sea-orm",
  "sea-orm-migration",
@@ -3084,9 +3160,9 @@ checksum = "dc375e1527247fe1a97d8b7156678dfe7c1af2fc075c9a4db3690ecd2a148068"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.101"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
+checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
 dependencies = [
  "unicode-ident",
 ]
@@ -3179,7 +3255,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bitflags 2.10.0",
  "bytes",
@@ -3202,7 +3278,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "qbase",
  "qevent",
@@ -3215,7 +3291,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3240,7 +3316,7 @@ dependencies = [
 [[package]]
 name = "qdns"
 version = "0.2.2"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3248,9 +3324,11 @@ dependencies = [
  "futures",
  "gmdns",
  "qbase",
+ "qinterface",
  "qtraversal",
  "reqwest",
  "serde",
+ "snafu",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -3260,7 +3338,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3278,7 +3356,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3286,6 +3364,7 @@ dependencies = [
  "derive_more",
  "futures",
  "netdev",
+ "netwatcher",
  "qbase",
  "qevent",
  "qudp",
@@ -3300,7 +3379,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "darling 0.21.3",
  "proc-macro2",
@@ -3311,7 +3390,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3329,7 +3408,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "async-trait",
  "bitflags 2.10.0",
@@ -3355,7 +3434,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3364,7 +3443,7 @@ dependencies = [
  "socket2 0.6.1",
  "tokio",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3425,7 +3504,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=main#f6e548943e75923e1c23e8c0ad08a0eca491d2b9"
+source = "git+ssh://git@github.com/genmeta/gm-quic-traversal.git?branch=fix%2Fv0.4.2#9e202da1bf3ff8971885899cf32e69d58419ff37"
 dependencies = [
  "bytes",
  "futures",
@@ -3910,6 +3989,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4362,12 +4450,12 @@ dependencies = [
 
 [[package]]
 name = "smol_str"
-version = "0.3.2"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
+checksum = "3498b0a27f93ef1402f20eefacfaa1691272ac4eca1cdc8c596cb0a245d6cbf5"
 dependencies = [
  "borsh",
- "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -5090,17 +5178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5111,12 +5188,10 @@ dependencies = [
  "once_cell",
  "regex-automata",
  "sharded-slab",
- "smallvec",
  "thread_local",
  "time",
  "tracing",
  "tracing-core",
- "tracing-log",
 ]
 
 [[package]]
@@ -5250,6 +5325,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
+]
 
 [[package]]
 name = "want"
@@ -5430,10 +5515,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
 
 [[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "windows"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de69df01bdf1ead2f4ac895dc77c9351aefff65b2f3db429a343f9cbf05e132"
+dependencies = [
+ "windows-core 0.56.0",
+ "windows-targets 0.52.6",
+]
 
 [[package]]
 name = "windows-core"
@@ -5491,6 +5595,15 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
+dependencies = [
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -5621,6 +5734,12 @@ dependencies = [
  "windows_x86_64_gnullvm 0.53.1",
  "windows_x86_64_msvc 0.53.1",
 ]
+
+[[package]]
+name = "windows_aarch64_gnullvm"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "597a5118570b68bc08d8d59125332c54f1ba9d9adeedeef5b99b02ba2b0698f8"
 
 [[package]]
 name = "windows_aarch64_gnullvm"

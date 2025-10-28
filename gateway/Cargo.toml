@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 
 [[example]]
@@ -40,6 +40,7 @@ getrandom = { workspace = true }
 # --- QUIC Implementation ---
 gm-quic = { workspace = true }
 h3-shim = { workspace = true }
+qbase = { workspace = true }
 qdns = { workspace = true }
 qconnection = { workspace = true }
 qtraversal = { workspace = true }
@@ -60,6 +61,7 @@ form_urlencoded = { workspace = true }
 x509-parser = { workspace = true }
 
 genmeta-ssh3-server = { git = "ssh://git@github.com/genmeta/genmeta-ssh3.git", optional = true }
+# genmeta-ssh3-server = { path = "../../genmeta-ssh3/genmeta-ssh3-server", optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
