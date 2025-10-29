@@ -89,6 +89,45 @@ pub async fn serve(
         resolvers = resolvers.with(Arc::new(mdns_resolver));
     }
 
+    // 从配置中读取客户端配置
+    let Value::Path(cert_path) = node
+        .get("ssl_certificate")
+        .expect("Missing ssl_certificate in proxy configuration")
+    else {
+        panic!("ssl_certificate must be a path");
+    };
+
+    let Value::Path(key_path) = node
+        .get("ssl_certificate_key")
+        .expect("Missing ssl_certificate_key in proxy configuration")
+    else {
+        panic!("ssl_certificate_key must be a path");
+    };
+
+    let Value::String(client_name) = node
+        .get("client_name")
+        .expect("Missing client_name in proxy configuration")
+    else {
+        panic!("client_name must be a string");
+    };
+
+    // 读取证书和密钥
+    let cert_chain = std::fs::read(cert_path).whatever_context::<_, Whatever>(format!(
+        "Failed to read client certificate from {}",
+        cert_path.display()
+    ))?;
+    let private_key = std::fs::read(key_path).whatever_context::<_, Whatever>(format!(
+        "Failed to read client private key from {}",
+        key_path.display()
+    ))?;
+
+    // 设置客户端配置
+    if let Err(e) = crate::pool::set_client_config(cert_chain, private_key, client_name.clone()) {
+        info!(target: "forward", "Client config already set: {e}, will reinitialize connection pool");
+    } else {
+        info!(target: "forward", "Client config set with name: {client_name}");
+    }
+
     H3ConnectionPool::reinitialize();
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
