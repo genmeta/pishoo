@@ -6,7 +6,7 @@ pub mod error;
 pub mod forward;
 mod h3;
 pub mod parse;
-mod pool;
+pub mod pool;
 mod publisher;
 pub mod reverse;
 

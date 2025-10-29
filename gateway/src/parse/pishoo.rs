@@ -8,6 +8,7 @@ use crate::parse::{
 pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     let mut commands = Commands::new();
 
+    commands.insert("pid", parse_string);
     commands.insert("types", parse_types);
     commands.insert("access_rules", parse_string);
     commands.insert("default_type", parse_header_value);

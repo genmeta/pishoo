@@ -40,6 +40,17 @@ async fn main() -> Result<(), Whatever> {
         unreachable!("Parse error")
     };
 
+    // 设置客户端配置
+    let cert_chain = std::fs::read("keychain/client/signed_certificate.pem")
+        .whatever_context("Failed to read client certificate")?;
+    let private_key = std::fs::read("keychain/client/test.key")
+        .whatever_context("Failed to read client private key")?;
+    let client_name = "borber.pilot.genmeta.net".to_string();
+
+    if let Err(e) = gateway::pool::set_client_config(cert_chain, private_key, client_name) {
+        whatever!("Failed to set client config: {}", e);
+    }
+
     let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {
         whatever!("No proxy found in pishoo configuration");
     };

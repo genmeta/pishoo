@@ -12,7 +12,7 @@ use firewall_base::{
 use gm_quic::{Connection, QuicListeners, ToCertificate, handy::server_parameters};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
-use http::{Request, Response, StatusCode};
+use http::{HeaderValue, Request, Response, StatusCode};
 use qdns::{HttpResolver, Resolve};
 use qinterface::iface::{
     QuicInterfaces,
@@ -449,16 +449,17 @@ async fn handle_request(
 
     let (mut sender, recver) = stream.split();
 
+    let client_name = match &client_name {
+        None => "<anonymous>",
+        Some(name) => name,
+    };
+
     if firewall_action == RequestAction::Deny {
         let response = Response::builder()
             .status(StatusCode::FORBIDDEN)
             .body(())
             .expect("Failed to build response");
 
-        let client_name = match &client_name {
-            None => "<anonymous>",
-            Some(name) => name,
-        };
         info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", req.uri());
         sender.send_response(response).await.context(StreamSnafu)?;
         sender.finish().await.context(StreamSnafu)?;
@@ -468,6 +469,12 @@ async fn handle_request(
     let Value::Pattern(_, location_values) = location.value() else {
         unreachable!("Invalid location value");
     };
+
+    let (mut parts, body) = req.into_parts();
+    parts
+        .headers
+        .insert("ClientName", HeaderValue::from_str(client_name).unwrap());
+    let req = Request::from_parts(parts, body);
 
     match location_values {
         location_value if location_value.contains_key("proxy_pass") => {

@@ -1,12 +1,12 @@
 use std::{
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
-use gm_quic::QuicClient;
+use gm_quic::{QuicClient, ToCertificate, ToPrivateKey};
 use h3::client::SendRequest;
 use qconnection::prelude::handy::client_parameters;
 use qdns::Resolvers;
@@ -24,6 +24,30 @@ use crate::{
     parse::{IfaceRange, IpFamilies, Listens},
     traversal_factory,
 };
+
+/// 全局客户端配置存储
+static CLIENT_CONFIG: OnceLock<(Vec<u8>, Vec<u8>, String)> = OnceLock::new();
+
+/// 设置客户端配置
+///
+/// 必须在创建连接池之前调用此函数设置证书、密钥和客户端名称。
+/// 此函数只能成功调用一次。
+pub fn set_client_config(
+    cert_chain: Vec<u8>,
+    private_key: Vec<u8>,
+    client_name: String,
+) -> Result<(), &'static str> {
+    CLIENT_CONFIG
+        .set((cert_chain, private_key, client_name))
+        .map_err(|_| "Client config already set")
+}
+
+/// 获取客户端配置
+fn get_client_config() -> (Vec<u8>, Vec<u8>, String) {
+    CLIENT_CONFIG.get().cloned().expect(
+        "Client config not set. Please call set_client_config() before using the connection pool",
+    )
+}
 
 #[derive(Clone)]
 pub struct ReusableConnection {
@@ -52,7 +76,8 @@ impl H3ConnectionPool {
         if let Some(pool) = guard.as_ref() {
             return pool.clone();
         }
-        let pool = Arc::new(H3ConnectionPool::new());
+        let (cert_chain, key_der, client_name) = get_client_config();
+        let pool = Arc::new(H3ConnectionPool::new(cert_chain, key_der, client_name));
         *guard = Some(pool.clone());
         pool
     }
@@ -62,7 +87,8 @@ impl H3ConnectionPool {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
         debug!(target: "pool", "Reinitializing H3ConnectionPool");
         let mut guard = GLOBAL.write().unwrap();
-        let pool = Arc::new(H3ConnectionPool::new());
+        let (cert_chain, key_der, client_name) = get_client_config();
+        let pool = Arc::new(H3ConnectionPool::new(cert_chain, key_der, client_name));
         *guard = Some(pool.clone());
         pool
     }
@@ -70,14 +96,21 @@ impl H3ConnectionPool {
     ///
     /// If this client is used by multiple [`H3ConnectionPool`] and the client enables [`reuse_connection`], it may cause some problems.
     ///
+    /// # Arguments
+    /// * `cert_chain` - PEM 或 DER 格式的证书链
+    /// * `key_der` - PEM 或 DER 格式的私钥
+    /// * `client_name` - 客户端名称
+    ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
-    pub fn new() -> Self {
+    pub fn new(cert_chain: Vec<u8>, key_der: Vec<u8>, client_name: String) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
+
         let mut tls_config = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
             .with_root_certificates(crate::common::root_cert())
-            .with_no_client_auth();
+            .with_client_auth_cert(cert_chain.to_certificate(), key_der.to_private_key())
+            .unwrap();
 
         // TLS 特性配置
         tls_config.resumption = rustls::client::Resumption::disabled();
@@ -103,9 +136,14 @@ impl H3ConnectionPool {
 
         let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);
 
+        let mut parameters = client_parameters();
+        parameters
+            .set(gm_quic::ParameterId::ClientName, client_name)
+            .unwrap();
+
         let client = Arc::new(
             builder
-                .with_parameters(client_parameters())
+                .with_parameters(parameters)
                 .defer_idle_timeout(Duration::from_secs(60))
                 .bind(listen_all.resolve(monitor.interfaces().keys().map(|d| d.as_str())))
                 .build(),
