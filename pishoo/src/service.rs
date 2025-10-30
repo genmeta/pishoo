@@ -89,7 +89,7 @@ pub fn start_services(
         let servers = servers.to_vec();
         let task = async move {
             if let Err(error) = reverse::serve(access_rules, servers).await {
-                tracing::error!(target: "reverse", "Reverse proxy failed: {error:?}")
+                tracing::error!(target: "reverse_proxy", "Reverse proxy failed: {error:?}")
             }
         };
         handler.spawn(task);
@@ -101,11 +101,11 @@ pub fn start_services(
             match forward::serve(proxy).await {
                 Ok((_bind_addr, forward_proxy)) => {
                     if let Err(error) = forward_proxy.await {
-                        tracing::error!(target: "forward", "Forward proxy error: {error:?}");
+                        tracing::error!(target: "forward_proxy", "Forward proxy error: {error:?}");
                     }
                 }
                 Err(launch_error) => {
-                    tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}");
+                    tracing::error!(target: "forward_proxy", "Failed to launch forward proxy: {launch_error:?}");
                 }
             };
         };

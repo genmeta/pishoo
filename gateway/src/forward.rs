@@ -1,17 +1,19 @@
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use futures::FutureExt;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
-use hyper::{Request, Response, server::conn::http1, service::service_fn};
+use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
 use qconnection::prelude::BindUri;
 use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use qinterface::iface::physical::PhysicalInterfaces;
 use snafu::{Report, ResultExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{Instrument, error, info, info_span, warn};
+use tokio::{
+    io,
+    net::{TcpListener, TcpStream},
+};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     command,
@@ -54,7 +56,7 @@ pub async fn serve(
     .await
     .whatever_context::<_, Whatever>(format!("Failed to listen to TCP address: {}", addr))?;
 
-    info!(target: "forward", "Listening on: http://{local_addr}");
+    info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
     let mut resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
         Resolvers::default().with(resolver.into())
@@ -71,7 +73,7 @@ pub async fn serve(
         ))) {
             Ok(socket_addr) => socket_addr,
             Err(error) => {
-                tracing::warn!(target: "forward", "Failed to create mDNS resolver for device {device}: {error}" );
+                warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );
                 continue;
             }
         };
@@ -82,7 +84,7 @@ pub async fn serve(
         {
             Ok(resolver) => resolver,
             Err(error) => {
-                tracing::warn!(target: "forward", "Failed to create mDNS resolver for device {device}: {error}" );
+                warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );
                 continue;
             }
         };
@@ -139,25 +141,41 @@ pub async fn serve(
 
         // 为每个连接创建服务处理器
         let service = service_fn(move |mut req| {
-            let host = validate_host(&mut req).unwrap();
-
-            if !acl.check(&host) {
-                return forward::normal::proxy(req).boxed();
-            }
-
-            let is_connect = req.method() == "CONNECT";
+            let acl = acl.clone();
             let resolvers = resolvers.clone();
-            let span =
-                info_span!(target: "forward_proxy", "serve", uri=%req.uri(), method=%req.method());
+            let span = info_span!(target: "forward_proxy", "forward_proxy", uri=%req.uri(), method=%req.method());
             async move {
-                if is_connect {
-                    forward::quic::connect(req, resolvers).await
-                } else {
-                    forward::quic::proxy(req, resolvers).await
+                debug!(target: "forward_proxy", request=?req);
+                let host = match validate_host(&mut req) {
+                    Ok(host) => host,
+                    Err(reason) => {
+                        error!(target: "forward_proxy", "Invalid host: {reason}");
+                        return Ok(build_error_response(reason));
+                    }
+                };
+
+                let is_connect = req.method() == Method::CONNECT;
+
+                match acl.check(&host) {
+                    true if is_connect => {
+                        debug!(target: "forward_proxy", "QUIC proxying CONNECT request to {host}",);
+                        forward::quic::connect(req, resolvers).await
+                    }
+                    true => {
+                        debug!(target: "forward_proxy", "QUIC proxying request to {host}");
+                        forward::quic::proxy(req, resolvers).await
+                    }
+                    false if is_connect => {
+                        debug!(target: "forward_proxy", "Normal proxying CONNECT request to {host}");
+                        forward::normal::connect(req).await
+                    }
+                    false => {
+                        debug!(target: "forward_proxy", "Normal proxying request to {host}");
+                        forward::normal::proxy(req).await
+                    }
                 }
             }
             .instrument(span)
-            .boxed()
         });
 
         tokio::task::spawn(async move {
@@ -169,7 +187,7 @@ pub async fn serve(
                 .with_upgrades()
                 .await
             {
-                error!(target: "forward", "Connection handling failed: {}", Report::from_error(&error));
+                error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(&error));
             }
         });
     };
@@ -179,7 +197,7 @@ pub async fn serve(
             match listener.accept().await {
                 Ok((stream, from)) => {
                     accept_tcp_stream(stream)
-                        .instrument(info_span!(target: "forward", "accept", %from))
+                        .instrument(info_span!(target: "forward_proxy", "accept", %from))
                         .await
                 }
                 Err(_) => {
@@ -202,7 +220,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             qinterface::iface::QuicInterfaces::global().clear();
             tokio::spawn(async move {
                 if let Err(error) = forward_proxy.await {
-                    error!(target: "forward", "Forward proxy failed: {}", Report::from_error(&error));
+                    error!(target: "forward_proxy", "Forward proxy failed: {}", Report::from_error(&error));
                 }
             });
             Ok(())
@@ -210,7 +228,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
         Err(launch_error) => {
             H3ConnectionPool::global().clear_connections();
             qinterface::iface::QuicInterfaces::global().restart();
-            tracing::error!(target: "forward", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
+            error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }
     }
@@ -230,7 +248,7 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Str
         Some(h) => h,
         None => {
             let reason = format!("Invalid Host header: {req:?}");
-            warn!(target: "forward", "{}", reason);
+            warn!(target: "forward_proxy", "{}", reason);
             return Err(reason);
         }
     };
@@ -270,4 +288,42 @@ fn build_error_response(message: String) -> BoxResponse {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(body)
         .unwrap()
+}
+
+async fn tunnel_upgrade(request_upgrade: OnUpgrade, response_upgrade: OnUpgrade) {
+    let client_io = match request_upgrade.await {
+        Ok(client_io) => client_io,
+        Err(error) if error.is_user() => {
+            debug!(target: "forward_proxy", "Client request upgrade failed: {}", Report::from_error(&error));
+            return;
+        }
+        Err(error) => {
+            error!(target: "forward_proxy", "Client request upgrade failed: {}", Report::from_error(&error));
+            return;
+        }
+    };
+    let server_io = match response_upgrade.await {
+        Ok(server_io) => server_io,
+        Err(error) if error.is_user() => {
+            debug!(target: "forward_proxy", "Server response upgrade failed: {}", Report::from_error(&error));
+            return;
+        }
+        Err(error) => {
+            error!(target: "forward_proxy", "Server response upgrade failed: {}", Report::from_error(&error));
+            return;
+        }
+    };
+
+    tracing::debug!(target: "forward_proxy", "Upgraded proxy started");
+    match io::copy_bidirectional(&mut TokioIo::new(client_io), &mut TokioIo::new(server_io)).await {
+        Ok((from_client, from_server)) => {
+            info!(
+                target: "forward_proxy",
+                "Upgraded proxy done: client wrote {from_client} bytes and received {from_server} bytes",
+            );
+        }
+        Err(error) => {
+            error!(target: "forward_proxy", "Upgraded proxy aborted: {}", Report::from_error(&error));
+        }
+    }
 }

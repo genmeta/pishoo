@@ -14,7 +14,7 @@ use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
 use crate::{
-    forward::{build_empty_response, build_error_response, validate_host},
+    forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host},
     h3::{H3SendRequest, H3Sink, H3Stream},
     pool::H3ConnectionPool,
 };
@@ -36,7 +36,10 @@ pub async fn proxy(
     let pool = H3ConnectionPool::global();
     // 创建 QUIC 连接
     let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
-        Ok(conn) => conn,
+        Ok(conn) => {
+            debug!(target: "forward_proxy", "Quic connection established");
+            conn
+        }
         Err(error) => {
             let report = Report::from_error(error).to_string();
             error!(target: "forward_proxy", "Failed to create QUIC connection: {report}");
@@ -44,11 +47,13 @@ pub async fn proxy(
         }
     };
 
-    debug!(target: "forward_proxy", "Quic connection established");
+    let request_upgrade = hyper::upgrade::on(&mut req);
 
     // 代理请求并返回响应
     match send(send_request, req).await {
-        Ok(response) => {
+        Ok(mut response) => {
+            let response_upgrade = hyper::upgrade::on(&mut response);
+            tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
             info!(target: "forward_proxy", "Request proxied successfully: {:?}", response);
             Ok(response)
         }
@@ -66,24 +71,21 @@ pub async fn connect(
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
     // 升级连接并处理后续请求
-    tokio::task::spawn(async move {
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                info!(target: "forward_proxy", "Establishing tunnel to the request uri");
-                let service = service_fn(move |req| proxy(req, resolvers.clone()));
-                if let Err(error) = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(upgraded, service)
-                    .await
-                {
-                    error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
-                }
+    match hyper::upgrade::on(req).await {
+        Ok(upgraded) => {
+            info!(target: "forward_proxy", "Establishing tunnel to the request uri");
+            let service = service_fn(move |req| proxy(req, resolvers.clone()));
+            if let Err(error) = http1::Builder::new()
+                .preserve_header_case(true)
+                .title_case_headers(true)
+                .serve_connection(upgraded, service)
+                .await
+            {
+                error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
             }
-            Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
         }
-    });
-
+        Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
+    }
     Ok(build_empty_response())
 }
 
@@ -148,7 +150,7 @@ async fn create_quic_connection(
 ) -> Result<H3SendRequest, Whatever> {
     let handle_connection_error = || {
         H3ConnectionPool::global().clear_connections();
-        qinterface::iface::QuicInterfaces::global();
+        qinterface::iface::QuicInterfaces::global().restart();
     };
     let conn = match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
         Ok(Ok(conn)) => conn,

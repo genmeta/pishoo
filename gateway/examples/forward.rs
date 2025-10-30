@@ -50,13 +50,13 @@ async fn main() -> Result<(), Whatever> {
         handler.spawn(async move {
             match forward::serve(proxy).await {
                 Ok((bind_addr, forward_proxy)) => {
-                    tracing::info!(target: "forward", "Forward proxy started at {bind_addr}", );
+                    tracing::info!(target: "forward_proxy", "Forward proxy started at {bind_addr}", );
                     if let Err(error) = forward_proxy.await {
-                        tracing::error!(target: "forward", "Forward proxy error: {error:?}", );
+                        tracing::error!(target: "forward_proxy", "Forward proxy error: {error:?}", );
                     }
                 }
                 Err(launch_error) => {
-                    tracing::error!(target: "forward", "Failed to launch forward proxy: {launch_error:?}", );
+                    tracing::error!(target: "forward_proxy", "Failed to launch forward proxy: {launch_error:?}", );
                 }
             };
         });
