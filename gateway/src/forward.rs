@@ -33,6 +33,66 @@ static ALPN: &[u8] = b"h3";
 
 type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
 
+/// 从配置节点中读取并设置客户端认证配置
+///
+/// 仅当 ssl_certificate、ssl_certificate_key 和 client_name 三者都存在且类型正确时才会设置。
+/// 如果配置不完整或类型错误，会记录相应的日志。
+fn setup_client_config(node: &Node) -> Result<()> {
+    // 从配置中读取客户端配置(可选)
+    let cert_path = node.get("ssl_certificate").and_then(|v| {
+        if let Value::Path(path) = v {
+            Some(path)
+        } else {
+            warn!(target: "forward", "ssl_certificate must be a path, ignoring");
+            None
+        }
+    });
+
+    let key_path = node.get("ssl_certificate_key").and_then(|v| {
+        if let Value::Path(path) = v {
+            Some(path)
+        } else {
+            warn!(target: "forward", "ssl_certificate_key must be a path, ignoring");
+            None
+        }
+    });
+
+    let client_name = node.get("client_name").and_then(|v| {
+        if let Value::String(name) = v {
+            Some(name.clone())
+        } else {
+            warn!(target: "forward", "client_name must be a string, ignoring");
+            None
+        }
+    });
+
+    // 仅当所有配置项都存在时才设置客户端配置
+    if let (Some(cert_path), Some(key_path), Some(client_name)) = (cert_path, key_path, client_name)
+    {
+        // 读取证书和密钥
+        let cert_chain = std::fs::read(cert_path).whatever_context::<_, Whatever>(format!(
+            "Failed to read client certificate from {}",
+            cert_path.display()
+        ))?;
+        let private_key = std::fs::read(key_path).whatever_context::<_, Whatever>(format!(
+            "Failed to read client private key from {}",
+            key_path.display()
+        ))?;
+
+        // 设置客户端配置
+        if let Err(e) = crate::pool::set_client_config(cert_chain, private_key, client_name.clone())
+        {
+            info!(target: "forward", "Client config already set: {e}, will reinitialize connection pool");
+        } else {
+            info!(target: "forward", "Client config set with name: {client_name}");
+        }
+    } else {
+        info!(target: "forward", "Client authentication not configured, using connection pool without client auth");
+    }
+
+    Ok(())
+}
+
 /// Start the QUIC proxy server
 ///
 /// # Arguments
@@ -46,6 +106,7 @@ pub async fn serve(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
+    tracing::info!(target: "forward", "Starting forward proxy server");
     let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
         unreachable!()
     };
@@ -93,46 +154,10 @@ pub async fn serve(
         resolvers = resolvers.with(Arc::new(mdns_resolver));
     }
 
-    // 从配置中读取客户端配置
-    let Value::Path(cert_path) = node
-        .get("ssl_certificate")
-        .expect("Missing ssl_certificate in proxy configuration")
-    else {
-        panic!("ssl_certificate must be a path");
-    };
-
-    let Value::Path(key_path) = node
-        .get("ssl_certificate_key")
-        .expect("Missing ssl_certificate_key in proxy configuration")
-    else {
-        panic!("ssl_certificate_key must be a path");
-    };
-
-    let Value::String(client_name) = node
-        .get("client_name")
-        .expect("Missing client_name in proxy configuration")
-    else {
-        panic!("client_name must be a string");
-    };
-
-    // 读取证书和密钥
-    let cert_chain = std::fs::read(cert_path).whatever_context::<_, Whatever>(format!(
-        "Failed to read client certificate from {}",
-        cert_path.display()
-    ))?;
-    let private_key = std::fs::read(key_path).whatever_context::<_, Whatever>(format!(
-        "Failed to read client private key from {}",
-        key_path.display()
-    ))?;
-
-    // 设置客户端配置
-    if let Err(e) = crate::pool::set_client_config(cert_chain, private_key, client_name.clone()) {
-        info!(target: "forward", "Client config already set: {e}, will reinitialize connection pool");
-    } else {
-        info!(target: "forward", "Client config set with name: {client_name}");
-    }
-
+    // 设置客户端认证配置
+    setup_client_config(&node)?;
     H3ConnectionPool::reinitialize();
+
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
 
