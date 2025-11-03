@@ -12,8 +12,8 @@ pub mod reverse;
 
 use std::sync::Arc;
 
-pub use gm_quic::EndpointAddr;
-use qtraversal::iface::TraversalFactory;
+pub use gm_quic::prelude::EndpointAddr;
+use gm_quic::qtraversal::iface::TraversalFactory;
 
 fn traversal_factory() -> &'static Arc<TraversalFactory> {
     let agents = [

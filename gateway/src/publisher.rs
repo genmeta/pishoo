@@ -7,14 +7,15 @@ use std::{
 
 use dashmap::DashMap;
 use futures::{StreamExt, stream::FuturesUnordered};
-use gm_quic::{QuicIO, QuicListeners, RealAddr};
-use qconnection::prelude::{BindUri, SocketEndpointAddr};
-use qdns::{MDNS_SERVICE, MdnsResolver, Resolve};
-use qinterface::{
-    QuicIoExt,
-    iface::{QuicInterface, physical::PhysicalInterfaces},
-    local::Locations,
+use gm_quic::{
+    prelude::{BindUri, QuicIO, QuicListeners, RealAddr, SocketEndpointAddr},
+    qinterface::{
+        QuicIoExt,
+        iface::{QuicInterface, physical::PhysicalInterfaces},
+        local::Locations,
+    },
 };
+use qdns::{MDNS_SERVICE, MdnsResolver, Resolve};
 use snafu::{Report, ResultExt};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;

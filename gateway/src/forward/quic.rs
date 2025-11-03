@@ -116,7 +116,7 @@ async fn send(
             }
             match stream.shutdown().await {
                 Ok(()) => info!(target: "forward_proxy", "Request finished sent"),
-                    Err(error) => error!(target: "forward_proxy", "Error sending request data end: {}",Report::from_error(error)),
+                Err(error) => error!(target: "forward_proxy", "Error sending request data end: {}",Report::from_error(error)),
             }
         }
         .in_current_span()
@@ -148,26 +148,15 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, Whatever> {
-    let handle_connection_error = || {
-        H3ConnectionPool::global().clear_connections();
-        qinterface::iface::QuicInterfaces::global().restart();
-    };
     let conn = match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(e)) => {
-            handle_connection_error();
-            return Err(e).whatever_context(format!("Connect to {host} failed"));
-        }
-        Err(_e) => {
-            handle_connection_error();
-            whatever!("Connect {host} timeout")
-        }
+        Ok(result) => whatever!(result, "Connect to {host} failed"),
+        Err(_timed_out) => whatever!("Connect {host} timeout"),
     };
 
-    let origin_dcid = conn
+    let odcid = conn
         .quic
         .origin_dcid()
-        .whatever_context("Get quic connection ODCID failed")?;
-    tracing::Span::current().record("odcid", format!("{origin_dcid:x}"));
+        .whatever_context("Get QUIC connection ODCID failed")?;
+    tracing::Span::current().record("odcid", format!("{odcid:x}"));
     Ok(conn.h3.clone())
 }

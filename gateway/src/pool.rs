@@ -6,16 +6,20 @@ use std::{
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
-use gm_quic::{QuicClient, ToCertificate, ToPrivateKey};
-use h3::client::SendRequest;
-use qconnection::prelude::handy::client_parameters;
-use qdns::Resolvers;
-use qinterface::iface::{
-    QuicInterfaces,
-    physical::{InterfaceEvent, PhysicalInterfaces},
+use gm_quic::{
+    prelude::{
+        Connection, ParameterId, QuicClient,
+        handy::{ToCertificate, ToPrivateKey, client_parameters},
+    },
+    qinterface::iface::{
+        QuicInterfaces,
+        physical::{InterfaceEvent, PhysicalInterfaces},
+    },
 };
+use h3::client::SendRequest;
+use qdns::Resolvers;
 use snafu::{OptionExt, Report, ResultExt};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
@@ -52,7 +56,7 @@ fn get_client_config() -> (Vec<u8>, Vec<u8>, String) {
 #[derive(Clone)]
 pub struct ReusableConnection {
     #[allow(unused)]
-    pub quic: Arc<gm_quic::Connection>,
+    pub quic: Arc<Connection>,
     pub h3: SendRequest<h3_shim::OpenStreams, Bytes>,
 }
 
@@ -117,7 +121,7 @@ impl H3ConnectionPool {
         tls_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
         #[cfg_attr(not(feature = "qlog"), allow(unused_mut))]
-        let mut builder = gm_quic::QuicClient::builder_with_tls(tls_config)
+        let mut builder = QuicClient::builder_with_tls(tls_config)
             .enable_sslkeylog()
             .with_iface_factory(traversal_factory().as_ref().clone());
         // .with_alpns([ALPN]);
@@ -138,7 +142,7 @@ impl H3ConnectionPool {
 
         let mut parameters = client_parameters();
         parameters
-            .set(gm_quic::ParameterId::ClientName, client_name)
+            .set(ParameterId::ClientName, client_name)
             .unwrap();
 
         let client = Arc::new(
@@ -188,7 +192,7 @@ impl H3ConnectionPool {
     pub async fn connect(
         &self,
         server_name: impl Into<String>,
-        resolvers: Resolvers,
+        server_endpoints: Resolvers,
     ) -> Result<ReusableConnection, Whatever> {
         let server_name: String = server_name.into();
         let mut entry = None;
@@ -214,7 +218,7 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            let mut lookup = resolvers
+            let mut lookup = server_endpoints
                 .lookup(&server_name)
                 .await
                 .whatever_context("DNS lookup failed")?;
@@ -239,10 +243,11 @@ impl H3ConnectionPool {
                     }
                 }
             });
-            let (mut h3_connection, send_request) =
-                h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()))
-                    .await
-                    .whatever_context("Failed to establish h3 connection")?;
+            let connect = h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()));
+            let (mut h3_connection, send_request) = time::timeout(Duration::from_secs(10), connect)
+                .await
+                .whatever_context("Establish h3 connection timed out")?
+                .whatever_context("Failed to establish HTTP3 connection")?;
 
             let conn = ReusableConnection {
                 quic: quic_connection.clone(),

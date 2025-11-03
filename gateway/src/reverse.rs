@@ -9,15 +9,20 @@ use firewall_base::{
     expr::atomics::HttpRequest,
     matcher::{DomainRulesMatcher, LocationRulesMatcher},
 };
-use gm_quic::{Connection, QuicListeners, ToCertificate, handy::server_parameters};
+use gm_quic::{
+    prelude::{
+        Connection, QuicListeners,
+        handy::{ToCertificate, server_parameters},
+    },
+    qinterface::iface::{
+        QuicInterfaces,
+        physical::{Interface, InterfaceEvent, InterfacesMonitor, PhysicalInterfaces},
+    },
+};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode};
 use qdns::{HttpResolver, Resolve};
-use qinterface::iface::{
-    QuicInterfaces,
-    physical::{Interface, InterfaceEvent, InterfacesMonitor, PhysicalInterfaces},
-};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
@@ -187,7 +192,7 @@ async fn create_quic_listeners(
     let initial_bind_uris: HashSet<_> = server_bind_uris.values().flatten().cloned().collect();
     debug!(?initial_bind_uris, "Binds");
 
-    let builder = gm_quic::QuicListeners::builder()
+    let builder = QuicListeners::builder()
         .whatever_context::<_, Whatever>("Failed to create QUIC listeners")?;
 
     #[cfg(feature = "qlog")]

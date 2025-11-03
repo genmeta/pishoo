@@ -1,13 +1,15 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
+use gm_quic::{
+    prelude::BindUri,
+    qinterface::iface::{QuicInterfaces, physical::PhysicalInterfaces},
+};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use qconnection::prelude::BindUri;
 use qdns::{HttpResolver, MdnsResolver, Resolvers};
-use qinterface::iface::physical::PhysicalInterfaces;
 use snafu::{Report, ResultExt};
 use tokio::{
     io,
@@ -217,7 +219,7 @@ pub async fn serve(
 pub async fn resume(node: Arc<Node>) -> Result<()> {
     match serve(node).await {
         Ok((_local_addr, forward_proxy)) => {
-            qinterface::iface::QuicInterfaces::global().clear();
+            QuicInterfaces::global().clear();
             tokio::spawn(async move {
                 if let Err(error) = forward_proxy.await {
                     error!(target: "forward_proxy", "Forward proxy failed: {}", Report::from_error(&error));
@@ -227,7 +229,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
         }
         Err(launch_error) => {
             H3ConnectionPool::global().clear_connections();
-            qinterface::iface::QuicInterfaces::global().restart();
+            QuicInterfaces::global().clear();
             error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }

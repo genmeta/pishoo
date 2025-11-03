@@ -8,13 +8,13 @@ use std::{
 };
 
 use conf::parse_conf;
+use gm_quic::prelude::BindUri;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
 use pattern::Pattern;
-use qconnection::prelude::BindUri;
 use qdns::Resolve;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
@@ -154,7 +154,7 @@ impl Listens {
     }
 
     pub fn contains(&self, bind_uri: &BindUri) -> bool {
-        use qbase::net::*;
+        use gm_quic::qbase::net::*;
         let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
             return false;
         };

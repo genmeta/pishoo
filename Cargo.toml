@@ -45,14 +45,9 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = "0.3.0"
-h3-shim = "0.3.0"
-qbase = "0.3.0"
-qdns = "0.2.2"
-qconnection = "0.3.0"
-qtraversal = "0.3.0"
-qinterface = "0.3.0"
-qevent = "0.3.0"
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
+qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -87,25 +82,6 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 
 # --- workspace ---
 gateway = { path = "gateway", default-features = false }
-
-[patch.crates-io]
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qconnection = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qbase = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qevent = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qinterface = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qtraversal = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-# gm-quic = { path = "../gm-quic-traversal/gm-quic" }
-# h3-shim = { path = "../gm-quic-traversal/h3-shim" }
-# qconnection = { path = "../gm-quic-traversal/qconnection" }
-# qbase = { path = "../gm-quic-traversal/qbase" }
-# qdns = { path = "../gm-quic-traversal/qdns" }
-# qevent = { path = "../gm-quic-traversal/qevent" }
-# qinterface = { path = "../gm-quic-traversal/qinterface" }
-# qtraversal = { path = "../gm-quic-traversal/qtraversal" }
-
 
 [profile.dev]
 panic = "abort"

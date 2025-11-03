@@ -6,7 +6,7 @@ use firewall_base::{
     expr::atomics::ConnectRequest,
     matcher::{DomainRulesMatcher, MatchRuleFailed},
 };
-use gm_quic::{AuthClient, ClientCertsVerifyResult, ClientNameVerifyResult};
+use gm_quic::prelude::{AuthClient, ClientCertsVerifyResult, ClientNameVerifyResult};
 use x509_parser::prelude::*;
 
 #[derive(Debug, From, Clone)]

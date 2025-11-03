@@ -40,12 +40,7 @@ getrandom = { workspace = true }
 # --- QUIC Implementation ---
 gm-quic = { workspace = true }
 h3-shim = { workspace = true }
-qbase = { workspace = true }
 qdns = { workspace = true }
-qconnection = { workspace = true }
-qtraversal = { workspace = true }
-qinterface = { workspace = true }
-qevent = { workspace = true, features = ["telemetry"] }
 
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }

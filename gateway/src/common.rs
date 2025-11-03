@@ -1,10 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
-use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, pem::PemObject},
-};
-use tracing::error;
+use gm_quic::prelude::handy::ToCertificate;
+use rustls::RootCertStore;
 
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
@@ -13,24 +10,7 @@ pub fn root_cert() -> Arc<RootCertStore> {
     ROOT_CERT_STORE
         .get_or_init(|| {
             let mut root_cert_store = rustls::RootCertStore::empty();
-            for cert in rustls_native_certs::load_native_certs().certs {
-                if let Err(error) = root_cert_store.add(cert) {
-                    error!("failed to parse trust anchor {error}");
-                }
-            }
-
-            let root_cert = match CertificateDer::from_pem_slice(root_cert) {
-                Ok(root) => vec![root],
-                Err(e) => {
-                    error!(
-                        "failed to parse PEM certificate, falling back to DER: {}",
-                        e
-                    );
-                    vec![CertificateDer::from(root_cert.to_vec())]
-                }
-            };
-
-            root_cert_store.add_parsable_certificates(root_cert);
+            root_cert_store.add_parsable_certificates(root_cert.to_certificate());
             Arc::new(root_cert_store)
         })
         .clone()
