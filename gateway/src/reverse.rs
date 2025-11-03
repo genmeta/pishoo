@@ -493,7 +493,7 @@ async fn handle_request(
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
-            let cn = client_name.unwrap_or_else(|| "<anonymous>".to_string());
+            let cn = client_name.to_string();
             let rule_set = firewall_matched_location;
             reverse::sshd::serve(location, final_pattern, rule_set, req, cn, recver, sender)
                 .await?;

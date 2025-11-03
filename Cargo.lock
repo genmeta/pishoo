@@ -1471,7 +1471,7 @@ dependencies = [
 [[package]]
 name = "genmeta-ssh3-proto"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/genmeta-ssh3.git#0ea1c011c2b777cd49b75d8014dd810bee5a77fb"
+source = "git+ssh://git@github.com/genmeta/genmeta-ssh3.git#93fa35b7dd819034395ea2b5430101f097319310"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1493,7 +1493,7 @@ dependencies = [
 [[package]]
 name = "genmeta-ssh3-server"
 version = "0.3.0"
-source = "git+ssh://git@github.com/genmeta/genmeta-ssh3.git#0ea1c011c2b777cd49b75d8014dd810bee5a77fb"
+source = "git+ssh://git@github.com/genmeta/genmeta-ssh3.git#93fa35b7dd819034395ea2b5430101f097319310"
 dependencies = [
  "bytes",
  "derive_more",
