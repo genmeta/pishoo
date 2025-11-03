@@ -1,15 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
 use qdns::Resolvers;
-use snafu::{Report, ResultExt, Whatever, whatever};
-use tokio::{
-    io::{self, AsyncWriteExt},
-    time::timeout,
-};
+use snafu::{Report, ResultExt, Whatever};
+use tokio::io::{self, AsyncWriteExt};
 use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
@@ -148,11 +145,10 @@ async fn create_quic_connection(
     host: &str,
     resolvers: Resolvers,
 ) -> Result<H3SendRequest, Whatever> {
-    let conn = match timeout(Duration::from_millis(5000), pool.connect(host, resolvers)).await {
-        Ok(result) => whatever!(result, "Connect to {host} failed"),
-        Err(_timed_out) => whatever!("Connect {host} timeout"),
-    };
-
+    let conn = pool
+        .connect(host, resolvers)
+        .await
+        .whatever_context(format!("Connect to {host} failed"))?;
     let odcid = conn
         .quic
         .origin_dcid()
