@@ -108,7 +108,7 @@ pub async fn pass(
         path_and_query
     );
 
-    if proxy_pass.path().ends_with('/') {
+    if !proxy_pass.path().eq("/") {
         // 将匹配到的路径部分替换掉原始请求路径
         let pattern = if let Value::Pattern(pattern, _) = location.value() {
             pattern
@@ -117,7 +117,7 @@ pub async fn pass(
         };
 
         match pattern {
-            Pattern::Exact(_) | Pattern::Regex(_) | Pattern::CRegex(_) => {
+            Pattern::Exact(_) | Pattern::Regex(_) | Pattern::CRegex(_) | Pattern::Common => {
                 // 精确匹配时, 直接替换整个路径, 不需要额外处理
                 // 正则匹配时, 忽略 proxy_pass 的 path 部分
             }
@@ -127,11 +127,14 @@ pub async fn pass(
             Pattern::NormalPrefix(p) => {
                 path_and_query = path_and_query.replace(p, proxy_pass.path());
             }
-            Pattern::Common => {
-                path_and_query = format!("{}{}", proxy_pass.path(), path_and_query);
-            }
         }
     }
+
+    tracing::info!(
+        target: "reverse_proxy",
+        "Proxying request to target URI before path replacement: {}",
+        path_and_query
+    );
 
     let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
         "Failed to generate target URI from `{path_and_query}`"

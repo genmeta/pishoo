@@ -27,16 +27,16 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
 
     // 默认添加 CORS 相关的响应头
     let cors_headers = vec![
-        (
-            HeaderName::from_static("access-control-allow-origin"),
-            HeaderValue::from_static("tauri://localhost"),
-            true,
-        ),
-        (
-            HeaderName::from_static("access-control-allow-methods"),
-            HeaderValue::from_static("*"),
-            true,
-        ),
+        // (
+        //     HeaderName::from_static("access-control-allow-origin"),
+        //     HeaderValue::from_static("tauri://localhost"),
+        //     true,
+        // ),
+        // (
+        //     HeaderName::from_static("access-control-allow-methods"),
+        //     HeaderValue::from_static("*"),
+        //     true,
+        // ),
         (
             HeaderName::from_static("server"),
             HeaderValue::from_static("pishoo"),

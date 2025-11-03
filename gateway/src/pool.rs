@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -25,28 +25,30 @@ use crate::{
     traversal_factory,
 };
 
+/// 客户端配置类型: (证书链, 私钥, 客户端名称)
+type ClientConfig = (Vec<u8>, Vec<u8>, String);
+
 /// 全局客户端配置存储
-static CLIENT_CONFIG: OnceLock<(Vec<u8>, Vec<u8>, String)> = OnceLock::new();
+static CLIENT_CONFIG: RwLock<Option<ClientConfig>> = RwLock::new(None);
 
 /// 设置客户端配置
 ///
-/// 必须在创建连接池之前调用此函数设置证书、密钥和客户端名称。
-/// 此函数只能成功调用一次。
+/// 可以多次调用以更新证书、密钥和客户端名称。
 pub fn set_client_config(
     cert_chain: Vec<u8>,
     private_key: Vec<u8>,
     client_name: String,
 ) -> Result<(), &'static str> {
-    CLIENT_CONFIG
-        .set((cert_chain, private_key, client_name))
-        .map_err(|_| "Client config already set")
+    let mut config = CLIENT_CONFIG
+        .write()
+        .map_err(|_| "Failed to acquire write lock")?;
+    *config = Some((cert_chain, private_key, client_name));
+    Ok(())
 }
 
 /// 获取客户端配置
-fn get_client_config() -> (Vec<u8>, Vec<u8>, String) {
-    CLIENT_CONFIG.get().cloned().expect(
-        "Client config not set. Please call set_client_config() before using the connection pool",
-    )
+fn get_client_config() -> Option<ClientConfig> {
+    CLIENT_CONFIG.read().ok().and_then(|guard| guard.clone())
 }
 
 #[derive(Clone)]
@@ -76,8 +78,8 @@ impl H3ConnectionPool {
         if let Some(pool) = guard.as_ref() {
             return pool.clone();
         }
-        let (cert_chain, key_der, client_name) = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(cert_chain, key_der, client_name));
+        let config = get_client_config();
+        let pool = Arc::new(H3ConnectionPool::new(config));
         *guard = Some(pool.clone());
         pool
     }
@@ -87,8 +89,8 @@ impl H3ConnectionPool {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
         debug!(target: "pool", "Reinitializing H3ConnectionPool");
         let mut guard = GLOBAL.write().unwrap();
-        let (cert_chain, key_der, client_name) = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(cert_chain, key_der, client_name));
+        let config = get_client_config();
+        let pool = Arc::new(H3ConnectionPool::new(config));
         *guard = Some(pool.clone());
         pool
     }
@@ -97,20 +99,32 @@ impl H3ConnectionPool {
     /// If this client is used by multiple [`H3ConnectionPool`] and the client enables [`reuse_connection`], it may cause some problems.
     ///
     /// # Arguments
-    /// * `cert_chain` - PEM 或 DER 格式的证书链
-    /// * `key_der` - PEM 或 DER 格式的私钥
-    /// * `client_name` - 客户端名称
+    /// * `config` - 可选的配置元组 (cert_chain, key_der, client_name)
+    ///   - 如果为 None，则不使用客户端认证
+    ///   - cert_chain: PEM 或 DER 格式的证书链
+    ///   - key_der: PEM 或 DER 格式的私钥
+    ///   - client_name: 客户端名称
     ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
-    pub fn new(cert_chain: Vec<u8>, key_der: Vec<u8>, client_name: String) -> Self {
+    pub fn new(config: Option<ClientConfig>) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-        let mut tls_config = rustls::ClientConfig::builder_with_provider(provider)
+        // 创建基础 TLS 配置 builder
+        let tls_builder = rustls::ClientConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
-            .with_root_certificates(crate::common::root_cert())
-            .with_client_auth_cert(cert_chain.to_certificate(), key_der.to_private_key())
-            .unwrap();
+            .with_root_certificates(crate::common::root_cert());
+
+        // 根据是否有客户端配置选择认证方式
+        let mut tls_config = if let Some((cert_chain, key_der, _)) = config.as_ref() {
+            // 使用客户端认证
+            tls_builder
+                .with_client_auth_cert(cert_chain.to_certificate(), key_der.to_private_key())
+                .unwrap()
+        } else {
+            // 不使用客户端认证
+            tls_builder.with_no_client_auth()
+        };
 
         // TLS 特性配置
         tls_config.resumption = rustls::client::Resumption::disabled();
@@ -137,9 +151,12 @@ impl H3ConnectionPool {
         let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);
 
         let mut parameters = client_parameters();
-        parameters
-            .set(gm_quic::ParameterId::ClientName, client_name)
-            .unwrap();
+        // 仅在提供了 client_name 时设置
+        if let Some((_, _, client_name)) = config.as_ref() {
+            parameters
+                .set(gm_quic::ParameterId::ClientName, client_name.clone())
+                .unwrap();
+        }
 
         let client = Arc::new(
             builder

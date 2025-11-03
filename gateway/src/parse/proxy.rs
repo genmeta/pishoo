@@ -25,18 +25,6 @@ pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
         values.contains_key("listen"),
         "Missing directive listen in proxy block"
     );
-    ensure_whatever!(
-        values.contains_key("client_name"),
-        "Missing directive client_name in proxy block"
-    );
-    ensure_whatever!(
-        values.contains_key("ssl_certificate"),
-        "Missing directive ssl_certificate in proxy block"
-    );
-    ensure_whatever!(
-        values.contains_key("ssl_certificate_key"),
-        "Missing directive ssl_certificate_key in proxy block"
-    );
 
     Ok(Value::ValueMap(values))
 }
