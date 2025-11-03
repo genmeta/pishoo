@@ -45,9 +45,9 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
-qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "fix/v0.4.2" }
+gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
