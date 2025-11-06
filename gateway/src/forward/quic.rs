@@ -67,22 +67,25 @@ pub async fn connect(
     req: Request<hyper::body::Incoming>,
     resolvers: Resolvers,
 ) -> Result<BoxResponse, hyper::Error> {
-    // 升级连接并处理后续请求
-    match hyper::upgrade::on(req).await {
-        Ok(upgraded) => {
-            info!(target: "forward_proxy", "Establishing tunnel to the request uri");
-            let service = service_fn(move |req| proxy(req, resolvers.clone()));
-            if let Err(error) = http1::Builder::new()
-                .preserve_header_case(true)
-                .title_case_headers(true)
-                .serve_connection(upgraded, service)
-                .await
-            {
-                error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
+    tokio::spawn(async move {
+        // 升级连接并处理后续请求
+        match hyper::upgrade::on(req).await {
+            Ok(upgraded) => {
+                info!(target: "forward_proxy", "Establishing tunnel to the request uri");
+                let service = service_fn(move |req| proxy(req, resolvers.clone()));
+                if let Err(error) = http1::Builder::new()
+                    .preserve_header_case(true)
+                    .title_case_headers(true)
+                    .serve_connection(upgraded, service)
+                    .await
+                {
+                    error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
+                }
             }
+            Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
         }
-        Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
-    }
+    });
+
     Ok(build_empty_response())
 }
 
