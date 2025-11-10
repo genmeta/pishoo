@@ -253,6 +253,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             Ok(())
         }
         Err(launch_error) => {
+            H3ConnectionPool::global().clear_connections();
             error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }
