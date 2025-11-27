@@ -49,7 +49,9 @@ pub async fn handle_signal(
 ) -> Result<(), Whatever> {
     // 设置信号处理器（仅 Unix 可用）
     let mut term_signal =
-        signal(SignalKind::terminate()).whatever_context("Failed to create SINTERM listener")?;
+        signal(SignalKind::terminate()).whatever_context("Failed to create SIGTERM listener")?;
+    let mut int_signal =
+        signal(SignalKind::interrupt()).whatever_context("Failed to create SIGINT listener")?;
     let quit_signal =
         signal(SignalKind::quit()).whatever_context("Failed to create SIGQUIT listener")?;
     let hup_signal =
@@ -67,9 +69,15 @@ pub async fn handle_signal(
     // 处理 SIGUSR1 信号（仅 Unix）
     tokio::spawn(handle_sigusr1(usr1_signal));
 
-    // 等待 SIGTERM 并退出（仅 Unix）
-    term_signal.recv().await;
-    tracing::info!(target: "signal", "Received Stop signal, exiting immediately...");
+    // 等待 SIGTERM 或 SIGINT (Ctrl+C) 并退出（仅 Unix）
+    tokio::select! {
+        _ = term_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGTERM signal, exiting immediately...");
+        }
+        _ = int_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGINT signal (Ctrl+C), exiting immediately...");
+        }
+    }
 
     Ok(())
 }
@@ -80,31 +88,83 @@ pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
     let mut pid_file = match fs::File::create_new(pid_file_path).await {
         Ok(pid_file) => pid_file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return whatever!(
-                Err(error),
-                "PID file `{pid_file_path}` already exists. Is Pishoo already running?\n\
-- If not, please remove the file and try again.\n\
-- If you want to start multiple instances, please change the `pid_file`\
- directive in your config to a different location.",
-            );
+            handle_existing_pid_file(pid_file_path, error).await?
         }
         Err(error) => {
             return whatever!(
                 Err(error),
                 "Failed to create new PID file at `{pid_file_path}`\n\
-Please either:\n\
-- Run as root user, or\n\
-- Change the `pid_file` directive in your config to a writable path.",
+                    Please either:\n\
+                    - Run as root user, or\n\
+                    - Change the `pid_file` directive in your config to a writable path.",
             );
         }
     };
 
-    async {
-        pid_file.write_all(pid.as_bytes()).await?;
-        pid_file.shutdown().await
+    pid_file
+        .write_all(pid.as_bytes())
+        .await
+        .whatever_context(format!("Failed to write PID to file `{pid_file_path}`"))?;
+    pid_file
+        .shutdown()
+        .await
+        .whatever_context(format!("Failed to close PID file `{pid_file_path}`"))
+}
+
+// 处理已存在的 PID 文件
+async fn handle_existing_pid_file(
+    pid_file_path: &str,
+    original_error: io::Error,
+) -> Result<fs::File, Whatever> {
+    use nix::unistd::Pid;
+
+    // 读取旧的 PID
+    let old_pid_str = match fs::read_to_string(pid_file_path).await {
+        Ok(content) => content,
+        Err(_) => {
+            tracing::warn!(target: "signal", "Cannot read PID file, removing stale PID file");
+            return recreate_pid_file(pid_file_path).await;
+        }
+    };
+
+    // 解析 PID
+    let old_pid = match old_pid_str.trim().parse::<i32>() {
+        Ok(pid) => pid,
+        Err(_) => {
+            tracing::warn!(target: "signal", "PID file contains invalid PID, removing stale PID file");
+            return recreate_pid_file(pid_file_path).await;
+        }
+    };
+
+    // 检查进程是否还在运行
+    match nix::sys::signal::kill(Pid::from_raw(old_pid), None) {
+        Ok(_) => {
+            // 进程仍在运行
+            whatever!(
+                Err(original_error),
+                "PID file `{pid_file_path}` already exists and process {old_pid} is still running.\n\
+- If you want to start multiple instances, please change the `pid_file` directive in your config to a different location."
+            )
+        }
+        Err(_) => {
+            // 进程不存在，删除旧的 PID 文件
+            tracing::warn!(target: "signal", "PID file exists but process {old_pid} is not running, removing stale PID file");
+            recreate_pid_file(pid_file_path).await
+        }
     }
-    .await
-    .whatever_context(format!("Failed to write PID to file `{pid_file_path}`",))
+}
+
+// 删除并重新创建 PID 文件
+async fn recreate_pid_file(pid_file_path: &str) -> Result<fs::File, Whatever> {
+    fs::remove_file(pid_file_path)
+        .await
+        .whatever_context(format!(
+            "Failed to remove stale PID file at `{pid_file_path}`"
+        ))?;
+
+    fs::File::create(pid_file_path)
+        .await
+        .whatever_context(format!("Failed to create PID file at `{pid_file_path}`"))
 }
 
 // 处理 SIGQUIT 信号（仅 Unix）

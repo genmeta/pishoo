@@ -99,7 +99,7 @@ async fn main() -> Result<(), Whatever> {
         return Ok(());
     }
 
-    let pid_file = if let Some(Value::String(pid_file)) = config.get("pid") {
+    let pid_file = if let Some(Value::String(pid_file)) = pishoo.get("pid") {
         pid_file
     } else {
         PID_FILE_DEFAULT
