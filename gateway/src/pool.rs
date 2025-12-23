@@ -11,13 +11,15 @@ use gm_quic::{
         Connection, ParameterId, QuicClient,
         handy::{ToCertificate, ToPrivateKey, client_parameters},
     },
-    qinterface::iface::{
-        QuicInterfaces,
-        physical::{InterfaceEvent, PhysicalInterfaces},
+    qbase::net::route::{EndpointAddr as QuicEndpointAddr, SocketEndpointAddr},
+    qinterface::{
+        device::{Devices, InterfaceEvent},
+        io::ProductIO,
+        manager::InterfaceManager,
     },
 };
+use gmdns::{parser::record::endpoint::EndpointAddr as DnsEndpointAddr, resolver::Resolvers};
 use h3::client::SendRequest;
-use qdns::Resolvers;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::{sync::Mutex, time};
 use tokio_util::task::AbortOnDropHandle;
@@ -26,7 +28,6 @@ use tracing::debug;
 use crate::{
     error::Whatever,
     parse::{IfaceRange, IpFamilies, Listens},
-    traversal_factory,
 };
 
 /// 客户端配置类型: (证书链, 私钥, 客户端名称)
@@ -71,30 +72,30 @@ pub struct H3ConnectionPool {
 
 impl H3ConnectionPool {
     /// 获取全局连接池实例
-    pub fn global() -> Arc<Self> {
+    pub async fn global() -> Arc<Self> {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
         if let Ok(guard) = GLOBAL.read()
             && let Some(pool) = guard.as_ref()
         {
             return pool.clone();
         }
-        let mut guard = GLOBAL.write().unwrap();
-        if let Some(pool) = guard.as_ref() {
-            return pool.clone();
-        }
         let config = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(config));
+        let pool = Arc::new(H3ConnectionPool::new(config).await);
+        let mut guard = GLOBAL.write().unwrap();
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
         *guard = Some(pool.clone());
         pool
     }
 
     /// 重新初始化全局连接池
-    pub fn reinitialize() -> Arc<Self> {
+    pub async fn reinitialize() -> Arc<Self> {
         static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
         debug!(target: "pool", "Reinitializing H3ConnectionPool");
-        let mut guard = GLOBAL.write().unwrap();
         let config = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(config));
+        let pool = Arc::new(H3ConnectionPool::new(config).await);
+        let mut guard = GLOBAL.write().unwrap();
         *guard = Some(pool.clone());
         pool
     }
@@ -110,7 +111,7 @@ impl H3ConnectionPool {
     ///   - client_name: 客户端名称
     ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
-    pub fn new(config: Option<ClientConfig>) -> Self {
+    pub async fn new(config: Option<ClientConfig>) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
         // 创建基础 TLS 配置 builder
@@ -134,23 +135,26 @@ impl H3ConnectionPool {
         tls_config.resumption = rustls::client::Resumption::disabled();
         tls_config.key_log = Arc::new(rustls::KeyLogFile::new());
 
+        let iface_factory: Arc<dyn ProductIO> =
+            Arc::new(gm_quic::prelude::handy::DEFAULT_IO_FACTORY);
+        let iface_manager = InterfaceManager::global().clone();
+
         #[cfg_attr(not(feature = "qlog"), allow(unused_mut))]
         let mut builder = QuicClient::builder_with_tls(tls_config)
             .enable_sslkeylog()
-            .with_iface_factory(traversal_factory().as_ref().clone());
+            .with_iface_factory(iface_factory.clone());
         // .with_alpns([ALPN]);
 
         #[cfg(feature = "qlog")]
         {
             use std::path::PathBuf;
 
-            use qevent::telemetry::handy::DefaultSeqLogger;
+            use qevent::telemetry::handy::LegacySeqLogger;
 
-            builder =
-                builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+            builder = builder.with_qlog(Arc::new(LegacySeqLogger::new(PathBuf::from("/tmp/qlog"))));
         }
 
-        let mut monitor = PhysicalInterfaces::global().monitor();
+        let mut monitor = Devices::global().monitor();
 
         let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);
 
@@ -167,26 +171,27 @@ impl H3ConnectionPool {
                 .with_parameters(parameters)
                 .defer_idle_timeout(Duration::from_secs(60))
                 .bind(listen_all.resolve(monitor.interfaces().keys().map(|d| d.as_str())))
+                .await
                 .build(),
         );
 
         let quic_client = client.clone();
         let maintain_binding = AbortOnDropHandle::new(tokio::spawn(async move {
             while let Some((_currnet_interfaces, event)) = monitor.update().await {
-                tracing::debug!(target: "listen", ?event, "Interface event received");
+                // tracing::debug!(target: "listen", ?event, "Interface event received");
                 match event.as_ref() {
                     InterfaceEvent::Added { device, .. } => {
                         for bind_uri in listen_all.resolve([device.as_str()]) {
                             debug!(target: "listen", ?bind_uri, "Add interface to client binding");
-                            let bind_interface = QuicInterfaces::global()
-                                .bind(bind_uri, traversal_factory().clone());
-                            quic_client.add_interface(bind_interface);
+                            let bind_interface =
+                                iface_manager.bind(bind_uri, iface_factory.clone()).await;
+                            quic_client.add_bind_iface(bind_interface);
                         }
                     }
                     InterfaceEvent::Removed { device, .. } => {
                         for bind_uri in listen_all.resolve([device.as_str()]) {
                             debug!(target: "listen", ?bind_uri, "Remove interface from client binding");
-                            quic_client.remove_interface(&bind_uri);
+                            quic_client.remove_bind_iface(&bind_uri);
                         }
                     }
                     InterfaceEvent::Changed { .. } => { /* Ignore changes */ }
@@ -235,31 +240,37 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            let mut lookup = server_endpoints
-                .lookup(&server_name)
-                .await
-                .whatever_context("DNS lookup failed")?;
+            // TODO: gmdns 应该有实现，直接 INTO
+            fn dns_to_quic(ep: &DnsEndpointAddr) -> QuicEndpointAddr {
+                let socket_ep = match ep.agent {
+                    Some(agent) => SocketEndpointAddr::with_agent(agent, ep.primary),
+                    None => SocketEndpointAddr::direct(ep.primary),
+                };
+                QuicEndpointAddr::Socket(socket_ep)
+            }
 
-            let (_resolver, server_eps) = lookup
-                .next()
-                .await
-                .whatever_context("No endpoint found for server")?;
+            let mut lookup = server_endpoints.lookup(&server_name);
+            let mut server_eps = vec![];
 
+            while let Some((_resolver, endpoint)) = lookup.next().await {
+                server_eps.push(dns_to_quic(&endpoint));
+            }
+
+            if server_eps.is_empty() {
+                return None.whatever_context("No endpoint found for server");
+            }
+
+            // TODO： 直接调用 connect(name),里面自动域名解析
+            // 所以，这里的 resovler 发布和查询要分开
+            // resovler 注入 quic client
             let quic_connection = self
                 .quic_client
-                .connect(server_name.clone(), server_eps)
+                .connected_to(server_name.clone(), server_eps)
+                .await
                 .unwrap();
 
-            tokio::spawn({
-                let conn = quic_connection.clone();
-                async move {
-                    while let Some((_resolver, endpoints)) = lookup.next().await {
-                        for endpoint in endpoints {
-                            _ = conn.add_peer_endpoint(endpoint.into());
-                        }
-                    }
-                }
-            });
+            let quic_connection = Arc::new(quic_connection);
+
             let connect = h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()));
             let (mut h3_connection, send_request) = time::timeout(Duration::from_secs(10), connect)
                 .await

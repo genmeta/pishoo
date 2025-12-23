@@ -125,9 +125,6 @@ assets = [["target/release/pishoo", "usr/bin/", "755"]]
 # --- Workspace Member ---
 gateway = { workspace = true }
 
-# --- DNS Publishing & Resolution 
-qdns = { workspace = true }
-
 # --- Core & Error Handling ---
 snafu = { workspace = true }
 

@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fmt::Display,
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
@@ -8,14 +7,16 @@ use std::{
 };
 
 use conf::parse_conf;
-use gm_quic::prelude::BindUri;
+use gm_quic::prelude::{BindUri, QuicClient};
+use gmdns::resolver::{H3Resolver, Publisher as GmdnsPublisher, Resolver as GmdnsResolver};
+use h3x::client::Client;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
 };
 use pattern::Pattern;
-use qdns::Resolve;
+use rustls::RootCertStore;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
 
@@ -32,15 +33,24 @@ type Result<T, E = Whatever> = std::result::Result<T, E>;
 
 type ParseFn = fn(Directive<Nginx>) -> Result<Value>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServerName {
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     String(String),
     Uri(Uri),
-    Resolver(Resolver),
+    DnsResolver(DnsResolver),
+    DnsPublisher(DnsPublisher),
     StringVec(Vec<String>),
+    ServerName(Vec<ServerName>),
+    ServerId(u8),
     StringMap(HashMap<String, String>),
     Boolean(bool),
     Addr(SocketAddr),
+    AddrVec(Vec<SocketAddr>),
     Path(PathBuf),
     Header(Vec<(HeaderName, HeaderValue, bool)>),
     Types(HashMap<String, HeaderValue>),
@@ -62,28 +72,97 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Resolver {
-    Http { base_url: Uri },
+// Server configuration for TLS certificates and server name
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerConfig {
+    pub cert_path: Option<PathBuf>,
+    pub key_path: Option<PathBuf>,
+    pub server_name: Option<String>,
 }
 
-impl Display for Resolver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Resolver::Http { base_url } => write!(f, "http {} ", base_url),
-        }
+// DNS resolver configuration for queries (no certificates needed)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsResolver {
+    pub base_url: Uri,
+}
+
+// DNS publisher configuration for publishing (with optional certificates)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsPublisher {
+    pub base_url: Uri,
+    pub client_config: Option<ServerConfig>,
+}
+
+impl DnsResolver {
+    pub fn create_resolver(&self) -> Arc<dyn GmdnsResolver + Send + Sync> {
+        // Only support HTTP3 resolver as per TODO comment
+        Arc::new(
+            H3Resolver::new(
+                self.base_url.to_string(),
+                self.create_h3_client_without_identity(),
+            )
+            .expect("H3 dns server base_url has been checked"),
+        )
+    }
+
+    fn create_h3_client_without_identity(&self) -> Client<QuicClient> {
+        let root_store = RootCertStore::empty();
+        Client::<QuicClient>::builder()
+            .with_root_certificates(std::sync::Arc::new(root_store))
+            .without_identity()
+            .expect("Failed to configure TLS")
+            .build()
     }
 }
 
-impl From<&Resolver> for Arc<dyn Resolve + Send + Sync> {
-    fn from(resolver: &Resolver) -> Self {
-        use qdns::*;
-        match resolver {
-            Resolver::Http { base_url } => Arc::new(
-                HttpResolver::new(base_url.to_string())
-                    .expect("HTTP dns server base_url has been checked"),
-            ),
+impl DnsPublisher {
+    pub fn create_publisher(&self) -> Arc<dyn GmdnsPublisher + Send + Sync> {
+        // Only support HTTP3 publisher as per TODO comment
+        Arc::new(
+            H3Resolver::new(self.base_url.to_string(), self.create_h3_client())
+                .expect("H3 dns server base_url has been checked"),
+        )
+    }
+
+    fn create_h3_client(&self) -> Client<QuicClient> {
+        let root_store = RootCertStore::empty();
+
+        let client_builder =
+            Client::<QuicClient>::builder().with_root_certificates(std::sync::Arc::new(root_store));
+
+        // Configure client identity if certificates are provided
+        if let Some(config) = &self.client_config {
+            if let (Some(cert_path), Some(key_path), Some(name)) =
+                (&config.cert_path, &config.key_path, &config.server_name)
+            {
+                if let (Ok(cert_data), Ok(key_data)) =
+                    (std::fs::read(cert_path), std::fs::read(key_path))
+                {
+                    // Parse certificates and private key
+                    use std::io::Cursor;
+
+                    use rustls_pemfile::{certs, private_key};
+
+                    let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("Failed to parse certificates");
+
+                    let private_key = private_key(&mut Cursor::new(&key_data))
+                        .expect("Failed to parse private key")
+                        .expect("No private key found");
+
+                    return client_builder
+                        .with_identity(name.clone(), cert_chain, private_key)
+                        .expect("Failed to configure client identity")
+                        .build();
+                }
+            }
         }
+
+        client_builder
+            .without_identity()
+            .expect("Failed to configure TLS")
+            .build()
     }
 }
 
@@ -142,6 +221,7 @@ pub struct Listens {
     pub range: IfaceRange,
     pub families: IpFamilies,
     pub port: u16,
+    pub specific_addrs: Option<Vec<SocketAddr>>,
 }
 
 impl Listens {
@@ -150,11 +230,13 @@ impl Listens {
             range,
             families,
             port,
+            specific_addrs: None,
         }
     }
 
     pub fn contains(&self, bind_uri: &BindUri) -> bool {
         use gm_quic::qbase::net::*;
+        // TODO: check specific_addrs
         let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
             return false;
         };
@@ -166,28 +248,41 @@ impl Listens {
             && self.port == port
     }
 
-    pub fn resolve<'i>(
-        &self,
-        devices: impl IntoIterator<Item = &'i str>,
-    ) -> impl Iterator<Item = BindUri> {
-        devices.into_iter().filter(|name| {
-            (matches!(self.range, IfaceRange::All)
-                || matches!(self.range, IfaceRange::Exact(ref iface_name) if iface_name == name))
-        })
-        .flat_map(move |name| {
-            let mut ipv4_bind_uri = BindUri::from( format!("iface://v4.{name}:{}",self.port));
-            let mut ipv6_bind_uri = BindUri::from( format!("iface://v6.{name}:{}",self.port));
-            if self.port == 0 {
-                ipv4_bind_uri = ipv4_bind_uri.alloc_port();
-                ipv6_bind_uri = ipv6_bind_uri.alloc_port();
-            }
+    pub fn resolve<'i, I>(&'i self, devices: I) -> Box<dyn Iterator<Item = BindUri> + Send + 'i>
+    where
+        I: IntoIterator<Item = &'i str>,
+        I::IntoIter: Send + 'i,
+    {
+        if let Some(ref specific_addrs) = self.specific_addrs {
+            return Box::new(specific_addrs.clone().into_iter().map(BindUri::from));
+        }
 
-            match self.families {
-                IpFamilies::V4 => [Some(ipv4_bind_uri),None],
-                IpFamilies::V6 => [None,Some(ipv6_bind_uri)],
-                IpFamilies::Dual => [Some(ipv4_bind_uri),Some(ipv6_bind_uri)],
-            }.into_iter().flatten()
-        })
+        Box::new(
+            devices
+                .into_iter()
+                .filter(|name| {
+                    matches!(self.range, IfaceRange::All)
+                        || matches!(self.range, IfaceRange::Exact(ref iface_name) if iface_name == *name)
+                })
+                .flat_map(move |name| {
+                    let mut ipv4_bind_uri =
+                        BindUri::from(format!("iface://v4.{name}:{}", self.port));
+                    let mut ipv6_bind_uri =
+                        BindUri::from(format!("iface://v6.{name}:{}", self.port));
+                    if self.port == 0 {
+                        ipv4_bind_uri = ipv4_bind_uri.alloc_port();
+                        ipv6_bind_uri = ipv6_bind_uri.alloc_port();
+                    }
+
+                    match self.families {
+                        IpFamilies::V4 => [Some(ipv4_bind_uri), None],
+                        IpFamilies::V6 => [None, Some(ipv6_bind_uri)],
+                        IpFamilies::Dual => [Some(ipv4_bind_uri), Some(ipv6_bind_uri)],
+                    }
+                    .into_iter()
+                    .flatten()
+                }),
+        )
     }
 }
 
@@ -349,6 +444,16 @@ impl Commands {
                     };
                     exist_users.extend(users);
                 }
+                Value::Addr(addr) => {
+                    values
+                        .entry(name)
+                        .and_modify(|v| match v {
+                            Value::Addr(old_addr) => *v = Value::AddrVec(vec![*old_addr, addr]),
+                            Value::AddrVec(vec) => vec.push(addr),
+                            _ => unreachable!("Unexpected value type for Addr aggregation"),
+                        })
+                        .or_insert(Value::Addr(addr));
+                }
                 value => _ = values.insert(name, value),
             }
         }
@@ -470,11 +575,34 @@ fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [iface] => {
+            // Check if iface is actually a list of addresses
+            if iface.contains(',') || iface.parse::<SocketAddr>().is_ok() {
+                let addrs = iface
+                    .split(',')
+                    .map(|s| {
+                        s.trim().parse::<SocketAddr>().whatever_context(format!(
+                            "Invalid socket address `{s}` while parsing directive {}",
+                            directive.name
+                        ))
+                    })
+                    .collect::<Result<Vec<SocketAddr>, Whatever>>();
+
+                if let Ok(addrs) = addrs {
+                    return Ok(Value::Listen(vec![Listens {
+                        range: IfaceRange::All,
+                        families: IpFamilies::Dual,
+                        port: 0,
+                        specific_addrs: Some(addrs),
+                    }]));
+                }
+            }
+
             // 单个参数 只能是网卡名, 省略了 families 和端口的情况
             Ok(Value::Listen(vec![Listens {
                 range: IfaceRange::from(iface.as_str()),
                 families: IpFamilies::default(),
                 port: 0,
+                specific_addrs: None,
             }]))
         }
         [iface, param] => {
@@ -488,6 +616,7 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
                     range,
                     families,
                     port: 0,
+                    specific_addrs: None,
                 }])),
                 Err(error) => {
                     let port = param
@@ -503,6 +632,7 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
                         range,
                         families: IpFamilies::default(),
                         port,
+                        specific_addrs: None,
                     }]))
                 }
             }
@@ -519,6 +649,7 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
                 range,
                 families,
                 port,
+                specific_addrs: None,
             }]))
         }
         _ => whatever!(
@@ -531,11 +662,24 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
 fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
-            let addr = string.parse::<SocketAddr>().whatever_context(format!(
-                "Invalid socket address `{string}` while parsing directive {}",
-                directive.name
-            ))?;
-            Ok(Value::Addr(addr))
+            if string.contains(',') {
+                let addrs = string
+                    .split(',')
+                    .map(|s| {
+                        s.trim().parse::<SocketAddr>().whatever_context(format!(
+                            "Invalid socket address `{s}` while parsing directive {}",
+                            directive.name
+                        ))
+                    })
+                    .collect::<Result<Vec<SocketAddr>, Whatever>>()?;
+                Ok(Value::AddrVec(addrs))
+            } else {
+                let addr = string.parse::<SocketAddr>().whatever_context(format!(
+                    "Invalid socket address `{string}` while parsing directive {}",
+                    directive.name
+                ))?;
+                Ok(Value::Addr(addr))
+            }
         }
         _ => whatever!(
             "Invalid number of arguments for directive: {}",
@@ -544,25 +688,50 @@ fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-// resolver udp
-// resolver http
+// resolver h3 <base_url> - creates DnsResolver configuration
 fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [kind, resolver] => match kind.as_str() {
             "udp" => {
-                whatever!("`udp` resolver is deprecated, please use `http` instead",);
-                // let server_addr = resolver.parse::<SocketAddr>().whatever_context(format!(
-                //     "Invalid socket address `{resolver}` whiling parsing udp resolver",
-                // ))?;
-                // Ok(Value::Resolver(Resolver::Udp { server_addr }))
+                whatever!("`udp` resolver is deprecated, please use `h3` instead",);
             }
             "http" => {
-                let base_url = resolver.parse::<Uri>().whatever_context(format!(
-                    "Invalid base URL `{resolver}` whiling parsing http resolver",
-                ))?;
-                Ok(Value::Resolver(Resolver::Http { base_url }))
+                whatever!("`http` resolver is deprecated, please use `h3` instead",);
             }
-            _ => whatever!("Unknown resolver kind: {kind}, expected `udp` or `http`"),
+            "h3" => {
+                let base_url = resolver.parse::<Uri>().whatever_context(format!(
+                    "Invalid base URL `{resolver}` whiling parsing h3 resolver",
+                ))?;
+
+                let resolver_config = DnsResolver { base_url };
+
+                Ok(Value::DnsResolver(resolver_config))
+            }
+            _ => whatever!("Unknown resolver kind: {kind}, expected `h3`"),
+        },
+        _ => whatever!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        ),
+    }
+}
+
+fn parse_publisher(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [kind, publisher] => match kind.as_str() {
+            "h3" => {
+                let base_url = publisher.parse::<Uri>().whatever_context(format!(
+                    "Invalid base URL `{publisher}` while parsing h3 publisher",
+                ))?;
+
+                let publisher_config = DnsPublisher {
+                    base_url,
+                    client_config: None, // Will be set later if certificates are provided
+                };
+
+                Ok(Value::DnsPublisher(publisher_config))
+            }
+            _ => whatever!("Unknown publisher kind: {kind}, expected `h3`"),
         },
         _ => whatever!(
             "Invalid number of arguments for directive: {}",
@@ -587,6 +756,31 @@ fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
 
 pub(crate) fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
     Ok(Value::StringVec(directive.args))
+}
+
+pub(crate) fn parse_server_name(directive: Directive<Nginx>) -> Result<Value> {
+    let names: Vec<ServerName> = directive
+        .args
+        .into_iter()
+        .map(|name| ServerName { name })
+        .collect();
+    Ok(Value::ServerName(names))
+}
+
+pub(crate) fn parse_server_id(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [id_str] => {
+            let id = id_str.parse::<u8>().whatever_context(format!(
+                "Invalid server ID `{id_str}` while parsing directive {}",
+                directive.name
+            ))?;
+            Ok(Value::ServerId(id))
+        }
+        _ => whatever!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        ),
+    }
 }
 
 fn parse_header(directive: Directive<Nginx>) -> Result<Value> {
@@ -680,5 +874,293 @@ fn parse_ssh_ssl_user(directive: Directive<Nginx>) -> Result<Value> {
             "Invalid number of arguments for directive: {}",
             directive.name
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试：解析新的 server_id 配置格式
+    #[test]
+    fn test_parse_server_with_server_id() {
+        let conf = r#"
+pishoo {
+    server {
+        listen all 5378;
+        server_name example.com;
+        server_id 1;
+        ssl_certificate /tmp/test_cert.pem;
+        ssl_certificate_key /tmp/test_key.pem;
+    }
+}
+"#;
+        // 创建临时证书文件用于测试
+        std::fs::write("/tmp/test_cert.pem", "dummy cert").expect("Failed to create test cert");
+        std::fs::write("/tmp/test_key.pem", "dummy key").expect("Failed to create test key");
+
+        let result = parse(conf.as_bytes(), None);
+
+        // 清理临时文件
+        let _ = std::fs::remove_file("/tmp/test_cert.pem");
+        let _ = std::fs::remove_file("/tmp/test_key.pem");
+
+        let root = result.expect("配置解析失败");
+        let pishoo = root
+            .get("pishoo")
+            .and_then(|v| {
+                if let Value::Nodes(n) = v {
+                    n.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .expect("未找到 pishoo 块");
+
+        let servers = match pishoo.get("server") {
+            Some(Value::Nodes(nodes)) => nodes,
+            _ => panic!("未找到 server 配置块"),
+        };
+        assert_eq!(servers.len(), 1);
+
+        let server = &servers[0];
+
+        // 验证 server_name
+        match server.get("server_name") {
+            Some(Value::ServerName(names)) => {
+                assert_eq!(names.len(), 1);
+                assert_eq!(names[0].name, "example.com");
+            }
+            _ => panic!("server_name 解析失败"),
+        }
+
+        // 验证 server_id
+        match server.get("server_id") {
+            Some(Value::ServerId(id)) => assert_eq!(*id, 1),
+            _ => panic!("server_id 解析失败"),
+        }
+    }
+
+    /// 测试：解析多个 server 配置，每个有不同的 server_id
+    #[test]
+    fn test_parse_multiple_servers_with_different_ids() {
+        let conf = r#"
+pishoo {
+    server {
+        listen all 5378;
+        server_name main.example.com;
+        server_id 0;
+        ssl_certificate /tmp/test_cert1.pem;
+        ssl_certificate_key /tmp/test_key1.pem;
+    }
+    server {
+        listen all 5379;
+        server_name backup.example.com;
+        server_id 1;
+        ssl_certificate /tmp/test_cert2.pem;
+        ssl_certificate_key /tmp/test_key2.pem;
+    }
+}
+"#;
+        // 创建临时证书文件用于测试
+        std::fs::write("/tmp/test_cert1.pem", "dummy cert 1")
+            .expect("Failed to create test cert 1");
+        std::fs::write("/tmp/test_key1.pem", "dummy key 1").expect("Failed to create test key 1");
+        std::fs::write("/tmp/test_cert2.pem", "dummy cert 2")
+            .expect("Failed to create test cert 2");
+        std::fs::write("/tmp/test_key2.pem", "dummy key 2").expect("Failed to create test key 2");
+
+        let result = parse(conf.as_bytes(), None);
+
+        // 清理临时文件
+        let _ = std::fs::remove_file("/tmp/test_cert1.pem");
+        let _ = std::fs::remove_file("/tmp/test_key1.pem");
+        let _ = std::fs::remove_file("/tmp/test_cert2.pem");
+        let _ = std::fs::remove_file("/tmp/test_key2.pem");
+
+        let root = result.expect("配置解析失败");
+        let pishoo = root
+            .get("pishoo")
+            .and_then(|v| {
+                if let Value::Nodes(n) = v {
+                    n.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .expect("未找到 pishoo 块");
+
+        let servers = match pishoo.get("server") {
+            Some(Value::Nodes(nodes)) => nodes,
+            _ => panic!("未找到 server 配置块"),
+        };
+        assert_eq!(servers.len(), 2);
+
+        // 验证第一个 server
+        let server1 = &servers[0];
+        match server1.get("server_name") {
+            Some(Value::ServerName(names)) => assert_eq!(names[0].name, "main.example.com"),
+            _ => panic!("第一个 server 的 server_name 解析失败"),
+        }
+        match server1.get("server_id") {
+            Some(Value::ServerId(id)) => assert_eq!(*id, 0),
+            _ => panic!("第一个 server 的 server_id 解析失败"),
+        }
+
+        // 验证第二个 server
+        let server2 = &servers[1];
+        match server2.get("server_name") {
+            Some(Value::ServerName(names)) => assert_eq!(names[0].name, "backup.example.com"),
+            _ => panic!("第二个 server 的 server_name 解析失败"),
+        }
+        match server2.get("server_id") {
+            Some(Value::ServerId(id)) => assert_eq!(*id, 1),
+            _ => panic!("第二个 server 的 server_id 解析失败"),
+        }
+    }
+
+    /// 测试：server 配置缺少 server_id 时的默认行为
+    #[test]
+    fn test_parse_server_without_server_id() {
+        use std::env;
+        let temp_dir = env::temp_dir();
+        let cert_path = temp_dir.join("test_cert_no_id.pem");
+        let key_path = temp_dir.join("test_key_no_id.pem");
+
+        let conf = format!(
+            r#"
+pishoo {{
+    server {{
+        listen all 5378;
+        server_name example.com;
+        ssl_certificate {};
+        ssl_certificate_key {};
+    }}
+}}
+"#,
+            cert_path.display(),
+            key_path.display()
+        );
+
+        // 创建临时证书文件用于测试
+        std::fs::write(&cert_path, "dummy cert").expect("Failed to create test cert");
+        std::fs::write(&key_path, "dummy key").expect("Failed to create test key");
+
+        let result = parse(conf.as_bytes(), None);
+
+        // 清理临时文件
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+
+        let root = result.expect("配置解析失败");
+        let pishoo = root
+            .get("pishoo")
+            .and_then(|v| {
+                if let Value::Nodes(n) = v {
+                    n.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .expect("未找到 pishoo 块");
+
+        let servers = match pishoo.get("server") {
+            Some(Value::Nodes(nodes)) => nodes,
+            _ => panic!("未找到 server 配置块"),
+        };
+        assert_eq!(servers.len(), 1);
+
+        let server = &servers[0];
+
+        // 验证 server_name
+        match server.get("server_name") {
+            Some(Value::ServerName(names)) => assert_eq!(names[0].name, "example.com"),
+            _ => panic!("server_name 解析失败"),
+        }
+
+        // 验证没有 server_id 时应该返回 None
+        match server.get("server_id") {
+            None => {} // 这是期望的行为
+            Some(_) => panic!("不应该有 server_id 字段"),
+        }
+    }
+
+    /// 测试：解析 DNS resolver 和 publisher 配置
+    #[test]
+    fn test_parse_dns_resolver_and_publisher() {
+        use std::env;
+        let temp_dir = env::temp_dir();
+        let cert_path = temp_dir.join("test_cert_dns.pem");
+        let key_path = temp_dir.join("test_key_dns.pem");
+
+        let conf = format!(
+            r#"
+pishoo {{
+    server {{
+        listen all 5378;
+        server_name example.com;
+        resolver h3 https://dns.example.com/dns-query;
+        publisher h3 https://dns.example.com/dns-publish;
+        ssl_certificate {};
+        ssl_certificate_key {};
+    }}
+}}
+"#,
+            cert_path.display(),
+            key_path.display()
+        );
+
+        // 创建临时证书文件用于测试
+        std::fs::write(&cert_path, "dummy cert").expect("Failed to create test cert");
+        std::fs::write(&key_path, "dummy key").expect("Failed to create test key");
+
+        let result = parse(conf.as_bytes(), None);
+
+        // 清理临时文件
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+
+        let root = result.expect("配置解析失败");
+        let pishoo = root
+            .get("pishoo")
+            .and_then(|v| {
+                if let Value::Nodes(n) = v {
+                    n.first().cloned()
+                } else {
+                    None
+                }
+            })
+            .expect("未找到 pishoo 块");
+
+        let servers = match pishoo.get("server") {
+            Some(Value::Nodes(nodes)) => nodes,
+            _ => panic!("未找到 server 配置块"),
+        };
+        assert_eq!(servers.len(), 1);
+
+        let server = &servers[0];
+
+        // 验证 resolver 配置
+        match server.get("resolver") {
+            Some(Value::DnsResolver(resolver)) => {
+                assert_eq!(
+                    resolver.base_url.to_string(),
+                    "https://dns.example.com/dns-query"
+                );
+            }
+            _ => panic!("resolver 解析失败"),
+        }
+
+        // 验证 publisher 配置
+        match server.get("publisher") {
+            Some(Value::DnsPublisher(publisher)) => {
+                assert_eq!(
+                    publisher.base_url.to_string(),
+                    "https://dns.example.com/dns-publish"
+                );
+                assert!(publisher.client_config.is_none());
+            }
+            _ => panic!("publisher 解析失败"),
+        }
     }
 }

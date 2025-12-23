@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
+use gmdns::resolver::Resolvers;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
-use qdns::Resolvers;
 use snafu::{Report, ResultExt, Whatever};
 use tokio::io::{self, AsyncWriteExt};
 use tracing::{Instrument, debug, error, info};
@@ -30,7 +30,7 @@ pub async fn proxy(
             return Ok(build_error_response(reason));
         }
     };
-    let pool = H3ConnectionPool::global();
+    let pool = H3ConnectionPool::global().await;
     // 创建 QUIC 连接
     let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
         Ok(conn) => {

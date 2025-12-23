@@ -7,6 +7,7 @@ edition = "2024"
 name = "forward"
 path = "examples/forward.rs"
 
+
 [dependencies]
 # --- Core & Error Handling ---
 snafu = { workspace = true }
@@ -35,12 +36,17 @@ firewall-base = { workspace = true, features = ["http"] }
 # --- Security & TLS ---
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
+rustls-pemfile = "2"
 getrandom = { workspace = true }
 
 # --- QUIC Implementation ---
 gm-quic = { workspace = true }
 h3-shim = { workspace = true }
-qdns = { workspace = true }
+qevent = { workspace = true }
+
+# --- DNS resolver ---
+gmdns = { workspace = true }
+h3x = {workspace = true}
 
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }
@@ -76,4 +82,5 @@ clap = { workspace = true }
 [features]
 sshd = ["dep:genmeta-ssh3-server"]
 sshd-pam = ["genmeta-ssh3-server/pam"]
+stun_traversal = []
 qlog = []

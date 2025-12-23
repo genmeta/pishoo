@@ -14,26 +14,22 @@ use gm_quic::{
         Connection, QuicListeners,
         handy::{ToCertificate, server_parameters},
     },
-    qinterface::iface::{
-        QuicInterfaces,
-        physical::{Interface, InterfaceEvent, InterfacesMonitor, PhysicalInterfaces},
-    },
+    qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
+use gmdns::resolver::{HTTP_DNS_SERVER, HttpResolver};
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode};
-use qdns::{HttpResolver, Resolve};
-use rustls::server::WebPkiClientVerifier;
+use rustls::{SignatureScheme, server::WebPkiClientVerifier, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span};
 
 use crate::{
     error::{Result, StreamSnafu, Whatever},
-    parse::{Listens, Node, Resolver, Value},
+    parse::{DnsResolver, Listens, Node, Value},
     publisher::Publisher,
-    reverse::{self},
-    traversal_factory,
+    reverse::{self, auth::load_key},
 };
 
 mod auth;
@@ -69,7 +65,13 @@ mod sshd;
 */
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
-type ServerResolverList<'a> = Vec<(String, Vec<&'a Resolver>)>;
+type ServerResolverList<'a> = Vec<(
+    String,
+    Vec<&'a DnsResolver>,
+    Vec<&'a crate::parse::DnsPublisher>,
+    u8,
+    Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+)>;
 
 /// Start the QUIC proxy server
 ///
@@ -83,33 +85,52 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
-    let monitor = PhysicalInterfaces::global().monitor();
+    let monitor = Devices::global().monitor();
     let current_interfaces = monitor.interfaces();
     let (router, server_resolvers) = init_router(&servers)?;
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
 
     let default_http_resolver = Arc::new(
-        HttpResolver::new(qdns::HTTP_DNS_SERVER)
+        HttpResolver::new(HTTP_DNS_SERVER)
             .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
     );
-    let server_resolvers: HashMap<String, Vec<Arc<dyn Resolve + Send + Sync>>> = server_resolvers
+
+    let server_resolvers: HashMap<
+        String,
+        (
+            Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>>,
+            u8,
+            Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+        ),
+    > = server_resolvers
         .into_iter()
-        .map(|(server_name, resolvers)| {
-            let server_resolvers: Vec<Arc<dyn Resolve + Send + Sync>> =
-                if ["test.genmeta.net", "user.genmeta.net"]
-                    .iter()
-                    .any(|suffix| server_name.ends_with(suffix))
-                {
-                    vec![]
-                } else if resolvers.is_empty() {
-                    vec![default_http_resolver.clone()]
-                } else {
-                    debug_assert!(!resolvers.is_empty());
-                    resolvers.iter().map(|r| (*r).into()).collect()
-                };
-            (server_name, server_resolvers)
-        })
+        .map(
+            |(server_name, _resolvers, publishers, id, key): (
+                String,
+                Vec<&DnsResolver>,
+                Vec<&crate::parse::DnsPublisher>,
+                u8,
+                Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+            )| {
+                let server_publishers: Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>> =
+                    if ["test.genmeta.net", "user.genmeta.net"]
+                        .iter()
+                        .any(|suffix| server_name.ends_with(suffix))
+                    {
+                        vec![]
+                    } else if publishers.is_empty() {
+                        vec![default_http_resolver.clone()]
+                    } else {
+                        debug_assert!(!publishers.is_empty());
+                        publishers
+                            .iter()
+                            .map(|p: &&crate::parse::DnsPublisher| p.create_publisher())
+                            .collect()
+                    };
+                (server_name, (server_publishers, id, key))
+            },
+        )
         .collect();
 
     // 启动 dns 上报
@@ -132,20 +153,43 @@ fn init_router(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLis
 
     for server in servers {
         let server_resolvers = match server.get("resolver") {
-            Some(Value::Resolver(resolver)) => vec![resolver],
+            Some(Value::DnsResolver(resolver)) => vec![resolver],
             _ => vec![], // 默认使用空 resolver
         };
 
+        let server_publishers = match server.get("publisher") {
+            Some(Value::DnsPublisher(publisher)) => vec![publisher],
+            _ => vec![], // 默认使用空 publisher
+        };
+
         let server_name = match server.get("server_name") {
-            Some(Value::StringVec(names)) => names.clone(),
+            Some(Value::ServerName(names)) => names.clone(),
             _ => unreachable!("Invalid server name"),
         };
 
-        for mut domain in server_name {
+        let server_id = match server.get("server_id") {
+            Some(Value::ServerId(id)) => *id,
+            _ => 0, // 默认为 0
+        };
+
+        let key_path = match server.get("ssl_certificate_key") {
+            Some(Value::Path(path)) => path,
+            _ => unreachable!("Invalid ssl_certificate_key path"),
+        };
+        let key_pair = load_key(key_path).ok();
+
+        for server_name_struct in server_name {
+            let mut domain = server_name_struct.name;
             if domain.ends_with('~') {
                 domain = domain.replace('~', ".genmeta.net");
             }
-            resolvers.push((domain.clone(), server_resolvers.clone()));
+            resolvers.push((
+                domain.clone(),
+                server_resolvers.clone(),
+                server_publishers.clone(),
+                server_id,
+                key_pair.clone(),
+            ));
             routers.insert(domain, Arc::clone(server));
         }
     }
@@ -166,11 +210,12 @@ async fn create_quic_listeners(
             unreachable!("Invalid listen address");
         };
 
-        let Some(Value::StringVec(server_names)) = server.get("server_name").cloned() else {
+        let Some(Value::ServerName(server_names)) = server.get("server_name").cloned() else {
             unreachable!("Invalid server name");
         };
 
-        for mut server_name in server_names {
+        for server_name_struct in server_names {
+            let mut server_name = server_name_struct.name;
             if server_name.ends_with('~') {
                 server_name = server_name.replace('~', ".genmeta.net");
             }
@@ -193,15 +238,15 @@ async fn create_quic_listeners(
     let initial_bind_uris: HashSet<_> = server_bind_uris.values().flatten().cloned().collect();
     debug!(?initial_bind_uris, "Binds");
 
-    let builder = QuicListeners::builder()
-        .whatever_context::<_, Whatever>("Failed to create QUIC listeners")?;
+    #[allow(unused_mut)]
+    let mut builder = QuicListeners::builder();
 
     #[cfg(feature = "qlog")]
     {
         use std::path::PathBuf;
 
-        use qevent::telemetry::handy::DefaultSeqLogger;
-        builder = builder.with_qlog(Arc::new(DefaultSeqLogger::new(PathBuf::from("/tmp/qlog"))));
+        use qevent::telemetry::handy::LegacySeqLogger;
+        builder = builder.with_qlog(Arc::new(LegacySeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
     let mut roots = rustls::RootCertStore::empty();
@@ -214,11 +259,11 @@ async fn create_quic_listeners(
         .unwrap();
 
     let listeners = builder
-        .with_iface_factory(traversal_factory().as_ref().clone())
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_client_auther(auth::ClientAuther::from(domain_access_rules))
-        .listen(1024);
+        .listen(1024)
+        .whatever_context::<_, Whatever>("Failed to listen quic")?;
 
     // 为每个服务器添加TLS证书
     for server in servers {
@@ -230,7 +275,7 @@ async fn create_quic_listeners(
             unreachable!("Invalid ssl_certificate_key path");
         };
 
-        let Some(Value::StringVec(server_names)) = server.get("server_name").cloned() else {
+        let Some(Value::ServerName(server_names)) = server.get("server_name").cloned() else {
             unreachable!("Invalid server name");
         };
 
@@ -246,14 +291,22 @@ async fn create_quic_listeners(
                 "Failed to read private key file `{}`",
                 key_path.display()
             ))?;
-        for mut server_name in server_names {
+        for server_name_struct in server_names {
+            let mut server_name = server_name_struct.name;
             if server_name.ends_with('~') {
                 server_name = server_name.replace('~', ".genmeta.net");
             }
             let bind_uris = server_bind_uris.get(&server_name).unwrap();
             debug!(server_name, ?bind_uris, "Adding server");
             listeners
-                .add_server(server_name, &*cert, &*key, bind_uris.clone(), None)
+                .add_server(
+                    &server_name,
+                    cert.as_slice(),
+                    key.as_slice(),
+                    bind_uris.clone(),
+                    None,
+                )
+                .await
                 .whatever_context::<_, Whatever>("Failed to initial quic listeners")?;
         }
     }
@@ -268,9 +321,12 @@ async fn maintain_binding(
     server_listens: HashMap<String, Vec<Listens>>,
 ) {
     while let Some((_currnet_interfaces, event)) = monitor.update().await {
-        tracing::debug!(target: "listen", ?event, "Interface event received");
+        //tracing::debug!(target: "listen", ?event, "Interface event received");
         match event.as_ref() {
             InterfaceEvent::Added { device, .. } => {
+                let mut main_bind_uris = HashSet::new();
+
+                // 启动主Quic监听的接口绑定
                 for (server, listens) in &server_listens {
                     let bind_uris = listens
                         .iter()
@@ -284,9 +340,9 @@ async fn maintain_binding(
                         unreachable!()
                     };
                     for bind_uri in bind_uris {
-                        let bind_interface =
-                            QuicInterfaces::global().bind(bind_uri, traversal_factory().clone());
-                        server.add_interface(bind_interface);
+                        // Server will bind the interface using its configured IO factory.
+                        server.bind([bind_uri.clone()]).await;
+                        main_bind_uris.insert(bind_uri);
                     }
                 }
             }
@@ -304,7 +360,7 @@ async fn maintain_binding(
                         unreachable!()
                     };
                     for bind_uri in bind_uris {
-                        server.remove_interface(&bind_uri);
+                        _ = server.remove_iface(&bind_uri);
                     }
                 }
             }
@@ -398,7 +454,7 @@ async fn handle_connections(
             %link
         );
         async move {
-            if let Err(error) = handle_connection(conn, server_name).await {
+            if let Err(error) = handle_connection(conn.into(), server_name).await {
                 error!(
                     target: "connect", "Failed to handle connection: {}",
                     Report::from_error(error)
@@ -443,7 +499,12 @@ async fn handle_request(
         ))?;
     let final_pattern = final_pattern.to_string();
 
-    let client_name = conn.client_name().await.unwrap_or_default();
+    let client_name = conn
+        .remote_agent()
+        .await
+        .ok()
+        .flatten()
+        .map(|agent| agent.name().to_string());
     let http_request = HttpRequest::new(client_name.as_deref(), &req);
 
     #[allow(unused_variables)]

@@ -1,245 +1,302 @@
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use dashmap::DashMap;
 use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
-    prelude::{BindUri, QuicIO, QuicListeners, RealAddr, SocketEndpointAddr},
-    qinterface::{
-        QuicIoExt,
-        iface::{QuicInterface, physical::PhysicalInterfaces},
-        local::Locations,
-    },
+    prelude::{BindUri, QuicListeners, RealAddr},
+    qbase::net::route::SocketEndpointAddr,
+    qinterface::{BindInterface, component::location::Locations, io::IO},
+    qtraversal::nat::client::StunClientsComponent,
 };
-use qdns::{MDNS_SERVICE, MdnsResolver, Resolve};
-use snafu::{Report, ResultExt};
+use gmdns::{
+    mdns::Mdns,
+    parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
+    resolver::{MDNS_SERVICE, MdnsResolver, Publisher as DnsPublisher},
+};
+use rustls::{SignatureScheme, sign::SigningKey};
+use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
-
-use crate::error::Whatever;
 
 pub struct Publisher {
     _task: AbortOnDropHandle<()>,
 }
 
-pub type Resolver = dyn Resolve + Send + Sync;
+pub type Resolver = dyn DnsPublisher + Send + Sync;
 pub type Resolvers = Vec<Arc<Resolver>>;
-pub type MDnsResolvers = DashMap<String, Arc<MdnsResolver>>;
+
+pub type ServerConfig = (
+    Resolvers,
+    u8,
+    Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+);
 
 pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
 
-async fn initial_mdns_resolvers<'b>(
-    bind_uris: impl IntoIterator<Item = &'b BindUri>,
-) -> impl Iterator<Item = (String, Arc<MdnsResolver>)> + 'b {
-    let physical_interfaces = PhysicalInterfaces::global().interfaces();
-    bind_uris
-        .into_iter()
-        .filter_map(|bind_uri| {
-            bind_uri
-                .as_iface_bind_uri()
-                .map(|(_ip_family, device, _port)| device)
+// Initialize Mdns for a given device and bind it to the interface
+fn ensure_mdns_for_device(bind_iface: &BindInterface, device: &str) -> Option<()> {
+    // Check if Mdns already exists for this interface
+    let has_component = bind_iface.borrow().with_component(|_: &Mdns| true).is_ok();
+
+    if has_component {
+        return Some(());
+    }
+
+    // Create socket address for mDNS
+    let socket_addr = match SocketAddr::try_from(&BindUri::from(format!(
+        "iface://v4.{device}:5353"
+    ))) {
+        Ok(socket_addr) => socket_addr,
+        Err(error) => {
+            tracing::debug!(target: "dns", "Failed to resolve IPv4 addr for mDNS on {device}: {error}");
+            return None;
+        }
+    };
+
+    let SocketAddr::V4(socket_addr) = socket_addr else {
+        return None;
+    };
+
+    // Create Mdns
+    let mdns = match Mdns::new(MDNS_SERVICE, *socket_addr.ip(), device) {
+        Ok(mdns) => mdns,
+        Err(error) => {
+            tracing::debug!(target: "dns", "Failed to create mDNS for {device}: {error}");
+            return None;
+        }
+    };
+
+    // Initialize Mdns in the interface's component system
+    bind_iface.with_components_mut(|components, _iface| {
+        components.init_with(|| mdns);
+    });
+
+    Some(())
+}
+
+fn endpoint_to_dns_endpoint(
+    server_id: u8,
+    key: Option<(&dyn SigningKey, SignatureScheme)>,
+    endpoint: SocketEndpointAddr,
+) -> Option<DnsEndpointAddr> {
+    let mut ep: DnsEndpointAddr = endpoint.try_into().ok()?;
+
+    ep.set_main(server_id == 0);
+    ep.set_sequence(server_id as u64);
+
+    if let Some((key, scheme)) = key {
+        let _ = ep.sign_with(key, scheme);
+    }
+
+    Some(ep)
+}
+
+async fn get_stun_endpoints(iface: &gm_quic::qinterface::Interface) -> Vec<SocketEndpointAddr> {
+    // Get STUN-derived external endpoints if available
+    let maybe_join_set: Option<tokio::task::JoinSet<_>> = iface
+        .with_component(|clients: &StunClientsComponent| {
+            clients.with_clients(|clients| {
+                clients
+                    .values()
+                    .cloned()
+                    .map(|client| async move {
+                        let agent = client.agent_addr();
+                        let outer = client.outer_addr().await?;
+                        std::io::Result::Ok(SocketEndpointAddr::with_agent(agent, outer))
+                    })
+                    .collect::<tokio::task::JoinSet<_>>()
+            })
         })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .filter_map(move |device| {
-            let mdns_resolver = (|| {
-                let socket_addr = BindUri::from(format!("iface://v4.{device}:5353"))
-                    .resolve(physical_interfaces.get(device))
-                    .whatever_context(format!("Failed to create mDNS resolver for {device}"))?;
-                let SocketAddr::V4(socket_addr) = socket_addr else {
-                    unreachable!()
-                };
+        .ok()
+        .flatten();
 
-                let mdns_resolver = MdnsResolver::new(MDNS_SERVICE, *socket_addr.ip(), device)
-                    .whatever_context(format!("Failed to create mDNS resolver for {device}"))?;
-                Result::<_, Whatever>::Ok(mdns_resolver)
-            })();
-
-            match mdns_resolver {
-                Ok(resolver) => Some((device.to_owned(), Arc::new(resolver))),
-                Err(error) => {
-                    tracing::debug!(
-                        target: "dns",
-                        "Some addresses will not be publish: {}",
-                        Report::from_error(error),
-                    );
-                    None
-                }
+    if let Some(mut join_set) = maybe_join_set {
+        let mut out = vec![];
+        while let Some(joined) = join_set.join_next().await {
+            if let Ok(Ok(ep)) = joined {
+                out.push(ep);
             }
-        })
+        }
+        return out;
+    }
+
+    // No STUN endpoints available
+    vec![]
 }
 
 async fn do_publish_server(
-    server: &str,
+    server_name: &str,
+    server_id: u8,
     resolver: &Resolver,
-    endpoint_addresses: &[SocketEndpointAddr],
+    _key: Option<(&dyn SigningKey, SignatureScheme)>,
+    endpoint_addresses: &[DnsEndpointAddr],
 ) {
-    match resolver.publish(server, endpoint_addresses).await {
-        Ok(..) => tracing::debug!(
+    tracing::debug!(target: "dns", server_name, server_id, "Publishing dns for server");
+
+    if let Err(error) = resolver.publish(server_name, endpoint_addresses).await {
+        tracing::error!(
             target: "dns",
-            "Resolver `{resolver}` publish dns {endpoint_addresses:?} success",
-        ),
-        Err(error) => {
-            let addresses = endpoint_addresses
-                .iter()
-                .map(|addr| addr.to_string())
-                .collect::<Vec<_>>();
-            tracing::error!(
-                target: "dns",
-                "Resolver `{resolver}` publish dns {addresses:?} failed: {}",
-                Report::from_error(error),
-            );
-        }
+            "Resolver `{resolver}` publish dns failed: {}",
+            Report::from_error(error),
+        );
     }
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(%server))]
-async fn publish_dns(
-    server: &str,
-    resolvers: &Resolvers,
-    interfaces: impl IntoIterator<Item = (&BindUri, &QuicInterface)>,
-) {
-    let endpoint_addresses = futures::stream::iter(interfaces.into_iter())
-        .filter_map(async |(bind_uri, interface)| {
-            let endpoint_addr = match interface.endpoint_addr().await {
-                Ok(addr) => {
-                    tracing::debug!(target: "dns", bind_uri=%bind_uri, %addr, "Get endpoint addr for publish");
-                    Ok(addr)
-                }
-                Err(error) => {
-                    tracing::debug!(target: "dns", %bind_uri, "Get endpoint addr error, skip dns publish: {}", Report::from_error(&error));
-                    Err(error)
-                }
-            };
-            endpoint_addr.ok()
-        })
-        .collect::<Vec<_>>()
-        .await;
-    match endpoint_addresses.as_slice() {
-        [] => tracing::warn!(target: "dns", "No endpoint addresses to publish, skip"),
-        _ => {
-            resolvers
-                .iter()
-                .map(|resolver| do_publish_server(server, resolver.as_ref(), &endpoint_addresses))
-                .collect::<FuturesUnordered<_>>()
-                .collect::<()>()
-                .await;
-        }
-    }
-}
-
-#[tracing::instrument(level = "info", skip_all, fields(%server))]
+#[tracing::instrument(level = "info", skip_all, fields(server_name, server_id))]
 async fn publish_mdns(
-    server: &str,
-    resolvers: &MDnsResolvers,
-    interfaces: impl IntoIterator<Item = (&BindUri, &QuicInterface)>,
+    server_name: &str,
+    server_id: u8,
+    key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+    interfaces: impl IntoIterator<Item = (&BindUri, &BindInterface)>,
 ) {
-    interfaces
-        .into_iter()
-        .fold(
-            HashMap::<String, (Arc<MdnsResolver>, Vec<SocketEndpointAddr>)>::new(),
-            |mut map, (bind_uri, interface)| {
-                if let Some((_ip_family, device, _port)) = bind_uri.as_iface_bind_uri() {
-                    let socket_addr = match interface.real_addr() {
-                        Ok(RealAddr::Internet(socket_addr)) => socket_addr,
-                        Ok(_) => {
-                            tracing::debug!(target: "dns", %bind_uri, "Unsupported address kind, skip");
-                            return map;
-                        }
-                        Err(error) => {
-                            tracing::debug!(target: "dns", %bind_uri, "Get real addr error, skip: {}", Report::from_error(&error));
-                            return map;
-                        }
-                    };
-                    let Some(resolver) = resolvers.get(device) else {
-                        tracing::warn!(target: "dns", %bind_uri, "No mDNS resolver for the device, skip");
-                        return map;
-                    };
-                    map.entry(device.to_owned())
-                        .or_insert_with(|| (resolver.clone(), vec![]))
-                        .1
-                        .push(SocketEndpointAddr::from(socket_addr));
-                };
+    let mut publish_futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        Vec::new();
 
-                map
+    for (bind_uri, bind_iface) in interfaces {
+        let Some((_ip_family, device, _port)) = bind_uri.as_iface_bind_uri() else {
+            continue;
+        };
+
+        // Ensure Mdns exists for this device
+        ensure_mdns_for_device(bind_iface, device);
+
+        let iface = bind_iface.borrow();
+
+        // Get local address for mDNS publishing
+        let local_addr = match iface.real_addr().ok() {
+            Some(RealAddr::Internet(addr)) => addr,
+            _ => {
+                tracing::debug!(target: "dns", %bind_uri, device, "No local internet address available for mDNS publish, skipping");
+                continue;
+            }
+        };
+
+        // Create MdnsResolver for publishing
+        let ip = match local_addr {
+            SocketAddr::V4(addr) => *addr.ip(),
+            _ => continue,
+        };
+        let resolver = match MdnsResolver::new(MDNS_SERVICE, ip, device) {
+            Ok(resolver) => Arc::new(resolver),
+            Err(error) => {
+                tracing::debug!(target: "dns", "Failed to create mDNS resolver for {device}: {error}");
+                continue;
+            }
+        };
+
+        let key = key.clone();
+        let server_name = server_name.to_string();
+        let bind_uri = bind_uri.clone();
+
+        let future = async move {
+            let mut dns_ep = match local_addr {
+                SocketAddr::V4(addr) => DnsEndpointAddr::direct_v4(addr),
+                SocketAddr::V6(addr) => DnsEndpointAddr::direct_v6(addr),
+            };
+            dns_ep.set_main(server_id == 0);
+            dns_ep.set_sequence(server_id as u64);
+            if let Some((key, scheme)) = key.as_ref() {
+                let _ = dns_ep.sign_with(key.as_ref(), *scheme);
+            }
+
+            do_publish_server(
+                &server_name,
+                server_id,
+                resolver.as_ref(),
+                key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
+                &[dns_ep],
+            )
+            .await;
+        };
+
+        tracing::debug!(target: "dns", %bind_uri, device, %local_addr, "Publishing local address to mDNS");
+        publish_futures.push(Box::pin(future));
+    }
+
+    // Execute all publish futures concurrently
+    futures::future::join_all(publish_futures).await;
+}
+
+#[tracing::instrument(level = "info", skip_all, fields(server_name, server_id))]
+async fn publish_resolvers(
+    server_name: &str,
+    server_id: u8,
+    resolvers: &Resolvers,
+    key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+    interfaces: impl IntoIterator<Item = (&BindUri, &BindInterface)>,
+) {
+    let mut endpoint_addresses = vec![];
+
+    for (_bind_uri, bind_iface) in interfaces {
+        let iface = bind_iface.borrow();
+
+        // Get STUN external endpoints for DNS publishing
+        for endpoint in get_stun_endpoints(&iface).await {
+            if let Some(dns_ep) = endpoint_to_dns_endpoint(
+                server_id,
+                key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
+                endpoint,
+            ) {
+                endpoint_addresses.push(dns_ep);
+            }
+        }
+    }
+
+    if endpoint_addresses.is_empty() {
+        tracing::debug!(target: "dns", server_name, server_id, "No STUN endpoints available for DNS publish, skipping");
+        return;
+    }
+
+    tracing::debug!(target: "dns", server_name, server_id, endpoint_count = endpoint_addresses.len(), "Publishing STUN endpoints to DNS");
+
+    for resolver in resolvers {
+        do_publish_server(
+            server_name,
+            server_id,
+            resolver.as_ref(),
+            key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
+            &endpoint_addresses,
+        )
+        .await;
+    }
+}
+async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String, ServerConfig>) {
+    let servers = listeners
+        .servers()
+        .into_iter()
+        .filter_map(|server_name| {
+            let interfaces = listeners.get_server(&server_name)?.bind_interfaces();
+            let (resolvers, id, key) = resolvers.get(&server_name)?;
+            Some((server_name, (interfaces, resolvers, *id, key.clone())))
+        })
+        .collect::<HashMap<_, _>>();
+
+    servers
+        .iter()
+        .map(
+            |(server_name, (interfaces, resolvers, id, key))| async move {
+                publish_resolvers(server_name, *id, resolvers, key.clone(), interfaces.iter())
+                    .await;
+                publish_mdns(server_name, *id, key.clone(), interfaces.iter()).await;
             },
         )
-        .into_iter()
-        .map(|(_device, (resolver, addresses))| async move {
-            do_publish_server(server, resolver.as_ref(), &addresses).await
-        })
         .collect::<FuturesUnordered<_>>()
         .collect::<()>()
         .await;
 }
 
-#[tracing::instrument(level = "debug", skip_all)]
-async fn publish_once(
-    listeners: &Arc<QuicListeners>,
-    resolvers: &HashMap<String, Resolvers>,
-    mdns_resolvers: &MDnsResolvers,
-) {
-    let servers = (listeners.servers().into_iter())
-        .filter_map(|server| {
-            let interfaces = listeners.get_server(&server)?.bind_interfaces();
-            let interfaces = interfaces.into_iter().filter_map(|(bind_uri, interface)| {
-                match interface.borrow() {
-                    Ok(interface) => Some((bind_uri, interface)),
-                    Err(error) => {
-                        tracing::debug!(target: "dns", %bind_uri, "Get interface error, skip: {}", Report::from_error(&error));
-                        None
-                    }
-                }
-            }).collect::<HashMap<_, _>>();
-            let resolvers = resolvers.get(&server)?;
-            Some((server, (interfaces, resolvers)))
-        })
-        .collect::<HashMap<_, _>>();
-
-    let publish_dns = servers
-        .iter()
-        .map(|(server, (ifaces, resolvers))| publish_dns(server, resolvers, ifaces.iter()))
-        .collect::<FuturesUnordered<_>>()
-        .collect::<()>();
-
-    let publish_mdns = async {
-        mdns_resolvers.clear();
-        for (device, mdns) in
-            initial_mdns_resolvers(servers.values().flat_map(|(ifaces, _)| ifaces.keys())).await
-        {
-            mdns_resolvers.insert(device, mdns);
-        }
-        servers
-            .iter()
-            .map(|(server, (ifaces, _))| publish_mdns(server, mdns_resolvers, ifaces.iter()))
-            .collect::<FuturesUnordered<_>>()
-            .collect::<()>()
-            .await;
-    };
-
-    futures::join!(publish_dns, publish_mdns);
-}
-
 impl Publisher {
-    pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, Resolvers>) -> Self {
+    pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, ServerConfig>) -> Self {
         let resolvers = Arc::new(resolvers);
-        let mdns_resolvers = Arc::new(MDnsResolvers::new());
 
         let publish_all =
             async move |listeners: Arc<QuicListeners>,
-                        resolvers: Arc<HashMap<String, Resolvers>>,
-                        mdns_resolvers: Arc<DashMap<String, Arc<MdnsResolver>>>| {
-                publish_once(&listeners, &resolvers, &mdns_resolvers).await
+                        resolvers: Arc<HashMap<String, ServerConfig>>| {
+                publish_once(&listeners, &resolvers).await
             };
 
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
             let new_publish_task = || {
-                let publish_all =
-                    publish_all(listeners.clone(), resolvers.clone(), mdns_resolvers.clone());
+                let publish_all = publish_all(listeners.clone(), resolvers.clone());
                 AbortOnDropHandle::new(tokio::spawn(async move {
                     // 过滤抖动
                     time::sleep(Duration::from_millis(50)).await;

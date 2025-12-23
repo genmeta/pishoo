@@ -45,9 +45,13 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
-h3-shim = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
-qdns = { git = "ssh://git@github.com/genmeta/gm-quic-traversal.git", branch = "main" }
+gm-quic = { path = "../gm-quic/gm-quic" }
+h3-shim = { path = "../gm-quic/h3-shim" }
+h3x = { path = "../h3x" }
+qevent = { path = "../gm-quic/qevent" }
+
+# --- DNS (mDNS/HTTP resolver) ---
+gmdns = { path = "../gmdns"}
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -83,6 +87,9 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 
 # --- workspace ---
 gateway = { path = "gateway", default-features = false }
+
+[patch."https://github.com/genmeta/gm-quic.git"]
+gm-quic = { path = "../gm-quic/gm-quic" }
 
 [profile.dev]
 panic = "abort"

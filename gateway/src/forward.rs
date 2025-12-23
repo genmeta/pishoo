@@ -1,15 +1,12 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use gm_quic::{
-    prelude::BindUri,
-    qinterface::iface::{QuicInterfaces, physical::PhysicalInterfaces},
-};
+use gm_quic::{prelude::BindUri, qinterface::device::Devices};
+use gmdns::resolver::{HTTP_DNS_SERVER, HttpResolver, MDNS_SERVICE, MdnsResolver, Resolvers};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use qdns::{HttpResolver, MdnsResolver, Resolvers};
 use snafu::{Report, ResultExt};
 use tokio::{
     io,
@@ -121,16 +118,16 @@ pub async fn serve(
 
     info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
-    let mut resolvers = if let Some(Value::Resolver(resolver)) = node.get("resolver") {
-        Resolvers::default().with(resolver.into())
+    let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
+        Resolvers::default().with(resolver.create_resolver())
     } else {
         Resolvers::default().with(Arc::new(
-            HttpResolver::new(qdns::HTTP_DNS_SERVER)
+            HttpResolver::new(HTTP_DNS_SERVER)
                 .whatever_context::<_, Whatever>("Failed to create http dns resolver")?,
         ))
     };
 
-    for (device, ..) in PhysicalInterfaces::global().interfaces() {
+    for device in Devices::global().interfaces().into_keys() {
         let socket_addr = match SocketAddr::try_from(&BindUri::from(format!(
             "iface://v4.{device}:0"
         ))) {
@@ -143,8 +140,7 @@ pub async fn serve(
         let SocketAddr::V4(socket_addr) = socket_addr else {
             unreachable!()
         };
-        let mdns_resolver = match MdnsResolver::new(qdns::MDNS_SERVICE, *socket_addr.ip(), &device)
-        {
+        let mdns_resolver = match MdnsResolver::new(MDNS_SERVICE, *socket_addr.ip(), &device) {
             Ok(resolver) => resolver,
             Err(error) => {
                 warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );
@@ -156,7 +152,7 @@ pub async fn serve(
 
     // 设置客户端认证配置
     setup_client_config(&node)?;
-    H3ConnectionPool::reinitialize();
+    H3ConnectionPool::reinitialize().await;
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
@@ -244,8 +240,8 @@ pub async fn serve(
 pub async fn resume(node: Arc<Node>) -> Result<()> {
     match serve(node).await {
         Ok((_local_addr, forward_proxy)) => {
-            QuicInterfaces::global().clear();
             tokio::spawn(async move {
+                // QuicInterfaces::global().clear();
                 if let Err(error) = forward_proxy.await {
                     error!(target: "forward_proxy", "Forward proxy failed: {}", Report::from_error(&error));
                 }
@@ -253,7 +249,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             Ok(())
         }
         Err(launch_error) => {
-            H3ConnectionPool::global().clear_connections();
+            H3ConnectionPool::global().await.clear_connections();
             error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }
