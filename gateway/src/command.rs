@@ -47,13 +47,7 @@ pub(crate) async fn index(
         }
         let base_dir_path = file_path.clone();
 
-        let node_found = node.backtrack_node("index");
-        let index_files = node_found.as_ref().map(|node| {
-            let Some(Value::StringVec(index_files)) = node.get("index") else {
-                unreachable!("Invalid index value")
-            };
-            index_files
-        });
+        let index_files = node.get_string_vec("index");
 
         let index_files = if let Some(index_files) = index_files {
             index_files
@@ -66,7 +60,7 @@ pub(crate) async fn index(
 
         for index_filename in index_files {
             let mut potential_path = base_dir_path.clone();
-            potential_path.push_str(index_filename);
+            potential_path.push_str(&index_filename);
 
             if let Ok(metadata) = tokio::fs::metadata(&*potential_path).await
                 && metadata.is_file()
@@ -168,26 +162,12 @@ pub(crate) fn add_header(node: &Arc<Node>, parts: &mut Parts) {
 /// Panics with `unreachable!` if a configuration node for `types` or `default_type` is found
 /// but contains a value of an unexpected type, indicating invalid configuration data.
 pub(crate) fn content_type(node: &Arc<Node>, parts: &mut Parts, file_path: &str) {
-    let node_found = node.backtrack_node("types");
-    let mime_types = node_found.as_ref().map(|node| {
-        if let Some(Value::Types(mime_types)) = node.get("types") {
-            mime_types
-        } else {
-            unreachable!("Invalid mime_types value")
-        }
-    });
-
-    let node_found = node.backtrack_node("default_type");
-    let default_type = node_found.as_ref().map(|node| {
-        if let Some(Value::HeaderValue(default_type)) = node.get("default_type") {
-            default_type
-        } else {
-            unreachable!("Invalid default_type value")
-        }
-    });
+    let mime_types = node.get_types("types");
+    let default_type = node.get_header_value("default_type");
 
     if let Some(mime_types) = mime_types
-        && let Some(content_type) = infer_content_type(file_path, mime_types, default_type)
+        && let Some(content_type) =
+            infer_content_type(file_path, &mime_types, default_type.as_ref())
     {
         parts.headers.insert("Content-Type", content_type.clone());
     }
@@ -223,36 +203,11 @@ fn infer_content_type<'a>(
 }
 
 pub(crate) fn acl(node: &Arc<Node>) -> Acl {
-    let node_found = node.backtrack_node("allow");
-    let allow = node_found.as_ref().map(|node| {
-        if let Some(Value::StringVec(allow)) = node.get("allow") {
-            allow
-        } else {
-            unreachable!("Invalid allow value")
-        }
-    });
-    let allow = if let Some(allow) = allow {
-        allow
-    } else {
-        &Vec::new()
-    };
+    let allow_vec = node.get_string_vec("allow").unwrap_or_default();
+    let deny_vec = node.get_string_vec("deny").unwrap_or_default();
 
-    let node_found = node.backtrack_node("deny");
-    let deny = node_found.as_ref().map(|node| {
-        if let Some(Value::StringVec(deny)) = node.get("deny") {
-            deny
-        } else {
-            unreachable!("Invalid deny value")
-        }
-    });
-    let deny = if let Some(deny) = deny {
-        deny
-    } else {
-        &Vec::new()
-    };
-
-    let allow = acl::parse_host_matches(allow);
-    let deny = acl::parse_host_matches(deny);
+    let allow = acl::parse_host_matches(&allow_vec);
+    let deny = acl::parse_host_matches(&deny_vec);
 
     Acl::new(allow, deny)
 }

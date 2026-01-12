@@ -241,6 +241,45 @@ impl Node {
             current_node = parent;
         }
     }
+
+    pub fn get_value_recursive(self: &Arc<Self>, key: &str) -> Option<Value> {
+        self.backtrack_node(key).and_then(|n| n.get(key).cloned())
+    }
+
+    pub fn get_bool(self: &Arc<Self>, key: &str) -> Option<bool> {
+        match self.get_value_recursive(key) {
+            Some(Value::Boolean(b)) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn get_str_parsed<T: FromStr>(self: &Arc<Self>, key: &str) -> Option<T> {
+        match self.get_value_recursive(key) {
+            Some(Value::String(s)) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn get_string_vec(self: &Arc<Self>, key: &str) -> Option<Vec<String>> {
+        match self.get_value_recursive(key) {
+            Some(Value::StringVec(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn get_types(self: &Arc<Self>, key: &str) -> Option<HashMap<String, HeaderValue>> {
+        match self.get_value_recursive(key) {
+            Some(Value::Types(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn get_header_value(self: &Arc<Self>, key: &str) -> Option<HeaderValue> {
+        match self.get_value_recursive(key) {
+            Some(Value::HeaderValue(v)) => Some(v.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
@@ -318,7 +357,7 @@ impl Commands {
 }
 
 #[allow(dead_code)]
-fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
+pub(crate) fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
     if let Some(children) = directive.children {
         let mut map = HashMap::new();
         for directive in children {
@@ -330,6 +369,20 @@ fn parse_string_map(directive: Directive<Nginx>) -> Result<Value> {
         return Ok(Value::StringMap(map));
     }
     Ok(Value::ValueMap(HashMap::new()))
+}
+
+pub(crate) fn parse_boolean(directive: Directive<Nginx>) -> Result<Value> {
+    match &directive.args[..] {
+        [flag] => match flag.as_str() {
+            "on" => Ok(Value::Boolean(true)),
+            "off" => Ok(Value::Boolean(false)),
+            _ => whatever!("Invalid boolean value `{flag}`, expected `on` or `off`"),
+        },
+        _ => whatever!(
+            "Invalid number of arguments for directive: {}",
+            directive.name
+        ),
+    }
 }
 
 fn parse_header_value(directive: Directive<Nginx>) -> Result<Value> {
@@ -362,8 +415,7 @@ fn parse_types(directive: Directive<Nginx>) -> Result<Value> {
     Ok(Value::ValueMap(HashMap::new()))
 }
 
-#[allow(dead_code)]
-fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
+pub(crate) fn parse_string(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => Ok(Value::String(string.to_string())),
         _ => whatever!(
@@ -533,7 +585,7 @@ fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
+pub(crate) fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
     Ok(Value::StringVec(directive.args))
 }
 

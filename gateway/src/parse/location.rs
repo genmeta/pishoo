@@ -3,8 +3,9 @@ use misc_conf::{ast::Directive, nginx::Nginx};
 use snafu::ResultExt;
 
 use crate::parse::{
-    Commands, Result, Value, parse_header, parse_header_always, parse_path, parse_proxy_pass,
-    parse_ssh_login, parse_ssh_ssl_user, parse_string_vec, parse_types, pattern::parse_pattern,
+    Commands, Result, Value, parse_boolean, parse_header, parse_header_always, parse_path,
+    parse_proxy_pass, parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_vec,
+    parse_types, pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
@@ -13,6 +14,11 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("types", parse_types);
     commands.insert("root", parse_path);
     commands.insert("alias", parse_path);
+    commands.insert("gzip", parse_boolean);
+    commands.insert("gzip_vary", parse_boolean);
+    commands.insert("gzip_min_length", parse_string);
+    commands.insert("gzip_comp_level", parse_string);
+    commands.insert("gzip_types", parse_string_vec);
     commands.insert("index", parse_string_vec);
     commands.insert("add_header", parse_header_always);
     commands.insert("proxy_set_header", parse_header);

@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use async_compression::{Level, tokio::bufread::GzipEncoder};
 use bytes::Bytes;
 use h3::server::RequestStream;
 use h3_shim::SendStream;
-use http::{Request, Response, StatusCode, Uri, header::CONTENT_LENGTH};
+use http::{Request, Response, StatusCode, header::CONTENT_LENGTH};
 use snafu::ResultExt;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info};
@@ -45,7 +46,7 @@ pub async fn root(
     };
 
     let file_path = format!("{}{}", root.display(), req.uri().path());
-    serve_static_file(location, &file_path, req.uri(), sender).await?;
+    serve_static_file(location, &file_path, &req, sender).await?;
     Ok(())
 }
 
@@ -88,7 +89,7 @@ pub async fn alias(
     };
 
     let file_path = format!("{}{}", alias.display(), relative_path);
-    serve_static_file(location, &file_path, req.uri(), sender).await?;
+    serve_static_file(location, &file_path, &req, sender).await?;
     Ok(())
 }
 
@@ -113,9 +114,10 @@ pub async fn alias(
 async fn serve_static_file(
     location: &Arc<Node>,
     file_path: &str,
-    uri: &Uri,
+    req: &Request<()>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    let uri = req.uri();
     debug!(target: "static_file", "[Response handling][{}] Processing static file", uri);
 
     let (file, file_size, file_path) = match index(location, file_path).await {
@@ -138,16 +140,73 @@ async fn serve_static_file(
     parts.status = StatusCode::OK;
 
     command::add_header(location, &mut parts);
-
-    // 添加长度
-    // TODO gzip 压缩时不添加长度
-    parts.headers.insert(CONTENT_LENGTH, file_size.into());
     content_type(location, &mut parts, &file_path);
+
+    let accept_gzip = req
+        .headers()
+        .get(http::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("gzip"))
+        .unwrap_or(false);
+
+    let gzip_enabled = location.get_bool("gzip").unwrap_or(false);
+
+    let gzip_vary = location.get_bool("gzip_vary").unwrap_or(false);
+
+    let gzip_min_length = location.get_str_parsed("gzip_min_length").unwrap_or(20);
+
+    let gzip_comp_level = location.get_str_parsed("gzip_comp_level").unwrap_or(1);
+
+    let gzip_types = location.get_string_vec("gzip_types");
+
+    let content_type = parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).trim())
+        .unwrap_or("");
+
+    let length_ok = file_size >= gzip_min_length;
+    let type_ok = match &gzip_types {
+        None => content_type == "text/html",
+        Some(types) => types.iter().any(|t| t == "*" || t == content_type),
+    };
+
+    let should_compress = gzip_enabled
+        && accept_gzip
+        && parts.headers.get(http::header::CONTENT_ENCODING).is_none()
+        && length_ok
+        && type_ok;
+
+    if should_compress {
+        parts
+            .headers
+            .insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
+
+        if gzip_vary {
+            parts
+                .headers
+                .append(http::header::VARY, "Accept-Encoding".parse().unwrap());
+        }
+    } else {
+        parts.headers.insert(CONTENT_LENGTH, file_size.into());
+    }
 
     let response = Response::from_parts(parts, body);
     sender.send_response(response).await.context(StreamSnafu)?;
 
-    let mut reader = BufReader::new(file);
+    let reader = BufReader::new(file);
+    let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if should_compress {
+        let level = match gzip_comp_level {
+            1 => Level::Fastest,
+            9 => Level::Best,
+            l => Level::Precise(l),
+        };
+        Box::new(GzipEncoder::with_quality(reader, level))
+    } else {
+        Box::new(reader)
+    };
+
     let mut stream = H3Sink::new(sender);
     tokio::io::copy(&mut reader, &mut stream)
         .await
