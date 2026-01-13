@@ -23,6 +23,8 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("add_header", parse_header_always);
     commands.insert("proxy_set_header", parse_header);
     commands.insert("proxy_pass", parse_proxy_pass);
+    commands.insert("access_log", parse_path);
+    commands.insert("error_log", parse_path);
     commands.insert("ssh_login", parse_ssh_login);
     commands.insert("ssh_ssl_user", parse_ssh_ssl_user);
     commands.insert("ssh_deny", parse_string_vec);

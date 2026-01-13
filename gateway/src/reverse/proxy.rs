@@ -1,7 +1,8 @@
-use std::{str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use async_compression::{Level, tokio::bufread::GzipEncoder};
 use bytes::Bytes;
+use chrono::Local;
 use futures::TryStreamExt;
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
@@ -28,6 +29,41 @@ pub async fn handle(
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    // Capture request info for logging
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let version = req.version();
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let referer = req
+        .headers()
+        .get("referer")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let client_addr_str = req
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let access_log_path = location
+        .get_value_recursive("access_log")
+        .and_then(|v| match v {
+            Value::Path(p) => Some(p),
+            _ => None,
+        });
+    let error_log_path = location
+        .get_value_recursive("error_log")
+        .and_then(|v| match v {
+            Value::Path(p) => Some(p),
+            _ => None,
+        });
+
     // proxy_set_header
     let req = command::proxy_set_header(location, req);
 
@@ -57,12 +93,34 @@ pub async fn handle(
     let resp = match pass(location, req, recver).await {
         Ok(resp) => resp,
         Err(e) => {
-            error!(
-                target: "reverse_proxy",
-                "Proxy request error: {}",
-                Report::from_error(e)
-            );
+            let err_msg = format!("Proxy request error: {}", Report::from_error(e));
+            error!(target: "reverse_proxy", "{}", err_msg);
+
+            if let Some(path) = error_log_path {
+                crate::reverse::log::write_error_log(path, err_msg).await;
+            }
+
             let resp = build_error_response();
+
+            if let Some(path) = access_log_path {
+                let status = resp.status();
+                let body_bytes_sent = 0;
+                let time_local = Local::now().format("%d/%b/%Y:%H:%M:%S %z");
+                let log_line = format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} {} \"{}\" \"{}\"",
+                    client_addr_str,
+                    time_local,
+                    method,
+                    uri,
+                    version,
+                    status.as_u16(),
+                    body_bytes_sent,
+                    referer,
+                    user_agent
+                );
+                crate::reverse::log::write_access_log(path, log_line).await;
+            }
+
             sender.send_response(resp).await.context(StreamSnafu)?;
             sender.finish().await.context(StreamSnafu)?;
             return Ok(());
@@ -118,6 +176,7 @@ pub async fn handle(
 
     // 发送响应头
     let resp1 = Response::from_parts(parts, ());
+    let status_code = resp1.status();
     sender.send_response(resp1).await.context(StreamSnafu)?;
 
     let body_stream =
@@ -136,12 +195,32 @@ pub async fn handle(
 
     let mut stream = H3Sink::new(sender);
     match tokio::io::copy(&mut reader, &mut stream).await {
-        Ok(size) => debug!(target: "reverse_proxy", "Request body sent: size={size}"),
-        Err(e) => error!(
-            target: "reverse_proxy",
-            "Error sending request body: {}",
-            Report::from_error(e)
-        ),
+        Ok(size) => {
+            debug!(target: "reverse_proxy", "Request body sent: size={size}");
+            if let Some(path) = access_log_path {
+                let time_local = Local::now().format("%d/%b/%Y:%H:%M:%S %z");
+                let log_line = format!(
+                    "{} - - [{}] \"{} {} {:?}\" {} {} \"{}\" \"{}\"",
+                    client_addr_str,
+                    time_local,
+                    method,
+                    uri,
+                    version,
+                    status_code.as_u16(),
+                    size,
+                    referer,
+                    user_agent
+                );
+                crate::reverse::log::write_access_log(path, log_line).await;
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("Error sending request body: {}", Report::from_error(e));
+            error!(target: "reverse_proxy", "{}", err_msg);
+            if let Some(path) = error_log_path {
+                crate::reverse::log::write_error_log(path, err_msg).await;
+            }
+        }
     }
     match stream.shutdown().await {
         Ok(()) => debug!(target: "reverse_proxy", "Request finished sent"),

@@ -22,6 +22,8 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whateve
     commands.insert("gzip_types", parse_string_vec);
     commands.insert("ssl_certificate", parse_path);
     commands.insert("ssl_certificate_key", parse_path);
+    commands.insert("access_log", parse_path);
+    commands.insert("error_log", parse_path);
     commands.insert("location", parse_location);
     commands.insert("types", parse_types);
     commands.insert("default_type", parse_header_value);

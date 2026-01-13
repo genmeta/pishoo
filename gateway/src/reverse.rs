@@ -38,6 +38,7 @@ use crate::{
 
 mod auth;
 mod file;
+pub(crate) mod log;
 mod proxy;
 #[cfg(feature = "sshd")]
 mod sshd;
