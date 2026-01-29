@@ -1,8 +1,7 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 
 use async_compression::{Level, tokio::bufread::GzipEncoder};
 use bytes::Bytes;
-use chrono::Local;
 use futures::TryStreamExt;
 use h3::server::RequestStream;
 use h3_shim::{RecvStream, SendStream};
@@ -20,7 +19,7 @@ use crate::{
     error::{Result, StreamSnafu, Whatever},
     h3::{H3Sink, H3Stream},
     parse::{Node, Value, pattern::Pattern},
-    reverse::build_error_response,
+    reverse::{build_error_response, log::RequestInfo},
 };
 
 pub async fn handle(
@@ -29,40 +28,7 @@ pub async fn handle(
     recver: RequestStream<RecvStream, Bytes>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
-    // Capture request info for logging
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let version = req.version();
-    let user_agent = req
-        .headers()
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let referer = req
-        .headers()
-        .get("referer")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let client_addr_str = req
-        .extensions()
-        .get::<SocketAddr>()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "-".to_string());
-
-    let access_log_path = location
-        .get_value_recursive("access_log")
-        .and_then(|v| match v {
-            Value::Path(p) => Some(p),
-            _ => None,
-        });
-    let error_log_path = location
-        .get_value_recursive("error_log")
-        .and_then(|v| match v {
-            Value::Path(p) => Some(p),
-            _ => None,
-        });
+    let req_info = RequestInfo::from_request(&req);
 
     // proxy_set_header
     let req = command::proxy_set_header(location, req);
@@ -75,13 +41,9 @@ pub async fn handle(
         .unwrap_or(false);
 
     let gzip_enabled = location.get_bool("gzip").unwrap_or(false);
-
     let gzip_vary = location.get_bool("gzip_vary").unwrap_or(false);
-
     let gzip_min_length = location.get_str_parsed("gzip_min_length").unwrap_or(20);
-
     let gzip_comp_level = location.get_str_parsed("gzip_comp_level").unwrap_or(1);
-
     let gzip_types = location.get_string_vec("gzip_types");
 
     debug!(
@@ -95,31 +57,10 @@ pub async fn handle(
         Err(e) => {
             let err_msg = format!("Proxy request error: {}", Report::from_error(e));
             error!(target: "reverse_proxy", "{}", err_msg);
-
-            if let Some(path) = error_log_path {
-                crate::reverse::log::write_error_log(path, err_msg).await;
-            }
+            req_info.log_error(&err_msg).await;
 
             let resp = build_error_response();
-
-            if let Some(path) = access_log_path {
-                let status = resp.status();
-                let body_bytes_sent = 0;
-                let time_local = Local::now().format("%d/%b/%Y:%H:%M:%S %z");
-                let log_line = format!(
-                    "{} - - [{}] \"{} {} {:?}\" {} {} \"{}\" \"{}\"",
-                    client_addr_str,
-                    time_local,
-                    method,
-                    uri,
-                    version,
-                    status.as_u16(),
-                    body_bytes_sent,
-                    referer,
-                    user_agent
-                );
-                crate::reverse::log::write_access_log(path, log_line).await;
-            }
+            req_info.log_access(resp.status().as_u16(), 0).await;
 
             sender.send_response(resp).await.context(StreamSnafu)?;
             sender.finish().await.context(StreamSnafu)?;
@@ -197,29 +138,12 @@ pub async fn handle(
     match tokio::io::copy(&mut reader, &mut stream).await {
         Ok(size) => {
             debug!(target: "reverse_proxy", "Request body sent: size={size}");
-            if let Some(path) = access_log_path {
-                let time_local = Local::now().format("%d/%b/%Y:%H:%M:%S %z");
-                let log_line = format!(
-                    "{} - - [{}] \"{} {} {:?}\" {} {} \"{}\" \"{}\"",
-                    client_addr_str,
-                    time_local,
-                    method,
-                    uri,
-                    version,
-                    status_code.as_u16(),
-                    size,
-                    referer,
-                    user_agent
-                );
-                crate::reverse::log::write_access_log(path, log_line).await;
-            }
+            req_info.log_access(status_code.as_u16(), size).await;
         }
         Err(e) => {
             let err_msg = format!("Error sending request body: {}", Report::from_error(e));
             error!(target: "reverse_proxy", "{}", err_msg);
-            if let Some(path) = error_log_path {
-                crate::reverse::log::write_error_log(path, err_msg).await;
-            }
+            req_info.log_error(&err_msg).await;
         }
     }
     match stream.shutdown().await {

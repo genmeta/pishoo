@@ -29,3 +29,6 @@ keychain/borber.pilot.genmeta.net
 
 # Scripts
 scripts/*
+
+# Agent instructions
+AGENTS.md

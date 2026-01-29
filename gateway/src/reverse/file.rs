@@ -14,6 +14,7 @@ use crate::{
     error::{Result, StreamSnafu, Whatever},
     h3::H3Sink,
     parse::{Node, Value},
+    reverse::log::RequestInfo,
 };
 
 /// Handles incoming HTTP requests, attempting to serve a static file based on a configured root directory.
@@ -117,7 +118,9 @@ async fn serve_static_file(
     req: &Request<()>,
     mut sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    let req_info = RequestInfo::from_request(req);
     let uri = req.uri();
+
     debug!(target: "static_file", "[Response handling][{}] Processing static file", uri);
 
     let (file, file_size, file_path) = match index(location, file_path).await {
@@ -131,6 +134,8 @@ async fn serve_static_file(
             tracing::info!(target: "static_file", "[Proxy][{}] File not found: {}, error: {}", uri, file_path, index_error);
             sender.send_response(response).await.context(StreamSnafu)?;
             sender.finish().await.context(StreamSnafu)?;
+
+            req_info.log_access(404, 0).await;
             return Ok(());
         }
     };
@@ -150,13 +155,9 @@ async fn serve_static_file(
         .unwrap_or(false);
 
     let gzip_enabled = location.get_bool("gzip").unwrap_or(false);
-
     let gzip_vary = location.get_bool("gzip_vary").unwrap_or(false);
-
     let gzip_min_length = location.get_str_parsed("gzip_min_length").unwrap_or(20);
-
     let gzip_comp_level = location.get_str_parsed("gzip_comp_level").unwrap_or(1);
-
     let gzip_types = location.get_string_vec("gzip_types");
 
     let content_type = parts
@@ -208,9 +209,17 @@ async fn serve_static_file(
     };
 
     let mut stream = H3Sink::new(sender);
-    tokio::io::copy(&mut reader, &mut stream)
-        .await
-        .whatever_context::<_, Whatever>("Failed to send file content")?;
+    match tokio::io::copy(&mut reader, &mut stream).await {
+        Ok(size) => {
+            req_info.log_access(200, size).await;
+        }
+        Err(e) => {
+            let err_msg = format!("Failed to send file content: {}", e);
+            error!(target: "static_file", "[Proxy][{}] {}", uri, err_msg);
+            req_info.log_error(&err_msg).await;
+            return Err(e).whatever_context::<_, Whatever>("Failed to send file content")?;
+        }
+    }
 
     match stream.shutdown().await {
         Ok(()) => info!(target: "static_file", "[Proxy][{}] Request finished sent", uri),

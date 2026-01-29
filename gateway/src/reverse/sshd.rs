@@ -11,6 +11,7 @@ use crate::{
     error::{Result, StreamSnafu},
     h3::{H3Sink, H3Stream},
     parse::Node,
+    reverse::log::RequestInfo,
 };
 
 /// ``` conf
@@ -33,6 +34,8 @@ pub async fn serve(
     recver: RequestStream<RecvStream, Bytes>,
     sender: RequestStream<SendStream<Bytes>, Bytes>,
 ) -> Result<()> {
+    let req_info = RequestInfo::from_request(&request);
+
     let Some(crate::parse::Value::StringVec(ssh_login)) = location.get("ssh_login") else {
         unreachable!()
     };
@@ -52,9 +55,7 @@ pub async fn serve(
         ssh_deny,
     };
 
-    // TODO: 暂时使用了一个很粗糙的方案来融合模块
-    // 自研HTTP3迫在眉睫
-    genmeta_ssh3_server::serve::<_, _, _, H3Sink, H3Stream>(
+    let result = genmeta_ssh3_server::serve::<_, _, _, H3Sink, H3Stream>(
         Arc::new(config),
         request,
         final_pattern,
@@ -64,5 +65,19 @@ pub async fn serve(
         sender,
         async |sender, response| sender.send_response(response).await.context(StreamSnafu),
     )
-    .await
+    .await;
+
+    match &result {
+        Ok(()) => {
+            req_info.log_access(200, 0).await;
+        }
+        Err(e) => {
+            req_info
+                .log_error(format!("SSH session error: {:?}", e))
+                .await;
+            req_info.log_access(500, 0).await;
+        }
+    }
+
+    result
 }
