@@ -5,8 +5,8 @@ use crate::{
     error::{Result, Whatever},
     parse::{
         Commands, Value, location::parse_location, parse_boolean, parse_header_value, parse_listen,
-        parse_path, parse_publisher, parse_resolver, parse_server_id, parse_server_name,
-        parse_string, parse_string_vec, parse_types,
+        parse_path, parse_resolver, parse_server_id, parse_server_name, parse_string,
+        parse_string_vec, parse_types,
     },
 };
 
@@ -22,7 +22,6 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whateve
     commands.insert("gzip_min_length", parse_string);
     commands.insert("gzip_comp_level", parse_string);
     commands.insert("gzip_types", parse_string_vec);
-    commands.insert("publisher", parse_publisher);
     commands.insert("ssl_certificate", parse_path);
     commands.insert("ssl_certificate_key", parse_path);
     commands.insert("location", parse_location);

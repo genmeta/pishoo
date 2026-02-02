@@ -1846,6 +1846,7 @@ dependencies = [
  "gm-quic",
  "h3x",
  "http",
+ "nix 0.29.0",
  "nom 8.0.0",
  "rand 0.9.2",
  "reqwest",

@@ -12,7 +12,6 @@ use gmdns::{
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolver::{MDNS_SERVICE, MdnsResolver, Publisher as DnsPublisher},
 };
-use qevent::loglevel::Info;
 use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
@@ -95,7 +94,7 @@ async fn publish_single_mdns(
                 Report::from_error(error)
             );
         } else {
-            tracing::debug!(target: "dns", %bind_uri, %addr, "Publishing local address to mDNS");
+            tracing::trace!(target: "dns", %bind_uri, %addr, "Publishing local address to mDNS");
         }
     }
 }
@@ -176,7 +175,6 @@ impl Publisher {
     pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, ServerConfig>) -> Self {
         let resolvers = Arc::new(resolvers);
 
-        info!("Starting DNS Publisher task");
         let publish_all =
             async move |listeners: Arc<QuicListeners>,
                         resolvers: Arc<HashMap<String, ServerConfig>>| {

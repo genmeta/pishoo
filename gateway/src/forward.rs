@@ -18,7 +18,7 @@ use crate::{
     command,
     error::{Result, Whatever},
     forward,
-    parse::{Node, Value},
+    parse::{Node, ServerConfig, Value},
     pool::H3ConnectionPool,
 };
 
@@ -118,8 +118,28 @@ pub async fn serve(
 
     info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
+    // TODO: 客户端考虑可以不配置这些
     let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
-        Resolvers::default().with(resolver.create_resolver())
+        let cert_path = match node.get("ssl_certificate") {
+            Some(Value::Path(path)) => path.clone(),
+            _ => panic!("H3 resolver requires ssl_certificate"),
+        };
+        let key_path = match node.get("ssl_certificate_key") {
+            Some(Value::Path(path)) => path.clone(),
+            _ => panic!("H3 resolver requires ssl_certificate_key"),
+        };
+        let server_name = match node.get("client_name") {
+            Some(Value::String(name)) => name.clone(),
+            _ => panic!("H3 resolver requires client_name"),
+        };
+
+        let config = ServerConfig {
+            cert_path,
+            key_path,
+            server_name,
+            server_id: 0,
+        };
+        Resolvers::default().with(resolver.create_resolver(&config))
     } else {
         Resolvers::default().with(Arc::new(
             HttpResolver::new(HTTP_DNS_SERVER)

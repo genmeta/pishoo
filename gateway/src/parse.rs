@@ -19,6 +19,7 @@ use pattern::Pattern;
 use rustls::RootCertStore;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
+use tracing::info;
 
 use crate::error::Whatever;
 
@@ -43,7 +44,6 @@ pub enum Value {
     String(String),
     Uri(Uri),
     DnsResolver(DnsResolver),
-    DnsPublisher(DnsPublisher),
     StringVec(Vec<String>),
     ServerName(Vec<ServerName>),
     ServerId(u8),
@@ -75,9 +75,10 @@ impl Value {
 // Server configuration for TLS certificates and server name
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
-    pub cert_path: Option<PathBuf>,
-    pub key_path: Option<PathBuf>,
-    pub server_name: Option<String>,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub server_name: String,
+    pub server_id: u8,
 }
 
 // DNS resolver configuration for queries (no certificates needed)
@@ -86,77 +87,57 @@ pub struct DnsResolver {
     pub base_url: Uri,
 }
 
-// DNS publisher configuration for publishing (with optional certificates)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsPublisher {
-    pub base_url: Uri,
-    pub config: Option<ServerConfig>,
-}
-
 impl DnsResolver {
-    pub fn create_resolver(&self) -> Arc<dyn GmdnsResolver + Send + Sync> {
+    pub fn create_resolver(&self, config: &ServerConfig) -> Arc<dyn GmdnsResolver + Send + Sync> {
         // Only support HTTP3 resolver as per TODO comment
         Arc::new(
-            H3Resolver::new(
-                self.base_url.to_string(),
-                self.create_h3_client_without_identity(),
-            )
-            .expect("H3 dns server base_url has been checked"),
-        )
-    }
-
-    fn create_h3_client_without_identity(&self) -> Client<QuicClient> {
-        let root_store = RootCertStore::empty();
-        Client::<QuicClient>::builder()
-            .with_root_certificates(std::sync::Arc::new(root_store))
-            .without_identity()
-            .expect("Failed to configure TLS")
-            .build()
-    }
-}
-
-impl DnsPublisher {
-    pub fn create_publisher(&self) -> Arc<dyn GmdnsPublisher + Send + Sync> {
-        Arc::new(
-            H3Resolver::new(self.base_url.to_string(), self.create_h3_client())
+            H3Resolver::new(self.base_url.to_string(), self.create_h3_client(config))
                 .expect("H3 dns server base_url has been checked"),
         )
     }
 
-    fn create_h3_client(&self) -> Client<QuicClient> {
+    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<dyn GmdnsPublisher + Send + Sync> {
+        info!(
+            target = "dns",
+            "Creating H3 DNS publisher for server {} base url {}",
+            config.server_name,
+            self.base_url
+        );
+        Arc::new(
+            H3Resolver::new(self.base_url.to_string(), self.create_h3_client(config))
+                .expect("H3 dns server base_url has been checked"),
+        )
+    }
+
+    fn create_h3_client(&self, config: &ServerConfig) -> Client<QuicClient> {
         let root_store = RootCertStore::empty();
 
         let client_builder =
             Client::<QuicClient>::builder().with_root_certificates(std::sync::Arc::new(root_store));
 
-        // Configure client identity if certificates are provided
-        if let Some(config) = &self.config
-            && let (Some(cert_path), Some(key_path), Some(name)) =
-                (&config.cert_path, &config.key_path, &config.server_name)
-            && let (Ok(cert_data), Ok(key_data)) =
-                (std::fs::read(cert_path), std::fs::read(key_path))
-        {
-            // Parse certificates and private key
-            use std::io::Cursor;
+        let (cert_path, key_path, name) =
+            (&config.cert_path, &config.key_path, &config.server_name);
+        let (Ok(cert_data), Ok(key_data)) = (std::fs::read(cert_path), std::fs::read(key_path))
+        else {
+            panic!("Failed to read cert or key");
+        };
 
-            use rustls_pemfile::{certs, private_key};
+        // Parse certificates and private key
+        use std::io::Cursor;
 
-            let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
-                .collect::<Result<Vec<_>, _>>()
-                .expect("Failed to parse certificates");
+        use rustls_pemfile::{certs, private_key};
 
-            let private_key = private_key(&mut Cursor::new(&key_data))
-                .expect("Failed to parse private key")
-                .expect("No private key found");
+        let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Failed to parse certificates");
 
-            return client_builder
-                .with_identity(name.clone(), cert_chain, private_key)
-                .expect("Failed to configure client identity")
-                .build();
-        }
+        let private_key = private_key(&mut Cursor::new(&key_data))
+            .expect("Failed to parse private key")
+            .expect("No private key found");
+
         client_builder
-            .without_identity()
-            .expect("Failed to configure TLS")
+            .with_identity(name.clone(), cert_chain, private_key)
+            .expect("Failed to configure client identity")
             .build()
     }
 }
@@ -710,30 +691,6 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-fn parse_publisher(directive: Directive<Nginx>) -> Result<Value> {
-    match &directive.args[..] {
-        [kind, publisher] => match kind.as_str() {
-            "h3" => {
-                let base_url = publisher.parse::<Uri>().whatever_context(format!(
-                    "Invalid base URL `{publisher}` while parsing h3 publisher",
-                ))?;
-
-                let publisher_config = DnsPublisher {
-                    base_url,
-                    config: None, // Will be set later if certificates are provided
-                };
-
-                Ok(Value::DnsPublisher(publisher_config))
-            }
-            _ => whatever!("Unknown publisher kind: {kind}, expected `h3`"),
-        },
-        _ => whatever!(
-            "Invalid number of arguments for directive: {}",
-            directive.name
-        ),
-    }
-}
-
 fn parse_path(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
@@ -1094,7 +1051,6 @@ pishoo {{
         listen all 5378;
         server_name example.com;
         resolver h3 https://dns.example.com/dns-query;
-        publisher h3 https://dns.example.com/dns-publish;
         ssl_certificate {};
         ssl_certificate_key {};
     }}
@@ -1143,18 +1099,6 @@ pishoo {{
                 );
             }
             _ => panic!("resolver 解析失败"),
-        }
-
-        // 验证 publisher 配置
-        match server.get("publisher") {
-            Some(Value::DnsPublisher(publisher)) => {
-                assert_eq!(
-                    publisher.base_url.to_string(),
-                    "https://dns.example.com/dns-publish"
-                );
-                assert!(publisher.config.is_none());
-            }
-            _ => panic!("publisher 解析失败"),
         }
     }
 }

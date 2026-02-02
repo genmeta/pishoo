@@ -16,18 +16,18 @@ use gm_quic::{
     },
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
-use gmdns::resolver::{HTTP_DNS_SERVER, HttpResolver};
+use gmdns::resolver::H3_DNS_SERVER;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
-use http::{HeaderValue, Request, Response, StatusCode};
+use http::{HeaderValue, Request, Response, StatusCode, Uri};
 use rustls::{SignatureScheme, server::WebPkiClientVerifier, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
-use tracing::{Instrument, debug, error, info, info_span};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     error::{Result, StreamSnafu, Whatever},
-    parse::{DnsResolver, Listens, Node, Value},
+    parse::{DnsResolver, Listens, Node, ServerConfig as ParseServerConfig, Value},
     publisher::{Publisher, ServerConfig},
     reverse::{self, auth::load_key},
 };
@@ -65,13 +65,8 @@ mod sshd;
 */
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
-type ServerResolverList<'a> = Vec<(
-    String,
-    Vec<&'a DnsResolver>,
-    Vec<&'a crate::parse::DnsPublisher>,
-    u8,
-    Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-)>;
+
+const NO_PUBLISH_DOMAINS: &[&str] = &["user.genmeta.net"];
 
 /// Start the QUIC proxy server
 ///
@@ -91,48 +86,7 @@ pub async fn serve(
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
 
-    let default_http_resolver = Arc::new(
-        HttpResolver::new(HTTP_DNS_SERVER)
-            .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
-    );
-
     info!("DNS Resolvers initialized");
-    let server_resolvers: HashMap<String, ServerConfig> = server_resolvers
-        .into_iter()
-        .map(
-            |(server_name, _resolvers, publishers, id, key): (
-                String,
-                Vec<&DnsResolver>,
-                Vec<&crate::parse::DnsPublisher>,
-                u8,
-                Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-            )| {
-                let resolvers: Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>> =
-                    if ["test.genmeta.net", "user.genmeta.net"]
-                        .iter()
-                        .any(|suffix| server_name.ends_with(suffix))
-                    {
-                        vec![]
-                    } else if publishers.is_empty() {
-                        vec![default_http_resolver.clone()]
-                    } else {
-                        debug_assert!(!publishers.is_empty());
-                        publishers
-                            .iter()
-                            .map(|p: &&crate::parse::DnsPublisher| p.create_publisher())
-                            .collect()
-                    };
-                (
-                    server_name,
-                    ServerConfig {
-                        resolvers,
-                        server_id: id,
-                        signing_key: key,
-                    },
-                )
-            },
-        )
-        .collect();
 
     // 启动 dns 上报
     let _publisher = Publisher::spawn(quic_listeners.clone(), server_resolvers);
@@ -148,19 +102,29 @@ pub async fn serve(
 }
 
 /// 初始化路由器，根据服务器配置创建路由表
-fn init_router(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverList<'_>)> {
+fn init_router(servers: &[Arc<Node>]) -> Result<(RouterMap, HashMap<String, ServerConfig>)> {
     let mut routers = HashMap::new();
-    let mut resolvers = vec![];
+    let mut resolvers = HashMap::new();
 
     for server in servers {
-        let server_resolvers = match server.get("resolver") {
-            Some(Value::DnsResolver(resolver)) => vec![resolver],
-            _ => vec![], // 默认使用空 resolver
+        let cert_path = match server.get("ssl_certificate") {
+            Some(Value::Path(p)) => p.clone(),
+            _ => panic!("Missing ssl_certificate"),
+        };
+        let key_path = match server.get("ssl_certificate_key") {
+            Some(Value::Path(p)) => p.clone(),
+            _ => panic!("Missing ssl_certificate_key"),
         };
 
-        let server_publishers = match server.get("publisher") {
-            Some(Value::DnsPublisher(publisher)) => vec![publisher],
-            _ => vec![], // 默认使用空 publisher
+        let resolver = match server.get("resolver") {
+            Some(Value::DnsResolver(resolver)) => resolver.clone(),
+            _ => {
+                info!(
+                    "Server has no DNS resolver configured, using default H3 DNS resolver {H3_DNS_SERVER}"
+                );
+                let base_url = H3_DNS_SERVER.parse::<Uri>().expect("Invalid H3_DNS_SERVER");
+                DnsResolver { base_url }
+            }
         };
 
         let server_name = match server.get("server_name") {
@@ -173,24 +137,39 @@ fn init_router(servers: &'_ [Arc<Node>]) -> Result<(RouterMap, ServerResolverLis
             _ => 0, // 默认为 0
         };
 
-        let key_path = match server.get("ssl_certificate_key") {
-            Some(Value::Path(path)) => path,
-            _ => unreachable!("Invalid ssl_certificate_key path"),
-        };
-        let key_pair = load_key(key_path).ok();
+        let key_pair = load_key(&key_path).ok();
 
         for server_name_struct in server_name {
             let mut domain = server_name_struct.name;
             if domain.ends_with('~') {
                 domain = domain.replace('~', ".genmeta.net");
             }
-            resolvers.push((
-                domain.clone(),
-                server_resolvers.clone(),
-                server_publishers.clone(),
+            let parse_server_config = ParseServerConfig {
+                cert_path: cert_path.clone(),
+                key_path: key_path.clone(),
+                server_name: domain.clone(),
                 server_id,
-                key_pair.clone(),
-            ));
+            };
+
+            info!(target: "dns", server_name = %domain, server_id, "Configuring DNS publisher");
+            let publisher_resolvers = if NO_PUBLISH_DOMAINS
+                .iter()
+                .any(|suffix| domain.ends_with(suffix))
+            {
+                warn!(target: "dns", server_name = %domain, "Domain excluded from publishing");
+                vec![]
+            } else {
+                vec![resolver.create_publisher(&parse_server_config)]
+            };
+
+            resolvers.insert(
+                domain.clone(),
+                ServerConfig {
+                    resolvers: publisher_resolvers,
+                    server_id,
+                    signing_key: key_pair.clone(),
+                },
+            );
             routers.insert(domain, Arc::clone(server));
         }
     }
@@ -241,6 +220,8 @@ async fn create_quic_listeners(
 
     #[allow(unused_mut)]
     let mut builder = QuicListeners::builder();
+
+    builder = builder.with_stun("nat.genmeta.net:20004");
 
     #[cfg(feature = "qlog")]
     {
