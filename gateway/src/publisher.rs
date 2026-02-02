@@ -21,8 +21,7 @@ pub struct Publisher {
     _task: AbortOnDropHandle<()>,
 }
 
-pub type Resolver = dyn DnsPublisher + Send + Sync;
-pub type Resolvers = Vec<Arc<Resolver>>;
+pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -43,45 +42,42 @@ impl ServerConfig {
     }
 }
 
-pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
-const MAIN_SERVER_ID: u8 = 0;
+fn ensure_mdns_resolver(
+    bind_uri: &BindUri,
+    bind_iface: &BindInterface,
+) -> Option<(MdnsResolver, std::net::SocketAddrV4)> {
+    let iface = bind_iface.borrow();
 
-// Initialize Mdns for a given device if not present
-fn ensure_mdns_for_device(bind_iface: &BindInterface, device: &str) {
-    if matches!(
+    let (_, device, _) = bind_uri.as_iface_bind_uri()?;
+    let Ok(RealAddr::Internet(local_addr)) = iface.real_addr() else {
+        return None;
+    };
+    let SocketAddr::V4(addr) = local_addr else {
+        return None;
+    };
+
+    if !matches!(
         bind_iface.borrow().with_component(|_: &Mdns| ()),
         Ok(Some(_))
     ) {
-        return;
+        if let Ok(SocketAddr::V4(mdns_addr)) =
+            SocketAddr::try_from(&BindUri::from(format!("iface://v4.{device}:5353")))
+            && let Ok(mdns) = Mdns::new(MDNS_SERVICE, *mdns_addr.ip(), device)
+        {
+            bind_iface.with_components_mut(|components, _| {
+                components.init_with(move || mdns);
+            });
+        } else {
+            return None;
+        }
     }
 
-    if let Ok(SocketAddr::V4(addr)) =
-        SocketAddr::try_from(&BindUri::from(format!("iface://v4.{device}:5353")))
-        && let Ok(mdns) = Mdns::new(MDNS_SERVICE, *addr.ip(), device)
-    {
-        bind_iface.with_components_mut(|components, _| {
-            components.init_with(move || mdns);
-        });
-    }
+    let resolver = MdnsResolver::new(MDNS_SERVICE, *addr.ip(), device).ok()?;
+    Some((resolver, addr))
 }
 
-fn get_stun_endpoints(iface: &gm_quic::qinterface::Interface) -> Vec<SocketEndpointAddr> {
-    iface
-        .with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|clients| {
-                clients
-                    .values()
-                    .filter_map(|client| {
-                        let outer = client.get_outer_addr()?.ok()?;
-                        Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
-                    })
-                    .collect()
-            })
-        })
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
+pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
+const MAIN_SERVER_ID: u8 = 0;
 
 async fn publish_single_mdns(
     bind_uri: &BindUri,
@@ -89,36 +85,19 @@ async fn publish_single_mdns(
     server_name: &str,
     config: &ServerConfig,
 ) {
-    let Some((_, device, _)) = bind_uri.as_iface_bind_uri() else {
-        return;
-    };
+    if let Some((resolver, addr)) = ensure_mdns_resolver(bind_uri, bind_iface) {
+        let mut ep = DnsEndpointAddr::direct_v4(addr);
+        config.sign_endpoint(&mut ep);
 
-    ensure_mdns_for_device(bind_iface, device);
-
-    let iface = bind_iface.borrow();
-    let Ok(RealAddr::Internet(local_addr)) = iface.real_addr() else {
-        return;
-    };
-
-    let SocketAddr::V4(ip) = local_addr else {
-        return;
-    };
-
-    let Ok(resolver) = MdnsResolver::new(MDNS_SERVICE, *ip.ip(), device) else {
-        return;
-    };
-
-    let mut ep = DnsEndpointAddr::direct_v4(ip);
-    config.sign_endpoint(&mut ep);
-
-    if let Err(error) = resolver.publish(server_name, &[ep]).await {
-        tracing::error!(
-            target: "dns",
-            "Resolve `{resolver}` publish dns failed: {}",
-            Report::from_error(error)
-        );
-    } else {
-        tracing::debug!(target: "dns", %bind_uri, device, %local_addr, "Publishing local address to mDNS");
+        if let Err(error) = resolver.publish(server_name, &[ep]).await {
+            tracing::error!(
+                target: "dns",
+                "Resolve `{resolver}` publish dns failed: {}",
+                Report::from_error(error)
+            );
+        } else {
+            tracing::debug!(target: "dns", %bind_uri, %addr, "Publishing local address to mDNS");
+        }
     }
 }
 
@@ -129,7 +108,23 @@ async fn publish_resolvers(
 ) {
     let mut endpoints = vec![];
     for (_, bind_iface) in interfaces {
-        for sock_ep in get_stun_endpoints(&bind_iface.borrow()) {
+        for sock_ep in bind_iface
+            .borrow()
+            .with_component(|clients: &StunClientsComponent| {
+                clients.with_clients(|clients| {
+                    clients
+                        .values()
+                        .filter_map(|client| {
+                            let outer = client.get_outer_addr()?.ok()?;
+                            Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+        {
             if let Ok(mut ep) = DnsEndpointAddr::try_from(sock_ep) {
                 config.sign_endpoint(&mut ep);
                 endpoints.push(ep);
