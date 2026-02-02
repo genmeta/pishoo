@@ -140,7 +140,11 @@ pub async fn serve(
         let SocketAddr::V4(socket_addr) = socket_addr else {
             unreachable!()
         };
-        let mdns_resolver = match MdnsResolver::new(MDNS_SERVICE, *socket_addr.ip(), &device) {
+        let mdns_resolver = match MdnsResolver::new(
+            MDNS_SERVICE,
+            (*socket_addr.ip()).into(),
+            &device,
+        ) {
             Ok(resolver) => resolver,
             Err(error) => {
                 warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );

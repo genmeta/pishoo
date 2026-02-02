@@ -96,6 +96,7 @@ pub async fn serve(
             .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
     );
 
+    info!("DNS Resolvers initialized");
     let server_resolvers: HashMap<String, ServerConfig> = server_resolvers
         .into_iter()
         .map(

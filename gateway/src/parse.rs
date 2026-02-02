@@ -90,7 +90,7 @@ pub struct DnsResolver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsPublisher {
     pub base_url: Uri,
-    pub client_config: Option<ServerConfig>,
+    pub config: Option<ServerConfig>,
 }
 
 impl DnsResolver {
@@ -117,7 +117,6 @@ impl DnsResolver {
 
 impl DnsPublisher {
     pub fn create_publisher(&self) -> Arc<dyn GmdnsPublisher + Send + Sync> {
-        // Only support HTTP3 publisher as per TODO comment
         Arc::new(
             H3Resolver::new(self.base_url.to_string(), self.create_h3_client())
                 .expect("H3 dns server base_url has been checked"),
@@ -131,34 +130,30 @@ impl DnsPublisher {
             Client::<QuicClient>::builder().with_root_certificates(std::sync::Arc::new(root_store));
 
         // Configure client identity if certificates are provided
-        if let Some(config) = &self.client_config {
-            if let (Some(cert_path), Some(key_path), Some(name)) =
+        if let Some(config) = &self.config
+            && let (Some(cert_path), Some(key_path), Some(name)) =
                 (&config.cert_path, &config.key_path, &config.server_name)
-            {
-                if let (Ok(cert_data), Ok(key_data)) =
-                    (std::fs::read(cert_path), std::fs::read(key_path))
-                {
-                    // Parse certificates and private key
-                    use std::io::Cursor;
+            && let (Ok(cert_data), Ok(key_data)) =
+                (std::fs::read(cert_path), std::fs::read(key_path))
+        {
+            // Parse certificates and private key
+            use std::io::Cursor;
 
-                    use rustls_pemfile::{certs, private_key};
+            use rustls_pemfile::{certs, private_key};
 
-                    let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
-                        .collect::<Result<Vec<_>, _>>()
-                        .expect("Failed to parse certificates");
+            let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
+                .collect::<Result<Vec<_>, _>>()
+                .expect("Failed to parse certificates");
 
-                    let private_key = private_key(&mut Cursor::new(&key_data))
-                        .expect("Failed to parse private key")
-                        .expect("No private key found");
+            let private_key = private_key(&mut Cursor::new(&key_data))
+                .expect("Failed to parse private key")
+                .expect("No private key found");
 
-                    return client_builder
-                        .with_identity(name.clone(), cert_chain, private_key)
-                        .expect("Failed to configure client identity")
-                        .build();
-                }
-            }
+            return client_builder
+                .with_identity(name.clone(), cert_chain, private_key)
+                .expect("Failed to configure client identity")
+                .build();
         }
-
         client_builder
             .without_identity()
             .expect("Failed to configure TLS")
@@ -688,7 +683,6 @@ fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-// resolver h3 <base_url> - creates DnsResolver configuration
 fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [kind, resolver] => match kind.as_str() {
@@ -726,7 +720,7 @@ fn parse_publisher(directive: Directive<Nginx>) -> Result<Value> {
 
                 let publisher_config = DnsPublisher {
                     base_url,
-                    client_config: None, // Will be set later if certificates are provided
+                    config: None, // Will be set later if certificates are provided
                 };
 
                 Ok(Value::DnsPublisher(publisher_config))
@@ -1158,7 +1152,7 @@ pishoo {{
                     publisher.base_url.to_string(),
                     "https://dns.example.com/dns-publish"
                 );
-                assert!(publisher.client_config.is_none());
+                assert!(publisher.config.is_none());
             }
             _ => panic!("publisher 解析失败"),
         }

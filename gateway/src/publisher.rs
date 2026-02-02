@@ -12,10 +12,12 @@ use gmdns::{
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolver::{MDNS_SERVICE, MdnsResolver, Publisher as DnsPublisher},
 };
+use qevent::loglevel::Info;
 use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
+use tracing::info;
 
 pub struct Publisher {
     _task: AbortOnDropHandle<()>,
@@ -45,35 +47,29 @@ impl ServerConfig {
 fn ensure_mdns_resolver(
     bind_uri: &BindUri,
     bind_iface: &BindInterface,
-) -> Option<(MdnsResolver, std::net::SocketAddrV4)> {
+) -> Option<(MdnsResolver, SocketAddr)> {
     let iface = bind_iface.borrow();
 
     let (_, device, _) = bind_uri.as_iface_bind_uri()?;
     let Ok(RealAddr::Internet(local_addr)) = iface.real_addr() else {
         return None;
     };
-    let SocketAddr::V4(addr) = local_addr else {
-        return None;
-    };
 
-    if !matches!(
-        bind_iface.borrow().with_component(|_: &Mdns| ()),
-        Ok(Some(_))
-    ) {
-        if let Ok(SocketAddr::V4(mdns_addr)) =
-            SocketAddr::try_from(&BindUri::from(format!("iface://v4.{device}:5353")))
-            && let Ok(mdns) = Mdns::new(MDNS_SERVICE, *mdns_addr.ip(), device)
-        {
-            bind_iface.with_components_mut(|components, _| {
-                components.init_with(move || mdns);
-            });
-        } else {
-            return None;
-        }
+    if let Ok(Some(mdns)) = bind_iface
+        .borrow()
+        .with_component(|mdns: &Mdns| mdns.clone())
+    {
+        return Some((mdns, local_addr));
     }
 
-    let resolver = MdnsResolver::new(MDNS_SERVICE, *addr.ip(), device).ok()?;
-    Some((resolver, addr))
+    let mdns = Mdns::new(MDNS_SERVICE, local_addr.ip(), device).ok()?;
+    let resolver = mdns.clone();
+
+    bind_iface.with_components_mut(|components, _| {
+        components.init_with(move || mdns);
+    });
+
+    Some((resolver, local_addr))
 }
 
 pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
@@ -86,7 +82,10 @@ async fn publish_single_mdns(
     config: &ServerConfig,
 ) {
     if let Some((resolver, addr)) = ensure_mdns_resolver(bind_uri, bind_iface) {
-        let mut ep = DnsEndpointAddr::direct_v4(addr);
+        let mut ep = match addr {
+            SocketAddr::V4(addr) => DnsEndpointAddr::direct_v4(addr),
+            SocketAddr::V6(addr) => DnsEndpointAddr::direct_v6(addr),
+        };
         config.sign_endpoint(&mut ep);
 
         if let Err(error) = resolver.publish(server_name, &[ep]).await {
@@ -177,6 +176,7 @@ impl Publisher {
     pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, ServerConfig>) -> Self {
         let resolvers = Arc::new(resolvers);
 
+        info!("Starting DNS Publisher task");
         let publish_all =
             async move |listeners: Arc<QuicListeners>,
                         resolvers: Arc<HashMap<String, ServerConfig>>| {
