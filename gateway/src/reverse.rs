@@ -28,7 +28,7 @@ use tracing::{Instrument, debug, error, info, info_span};
 use crate::{
     error::{Result, StreamSnafu, Whatever},
     parse::{DnsResolver, Listens, Node, Value},
-    publisher::Publisher,
+    publisher::{Publisher, ServerConfig},
     reverse::{self, auth::load_key},
 };
 
@@ -96,14 +96,7 @@ pub async fn serve(
             .whatever_context::<_, Whatever>("Failed to create HTTP dns resolver")?,
     );
 
-    let server_resolvers: HashMap<
-        String,
-        (
-            Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>>,
-            u8,
-            Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-        ),
-    > = server_resolvers
+    let server_resolvers: HashMap<String, ServerConfig> = server_resolvers
         .into_iter()
         .map(
             |(server_name, _resolvers, publishers, id, key): (
@@ -113,7 +106,7 @@ pub async fn serve(
                 u8,
                 Option<(Arc<dyn SigningKey>, SignatureScheme)>,
             )| {
-                let server_publishers: Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>> =
+                let resolvers: Vec<Arc<dyn gmdns::resolver::Publisher + Send + Sync>> =
                     if ["test.genmeta.net", "user.genmeta.net"]
                         .iter()
                         .any(|suffix| server_name.ends_with(suffix))
@@ -128,7 +121,14 @@ pub async fn serve(
                             .map(|p: &&crate::parse::DnsPublisher| p.create_publisher())
                             .collect()
                     };
-                (server_name, (server_publishers, id, key))
+                (
+                    server_name,
+                    ServerConfig {
+                        resolvers,
+                        server_id: id,
+                        signing_key: key,
+                    },
+                )
             },
         )
         .collect();

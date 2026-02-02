@@ -24,261 +24,155 @@ pub struct Publisher {
 pub type Resolver = dyn DnsPublisher + Send + Sync;
 pub type Resolvers = Vec<Arc<Resolver>>;
 
-pub type ServerConfig = (
-    Resolvers,
-    u8,
-    Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-);
+#[derive(Clone)]
+pub struct ServerConfig {
+    pub resolvers: Resolvers,
+    pub server_id: u8,
+    pub signing_key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+}
+
+impl ServerConfig {
+    fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
+        ep.set_main(self.server_id == MAIN_SERVER_ID);
+        ep.set_sequence(self.server_id as u64);
+        if let Some((key, scheme)) = &self.signing_key
+            && let Err(e) = ep.sign_with(key.as_ref(), *scheme)
+        {
+            tracing::warn!(target: "dns", "Failed to sign endpoint: {e}");
+        }
+    }
+}
 
 pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
+const MAIN_SERVER_ID: u8 = 0;
 
-// Initialize Mdns for a given device and bind it to the interface
-fn ensure_mdns_for_device(bind_iface: &BindInterface, device: &str) -> Option<()> {
-    // Check if Mdns already exists for this interface
-    let has_component = bind_iface.borrow().with_component(|_: &Mdns| true).is_ok();
-
-    if has_component {
-        return Some(());
+// Initialize Mdns for a given device if not present
+fn ensure_mdns_for_device(bind_iface: &BindInterface, device: &str) {
+    if matches!(
+        bind_iface.borrow().with_component(|_: &Mdns| ()),
+        Ok(Some(_))
+    ) {
+        return;
     }
 
-    // Create socket address for mDNS
-    let socket_addr = match SocketAddr::try_from(&BindUri::from(format!(
-        "iface://v4.{device}:5353"
-    ))) {
-        Ok(socket_addr) => socket_addr,
-        Err(error) => {
-            tracing::debug!(target: "dns", "Failed to resolve IPv4 addr for mDNS on {device}: {error}");
-            return None;
-        }
-    };
-
-    let SocketAddr::V4(socket_addr) = socket_addr else {
-        return None;
-    };
-
-    // Create Mdns
-    let mdns = match Mdns::new(MDNS_SERVICE, *socket_addr.ip(), device) {
-        Ok(mdns) => mdns,
-        Err(error) => {
-            tracing::debug!(target: "dns", "Failed to create mDNS for {device}: {error}");
-            return None;
-        }
-    };
-
-    // Initialize Mdns in the interface's component system
-    bind_iface.with_components_mut(|components, _iface| {
-        components.init_with(|| mdns);
-    });
-
-    Some(())
-}
-
-fn endpoint_to_dns_endpoint(
-    server_id: u8,
-    key: Option<(&dyn SigningKey, SignatureScheme)>,
-    endpoint: SocketEndpointAddr,
-) -> Option<DnsEndpointAddr> {
-    let mut ep: DnsEndpointAddr = endpoint.try_into().ok()?;
-
-    ep.set_main(server_id == 0);
-    ep.set_sequence(server_id as u64);
-
-    if let Some((key, scheme)) = key {
-        let _ = ep.sign_with(key, scheme);
+    if let Ok(SocketAddr::V4(addr)) =
+        SocketAddr::try_from(&BindUri::from(format!("iface://v4.{device}:5353")))
+        && let Ok(mdns) = Mdns::new(MDNS_SERVICE, *addr.ip(), device)
+    {
+        bind_iface.with_components_mut(|components, _| {
+            components.init_with(move || mdns);
+        });
     }
-
-    Some(ep)
 }
 
-async fn get_stun_endpoints(iface: &gm_quic::qinterface::Interface) -> Vec<SocketEndpointAddr> {
-    // Get STUN-derived external endpoints if available
-    let maybe_join_set: Option<tokio::task::JoinSet<_>> = iface
+fn get_stun_endpoints(iface: &gm_quic::qinterface::Interface) -> Vec<SocketEndpointAddr> {
+    iface
         .with_component(|clients: &StunClientsComponent| {
             clients.with_clients(|clients| {
                 clients
                     .values()
-                    .cloned()
-                    .map(|client| async move {
-                        let agent = client.agent_addr();
-                        let outer = client.outer_addr().await?;
-                        std::io::Result::Ok(SocketEndpointAddr::with_agent(agent, outer))
+                    .filter_map(|client| {
+                        let outer = client.get_outer_addr()?.ok()?;
+                        Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
                     })
-                    .collect::<tokio::task::JoinSet<_>>()
+                    .collect()
             })
         })
         .ok()
-        .flatten();
-
-    if let Some(mut join_set) = maybe_join_set {
-        let mut out = vec![];
-        while let Some(joined) = join_set.join_next().await {
-            if let Ok(Ok(ep)) = joined {
-                out.push(ep);
-            }
-        }
-        return out;
-    }
-
-    // No STUN endpoints available
-    vec![]
+        .flatten()
+        .unwrap_or_default()
 }
 
-async fn do_publish_server(
+async fn publish_single_mdns(
+    bind_uri: &BindUri,
+    bind_iface: &BindInterface,
     server_name: &str,
-    server_id: u8,
-    resolver: &Resolver,
-    _key: Option<(&dyn SigningKey, SignatureScheme)>,
-    endpoint_addresses: &[DnsEndpointAddr],
+    config: &ServerConfig,
 ) {
-    tracing::debug!(target: "dns", server_name, server_id, "Publishing dns for server");
+    let Some((_, device, _)) = bind_uri.as_iface_bind_uri() else {
+        return;
+    };
 
-    if let Err(error) = resolver.publish(server_name, endpoint_addresses).await {
+    ensure_mdns_for_device(bind_iface, device);
+
+    let iface = bind_iface.borrow();
+    let Ok(RealAddr::Internet(local_addr)) = iface.real_addr() else {
+        return;
+    };
+
+    let SocketAddr::V4(ip) = local_addr else {
+        return;
+    };
+
+    let Ok(resolver) = MdnsResolver::new(MDNS_SERVICE, *ip.ip(), device) else {
+        return;
+    };
+
+    let mut ep = DnsEndpointAddr::direct_v4(ip);
+    config.sign_endpoint(&mut ep);
+
+    if let Err(error) = resolver.publish(server_name, &[ep]).await {
         tracing::error!(
             target: "dns",
-            "Resolver `{resolver}` publish dns failed: {}",
-            Report::from_error(error),
+            "Resolve `{resolver}` publish dns failed: {}",
+            Report::from_error(error)
         );
-    }
-}
-
-#[tracing::instrument(level = "info", skip_all, fields(server_name, server_id))]
-async fn publish_mdns(
-    server_name: &str,
-    server_id: u8,
-    key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-    interfaces: impl IntoIterator<Item = (&BindUri, &BindInterface)>,
-) {
-    let mut publish_futures: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
-        Vec::new();
-
-    for (bind_uri, bind_iface) in interfaces {
-        let Some((_ip_family, device, _port)) = bind_uri.as_iface_bind_uri() else {
-            continue;
-        };
-
-        // Ensure Mdns exists for this device
-        ensure_mdns_for_device(bind_iface, device);
-
-        let iface = bind_iface.borrow();
-
-        // Get local address for mDNS publishing
-        let local_addr = match iface.real_addr().ok() {
-            Some(RealAddr::Internet(addr)) => addr,
-            _ => {
-                tracing::debug!(target: "dns", %bind_uri, device, "No local internet address available for mDNS publish, skipping");
-                continue;
-            }
-        };
-
-        // Create MdnsResolver for publishing
-        let ip = match local_addr {
-            SocketAddr::V4(addr) => *addr.ip(),
-            _ => continue,
-        };
-        let resolver = match MdnsResolver::new(MDNS_SERVICE, ip, device) {
-            Ok(resolver) => Arc::new(resolver),
-            Err(error) => {
-                tracing::debug!(target: "dns", "Failed to create mDNS resolver for {device}: {error}");
-                continue;
-            }
-        };
-
-        let key = key.clone();
-        let server_name = server_name.to_string();
-        let bind_uri = bind_uri.clone();
-
-        let future = async move {
-            let mut dns_ep = match local_addr {
-                SocketAddr::V4(addr) => DnsEndpointAddr::direct_v4(addr),
-                SocketAddr::V6(addr) => DnsEndpointAddr::direct_v6(addr),
-            };
-            dns_ep.set_main(server_id == 0);
-            dns_ep.set_sequence(server_id as u64);
-            if let Some((key, scheme)) = key.as_ref() {
-                let _ = dns_ep.sign_with(key.as_ref(), *scheme);
-            }
-
-            do_publish_server(
-                &server_name,
-                server_id,
-                resolver.as_ref(),
-                key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
-                &[dns_ep],
-            )
-            .await;
-        };
-
+    } else {
         tracing::debug!(target: "dns", %bind_uri, device, %local_addr, "Publishing local address to mDNS");
-        publish_futures.push(Box::pin(future));
     }
-
-    // Execute all publish futures concurrently
-    futures::future::join_all(publish_futures).await;
 }
 
-#[tracing::instrument(level = "info", skip_all, fields(server_name, server_id))]
 async fn publish_resolvers(
     server_name: &str,
-    server_id: u8,
-    resolvers: &Resolvers,
-    key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
-    interfaces: impl IntoIterator<Item = (&BindUri, &BindInterface)>,
+    config: &ServerConfig,
+    interfaces: impl Iterator<Item = (&BindUri, &BindInterface)>,
 ) {
-    let mut endpoint_addresses = vec![];
-
-    for (_bind_uri, bind_iface) in interfaces {
-        let iface = bind_iface.borrow();
-
-        // Get STUN external endpoints for DNS publishing
-        for endpoint in get_stun_endpoints(&iface).await {
-            if let Some(dns_ep) = endpoint_to_dns_endpoint(
-                server_id,
-                key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
-                endpoint,
-            ) {
-                endpoint_addresses.push(dns_ep);
+    let mut endpoints = vec![];
+    for (_, bind_iface) in interfaces {
+        for sock_ep in get_stun_endpoints(&bind_iface.borrow()) {
+            if let Ok(mut ep) = DnsEndpointAddr::try_from(sock_ep) {
+                config.sign_endpoint(&mut ep);
+                endpoints.push(ep);
             }
         }
     }
 
-    if endpoint_addresses.is_empty() {
-        tracing::debug!(target: "dns", server_name, server_id, "No STUN endpoints available for DNS publish, skipping");
+    if endpoints.is_empty() {
         return;
     }
 
-    tracing::debug!(target: "dns", server_name, server_id, endpoint_count = endpoint_addresses.len(), "Publishing STUN endpoints to DNS");
+    tracing::debug!(target: "dns", server_name, server_id = config.server_id, count = endpoints.len(), "Publishing STUN endpoints");
 
-    for resolver in resolvers {
-        do_publish_server(
-            server_name,
-            server_id,
-            resolver.as_ref(),
-            key.as_ref().map(|(k, s)| (k.as_ref(), *s)),
-            &endpoint_addresses,
-        )
-        .await;
+    for resolver in &config.resolvers {
+        if let Err(error) = resolver.publish(server_name, &endpoints).await {
+            tracing::error!(
+                target: "dns",
+                "Resolver `{resolver}` publish dns failed: {}",
+                Report::from_error(error)
+            );
+        }
     }
 }
+
 async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String, ServerConfig>) {
-    let servers = listeners
+    listeners
         .servers()
         .into_iter()
-        .filter_map(|server_name| {
-            let interfaces = listeners.get_server(&server_name)?.bind_interfaces();
-            let (resolvers, id, key) = resolvers.get(&server_name)?;
-            Some((server_name, (interfaces, resolvers, *id, key.clone())))
+        .filter_map(|name| {
+            let ifaces = listeners.get_server(&name)?.bind_interfaces();
+            let config = resolvers.get(&name)?;
+            Some((name, ifaces, config))
         })
-        .collect::<HashMap<_, _>>();
+        .map(|(name, ifaces, config)| async move {
+            publish_resolvers(&name, config, ifaces.iter()).await;
 
-    servers
-        .iter()
-        .map(
-            |(server_name, (interfaces, resolvers, id, key))| async move {
-                publish_resolvers(server_name, *id, resolvers, key.clone(), interfaces.iter())
-                    .await;
-                publish_mdns(server_name, *id, key.clone(), interfaces.iter()).await;
-            },
-        )
+            ifaces
+                .iter()
+                .map(|(uri, iface)| publish_single_mdns(uri, iface, &name, config))
+                .collect::<FuturesUnordered<_>>()
+                .collect::<()>()
+                .await;
+        })
         .collect::<FuturesUnordered<_>>()
         .collect::<()>()
         .await;
