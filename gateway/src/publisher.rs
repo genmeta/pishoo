@@ -2,9 +2,9 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
-    prelude::{BindUri, QuicListeners, RealAddr},
-    qbase::net::route::SocketEndpointAddr,
-    qinterface::{BindInterface, component::location::Locations, io::IO},
+    prelude::{BindUri, BoundAddr, QuicIO, QuicListeners},
+    qbase::net::addr::SocketEndpointAddr,
+    qinterface::{BindInterface, component::location::Locations},
     qtraversal::nat::client::StunClientsComponent,
 };
 use gmdns::{
@@ -49,7 +49,7 @@ fn ensure_mdns_resolver(
     let iface = bind_iface.borrow();
 
     let (_, device, _) = bind_uri.as_iface_bind_uri()?;
-    let Ok(RealAddr::Internet(local_addr)) = iface.real_addr() else {
+    let Ok(BoundAddr::Internet(local_addr)) = iface.bound_addr() else {
         return None;
     };
 
