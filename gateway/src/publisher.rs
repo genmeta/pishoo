@@ -16,7 +16,6 @@ use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::info;
 
 pub struct Publisher {
     _task: AbortOnDropHandle<()>,

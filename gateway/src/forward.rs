@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use gm_quic::{prelude::BindUri, qinterface::device::Devices};
-use gmdns::resolver::{HTTP_DNS_SERVER, HttpResolver, MDNS_SERVICE, MdnsResolver, Resolvers};
+use gmdns::resolver::{H3_DNS_SERVER, MDNS_SERVICE, MdnsResolver, Resolvers};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -18,7 +18,7 @@ use crate::{
     command,
     error::{Result, Whatever},
     forward,
-    parse::{Node, ServerConfig, Value},
+    parse::{DnsResolver, Node, ServerConfig, Value},
     pool::H3ConnectionPool,
 };
 
@@ -118,33 +118,33 @@ pub async fn serve(
 
     info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
-    // TODO: 客户端考虑可以不配置这些
-    let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
-        let cert_path = match node.get("ssl_certificate") {
-            Some(Value::Path(path)) => path.clone(),
-            _ => panic!("H3 resolver requires ssl_certificate"),
-        };
-        let key_path = match node.get("ssl_certificate_key") {
-            Some(Value::Path(path)) => path.clone(),
-            _ => panic!("H3 resolver requires ssl_certificate_key"),
-        };
-        let server_name = match node.get("client_name") {
-            Some(Value::String(name)) => name.clone(),
-            _ => panic!("H3 resolver requires client_name"),
-        };
-
-        let config = ServerConfig {
-            cert_path,
-            key_path,
-            server_name,
+    let config = if let (
+        Some(Value::Path(cert_path)),
+        Some(Value::Path(key_path)),
+        Some(Value::String(server_name)),
+    ) = (
+        node.get("ssl_certificate"),
+        node.get("ssl_certificate_key"),
+        node.get("client_name"),
+    ) {
+        Some(ServerConfig {
+            cert_path: cert_path.clone(),
+            key_path: key_path.clone(),
+            server_name: server_name.clone(),
             server_id: 0,
-        };
-        Resolvers::default().with(resolver.create_resolver(&config))
+        })
     } else {
-        Resolvers::default().with(Arc::new(
-            HttpResolver::new(HTTP_DNS_SERVER)
-                .whatever_context::<_, Whatever>("Failed to create http dns resolver")?,
-        ))
+        None
+    };
+
+    let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
+        Resolvers::default().with(resolver.create_resolver(config.as_ref()))
+    } else {
+        let default_uri: http::Uri = H3_DNS_SERVER.parse().expect("Valid default URI");
+        let resolver = DnsResolver {
+            base_url: default_uri,
+        };
+        Resolvers::default().with(resolver.create_resolver(config.as_ref()))
     };
 
     for device in Devices::global().interfaces().into_keys() {
@@ -153,7 +153,7 @@ pub async fn serve(
         ))) {
             Ok(socket_addr) => socket_addr,
             Err(error) => {
-                warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );
+                tracing::trace!(target: "forward_proxy", "Failed to create socket for device {device}: {error}" );
                 continue;
             }
         };
@@ -176,7 +176,7 @@ pub async fn serve(
 
     // 设置客户端认证配置
     setup_client_config(&node)?;
-    H3ConnectionPool::reinitialize().await;
+    H3ConnectionPool::reinitialize(Some(Arc::new(resolvers.clone()))).await;
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));

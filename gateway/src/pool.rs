@@ -5,22 +5,20 @@ use std::{
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use futures::StreamExt;
 use gm_quic::{
     prelude::{
         Connection, ParameterId, QuicClient,
         handy::{ToCertificate, ToPrivateKey, client_parameters},
     },
-    qbase::net::route::{EndpointAddr as QuicEndpointAddr, SocketEndpointAddr},
     qinterface::{
         device::{Devices, InterfaceEvent},
         io::ProductIO,
         manager::InterfaceManager,
     },
 };
-use gmdns::{parser::record::endpoint::EndpointAddr as DnsEndpointAddr, resolver::Resolvers};
+use gmdns::resolver::{H3_DNS_SERVER, H3Resolver, Resolvers};
 use h3::client::SendRequest;
-use snafu::{OptionExt, Report, ResultExt};
+use snafu::{Report, ResultExt};
 use tokio::{sync::Mutex, time};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
@@ -70,18 +68,47 @@ pub struct H3ConnectionPool {
     h3_clients: Arc<DashMap<String, Arc<Mutex<Option<ReusableConnection>>>>>,
 }
 
+static GLOBAL_POOL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
+
 impl H3ConnectionPool {
     /// 获取全局连接池实例
     pub async fn global() -> Arc<Self> {
-        static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
-        if let Ok(guard) = GLOBAL.read()
+        if let Ok(guard) = GLOBAL_POOL.read()
             && let Some(pool) = guard.as_ref()
         {
             return pool.clone();
         }
         let config = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(config).await);
-        let mut guard = GLOBAL.write().unwrap();
+
+        let resolver = Resolvers::default().with(Arc::new({
+            let root_store = crate::common::root_cert();
+            let builder =
+                h3x::client::Client::<QuicClient>::builder().with_root_certificates(root_store);
+
+            let client = if let Some((cert, key, name)) = config.as_ref() {
+                use std::io::Cursor;
+
+                use rustls_pemfile::certs;
+
+                let cert_chain: Vec<_> = certs(&mut Cursor::new(cert))
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("Failed to parse client certificates");
+
+                builder
+                    .with_identity(name.clone(), cert_chain, key.as_slice())
+                    .expect("Failed to create client builder with identity")
+                    .build()
+            } else {
+                builder
+                    .without_identity()
+                    .expect("Failed to create client builder")
+                    .build()
+            };
+
+            H3Resolver::new(H3_DNS_SERVER, client).expect("Failed to create default H3 resolver")
+        }));
+        let pool = Arc::new(H3ConnectionPool::new(config, Some(Arc::new(resolver))).await);
+        let mut guard = GLOBAL_POOL.write().unwrap();
         if let Some(existing) = guard.as_ref() {
             return existing.clone();
         }
@@ -90,12 +117,11 @@ impl H3ConnectionPool {
     }
 
     /// 重新初始化全局连接池
-    pub async fn reinitialize() -> Arc<Self> {
-        static GLOBAL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
+    pub async fn reinitialize(resolver: Option<Arc<Resolvers>>) -> Arc<Self> {
         debug!(target: "pool", "Reinitializing H3ConnectionPool");
         let config = get_client_config();
-        let pool = Arc::new(H3ConnectionPool::new(config).await);
-        let mut guard = GLOBAL.write().unwrap();
+        let pool = Arc::new(H3ConnectionPool::new(config, resolver).await);
+        let mut guard = GLOBAL_POOL.write().unwrap();
         *guard = Some(pool.clone());
         pool
     }
@@ -111,7 +137,7 @@ impl H3ConnectionPool {
     ///   - client_name: 客户端名称
     ///
     /// [`reuse_connection`]: gm_quic::QuicClientBuilder::reuse_connection
-    pub async fn new(config: Option<ClientConfig>) -> Self {
+    pub async fn new(config: Option<ClientConfig>, resolver: Option<Arc<Resolvers>>) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
         // 创建基础 TLS 配置 builder
@@ -142,7 +168,8 @@ impl H3ConnectionPool {
         #[cfg_attr(not(feature = "qlog"), allow(unused_mut))]
         let mut builder = QuicClient::builder_with_tls(tls_config)
             .enable_sslkeylog()
-            .with_iface_factory(iface_factory.clone());
+            .with_iface_factory(iface_factory.clone())
+            .with_stun("nat.genmeta.net:20004");
         // .with_alpns([ALPN]);
 
         #[cfg(feature = "qlog")]
@@ -154,7 +181,14 @@ impl H3ConnectionPool {
             builder = builder.with_qlog(Arc::new(LegacySeqLogger::new(PathBuf::from("/tmp/qlog"))));
         }
 
+        if let Some(resolver) = resolver {
+            builder = builder.with_resolver(resolver);
+        }
+
         let mut monitor = Devices::global().monitor();
+        for i in monitor.interfaces() {
+            debug!(target: "pool", "Initial interface detected: {:?}", i.0);
+        }
 
         let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);
 
@@ -214,7 +248,7 @@ impl H3ConnectionPool {
     pub async fn connect(
         &self,
         server_name: impl Into<String>,
-        server_endpoints: Resolvers,
+        _server_endpoints: Resolvers,
     ) -> Result<ReusableConnection, Whatever> {
         let server_name: String = server_name.into();
         let mut entry = None;
@@ -240,34 +274,11 @@ impl H3ConnectionPool {
         }
 
         let connect_or_reuse = async {
-            // TODO: gmdns 应该有实现，直接 INTO
-            fn dns_to_quic(ep: &DnsEndpointAddr) -> QuicEndpointAddr {
-                let socket_ep = match ep.agent {
-                    Some(agent) => SocketEndpointAddr::with_agent(agent, ep.primary),
-                    None => SocketEndpointAddr::direct(ep.primary),
-                };
-                QuicEndpointAddr::Socket(socket_ep)
-            }
-
-            let mut lookup = server_endpoints.lookup(&server_name);
-            let mut server_eps = vec![];
-
-            while let Some((_resolver, endpoint)) = lookup.next().await {
-                server_eps.push(dns_to_quic(&endpoint));
-            }
-
-            if server_eps.is_empty() {
-                return None.whatever_context("No endpoint found for server");
-            }
-
-            // TODO： 直接调用 connect(name),里面自动域名解析
-            // 所以，这里的 resovler 发布和查询要分开
-            // resovler 注入 quic client
             let quic_connection = self
                 .quic_client
-                .connected_to(server_name.clone(), server_eps)
+                .connect(&server_name)
                 .await
-                .unwrap();
+                .whatever_context(format!("Failed to connect to {}", server_name))?;
 
             let quic_connection = Arc::new(quic_connection);
 

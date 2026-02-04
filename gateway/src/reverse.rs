@@ -10,17 +10,14 @@ use firewall_base::{
     matcher::{DomainRulesMatcher, LocationRulesMatcher},
 };
 use gm_quic::{
-    prelude::{
-        Connection, QuicListeners,
-        handy::{ToCertificate, server_parameters},
-    },
+    prelude::{Connection, QuicListeners, handy::server_parameters},
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
 use gmdns::resolver::H3_DNS_SERVER;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode, Uri};
-use rustls::{SignatureScheme, server::WebPkiClientVerifier, sign::SigningKey};
+use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -231,10 +228,9 @@ async fn create_quic_listeners(
         builder = builder.with_qlog(Arc::new(LegacySeqLogger::new(PathBuf::from("/tmp/qlog"))));
     }
 
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add_parsable_certificates(include_bytes!("../../root.crt").to_certificate());
+    let roots = crate::common::root_cert();
 
-    let tls_client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+    let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
         // 允许client不带证书
         .allow_unauthenticated()
         .build()

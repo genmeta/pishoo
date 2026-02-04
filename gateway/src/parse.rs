@@ -8,7 +8,9 @@ use std::{
 
 use conf::parse_conf;
 use gm_quic::prelude::{BindUri, QuicClient};
-use gmdns::resolver::{H3Resolver, Publisher as GmdnsPublisher, Resolver as GmdnsResolver};
+use gmdns::resolver::{
+    H3Publisher, H3Resolver, Publisher as GmdnsPublisher, Resolver as GmdnsResolver,
+};
 use h3x::client::Client;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -16,7 +18,6 @@ use misc_conf::{
     nginx::Nginx,
 };
 use pattern::Pattern;
-use rustls::RootCertStore;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
 use tracing::info;
@@ -88,10 +89,19 @@ pub struct DnsResolver {
 }
 
 impl DnsResolver {
-    pub fn create_resolver(&self, config: &ServerConfig) -> Arc<dyn GmdnsResolver + Send + Sync> {
+    pub fn create_resolver(
+        &self,
+        config: Option<&ServerConfig>,
+    ) -> Arc<dyn GmdnsResolver + Send + Sync> {
+        let client = if let Some(config) = config {
+            self.create_h3_client(config)
+        } else {
+            self.create_h3_client_no_auth()
+        };
+
         // Only support HTTP3 resolver as per TODO comment
         Arc::new(
-            H3Resolver::new(self.base_url.to_string(), self.create_h3_client(config))
+            H3Resolver::new(self.base_url.to_string(), client)
                 .expect("H3 dns server base_url has been checked"),
         )
     }
@@ -104,16 +114,25 @@ impl DnsResolver {
             self.base_url
         );
         Arc::new(
-            H3Resolver::new(self.base_url.to_string(), self.create_h3_client(config))
+            H3Publisher::new(self.base_url.to_string(), self.create_h3_client(config))
                 .expect("H3 dns server base_url has been checked"),
         )
     }
 
+    fn create_h3_client_no_auth(&self) -> Client<QuicClient> {
+        let root_store = crate::common::root_cert();
+        Client::<QuicClient>::builder()
+            .with_root_certificates(root_store)
+            .without_identity()
+            .expect("Failed to create client builder")
+            .build()
+    }
+
     fn create_h3_client(&self, config: &ServerConfig) -> Client<QuicClient> {
-        let root_store = RootCertStore::empty();
+        let root_store = crate::common::root_cert();
 
         let client_builder =
-            Client::<QuicClient>::builder().with_root_certificates(std::sync::Arc::new(root_store));
+            Client::<QuicClient>::builder().with_root_certificates(root_store.clone());
 
         let (cert_path, key_path, name) =
             (&config.cert_path, &config.key_path, &config.server_name);
@@ -250,6 +269,7 @@ impl Listens {
                         ipv6_bind_uri = ipv6_bind_uri.alloc_port();
                     }
 
+                    info!("Resolved listen on device {}: {:?}", name, (ipv4_bind_uri.clone(), ipv6_bind_uri.clone()));
                     match self.families {
                         IpFamilies::V4 => [Some(ipv4_bind_uri), None],
                         IpFamilies::V6 => [None, Some(ipv6_bind_uri)],
