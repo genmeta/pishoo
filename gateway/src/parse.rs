@@ -9,7 +9,7 @@ use std::{
 use conf::parse_conf;
 use gm_quic::{
     prelude::{BindUri, QuicClient},
-    qdns::Resolve as GmdnsResolver,
+    qdns::{Publish as GmdnsPublisher, Resolve as GmdnsResolver},
 };
 use gmdns::resolvers::{H3Publisher, H3Resolver};
 use h3x::client::Client;
@@ -107,7 +107,7 @@ impl DnsResolver {
         )
     }
 
-    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<H3Publisher> {
+    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<dyn GmdnsPublisher + Send + Sync> {
         info!(
             target = "dns",
             "Creating H3 DNS publisher for server {} base url {}",

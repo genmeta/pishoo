@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use gm_quic::{prelude::BindUri, qinterface::device::Devices};
+use gm_quic::{prelude::BindUri, qdns::SystemResolver, qinterface::device::Devices};
 use gmdns::{
     H3_DNS_SERVER, MDNS_SERVICE,
     resolvers::{MdnsResolver, Resolvers},
@@ -141,13 +141,17 @@ pub async fn serve(
     };
 
     let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
-        Resolvers::default().with(resolver.create_resolver(config.as_ref()))
+        Resolvers::default()
+            .with(resolver.create_resolver(config.as_ref()))
+            .with(Arc::new(SystemResolver))
     } else {
         let default_uri: http::Uri = H3_DNS_SERVER.parse().expect("Valid default URI");
         let resolver = DnsResolver {
             base_url: default_uri,
         };
-        Resolvers::default().with(resolver.create_resolver(config.as_ref()))
+        Resolvers::default()
+            .with(resolver.create_resolver(config.as_ref()))
+            .with(Arc::new(SystemResolver))
     };
 
     for device in Devices::global().interfaces().into_keys() {

@@ -13,12 +13,12 @@ use gm_quic::{
     prelude::{Connection, QuicListeners, handy::server_parameters},
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
+use gmdns::H3_DNS_SERVER;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode, Uri};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
-use gmdns::H3_DNS_SERVER;
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
@@ -239,6 +239,7 @@ async fn create_quic_listeners(
     let listeners = builder
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
+        .with_alpns([b"h3".as_slice()])
         .with_client_auther(auth::ClientAuther::from(domain_access_rules))
         .listen(1024)
         .whatever_context::<_, Whatever>("Failed to listen quic")?;
