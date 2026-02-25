@@ -4,13 +4,15 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
     prelude::{BindUri, BoundAddr, QuicIO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
+    qdns::Publish as _,
     qinterface::{BindInterface, component::location::Locations},
     qtraversal::nat::client::StunClientsComponent,
 };
 use gmdns::{
+    MDNS_SERVICE, MdnsPacket,
     mdns::Mdns,
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
-    resolver::{MDNS_SERVICE, MdnsResolver, Publisher as DnsPublisher},
+    resolvers::{H3Resolver, MdnsResolver},
 };
 use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::Report;
@@ -21,7 +23,7 @@ pub struct Publisher {
     _task: AbortOnDropHandle<()>,
 }
 
-pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
+pub type Resolvers = Vec<Arc<H3Resolver>>;
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -86,7 +88,13 @@ async fn publish_single_mdns(
         };
         config.sign_endpoint(&mut ep);
 
-        if let Err(error) = resolver.publish(server_name, &[ep]).await {
+        if let Err(error) = resolver
+            .publish(
+                server_name,
+                &[gm_quic::prelude::EndpointAddr::Socket(ep.primary.into())],
+            )
+            .await
+        {
             tracing::error!(
                 target: "dns",
                 "Resolve `{resolver}` publish dns failed: {}",
@@ -135,8 +143,12 @@ async fn publish_resolvers(
 
     tracing::debug!(target: "dns", server_name, server_id = config.server_id, count = endpoints.len(), "Publishing STUN endpoints");
 
+    let mut hosts = std::collections::HashMap::new();
+    hosts.insert(server_name.to_string(), endpoints);
+    let packet = MdnsPacket::answer(0, &hosts).to_bytes();
+
     for resolver in &config.resolvers {
-        if let Err(error) = resolver.publish(server_name, &endpoints).await {
+        if let Err(error) = resolver.publish_packet(server_name, &packet).await {
             tracing::error!(
                 target: "dns",
                 "Resolver `{resolver}` publish dns failed: {}",

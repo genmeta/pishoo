@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
-use gmdns::resolver::Resolvers;
+use gmdns::resolvers::Resolvers;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};

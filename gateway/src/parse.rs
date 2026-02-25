@@ -7,10 +7,11 @@ use std::{
 };
 
 use conf::parse_conf;
-use gm_quic::prelude::{BindUri, QuicClient};
-use gmdns::resolver::{
-    H3Publisher, H3Resolver, Publisher as GmdnsPublisher, Resolver as GmdnsResolver,
+use gm_quic::{
+    prelude::{BindUri, QuicClient},
+    qdns::Resolve as GmdnsResolver,
 };
+use gmdns::resolvers::{H3Publisher, H3Resolver};
 use h3x::client::Client;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -106,7 +107,7 @@ impl DnsResolver {
         )
     }
 
-    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<dyn GmdnsPublisher + Send + Sync> {
+    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<H3Publisher> {
         info!(
             target = "dns",
             "Creating H3 DNS publisher for server {} base url {}",
@@ -119,20 +120,20 @@ impl DnsResolver {
         )
     }
 
-    fn create_h3_client_no_auth(&self) -> Client<QuicClient> {
+    fn create_h3_client_no_auth(&self) -> Client<Arc<QuicClient>> {
         let root_store = crate::common::root_cert();
-        Client::<QuicClient>::builder()
+        Client::<Arc<QuicClient>>::builder()
             .with_root_certificates(root_store)
             .without_identity()
             .expect("Failed to create client builder")
             .build()
     }
 
-    fn create_h3_client(&self, config: &ServerConfig) -> Client<QuicClient> {
+    fn create_h3_client(&self, config: &ServerConfig) -> Client<Arc<QuicClient>> {
         let root_store = crate::common::root_cert();
 
         let client_builder =
-            Client::<QuicClient>::builder().with_root_certificates(root_store.clone());
+            Client::<Arc<QuicClient>>::builder().with_root_certificates(root_store.clone());
 
         let (cert_path, key_path, name) =
             (&config.cert_path, &config.key_path, &config.server_name);

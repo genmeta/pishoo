@@ -2,7 +2,10 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use gm_quic::{prelude::BindUri, qinterface::device::Devices};
-use gmdns::resolver::{H3_DNS_SERVER, MDNS_SERVICE, MdnsResolver, Resolvers};
+use gmdns::{
+    H3_DNS_SERVER, MDNS_SERVICE,
+    resolvers::{MdnsResolver, Resolvers},
+};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -26,7 +29,7 @@ mod normal;
 mod quic;
 
 #[allow(dead_code)]
-static ALPN: &[u8] = b"h3";
+pub static ALPN: &[u8] = b"h3";
 
 type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
 

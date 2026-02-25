@@ -16,7 +16,10 @@ use gm_quic::{
         manager::InterfaceManager,
     },
 };
-use gmdns::resolver::{H3_DNS_SERVER, H3Resolver, Resolvers};
+use gmdns::{
+    H3_DNS_SERVER,
+    resolvers::{H3Resolver, Resolvers},
+};
 use h3::client::SendRequest;
 use snafu::{Report, ResultExt};
 use tokio::{sync::Mutex, time};
@@ -25,6 +28,7 @@ use tracing::debug;
 
 use crate::{
     error::Whatever,
+    forward::ALPN,
     parse::{IfaceRange, IpFamilies, Listens},
 };
 
@@ -82,8 +86,8 @@ impl H3ConnectionPool {
 
         let resolver = Resolvers::default().with(Arc::new({
             let root_store = crate::common::root_cert();
-            let builder =
-                h3x::client::Client::<QuicClient>::builder().with_root_certificates(root_store);
+            let builder = h3x::client::Client::<Arc<QuicClient>>::builder()
+                .with_root_certificates(root_store);
 
             let client = if let Some((cert, key, name)) = config.as_ref() {
                 use std::io::Cursor;
@@ -169,8 +173,8 @@ impl H3ConnectionPool {
         let mut builder = QuicClient::builder_with_tls(tls_config)
             .enable_sslkeylog()
             .with_iface_factory(iface_factory.clone())
-            .with_stun("nat.genmeta.net:20004");
-        // .with_alpns([ALPN]);
+            .with_stun("nat.genmeta.net:20004")
+            .with_alpns([ALPN]);
 
         #[cfg(feature = "qlog")]
         {
@@ -217,15 +221,15 @@ impl H3ConnectionPool {
                     InterfaceEvent::Added { device, .. } => {
                         for bind_uri in listen_all.resolve([device.as_str()]) {
                             debug!(target: "listen", ?bind_uri, "Add interface to client binding");
-                            let bind_interface =
+                            let _bind_interface =
                                 iface_manager.bind(bind_uri, iface_factory.clone()).await;
-                            quic_client.add_bind_iface(bind_interface);
+                            // Binding is handled by iface_manager
                         }
                     }
                     InterfaceEvent::Removed { device, .. } => {
                         for bind_uri in listen_all.resolve([device.as_str()]) {
                             debug!(target: "listen", ?bind_uri, "Remove interface from client binding");
-                            quic_client.remove_bind_iface(&bind_uri);
+                            quic_client.unbind(&bind_uri);
                         }
                     }
                     InterfaceEvent::Changed { .. } => { /* Ignore changes */ }

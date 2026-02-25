@@ -13,12 +13,12 @@ use gm_quic::{
     prelude::{Connection, QuicListeners, handy::server_parameters},
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
-use gmdns::resolver::H3_DNS_SERVER;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode, Uri};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
+use gmdns::H3_DNS_SERVER;
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 

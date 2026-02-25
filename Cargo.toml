@@ -51,7 +51,7 @@ h3x = { path = "../h3x" }
 qevent = { path = "../gm-quic/qevent" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { path = "../gmdns"}
+gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
