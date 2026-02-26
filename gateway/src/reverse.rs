@@ -206,6 +206,7 @@ async fn create_quic_listeners(
             let bind_uris = server_listen
                 .iter()
                 .flat_map(|listens| listens.resolve(current_interfaces.keys().map(|s| s.as_str())))
+                .filter(|uri| uri.resolve().is_ok())
                 .collect::<HashSet<_>>();
             (server_name, bind_uris)
         })
@@ -305,11 +306,12 @@ async fn maintain_binding(
             InterfaceEvent::Added { device, .. } => {
                 let mut main_bind_uris = HashSet::new();
 
-                // 启动主Quic监听的接口绑定
+                // 启动主Quic监听的接口绑定（仅绑定能解析出IP的接口）
                 for (server, listens) in &server_listens {
                     let bind_uris = listens
                         .iter()
                         .flat_map(|listens| listens.resolve([device.as_str()]))
+                        .filter(|uri| uri.resolve().is_ok())
                         .collect::<HashSet<_>>();
                     if bind_uris.is_empty() {
                         continue;
@@ -343,7 +345,28 @@ async fn maintain_binding(
                     }
                 }
             }
-            InterfaceEvent::Changed { .. } => { /* Ignore changes */ }
+            InterfaceEvent::Changed { device, .. } => {
+                // 设备信息变化时（如获得/更换IP），尝试绑定新可用的接口
+                for (server_name, listens) in &server_listens {
+                    let bind_uris = listens
+                        .iter()
+                        .flat_map(|listens| listens.resolve([device.as_str()]))
+                        .filter(|uri| uri.resolve().is_ok())
+                        .collect::<HashSet<_>>();
+                    if bind_uris.is_empty() {
+                        continue;
+                    }
+                    let Some(server) = quic_listeners.get_server(server_name) else {
+                        continue;
+                    };
+                    for bind_uri in bind_uris {
+                        if server.get_iface(&bind_uri).is_none() {
+                            debug!(target: "listen", server_name, %bind_uri, "Interface changed, binding new address");
+                            server.bind([bind_uri]).await;
+                        }
+                    }
+                }
+            }
         }
     }
 }
