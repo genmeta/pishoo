@@ -16,10 +16,7 @@ use gm_quic::{
         manager::InterfaceManager,
     },
 };
-use gmdns::{
-    H3_DNS_SERVER,
-    resolvers::{H3Resolver, Resolvers},
-};
+use gmdns::resolvers::{H3Resolver, Resolvers};
 use h3::client::SendRequest;
 use snafu::{Report, ResultExt};
 use tokio::{sync::Mutex, time};
@@ -30,6 +27,7 @@ use crate::{
     error::Whatever,
     forward::ALPN,
     parse::{IfaceRange, IpFamilies, Listens},
+    publisher::H3_DNS_SERVER,
 };
 
 /// 客户端配置类型: (证书链, 私钥, 客户端名称)

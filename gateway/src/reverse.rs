@@ -13,7 +13,6 @@ use gm_quic::{
     prelude::{Connection, QuicListeners, handy::server_parameters},
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
-use gmdns::H3_DNS_SERVER;
 use h3::server::RequestStream;
 use h3_shim::BidiStream;
 use http::{HeaderValue, Request, Response, StatusCode, Uri};
@@ -25,7 +24,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use crate::{
     error::{Result, StreamSnafu, Whatever},
     parse::{DnsResolver, Listens, Node, ServerConfig as ParseServerConfig, Value},
-    publisher::{Publisher, ServerConfig},
+    publisher::{H3_DNS_SERVER, Publisher, ServerConfig},
     reverse::{self, auth::load_key},
 };
 

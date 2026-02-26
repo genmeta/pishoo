@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
 use gm_quic::qdns::SystemResolver;
-use gmdns::{H3_DNS_SERVER, MDNS_SERVICE, resolvers::Resolvers};
+use gmdns::resolvers::Resolvers;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -19,6 +19,7 @@ use crate::{
     error::{Result, Whatever},
     forward,
     parse::{DnsResolver, Node, ServerConfig, Value},
+    publisher::{H3_DNS_SERVER, MDNS_SERVICE},
     pool::H3ConnectionPool,
 };
 

@@ -9,13 +9,18 @@ use gm_quic::{
     qtraversal::nat::client::StunClientsComponent,
 };
 use gmdns::{
-    MDNS_SERVICE, MdnsPacket, mdns::Mdns,
-    parser::record::endpoint::EndpointAddr as DnsEndpointAddr, resolvers::MdnsResolver,
+    MdnsPacket, mdns::Mdns, parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
+    resolvers::MdnsResolver,
 };
 use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
+
+#[allow(dead_code)]
+pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
+pub const H3_DNS_SERVER: &str = "https://localhost:4433";
+pub const MDNS_SERVICE: &str = "_genmeta.local";
 
 pub struct Publisher {
     _task: AbortOnDropHandle<()>,
