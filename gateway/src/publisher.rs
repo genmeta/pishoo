@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
-    prelude::{BindUri, BoundAddr, QuicIO, QuicListeners},
+    prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
     qdns::Publish as DnsPublisher,
     qinterface::{BindInterface, component::location::Locations},

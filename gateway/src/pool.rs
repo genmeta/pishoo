@@ -246,13 +246,10 @@ impl H3ConnectionPool {
 
     /// Get a connection to the specified server.
     ///
-    /// If there is no current connection to the server, the given endpoint addr will be used to create a connection.
-    ///
     /// If there is already a connection to the given server, just return the existing connection.
     pub async fn connect(
         &self,
         server_name: impl Into<String>,
-        _server_endpoints: Resolvers,
     ) -> Result<ReusableConnection, Whatever> {
         let server_name: String = server_name.into();
         let mut entry = None;

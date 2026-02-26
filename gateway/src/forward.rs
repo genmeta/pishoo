@@ -1,11 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use gm_quic::{prelude::BindUri, qdns::SystemResolver, qinterface::device::Devices};
-use gmdns::{
-    H3_DNS_SERVER, MDNS_SERVICE,
-    resolvers::{MdnsResolver, Resolvers},
-};
+use gm_quic::qdns::SystemResolver;
+use gmdns::{H3_DNS_SERVER, MDNS_SERVICE, resolvers::Resolvers};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -140,7 +137,7 @@ pub async fn serve(
         None
     };
 
-    let mut resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
+    let resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
         Resolvers::default()
             .with(resolver.create_resolver(config.as_ref()))
             .with(Arc::new(SystemResolver))
@@ -152,34 +149,8 @@ pub async fn serve(
         Resolvers::default()
             .with(resolver.create_resolver(config.as_ref()))
             .with(Arc::new(SystemResolver))
-    };
-
-    for device in Devices::global().interfaces().into_keys() {
-        let socket_addr = match SocketAddr::try_from(&BindUri::from(format!(
-            "iface://v4.{device}:0"
-        ))) {
-            Ok(socket_addr) => socket_addr,
-            Err(error) => {
-                tracing::trace!(target: "forward_proxy", "Failed to create socket for device {device}: {error}" );
-                continue;
-            }
-        };
-        let SocketAddr::V4(socket_addr) = socket_addr else {
-            unreachable!()
-        };
-        let mdns_resolver = match MdnsResolver::new(
-            MDNS_SERVICE,
-            (*socket_addr.ip()).into(),
-            &device,
-        ) {
-            Ok(resolver) => resolver,
-            Err(error) => {
-                warn!(target: "forward_proxy", "Failed to create mDNS resolver for device {device}: {error}" );
-                continue;
-            }
-        };
-        resolvers = resolvers.with(Arc::new(mdns_resolver));
     }
+    .with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
 
     // 设置客户端认证配置
     setup_client_config(&node)?;
@@ -191,12 +162,10 @@ pub async fn serve(
     let accept_tcp_stream = async move |stream: TcpStream| {
         let io = TokioIo::new(stream);
         let acl = acl.clone();
-        let resolvers = resolvers.clone();
 
         // 为每个连接创建服务处理器
         let service = service_fn(move |mut req| {
             let acl = acl.clone();
-            let resolvers = resolvers.clone();
             let span = info_span!(target: "forward_proxy", "forward_proxy", uri=%req.uri(), method=%req.method());
             async move {
                 debug!(target: "forward_proxy", request=?req);
@@ -213,11 +182,11 @@ pub async fn serve(
                 match acl.check(&host) {
                     true if is_connect => {
                         debug!(target: "forward_proxy", "QUIC proxying CONNECT request to {host}",);
-                        forward::quic::connect(req, resolvers).await
+                        forward::quic::connect(req).await
                     }
                     true => {
                         debug!(target: "forward_proxy", "QUIC proxying request to {host}");
-                        forward::quic::proxy(req, resolvers).await
+                        forward::quic::proxy(req).await
                     }
                     false if is_connect => {
                         debug!(target: "forward_proxy", "Normal proxying CONNECT request to {host}");

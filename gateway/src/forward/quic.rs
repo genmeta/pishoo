@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use futures::{StreamExt, TryStreamExt};
-use gmdns::resolvers::Resolvers;
 use http::{Request, Response};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Frame, server::conn::http1, service::service_fn};
@@ -18,10 +17,7 @@ use crate::{
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
-pub async fn proxy(
-    mut req: Request<hyper::body::Incoming>,
-    resolvers: Resolvers,
-) -> Result<BoxResponse, hyper::Error> {
+pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     // 验证主机合法性
     let host = match validate_host(&mut req) {
         Ok(host) => host,
@@ -32,7 +28,7 @@ pub async fn proxy(
     };
     let pool = H3ConnectionPool::global().await;
     // 创建 QUIC 连接
-    let send_request = match create_quic_connection(pool.clone(), &host, resolvers).await {
+    let send_request = match create_quic_connection(pool.clone(), &host).await {
         Ok(conn) => {
             debug!(target: "forward_proxy", "Quic connection established");
             conn
@@ -63,16 +59,13 @@ pub async fn proxy(
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect(
-    req: Request<hyper::body::Incoming>,
-    resolvers: Resolvers,
-) -> Result<BoxResponse, hyper::Error> {
+pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     tokio::spawn(async move {
         // 升级连接并处理后续请求
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 info!(target: "forward_proxy", "Establishing tunnel to the request uri");
-                let service = service_fn(move |req| proxy(req, resolvers.clone()));
+                let service = service_fn(proxy);
                 if let Err(error) = http1::Builder::new()
                     .preserve_header_case(true)
                     .title_case_headers(true)
@@ -146,10 +139,9 @@ async fn send(
 async fn create_quic_connection(
     pool: Arc<H3ConnectionPool>,
     host: &str,
-    resolvers: Resolvers,
 ) -> Result<H3SendRequest, Whatever> {
     let conn = pool
-        .connect(host, resolvers)
+        .connect(host)
         .await
         .whatever_context(format!("Connect to {host} failed"))?;
     let odcid = conn
