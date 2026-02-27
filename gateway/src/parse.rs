@@ -270,7 +270,6 @@ impl Listens {
                         ipv6_bind_uri = ipv6_bind_uri.alloc_port();
                     }
 
-                    info!("Resolved listen on device {}: {:?}", name, (ipv4_bind_uri.clone(), ipv6_bind_uri.clone()));
                     match self.families {
                         IpFamilies::V4 => [Some(ipv4_bind_uri), None],
                         IpFamilies::V6 => [None, Some(ipv6_bind_uri)],

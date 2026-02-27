@@ -139,10 +139,11 @@ async fn publish_resolvers(
     }
 
     if endpoints.is_empty() {
+        tracing::warn!(target: "dns", server_name, "No endpoints to publish for this server");
         return;
     }
 
-    tracing::debug!(target: "dns", server_name, server_id = config.server_id, count = endpoints.len(), "Publishing STUN endpoints");
+    tracing::debug!(target: "dns", server_name, server_id = config.server_id, count = endpoints.len(), "Publishing endpoints");
 
     let mut hosts = std::collections::HashMap::new();
     hosts.insert(server_name.to_string(), endpoints);

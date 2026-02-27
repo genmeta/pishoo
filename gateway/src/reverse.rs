@@ -24,8 +24,9 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use crate::{
     error::{Result, StreamSnafu, Whatever},
     parse::{DnsResolver, Listens, Node, ServerConfig as ParseServerConfig, Value},
-    publisher::{H3_DNS_SERVER, Publisher, ServerConfig},
+    publisher::{H3_DNS_SERVER, Publisher, Resolvers, ServerConfig},
     reverse::{self, auth::load_key},
+    stun::StunServerManager,
 };
 
 mod auth;
@@ -76,9 +77,16 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
+    let stun_enabled = servers
+        .iter()
+        .any(|s| matches!(s.get("stun_server"), Some(Value::Boolean(true))));
+
     let monitor = Devices::global().monitor();
     let current_interfaces = monitor.interfaces();
     let (router, server_resolvers) = init_router(&servers)?;
+    let stun_publishers = stun_enabled
+        .then(|| collect_stun_publishers(&server_resolvers))
+        .unwrap_or_default();
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
 
@@ -86,6 +94,17 @@ pub async fn serve(
 
     // 启动 dns 上报
     let _publisher = Publisher::spawn(quic_listeners.clone(), server_resolvers);
+    let _stun_manager = match (stun_enabled, stun_publishers.is_empty()) {
+        (true, false) => Some(StunServerManager::spawn(
+            quic_listeners.clone(),
+            stun_publishers,
+        )),
+        (true, true) => {
+            warn!(target: "stun", "`stun_server on` configured but no DNS publisher resolver available, STUN server manager disabled");
+            None
+        }
+        _ => None,
+    };
     let _guard = ShutdownListenersOnDrop(quic_listeners.clone());
     let _maintain_binding = tokio::spawn(maintain_binding(
         monitor,
@@ -95,6 +114,13 @@ pub async fn serve(
 
     // 主接受循环
     handle_connections(quic_listeners, access_rules.1, router).await
+}
+
+fn collect_stun_publishers(server_resolvers: &HashMap<String, ServerConfig>) -> Resolvers {
+    server_resolvers
+        .values()
+        .flat_map(|config| config.resolvers.iter().cloned())
+        .collect()
 }
 
 /// 初始化路由器，根据服务器配置创建路由表

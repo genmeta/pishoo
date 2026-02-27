@@ -9,5 +9,6 @@ pub mod parse;
 pub mod pool;
 mod publisher;
 pub mod reverse;
+pub mod stun;
 
 pub use gm_quic::prelude::EndpointAddr;
