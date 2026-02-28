@@ -41,48 +41,78 @@ const STUN_DOMAIN: &str = "stun.genmeta.net";
 /// 本节点 STUN 配置（从配置文件 `location /stun { ... }` 解析）
 ///
 /// 角色由配置内容决定：
-/// - 配置了 `outer` 等参数 → Bootstrap 节点（公网，直接启动 STUN server）
-/// - 未配置 `outer` → Dynamic 节点（NAT 后，等探测到 FullCone 后启动）
+/// - 配置了 `bind` 块（含 `outer`）→ Bootstrap 节点（公网，直接启动 STUN server）
+/// - 无 `bind` 块 → Dynamic 节点（NAT 后，等探测到 FullCone 后启动）
 ///
 /// `relay`：
 /// - `true`（`relay on;`）→ 加入 forward 中转组件
 /// - `false`（`relay off;`）→ 仅支持 STUN 探测，不参与中转
 #[derive(Debug, Clone)]
 pub struct StunNodeConfig {
-    /// 主绑定地址（可选，默认取 listen 地址）
-    pub bind_address: Option<SocketAddr>,
-    /// 辅助端口（可选，None 时绑定 port=0 随机分配）
-    pub change_port: Option<u16>,
-    /// 对外发布地址（用于 forward 中转组件上报可达地址）
-    pub outer_address: Option<SocketAddr>,
-    /// change_address（可选，bootstrap 建议配置）
-    pub change_address: Option<SocketAddr>,
     /// 是否加入 forward 中转网络（默认 false）
     pub relay: bool,
+    /// 每个 bind 块的配置（支持多地址族 / 多绑定）
+    pub binds: Vec<StunBindConfig>,
+}
+
+/// 单个 bind 块的 STUN 配置
+#[derive(Debug, Clone)]
+pub struct StunBindConfig {
+    /// 绑定地址
+    pub bind_address: SocketAddr,
+    /// 对外发布地址
+    pub outer_address: Option<SocketAddr>,
+    /// change_address
+    pub change_address: Option<SocketAddr>,
+    /// 辅助端口
+    pub change_port: Option<u16>,
 }
 
 impl StunNodeConfig {
-    /// 是否为 Bootstrap 节点（配置了 outer 地址）
-    pub fn is_bootstrap(&self) -> bool {
-        self.outer_address.is_some()
+    /// 是否配置了 bind 块
+    pub fn has_configured_binds(&self) -> bool {
+        !self.binds.is_empty()
     }
 }
 
-/// 管理每个 iface 上一对 StunServer（主端口 + 辅助端口）
-/// bootstrap 节点立即启动 server，dynamic 节点等待 FullCone 确认后启动
-/// 将外网地址发布到 stun.genmeta.net
+/// 管理 STUN server：
+///
+/// 1. **Configured pairs**（来自 `bind` 块）：独立绑定 socket，与 QUIC listener 无关，始终启动
+/// 2. **Dynamic pairs**（来自 QUIC listener）：探测到 FullCone 后在 QUIC 端口上启动 STUN server
+///
+/// 两类地址发布到 stun.genmeta.net
 pub struct StunServerManager {
     _task: AbortOnDropHandle<()>,
 }
 
-struct IfaceStunHandle {
+/// Configured bind 块创建的独立 STUN server 对（拥有自己的 socket）
+struct ConfiguredStunHandle {
+    _main_iface: Arc<dyn IO>,
+    _main_recv_task: AbortOnDropHandle<std::io::Result<()>>,
     _aux_iface: Arc<dyn IO>,
     _aux_recv_task: AbortOnDropHandle<std::io::Result<()>>,
     _server_main: AbortOnDropHandle<std::io::Result<()>>,
     _server_aux: AbortOnDropHandle<std::io::Result<()>>,
 }
 
-impl IfaceStunHandle {
+impl ConfiguredStunHandle {
+    fn is_alive(&self) -> bool {
+        !self._server_main.is_finished()
+            && !self._server_aux.is_finished()
+            && !self._main_recv_task.is_finished()
+            && !self._aux_recv_task.is_finished()
+    }
+}
+
+/// QUIC listener 上寄生的 STUN server 对（FullCone 确认后才启动）
+struct DynamicStunHandle {
+    _aux_iface: Arc<dyn IO>,
+    _aux_recv_task: AbortOnDropHandle<std::io::Result<()>>,
+    _server_main: AbortOnDropHandle<std::io::Result<()>>,
+    _server_aux: AbortOnDropHandle<std::io::Result<()>>,
+}
+
+impl DynamicStunHandle {
     fn is_alive(&self) -> bool {
         !self._server_main.is_finished() && !self._server_aux.is_finished()
     }
@@ -96,11 +126,21 @@ impl StunServerManager {
         config: StunNodeConfig,
     ) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
-            let mut handles: HashMap<BindUri, IfaceStunHandle> = HashMap::new();
+            // 两类 handle 分开管理
+            let mut configured_handles: HashMap<SocketAddr, ConfiguredStunHandle> = HashMap::new();
+            let mut dynamic_handles: HashMap<BindUri, DynamicStunHandle> = HashMap::new();
 
-            // Bootstrap 首次拉起
-            reconcile_stun_servers(&listeners, &mut handles, &config).await;
-            publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
+            // 首次拉起
+            reconcile_configured(&config, &mut configured_handles);
+            reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+            publish_stun_endpoints(
+                &listeners,
+                &configured_handles,
+                &dynamic_handles,
+                &publishers,
+                &config,
+            )
+            .await;
 
             let mut timer = interval(STUN_RECONCILE_INTERVAL);
             timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -113,15 +153,17 @@ impl StunServerManager {
                     _ = observer.recv() => {
                         // 防抖 50ms
                         time::sleep(Duration::from_millis(50)).await;
-                        reconcile_stun_servers(&listeners, &mut handles, &config).await;
-                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
+                        reconcile_configured(&config, &mut configured_handles);
+                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                     _ = timer.tick() => {
-                        reconcile_stun_servers(&listeners, &mut handles, &config).await;
-                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
+                        reconcile_configured(&config, &mut configured_handles);
+                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                 }
             }
@@ -131,97 +173,133 @@ impl StunServerManager {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Reconcile
+// Reconcile: Configured（bind 块 → 独立 socket）
 // ──────────────────────────────────────────────────────────────────────────────
 
-async fn reconcile_stun_servers(
-    listeners: &Arc<QuicListeners>,
-    handles: &mut HashMap<BindUri, IfaceStunHandle>,
+/// 为每个 `bind` 块创建/恢复独立的 STUN server 对
+fn reconcile_configured(
     config: &StunNodeConfig,
+    handles: &mut HashMap<SocketAddr, ConfiguredStunHandle>,
 ) {
-    let desired = collect_stun_eligible_bind_uris(listeners, config);
+    // 移除不在配置中或已失效的
+    let configured_addrs: HashSet<SocketAddr> =
+        config.binds.iter().map(|b| b.bind_address).collect();
+    handles.retain(|addr, h| configured_addrs.contains(addr) && h.is_alive());
 
-    // 移除不再需要的
-    handles.retain(|uri, _| desired.contains(uri));
-
-    // 为 desired 集合中没有存活 handle 的 bind_uri 拉起新对
-    for bind_uri in &desired {
-        let needs_start = handles.get(bind_uri).map(|h| !h.is_alive()).unwrap_or(true);
-
-        if !needs_start {
+    for bind_cfg in &config.binds {
+        if handles.contains_key(&bind_cfg.bind_address) {
             continue;
         }
-
-        // 移除已失效 handle（若存在）
-        handles.remove(bind_uri);
-
-        let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
-            continue;
-        };
-
-        match start_stun_pair(bind_uri, &bind_iface, config) {
+        match start_configured_stun_pair(bind_cfg) {
             Some(handle) => {
-                let role = if config.is_bootstrap() {
-                    "bootstrap"
-                } else {
-                    "dynamic"
-                };
-                info!(target: "stun", %bind_uri, role, "Started STUN server pair");
-                handles.insert(bind_uri.clone(), handle);
+                info!(target: "stun", bind = %bind_cfg.bind_address, "Started configured STUN server pair");
+                handles.insert(bind_cfg.bind_address, handle);
             }
             None => {
-                warn!(target: "stun", %bind_uri, "Failed to start STUN server pair, will retry");
+                warn!(target: "stun", bind = %bind_cfg.bind_address, "Failed to start configured STUN server pair, will retry");
             }
         }
     }
 }
 
-/// 收集当前所有 eligible iface 的 BindUri
-///
-/// - bootstrap 节点：只要 iface 绑定了公网地址即可，不需要等待 client 探测
-/// - dynamic 节点：需要 client 探测出 FullCone 才启动
-fn collect_stun_eligible_bind_uris(
+/// 在配置的地址上绑定独立 socket 并启动 STUN server 对
+fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStunHandle> {
+    let factory: Arc<dyn ProductIO> = Arc::new(DEFAULT_IO_FACTORY);
+
+    // 主 socket
+    let main_iface: Arc<dyn IO> = Arc::from(factory.bind(bind_cfg.bind_address.into()));
+    let main_port = match main_iface.bound_addr() {
+        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        _ => {
+            warn!(target: "stun", bind = %bind_cfg.bind_address, "Configured main iface has no internet bound addr");
+            return None;
+        }
+    };
+    let main_router = StunRouter::new();
+    let _main_recv_task = ReceiveAndDeliverPacket::task()
+        .stun_router(main_router.clone())
+        .iface_ref(main_iface.clone())
+        .spawn();
+
+    // 辅 socket
+    let aux_port_cfg = bind_cfg.change_port.unwrap_or(0);
+    let aux_addr = SocketAddr::new(bind_cfg.bind_address.ip(), aux_port_cfg);
+    let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_addr.into()));
+    let aux_port = match aux_iface.bound_addr() {
+        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        _ => {
+            warn!(target: "stun", "Configured aux iface has no internet bound addr");
+            return None;
+        }
+    };
+    let aux_router = StunRouter::new();
+    let _aux_recv_task = ReceiveAndDeliverPacket::task()
+        .stun_router(aux_router.clone())
+        .iface_ref(aux_iface.clone())
+        .spawn();
+
+    // 主 STUN server：change_port 指向辅助端口
+    let server_main = StunServer::new(
+        main_iface.clone(),
+        main_router,
+        StunServerConfig::builder()
+            .change_port(aux_port)
+            .maybe_change_address(bind_cfg.change_address)
+            .init(),
+    );
+    // 辅 STUN server：change_port 指向主端口
+    let server_aux = StunServer::new(
+        aux_iface.clone(),
+        aux_router,
+        StunServerConfig::builder()
+            .change_port(main_port)
+            .maybe_change_address(bind_cfg.change_address)
+            .init(),
+    );
+
+    Some(ConfiguredStunHandle {
+        _main_iface: main_iface,
+        _main_recv_task,
+        _aux_iface: aux_iface,
+        _aux_recv_task,
+        _server_main: server_main.spawn(),
+        _server_aux: server_aux.spawn(),
+    })
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Reconcile: Dynamic（QUIC listener FullCone → 寄生 STUN server）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 在 FullCone 确认的 QUIC listener 上启动/恢复 STUN server 对
+async fn reconcile_dynamic(
     listeners: &Arc<QuicListeners>,
-    config: &StunNodeConfig,
-) -> HashSet<BindUri> {
-    let mut result = HashSet::new();
-    for server_name in listeners.servers() {
-        let Some(server) = listeners.get_server(&server_name) else {
+    handles: &mut HashMap<BindUri, DynamicStunHandle>,
+) {
+    let desired = collect_fullcone_bind_uris(listeners);
+
+    // 移除不再 FullCone 或已失效的
+    handles.retain(|uri, h| desired.contains(uri) && h.is_alive());
+
+    for bind_uri in &desired {
+        if handles.contains_key(bind_uri) {
+            continue;
+        }
+
+        let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
             continue;
         };
-        for (bind_uri, bind_iface) in server.bind_interfaces() {
-            let bound_ok = bind_iface
-                .borrow()
-                .bound_addr()
-                .map(|addr| matches!(addr, BoundAddr::Internet(_)))
-                .unwrap_or(false);
-            if !bound_ok {
-                continue;
-            }
 
-            if config.is_bootstrap() {
-                // bootstrap 节点：绑定了公网地址即可，直接 eligible
-                result.insert(bind_uri);
-            } else {
-                // dynamic 节点：需要 client 探测出 FullCone
-                let is_fullcone = bind_iface
-                    .borrow()
-                    .with_component(|clients: &StunClientsComponent| {
-                        clients.with_clients(|map| {
-                            map.values()
-                                .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
-                        })
-                    })
-                    .ok()
-                    .flatten()
-                    .unwrap_or(false);
-                if is_fullcone {
-                    result.insert(bind_uri);
-                }
+        match start_dynamic_stun_pair(bind_uri, &bind_iface) {
+            Some(handle) => {
+                info!(target: "stun", %bind_uri, "Started dynamic STUN server pair (FullCone)");
+                handles.insert(bind_uri.clone(), handle);
+            }
+            None => {
+                warn!(target: "stun", %bind_uri, "Failed to start dynamic STUN server pair, will retry");
             }
         }
     }
-    result
 }
 
 fn find_bind_iface(listeners: &Arc<QuicListeners>, bind_uri: &BindUri) -> Option<BindInterface> {
@@ -236,15 +314,38 @@ fn find_bind_iface(listeners: &Arc<QuicListeners>, bind_uri: &BindUri) -> Option
     None
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Start pair
-// ──────────────────────────────────────────────────────────────────────────────
+/// 收集 FullCone 确认的 QUIC listener BindUri
+fn collect_fullcone_bind_uris(listeners: &Arc<QuicListeners>) -> HashSet<BindUri> {
+    let mut result = HashSet::new();
+    for server_name in listeners.servers() {
+        let Some(server) = listeners.get_server(&server_name) else {
+            continue;
+        };
+        for (bind_uri, bind_iface) in server.bind_interfaces() {
+            let is_fullcone = bind_iface
+                .borrow()
+                .with_component(|clients: &StunClientsComponent| {
+                    clients.with_clients(|map| {
+                        map.values()
+                            .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
+                    })
+                })
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+            if is_fullcone {
+                result.insert(bind_uri);
+            }
+        }
+    }
+    result
+}
 
-fn start_stun_pair(
+/// 在 QUIC listener 接口上寄生 STUN server 对（共享 QUIC socket）
+fn start_dynamic_stun_pair(
     bind_uri: &BindUri,
     bind_iface: &BindInterface,
-    config: &StunNodeConfig,
-) -> Option<IfaceStunHandle> {
+) -> Option<DynamicStunHandle> {
     let iface = bind_iface.borrow();
 
     let main_addr = match iface.bound_addr() {
@@ -261,30 +362,19 @@ fn start_stun_pair(
         .ok()
         .flatten()?;
 
-    // WeakInterface 作为主 StunServer 的 RefIO
+    // WeakInterface 作为主 StunServer 的 RefIO（共享 QUIC socket）
     let weak_iface: WeakInterface = bind_iface.borrow_weak();
-
-    // 主端口
     let main_port = main_addr.port();
-
-    // 地址族（IPv4 or IPv6），用于 change_address 过滤
     let main_is_ipv4 = is_ipv4_bind_uri(bind_uri);
 
-    // 计算 change_address：
-    // - 配置中有 change_address → 优先使用配置值（bootstrap 场景）
-    // - 配置中无 change_address → 从 stun client agent 中动态选取（dynamic 场景）
-    let change_address = config
-        .change_address
-        .or_else(|| compute_change_address(&iface, main_is_ipv4));
+    // 动态选取 change_address
+    let change_address = compute_change_address(&iface, main_is_ipv4);
 
-    // 派生辅助 BindUri：使用配置端口或 port=0 随机分配
-    let aux_bind_uri = derive_aux_bind_uri(bind_uri, config.change_port)?;
+    // 辅助端口：port=0 随机分配
+    let aux_bind_uri = derive_aux_bind_uri(bind_uri, None)?;
 
-    // 绑定辅助 iface
     let factory: Arc<dyn ProductIO> = Arc::new(DEFAULT_IO_FACTORY);
     let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_bind_uri));
-
-    // 取辅助端口
     let aux_port = match aux_iface.bound_addr() {
         Ok(BoundAddr::Internet(addr)) => addr.port(),
         _ => {
@@ -293,16 +383,12 @@ fn start_stun_pair(
         }
     };
 
-    // 创建辅助 StunRouter（独立于 Component 体系）
     let stun_router_aux = StunRouter::new();
-
-    // 启动辅助 iface 收包任务（仅分发 STUN 包）
     let _aux_recv_task = ReceiveAndDeliverPacket::task()
         .stun_router(stun_router_aux.clone())
         .iface_ref(aux_iface.clone())
         .spawn();
 
-    // 主端口 StunServer：change_port 指向辅助端口
     let server_main = StunServer::new(
         weak_iface,
         stun_router_main,
@@ -312,7 +398,6 @@ fn start_stun_pair(
             .init(),
     );
 
-    // 辅端口 StunServer：change_port 指向主端口
     let server_aux = StunServer::new(
         aux_iface.clone(),
         stun_router_aux,
@@ -322,14 +407,11 @@ fn start_stun_pair(
             .init(),
     );
 
-    let _server_main = server_main.spawn();
-    let _server_aux = server_aux.spawn();
-
-    Some(IfaceStunHandle {
+    Some(DynamicStunHandle {
         _aux_iface: aux_iface,
         _aux_recv_task,
-        _server_main,
-        _server_aux,
+        _server_main: server_main.spawn(),
+        _server_aux: server_aux.spawn(),
     })
 }
 
@@ -439,29 +521,34 @@ fn compute_change_address(
 
 async fn publish_stun_endpoints(
     listeners: &Arc<QuicListeners>,
-    handles: &HashMap<BindUri, IfaceStunHandle>,
+    configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
+    dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
     publishers: &[Arc<dyn DnsPublisher + Send + Sync>],
     config: &StunNodeConfig,
 ) {
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
 
-    // bootstrap 节点：直接用配置的 outer_address 或 bind_address 发布
-    if config.is_bootstrap() {
-        if let Some(addr) = config.outer_address.or(config.bind_address) {
+    // 1. Configured bind 块：直接用配置的 outer_address（或 bind_address）
+    for bind_cfg in &config.binds {
+        if !configured_handles.contains_key(&bind_cfg.bind_address) {
+            continue; // 未成功启动的不上报
+        }
+        if let Some(addr) = bind_cfg.outer_address.or(Some(bind_cfg.bind_address)) {
             outer_addrs.insert(addr);
         }
     }
 
-    // 同时收集 stun client 探测到的外网地址（两条路径互补）
-    for bind_uri in handles.keys() {
+    // 2. Dynamic（QUIC listener FullCone）：仅上报 FullCone 确认的外网地址
+    for bind_uri in dynamic_handles.keys() {
         let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
             continue;
         };
         let iface = bind_iface.borrow();
-        let outers: Vec<SocketAddr> = iface
+        let fullcone_outers: Vec<SocketAddr> = iface
             .with_component(|clients: &StunClientsComponent| {
                 clients.with_clients(|map| {
                     map.values()
+                        .filter(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
                         .filter_map(|c| c.get_outer_addr()?.ok())
                         .collect::<Vec<_>>()
                 })
@@ -469,8 +556,7 @@ async fn publish_stun_endpoints(
             .ok()
             .flatten()
             .unwrap_or_default();
-
-        outer_addrs.extend(outers);
+        outer_addrs.extend(fullcone_outers);
     }
 
     if outer_addrs.is_empty() {

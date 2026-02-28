@@ -28,7 +28,7 @@ use crate::{
     },
     publisher::{H3_DNS_SERVER, Publisher, Resolvers, ServerConfig},
     reverse::{self, auth::load_key},
-    stun::{StunNodeConfig, StunServerManager},
+    stun::{StunBindConfig, StunNodeConfig, StunServerManager},
 };
 
 mod auth;
@@ -642,7 +642,7 @@ fn match_location<'l: 's, 's>(
 /// 从 server 节点的 `location /stun` 中提取 `StunNodeConfig`
 ///
 /// 有 `location /stun` 块就代表打开 STUN；
-/// 块内配置了 `outer` 等参数代表 Bootstrap 节点，空块代表 Dynamic 探测。
+/// 块内有 `bind` 子块代表 Bootstrap 节点，仅 `relay` 代表 Dynamic 探测。
 fn extract_stun_config_from_server(server: &Arc<Node>) -> Option<StunNodeConfig> {
     let Value::Nodes(locations) = server.get("location")? else {
         return None;
@@ -661,22 +661,6 @@ fn extract_stun_config_from_server(server: &Arc<Node>) -> Option<StunNodeConfig>
             continue;
         }
 
-        let outer_address = values.get("outer").and_then(|v| match v {
-            Value::Addr(addr) => Some(*addr),
-            _ => None,
-        });
-        let bind_address = values.get("bind").and_then(|v| match v {
-            Value::Addr(addr) => Some(*addr),
-            _ => None,
-        });
-        let change_address = values.get("change_addr").and_then(|v| match v {
-            Value::Addr(addr) => Some(*addr),
-            _ => None,
-        });
-        let change_port = values.get("change_port").and_then(|v| match v {
-            Value::String(s) => s.parse::<u16>().ok(),
-            _ => None,
-        });
         let relay = values
             .get("relay")
             .and_then(|v| match v {
@@ -685,13 +669,42 @@ fn extract_stun_config_from_server(server: &Arc<Node>) -> Option<StunNodeConfig>
             })
             .unwrap_or(false);
 
-        return Some(StunNodeConfig {
-            bind_address,
-            change_port,
-            outer_address,
-            change_address,
-            relay,
-        });
+        // 提取 bind 子块（可能有多个）
+        let binds = match values.get("bind") {
+            Some(Value::Nodes(bind_nodes)) => bind_nodes
+                .iter()
+                .filter_map(|node| {
+                    let Value::ValueMap(map) = node.value() else {
+                        return None;
+                    };
+                    let bind_address = match map.get("bind_address")? {
+                        Value::Addr(addr) => *addr,
+                        _ => return None,
+                    };
+                    let outer_address = map.get("outer").and_then(|v| match v {
+                        Value::Addr(addr) => Some(*addr),
+                        _ => None,
+                    });
+                    let change_address = map.get("change_addr").and_then(|v| match v {
+                        Value::Addr(addr) => Some(*addr),
+                        _ => None,
+                    });
+                    let change_port = map.get("change_port").and_then(|v| match v {
+                        Value::String(s) => s.parse::<u16>().ok(),
+                        _ => None,
+                    });
+                    Some(StunBindConfig {
+                        bind_address,
+                        outer_address,
+                        change_address,
+                        change_port,
+                    })
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        return Some(StunNodeConfig { relay, binds });
     }
     None
 }
