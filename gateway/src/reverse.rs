@@ -23,10 +23,12 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     error::{Result, StreamSnafu, Whatever},
-    parse::{DnsResolver, Listens, Node, ServerConfig as ParseServerConfig, Value},
+    parse::{
+        DnsResolver, Listens, Node, ServerConfig as ParseServerConfig, Value, pattern::Pattern,
+    },
     publisher::{H3_DNS_SERVER, Publisher, Resolvers, ServerConfig},
     reverse::{self, auth::load_key},
-    stun::StunServerManager,
+    stun::{StunNodeConfig, StunServerManager},
 };
 
 mod auth;
@@ -77,15 +79,15 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
-    let stun_enabled = servers
-        .iter()
-        .any(|s| matches!(s.get("stun_server"), Some(Value::Boolean(true))));
+    // 从第一个 server 的 `location /stun` 中提取 StunNodeConfig
+    let stun_config = servers.iter().find_map(extract_stun_config_from_server);
 
     let monitor = Devices::global().monitor();
     let current_interfaces = monitor.interfaces();
     let (router, server_resolvers) = init_router(&servers)?;
-    let stun_publishers = stun_enabled
-        .then(|| collect_stun_publishers(&server_resolvers))
+    let stun_publishers = stun_config
+        .as_ref()
+        .map(|_| collect_stun_publishers(&server_resolvers))
         .unwrap_or_default();
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
@@ -94,13 +96,14 @@ pub async fn serve(
 
     // 启动 dns 上报
     let _publisher = Publisher::spawn(quic_listeners.clone(), server_resolvers);
-    let _stun_manager = match (stun_enabled, stun_publishers.is_empty()) {
-        (true, false) => Some(StunServerManager::spawn(
+    let _stun_manager = match (stun_config, stun_publishers.is_empty()) {
+        (Some(config), false) => Some(StunServerManager::spawn(
             quic_listeners.clone(),
             stun_publishers,
+            config,
         )),
-        (true, true) => {
-            warn!(target: "stun", "`stun_server on` configured but no DNS publisher resolver available, STUN server manager disabled");
+        (Some(_), true) => {
+            warn!(target: "stun", "`location /stun` configured but no DNS publisher resolver available, STUN server manager disabled");
             None
         }
         _ => None,
@@ -634,6 +637,63 @@ fn match_location<'l: 's, 's>(
     }
 
     Some((location_matched?, final_pattern))
+}
+
+/// 从 server 节点的 `location /stun` 中提取 `StunNodeConfig`
+///
+/// 有 `location /stun` 块就代表打开 STUN；
+/// 块内配置了 `outer` 等参数代表 Bootstrap 节点，空块代表 Dynamic 探测。
+fn extract_stun_config_from_server(server: &Arc<Node>) -> Option<StunNodeConfig> {
+    let Value::Nodes(locations) = server.get("location")? else {
+        return None;
+    };
+
+    for location in locations {
+        let Value::Pattern(pattern, values) = location.value() else {
+            continue;
+        };
+        // 匹配 `/stun` 路径（精确或前缀匹配）
+        let is_stun = match pattern {
+            Pattern::Exact(p) | Pattern::Prefix(p) | Pattern::NormalPrefix(p) => p == "/stun",
+            _ => false,
+        };
+        if !is_stun {
+            continue;
+        }
+
+        let outer_address = values.get("outer").and_then(|v| match v {
+            Value::Addr(addr) => Some(*addr),
+            _ => None,
+        });
+        let bind_address = values.get("bind").and_then(|v| match v {
+            Value::Addr(addr) => Some(*addr),
+            _ => None,
+        });
+        let change_address = values.get("change_addr").and_then(|v| match v {
+            Value::Addr(addr) => Some(*addr),
+            _ => None,
+        });
+        let change_port = values.get("change_port").and_then(|v| match v {
+            Value::String(s) => s.parse::<u16>().ok(),
+            _ => None,
+        });
+        let relay = values
+            .get("relay")
+            .and_then(|v| match v {
+                Value::Boolean(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        return Some(StunNodeConfig {
+            bind_address,
+            change_port,
+            outer_address,
+            change_address,
+            relay,
+        });
+    }
+    None
 }
 
 fn build_response(status: StatusCode) -> Response<()> {

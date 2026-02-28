@@ -34,8 +34,43 @@ const STUN_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const STUN_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
 const STUN_DOMAIN: &str = "stun.genmeta.net";
 
+// ──────────────────────────────────────────────────────────────────────────────
+// 数据结构
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 本节点 STUN 配置（从配置文件 `location /stun { ... }` 解析）
+///
+/// 角色由配置内容决定：
+/// - 配置了 `outer` 等参数 → Bootstrap 节点（公网，直接启动 STUN server）
+/// - 未配置 `outer` → Dynamic 节点（NAT 后，等探测到 FullCone 后启动）
+///
+/// `relay`：
+/// - `true`（`relay on;`）→ 加入 forward 中转组件
+/// - `false`（`relay off;`）→ 仅支持 STUN 探测，不参与中转
+#[derive(Debug, Clone)]
+pub struct StunNodeConfig {
+    /// 主绑定地址（可选，默认取 listen 地址）
+    pub bind_address: Option<SocketAddr>,
+    /// 辅助端口（可选，None 时绑定 port=0 随机分配）
+    pub change_port: Option<u16>,
+    /// 对外发布地址（用于 forward 中转组件上报可达地址）
+    pub outer_address: Option<SocketAddr>,
+    /// change_address（可选，bootstrap 建议配置）
+    pub change_address: Option<SocketAddr>,
+    /// 是否加入 forward 中转网络（默认 false）
+    pub relay: bool,
+}
+
+impl StunNodeConfig {
+    /// 是否为 Bootstrap 节点（配置了 outer 地址）
+    pub fn is_bootstrap(&self) -> bool {
+        self.outer_address.is_some()
+    }
+}
+
 /// 管理每个 iface 上一对 StunServer（主端口 + 辅助端口）
-/// 并在 FullCone 确认后将外网地址发布到 stun.genmeta.net
+/// bootstrap 节点立即启动 server，dynamic 节点等待 FullCone 确认后启动
+/// 将外网地址发布到 stun.genmeta.net
 pub struct StunServerManager {
     _task: AbortOnDropHandle<()>,
 }
@@ -58,13 +93,14 @@ impl StunServerManager {
     pub fn spawn(
         listeners: Arc<QuicListeners>,
         publishers: Vec<Arc<dyn DnsPublisher + Send + Sync>>,
+        config: StunNodeConfig,
     ) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut handles: HashMap<BindUri, IfaceStunHandle> = HashMap::new();
 
             // Bootstrap 首次拉起
-            reconcile_stun_servers(&listeners, &mut handles).await;
-            publish_stun_endpoints(&listeners, &handles, &publishers).await;
+            reconcile_stun_servers(&listeners, &mut handles, &config).await;
+            publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
 
             let mut timer = interval(STUN_RECONCILE_INTERVAL);
             timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -77,15 +113,15 @@ impl StunServerManager {
                     _ = observer.recv() => {
                         // 防抖 50ms
                         time::sleep(Duration::from_millis(50)).await;
-                        reconcile_stun_servers(&listeners, &mut handles).await;
-                        publish_stun_endpoints(&listeners, &handles, &publishers).await;
+                        reconcile_stun_servers(&listeners, &mut handles, &config).await;
+                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
                     }
                     _ = timer.tick() => {
-                        reconcile_stun_servers(&listeners, &mut handles).await;
-                        publish_stun_endpoints(&listeners, &handles, &publishers).await;
+                        reconcile_stun_servers(&listeners, &mut handles, &config).await;
+                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&listeners, &handles, &publishers).await;
+                        publish_stun_endpoints(&listeners, &handles, &publishers, &config).await;
                     }
                 }
             }
@@ -101,8 +137,9 @@ impl StunServerManager {
 async fn reconcile_stun_servers(
     listeners: &Arc<QuicListeners>,
     handles: &mut HashMap<BindUri, IfaceStunHandle>,
+    config: &StunNodeConfig,
 ) {
-    let desired = collect_fullcone_bind_uris(listeners);
+    let desired = collect_stun_eligible_bind_uris(listeners, config);
 
     // 移除不再需要的
     handles.retain(|uri, _| desired.contains(uri));
@@ -122,9 +159,14 @@ async fn reconcile_stun_servers(
             continue;
         };
 
-        match start_stun_pair(bind_uri, &bind_iface) {
+        match start_stun_pair(bind_uri, &bind_iface, config) {
             Some(handle) => {
-                info!(target: "stun", %bind_uri, "Started STUN server pair");
+                let role = if config.is_bootstrap() {
+                    "bootstrap"
+                } else {
+                    "dynamic"
+                };
+                info!(target: "stun", %bind_uri, role, "Started STUN server pair");
                 handles.insert(bind_uri.clone(), handle);
             }
             None => {
@@ -134,8 +176,14 @@ async fn reconcile_stun_servers(
     }
 }
 
-/// 收集当前所有 FullCone iface 的 BindUri
-fn collect_fullcone_bind_uris(listeners: &Arc<QuicListeners>) -> HashSet<BindUri> {
+/// 收集当前所有 eligible iface 的 BindUri
+///
+/// - bootstrap 节点：只要 iface 绑定了公网地址即可，不需要等待 client 探测
+/// - dynamic 节点：需要 client 探测出 FullCone 才启动
+fn collect_stun_eligible_bind_uris(
+    listeners: &Arc<QuicListeners>,
+    config: &StunNodeConfig,
+) -> HashSet<BindUri> {
     let mut result = HashSet::new();
     for server_name in listeners.servers() {
         let Some(server) = listeners.get_server(&server_name) else {
@@ -151,21 +199,25 @@ fn collect_fullcone_bind_uris(listeners: &Arc<QuicListeners>) -> HashSet<BindUri
                 continue;
             }
 
-            let is_fullcone = bind_iface
-                .borrow()
-                .with_component(|clients: &StunClientsComponent| {
-                    clients.with_clients(|map| {
-                        map.values()
-                            .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
-                    })
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            // for testing: treat all as fullcone
-            // let is_fullcone = true;
-            if is_fullcone {
+            if config.is_bootstrap() {
+                // bootstrap 节点：绑定了公网地址即可，直接 eligible
                 result.insert(bind_uri);
+            } else {
+                // dynamic 节点：需要 client 探测出 FullCone
+                let is_fullcone = bind_iface
+                    .borrow()
+                    .with_component(|clients: &StunClientsComponent| {
+                        clients.with_clients(|map| {
+                            map.values()
+                                .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
+                        })
+                    })
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                if is_fullcone {
+                    result.insert(bind_uri);
+                }
             }
         }
     }
@@ -188,7 +240,11 @@ fn find_bind_iface(listeners: &Arc<QuicListeners>, bind_uri: &BindUri) -> Option
 // Start pair
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn start_stun_pair(bind_uri: &BindUri, bind_iface: &BindInterface) -> Option<IfaceStunHandle> {
+fn start_stun_pair(
+    bind_uri: &BindUri,
+    bind_iface: &BindInterface,
+    config: &StunNodeConfig,
+) -> Option<IfaceStunHandle> {
     let iface = bind_iface.borrow();
 
     let main_addr = match iface.bound_addr() {
@@ -214,11 +270,15 @@ fn start_stun_pair(bind_uri: &BindUri, bind_iface: &BindInterface) -> Option<Ifa
     // 地址族（IPv4 or IPv6），用于 change_address 过滤
     let main_is_ipv4 = is_ipv4_bind_uri(bind_uri);
 
-    // 计算 change_address：从活跃 stun client 的 agent 中选同地址族且不在本机 outer IP 的地址
-    let change_address = compute_change_address(&iface, main_is_ipv4);
+    // 计算 change_address：
+    // - 配置中有 change_address → 优先使用配置值（bootstrap 场景）
+    // - 配置中无 change_address → 从 stun client agent 中动态选取（dynamic 场景）
+    let change_address = config
+        .change_address
+        .or_else(|| compute_change_address(&iface, main_is_ipv4));
 
-    // 派生辅助 BindUri（同 scheme/family/device，port=0）
-    let aux_bind_uri = derive_aux_bind_uri(bind_uri)?;
+    // 派生辅助 BindUri：使用配置端口或 port=0 随机分配
+    let aux_bind_uri = derive_aux_bind_uri(bind_uri, config.change_port)?;
 
     // 绑定辅助 iface
     let factory: Arc<dyn ProductIO> = Arc::new(DEFAULT_IO_FACTORY);
@@ -284,23 +344,30 @@ fn is_ipv4_bind_uri(bind_uri: &BindUri) -> bool {
     }
 }
 
-/// 派生辅助 BindUri：同 scheme/family/device，port=0
-fn derive_aux_bind_uri(bind_uri: &BindUri) -> Option<BindUri> {
+/// 派生辅助 BindUri：同 scheme/family/device
+/// 使用配置端口（fixed_port），None 时回退到 port=0 随机分配
+fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<BindUri> {
+    let port = fixed_port.unwrap_or(0);
     match bind_uri.scheme() {
         BindUriScheme::Iface => {
             let (family, device, _port) = bind_uri.as_iface_bind_uri()?;
-            Some(format!("iface://{family}.{device}:0").into())
+            Some(format!("iface://{family}.{device}:{port}").into())
         }
         BindUriScheme::Inet => {
             let addr = bind_uri.as_inet_bind_uri()?;
-            Some(SocketAddr::new(addr.ip(), 0).into())
+            Some(SocketAddr::new(addr.ip(), port).into())
         }
         _ => None,
     }
 }
 
-/// 从当前 iface 的 StunClientsComponent 中选取 change_address：
-/// 从活跃 stun client 的 agent 中选同地址族，且 IP 不在本机 outer IP 集合中的第一个地址
+/// 从当前 iface 的 StunClientsComponent 中选取 change_address
+///
+/// 使用 `by_port_ip_asc` 策略形成单向环，避免互指：
+/// 1. 从活跃 stun client 的 agent 中筛选同地址族
+/// 2. 排除自身 outer IP
+/// 3. 按 (port, ip) 排序，取"大于本机"的最小候选作为后继
+/// 4. 若无更大候选，回绕到排序最小的节点
 fn compute_change_address(
     iface: &gm_quic::qinterface::Interface,
     is_ipv4: bool,
@@ -318,18 +385,52 @@ fn compute_change_address(
         .flatten()
         .unwrap_or_default();
 
-    iface
+    // 获取本机的 outer addr（用于 by_port_ip_asc 排序比较）
+    let own_outer_addr: Option<SocketAddr> = iface
+        .with_component(|clients: &StunClientsComponent| {
+            clients.with_clients(|map| {
+                map.values()
+                    .filter_map(|c| c.get_outer_addr()?.ok())
+                    .find(|a| a.is_ipv4() == is_ipv4)
+            })
+        })
+        .ok()
+        .flatten()
+        .flatten();
+
+    // 收集所有候选 agent 地址（同地址族，不在本机 outer IP 集合中）
+    let mut candidates: Vec<SocketAddr> = iface
         .with_component(|clients: &StunClientsComponent| {
             clients.with_clients(|map| {
                 map.keys()
                     .copied()
                     .filter(|agent| agent.is_ipv4() == is_ipv4)
-                    .find(|agent| !own_outer_ips.contains(&agent.ip()))
+                    .filter(|agent| !own_outer_ips.contains(&agent.ip()))
+                    .collect::<Vec<_>>()
             })
         })
         .ok()
         .flatten()
-        .flatten()
+        .unwrap_or_default();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // 按 (port, ip) 排序
+    candidates.sort_by(|a, b| (a.port(), a.ip()).cmp(&(b.port(), b.ip())));
+
+    // by_port_ip_asc：取"大于本机"的最小候选，无更大候选则回绕到最小
+    if let Some(own) = own_outer_addr {
+        candidates
+            .iter()
+            .find(|c| (c.port(), c.ip()) > (own.port(), own.ip()))
+            .or_else(|| candidates.first())
+            .copied()
+    } else {
+        // 没有本机 outer addr 时，取排序最小的候选
+        candidates.first().copied()
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -340,9 +441,18 @@ async fn publish_stun_endpoints(
     listeners: &Arc<QuicListeners>,
     handles: &HashMap<BindUri, IfaceStunHandle>,
     publishers: &[Arc<dyn DnsPublisher + Send + Sync>],
+    config: &StunNodeConfig,
 ) {
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
 
+    // bootstrap 节点：直接用配置的 outer_address 或 bind_address 发布
+    if config.is_bootstrap() {
+        if let Some(addr) = config.outer_address.or(config.bind_address) {
+            outer_addrs.insert(addr);
+        }
+    }
+
+    // 同时收集 stun client 探测到的外网地址（两条路径互补）
     for bind_uri in handles.keys() {
         let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
             continue;

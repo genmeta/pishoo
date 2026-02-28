@@ -655,7 +655,7 @@ fn parse_listen(directive: Directive<Nginx>) -> Result<Value> {
     }
 }
 
-fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
+pub(crate) fn parse_address(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [string] => {
             if string.contains(',') {

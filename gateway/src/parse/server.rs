@@ -17,7 +17,6 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whateve
     commands.insert("server_name", parse_server_name);
     commands.insert("server_id", parse_server_id);
     commands.insert("resolver", parse_resolver);
-    commands.insert("stun_server", parse_boolean);
     commands.insert("gzip", parse_boolean);
     commands.insert("gzip_vary", parse_boolean);
     commands.insert("gzip_min_length", parse_string);
