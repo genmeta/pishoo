@@ -65,14 +65,21 @@ fn ensure_mdns_resolver(
         return Some((mdns, local_addr));
     }
 
-    let mdns = Mdns::new(MDNS_SERVICE, local_addr.ip(), device).ok()?;
-    let resolver = mdns.clone();
+    match Mdns::new(MDNS_SERVICE, local_addr.ip(), device) {
+        Ok(mdns) => {
+            let resolver = mdns.clone();
 
-    bind_iface.with_components_mut(|components, _| {
-        components.init_with(move || mdns);
-    });
+            bind_iface.with_components_mut(|components, _| {
+                components.init_with(move || mdns);
+            });
 
-    Some((resolver, local_addr))
+            Some((resolver, local_addr))
+        }
+        Err(e) => {
+            tracing::warn!(target: "dns", "Mdns::new failed for {bind_uri} addr={local_addr} device={device}: {e}");
+            None
+        }
+    }
 }
 
 pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
@@ -170,14 +177,20 @@ async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String
             Some((name, ifaces, config))
         })
         .map(|(name, ifaces, config)| async move {
-            publish_resolvers(&name, config, ifaces.iter()).await;
+            // MDNS 和 H3 DNS 发布并行执行，避免 H3 DNS 卡住时阻塞 MDNS
+            let mdns_name = name.clone();
+            let mdns_future = async {
+                ifaces
+                    .iter()
+                    .map(|(uri, iface)| publish_single_mdns(uri, iface, &mdns_name, config))
+                    .collect::<FuturesUnordered<_>>()
+                    .collect::<()>()
+                    .await;
+            };
 
-            ifaces
-                .iter()
-                .map(|(uri, iface)| publish_single_mdns(uri, iface, &name, config))
-                .collect::<FuturesUnordered<_>>()
-                .collect::<()>()
-                .await;
+            let resolvers_future = publish_resolvers(&name, config, ifaces.iter());
+
+            tokio::join!(mdns_future, resolvers_future);
         })
         .collect::<FuturesUnordered<_>>()
         .collect::<()>()

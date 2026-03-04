@@ -26,7 +26,6 @@ tracing-subscriber = { workspace = true }
 
 # --- Networking & HTTP ---
 bytes = { workspace = true }
-h3 = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
@@ -41,7 +40,6 @@ getrandom = { workspace = true }
 
 # --- QUIC Implementation ---
 gm-quic = { workspace = true }
-h3-shim = { workspace = true }
 qevent = { workspace = true }
 
 # --- DNS resolver ---

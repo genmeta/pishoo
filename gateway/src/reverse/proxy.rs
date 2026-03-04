@@ -1,23 +1,19 @@
 use std::{str::FromStr, sync::Arc};
 
 use async_compression::{Level, tokio::bufread::GzipEncoder};
-use bytes::Bytes;
 use futures::TryStreamExt;
-use h3::server::RequestStream;
-use h3_shim::{RecvStream, SendStream};
+use h3x::message::stream::{ReadStream, WriteStream};
 use http::{Request, Response, Uri, Version};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::TokioIo;
 use snafu::{Report, ResultExt};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
-use tokio_stream::StreamExt;
 use tracing::{debug, error};
 
 use crate::{
     command,
     error::{Result, StreamSnafu, Whatever},
-    h3::{H3Sink, H3Stream},
     parse::{Node, Value, pattern::Pattern},
     reverse::{build_error_response, log::RequestInfo},
 };
@@ -25,8 +21,8 @@ use crate::{
 pub async fn handle(
     location: &Arc<Node>,
     req: Request<()>,
-    recver: RequestStream<RecvStream, Bytes>,
-    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
+    recver: ReadStream,
+    mut sender: WriteStream,
 ) -> Result<()> {
     let req_info = RequestInfo::from_request(&req);
 
@@ -60,10 +56,15 @@ pub async fn handle(
             req_info.log_error(&err_msg).await;
 
             let resp = build_error_response();
-            req_info.log_access(resp.status().as_u16(), 0).await;
+            let status_code = resp.status().as_u16();
+            req_info.log_access(status_code, 0).await;
 
-            sender.send_response(resp).await.context(StreamSnafu)?;
-            sender.finish().await.context(StreamSnafu)?;
+            let (parts, _) = resp.into_parts();
+            sender
+                .send_hyper_response_parts(parts)
+                .await
+                .context(StreamSnafu)?;
+            sender.close().await.context(StreamSnafu)?;
             return Ok(());
         }
     };
@@ -116,9 +117,11 @@ pub async fn handle(
     debug!(target: "reverse_proxy", "Sending response headers: {parts:?}");
 
     // 发送响应头
-    let resp1 = Response::from_parts(parts, ());
-    let status_code = resp1.status();
-    sender.send_response(resp1).await.context(StreamSnafu)?;
+    let status_code = parts.status;
+    sender
+        .send_hyper_response_parts(parts)
+        .await
+        .context(StreamSnafu)?;
 
     let body_stream =
         tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
@@ -134,8 +137,8 @@ pub async fn handle(
         Box::new(body_stream)
     };
 
-    let mut stream = H3Sink::new(sender);
-    match tokio::io::copy(&mut reader, &mut stream).await {
+    let mut writer = Box::pin(sender.into_writer());
+    match tokio::io::copy(&mut reader, &mut writer).await {
         Ok(size) => {
             debug!(target: "reverse_proxy", "Request body sent: size={size}");
             req_info.log_access(status_code.as_u16(), size).await;
@@ -146,7 +149,7 @@ pub async fn handle(
             req_info.log_error(&err_msg).await;
         }
     }
-    match stream.shutdown().await {
+    match writer.shutdown().await {
         Ok(()) => debug!(target: "reverse_proxy", "Request finished sent"),
         Err(e) => {
             error!(target: "reverse_proxy", "Error sending request data end: {}", Report::from_error(e))
@@ -159,7 +162,7 @@ pub async fn handle(
 pub async fn pass(
     location: &Node,
     req: Request<()>,
-    receiver: RequestStream<RecvStream, Bytes>,
+    receiver: ReadStream,
 ) -> Result<Response<Incoming>> {
     // 构造目标URI
     let (parts, _) = req.into_parts();
@@ -259,7 +262,12 @@ pub async fn pass(
         }
     });
 
-    let stream = H3Stream::new(receiver).map(|item| item.map(Frame::data));
+    // 使用 h3x ReadStream 的 as_bytes_stream 将接收到的数据转换为 Stream
+    let stream = receiver
+        .into_bytes_stream()
+        .map_ok(Frame::data)
+        .map_err(std::io::Error::from);
+
     // 发送代理请求
     let response = sender
         .send_request(Request::from_parts(new_parts, StreamBody::new(stream)))

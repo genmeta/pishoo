@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
 use dashmap::DashMap;
 use gm_quic::{
     prelude::{
@@ -17,7 +16,7 @@ use gm_quic::{
     },
 };
 use gmdns::resolvers::{H3Resolver, Resolvers};
-use h3::client::SendRequest;
+use h3x::connection::{Connection as H3Connection, settings::Settings};
 use snafu::{Report, ResultExt};
 use tokio::{sync::Mutex, time};
 use tokio_util::task::AbortOnDropHandle;
@@ -56,18 +55,15 @@ fn get_client_config() -> Option<ClientConfig> {
     CLIENT_CONFIG.read().ok().and_then(|guard| guard.clone())
 }
 
-#[derive(Clone)]
-pub struct ReusableConnection {
-    #[allow(unused)]
-    pub quic: Arc<Connection>,
-    pub h3: SendRequest<h3_shim::OpenStreams, Bytes>,
-}
+/// A reusable H3 connection wrapping an h3x Connection
+pub type H3Conn = Arc<H3Connection<Connection>>;
 
 /// H3 Connection reuse pool
 pub struct H3ConnectionPool {
     quic_client: Arc<QuicClient>,
+    h3_settings: Arc<Settings>,
     _maintain_binding: AbortOnDropHandle<()>,
-    h3_clients: Arc<DashMap<String, Arc<Mutex<Option<ReusableConnection>>>>>,
+    h3_clients: Arc<DashMap<String, Arc<Mutex<Option<H3Conn>>>>>,
 }
 
 static GLOBAL_POOL: RwLock<Option<Arc<H3ConnectionPool>>> = RwLock::new(None);
@@ -88,16 +84,8 @@ impl H3ConnectionPool {
                 .with_root_certificates(root_store);
 
             let client = if let Some((cert, key, name)) = config.as_ref() {
-                use std::io::Cursor;
-
-                use rustls_pemfile::certs;
-
-                let cert_chain: Vec<_> = certs(&mut Cursor::new(cert))
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("Failed to parse client certificates");
-
                 builder
-                    .with_identity(name.clone(), cert_chain, key.as_slice())
+                    .with_identity(name.clone(), cert.to_certificate(), key.as_slice())
                     .expect("Failed to create client builder with identity")
                     .build()
             } else {
@@ -237,6 +225,7 @@ impl H3ConnectionPool {
 
         Self {
             quic_client: client,
+            h3_settings: Arc::new(Settings::default()),
             _maintain_binding: maintain_binding,
             h3_clients: Arc::new(DashMap::new()),
         }
@@ -245,10 +234,7 @@ impl H3ConnectionPool {
     /// Get a connection to the specified server.
     ///
     /// If there is already a connection to the given server, just return the existing connection.
-    pub async fn connect(
-        &self,
-        server_name: impl Into<String>,
-    ) -> Result<ReusableConnection, Whatever> {
+    pub async fn connect(&self, server_name: impl Into<String>) -> Result<H3Conn, Whatever> {
         let server_name: String = server_name.into();
         let mut entry = None;
 
@@ -267,7 +253,6 @@ impl H3ConnectionPool {
         let mut entry = entry.lock().await;
 
         if let Some(conn) = entry.as_ref() {
-            // todo: fresh quic conenc
             tracing::debug!(target: "pool", "Reusing connection to {server_name}");
             return Ok(conn.clone());
         }
@@ -279,26 +264,24 @@ impl H3ConnectionPool {
                 .await
                 .whatever_context(format!("Failed to connect to {}", server_name))?;
 
-            let quic_connection = Arc::new(quic_connection);
+            let h3_connection = time::timeout(
+                Duration::from_secs(10),
+                H3Connection::new(self.h3_settings.clone(), quic_connection),
+            )
+            .await
+            .whatever_context("Establish h3 connection timed out")?
+            .whatever_context("Failed to establish HTTP3 connection")?;
 
-            let connect = h3::client::new(h3_shim::QuicConnection::new(quic_connection.clone()));
-            let (mut h3_connection, send_request) = time::timeout(Duration::from_secs(10), connect)
-                .await
-                .whatever_context("Establish h3 connection timed out")?
-                .whatever_context("Failed to establish HTTP3 connection")?;
-
-            let conn = ReusableConnection {
-                quic: quic_connection.clone(),
-                h3: send_request.clone(),
-            };
+            let conn: H3Conn = Arc::new(h3_connection);
 
             *entry = Some(conn.clone());
 
             tokio::spawn({
                 let h3_clients = self.h3_clients.clone();
                 let server_name = server_name.clone();
+                let conn = conn.clone();
                 async move {
-                    _ = h3_connection.wait_idle().await;
+                    _ = conn.closed().await;
                     h3_clients.remove(&server_name);
                 }
             });
@@ -309,7 +292,7 @@ impl H3ConnectionPool {
         };
 
         match connect_or_reuse.await {
-            Ok(send_request) => Ok(send_request),
+            Ok(conn) => Ok(conn),
             Err(error) => {
                 // clean up failed connections
                 tracing::debug!(

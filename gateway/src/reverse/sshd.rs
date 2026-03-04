@@ -1,18 +1,84 @@
-use std::{self, sync::Arc};
+use std::{self, io, pin::Pin, sync::Arc, task::{Context, Poll}};
 
 use bytes::Bytes;
 use firewall_base::pattern::{LocationPattern, LocationPatternKind};
-use h3::server::RequestStream;
-use h3_shim::{RecvStream, SendStream};
+use futures::Stream;
+use h3x::message::stream::{ReadStream, StreamError, WriteStream};
 use http::Request;
 use snafu::ResultExt;
 
 use crate::{
     error::{Result, StreamSnafu},
-    h3::{H3Sink, H3Stream},
     parse::Node,
     reverse::log::RequestInfo,
 };
+
+/// Newtype wrapper around ReadStream that implements `From<ReadStream>` and `Stream`
+///
+/// Needed because `genmeta_ssh3_server::serve` requires `St: From<R> + Stream<Item=Result<Bytes, io::Error>>`
+pub struct H3ReadStreamWrapper {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, io::Error>> + Send + Unpin + 'static>>,
+}
+
+impl From<ReadStream> for H3ReadStreamWrapper {
+    fn from(read_stream: ReadStream) -> Self {
+        use futures::TryStreamExt;
+        let stream = read_stream
+            .into_bytes_stream()
+            .map_err(|e| io::Error::from(e));
+        Self {
+            inner: Box::pin(stream),
+        }
+    }
+}
+
+impl Stream for H3ReadStreamWrapper {
+    type Item = Result<Bytes, io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Unpin for H3ReadStreamWrapper {}
+
+/// Newtype wrapper around WriteStream that implements `From<WriteStream>` and `AsyncWrite`
+///
+/// Needed because `genmeta_ssh3_server::serve` requires `Si: From<W> + AsyncWrite`
+pub struct H3WriteStreamWrapper {
+    inner: Pin<Box<dyn tokio::io::AsyncWrite + Send + Unpin + 'static>>,
+}
+
+impl From<WriteStream> for H3WriteStreamWrapper {
+    fn from(write_stream: WriteStream) -> Self {
+        Self {
+            inner: Box::pin(write_stream.into_writer()),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for H3WriteStreamWrapper {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl Unpin for H3WriteStreamWrapper {}
 
 /// ``` conf
 /// location /ssh {
@@ -31,8 +97,8 @@ pub async fn serve(
     rule_set: Option<&LocationPattern>,
     request: Request<()>,
     client_name: String,
-    recver: RequestStream<RecvStream, Bytes>,
-    sender: RequestStream<SendStream<Bytes>, Bytes>,
+    recver: ReadStream,
+    mut sender: WriteStream,
 ) -> Result<()> {
     let req_info = RequestInfo::from_request(&request);
 
@@ -55,17 +121,24 @@ pub async fn serve(
         ssh_deny,
     };
 
-    let result = genmeta_ssh3_server::serve::<_, _, _, H3Sink, H3Stream>(
-        Arc::new(config),
-        request,
-        final_pattern,
-        rule_set.is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact)),
-        client_name,
-        recver,
-        sender,
-        async |sender, response| sender.send_response(response).await.context(StreamSnafu),
-    )
-    .await;
+    let result =
+        genmeta_ssh3_server::serve::<_, _, _, H3WriteStreamWrapper, H3ReadStreamWrapper>(
+            Arc::new(config),
+            request,
+            final_pattern,
+            rule_set.is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact)),
+            client_name,
+            recver,
+            sender,
+            async |sender, response| {
+                sender
+                    .send_hyper_response(response)
+                    .await
+                    .map_err(|e| std::io::Error::other(format!("{e}")))
+                    .context(StreamSnafu)
+            },
+        )
+        .await;
 
     match &result {
         Ok(()) => {

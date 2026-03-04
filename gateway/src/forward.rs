@@ -4,7 +4,7 @@ use bytes::Bytes;
 use gm_quic::qdns::SystemResolver;
 use gmdns::resolvers::Resolvers;
 use http::{Method, StatusCode};
-use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
 use snafu::{Report, ResultExt};
@@ -19,8 +19,8 @@ use crate::{
     error::{Result, Whatever},
     forward,
     parse::{DnsResolver, Node, ServerConfig, Value},
-    publisher::{H3_DNS_SERVER, MDNS_SERVICE},
     pool::H3ConnectionPool,
+    publisher::{H3_DNS_SERVER, MDNS_SERVICE},
 };
 
 mod normal;
@@ -29,7 +29,7 @@ mod quic;
 #[allow(dead_code)]
 pub static ALPN: &[u8] = b"h3";
 
-type BoxResponse = Response<BoxBody<Bytes, io::Error>>;
+type BoxResponse = Response<UnsyncBoxBody<Bytes, io::Error>>;
 
 /// 从配置节点中读取并设置客户端认证配置
 ///
@@ -204,14 +204,24 @@ pub async fn serve(
 
         tokio::task::spawn(async move {
             // 启动 HTTP/1.1 服务
-            if let Err(error) = http1::Builder::new()
+            let result = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
                 .serve_connection(io, service)
                 .with_upgrades()
-                .await
-            {
-                error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(&error));
+                .await;
+            match &result {
+                Ok(()) => info!(target: "forward_proxy", "HTTP/1.1 serve_connection completed"),
+                Err(error) => {
+                    error!(target: "forward_proxy", "HTTP/1.1 serve_connection failed: {}, is_canceled={}, is_closed={}, is_parse={}, is_user={}, is_incomplete_message={}",
+                        Report::from_error(error),
+                        error.is_canceled(),
+                        error.is_closed(),
+                        error.is_parse(),
+                        error.is_user(),
+                        error.is_incomplete_message(),
+                    );
+                }
             }
         });
     };
@@ -224,8 +234,8 @@ pub async fn serve(
                         .instrument(info_span!(target: "forward_proxy", "accept", %from))
                         .await
                 }
-                Err(_) => {
-                    // 出错时，继续循环以便可响应停止信号
+                Err(e) => {
+                    error!(target: "forward_proxy", "listener.accept() error: {e}");
                 }
             }
         }
@@ -292,7 +302,9 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Str
 
 /// 创建空响应
 fn build_empty_response() -> BoxResponse {
-    let body = Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed();
+    let body = Empty::<Bytes>::new()
+        .map_err(|_| unreachable!())
+        .boxed_unsync();
 
     Response::builder()
         .status(StatusCode::OK)
@@ -305,7 +317,7 @@ fn build_error_response(message: String) -> BoxResponse {
     error!("[Forward] Error response: {}", message);
     let body = Full::new(Bytes::from(message))
         .map_err(|_| unreachable!())
-        .boxed();
+        .boxed_unsync();
 
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)

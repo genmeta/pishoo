@@ -34,3 +34,8 @@ scripts/*
 AGENTS.md
 libstun.rlib
 log
+
+.serena
+
+# Reference repos
+refs/

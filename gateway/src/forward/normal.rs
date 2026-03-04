@@ -1,5 +1,5 @@
 use http::Request;
-use http_body_util::{BodyExt, combinators::BoxBody};
+use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use snafu::Report;
@@ -71,7 +71,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 
     tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
 
-    Ok(resp.map(|b| BoxBody::new(b.map_err(io::Error::other))))
+    Ok(resp.map(|b| UnsyncBoxBody::new(b.map_err(io::Error::other))))
 }
 
 pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {

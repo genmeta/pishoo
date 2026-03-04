@@ -500,7 +500,7 @@ fn compute_change_address(
     }
 
     // 按 (port, ip) 排序
-    candidates.sort_by(|a, b| (a.port(), a.ip()).cmp(&(b.port(), b.ip())));
+    candidates.sort_by_key(|a| (a.port(), a.ip()));
 
     // by_port_ip_asc：取"大于本机"的最小候选，无更大候选则回绕到最小
     if let Some(own) = own_outer_addr {

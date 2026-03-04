@@ -40,18 +40,18 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-h3 = { version = "0.0.8", features = ["tracing"] }
 firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = { path = "../gm-quic/gm-quic" }
-h3-shim = { path = "../gm-quic/h3-shim" }
-h3x = { path = "../h3x" }
-qevent = { path = "../gm-quic/qevent" }
+gm-quic = { git = "https://github.com/genmeta/gm-quic.git", branch = "feat/v0.5" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "feat/v0.5" }
+qevent = { git = "https://github.com/genmeta/gm-quic.git", branch = "feat/v0.5" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
+gmdns = { git = "https://github.com/genmeta/gmdns.git", branch = "feat/resolver", features = [
+    "h3x-resolver",
+] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -88,8 +88,14 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 # --- workspace ---
 gateway = { path = "gateway", default-features = false }
 
-[patch."https://github.com/genmeta/gm-quic.git"]
-gm-quic = { path = "../gm-quic/gm-quic" }
+
+[patch."https://github.com/genmeta/gmdns.git"]
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "feat/v0.5" }
+qdns = { git = "https://github.com/genmeta/gm-quic.git", branch = "feat/v0.5" }
+qinterface = { git = "https://github.com/genmeta/gm-quic.git", branch = "feat/v0.5" }
+
+[patch."https://github.com/genmeta/h3x.git"]
+gm-quic = { git = "https://github.com/genmeta/gm-quic.git", branch = "feat/v0.5" }
 
 [profile.dev]
 panic = "abort"

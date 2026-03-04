@@ -5,7 +5,7 @@ use rustls::RootCertStore;
 
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
-    let root_cert = include_bytes!("../../keychain/rootCA-ECC.crt");
+    let root_cert = include_bytes!("../../keychain/root.crt");
 
     ROOT_CERT_STORE
         .get_or_init(|| {

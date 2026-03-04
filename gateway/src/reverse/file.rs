@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use async_compression::{Level, tokio::bufread::GzipEncoder};
-use bytes::Bytes;
-use h3::server::RequestStream;
-use h3_shim::SendStream;
+use h3x::message::stream::WriteStream;
 use http::{Request, Response, StatusCode, header::CONTENT_LENGTH};
 use snafu::ResultExt;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -12,7 +10,6 @@ use tracing::{debug, error, info};
 use crate::{
     command::{self, content_type, index},
     error::{Result, StreamSnafu, Whatever},
-    h3::H3Sink,
     parse::{Node, Value},
     reverse::log::RequestInfo,
 };
@@ -31,17 +28,13 @@ use crate::{
 ///
 /// * `location`: An `Arc<Node>` containing configuration, expected to hold a `root` path value.
 /// * `req`: The incoming HTTP `Request`. Its URI path is used to determine the file to serve.
-/// * `sender`: The `RequestStream` used to send the HTTP response (either the file or an error) back to the client.
+/// * `sender`: The `WriteStream` used to send the HTTP response (either the file or an error) back to the client.
 ///
 /// # Returns
 ///
 /// * `Ok(())` if a response (either the file or an error message) was successfully initiated.
 /// * `Err` if an error occurred during the process of sending the response (e.g., I/O error in `serve_static_file`).
-pub async fn root(
-    location: &Arc<Node>,
-    req: Request<()>,
-    sender: RequestStream<SendStream<Bytes>, Bytes>,
-) -> Result<()> {
+pub async fn root(location: &Arc<Node>, req: Request<()>, sender: WriteStream) -> Result<()> {
     let Some(Value::Path(root)) = location.get("root") else {
         unreachable!()
     };
@@ -70,7 +63,7 @@ pub async fn root(
 /// * `location`: An `Arc<Node>` containing configuration, expected to hold an `alias` path value.
 /// * `pattern`: The URL path prefix that was matched to invoke this handler.
 /// * `req`: The incoming HTTP `Request`. Its URI path, relative to the `pattern`, is used.
-/// * `sender`: The `RequestStream` used to send the HTTP response (either the file or an error) back to the client.
+/// * `sender`: The `WriteStream` used to send the HTTP response (either the file or an error) back to the client.
 ///
 /// # Returns
 ///
@@ -80,7 +73,7 @@ pub async fn alias(
     location: &Arc<Node>,
     pattern: &str,
     req: Request<()>,
-    sender: RequestStream<SendStream<Bytes>, Bytes>,
+    sender: WriteStream,
 ) -> Result<()> {
     // In the case of an `alias`, it is necessary to remove the matched prefix from the URL.
     let relative_path = req.uri().path().trim_start_matches(pattern);
@@ -116,7 +109,7 @@ async fn serve_static_file(
     location: &Arc<Node>,
     file_path: &str,
     req: &Request<()>,
-    mut sender: RequestStream<SendStream<Bytes>, Bytes>,
+    mut sender: WriteStream,
 ) -> Result<()> {
     let req_info = RequestInfo::from_request(req);
     let uri = req.uri();
@@ -132,15 +125,19 @@ async fn serve_static_file(
                 .expect("Failed to build response");
 
             tracing::info!(target: "static_file", "[Proxy][{}] File not found: {}, error: {}", uri, file_path, index_error);
-            sender.send_response(response).await.context(StreamSnafu)?;
-            sender.finish().await.context(StreamSnafu)?;
+            let (parts, _) = response.into_parts();
+            sender
+                .send_hyper_response_parts(parts)
+                .await
+                .context(StreamSnafu)?;
+            sender.close().await.context(StreamSnafu)?;
 
             req_info.log_access(404, 0).await;
             return Ok(());
         }
     };
 
-    let (mut parts, body) = Response::<()>::default().into_parts();
+    let (mut parts, _body) = Response::<()>::default().into_parts();
 
     parts.status = StatusCode::OK;
 
@@ -193,8 +190,11 @@ async fn serve_static_file(
         parts.headers.insert(CONTENT_LENGTH, file_size.into());
     }
 
-    let response = Response::from_parts(parts, body);
-    sender.send_response(response).await.context(StreamSnafu)?;
+    // 发送响应头
+    sender
+        .send_hyper_response_parts(parts)
+        .await
+        .context(StreamSnafu)?;
 
     let reader = BufReader::new(file);
     let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if should_compress {
@@ -208,8 +208,8 @@ async fn serve_static_file(
         Box::new(reader)
     };
 
-    let mut stream = H3Sink::new(sender);
-    match tokio::io::copy(&mut reader, &mut stream).await {
+    let mut writer = Box::pin(sender.into_writer());
+    match tokio::io::copy(&mut reader, &mut writer).await {
         Ok(size) => {
             req_info.log_access(200, size).await;
         }
@@ -221,7 +221,7 @@ async fn serve_static_file(
         }
     }
 
-    match stream.shutdown().await {
+    match writer.shutdown().await {
         Ok(()) => info!(target: "static_file", "[Proxy][{}] Request finished sent", uri),
         Err(e) => {
             error!(target: "static_file", "[Proxy][{}] Error sending request data end: {}", uri, e)
