@@ -44,7 +44,7 @@ qevent = { workspace = true }
 
 # --- DNS resolver ---
 gmdns = { workspace = true }
-h3x = {workspace = true}
+h3x = { workspace = true }
 
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }

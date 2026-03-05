@@ -1,9 +1,14 @@
-use std::{self, io, pin::Pin, sync::Arc, task::{Context, Poll}};
+use std::{
+    self, io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use bytes::Bytes;
 use firewall_base::pattern::{LocationPattern, LocationPatternKind};
 use futures::Stream;
-use h3x::message::stream::{ReadStream, StreamError, WriteStream};
+use h3x::message::stream::{ReadStream, WriteStream};
 use http::Request;
 use snafu::ResultExt;
 
@@ -17,7 +22,7 @@ use crate::{
 ///
 /// Needed because `genmeta_ssh3_server::serve` requires `St: From<R> + Stream<Item=Result<Bytes, io::Error>>`
 pub struct H3ReadStreamWrapper {
-    inner: Pin<Box<dyn Stream<Item = Result<Bytes, io::Error>> + Send + Unpin + 'static>>,
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, io::Error>> + Send + 'static>>,
 }
 
 impl From<ReadStream> for H3ReadStreamWrapper {
@@ -36,7 +41,7 @@ impl Stream for H3ReadStreamWrapper {
     type Item = Result<Bytes, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        self.inner.as_mut().poll_next(cx)
     }
 }
 
@@ -46,7 +51,7 @@ impl Unpin for H3ReadStreamWrapper {}
 ///
 /// Needed because `genmeta_ssh3_server::serve` requires `Si: From<W> + AsyncWrite`
 pub struct H3WriteStreamWrapper {
-    inner: Pin<Box<dyn tokio::io::AsyncWrite + Send + Unpin + 'static>>,
+    inner: Pin<Box<dyn tokio::io::AsyncWrite + Send + 'static>>,
 }
 
 impl From<WriteStream> for H3WriteStreamWrapper {
@@ -63,18 +68,18 @@ impl tokio::io::AsyncWrite for H3WriteStreamWrapper {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        self.inner.as_mut().poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        self.inner.as_mut().poll_flush(cx)
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        self.inner.as_mut().poll_shutdown(cx)
     }
 }
 
@@ -98,7 +103,7 @@ pub async fn serve(
     request: Request<()>,
     client_name: String,
     recver: ReadStream,
-    mut sender: WriteStream,
+    sender: WriteStream,
 ) -> Result<()> {
     let req_info = RequestInfo::from_request(&request);
 
@@ -121,24 +126,23 @@ pub async fn serve(
         ssh_deny,
     };
 
-    let result =
-        genmeta_ssh3_server::serve::<_, _, _, H3WriteStreamWrapper, H3ReadStreamWrapper>(
-            Arc::new(config),
-            request,
-            final_pattern,
-            rule_set.is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact)),
-            client_name,
-            recver,
-            sender,
-            async |sender, response| {
-                sender
-                    .send_hyper_response(response)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("{e}")))
-                    .context(StreamSnafu)
-            },
-        )
-        .await;
+    let result = genmeta_ssh3_server::serve::<_, _, _, H3WriteStreamWrapper, H3ReadStreamWrapper>(
+        Arc::new(config),
+        request,
+        final_pattern,
+        rule_set.is_some_and(|pat| matches!(pat.kind(), LocationPatternKind::Exact)),
+        client_name,
+        recver,
+        sender,
+        async |sender, response| {
+            let (parts, _body) = response.into_parts();
+            sender
+                .send_hyper_response_parts(parts)
+                .await
+                .context(StreamSnafu)
+        },
+    )
+    .await;
 
     match &result {
         Ok(()) => {

@@ -20,7 +20,6 @@ pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("server", parse_server);
     commands.insert("proxy", parse_proxy);
 
-
     let values = commands.parse(directive.children.into_iter().flatten())?;
 
     Ok(Value::ValueMap(values))

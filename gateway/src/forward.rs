@@ -19,10 +19,10 @@ use crate::{
     error::{Result, Whatever},
     forward,
     parse::{DnsResolver, Node, ServerConfig, Value},
-    pool::H3ConnectionPool,
     publisher::{H3_DNS_SERVER, MDNS_SERVICE},
 };
 
+pub(crate) mod h3_client;
 mod normal;
 mod quic;
 
@@ -78,8 +78,7 @@ fn setup_client_config(node: &Node) -> Result<()> {
         ))?;
 
         // 设置客户端配置
-        if let Err(e) = crate::pool::set_client_config(cert_chain, private_key, client_name.clone())
-        {
+        if let Err(e) = h3_client::set_client_config(cert_chain, private_key, client_name.clone()) {
             info!(target: "forward", "Client config already set: {e}, will reinitialize connection pool");
         } else {
             info!(target: "forward", "Client config set with name: {client_name}");
@@ -155,7 +154,7 @@ pub async fn serve(
 
     // 设置客户端认证配置
     setup_client_config(&node)?;
-    H3ConnectionPool::reinitialize(Some(Arc::new(resolvers.clone()))).await;
+    h3_client::reinitialize(Some(Arc::new(resolvers.clone()))).await;
 
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
@@ -183,7 +182,7 @@ pub async fn serve(
                 match acl.check(&host) {
                     true if is_connect => {
                         debug!(target: "forward_proxy", "QUIC proxying CONNECT request to {host}",);
-                        forward::quic::connect(req).await
+                        forward::quic::connect_tunnel(req).await
                     }
                     true => {
                         debug!(target: "forward_proxy", "QUIC proxying request to {host}");
@@ -260,7 +259,8 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             Ok(())
         }
         Err(launch_error) => {
-            H3ConnectionPool::global().await.clear_connections();
+            // 重新初始化 H3Client，清除旧连接状态
+            h3_client::reinitialize(None).await;
             error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
             Err(launch_error)
         }
@@ -288,13 +288,14 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Str
 
     if host.ends_with("~") {
         host = host.replacen("~", ".genmeta.net", 1);
-        req.headers_mut().insert(
-            http::header::HOST,
-            http::HeaderValue::from_str(&host).unwrap(),
-        );
-        let old_uri = req.uri().clone().to_string();
+        if let Ok(hv) = http::HeaderValue::from_str(&host) {
+            req.headers_mut().insert(http::header::HOST, hv);
+        }
+        let old_uri = req.uri().to_string();
         let new_uri = old_uri.replacen("~", ".genmeta.net", 1);
-        *req.uri_mut() = new_uri.parse().unwrap();
+        if let Ok(parsed) = new_uri.parse() {
+            *req.uri_mut() = parsed;
+        }
     }
 
     Ok(host)

@@ -28,5 +28,3 @@ fn put_parent_recursively(node: &Arc<Node>) {
         }
     }
 }
-
-

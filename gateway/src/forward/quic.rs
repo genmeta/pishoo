@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use http::{Request, Response};
+use h3x::gm_quic::H3Client;
+use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
 use snafu::{Report, ResultExt, Whatever};
@@ -8,10 +9,7 @@ use tokio::io;
 use tracing::{Instrument, error, info};
 
 use super::BoxResponse;
-use crate::{
-    forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host},
-    pool::{H3Conn, H3ConnectionPool},
-};
+use crate::forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host};
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
@@ -24,9 +22,9 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
             return Ok(build_error_response(reason));
         }
     };
-    let pool = H3ConnectionPool::global().await;
+    let client = super::h3_client::global().await;
     // 创建 QUIC 连接
-    let h3_conn = match create_quic_connection(pool.clone(), &host).await {
+    let h3_conn = match connect(&client, &host).await {
         Ok(conn) => conn,
         Err(error) => {
             let report = Report::from_error(error).to_string();
@@ -54,7 +52,9 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
+pub async fn connect_tunnel(
+    req: Request<hyper::body::Incoming>,
+) -> Result<BoxResponse, hyper::Error> {
     tokio::spawn(async move {
         // 升级连接并处理后续请求
         match hyper::upgrade::on(req).await {
@@ -79,7 +79,7 @@ pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse,
 
 /// 将请求通过 quic 转发到目标服务器
 async fn send(
-    h3_conn: H3Conn,
+    h3_conn: Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, Box<dyn std::error::Error + Send + Sync>> {
     // 使用 h3x 的 execute_hyper_request 一步完成：打开流、发送请求、接收响应
@@ -95,13 +95,16 @@ async fn send(
     Ok(Response::from_parts(parts, body))
 }
 
-/// 创建 QUIC 连接
-async fn create_quic_connection(
-    pool: Arc<H3ConnectionPool>,
+/// 通过 h3x 连接池获取连接
+async fn connect(
+    client: &H3Client,
     host: &str,
-) -> Result<H3Conn, Whatever> {
-    let conn = pool
-        .connect(host)
+) -> Result<Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>, Whatever> {
+    let authority: Authority = host
+        .parse()
+        .whatever_context(format!("Invalid host: {host}"))?;
+    let conn = client
+        .connect(authority)
         .await
         .whatever_context(format!("Connect to {host} failed"))?;
     Ok(conn)

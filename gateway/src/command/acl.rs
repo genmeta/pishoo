@@ -42,13 +42,13 @@ impl HostMatch {
         if host == "*" {
             return HostMatch::AllAllow;
         }
-        let (header, remain) = host
-            .split_once('.')
-            .expect("Host pattern string must contain a '.'");
-        if header == "*" {
-            HostMatch::HeaderFuzzy(remain.to_ascii_lowercase())
-        } else {
-            HostMatch::Exact(host.to_ascii_lowercase())
+        match host.split_once('.') {
+            Some(("*", remain)) => HostMatch::HeaderFuzzy(remain.to_ascii_lowercase()),
+            Some(_) => HostMatch::Exact(host.to_ascii_lowercase()),
+            None => {
+                // 没有 '.' 的模式视为精确匹配
+                HostMatch::Exact(host.to_ascii_lowercase())
+            }
         }
     }
 

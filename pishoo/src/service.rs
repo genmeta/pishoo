@@ -71,13 +71,7 @@ pub async fn start_services_from_pishoo_block(
         &Vec::new()
     };
 
-
-    start_services(
-        &mut *handler.lock().await,
-        access_rules,
-        servers,
-        proxys,
-    );
+    start_services(&mut *handler.lock().await, access_rules, servers, proxys);
 
     Ok(())
 }

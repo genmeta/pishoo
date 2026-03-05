@@ -82,15 +82,18 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
     let (mut parts, body) = req.into_parts();
 
     // 默认将 Host 变更为 proxy_pass target
-    if let Some(Value::String(uri)) = node.get("proxy_pass") {
+    let proxy_host = match node.get("proxy_pass") {
+        Some(Value::Uri(uri)) => uri.host().map(|h| h.to_string()),
+        Some(Value::String(s)) => s
+            .parse::<Uri>()
+            .ok()
+            .and_then(|u| u.host().map(|h| h.to_string())),
+        _ => None,
+    };
+    if let Some(host) = proxy_host {
         parts.headers.insert(
             header::HOST,
-            uri.parse::<Uri>()
-                .unwrap()
-                .host()
-                .unwrap_or_default()
-                .to_string()
-                .parse()
+            host.parse()
                 .unwrap_or_else(|_| HeaderValue::from_static("localhost")),
         );
     };

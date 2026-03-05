@@ -1902,7 +1902,7 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/h3x.git?branch=feat%2Fv0.5#ab251f9844f3e4bda6350bd4ee45059592d2cfff"
+source = "git+https://github.com/genmeta/h3x.git?branch=feat%2Fv0.5#9cd225d4ed653c896f17df08a3388e730a8426c8"
 dependencies = [
  "bon",
  "bytes",

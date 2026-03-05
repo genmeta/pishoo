@@ -1,13 +1,12 @@
 use http::{HeaderValue, header, request::Parts};
 
 pub(crate) fn search(parts: &Parts, value: HeaderValue) -> HeaderValue {
-    let name_cloned = value.clone();
-    let value = match value.to_str() {
+    let value_str = match value.to_str() {
         Ok(s) => s,
         Err(_) => return HeaderValue::from_static(""),
     };
 
-    match value {
+    match value_str {
         "$host" => {
             let host = parts.headers.get(header::HOST);
             if let Some(host_value) = host {
@@ -51,6 +50,6 @@ pub(crate) fn search(parts: &Parts, value: HeaderValue) -> HeaderValue {
             };
             HeaderValue::from_static("")
         }
-        _ => name_cloned,
+        _ => value,
     }
 }

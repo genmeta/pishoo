@@ -139,7 +139,7 @@ impl DnsResolver {
             (&config.cert_path, &config.key_path, &config.server_name);
         let (Ok(cert_data), Ok(key_data)) = (std::fs::read(cert_path), std::fs::read(key_path))
         else {
-            panic!("Failed to read cert or key");
+            return self.create_h3_client_no_auth();
         };
 
         // Parse certificates and private key
@@ -196,7 +196,12 @@ impl IfaceRange {
         match self {
             IfaceRange::All => true,
             IfaceRange::Exact(name) => name == iface_name,
-            IfaceRange::External | IfaceRange::Internal => unimplemented!(),
+            IfaceRange::External | IfaceRange::Internal => {
+                tracing::warn!(
+                    "IfaceRange::External/Internal not yet implemented, treating as non-match"
+                );
+                false
+            }
         }
     }
 }
@@ -433,10 +438,11 @@ impl Commands {
                     exist_headers.extend(headers);
                 }
                 Value::SshSslUser(users) => {
-                    let Value::SshSslUser(exist_users) =
-                        values.entry(name).or_insert_with(|| Value::Header(vec![]))
+                    let Value::SshSslUser(exist_users) = values
+                        .entry(name)
+                        .or_insert_with(|| Value::SshSslUser(vec![]))
                     else {
-                        unreachable!("Unexpected value type, should be `Header`");
+                        unreachable!("Unexpected value type, should be `SshSslUser`");
                     };
                     exist_users.extend(users);
                 }

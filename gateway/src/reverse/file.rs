@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_compression::{Level, tokio::bufread::GzipEncoder};
 use h3x::message::stream::WriteStream;
 use http::{Request, Response, StatusCode, header::CONTENT_LENGTH};
 use snafu::ResultExt;
@@ -11,7 +10,7 @@ use crate::{
     command::{self, content_type, index},
     error::{Result, StreamSnafu, Whatever},
     parse::{Node, Value},
-    reverse::log::RequestInfo,
+    reverse::{gzip::GzipConfig, log::RequestInfo},
 };
 
 /// Handles incoming HTTP requests, attempting to serve a static file based on a configured root directory.
@@ -119,19 +118,8 @@ async fn serve_static_file(
     let (file, file_size, file_path) = match index(location, file_path).await {
         Ok(result) => result,
         Err(index_error) => {
-            let response = Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(())
-                .expect("Failed to build response");
-
             tracing::info!(target: "static_file", "[Proxy][{}] File not found: {}, error: {}", uri, file_path, index_error);
-            let (parts, _) = response.into_parts();
-            sender
-                .send_hyper_response_parts(parts)
-                .await
-                .context(StreamSnafu)?;
-            sender.close().await.context(StreamSnafu)?;
-
+            super::send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
             req_info.log_access(404, 0).await;
             return Ok(());
         }
@@ -144,48 +132,16 @@ async fn serve_static_file(
     command::add_header(location, &mut parts);
     content_type(location, &mut parts, &file_path);
 
-    let accept_gzip = req
+    let accept_encoding = req
         .headers()
         .get(http::header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("gzip"))
-        .unwrap_or(false);
+        .and_then(|v| v.to_str().ok());
+    let gzip = GzipConfig::from_location(location, accept_encoding);
 
-    let gzip_enabled = location.get_bool("gzip").unwrap_or(false);
-    let gzip_vary = location.get_bool("gzip_vary").unwrap_or(false);
-    let gzip_min_length = location.get_str_parsed("gzip_min_length").unwrap_or(20);
-    let gzip_comp_level = location.get_str_parsed("gzip_comp_level").unwrap_or(1);
-    let gzip_types = location.get_string_vec("gzip_types");
-
-    let content_type = parts
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(';').next().unwrap_or(v).trim())
-        .unwrap_or("");
-
-    let length_ok = file_size >= gzip_min_length;
-    let type_ok = match &gzip_types {
-        None => content_type == "text/html",
-        Some(types) => types.iter().any(|t| t == "*" || t == content_type),
-    };
-
-    let should_compress = gzip_enabled
-        && accept_gzip
-        && parts.headers.get(http::header::CONTENT_ENCODING).is_none()
-        && length_ok
-        && type_ok;
+    let should_compress = gzip.should_compress(&parts, Some(file_size));
 
     if should_compress {
-        parts
-            .headers
-            .insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
-
-        if gzip_vary {
-            parts
-                .headers
-                .append(http::header::VARY, "Accept-Encoding".parse().unwrap());
-        }
+        gzip.apply_headers(&mut parts);
     } else {
         parts.headers.insert(CONTENT_LENGTH, file_size.into());
     }
@@ -197,16 +153,7 @@ async fn serve_static_file(
         .context(StreamSnafu)?;
 
     let reader = BufReader::new(file);
-    let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if should_compress {
-        let level = match gzip_comp_level {
-            1 => Level::Fastest,
-            9 => Level::Best,
-            l => Level::Precise(l),
-        };
-        Box::new(GzipEncoder::with_quality(reader, level))
-    } else {
-        Box::new(reader)
-    };
+    let mut reader = gzip.wrap_reader(should_compress, reader);
 
     let mut writer = Box::pin(sender.into_writer());
     match tokio::io::copy(&mut reader, &mut writer).await {

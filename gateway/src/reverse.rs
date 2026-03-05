@@ -18,7 +18,7 @@ use h3x::{
 };
 use http::{HeaderValue, Request, Response, StatusCode, Uri};
 use rustls::server::WebPkiClientVerifier;
-use snafu::{OptionExt, Report, ResultExt};
+use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
@@ -34,6 +34,7 @@ use crate::{
 
 mod auth;
 mod file;
+pub(crate) mod gzip;
 pub(crate) mod log;
 mod proxy;
 #[cfg(feature = "sshd")]
@@ -135,11 +136,11 @@ fn init_router(servers: &[Arc<Node>]) -> Result<(RouterMap, HashMap<String, Serv
     for server in servers {
         let cert_path = match server.get("ssl_certificate") {
             Some(Value::Path(p)) => p.clone(),
-            _ => panic!("Missing ssl_certificate"),
+            _ => whatever!("Missing or invalid ssl_certificate for server"),
         };
         let key_path = match server.get("ssl_certificate_key") {
             Some(Value::Path(p)) => p.clone(),
-            _ => panic!("Missing ssl_certificate_key"),
+            _ => whatever!("Missing or invalid ssl_certificate_key for server"),
         };
 
         let resolver = match server.get("resolver") {
@@ -264,7 +265,7 @@ async fn create_quic_listeners(
         // 允许client不带证书
         .allow_unauthenticated()
         .build()
-        .unwrap();
+        .whatever_context::<_, Whatever>("Failed to build TLS client cert verifier")?;
 
     let listeners = builder
         .with_parameters(server_parameters())
@@ -305,7 +306,11 @@ async fn create_quic_listeners(
             if server_name.ends_with('~') {
                 server_name = server_name.replace('~', ".genmeta.net");
             }
-            let bind_uris = server_bind_uris.get(&server_name).unwrap();
+            let bind_uris = server_bind_uris
+                .get(&server_name)
+                .whatever_context::<_, Whatever>(format!(
+                    "No bind URIs found for server `{server_name}`"
+                ))?;
             debug!(server_name, ?bind_uris, "Adding server");
             listeners
                 .add_server(
@@ -408,87 +413,6 @@ async fn handle_connections(
 ) -> Result<()> {
     let h3_settings = Arc::new(Settings::default());
 
-    let handle_connection = async |conn: gm_quic::prelude::Connection,
-                                   server_name: String,
-                                   h3_settings: Arc<Settings>| {
-        info!(target: "connect", "Accepted connection");
-
-        // 建立H3连接
-        let h3_conn = Arc::new(
-            H3Connection::new(h3_settings, conn)
-                .await
-                .whatever_context::<_, Whatever>("Failed to establish H3 connection")?,
-        );
-
-        debug!(target: "connect", "H3 connection established");
-        debug!(target: "connect", "RouterMap: {:?}", router);
-
-        let router = router.clone();
-        let access_rules = access_rules.clone();
-
-        let h3_conn_for_accept = h3_conn.clone();
-        let handle_request_fn = Arc::new(
-            async move |request: Request<()>, recver: ReadStream, sender: WriteStream| {
-                let span = info_span!("handle_request", uri=%request.uri());
-                let handle_result = handle_request(
-                    server_name.clone(),
-                    router.clone(),
-                    access_rules.clone(),
-                    h3_conn.clone(),
-                    request,
-                    recver,
-                    sender,
-                )
-                .await;
-
-                async move {
-                    info!(target: "request", "Resolved new request");
-
-                    if let Err(handle_request_error) = handle_result {
-                        error!(
-                            target: "request", "Failed to handle resolved request: {}",
-                            Report::from_error(handle_request_error)
-                        );
-                    }
-                }
-                .instrument(span)
-                .await
-            },
-        );
-
-        // 为每个连接创建异步任务
-        let accept_requests = async move {
-            loop {
-                match h3_conn_for_accept.accept_request_stream().await {
-                    Ok((mut read_stream, write_stream)) => {
-                        let handle_request_fn = handle_request_fn.clone();
-                        let task = async move {
-                            match read_stream.read_hyper_request_parts().await {
-                                Ok(parts) => {
-                                    let request = Request::from_parts(parts, ());
-                                    handle_request_fn(request, read_stream, write_stream).await;
-                                }
-                                Err(e) => error!(
-                                    target: "request", "Failed to read request: {}",
-                                    Report::from_error(e)
-                                ),
-                            }
-                        };
-                        tokio::spawn(task.in_current_span());
-                    }
-                    Err(e) => {
-                        error!(
-                            target: "connect", "Failed to accept more request: {}",
-                            Report::from_error(e)
-                        );
-                        break;
-                    }
-                }
-            }
-        };
-        Result::<_, Whatever>::Ok(tokio::spawn(accept_requests.in_current_span()))
-    };
-
     // 持续接受新连接
     while let Ok((conn, server_name, pathway, link)) = quic_server.accept().await {
         let span = info_span!(
@@ -498,17 +422,107 @@ async fn handle_connections(
             %link
         );
         let h3_settings = h3_settings.clone();
-        async move {
-            if let Err(error) = handle_connection(conn, server_name, h3_settings).await {
-                error!(
-                    target: "connect", "Failed to handle connection: {}",
-                    Report::from_error(error)
-                );
+        let router = router.clone();
+        let access_rules = access_rules.clone();
+        tokio::spawn(
+            async move {
+                if let Err(error) =
+                    handle_single_connection(conn, server_name, h3_settings, router, access_rules)
+                        .await
+                {
+                    error!(
+                        target: "connect", "Failed to handle connection: {}",
+                        Report::from_error(error)
+                    );
+                }
+            }
+            .instrument(span),
+        );
+    }
+    Ok(())
+}
+
+/// 处理单个 QUIC 连接的 H3 握手和请求接受
+async fn handle_single_connection(
+    conn: gm_quic::prelude::Connection,
+    server_name: String,
+    h3_settings: Arc<Settings>,
+    router: Arc<HashMap<String, Arc<Node>>>,
+    access_rules: Arc<LocationRulesMatcher>,
+) -> Result<()> {
+    info!(target: "connect", "Accepted connection");
+
+    // 建立H3连接
+    let h3_conn = Arc::new(
+        H3Connection::new(h3_settings, conn)
+            .await
+            .whatever_context::<_, Whatever>("Failed to establish H3 connection")?,
+    );
+
+    debug!(target: "connect", "H3 connection established");
+    debug!(target: "connect", "RouterMap: {:?}", router);
+
+    let h3_conn_for_accept = h3_conn.clone();
+    let handle_request_fn = Arc::new(
+        async move |request: Request<()>, recver: ReadStream, sender: WriteStream| {
+            let span = info_span!("handle_request", uri=%request.uri());
+            let handle_result = handle_request(
+                server_name.clone(),
+                router.clone(),
+                access_rules.clone(),
+                h3_conn.clone(),
+                request,
+                recver,
+                sender,
+            )
+            .await;
+
+            async move {
+                info!(target: "request", "Resolved new request");
+
+                if let Err(handle_request_error) = handle_result {
+                    error!(
+                        target: "request", "Failed to handle resolved request: {}",
+                        Report::from_error(handle_request_error)
+                    );
+                }
+            }
+            .instrument(span)
+            .await
+        },
+    );
+
+    // 为每个连接创建异步任务
+    let accept_requests = async move {
+        loop {
+            match h3_conn_for_accept.accept_request_stream().await {
+                Ok((mut read_stream, write_stream)) => {
+                    let handle_request_fn = handle_request_fn.clone();
+                    let task = async move {
+                        match read_stream.read_hyper_request_parts().await {
+                            Ok(parts) => {
+                                let request = Request::from_parts(parts, ());
+                                handle_request_fn(request, read_stream, write_stream).await;
+                            }
+                            Err(e) => error!(
+                                target: "request", "Failed to read request: {}",
+                                Report::from_error(e)
+                            ),
+                        }
+                    };
+                    tokio::spawn(task.in_current_span());
+                }
+                Err(e) => {
+                    error!(
+                        target: "connect", "Failed to accept more request: {}",
+                        Report::from_error(e)
+                    );
+                    break;
+                }
             }
         }
-        .instrument(span)
-        .await;
-    }
+    };
+    tokio::spawn(accept_requests.in_current_span());
     Ok(())
 }
 
@@ -520,7 +534,7 @@ async fn handle_request(
     conn: Arc<H3Connection<gm_quic::prelude::Connection>>,
     req: Request<()>,
     recver: ReadStream,
-    mut sender: WriteStream,
+    sender: WriteStream,
 ) -> Result<()> {
     tracing::debug!(target: "request", ?req);
     // 查找匹配的路由规则
@@ -532,9 +546,9 @@ async fn handle_request(
         ))?;
 
     let locations = if let Some(Value::Nodes(locations)) = server.get("location") {
-        locations
+        locations.as_slice()
     } else {
-        &Vec::new()
+        &[]
     };
 
     let (location, final_pattern) = match_location(locations, req.uri().path())
@@ -566,18 +580,8 @@ async fn handle_request(
     };
 
     if firewall_action == RequestAction::Deny {
-        let response = Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(())
-            .expect("Failed to build response");
-
         info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", req.uri());
-        let (parts, _) = response.into_parts();
-        sender
-            .send_hyper_response_parts(parts)
-            .await
-            .context(StreamSnafu)?;
-        sender.close().await.context(StreamSnafu)?;
+        send_status_and_close(sender, StatusCode::FORBIDDEN).await?;
         return Ok(());
     }
 
@@ -609,17 +613,7 @@ async fn handle_request(
                 .await?;
         }
         _ => {
-            let response = Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(())
-                .expect("Failed to build response");
-
-            let (parts, _) = response.into_parts();
-            sender
-                .send_hyper_response_parts(parts)
-                .await
-                .context(StreamSnafu)?;
-            sender.close().await.context(StreamSnafu)?;
+            send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
         }
     }
     Ok(())
@@ -738,9 +732,15 @@ fn build_response(status: StatusCode) -> Response<()> {
         .expect("Failed to build response")
 }
 
-/// 构造错误响应
-fn build_error_response() -> Response<()> {
-    build_response(StatusCode::INTERNAL_SERVER_ERROR)
+/// 发送状态码响应并关闭流
+async fn send_status_and_close(mut sender: WriteStream, status: StatusCode) -> Result<()> {
+    let (parts, _) = build_response(status).into_parts();
+    sender
+        .send_hyper_response_parts(parts)
+        .await
+        .context(StreamSnafu)?;
+    sender.close().await.context(StreamSnafu)?;
+    Ok(())
 }
 
 struct ShutdownListenersOnDrop(Arc<QuicListeners>);

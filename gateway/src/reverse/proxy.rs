@@ -1,6 +1,5 @@
 use std::{str::FromStr, sync::Arc};
 
-use async_compression::{Level, tokio::bufread::GzipEncoder};
 use futures::TryStreamExt;
 use h3x::message::stream::{ReadStream, WriteStream};
 use http::{Request, Response, Uri, Version};
@@ -15,7 +14,7 @@ use crate::{
     command,
     error::{Result, StreamSnafu, Whatever},
     parse::{Node, Value, pattern::Pattern},
-    reverse::{build_error_response, log::RequestInfo},
+    reverse::{gzip::GzipConfig, log::RequestInfo},
 };
 
 pub async fn handle(
@@ -29,18 +28,11 @@ pub async fn handle(
     // proxy_set_header
     let req = command::proxy_set_header(location, req);
 
-    let accept_gzip = req
+    let accept_encoding = req
         .headers()
         .get(http::header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("gzip"))
-        .unwrap_or(false);
-
-    let gzip_enabled = location.get_bool("gzip").unwrap_or(false);
-    let gzip_vary = location.get_bool("gzip_vary").unwrap_or(false);
-    let gzip_min_length = location.get_str_parsed("gzip_min_length").unwrap_or(20);
-    let gzip_comp_level = location.get_str_parsed("gzip_comp_level").unwrap_or(1);
-    let gzip_types = location.get_string_vec("gzip_types");
+        .and_then(|v| v.to_str().ok());
+    let gzip = GzipConfig::from_location(location, accept_encoding);
 
     debug!(
         target: "reverse_proxy",
@@ -54,17 +46,9 @@ pub async fn handle(
             let err_msg = format!("Proxy request error: {}", Report::from_error(e));
             error!(target: "reverse_proxy", "{}", err_msg);
             req_info.log_error(&err_msg).await;
+            req_info.log_access(500, 0).await;
 
-            let resp = build_error_response();
-            let status_code = resp.status().as_u16();
-            req_info.log_access(status_code, 0).await;
-
-            let (parts, _) = resp.into_parts();
-            sender
-                .send_hyper_response_parts(parts)
-                .await
-                .context(StreamSnafu)?;
-            sender.close().await.context(StreamSnafu)?;
+            super::send_status_and_close(sender, http::StatusCode::INTERNAL_SERVER_ERROR).await?;
             return Ok(());
         }
     };
@@ -72,43 +56,16 @@ pub async fn handle(
     debug!(target: "reverse_proxy", "Sending response");
     let (mut parts, body) = resp.into_parts();
 
-    let content_type = parts
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(';').next().unwrap_or(v).trim())
-        .unwrap_or("");
-
     let content_length = parts
         .headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
-    let length_ok = content_length.map(|l| l >= gzip_min_length).unwrap_or(true);
-
-    let type_ok = match &gzip_types {
-        None => content_type == "text/html",
-        Some(types) => types.iter().any(|t| t == "*" || t == content_type),
-    };
-
-    let should_compress = gzip_enabled
-        && accept_gzip
-        && parts.headers.get(http::header::CONTENT_ENCODING).is_none()
-        && length_ok
-        && type_ok;
+    let should_compress = gzip.should_compress(&parts, content_length);
 
     if should_compress {
-        parts
-            .headers
-            .insert(http::header::CONTENT_ENCODING, "gzip".parse().unwrap());
-        parts.headers.remove(http::header::CONTENT_LENGTH);
-
-        if gzip_vary {
-            parts
-                .headers
-                .append(http::header::VARY, "Accept-Encoding".parse().unwrap());
-        }
+        gzip.apply_headers(&mut parts);
     }
 
     // 添加自定义响应头字段
@@ -126,16 +83,7 @@ pub async fn handle(
     let body_stream =
         tokio_util::io::StreamReader::new(body.into_data_stream().map_err(std::io::Error::other));
 
-    let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if should_compress {
-        let level = match gzip_comp_level {
-            1 => Level::Fastest,
-            9 => Level::Best,
-            l => Level::Precise(l),
-        };
-        Box::new(GzipEncoder::with_quality(body_stream, level))
-    } else {
-        Box::new(body_stream)
-    };
+    let mut reader = gzip.wrap_reader(should_compress, body_stream);
 
     let mut writer = Box::pin(sender.into_writer());
     match tokio::io::copy(&mut reader, &mut writer).await {
@@ -197,11 +145,10 @@ pub async fn pass(
                 // 精确匹配时, 直接替换整个路径, 不需要额外处理
                 // 正则匹配时, 忽略 proxy_pass 的 path 部分
             }
-            Pattern::Prefix(p) => {
-                path_and_query = path_and_query.replace(p, proxy_pass.path());
-            }
-            Pattern::NormalPrefix(p) => {
-                path_and_query = path_and_query.replace(p, proxy_pass.path());
+            Pattern::Prefix(p) | Pattern::NormalPrefix(p) => {
+                if let Some(rest) = path_and_query.strip_prefix(p.as_str()) {
+                    path_and_query = format!("{}{}", proxy_pass.path(), rest);
+                }
             }
         }
     }
