@@ -8,7 +8,6 @@ use std::{
 use gm_quic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::Family,
-    qdns::Publish as DnsPublisher,
     qinterface::{
         BindInterface, WeakInterface,
         bind_uri::BindUriScheme,
@@ -30,9 +29,11 @@ use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, warn};
 
+use crate::publisher::ServerConfig;
+
 const STUN_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const STUN_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
-const STUN_DOMAIN: &str = "stun.genmeta.net";
+pub const STUN_DOMAIN: &str = "stun.genmeta.net";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 数据结构
@@ -119,25 +120,32 @@ impl DynamicStunHandle {
 }
 
 impl StunServerManager {
-    /// 启动 StunServerManager，持久持有返回值
     pub fn spawn(
         listeners: Arc<QuicListeners>,
-        publishers: Vec<Arc<dyn DnsPublisher + Send + Sync>>,
+        publish_config: ServerConfig,
         config: StunNodeConfig,
     ) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
-            // 两类 handle 分开管理
             let mut configured_handles: HashMap<SocketAddr, ConfiguredStunHandle> = HashMap::new();
             let mut dynamic_handles: HashMap<BindUri, DynamicStunHandle> = HashMap::new();
+            let use_configured = config.has_configured_binds();
 
-            // 首次拉起
-            reconcile_configured(&config, &mut configured_handles);
-            reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+            macro_rules! reconcile {
+                () => {
+                    if use_configured {
+                        reconcile_configured(&config, &mut configured_handles);
+                    } else {
+                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+                    }
+                };
+            }
+
+            reconcile!();
             publish_stun_endpoints(
                 &listeners,
                 &configured_handles,
                 &dynamic_handles,
-                &publishers,
+                &publish_config,
                 &config,
             )
             .await;
@@ -151,19 +159,16 @@ impl StunServerManager {
             loop {
                 tokio::select! {
                     _ = observer.recv() => {
-                        // 防抖 50ms
                         time::sleep(Duration::from_millis(50)).await;
-                        reconcile_configured(&config, &mut configured_handles);
-                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
+                        reconcile!();
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                     _ = timer.tick() => {
-                        reconcile_configured(&config, &mut configured_handles);
-                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
+                        reconcile!();
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publishers, &config).await;
+                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                 }
             }
@@ -523,9 +528,14 @@ async fn publish_stun_endpoints(
     listeners: &Arc<QuicListeners>,
     configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
     dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
-    publishers: &[Arc<dyn DnsPublisher + Send + Sync>],
+    publish_config: &ServerConfig,
     config: &StunNodeConfig,
 ) {
+    if publish_config.resolvers.is_empty() {
+        warn!(target: "stun", "STUN endpoints found but no DNS publisher resolver available, cannot publish");
+        return;
+    }
+
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
 
     // 1. Configured bind 块：直接用配置的 outer_address（或 bind_address）
@@ -564,24 +574,22 @@ async fn publish_stun_endpoints(
         return;
     }
 
-    if publishers.is_empty() {
-        warn!(target: "stun", "STUN endpoints found but no DNS publisher resolver available, cannot publish");
-        return;
-    }
-
-    let endpoints: Vec<DnsEndpointAddr> = outer_addrs
+    let mut endpoints: Vec<DnsEndpointAddr> = outer_addrs
         .iter()
         .map(|addr| match addr {
             SocketAddr::V4(a) => DnsEndpointAddr::direct_v4(*a),
             SocketAddr::V6(a) => DnsEndpointAddr::direct_v6(*a),
         })
         .collect();
+    endpoints
+        .iter_mut()
+        .for_each(|ep| publish_config.sign_endpoint(ep));
 
     let mut hosts = HashMap::new();
     hosts.insert(STUN_DOMAIN.to_string(), endpoints);
     let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
-    for publisher in publishers {
+    for publisher in &publish_config.resolvers {
         if let Err(e) = publisher.publish(STUN_DOMAIN, &packet).await {
             warn!(
                 target: "stun",

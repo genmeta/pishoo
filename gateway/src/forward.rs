@@ -18,8 +18,8 @@ use crate::{
     command,
     error::{Result, Whatever},
     forward,
-    parse::{DnsResolver, Node, ServerConfig, Value},
-    publisher::{H3_DNS_SERVER, MDNS_SERVICE},
+    parse::{DnsResolver, Node, Value, optional_server_identity},
+    publisher::MDNS_SERVICE,
 };
 
 pub(crate) mod h3_client;
@@ -118,39 +118,12 @@ pub async fn serve(
 
     info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
-    let config = if let (
-        Some(Value::Path(cert_path)),
-        Some(Value::Path(key_path)),
-        Some(Value::String(server_name)),
-    ) = (
-        node.get("ssl_certificate"),
-        node.get("ssl_certificate_key"),
-        node.get("client_name"),
-    ) {
-        Some(ServerConfig {
-            cert_path: cert_path.clone(),
-            key_path: key_path.clone(),
-            server_name: server_name.clone(),
-            server_id: 0,
-        })
-    } else {
-        None
-    };
-
-    let resolvers = if let Some(Value::DnsResolver(resolver)) = node.get("resolver") {
-        Resolvers::default()
-            .with(resolver.create_resolver(config.as_ref()))
-            .with(Arc::new(SystemResolver))
-    } else {
-        let default_uri: http::Uri = H3_DNS_SERVER.parse().expect("Valid default URI");
-        let resolver = DnsResolver {
-            base_url: default_uri,
-        };
-        Resolvers::default()
-            .with(resolver.create_resolver(config.as_ref()))
-            .with(Arc::new(SystemResolver))
-    }
-    .with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
+    let config = optional_server_identity(&node, "client_name");
+    let resolver = DnsResolver::from_node_or_default(&node);
+    let resolvers = Resolvers::default()
+        .with(resolver.create_resolver(config.as_ref()))
+        .with(Arc::new(SystemResolver))
+        .with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
 
     // 设置客户端认证配置
     setup_client_config(&node)?;

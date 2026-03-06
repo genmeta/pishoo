@@ -23,7 +23,7 @@ use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::error::Whatever;
+use crate::{error::Whatever, publisher::H3_DNS_SERVER};
 
 pub mod conf;
 mod location;
@@ -83,13 +83,26 @@ pub struct ServerConfig {
     pub server_id: u8,
 }
 
-// DNS resolver configuration for queries (no certificates needed)
+// DNS resolver configuration for queries (some H3 DNS servers require client certificates)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolver {
     pub base_url: Uri,
 }
 
 impl DnsResolver {
+    pub fn default_h3() -> Self {
+        Self {
+            base_url: H3_DNS_SERVER.parse().expect("Invalid H3_DNS_SERVER"),
+        }
+    }
+
+    pub fn from_node_or_default(node: &Node) -> Self {
+        match node.get("resolver") {
+            Some(Value::DnsResolver(resolver)) => resolver.clone(),
+            _ => Self::default_h3(),
+        }
+    }
+
     pub fn create_resolver(
         &self,
         config: Option<&ServerConfig>,
@@ -160,6 +173,43 @@ impl DnsResolver {
             .expect("Failed to configure client identity")
             .build()
     }
+}
+
+pub fn server_id_or_default(node: &Node) -> u8 {
+    match node.get("server_id") {
+        Some(Value::ServerId(id)) => *id,
+        _ => 0,
+    }
+}
+
+pub fn normalize_server_name(mut server_name: String) -> String {
+    if server_name.ends_with('~') {
+        server_name = server_name.replace('~', ".genmeta.net");
+    }
+    server_name
+}
+
+pub fn server_identity(node: &Node, server_name: String) -> Option<ServerConfig> {
+    let (Some(Value::Path(cert_path)), Some(Value::Path(key_path))) =
+        (node.get("ssl_certificate"), node.get("ssl_certificate_key"))
+    else {
+        return None;
+    };
+
+    Some(ServerConfig {
+        cert_path: cert_path.clone(),
+        key_path: key_path.clone(),
+        server_name,
+        server_id: server_id_or_default(node),
+    })
+}
+
+pub fn optional_server_identity(node: &Node, server_name_key: &str) -> Option<ServerConfig> {
+    let Some(Value::String(server_name)) = node.get(server_name_key) else {
+        return None;
+    };
+
+    server_identity(node, server_name.clone())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]

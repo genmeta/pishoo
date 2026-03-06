@@ -17,7 +17,7 @@ pub enum CustomError {
 
     #[snafu(display("Http3 stream I/O error"))]
     Stream {
-        source: h3x::message::stream::StreamError,
+        source: h3x::message::stream::MessageStreamError,
     },
 
     #[snafu(transparent)]

@@ -19,7 +19,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 #[allow(dead_code)]
 pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
-pub const H3_DNS_SERVER: &str = "https://localhost:4433";
+pub const H3_DNS_SERVER: &str = "https://dns.genmeta.net:4433";
 pub const MDNS_SERVICE: &str = "_genmeta.local";
 
 pub struct Publisher {
@@ -36,7 +36,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
+    pub(crate) fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
         ep.set_main(self.server_id == MAIN_SERVER_ID);
         ep.set_sequence(self.server_id as u64);
         if let Some((key, scheme)) = &self.signing_key
