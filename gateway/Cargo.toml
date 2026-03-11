@@ -35,6 +35,7 @@ firewall-base = { workspace = true, features = ["http"] }
 # --- Security & TLS ---
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
+tokio-rustls = { workspace = true }
 rustls-pemfile = "2"
 getrandom = { workspace = true }
 

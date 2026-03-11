@@ -11,7 +11,7 @@ pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
 
     commands.insert("listen", parse_address);
     commands.insert("client_name", parse_string);
-    commands.insert("resolver", parse_resolver);
+    commands.insert("dns", parse_resolver);
     commands.insert("ssl_certificate", parse_path);
     commands.insert("ssl_certificate_key", parse_path);
     commands.insert("allow", parse_string_vec);

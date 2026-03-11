@@ -27,9 +27,6 @@ keychain/test.genmeta.net
 keychain/mcp.test.genmeta.net
 keychain/borber.pilot.genmeta.net
 
-# Scripts
-scripts/*
-
 # Agent instructions
 AGENTS.md
 libstun.rlib
@@ -39,3 +36,9 @@ log
 
 # Reference repos
 refs/
+.ace-tool/
+
+doc
+tmp/
+
+TODO

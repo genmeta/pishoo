@@ -124,6 +124,7 @@ assets = [["target/release/pishoo", "usr/bin/", "755"]]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
+genmeta-home = { workspace = true }
 
 # --- Core & Error Handling ---
 snafu = { workspace = true }

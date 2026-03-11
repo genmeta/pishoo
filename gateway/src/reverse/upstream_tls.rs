@@ -1,0 +1,301 @@
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use http::Uri;
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{PrivateKeyDer, ServerName},
+};
+use rustls_pemfile::{certs, private_key};
+use snafu::{ResultExt, ensure_whatever, whatever};
+use tokio::net::TcpStream;
+use tokio_rustls::{TlsConnector, client::TlsStream};
+use tracing::debug;
+
+use crate::{
+    error::Whatever,
+    parse::{Node, Value},
+};
+
+type Result<T, E = Whatever> = std::result::Result<T, E>;
+
+#[derive(Debug, Clone, Default)]
+struct UpstreamTlsSettings {
+    client_cert: Option<PathBuf>,
+    client_key: Option<PathBuf>,
+    trusted_ca: Option<PathBuf>,
+}
+
+impl UpstreamTlsSettings {
+    /// 从 location 配置节点中提取上游 TLS 所需的证书路径。
+    fn from_location(location: &Node) -> Self {
+        Self {
+            client_cert: path_from_value(location.get("proxy_ssl_certificate")),
+            client_key: path_from_value(location.get("proxy_ssl_certificate_key")),
+            trusted_ca: path_from_value(location.get("proxy_ssl_trusted_certificate")),
+        }
+    }
+}
+
+/// 连接 HTTPS 上游，并在 TCP 连接之上完成 TLS 握手。
+pub(super) async fn connect_https(
+    location: &Node,
+    proxy_pass: &Uri,
+) -> Result<TlsStream<TcpStream>> {
+    // 先从 proxy_pass 中解析服务端主机名和端口，作为 TCP 连接与 SNI 的输入。
+    let host = proxy_pass.host().expect("Missing host in proxy_pass URI");
+    let port = proxy_pass.port_u16().unwrap_or(443);
+    let server_name = ServerName::try_from(host.to_string())
+        .whatever_context::<_, Whatever>(format!("Invalid upstream TLS server name `{host}`"))?;
+
+    debug!(target: "upstream_tls", host, port, "Connecting to HTTPS upstream");
+
+    let tcp_stream = TcpStream::connect((host, port))
+        .await
+        .whatever_context::<_, Whatever>(format!(
+            "Cannot connect to HTTPS upstream {host}:{port}"
+        ))?;
+
+    // 根据 location 中的 TLS 配置构造客户端配置，再执行 TLS 握手。
+    let tls_config = build_client_config(location)?;
+    let connector = TlsConnector::from(tls_config);
+
+    let tls_stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .whatever_context::<_, Whatever>(format!(
+            "Failed to establish TLS connection to upstream {host}:{port}"
+        ))?;
+
+    Ok(tls_stream)
+}
+
+/// 构建上游 TLS 客户端配置，支持自定义 CA 和可选的双向 TLS 客户端证书。
+fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
+    let settings = UpstreamTlsSettings::from_location(location);
+
+    // 客户端证书和私钥必须成对出现，否则无法完成双向 TLS 配置。
+    ensure_whatever!(
+        settings.client_cert.is_some() == settings.client_key.is_some(),
+        "proxy_ssl_certificate and proxy_ssl_certificate_key must be configured together"
+    );
+
+    debug!(
+        target: "upstream_tls",
+        client_auth_enabled = settings.client_cert.is_some(),
+        custom_trusted_ca = settings.trusted_ca.is_some(),
+        "Building upstream TLS client config"
+    );
+
+    let root_store = build_root_store(settings.trusted_ca.as_deref())?;
+    let builder = ClientConfig::builder().with_root_certificates(root_store);
+
+    // 如果显式配置了客户端证书和私钥，则开启双向 TLS；否则退回到单向校验。
+    let mut config = if let (Some(cert_path), Some(key_path)) = (
+        settings.client_cert.as_deref(),
+        settings.client_key.as_deref(),
+    ) {
+        let cert_chain = load_cert_chain(cert_path, "upstream client certificate")?;
+        let private_key = load_private_key(key_path)?;
+
+        builder
+            .with_client_auth_cert(cert_chain, private_key)
+            .whatever_context::<_, Whatever>(format!(
+                "Failed to configure upstream TLS client identity from `{}` and `{}`",
+                cert_path.display(),
+                key_path.display()
+            ))?
+    } else {
+        builder.with_no_client_auth()
+    };
+
+    config.enable_sni = true;
+    Ok(Arc::new(config))
+}
+
+/// 构建根证书池：默认使用系统/项目内置根证书，并按需追加自定义上游 CA。
+fn build_root_store(trusted_ca: Option<&Path>) -> Result<RootCertStore> {
+    let mut root_store = crate::common::root_cert().as_ref().clone();
+
+    if let Some(ca_path) = trusted_ca {
+        let trusted_certs = load_cert_chain(ca_path, "upstream trusted CA certificate")?;
+
+        // 自定义 CA 证书链中的每一张证书都加入根证书池，供后续校验上游证书使用。
+        for cert in trusted_certs {
+            root_store
+                .add(cert)
+                .whatever_context::<_, Whatever>(format!(
+                    "Failed to add upstream trusted CA certificate from `{}`",
+                    ca_path.display()
+                ))?;
+        }
+    }
+
+    Ok(root_store)
+}
+
+/// 从 PEM 文件中读取证书链，并校验文件中至少包含一张证书。
+fn load_cert_chain(
+    path: &Path,
+    label: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let cert_bytes = std::fs::read(path).whatever_context::<_, Whatever>(format!(
+        "Failed to read {label} from `{}`",
+        path.display()
+    ))?;
+
+    let cert_chain = certs(&mut Cursor::new(cert_bytes))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .whatever_context::<_, Whatever>(format!(
+            "Failed to parse {label} from `{}`",
+            path.display()
+        ))?;
+
+    ensure_whatever!(
+        !cert_chain.is_empty(),
+        "No certificates found in {} `{}`",
+        label,
+        path.display()
+    );
+
+    Ok(cert_chain)
+}
+
+/// 从 PEM 文件中读取私钥，用于配置上游双向 TLS 的客户端身份。
+fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let key_bytes = std::fs::read(path).whatever_context::<_, Whatever>(format!(
+        "Failed to read upstream client private key from `{}`",
+        path.display()
+    ))?;
+
+    let mut cursor = Cursor::new(key_bytes);
+    let parsed_key = private_key(&mut cursor)
+        .whatever_context::<_, Whatever>(format!(
+            "Failed to parse upstream client private key from `{}`",
+            path.display()
+        ))?
+        .map(|private_key| private_key.clone_key());
+
+    let Some(private_key) = parsed_key else {
+        whatever!("No private key found in `{}`", path.display());
+    };
+
+    Ok(private_key)
+}
+
+/// 仅当配置值本身就是路径类型时，才提取出对应的文件路径。
+fn path_from_value(value: Option<&Value>) -> Option<PathBuf> {
+    match value {
+        Some(Value::Path(path)) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, path::PathBuf, sync::Once};
+
+    use super::*;
+    use crate::parse::Value;
+
+    static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
+
+    fn ensure_crypto_provider() {
+        INSTALL_CRYPTO_PROVIDER.call_once(|| {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .expect("ring crypto provider should install once");
+        });
+    }
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(relative)
+    }
+
+    fn test_location(values: HashMap<String, Value>) -> Node {
+        Node::new(Value::ValueMap(values))
+    }
+
+    #[test]
+    fn test_load_cert_chain_from_existing_fixture() {
+        let cert_path = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
+
+        let certs = load_cert_chain(&cert_path, "test fixture certificate")
+            .expect("fixture certificate should load");
+
+        assert!(!certs.is_empty());
+    }
+
+    #[test]
+    fn test_load_private_key_from_existing_fixture() {
+        let key_path = fixture_path("keychain/test.genmeta.net/test.genmeta.net.key");
+
+        let key = load_private_key(&key_path).expect("fixture private key should load");
+
+        assert!(!key.secret_der().is_empty());
+    }
+
+    #[test]
+    fn test_build_client_config_with_trusted_ca_only() {
+        ensure_crypto_provider();
+
+        let trusted_ca = fixture_path("keychain/root.crt");
+        let mut values = HashMap::new();
+        values.insert(
+            "proxy_ssl_trusted_certificate".to_string(),
+            Value::Path(trusted_ca),
+        );
+
+        let location = test_location(values);
+        let client_config = build_client_config(&location).expect("client config should build");
+
+        assert!(client_config.enable_sni);
+    }
+
+    #[test]
+    fn test_build_client_config_with_client_identity() {
+        ensure_crypto_provider();
+
+        let trusted_ca = fixture_path("keychain/root.crt");
+        let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
+        let client_key = fixture_path("keychain/test.genmeta.net/test.genmeta.net.key");
+        let mut values = HashMap::new();
+        values.insert(
+            "proxy_ssl_trusted_certificate".to_string(),
+            Value::Path(trusted_ca),
+        );
+        values.insert(
+            "proxy_ssl_certificate".to_string(),
+            Value::Path(client_cert),
+        );
+        values.insert(
+            "proxy_ssl_certificate_key".to_string(),
+            Value::Path(client_key),
+        );
+
+        let location = test_location(values);
+        let client_config = build_client_config(&location).expect("client config should build");
+
+        assert!(client_config.enable_sni);
+    }
+
+    #[test]
+    fn test_build_client_config_rejects_incomplete_identity() {
+        let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
+        let mut values = HashMap::new();
+        values.insert(
+            "proxy_ssl_certificate".to_string(),
+            Value::Path(client_cert),
+        );
+
+        let location = test_location(values);
+        let error = build_client_config(&location).expect_err("incomplete identity should fail");
+
+        assert!(error.to_string().contains("must be configured together"));
+    }
+}

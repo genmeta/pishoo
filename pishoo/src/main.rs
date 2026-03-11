@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use gateway::{error::Whatever, parse::Value};
+use genmeta_home::GenmetaHome;
 use snafu::{OptionExt, ResultExt};
 use tokio::{fs, task::JoinSet};
 
@@ -67,6 +68,11 @@ async fn main() -> Result<(), Whatever> {
 
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
+
+    let _genmeta_home = GenmetaHome::load_from_environment()
+        .whatever_context("Failed to load Genmeta home directory")?;
+
+    // 遍历 genmeta_home 中所有的 identity 文件夹, 解析多个 pishoo 块, 合并启动 server 服务
 
     let config_file = args.config_file;
 

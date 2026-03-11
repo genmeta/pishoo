@@ -7,7 +7,10 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::TokioIo;
 use snafu::{Report, ResultExt};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+};
 use tracing::{debug, error};
 
 use crate::{
@@ -172,19 +175,44 @@ pub async fn pass(
 
     // 解析目标地址
     // Checked in configuration parsing phase
+    let scheme = proxy_pass
+        .scheme_str()
+        .expect("Missing scheme in proxy_pass URI");
     let host = proxy_pass.host().expect("Missing host in proxy_pass URI");
-    let port = proxy_pass.port_u16().unwrap_or(80);
+    let port = proxy_pass.port_u16().unwrap_or(match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => unreachable!("Unsupported proxy_pass scheme"),
+    });
 
-    // 建立TCP连接
-    let io = TokioIo::new(
-        TcpStream::connect((host, port))
-            .await
-            .whatever_context::<_, Whatever>(format!(
-                "Cannot connect to target server {host}:{port}"
-            ))?,
-    );
+    match scheme {
+        "http" => {
+            let io = TcpStream::connect((host, port))
+                .await
+                .whatever_context::<_, Whatever>(format!(
+                    "Cannot connect to target server {host}:{port}"
+                ))?;
+            send_request(io, new_parts, receiver, target_uri).await
+        }
+        "https" => {
+            let io = super::upstream_tls::connect_https(location, proxy_pass).await?;
+            send_request(io, new_parts, receiver, target_uri).await
+        }
+        _ => unreachable!("Unsupported proxy_pass scheme"),
+    }
+}
 
-    // 创建HTTP客户端连接
+async fn send_request<I>(
+    io: I,
+    new_parts: http::request::Parts,
+    receiver: ReadStream,
+    target_uri: Uri,
+) -> Result<Response<Incoming>>
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(io);
+
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true) // 保持首字母大小写
         .title_case_headers(true) // 标题首字母大写

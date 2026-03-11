@@ -25,6 +25,10 @@ use tracing::info;
 
 use crate::{error::Whatever, publisher::H3_DNS_SERVER};
 
+thread_local! {
+    pub(crate) static CONFIG_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub mod conf;
 mod location;
 pub mod pattern;
@@ -429,6 +433,8 @@ impl Node {
 }
 
 pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
+    CONFIG_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
+
     let mut directives =
         Directive::<Nginx>::parse(configure).whatever_context("Cannot parse configuration")?;
 
@@ -606,6 +612,19 @@ fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
                 "Invalid URI `{s}` while parsing directive {}",
                 directive.name
             ))?;
+
+            let scheme = uri
+                .scheme_str()
+                .whatever_context::<_, Whatever>("Missing scheme in proxy_pass URI")
+                .whatever_context(format!(
+                    "Invalid URI `{s}` while parsing directive {}",
+                    directive.name
+                ))?;
+
+            ensure_whatever!(
+                matches!(scheme, "http" | "https"),
+                "Invalid proxy_pass scheme `{scheme}`, expected `http` or `https`"
+            );
 
             uri.host()
                 .whatever_context::<_, Whatever>("Missing host in proxy_pass URI")
@@ -906,7 +925,52 @@ fn parse_ssh_ssl_user(directive: Directive<Nginx>) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
     use super::*;
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn create_temp_file(prefix: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "gateway_{prefix}_{}_{}.pem",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, "dummy").expect("Failed to create temp file");
+        path
+    }
+
+    fn cleanup_temp_files(paths: &[&Path]) {
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn build_proxy_conf(server_cert: &Path, server_key: &Path, location_body: &str) -> String {
+        format!(
+            r#"
+pishoo {{
+    server {{
+        listen all 5378;
+        server_name example.com;
+        ssl_certificate {};
+        ssl_certificate_key {};
+        location /api {{
+            {}
+        }}
+    }}
+}}
+"#,
+            server_cert.display(),
+            server_key.display(),
+            location_body
+        )
+    }
 
     /// 测试：解析新的 server_id 配置格式
     #[test]
@@ -1126,7 +1190,7 @@ pishoo {{
     server {{
         listen all 5378;
         server_name example.com;
-        resolver h3 https://dns.example.com/dns-query;
+        dns h3 https://dns.example.com/dns-query;
         ssl_certificate {};
         ssl_certificate_key {};
     }}
@@ -1166,15 +1230,111 @@ pishoo {{
 
         let server = &servers[0];
 
-        // 验证 resolver 配置
-        match server.get("resolver") {
+        // 验证 dns 配置
+        match server.get("dns") {
             Some(Value::DnsResolver(resolver)) => {
                 assert_eq!(
                     resolver.base_url.to_string(),
                     "https://dns.example.com/dns-query"
                 );
             }
-            _ => panic!("resolver 解析失败"),
+            _ => panic!("dns 解析失败"),
         }
+    }
+
+    #[test]
+    fn test_parse_proxy_pass_rejects_unsupported_scheme() {
+        let server_cert = create_temp_file("server_cert_scheme");
+        let server_key = create_temp_file("server_key_scheme");
+        let conf = build_proxy_conf(
+            &server_cert,
+            &server_key,
+            "proxy_pass ftp://backend.example.com;",
+        );
+
+        let result = parse(conf.as_bytes(), None);
+
+        cleanup_temp_files(&[&server_cert, &server_key]);
+
+        assert!(result.is_err(), "unsupported proxy_pass scheme should fail");
+    }
+
+    #[test]
+    fn test_parse_https_proxy_with_optional_trusted_certificate() {
+        let server_cert = create_temp_file("server_cert_https");
+        let server_key = create_temp_file("server_key_https");
+        let trusted_ca = create_temp_file("trusted_ca_https");
+        let conf = build_proxy_conf(
+            &server_cert,
+            &server_key,
+            &format!(
+                "proxy_pass https://backend.example.com; proxy_ssl_trusted_certificate {};",
+                trusted_ca.display()
+            ),
+        );
+
+        let result = parse(conf.as_bytes(), None);
+
+        cleanup_temp_files(&[&server_cert, &server_key, &trusted_ca]);
+
+        assert!(result.is_ok(), "https proxy with trusted CA should parse");
+    }
+
+    #[test]
+    fn test_parse_proxy_ssl_certificate_requires_matching_key() {
+        let server_cert = create_temp_file("server_cert_pair");
+        let server_key = create_temp_file("server_key_pair");
+        let proxy_client_cert = create_temp_file("proxy_client_cert_pair");
+        let conf = build_proxy_conf(
+            &server_cert,
+            &server_key,
+            &format!(
+                "proxy_pass https://backend.example.com; proxy_ssl_certificate {};",
+                proxy_client_cert.display()
+            ),
+        );
+
+        let result = parse(conf.as_bytes(), None);
+
+        cleanup_temp_files(&[&server_cert, &server_key, &proxy_client_cert]);
+
+        assert!(
+            result.is_err(),
+            "proxy_ssl_certificate without key should fail"
+        );
+    }
+
+    #[test]
+    fn test_parse_http_proxy_allows_proxy_ssl_directives() {
+        let server_cert = create_temp_file("server_cert_http");
+        let server_key = create_temp_file("server_key_http");
+        let proxy_client_cert = create_temp_file("proxy_client_cert_http");
+        let proxy_client_key = create_temp_file("proxy_client_key_http");
+        let trusted_ca = create_temp_file("trusted_ca_http");
+        let conf = build_proxy_conf(
+            &server_cert,
+            &server_key,
+            &format!(
+                "proxy_pass http://backend.example.com; proxy_ssl_certificate {}; proxy_ssl_certificate_key {}; proxy_ssl_trusted_certificate {};",
+                proxy_client_cert.display(),
+                proxy_client_key.display(),
+                trusted_ca.display()
+            ),
+        );
+
+        let result = parse(conf.as_bytes(), None);
+
+        cleanup_temp_files(&[
+            &server_cert,
+            &server_key,
+            &proxy_client_cert,
+            &proxy_client_key,
+            &trusted_ca,
+        ]);
+
+        assert!(
+            result.is_ok(),
+            "http proxy should allow proxy_ssl directives to remain optional"
+        );
     }
 }

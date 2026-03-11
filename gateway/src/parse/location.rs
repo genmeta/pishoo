@@ -1,6 +1,6 @@
 use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure_whatever};
 
 use crate::parse::{
     Commands, Result, Value, parse_boolean, parse_header, parse_header_always, parse_path,
@@ -23,6 +23,9 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("add_header", parse_header_always);
     commands.insert("proxy_set_header", parse_header);
     commands.insert("proxy_pass", parse_proxy_pass);
+    commands.insert("proxy_ssl_certificate", parse_path);
+    commands.insert("proxy_ssl_certificate_key", parse_path);
+    commands.insert("proxy_ssl_trusted_certificate", parse_path);
     commands.insert("ssh_login", parse_ssh_login);
     commands.insert("ssh_ssl_user", parse_ssh_ssl_user);
     commands.insert("ssh_deny", parse_string_vec);
@@ -30,6 +33,14 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     let pattern =
         parse_pattern(&directive.args).whatever_context("Failed to parse location pattern")?;
     let mut values = commands.parse(directive.children.into_iter().flatten())?;
+
+    let proxy_ssl_certificate = values.contains_key("proxy_ssl_certificate");
+    let proxy_ssl_certificate_key = values.contains_key("proxy_ssl_certificate_key");
+
+    ensure_whatever!(
+        proxy_ssl_certificate == proxy_ssl_certificate_key,
+        "proxy_ssl_certificate and proxy_ssl_certificate_key must be configured together"
+    );
 
     // 默认添加 CORS 相关的响应头
     let cors_headers = vec![

@@ -42,6 +42,7 @@ pub(crate) mod log;
 mod proxy;
 #[cfg(feature = "sshd")]
 mod sshd;
+mod upstream_tls;
 
 /*
  - PhysicalInterfaces:
@@ -84,6 +85,8 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
+    crate::common::ensure_crypto_provider();
+
     // 从第一个 server 的 `location /stun` 中提取 StunNodeConfig
     let stun_config = servers.iter().find_map(extract_stun_config_from_server);
 
@@ -131,10 +134,9 @@ fn init_router(servers: &[Arc<Node>]) -> Result<(RouterMap, HashMap<String, Serv
     let mut resolvers = HashMap::new();
 
     for server in servers {
-        let cert_path = match server.get("ssl_certificate") {
-            Some(Value::Path(p)) => p.clone(),
-            _ => whatever!("Missing or invalid ssl_certificate for server"),
-        };
+        if !matches!(server.get("ssl_certificate"), Some(Value::Path(_))) {
+            whatever!("Missing or invalid ssl_certificate for server");
+        }
         let key_path = match server.get("ssl_certificate_key") {
             Some(Value::Path(p)) => p.clone(),
             _ => whatever!("Missing or invalid ssl_certificate_key for server"),

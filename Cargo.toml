@@ -58,6 +58,7 @@ gmdns = { git = "https://github.com/genmeta/gmdns.git", branch = "feat/resolver"
 getrandom = "0.3.1"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
+tokio-rustls = "0.26"
 
 # --- Utilities ---
 atty = "0.2"
