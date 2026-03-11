@@ -44,15 +44,13 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = { git = "https://github.com/genmeta/gm-quic.git", branch = "main" }
-qevent = { git = "https://github.com/genmeta/gm-quic.git", branch = "main" }
+gm-quic = { path = "../gm-quic/gm-quic" }
+qevent = { path = "../gm-quic/qevent" }
 
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "feat/v0.5" }
+h3x = { path = "../h3x" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "https://github.com/genmeta/gmdns.git", branch = "feat/resolver", features = [
-    "h3x-resolver",
-] }
+gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -92,12 +90,12 @@ gateway = { path = "gateway", default-features = false }
 
 
 [patch."https://github.com/genmeta/gmdns.git"]
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "feat/v0.5" }
-qdns = { git = "https://github.com/genmeta/gm-quic.git", branch = "main" }
-qinterface = { git = "https://github.com/genmeta/gm-quic.git", branch = "main" }
+h3x = { path = "../h3x" }
+qdns = { path = "../gm-quic/qdns" }
+qinterface = { path = "../gm-quic/qinterface" }
 
 [patch."https://github.com/genmeta/h3x.git"]
-gm-quic = { git = "https://github.com/genmeta/gm-quic.git", branch = "main" }
+gm-quic = { path = "../gm-quic/gm-quic" }
 
 [profile.dev]
 panic = "abort"

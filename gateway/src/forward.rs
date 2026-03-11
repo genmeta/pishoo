@@ -1,8 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::Bytes;
-use gm_quic::qdns::SystemResolver;
-use gmdns::resolvers::Resolvers;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -16,10 +14,10 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     command,
+    dns::{MDNS_SERVICE, build_query_resolvers},
     error::{Result, Whatever},
     forward,
-    parse::{DnsResolver, Node, Value, optional_server_identity},
-    publisher::MDNS_SERVICE,
+    parse::{Node, Value},
 };
 
 pub(crate) mod h3_client;
@@ -118,12 +116,8 @@ pub async fn serve(
 
     info!(target: "forward_proxy", "Listening on: http://{local_addr}");
 
-    let config = optional_server_identity(&node, "client_name");
-    let resolver = DnsResolver::from_node_or_default(&node);
-    let resolvers = Resolvers::default()
-        .with(resolver.create_resolver(config.as_ref()))
-        .with(Arc::new(SystemResolver))
-        .with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
+    let resolvers =
+        build_query_resolvers(&node, "client_name").with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
 
     // 设置客户端认证配置
     setup_client_config(&node)?;

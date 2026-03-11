@@ -1911,7 +1911,6 @@ dependencies = [
 [[package]]
 name = "gm-quic"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1929,7 +1928,6 @@ dependencies = [
 [[package]]
 name = "gmdns"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/gmdns.git?branch=feat%2Fresolver#16a4afe6165af97dca00b7114f339534db585544"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1982,7 +1980,6 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/h3x.git?branch=feat%2Fv0.5#4eee9fb2afbc57e368023bf14be02905ea81ecde"
 dependencies = [
  "bon",
  "bytes",
@@ -3675,7 +3672,6 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3699,7 +3695,6 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "qbase",
  "qevent",
@@ -3712,7 +3707,6 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3740,7 +3734,6 @@ dependencies = [
 [[package]]
 name = "qdns"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "futures",
  "qbase",
@@ -3751,7 +3744,6 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3769,7 +3761,6 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3794,7 +3785,6 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3805,7 +3795,6 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3823,7 +3812,6 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -3852,7 +3840,6 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3931,7 +3918,6 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/gm-quic.git?branch=main#89b6c88e1fef17789f31a11c8b4c382fb8e0ddab"
 dependencies = [
  "bytes",
  "futures",

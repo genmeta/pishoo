@@ -6,21 +6,25 @@ use gm_quic::{
     qbase::net::addr::SocketEndpointAddr,
     qdns::Publish as DnsPublisher,
     qinterface::{BindInterface, component::location::Locations},
-    qtraversal::nat::client::StunClientsComponent,
+    qtraversal::nat::client::{NatType, StunClientsComponent},
 };
 use gmdns::{
-    MdnsPacket, mdns::Mdns, parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
-    resolvers::MdnsResolver,
+    MdnsPacket,
+    mdns::Mdns,
+    parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
+    resolvers::{H3Publisher, MdnsResolver},
 };
 use rustls::{SignatureScheme, sign::SigningKey};
-use snafu::Report;
+use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
+use tracing::info;
 
-#[allow(dead_code)]
-pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
-pub const H3_DNS_SERVER: &str = "https://dns.genmeta.net:4433";
-pub const MDNS_SERVICE: &str = "_genmeta.local";
+use crate::{
+    dns::{MDNS_SERVICE, resolve::DnsResolver},
+    error::{Result, Whatever},
+    parse::{Node, ServerIdentity, Value, server_identity},
+};
 
 pub struct Publisher {
     _task: AbortOnDropHandle<()>,
@@ -29,13 +33,13 @@ pub struct Publisher {
 pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
 
 #[derive(Clone)]
-pub struct ServerConfig {
+pub struct PublishConfig {
     pub resolvers: Resolvers,
     pub server_id: u8,
     pub signing_key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
 }
 
-impl ServerConfig {
+impl PublishConfig {
     pub(crate) fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
         ep.set_main(self.server_id == MAIN_SERVER_ID);
         ep.set_sequence(self.server_id as u64);
@@ -45,6 +49,111 @@ impl ServerConfig {
             tracing::warn!(target: "dns", "Failed to sign endpoint: {e}");
         }
     }
+}
+
+/// 将一组 endpoint 签名后发布到指定主机名。
+///
+/// 该函数只负责 DNS 发布；endpoint 的筛选与来源由调用方决定。
+pub async fn publish_host_endpoints(
+    host: &str,
+    mut endpoints: Vec<DnsEndpointAddr>,
+    config: &PublishConfig,
+) {
+    if config.resolvers.is_empty() {
+        tracing::warn!(target: "dns", host, "No DNS publisher resolver available, cannot publish endpoints");
+        return;
+    }
+
+    if endpoints.is_empty() {
+        tracing::warn!(target: "dns", host, "No endpoints to publish");
+        return;
+    }
+
+    endpoints.iter_mut().for_each(|ep| config.sign_endpoint(ep));
+
+    let mut hosts = HashMap::new();
+    hosts.insert(host.to_string(), endpoints);
+    let packet = MdnsPacket::answer(0, &hosts).to_bytes();
+
+    for resolver in &config.resolvers {
+        if let Err(error) = resolver.publish(host, &packet).await {
+            tracing::error!(
+                target: "dns",
+                host,
+                "Resolver `{resolver}` publish dns failed: {}",
+                Report::from_error(error)
+            );
+        } else {
+            tracing::info!(target: "dns", host, "Published endpoints");
+        }
+    }
+}
+
+fn build_publisher(
+    resolver: &DnsResolver,
+    config: &ServerIdentity,
+) -> Arc<dyn DnsPublisher + Send + Sync> {
+    info!(
+        target = "dns",
+        "Creating H3 DNS publisher for server {} base url {}",
+        config.server_name,
+        resolver.base_url
+    );
+    Arc::new(
+        H3Publisher::new(
+            resolver.base_url.to_string(),
+            resolver.create_h3_client(config),
+        )
+        .expect("H3 dns server base_url has been checked"),
+    )
+}
+
+pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, PublishConfig>> {
+    let mut configs = HashMap::new();
+
+    for server in servers {
+        let key_path = match server.get("ssl_certificate_key") {
+            Some(Value::Path(path)) => path,
+            _ => whatever!("Missing or invalid ssl_certificate_key for server"),
+        };
+
+        let resolver = DnsResolver::from_node_or_default(server);
+        let signing_key = load_signing_key(key_path).ok();
+
+        let server_names = match server.get("server_name") {
+            Some(Value::ServerName(names)) => names,
+            _ => unreachable!("Invalid server name"),
+        };
+
+        for server_name in server_names {
+            let domain = match server_name.name.strip_suffix('~') {
+                Some(prefix) => format!("{prefix}.genmeta.net"),
+                None => server_name.name.clone(),
+            };
+
+            let identity = server_identity(server, domain.clone())
+                .expect("Missing ssl_certificate or ssl_certificate_key");
+
+            let resolvers = if domain.ends_with("user.genmeta.net") {
+                tracing::warn!(target: "dns", server_name = %domain, "Domain excluded from publishing");
+                vec![]
+            } else {
+                tracing::info!(target: "dns", server_name = %domain, server_id = identity.server_id, "Configuring DNS publisher");
+                vec![build_publisher(&resolver, &identity)]
+            };
+
+            configs.insert(
+                domain,
+                PublishConfig {
+                    resolvers,
+                    server_id: identity.server_id,
+                    signing_key: signing_key.clone(),
+                },
+            );
+        }
+    }
+
+    Ok(configs)
 }
 
 fn ensure_mdns_resolver(
@@ -89,7 +198,7 @@ async fn publish_single_mdns(
     bind_uri: &BindUri,
     bind_iface: &BindInterface,
     server_name: &str,
-    config: &ServerConfig,
+    config: &PublishConfig,
 ) {
     if let Some((resolver, addr)) = ensure_mdns_resolver(bind_uri, bind_iface) {
         let mut ep = match addr {
@@ -116,7 +225,7 @@ async fn publish_single_mdns(
 
 async fn publish_resolvers(
     server_name: &str,
-    config: &ServerConfig,
+    config: &PublishConfig,
     interfaces: impl Iterator<Item = (&BindUri, &BindInterface)>,
 ) {
     let mut endpoints = vec![];
@@ -129,7 +238,20 @@ async fn publish_resolvers(
                         .values()
                         .filter_map(|client| {
                             let outer = client.get_outer_addr()?.ok()?;
-                            Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                            match client.get_nat_type() {
+                                Some(Ok(NatType::FullCone)) => {
+                                    tracing::debug!(target: "dns", outer = ?outer, "Client behind Full Cone NAT, suitable for DNS publication");
+                                    Some(SocketEndpointAddr::direct(outer))
+                                }
+                                Some(Ok(_)) => {
+                                    tracing::debug!(target: "dns", outer = ?outer, "Found STUN client with unknown NAT type for DNS publication");
+                                    Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                                }
+                                _ => {
+                                    tracing::debug!(target: "dns", outer = ?outer, "Found STUN client with unknown NAT type for DNS publication");
+                                    Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                                }
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -167,7 +289,7 @@ async fn publish_resolvers(
     }
 }
 
-async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String, ServerConfig>) {
+async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String, PublishConfig>) {
     listeners
         .servers()
         .into_iter()
@@ -177,7 +299,6 @@ async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String
             Some((name, ifaces, config))
         })
         .map(|(name, ifaces, config)| async move {
-            // MDNS 和 H3 DNS 发布并行执行，避免 H3 DNS 卡住时阻塞 MDNS
             let mdns_name = name.clone();
             let mdns_future = async {
                 ifaces
@@ -198,12 +319,12 @@ async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String
 }
 
 impl Publisher {
-    pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, ServerConfig>) -> Self {
+    pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, PublishConfig>) -> Self {
         let resolvers = Arc::new(resolvers);
 
         let publish_all =
             async move |listeners: Arc<QuicListeners>,
-                        resolvers: Arc<HashMap<String, ServerConfig>>| {
+                        resolvers: Arc<HashMap<String, PublishConfig>>| {
                 publish_once(&listeners, &resolvers).await
             };
 
@@ -211,7 +332,6 @@ impl Publisher {
             let new_publish_task = || {
                 let publish_all = publish_all(listeners.clone(), resolvers.clone());
                 AbortOnDropHandle::new(tokio::spawn(async move {
-                    // 过滤抖动
                     time::sleep(Duration::from_millis(50)).await;
                     publish_all.await
                 }))
@@ -235,4 +355,34 @@ impl Publisher {
         }));
         Self { _task }
     }
+}
+
+fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {
+    use gm_quic::prelude::handy::ToPrivateKey;
+
+    let key_bytes = std::fs::read(path)
+        .whatever_context::<_, Whatever>(format!("Failed to read key file {}", path.display()))?;
+    let key_der = key_bytes.to_private_key();
+    let key = rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .whatever_context::<_, Whatever>("Unsupported key type")?;
+
+    let supported_schemes = [
+        SignatureScheme::ECDSA_NISTP256_SHA256,
+        SignatureScheme::ECDSA_NISTP384_SHA384,
+        SignatureScheme::ED25519,
+        SignatureScheme::RSA_PSS_SHA256,
+        SignatureScheme::RSA_PSS_SHA384,
+        SignatureScheme::RSA_PSS_SHA512,
+        SignatureScheme::RSA_PKCS1_SHA256,
+        SignatureScheme::RSA_PKCS1_SHA384,
+        SignatureScheme::RSA_PKCS1_SHA512,
+    ];
+
+    let scheme = supported_schemes
+        .iter()
+        .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
+        .copied()
+        .whatever_context::<_, Whatever>("No supported signature scheme found for key")?;
+
+    Ok((key, scheme))
 }

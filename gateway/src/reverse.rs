@@ -10,7 +10,6 @@ use firewall_base::{
 };
 use gm_quic::{
     prelude::{QuicListeners, handy::server_parameters},
-    qdns::SystemResolver,
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
 use h3x::{
@@ -20,19 +19,16 @@ use h3x::{
 };
 use http::{HeaderValue, Request, Response, StatusCode};
 use rustls::server::WebPkiClientVerifier;
-use snafu::{OptionExt, Report, ResultExt, whatever};
+use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
+    dns::{Publisher, build_publish_configs, build_query_resolver_chain},
     error::{Result, StreamSnafu, Whatever},
-    parse::{
-        DnsResolver, Listens, Node, Value, normalize_server_name, server_id_or_default,
-        server_identity,
-    },
-    publisher::{Publisher, ServerConfig},
-    reverse::{self, auth::load_key},
-    stun::{STUN_DOMAIN, StunBindConfig, StunNodeConfig, StunServerManager},
+    parse::{Listens, Node, Value},
+    reverse::{self},
+    stun::{STUN_DOMAIN, StunNodeConfig, StunServerManager},
 };
 
 mod auth;
@@ -71,8 +67,6 @@ mod upstream_tls;
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
 
-const NO_PUBLISH_DOMAINS: &[&str] = &["user.genmeta.net"];
-
 /// Start the QUIC proxy server
 ///
 /// # Arguments
@@ -85,18 +79,17 @@ pub async fn serve(
     access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
     servers: Vec<Arc<Node>>,
 ) -> Result<()> {
-    crate::common::ensure_crypto_provider();
-
-    // 从第一个 server 的 `location /stun` 中提取 StunNodeConfig
-    let stun_config = servers.iter().find_map(extract_stun_config_from_server);
+    // 从第一个声明了 STUN 的 server 中提取运行时 STUN 配置
+    let stun_config = servers.iter().find_map(StunNodeConfig::from_server_node);
 
     let monitor = Devices::global().monitor();
     let current_interfaces = monitor.interfaces();
-    let (router, mut server_resolvers) = init_router(&servers)?;
+    let router = build_router(&servers);
+    let mut publish_configs = build_publish_configs(&servers)?;
 
     // stun.genmeta.net 由 StunServerManager 全权负责（包括启动和 DNS 上报），
-    // 从 server_resolvers 中取出其 ServerConfig，不再交给 Publisher
-    let stun_publish_config = server_resolvers.remove(STUN_DOMAIN);
+    // 从 publish_configs 中取出其 PublishConfig，不再交给 Publisher
+    let stun_publish_config = publish_configs.remove(STUN_DOMAIN);
 
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
@@ -104,7 +97,7 @@ pub async fn serve(
     info!("DNS Resolvers initialized");
 
     // 启动 dns 上报（不含 stun.genmeta.net）
-    let _publisher = Publisher::spawn(quic_listeners.clone(), server_resolvers);
+    let _publisher = Publisher::spawn(quic_listeners.clone(), publish_configs);
     let _stun_manager = match (stun_config, stun_publish_config) {
         (Some(config), Some(publish_config)) => Some(StunServerManager::spawn(
             quic_listeners.clone(),
@@ -112,7 +105,7 @@ pub async fn serve(
             config,
         )),
         (Some(_), None) => {
-            warn!(target: "stun", "`location /stun` configured but no DNS publisher for {STUN_DOMAIN}, STUN server manager disabled");
+            warn!(target: "stun", "STUN configured but no DNS publisher for {STUN_DOMAIN}, STUN server manager disabled");
             None
         }
         _ => None,
@@ -128,90 +121,26 @@ pub async fn serve(
     handle_connections(quic_listeners, access_rules.1, router).await
 }
 
-/// 初始化路由器，根据服务器配置创建路由表
-fn init_router(servers: &[Arc<Node>]) -> Result<(RouterMap, HashMap<String, ServerConfig>)> {
+/// 根据服务器配置创建路由表
+fn build_router(servers: &[Arc<Node>]) -> RouterMap {
     let mut routers = HashMap::new();
-    let mut resolvers = HashMap::new();
 
     for server in servers {
-        if !matches!(server.get("ssl_certificate"), Some(Value::Path(_))) {
-            whatever!("Missing or invalid ssl_certificate for server");
-        }
-        let key_path = match server.get("ssl_certificate_key") {
-            Some(Value::Path(p)) => p.clone(),
-            _ => whatever!("Missing or invalid ssl_certificate_key for server"),
-        };
-
-        let resolver = DnsResolver::from_node_or_default(server);
-
-        let server_name = match server.get("server_name") {
-            Some(Value::ServerName(names)) => names.clone(),
-            _ => unreachable!("Invalid server name"),
-        };
-
-        let server_id = server_id_or_default(server);
-
-        let key_pair = load_key(&key_path).ok();
-
-        for server_name_struct in server_name {
-            let domain = normalize_server_name(server_name_struct.name);
-            let parse_server_config = server_identity(server, domain.clone())
-                .expect("Missing ssl_certificate or ssl_certificate_key");
-
-            info!(target: "dns", server_name = %domain, server_id, "Configuring DNS publisher");
-            let publisher_resolvers = if NO_PUBLISH_DOMAINS
-                .iter()
-                .any(|suffix| domain.ends_with(suffix))
-            {
-                warn!(target: "dns", server_name = %domain, "Domain excluded from publishing");
-                vec![]
-            } else {
-                vec![resolver.create_publisher(&parse_server_config)]
-            };
-
-            resolvers.insert(
-                domain.clone(),
-                ServerConfig {
-                    resolvers: publisher_resolvers,
-                    server_id,
-                    signing_key: key_pair.clone(),
-                },
-            );
-            routers.insert(domain, Arc::clone(server));
-        }
-    }
-
-    Ok((Arc::new(routers), resolvers))
-}
-
-fn create_stun_resolver(servers: &[Arc<Node>]) -> Arc<gmdns::resolvers::Resolvers> {
-    let mut resolvers = gmdns::resolvers::Resolvers::default();
-    let mut seen = HashSet::new();
-
-    for server in servers {
-        let resolver = DnsResolver::from_node_or_default(server);
         let server_names = match server.get("server_name") {
             Some(Value::ServerName(names)) => names.clone(),
             _ => unreachable!("Invalid server name"),
         };
 
-        for server_name_struct in server_names {
-            let domain = normalize_server_name(server_name_struct.name);
-
-            let resolver_key = (resolver.base_url.to_string(), domain.clone());
-            if seen.insert(resolver_key) {
-                let config = server_identity(server, domain)
-                    .expect("Missing ssl_certificate or ssl_certificate_key");
-                resolvers = resolvers.with(resolver.create_resolver(Some(&config)));
-            }
+        for server_name in server_names {
+            let domain = match server_name.name.strip_suffix('~') {
+                Some(prefix) => format!("{prefix}.genmeta.net"),
+                None => server_name.name.clone(),
+            };
+            routers.insert(domain, Arc::clone(server));
         }
     }
 
-    if seen.is_empty() {
-        resolvers = resolvers.with(DnsResolver::default_h3().create_resolver(None));
-    }
-
-    Arc::new(resolvers.with(Arc::new(SystemResolver)))
+    Arc::new(routers)
 }
 
 /// 创建QUIC服务器实例
@@ -232,7 +161,10 @@ async fn create_quic_listeners(
         };
 
         for server_name_struct in server_names {
-            let server_name = normalize_server_name(server_name_struct.name);
+            let server_name = match server_name_struct.name.strip_suffix('~') {
+                Some(prefix) => format!("{prefix}.genmeta.net"),
+                None => server_name_struct.name,
+            };
             server_listens.insert(server_name, listens.clone());
         }
     }
@@ -254,7 +186,8 @@ async fn create_quic_listeners(
     debug!(?initial_bind_uris, "Binds");
 
     #[allow(unused_mut)]
-    let mut builder = QuicListeners::builder().with_resolver(create_stun_resolver(servers));
+    let mut builder =
+        QuicListeners::builder().with_resolver(Arc::new(build_query_resolver_chain(servers)));
 
     builder = builder.with_stun("stun.genmeta.net");
 
@@ -309,10 +242,10 @@ async fn create_quic_listeners(
                 key_path.display()
             ))?;
         for server_name_struct in server_names {
-            let mut server_name = server_name_struct.name;
-            if server_name.ends_with('~') {
-                server_name = server_name.replace('~', ".genmeta.net");
-            }
+            let server_name = match server_name_struct.name.strip_suffix('~') {
+                Some(prefix) => format!("{prefix}.genmeta.net"),
+                None => server_name_struct.name,
+            };
             let bind_uris = server_bind_uris
                 .get(&server_name)
                 .whatever_context::<_, Whatever>(format!(
@@ -660,72 +593,6 @@ fn match_location<'l: 's, 's>(
     }
 
     Some((location_matched?, final_pattern))
-}
-
-/// 从 server 节点中提取 `StunNodeConfig`
-///
-/// 两种启用方式（只需满足其一）：
-/// - `stun on;` 显式启用（动态节点，等 FullCone 后启动）
-/// - 存在 `stun_server { ... }` 子块（Bootstrap 公网节点，直接启动）
-fn extract_stun_config_from_server(server: &Arc<Node>) -> Option<StunNodeConfig> {
-    let stun_enabled = server
-        .get("stun")
-        .and_then(|v| match v {
-            Value::Boolean(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
-
-    // 提取 stun_server 子块（可能有多个，对应多地址族）
-    let binds: Vec<StunBindConfig> = match server.get("stun_server") {
-        Some(Value::Nodes(nodes)) => nodes
-            .iter()
-            .filter_map(|node| {
-                let Value::ValueMap(map) = node.value() else {
-                    return None;
-                };
-                let bind_address = match map.get("bind")? {
-                    Value::Addr(addr) => *addr,
-                    _ => return None,
-                };
-                let outer_address = map.get("outer_addr").and_then(|v| match v {
-                    Value::Addr(addr) => Some(*addr),
-                    _ => None,
-                });
-                let change_address = map.get("change_addr").and_then(|v| match v {
-                    Value::Addr(addr) => Some(*addr),
-                    _ => None,
-                });
-                let change_port = map.get("change_port").and_then(|v| match v {
-                    Value::String(s) => s.parse::<u16>().ok(),
-                    _ => None,
-                });
-                Some(StunBindConfig {
-                    bind_address,
-                    outer_address,
-                    change_address,
-                    change_port,
-                })
-            })
-            .collect(),
-        _ => vec![],
-    };
-
-    let has_stun_server_blocks = !binds.is_empty();
-
-    if !stun_enabled && !has_stun_server_blocks {
-        return None;
-    }
-
-    let relay = server
-        .get("relay")
-        .and_then(|v| match v {
-            Value::Boolean(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
-
-    Some(StunNodeConfig { relay, binds })
 }
 
 fn build_response(status: StatusCode) -> Response<()> {

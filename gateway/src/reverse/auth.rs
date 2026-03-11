@@ -8,13 +8,8 @@ use firewall_base::{
 };
 use gm_quic::prelude::{
     AuthClient, ClientAgentVerifyResult, ClientNameVerifyResult, LocalAgent, RemoteAgent,
-    handy::ToPrivateKey,
 };
-use rustls::{SignatureScheme, sign::SigningKey};
-use snafu::{OptionExt as _, ResultExt as _};
 use x509_parser::prelude::*;
-
-use crate::error::Result;
 
 #[derive(Debug, From, Clone)]
 pub struct ClientAuther {
@@ -105,36 +100,4 @@ fn extract_client_names<'c>(cert: &'c X509Certificate<'c>) -> impl Iterator<Item
     });
 
     common_names.chain(sans)
-}
-
-pub(super) fn load_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {
-    let key_bytes = std::fs::read(path).whatever_context::<_, crate::error::Whatever>(format!(
-        "Failed to read key file {}",
-        path.display()
-    ))?;
-    let key_der = key_bytes.to_private_key();
-    let key = rustls::crypto::ring::sign::any_supported_type(&key_der)
-        .whatever_context::<_, crate::error::Whatever>("Unsupported key type")?;
-
-    let supported_schemes = [
-        SignatureScheme::ECDSA_NISTP256_SHA256,
-        SignatureScheme::ECDSA_NISTP384_SHA384,
-        SignatureScheme::ED25519,
-        SignatureScheme::RSA_PSS_SHA256,
-        SignatureScheme::RSA_PSS_SHA384,
-        SignatureScheme::RSA_PSS_SHA512,
-        SignatureScheme::RSA_PKCS1_SHA256,
-        SignatureScheme::RSA_PKCS1_SHA384,
-        SignatureScheme::RSA_PKCS1_SHA512,
-    ];
-
-    let scheme = supported_schemes
-        .iter()
-        .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
-        .copied()
-        .whatever_context::<_, crate::error::Whatever>(
-            "No supported signature scheme found for key",
-        )?;
-
-    Ok((key, scheme))
 }

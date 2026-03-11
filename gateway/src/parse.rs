@@ -7,12 +7,7 @@ use std::{
 };
 
 use conf::parse_conf;
-use gm_quic::{
-    prelude::{BindUri, QuicClient},
-    qdns::{Publish as GmdnsPublisher, Resolve as GmdnsResolver},
-};
-use gmdns::resolvers::{H3Publisher, H3Resolver};
-use h3x::client::Client;
+use gm_quic::prelude::BindUri;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
@@ -21,9 +16,8 @@ use misc_conf::{
 use pattern::Pattern;
 use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
-use tracing::info;
 
-use crate::{error::Whatever, publisher::H3_DNS_SERVER};
+use crate::error::Whatever;
 
 thread_local! {
     pub(crate) static CONFIG_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
@@ -49,7 +43,7 @@ pub struct ServerName {
 pub enum Value {
     String(String),
     Uri(Uri),
-    DnsResolver(DnsResolver),
+    Resolver(Uri),
     StringVec(Vec<String>),
     ServerName(Vec<ServerName>),
     ServerId(u8),
@@ -78,105 +72,13 @@ impl Value {
     }
 }
 
-// Server configuration for TLS certificates and server name
+// TLS identity configuration for clients/servers that need certificates
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerConfig {
+pub struct ServerIdentity {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub server_name: String,
     pub server_id: u8,
-}
-
-// DNS resolver configuration for queries (some H3 DNS servers require client certificates)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsResolver {
-    pub base_url: Uri,
-}
-
-impl DnsResolver {
-    pub fn default_h3() -> Self {
-        Self {
-            base_url: H3_DNS_SERVER.parse().expect("Invalid H3_DNS_SERVER"),
-        }
-    }
-
-    pub fn from_node_or_default(node: &Node) -> Self {
-        match node.get("dns") {
-            Some(Value::DnsResolver(resolver)) => resolver.clone(),
-            _ => Self::default_h3(),
-        }
-    }
-
-    pub fn create_resolver(
-        &self,
-        config: Option<&ServerConfig>,
-    ) -> Arc<dyn GmdnsResolver + Send + Sync> {
-        let client = if let Some(config) = config {
-            self.create_h3_client(config)
-        } else {
-            self.create_h3_client_no_auth()
-        };
-
-        // Only support HTTP3 resolver as per TODO comment
-        Arc::new(
-            H3Resolver::new(self.base_url.to_string(), client)
-                .expect("H3 dns server base_url has been checked"),
-        )
-    }
-
-    pub fn create_publisher(&self, config: &ServerConfig) -> Arc<dyn GmdnsPublisher + Send + Sync> {
-        info!(
-            target = "dns",
-            "Creating H3 DNS publisher for server {} base url {}",
-            config.server_name,
-            self.base_url
-        );
-        Arc::new(
-            H3Publisher::new(self.base_url.to_string(), self.create_h3_client(config))
-                .expect("H3 dns server base_url has been checked"),
-        )
-    }
-
-    fn create_h3_client_no_auth(&self) -> Client<Arc<QuicClient>> {
-        let root_store = crate::common::root_cert();
-        Client::<Arc<QuicClient>>::builder()
-            .with_root_certificates(root_store)
-            .without_identity()
-            .expect("Failed to create client builder")
-            .build()
-    }
-
-    fn create_h3_client(&self, config: &ServerConfig) -> Client<Arc<QuicClient>> {
-        let root_store = crate::common::root_cert();
-
-        let client_builder =
-            Client::<Arc<QuicClient>>::builder().with_root_certificates(root_store.clone());
-
-        let (cert_path, key_path, name) =
-            (&config.cert_path, &config.key_path, &config.server_name);
-        let (Ok(cert_data), Ok(key_data)) = (std::fs::read(cert_path), std::fs::read(key_path))
-        else {
-            return self.create_h3_client_no_auth();
-        };
-
-        // Parse certificates and private key
-        use std::io::Cursor;
-
-        use rustls_pemfile::{certs, private_key};
-
-        let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("Failed to parse certificates");
-
-        let private_key = private_key(&mut Cursor::new(&key_data))
-            .expect("Failed to parse private key")
-            .expect("No private key found");
-
-        client_builder
-            .with_identity(name.clone(), cert_chain, private_key)
-            .expect("Failed to configure client identity")
-            .build()
-    }
 }
 
 pub fn server_id_or_default(node: &Node) -> u8 {
@@ -186,21 +88,14 @@ pub fn server_id_or_default(node: &Node) -> u8 {
     }
 }
 
-pub fn normalize_server_name(mut server_name: String) -> String {
-    if server_name.ends_with('~') {
-        server_name = server_name.replace('~', ".genmeta.net");
-    }
-    server_name
-}
-
-pub fn server_identity(node: &Node, server_name: String) -> Option<ServerConfig> {
+pub fn server_identity(node: &Node, server_name: String) -> Option<ServerIdentity> {
     let (Some(Value::Path(cert_path)), Some(Value::Path(key_path))) =
         (node.get("ssl_certificate"), node.get("ssl_certificate_key"))
     else {
         return None;
     };
 
-    Some(ServerConfig {
+    Some(ServerIdentity {
         cert_path: cert_path.clone(),
         key_path: key_path.clone(),
         server_name,
@@ -208,7 +103,7 @@ pub fn server_identity(node: &Node, server_name: String) -> Option<ServerConfig>
     })
 }
 
-pub fn optional_server_identity(node: &Node, server_name_key: &str) -> Option<ServerConfig> {
+pub fn optional_server_identity(node: &Node, server_name_key: &str) -> Option<ServerIdentity> {
     let Some(Value::String(server_name)) = node.get(server_name_key) else {
         return None;
     };
@@ -473,7 +368,7 @@ impl Commands {
         for directive in directives {
             let name = directive.name.clone();
             let Some(command) = self.0.get(name.as_str()) else {
-                whatever!("Unknown directive `{name}`",);
+                whatever!("Unknown directive `{name}`",)
             };
 
             match command(directive)? {
@@ -763,19 +658,17 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [kind, resolver] => match kind.as_str() {
             "udp" => {
-                whatever!("`udp` resolver is deprecated, please use `h3` instead",);
+                whatever!("`udp` resolver is deprecated, please use `h3` instead",)
             }
             "http" => {
-                whatever!("`http` resolver is deprecated, please use `h3` instead",);
+                whatever!("`http` resolver is deprecated, please use `h3` instead",)
             }
             "h3" => {
                 let base_url = resolver.parse::<Uri>().whatever_context(format!(
                     "Invalid base URL `{resolver}` whiling parsing h3 resolver",
                 ))?;
 
-                let resolver_config = DnsResolver { base_url };
-
-                Ok(Value::DnsResolver(resolver_config))
+                Ok(Value::Resolver(base_url))
             }
             _ => whatever!("Unknown resolver kind: {kind}, expected `h3`"),
         },
@@ -1232,11 +1125,8 @@ pishoo {{
 
         // 验证 dns 配置
         match server.get("dns") {
-            Some(Value::DnsResolver(resolver)) => {
-                assert_eq!(
-                    resolver.base_url.to_string(),
-                    "https://dns.example.com/dns-query"
-                );
+            Some(Value::Resolver(resolver)) => {
+                assert_eq!(resolver.to_string(), "https://dns.example.com/dns-query");
             }
             _ => panic!("dns 解析失败"),
         }
