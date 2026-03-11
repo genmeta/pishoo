@@ -4,9 +4,9 @@ use snafu::ensure_whatever;
 use crate::{
     error::{Result, Whatever},
     parse::{
-        CONFIG_ROOT, Commands, ServerName, Value, location::parse_location, parse_address,
-        parse_boolean, parse_header_value, parse_listen, parse_path, parse_resolver,
-        parse_server_id, parse_server_name, parse_string, parse_string_vec, parse_types,
+        location::parse_location, parse_address, parse_boolean, parse_header_value, parse_listen,
+        parse_path, parse_resolver, parse_server_id, parse_server_name, parse_string,
+        parse_string_vec, parse_types, Commands, ServerName, Value, CONFIG_ROOT,
     },
 };
 

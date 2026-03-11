@@ -1,5 +1,3 @@
-#![feature(ip)]
-
 mod command;
 mod common;
 pub mod error;

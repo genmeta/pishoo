@@ -101,7 +101,7 @@ impl DnsResolver {
     }
 
     pub fn from_node_or_default(node: &Node) -> Self {
-        match node.get("resolver") {
+        match node.get("dns") {
             Some(Value::DnsResolver(resolver)) => resolver.clone(),
             _ => Self::default_h3(),
         }
