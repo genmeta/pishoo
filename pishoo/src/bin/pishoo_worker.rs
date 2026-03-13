@@ -16,8 +16,9 @@ use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
 use h3x::{
     dhttp::settings::Settings,
-    remoc::quic::{ListenClient, RemoteConnectClient, serve_quic_connector},
+    remoc::quic::{ListenClient, RemoteConnectClient},
 };
+use h3x::remoc::quic::connect::serve_quic_connector;
 use h3x::quic::Listen;
 use pishoo::protocol::{
     ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,

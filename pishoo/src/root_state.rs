@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
-use h3x::remoc::quic::{ListenClient, RemoteConnectClient, serve_quic_connector, serve_quic_listener};
+use h3x::remoc::quic::{ListenClient, RemoteConnectClient};
+use h3x::remoc::quic::connect::serve_quic_connector;
+use h3x::remoc::quic::listen::serve_quic_listener;
 use nix::{sys::signal::Signal, unistd::{Pid, Uid}};
 use rustls_pemfile::{certs, private_key};
 use tokio::sync::mpsc;
