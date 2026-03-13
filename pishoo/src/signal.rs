@@ -1,8 +1,12 @@
-use std::sync::Arc;
-
 use gateway::error::Whatever;
 
 use crate::SignalType;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownSignal {
+    SigTerm,
+    SigInt,
+}
 
 #[cfg(unix)]
 mod unix;
@@ -24,18 +28,16 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 }
 
 pub async fn handle_signal(
-    state: Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
-) -> Result<(), Whatever> {
+) -> Result<Option<ShutdownSignal>, Whatever> {
     #[cfg(unix)]
     {
-        unix::handle_signal(state).await
+        unix::handle_signal().await
     }
 
     #[cfg(not(unix))]
     {
-        let _ = state;
         tracing::warn!("Signal handling not supported on this platform");
-        Ok(())
+        Ok(None)
     }
 }
 

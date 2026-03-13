@@ -7,6 +7,10 @@ use gm_quic::prelude::{QuicListeners, handy::{server_parameters, ToCertificate}}
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs;
+#[cfg(unix)]
+use nix::sys::signal::Signal;
+#[cfg(unix)]
+use nix::unistd::{Pid, Uid};
 
 mod config;
 mod signal;
@@ -168,7 +172,7 @@ async fn main() -> Result<(), Whatever> {
     for target in worker_targets {
         let spawned = pishoo::worker_spawn::spawn_worker(
             &worker_bin,
-            target.uid,
+            Uid::from_raw(target.uid),
             target.gid,
             target.username.clone(),
             target.home.clone(),
@@ -182,10 +186,11 @@ async fn main() -> Result<(), Whatever> {
             .child
             .id()
             .expect("worker must have pid");
+        let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;
         if hello.pid != pid
-            || hello.uid != target.uid
-            || hello.euid != target.uid
+            || hello.uid != target_uid.as_raw()
+            || hello.euid != target_uid.as_raw()
             || hello.gid != target.gid
             || hello.egid != target.gid
         {
@@ -196,7 +201,7 @@ async fn main() -> Result<(), Whatever> {
                 hello.pid,
                 hello.uid,
                 hello.euid,
-                target.uid,
+                target_uid.as_raw(),
                 hello.gid,
                 hello.egid,
                 target.gid
@@ -205,14 +210,14 @@ async fn main() -> Result<(), Whatever> {
 
         tracing::info!(
             pid,
-            uid = target.uid,
+            uid = target_uid.as_raw(),
             gid = target.gid,
             user = %target.username,
             "worker privilege separation verified"
         );
 
         let mut st = state.lock().await;
-        st.register_worker(pid, target.uid, spawned.handle);
+        st.register_worker(Pid::from_raw(pid as i32), target_uid, spawned.handle);
     }
 
     // Central accept loop: route connections by server_name
@@ -251,9 +256,38 @@ async fn main() -> Result<(), Whatever> {
         }
     });
 
-    signal::handle_signal(state.clone()).await?;
+    if let Some(sig) = signal::handle_signal().await? {
+        let forwarded = match sig {
+            signal::ShutdownSignal::SigTerm => Signal::SIGTERM,
+            signal::ShutdownSignal::SigInt => Signal::SIGINT,
+        };
+        {
+            let mut st = state.lock().await;
+            st.forward_unix_signal(forwarded);
+        }
+        accept_handle.abort();
+        tracing::info!(?sig, "forwarded unix shutdown signal to workers");
 
-    accept_handle.abort();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let mut done = false;
+            {
+                let mut st = state.lock().await;
+                let exited = st.collect_exited_workers();
+                for pid in exited {
+                    st.cleanup_worker_with_reason(pid, "signal_terminate");
+                }
+                if st.worker_pids().is_empty() {
+                    done = true;
+                }
+            }
+            if done || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     monitor_handle.abort();
     {
         let mut st = state.lock().await;

@@ -8,28 +8,25 @@
 //! 1. Root spawns `pishoo-worker` with stdin/stdout piped, stderr inherited.
 //! 2. `pre_exec` drops privileges: `setgid` → `initgroups` → `setuid`.
 //! 3. Root establishes remoc connection: reads from child's stdout, writes to child's stdin.
-//! 4. Root sends [`WorkerBootstrap`] (including an mpsc signal channel) via base channel.
+//! 4. Root sends [`WorkerBootstrap`] via base channel.
 //! 5. Child receives bootstrap and sends `()` ack back.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nix::unistd::{Gid, Uid as NixUid};
+use nix::unistd::{Gid, Pid, Uid};
 use remoc::rtc::ServerShared;
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use crate::protocol::{RootToWorker, Uid, WorkerBootstrap, WorkerHello, RootTransportApiServerShared};
+use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello};
 
 /// Handle to a spawned worker process.
 ///
-/// Holds the child process and a signal channel for sending [`RootToWorker`]
-/// messages to the worker. Killing the child on drop ensures cleanup.
+/// Holds the child process. Killing the child on drop ensures cleanup.
 pub struct WorkerHandle {
     pub child: Child,
-    /// Root → worker signal channel (mpsc sender kept by root).
-    pub signal_tx: remoc::rch::mpsc::Sender<RootToWorker>,
 }
 
 pub struct SpawnedWorker {
@@ -80,7 +77,7 @@ pub async fn spawn_worker(
     unsafe {
         let groups = supplementary_groups.clone();
         let nix_gid = Gid::from_raw(gid);
-        let nix_uid = NixUid::from_raw(uid);
+        let nix_uid = uid;
         command.pre_exec(move || {
             if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -127,22 +124,17 @@ pub async fn spawn_worker(
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     tokio::spawn(conn);
-    // Create the root→worker signal channel (mpsc). The receiver end is embedded
-    // in the bootstrap so it crosses the remoc boundary to the child.
-    let (signal_tx, signal_rx) = remoc::rch::mpsc::channel(16);
-
     // Create per-worker RPC API server+client pair.
     let pid = child.id().expect("child has pid");
-    let api_impl = crate::root_transport_api::RootTransportApiImpl::new(pid, state.clone());
+    let api_impl = crate::root_transport_api::RootTransportApiImpl::new(Pid::from_raw(pid as i32), state.clone());
     let (server, client) = RootTransportApiServerShared::new(Arc::new(api_impl), 1);
     tokio::spawn(async move { server.serve(true).await });
 
     let bootstrap = WorkerBootstrap {
-        uid,
+        uid: uid.as_raw(),
         username,
         home,
         log_dir,
-        signal_rx,
         root_api: client,
     };
 
@@ -158,7 +150,7 @@ pub async fn spawn_worker(
         .ok_or_else(|| std::io::Error::other("worker closed channel without sending startup hello"))?;
 
     Ok(SpawnedWorker {
-        handle: WorkerHandle { child, signal_tx },
+        handle: WorkerHandle { child },
         hello,
     })
 }

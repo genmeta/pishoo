@@ -1,4 +1,4 @@
-use std::{process, sync::Arc};
+use std::process;
 
 use gateway::error::Whatever;
 use snafu::{ResultExt, whatever};
@@ -6,12 +6,10 @@ use tokio::{
     fs,
     io::{self, AsyncWriteExt},
     signal::unix::{SignalKind, signal},
-    sync::Mutex,
 };
 
 use crate::SignalType;
-use pishoo::protocol::{RootToWorker, WorkerSignal};
-use pishoo::root_state::RootState;
+use crate::signal::ShutdownSignal;
 
 pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
     use nix::{sys::signal::Signal, unistd::Pid};
@@ -42,8 +40,7 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 }
 
 pub async fn handle_signal(
-    state: Arc<Mutex<RootState>>,
-) -> Result<(), Whatever> {
+) -> Result<Option<ShutdownSignal>, Whatever> {
     // 设置信号处理器（仅 Unix 可用）
     let mut term_signal =
         signal(SignalKind::terminate()).whatever_context("Failed to create SIGTERM listener")?;
@@ -60,31 +57,23 @@ pub async fn handle_signal(
         tokio::select! {
             _ = term_signal.recv() => {
                 tracing::info!(target: "signal", "Received SIGTERM signal, exiting immediately...");
-                break;
+                return Ok(Some(ShutdownSignal::SigTerm));
             }
             _ = int_signal.recv() => {
                 tracing::info!(target: "signal", "Received SIGINT signal (Ctrl+C), exiting immediately...");
-                break;
+                return Ok(Some(ShutdownSignal::SigInt));
             }
             _ = quit_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGQUIT signal, forwarding Quit to workers...");
-                let mut st = state.lock().await;
-                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::Quit)).await;
+                tracing::info!(target: "signal", "Received SIGQUIT signal");
             }
             _ = hup_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGHUP signal, forwarding Reload to workers...");
-                let mut st = state.lock().await;
-                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::Reload)).await;
+                tracing::info!(target: "signal", "Received SIGHUP signal");
             }
             _ = usr1_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGUSR1 signal, forwarding ReopenLogs to workers...");
-                let mut st = state.lock().await;
-                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::ReopenLogs)).await;
+                tracing::info!(target: "signal", "Received SIGUSR1 signal");
             }
         }
     }
-
-    Ok(())
 }
 
 // 写入 PID 文件（仅 Unix）

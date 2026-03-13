@@ -14,10 +14,16 @@ use std::sync::Arc;
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
-use h3x::{dhttp::settings::Settings, remoc::quic::RemoteQuicListener};
+use h3x::{
+    dhttp::settings::Settings,
+    remoc::quic::{ListenClient, RemoteConnectClient, serve_quic_connector},
+};
 use h3x::quic::Listen;
-use pishoo::protocol::{OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello, RootToWorker, WorkerSignal};
+use pishoo::protocol::{
+    ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
+};
 use rustls_pemfile::{certs, private_key};
+use snafu::Snafu;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -29,42 +35,61 @@ struct ServerRuntime {
     task: tokio::task::JoinHandle<()>,
 }
 
+struct ConnectorRuntime {
+    _connector: RemoteConnectClient,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct WorkerRouting {
+    router: Arc<HashMap<String, Arc<Node>>>,
+    binds: Arc<HashMap<String, Vec<String>>>,
+}
+
 #[derive(Clone)]
 struct WorkerPolicy {
     access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, Snafu)]
 enum WorkerError {
-    #[error("access_rules not configured for worker" )]
+    #[snafu(display("access_rules not configured for worker"))]
     MissingAccessRules,
-    #[error("invalid access_rules database uri `{0}`")]
-    InvalidAccessRules(String),
-    #[error("failed to connect access_rules database: {0}")]
-    AccessRulesDb(String),
-    #[error("failed to load location rules: {0}")]
-    AccessRulesLoad(String),
-    #[error("failed to read worker policy config `{path}`: {source}")]
+    #[snafu(display("invalid access_rules database uri `{message}`"))]
+    InvalidAccessRules { message: String },
+    #[snafu(display("failed to connect access_rules database: {message}"))]
+    AccessRulesDb { message: String },
+    #[snafu(display("failed to load location rules: {message}"))]
+    AccessRulesLoad { message: String },
+    #[snafu(display("failed to read worker policy config `{path}`: {source}"))]
     ReadPolicy { path: String, source: std::io::Error },
-    #[error("failed to read cert `{path}`: {source}")]
+    #[snafu(display("failed to read cert `{path}`: {source}"))]
     ReadCert { path: String, source: std::io::Error },
-    #[error("failed to read key `{path}`: {source}")]
+    #[snafu(display("failed to read key `{path}`: {source}"))]
     ReadKey { path: String, source: std::io::Error },
-    #[error("certificate file too large `{path}` ({actual} > {limit})")]
+    #[snafu(display("certificate file too large `{path}` ({actual} > {limit})"))]
     CertTooLarge { path: String, actual: usize, limit: usize },
-    #[error("private key file too large `{path}` ({actual} > {limit})")]
+    #[snafu(display("private key file too large `{path}` ({actual} > {limit})"))]
     KeyTooLarge { path: String, actual: usize, limit: usize },
-    #[error("failed to parse certificate PEM `{path}`: {source}")]
+    #[snafu(display("failed to parse certificate PEM `{path}`: {source}"))]
     ParseCert { path: String, source: std::io::Error },
-    #[error("certificate PEM contains no certificate `{path}`")]
+    #[snafu(display("certificate PEM contains no certificate `{path}`"))]
     EmptyCert { path: String },
-    #[error("failed to parse private key PEM `{path}`: {source}")]
+    #[snafu(display("failed to parse private key PEM `{path}`: {source}"))]
     ParseKey { path: String, source: std::io::Error },
-    #[error("private key PEM contains no key `{path}`")]
+    #[snafu(display("private key PEM contains no key `{path}`"))]
     EmptyKey { path: String },
 }
 
 impl ServerRuntime {
+    fn stop(self) {
+        self.cancel.cancel();
+        self.task.abort();
+    }
+}
+
+impl ConnectorRuntime {
     fn stop(self) {
         self.cancel.cancel();
         self.task.abort();
@@ -126,8 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("startup hello sent to root, worker ready");
 
-    // Extract channels and API client from bootstrap.
-    let mut signal_rx = bootstrap.signal_rx;
     let root_api = bootstrap.root_api;
 
     // --- Identity scan: discover ~/.genmeta identities and request listeners ---
@@ -136,11 +159,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let h3_settings = Arc::new(Settings::default());
 
     let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf")).await?;
+    let connector_runtime = start_connector_runtime().await?;
+    tracing::info!("worker-owned connector runtime started");
 
     let identities = genmeta_home.identities();
     match identities.list().await {
         Ok(names) => {
-            let router = build_worker_router(&identities, &names).await;
+            let routing = build_worker_routing(&identities, &names).await;
             let total = names.len();
             for name in &names {
                 let identity_dir = identities.join_name(name.borrow());
@@ -151,10 +176,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let request = RequestListen {
                     server_name: server_name.clone(),
-                    bind: vec![],
+                    bind: routing
+                        .binds
+                        .get(&server_name)
+                        .cloned()
+                        .unwrap_or_default(),
                     cert_pem,
                     key_pem,
                 };
+                if request.bind.is_empty() {
+                    tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
+                    continue;
+                }
 
                 match root_api.request_listen(request).await {
                     Ok(listener) => {
@@ -162,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             listener,
                             server_name.clone(),
                             h3_settings.clone(),
-                            router.clone(),
+                            routing.router.clone(),
                             worker_policy.clone(),
                         );
                         tracing::info!(%server_name, "acquired listener");
@@ -184,38 +217,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Request a forward connector from root.
-    let _connector = match root_api.open_connector(OpenConnector { profile: String::new() }).await {
-        Ok(c) => {
-            tracing::info!("acquired forward connector");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::warn!(%e, "failed to acquire connector, continuing without forward proxy");
-            None
-        }
-    };
-
     // Keep root_api and identity state alive for Reload handling.
     let genmeta_home_path = bootstrap.home.join(".genmeta");
 
-    // Signal loop: wait for root signals.
+    let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())?;
+    let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let mut usr1_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
+    let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
     loop {
-        match signal_rx.recv().await {
-            Ok(Some(RootToWorker::Signal(signal))) => {
-                tracing::info!(?signal, "received signal from root");
-                match signal {
-                    WorkerSignal::Quit | WorkerSignal::Terminate => {
-                        tracing::info!("shutting down worker");
-                        break;
-                    }
-                    WorkerSignal::Reload => {
+        tokio::select! {
+            _ = term_signal.recv() => {
+                tracing::info!("received SIGTERM; shutting down worker");
+                break;
+            }
+            _ = int_signal.recv() => {
+                tracing::info!("received SIGINT; shutting down worker");
+                break;
+            }
+            _ = quit_signal.recv() => {
+                tracing::info!("received SIGQUIT; shutting down worker");
+                break;
+            }
+            _ = hup_signal.recv() => {
                         tracing::info!("reloading identities");
                         let genmeta_home = GenmetaHome::new(genmeta_home_path.clone());
                         let identities = genmeta_home.identities();
                         match identities.list().await {
                             Ok(names) => {
-                                let router = build_worker_router(&identities, &names).await;
+                                let routing = build_worker_routing(&identities, &names).await;
                                 let new_set: HashSet<String> = names
                                     .iter()
                                     .map(|n| n.as_str().to_string())
@@ -267,10 +298,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     let request = RequestListen {
                                         server_name: (*server_name).clone(),
-                                        bind: vec![],
+                                        bind: routing
+                                            .binds
+                                            .get(*server_name)
+                                            .cloned()
+                                            .unwrap_or_default(),
                                         cert_pem,
                                         key_pem,
                                     };
+                                    if request.bind.is_empty() {
+                                        tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
+                                        continue;
+                                    }
 
                                     match root_api.request_listen(request).await {
                                         Ok(listener) => {
@@ -278,7 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 listener,
                                                 (*server_name).clone(),
                                                 h3_settings.clone(),
-                                                router.clone(),
+                                                routing.router.clone(),
                                                 worker_policy.clone(),
                                             );
                                             tracing::info!(%server_name, "acquired listener");
@@ -301,30 +340,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 tracing::warn!(%e, "failed to list identities during reload");
                             }
                         }
-                    }
-                    WorkerSignal::ReopenLogs => {
-                        reopen_worker_log(&bootstrap.log_dir)?;
-                        tracing::info!("worker log reopened");
-                    }
-                }
             }
-            Ok(None) => {
-                tracing::info!("signal channel closed, shutting down");
-                break;
-            }
-            Err(e) => {
-                tracing::error!(%e, "signal channel error, shutting down");
-                break;
+            _ = usr1_signal.recv() => {
+                reopen_worker_log(&bootstrap.log_dir)?;
+                tracing::info!("worker log reopened");
             }
         }
     }
 
+    connector_runtime.stop();
     tracing::info!("pishoo-worker exiting");
     Ok(())
 }
 
 fn start_server_runtime(
-    listener: RemoteQuicListener,
+    listener: ListenClient,
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
@@ -374,6 +404,33 @@ fn start_server_runtime(
     }
 }
 
+async fn start_connector_runtime() -> Result<ConnectorRuntime, WorkerError> {
+    use gm_quic::prelude::handy::ToCertificate;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(include_bytes!("../../../keychain/root.crt").to_certificate());
+    let client = gm_quic::prelude::QuicClient::builder()
+        .with_root_certificates(Arc::new(roots))
+        .without_cert()
+        .with_alpns(vec!["h3"])
+        .build();
+
+    let (connector, serve_fut) = serve_quic_connector(Arc::new(client));
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let task = tokio::spawn(async move {
+        tokio::select! {
+            () = serve_fut => {}
+            () = cancel_clone.cancelled() => {}
+        }
+    });
+    Ok(ConnectorRuntime {
+        _connector: connector,
+        cancel,
+        task,
+    })
+}
+
 async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerError> {
     let raw = tokio::fs::read(conf_path)
         .await
@@ -382,7 +439,7 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
             source: e,
         })?;
     let parsed = gateway::parse::parse(&raw, conf_path.parent())
-        .map_err(|e| WorkerError::InvalidAccessRules(e.to_string()))?;
+        .map_err(|e| WorkerError::InvalidAccessRules { message: e.to_string() })?;
     let pishoo = parsed
         .get("pishoo")
         .and_then(|v| match v { Value::Nodes(nodes) => nodes.first(), _ => None })
@@ -394,16 +451,16 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
 
     let db = sea_orm::Database::connect(&uri)
         .await
-        .map_err(|e| WorkerError::AccessRulesDb(e.to_string()))?;
+        .map_err(|e| WorkerError::AccessRulesDb { message: e.to_string() })?;
     let location_rules = LocationService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad(e.to_string()))?;
+        .map_err(|e| WorkerError::AccessRulesLoad { message: e.to_string() })?;
 
     let _ = DomainService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad(e.to_string()))?;
+        .map_err(|e| WorkerError::AccessRulesLoad { message: e.to_string() })?;
 
     Ok(WorkerPolicy {
         access_rules: Arc::new(location_rules.into()),
@@ -463,12 +520,19 @@ async fn read_tls_material(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>
     Ok((cert_pem, key_pem))
 }
 
-async fn build_worker_router(
+async fn build_worker_routing(
     identities: &genmeta_home::identity::Identities,
     names: &[genmeta_home::identity::Name<'_>],
-) -> Arc<HashMap<String, Arc<Node>>> {
+) -> WorkerRouting {
+    let device_names = gm_quic::qinterface::device::Devices::global()
+        .interfaces()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
     let mut servers: Vec<Arc<Node>> = Vec::new();
     let mut fallback_entries: HashMap<String, Arc<Node>> = HashMap::new();
+    let mut binds: HashMap<String, Vec<String>> = HashMap::new();
 
     for name in names {
         let identity_dir = identities.join_name(name.borrow());
@@ -486,6 +550,27 @@ async fn build_worker_router(
             && let Some(pishoo_node) = pishoo_nodes.first()
             && let Some(Value::Nodes(server_nodes)) = pishoo_node.get("server")
         {
+            for server_node in server_nodes {
+                if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
+                    (server_node.get("server_name"), server_node.get("listen"))
+                {
+                    for server_name in server_names {
+                        let normalized = match server_name.name.strip_suffix('~') {
+                            Some(prefix) => format!("{prefix}.genmeta.net"),
+                            None => server_name.name.clone(),
+                        };
+                        let bind_set = listens
+                            .iter()
+                            .flat_map(|listen| {
+                                listen.resolve(device_names.iter().map(|s| s.as_str()))
+                            })
+                            .filter(|uri| uri.resolve().is_ok())
+                            .map(|uri| uri.to_string())
+                            .collect::<std::collections::HashSet<_>>();
+                        binds.insert(normalized, bind_set.into_iter().collect());
+                    }
+                }
+            }
             servers.extend(server_nodes.iter().cloned());
         }
     }
@@ -496,7 +581,10 @@ async fn build_worker_router(
     for (name, node) in fallback_entries {
         router.entry(name).or_insert(node);
     }
-    Arc::new(router)
+    WorkerRouting {
+        router: Arc::new(router),
+        binds: Arc::new(binds),
+    }
 }
 
 fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {

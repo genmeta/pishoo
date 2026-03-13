@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use h3x::remoc::quic::{RemoteQuicConnector, RemoteQuicListener};
+use h3x::remoc::quic::{ListenClient, RemoteConnectClient};
+use nix::unistd::Pid;
 use tokio::sync::Mutex;
 
 use crate::protocol::{
@@ -14,8 +15,6 @@ use crate::protocol::{
     RequestListen, RootTransportApi,
 };
 use crate::root_state::RootState;
-
-use crate::protocol::Pid;
 
 /// Per-worker [`RootTransportApi`] implementation.
 ///
@@ -39,7 +38,7 @@ impl RootTransportApi for RootTransportApiImpl {
     async fn request_listen(
         &self,
         request: RequestListen,
-    ) -> Result<RemoteQuicListener, ListenRequestError> {
+    ) -> Result<ListenClient, ListenRequestError> {
         let mut state = self.state.lock().await;
         state.request_listen(self.caller_pid, request).await
     }
@@ -55,7 +54,7 @@ impl RootTransportApi for RootTransportApiImpl {
     async fn open_connector(
         &self,
         request: OpenConnector,
-    ) -> Result<RemoteQuicConnector, OpenConnectorError> {
+    ) -> Result<RemoteConnectClient, OpenConnectorError> {
         let mut state = self.state.lock().await;
         state.open_connector(self.caller_pid, request).await
     }

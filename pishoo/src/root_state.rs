@@ -8,15 +8,16 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
-use h3x::remoc::quic::{LocalQuicConnector, LocalQuicListener, RemoteQuicConnector, RemoteQuicListener};
+use h3x::remoc::quic::{ListenClient, RemoteConnectClient, serve_quic_connector, serve_quic_listener};
+use nix::{sys::signal::Signal, unistd::{Pid, Uid}};
 use rustls_pemfile::{certs, private_key};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::per_server_listen::PerServerListenAdapter;
 use crate::protocol::{
-    ListenRequestError, OpenConnector, OpenConnectorError, Pid, ReleaseListen,
-    ReleaseListenError, RequestListen, ServerName, Uid,
+    ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
+    RequestListen, ServerName,
 };
 use crate::worker_spawn::WorkerHandle;
 
@@ -103,7 +104,7 @@ impl RootState {
             },
         );
         self.users.insert(uid, pid);
-        tracing::info!(pid, uid, "registered worker");
+        tracing::info!(pid = %pid, uid = uid.as_raw(), "registered worker");
     }
 
     /// Remove all resources for a dead/exited worker process.
@@ -117,7 +118,7 @@ impl RootState {
 
     pub fn cleanup_worker_with_reason(&mut self, pid: Pid, reason: &str) -> Option<CleanupSummary> {
         let Some(record) = self.processes.remove(&pid) else {
-            tracing::debug!(pid, %reason, "cleanup skipped: worker not found");
+            tracing::debug!(pid = %pid, %reason, "cleanup skipped: worker not found");
             return None;
         };
 
@@ -147,8 +148,8 @@ impl RootState {
             connectors_cleaned,
         };
         tracing::info!(
-            pid = summary.pid,
-            uid = summary.uid,
+            pid = %summary.pid,
+            uid = summary.uid.as_raw(),
             servers_cleaned = summary.servers_cleaned,
             connectors_cleaned = summary.connectors_cleaned,
             %reason,
@@ -168,20 +169,20 @@ impl RootState {
         &mut self,
         caller_pid: Pid,
         request: RequestListen,
-    ) -> Result<RemoteQuicListener, ListenRequestError> {
+    ) -> Result<ListenClient, ListenRequestError> {
         let server_name = request.server_name;
 
         // 1. Conflict check: first-come-first-served.
         if self.servers.contains_key(&server_name) {
-            tracing::warn!(caller_pid, %server_name, "request_listen conflict");
+            tracing::warn!(caller_pid = %caller_pid, %server_name, "request_listen conflict");
             return Err(ListenRequestError::Conflict);
         }
 
         // 2. Verify caller is a registered worker.
         if !self.processes.contains_key(&caller_pid) {
-            return Err(ListenRequestError::Internal(format!(
-                "unknown caller pid {caller_pid}"
-            )));
+            return Err(ListenRequestError::Internal {
+                message: format!("unknown caller pid {caller_pid}"),
+            });
         }
 
         validate_listen_material(&request.cert_pem, &request.key_pem)?;
@@ -197,9 +198,9 @@ impl RootState {
                 None::<Vec<u8>>,
             )
             .await
-            .map_err(|e| ListenRequestError::Internal(format!(
-                "failed to add server `{server_name}`: {e}"
-            )))?;
+            .map_err(|e| ListenRequestError::Internal {
+                message: format!("failed to add server `{server_name}`: {e}"),
+            })?;
 
         // 5. Create mpsc channel for routing connections to this server.
         let (tx, rx) = mpsc::channel(128);
@@ -208,9 +209,7 @@ impl RootState {
         let shutdown_token = CancellationToken::new();
         let adapter = PerServerListenAdapter::new(rx, shutdown_token.clone());
 
-        // 7. Wrap in LocalQuicListener and convert to remote.
-        let local = LocalQuicListener::new(adapter);
-        let (remote_listener, serve_fut) = local.into_remote();
+        let (remote_listener, serve_fut) = serve_quic_listener(adapter);
 
         // 8. Spawn the serve future to drive the RTC server.
         tokio::spawn(serve_fut);
@@ -230,7 +229,7 @@ impl RootState {
             process.owned_servers.insert(server_name);
         }
 
-        tracing::info!(caller_pid, "request_listen success");
+        tracing::info!(caller_pid = %caller_pid, "request_listen success");
 
         // 11. Return the RemoteQuicListener for the worker.
         Ok(remote_listener)
@@ -245,17 +244,15 @@ impl RootState {
         &mut self,
         caller_pid: Pid,
         _request: OpenConnector,
-    ) -> Result<RemoteQuicConnector, OpenConnectorError> {
+    ) -> Result<RemoteConnectClient, OpenConnectorError> {
         // Verify caller is a registered worker.
         if !self.processes.contains_key(&caller_pid) {
-            return Err(OpenConnectorError::Internal(format!(
-                "unknown caller pid {caller_pid}"
-            )));
+            return Err(OpenConnectorError::Internal {
+                message: format!("unknown caller pid {caller_pid}"),
+            });
         }
 
-        // Create LocalQuicConnector wrapping the shared QuicClient.
-        let local = LocalQuicConnector::new(self.quic_client.clone());
-        let (remote_connector, serve_fut) = local.into_remote();
+        let (remote_connector, serve_fut) = serve_quic_connector(self.quic_client.clone());
 
         // Create a cancellation token so we can stop the serve future on cleanup.
         let cancel = CancellationToken::new();
@@ -272,7 +269,7 @@ impl RootState {
             process.connector_shutdown_tokens.push(cancel);
         }
 
-        tracing::info!(caller_pid, "open_connector success");
+        tracing::info!(caller_pid = %caller_pid, "open_connector success");
 
         Ok(remote_connector)
     }
@@ -295,7 +292,7 @@ impl RootState {
 
         // Ownership check.
         if server_record.owner_pid != caller_pid {
-            tracing::warn!(caller_pid, %server_name, "release_listen not owner");
+            tracing::warn!(caller_pid = %caller_pid, %server_name, "release_listen not owner");
             return Err(ReleaseListenError::NotOwner);
         }
 
@@ -313,7 +310,7 @@ impl RootState {
             process.owned_servers.remove(server_name);
         }
 
-        tracing::info!(caller_pid, %server_name, "release_listen success");
+        tracing::info!(caller_pid = %caller_pid, %server_name, "release_listen success");
 
         Ok(())
     }
@@ -323,12 +320,12 @@ impl RootState {
         for (pid, process) in &mut self.processes {
             match process.worker_handle.child.try_wait() {
                 Ok(Some(status)) => {
-                    tracing::warn!(pid = *pid, ?status, "worker exited");
+                tracing::warn!(pid = %pid, ?status, "worker exited");
                     exited.push(*pid);
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::error!(pid = *pid, %e, "failed to poll worker status");
+                    tracing::error!(pid = %pid, %e, "failed to poll worker status");
                     exited.push(*pid);
                 }
             }
@@ -361,11 +358,14 @@ impl RootState {
         self.processes.keys().copied().collect()
     }
 
-    /// Broadcast a signal to all registered workers.
-    pub async fn broadcast_signal(&mut self, msg: crate::protocol::RootToWorker) {
+    pub fn forward_unix_signal(&mut self, signal: Signal) {
         for (pid, record) in &mut self.processes {
-            if let Err(e) = record.worker_handle.signal_tx.send(msg.clone()).await {
-                tracing::warn!(pid, %e, "failed to send signal to worker");
+            let Some(raw_pid) = record.worker_handle.child.id() else {
+                continue;
+            };
+            let child_pid = Pid::from_raw(raw_pid as i32);
+            if let Err(e) = nix::sys::signal::kill(child_pid, signal) {
+                tracing::warn!(pid = %pid, %e, ?signal, "failed to forward unix signal to worker");
             }
         }
     }
@@ -373,37 +373,43 @@ impl RootState {
 
 fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), ListenRequestError> {
     if cert_pem.len() > MAX_CERT_PEM_BYTES {
-        return Err(ListenRequestError::InvalidRequest(format!(
-            "certificate PEM too large ({} > {})",
-            cert_pem.len(),
-            MAX_CERT_PEM_BYTES
-        )));
+        return Err(ListenRequestError::InvalidRequest {
+            message: format!(
+                "certificate PEM too large ({} > {})",
+                cert_pem.len(),
+                MAX_CERT_PEM_BYTES
+            ),
+        });
     }
     if key_pem.len() > MAX_KEY_PEM_BYTES {
-        return Err(ListenRequestError::InvalidRequest(format!(
-            "private key PEM too large ({} > {})",
-            key_pem.len(),
-            MAX_KEY_PEM_BYTES
-        )));
+        return Err(ListenRequestError::InvalidRequest {
+            message: format!(
+                "private key PEM too large ({} > {})",
+                key_pem.len(),
+                MAX_KEY_PEM_BYTES
+            ),
+        });
     }
     let cert_count = certs(&mut Cursor::new(cert_pem))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ListenRequestError::InvalidRequest(format!(
-            "invalid certificate PEM: {e}"
-        )))?
+        .map_err(|e| ListenRequestError::InvalidRequest {
+            message: format!("invalid certificate PEM: {e}"),
+        })?
         .len();
     if cert_count == 0 {
-        return Err(ListenRequestError::InvalidRequest(
-            "certificate PEM contains no certificates".to_string(),
-        ));
+        return Err(ListenRequestError::InvalidRequest {
+            message: "certificate PEM contains no certificates".to_string(),
+        });
     }
     let key = private_key(&mut Cursor::new(key_pem)).map_err(|e| {
-        ListenRequestError::InvalidRequest(format!("invalid private key PEM: {e}"))
+        ListenRequestError::InvalidRequest {
+            message: format!("invalid private key PEM: {e}"),
+        }
     })?;
     if key.is_none() {
-        return Err(ListenRequestError::InvalidRequest(
-            "private key PEM contains no key".to_string(),
-        ));
+        return Err(ListenRequestError::InvalidRequest {
+            message: "private key PEM contains no key".to_string(),
+        });
     }
     Ok(())
 }
@@ -440,27 +446,26 @@ mod tests {
         );
         let mut state = RootState::new(listeners, client);
 
-        state.users.insert(1000, 200);
+        state.users.insert(Uid::from_raw(1000), Pid::from_raw(200));
         state.processes.insert(
-            100,
+            Pid::from_raw(100),
             WorkerProcessRecord {
-                uid: 1000,
+                uid: Uid::from_raw(1000),
                 owned_servers: HashSet::new(),
                 worker_handle: super::WorkerHandle {
                     child: tokio::process::Command::new("/bin/true")
                         .spawn()
                         .expect("spawn child"),
-                    signal_tx: remoc::rch::mpsc::channel(1).0,
                 },
                 connector_shutdown_tokens: Vec::new(),
             },
         );
 
         let summary = state
-            .cleanup_worker_with_reason(100, "test")
+            .cleanup_worker_with_reason(Pid::from_raw(100), "test")
             .expect("cleanup summary");
-        assert_eq!(summary.pid, 100);
-        assert_eq!(state.get_pid_for_uid(1000), Some(200));
+        assert_eq!(summary.pid, Pid::from_raw(100));
+        assert_eq!(state.get_pid_for_uid(Uid::from_raw(1000)), Some(Pid::from_raw(200)));
     }
 
     #[test]
@@ -468,6 +473,6 @@ mod tests {
         let cert = b"not-a-cert";
         let key = b"not-a-key";
         let err = validate_listen_material(cert, key).expect_err("must reject invalid pem");
-        assert!(matches!(err, ListenRequestError::InvalidRequest(_)));
+        assert!(matches!(err, ListenRequestError::InvalidRequest { .. }));
     }
 }
