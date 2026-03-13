@@ -5,9 +5,11 @@
 //! per-server listen adapters routed from the central `QuicListeners`.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::sync::Arc;
 
 use h3x::remoc::quic::{LocalQuicConnector, LocalQuicListener, RemoteQuicConnector, RemoteQuicListener};
+use rustls_pemfile::{certs, private_key};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -58,6 +60,9 @@ pub struct RootState {
     /// uid → pid mapping.
     users: HashMap<Uid, Pid>,
 }
+
+const MAX_CERT_PEM_BYTES: usize = 512 * 1024;
+const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct CleanupSummary {
@@ -179,25 +184,18 @@ impl RootState {
             )));
         }
 
-        // 3. Read cert/key files (root still has permissions).
-        let cert = tokio::fs::read(&request.cert_path)
-            .await
-            .map_err(|e| ListenRequestError::InvalidRequest(format!(
-                "failed to read certificate file `{}`: {e}",
-                request.cert_path.display()
-            )))?;
-
-        let key = tokio::fs::read(&request.key_path)
-            .await
-            .map_err(|e| ListenRequestError::InvalidRequest(format!(
-                "failed to read private key file `{}`: {e}",
-                request.key_path.display()
-            )))?;
+        validate_listen_material(&request.cert_pem, &request.key_pem)?;
 
         // 4. Add server to QuicListeners.
         //    bind_uris is Vec<String>; BindUri implements From<String>.
         self.listeners
-            .add_server(&server_name, cert.as_slice(), key.as_slice(), request.bind, None::<Vec<u8>>)
+            .add_server(
+                &server_name,
+                request.cert_pem.as_slice(),
+                request.key_pem.as_slice(),
+                request.bind,
+                None::<Vec<u8>>,
+            )
             .await
             .map_err(|e| ListenRequestError::Internal(format!(
                 "failed to add server `{server_name}`: {e}"
@@ -373,6 +371,43 @@ impl RootState {
     }
 }
 
+fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), ListenRequestError> {
+    if cert_pem.len() > MAX_CERT_PEM_BYTES {
+        return Err(ListenRequestError::InvalidRequest(format!(
+            "certificate PEM too large ({} > {})",
+            cert_pem.len(),
+            MAX_CERT_PEM_BYTES
+        )));
+    }
+    if key_pem.len() > MAX_KEY_PEM_BYTES {
+        return Err(ListenRequestError::InvalidRequest(format!(
+            "private key PEM too large ({} > {})",
+            key_pem.len(),
+            MAX_KEY_PEM_BYTES
+        )));
+    }
+    let cert_count = certs(&mut Cursor::new(cert_pem))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ListenRequestError::InvalidRequest(format!(
+            "invalid certificate PEM: {e}"
+        )))?
+        .len();
+    if cert_count == 0 {
+        return Err(ListenRequestError::InvalidRequest(
+            "certificate PEM contains no certificates".to_string(),
+        ));
+    }
+    let key = private_key(&mut Cursor::new(key_pem)).map_err(|e| {
+        ListenRequestError::InvalidRequest(format!("invalid private key PEM: {e}"))
+    })?;
+    if key.is_none() {
+        return Err(ListenRequestError::InvalidRequest(
+            "private key PEM contains no key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +461,13 @@ mod tests {
             .expect("cleanup summary");
         assert_eq!(summary.pid, 100);
         assert_eq!(state.get_pid_for_uid(1000), Some(200));
+    }
+
+    #[test]
+    fn reject_invalid_listen_material() {
+        let cert = b"not-a-cert";
+        let key = b"not-a-key";
+        let err = validate_listen_material(cert, key).expect_err("must reject invalid pem");
+        assert!(matches!(err, ListenRequestError::InvalidRequest(_)));
     }
 }
