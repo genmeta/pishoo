@@ -67,32 +67,31 @@ mod upstream_tls;
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
 
+#[derive(Debug, Clone, Copy)]
+pub enum MissingRulePolicy {
+    Allow,
+    Deny,
+}
+
 pub fn build_router_for_worker(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
     build_router(servers)
 }
 
 pub async fn handle_single_connection_for_worker(
-    conn: gm_quic::prelude::Connection,
-    server_name: String,
-    h3_settings: Arc<Settings>,
-    router: Arc<HashMap<String, Arc<Node>>>,
-    access_rules: Arc<LocationRulesMatcher>,
-) -> Result<()> {
-    handle_single_connection(conn, server_name, h3_settings, router, access_rules).await
-}
-
-pub async fn handle_single_connection_for_worker_default(
     conn: impl h3x::quic::Connection + 'static,
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
+    access_rules: Arc<LocationRulesMatcher>,
+    missing_rule_policy: MissingRulePolicy,
 ) -> Result<()> {
     handle_single_connection(
         conn,
         server_name,
         h3_settings,
         router,
-        Arc::new(LocationRulesMatcher::default()),
+        access_rules,
+        missing_rule_policy,
     )
     .await
 }
@@ -397,7 +396,14 @@ async fn handle_connections(
         tokio::spawn(
             async move {
                 if let Err(error) =
-                    handle_single_connection(conn, server_name, h3_settings, router, access_rules)
+                    handle_single_connection(
+                        conn,
+                        server_name,
+                        h3_settings,
+                        router,
+                        access_rules,
+                        MissingRulePolicy::Allow,
+                    )
                         .await
                 {
                     error!(
@@ -419,6 +425,7 @@ async fn handle_single_connection(
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
     access_rules: Arc<LocationRulesMatcher>,
+    missing_rule_policy: MissingRulePolicy,
 ) -> Result<()> {
     info!(target: "connect", "Accepted connection");
 
@@ -440,6 +447,7 @@ async fn handle_single_connection(
                 server_name.clone(),
                 router.clone(),
                 access_rules.clone(),
+                missing_rule_policy,
                 h3_conn.clone(),
                 request,
                 recver,
@@ -501,6 +509,7 @@ async fn handle_request(
     server_name: String,
     servers: Arc<HashMap<String, Arc<Node>>>,
     access_rules: Arc<LocationRulesMatcher>,
+    missing_rule_policy: MissingRulePolicy,
     conn: Arc<H3Connection<impl h3x::quic::Connection + 'static>>,
     req: Request<()>,
     recver: ReadStream,
@@ -541,7 +550,18 @@ async fn handle_request(
     let (firewall_matched_domain, firewall_matched_location, firewall_action) =
         match access_rules.match_rule(&server_name, req.uri().path(), &http_request) {
             Ok((domain, location, action)) => (Some(domain), Some(location), action),
-            Err(..) => (None, None, RequestAction::Allow),
+            Err(error) => {
+                let action = action_on_missing_rule(missing_rule_policy);
+                warn!(
+                    target: "request",
+                    %server_name,
+                    path = %req.uri().path(),
+                    ?missing_rule_policy,
+                    %error,
+                    "firewall rule matching failed"
+                );
+                (None, None, action)
+            }
         };
 
     let client_name = match &client_name {
@@ -632,6 +652,13 @@ fn build_response(status: StatusCode) -> Response<()> {
         .expect("Failed to build response")
 }
 
+fn action_on_missing_rule(policy: MissingRulePolicy) -> RequestAction {
+    match policy {
+        MissingRulePolicy::Allow => RequestAction::Allow,
+        MissingRulePolicy::Deny => RequestAction::Deny,
+    }
+}
+
 /// 发送状态码响应并关闭流
 async fn send_status_and_close(mut sender: WriteStream, status: StatusCode) -> Result<()> {
     let (parts, _) = build_response(status).into_parts();
@@ -648,5 +675,15 @@ struct ShutdownListenersOnDrop(Arc<QuicListeners>);
 impl Drop for ShutdownListenersOnDrop {
     fn drop(&mut self) {
         self.0.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_rule_policy_deny_is_fail_closed() {
+        assert_eq!(action_on_missing_rule(MissingRulePolicy::Deny), RequestAction::Deny);
     }
 }
