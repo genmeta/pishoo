@@ -50,9 +50,9 @@ pub enum WorkerSignal {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RequestListen {
     pub server_name: ServerName,
-    pub bind: Vec<String>, // bind URIs as strings for now
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
+    pub bind: Vec<String>,
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,4 +119,22 @@ pub trait RootTransportApi: Send + Sync {
         &self,
         request: OpenConnector,
     ) -> Result<RemoteQuicConnector, OpenConnectorError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_listen_payload_is_material_not_paths() {
+        let req = RequestListen {
+            server_name: "example.test".to_string(),
+            bind: vec![],
+            cert_pem: b"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----".to_vec(),
+            key_pem: b"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".to_vec(),
+        };
+        assert_eq!(req.server_name, "example.test");
+        assert!(!req.cert_pem.is_empty());
+        assert!(!req.key_pem.is_empty());
+    }
 }

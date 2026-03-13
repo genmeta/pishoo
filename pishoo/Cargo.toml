@@ -157,6 +157,7 @@ firewall-db = { workspace = true }
 # --- Database & ORM ---
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
+rustls-pemfile = "2"
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }
