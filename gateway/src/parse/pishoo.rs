@@ -17,6 +17,7 @@ pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("types", parse_types);
     commands.insert("access_rules", parse_string);
     commands.insert("default_type", parse_header_value);
+    commands.insert("workers", parse_string_vec);
     commands.insert("server", parse_server);
     commands.insert("proxy", parse_proxy);
 

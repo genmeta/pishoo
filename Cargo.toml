@@ -49,6 +49,9 @@ qevent = { path = "../gm-quic/qevent" }
 
 h3x = { path = "../h3x" }
 
+# --- IPC / RPC ---
+remoc = { version = "0.18", default-features = false, features = ["remoc_macro", "rtc", "serde", "default-codec-postbag"] }
+
 # --- DNS (mDNS/HTTP resolver) ---
 gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
 

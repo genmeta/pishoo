@@ -1,19 +1,17 @@
-use std::{path::PathBuf, process, sync::Arc};
+use std::{process, sync::Arc};
 
-use gateway::{error::Whatever, parse};
-use snafu::{OptionExt, ResultExt, whatever};
+use gateway::error::Whatever;
+use snafu::{ResultExt, whatever};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
-    signal::unix::{Signal, SignalKind, signal},
+    signal::unix::{SignalKind, signal},
     sync::Mutex,
-    task::JoinSet,
 };
 
-use crate::{
-    SignalType,
-    service::{start_services_from_pishoo_block, stop_services},
-};
+use crate::SignalType;
+use pishoo::protocol::{RootToWorker, WorkerSignal};
+use pishoo::root_state::RootState;
 
 pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
     use nix::{sys::signal::Signal, unistd::Pid};
@@ -44,38 +42,45 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 }
 
 pub async fn handle_signal(
-    config_file: PathBuf,
-    handler: &Arc<Mutex<JoinSet<()>>>,
+    state: Arc<Mutex<RootState>>,
 ) -> Result<(), Whatever> {
     // 设置信号处理器（仅 Unix 可用）
     let mut term_signal =
         signal(SignalKind::terminate()).whatever_context("Failed to create SIGTERM listener")?;
     let mut int_signal =
         signal(SignalKind::interrupt()).whatever_context("Failed to create SIGINT listener")?;
-    let quit_signal =
+    let mut quit_signal =
         signal(SignalKind::quit()).whatever_context("Failed to create SIGQUIT listener")?;
-    let hup_signal =
+    let mut hup_signal =
         signal(SignalKind::hangup()).whatever_context("Failed to create SIGHUP listener")?;
-    let usr1_signal = signal(SignalKind::user_defined1())
+    let mut usr1_signal = signal(SignalKind::user_defined1())
         .whatever_context("Failed to create SIGUSR1 listener")?;
 
-    tokio::spawn(handle_sigquit(quit_signal, handler.clone()));
-
-    // 处理 SIGHUP 信号（仅 Unix）：先解析新配置，成功后停止旧任务并立即以新配置重启
-
-    let handler_clone = Arc::clone(handler);
-    tokio::spawn(handle_sighup(hup_signal, config_file, handler_clone));
-
-    // 处理 SIGUSR1 信号（仅 Unix）
-    tokio::spawn(handle_sigusr1(usr1_signal));
-
-    // 等待 SIGTERM 或 SIGINT (Ctrl+C) 并退出（仅 Unix）
-    tokio::select! {
-        _ = term_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGTERM signal, exiting immediately...");
-        }
-        _ = int_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGINT signal (Ctrl+C), exiting immediately...");
+    loop {
+        tokio::select! {
+            _ = term_signal.recv() => {
+                tracing::info!(target: "signal", "Received SIGTERM signal, exiting immediately...");
+                break;
+            }
+            _ = int_signal.recv() => {
+                tracing::info!(target: "signal", "Received SIGINT signal (Ctrl+C), exiting immediately...");
+                break;
+            }
+            _ = quit_signal.recv() => {
+                tracing::info!(target: "signal", "Received SIGQUIT signal, forwarding Quit to workers...");
+                let mut st = state.lock().await;
+                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::Quit)).await;
+            }
+            _ = hup_signal.recv() => {
+                tracing::info!(target: "signal", "Received SIGHUP signal, forwarding Reload to workers...");
+                let mut st = state.lock().await;
+                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::Reload)).await;
+            }
+            _ = usr1_signal.recv() => {
+                tracing::info!(target: "signal", "Received SIGUSR1 signal, forwarding ReopenLogs to workers...");
+                let mut st = state.lock().await;
+                st.broadcast_signal(RootToWorker::Signal(WorkerSignal::ReopenLogs)).await;
+            }
         }
     }
 
@@ -165,71 +170,4 @@ async fn recreate_pid_file(pid_file_path: &str) -> Result<fs::File, Whatever> {
     fs::File::create(pid_file_path)
         .await
         .whatever_context(format!("Failed to create PID file at `{pid_file_path}`"))
-}
-
-// 处理 SIGQUIT 信号（仅 Unix）
-async fn handle_sigquit(mut quit_signal: Signal, handler: Arc<Mutex<JoinSet<()>>>) {
-    use crate::service::stop_services;
-
-    quit_signal.recv().await;
-    tracing::info!(target: "signal" ,"Received SIGTERM signal, shutting down gracefully...");
-    _ = stop_services(&handler).await;
-}
-
-// 处理 SIGHUP 信号（仅 Unix）
-async fn handle_sighup(
-    mut hup_signal: Signal,
-    config_file: PathBuf,
-    handler: Arc<Mutex<JoinSet<()>>>,
-) {
-    let try_restart = async || {
-        let configure = fs::read(&config_file)
-            .await
-            .whatever_context("Read config failed")?;
-        let new_config = parse::parse(&configure, config_file.parent())
-            .whatever_context("Parse config failed")?;
-        let parse::Value::Nodes(pishoos) = new_config
-            .get("pishoo")
-            .whatever_context("Pishoo block not exists")?
-        else {
-            unreachable!("Parse error");
-        };
-        let pishoo = pishoos
-            .first()
-            .expect("No pishoo block found, but pishoo key exists");
-        start_services_from_pishoo_block(&handler, pishoo).await?;
-
-        Result::<_, Whatever>::Ok(())
-    };
-
-    loop {
-        hup_signal.recv().await;
-        let start_at = std::time::Instant::now();
-        tracing::info!(target: "signal", "Received SIGHUP signal, restarting services...");
-
-        stop_services(&handler).await;
-
-        if let Err(restart_error) = try_restart().await {
-            tracing::error!(target: "signal", "Failed to restart services: {restart_error:?}.");
-            continue;
-        }
-
-        tracing::info!(
-            target: "signal",
-            "Reloaded in {:?}",
-            std::time::Instant::now().duration_since(start_at)
-        );
-    }
-}
-
-// 处理 SIGUSR1 信号（仅 Unix）
-async fn handle_sigusr1(mut usr1_signal: Signal) {
-    loop {
-        usr1_signal.recv().await;
-        tracing::info!(target: "signal", "Received SIGUSR1 signal,  reopening log files...");
-        // 这里应该实现重新打开日志文件的逻辑
-        // 由于当前代码中没有具体的日志文件处理，我们只记录一条日志
-
-        tracing::info!(target: "signal", "Log files reopened");
-    }
 }

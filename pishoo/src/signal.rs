@@ -1,7 +1,6 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use gateway::error::Whatever;
-use tokio::task::JoinSet;
 
 use crate::SignalType;
 
@@ -25,16 +24,16 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 }
 
 pub async fn handle_signal(
-    config_file: PathBuf,
-    handler: &Arc<tokio::sync::Mutex<JoinSet<()>>>,
+    state: Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
 ) -> Result<(), Whatever> {
     #[cfg(unix)]
     {
-        unix::handle_signal(config_file, handler).await
+        unix::handle_signal(state).await
     }
 
     #[cfg(not(unix))]
     {
+        let _ = state;
         tracing::warn!("Signal handling not supported on this platform");
         Ok(())
     }

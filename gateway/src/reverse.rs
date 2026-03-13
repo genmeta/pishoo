@@ -67,6 +67,36 @@ mod upstream_tls;
 
 type RouterMap = Arc<HashMap<String, Arc<Node>>>;
 
+pub fn build_router_for_worker(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
+    build_router(servers)
+}
+
+pub async fn handle_single_connection_for_worker(
+    conn: gm_quic::prelude::Connection,
+    server_name: String,
+    h3_settings: Arc<Settings>,
+    router: Arc<HashMap<String, Arc<Node>>>,
+    access_rules: Arc<LocationRulesMatcher>,
+) -> Result<()> {
+    handle_single_connection(conn, server_name, h3_settings, router, access_rules).await
+}
+
+pub async fn handle_single_connection_for_worker_default(
+    conn: impl h3x::quic::Connection + 'static,
+    server_name: String,
+    h3_settings: Arc<Settings>,
+    router: Arc<HashMap<String, Arc<Node>>>,
+) -> Result<()> {
+    handle_single_connection(
+        conn,
+        server_name,
+        h3_settings,
+        router,
+        Arc::new(LocationRulesMatcher::default()),
+    )
+    .await
+}
+
 /// Start the QUIC proxy server
 ///
 /// # Arguments
@@ -384,7 +414,7 @@ async fn handle_connections(
 
 /// 处理单个 QUIC 连接的 H3 握手和请求接受
 async fn handle_single_connection(
-    conn: gm_quic::prelude::Connection,
+    conn: impl h3x::quic::Connection + 'static,
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
@@ -471,7 +501,7 @@ async fn handle_request(
     server_name: String,
     servers: Arc<HashMap<String, Arc<Node>>>,
     access_rules: Arc<LocationRulesMatcher>,
-    conn: Arc<H3Connection<gm_quic::prelude::Connection>>,
+    conn: Arc<H3Connection<impl h3x::quic::Connection + 'static>>,
     req: Request<()>,
     recver: ReadStream,
     sender: WriteStream,

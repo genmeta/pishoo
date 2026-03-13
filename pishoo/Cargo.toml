@@ -121,16 +121,31 @@ priority = "optional"
 maintainer-scripts = "pkg/debian"
 assets = [["target/release/pishoo", "usr/bin/", "755"]]
 
+[[bin]]
+name = "pishoo"
+path = "src/main.rs"
+
+[[bin]]
+name = "pishoo-worker"
+path = "src/bin/pishoo_worker.rs"
+
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
 genmeta-home = { workspace = true }
+
+# --- IPC / RPC ---
+remoc = { workspace = true }
+h3x = { workspace = true, features = ["remoc"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
 
 # --- Core & Error Handling ---
 snafu = { workspace = true }
 
 # --- Async Runtime ---
 tokio = { workspace = true }
+futures = { workspace = true }
 
 # --- CLI Parsing ---
 clap = { workspace = true }
@@ -153,7 +168,11 @@ atty = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # --- Signal Handling ---
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["signal", "process", "user"] }
+libc = { workspace = true }
+gm-quic = { workspace = true }
+tokio-util = { workspace = true }
+rustls = { workspace = true }
 
 [features]
 default = ["sqlx-sqlite"]

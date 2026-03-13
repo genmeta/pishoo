@@ -1,16 +1,36 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use gateway::{error::Whatever, parse::Value};
+use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
+use gm_quic::prelude::{QuicListeners, handy::{server_parameters, ToCertificate}};
+use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, ResultExt};
-use tokio::{fs, task::JoinSet};
-
-use crate::service::start_services_from_pishoo_block;
+use tokio::fs;
 
 mod config;
-mod service;
 mod signal;
+
+/// Load the root CA certificate from the bundled keychain.
+fn root_cert() -> Arc<rustls::RootCertStore> {
+    use std::sync::OnceLock;
+    static ROOT_CERT_STORE: OnceLock<Arc<rustls::RootCertStore>> = OnceLock::new();
+    let root_cert = include_bytes!("../../keychain/root.crt");
+
+    // Ensure the crypto provider is installed.
+    static INSTALL_CRYPTO_PROVIDER: std::sync::Once = std::sync::Once::new();
+    INSTALL_CRYPTO_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+
+    ROOT_CERT_STORE
+        .get_or_init(|| {
+            let mut store = rustls::RootCertStore::empty();
+            store.add_parsable_certificates(root_cert.to_certificate());
+            Arc::new(store)
+        })
+        .clone()
+}
 
 #[cfg(unix)]
 const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
@@ -23,18 +43,12 @@ struct Args {
     /// Set configuration file
     #[arg(short, default_value = "/etc/pishoo/pishoo.conf")]
     config_file: PathBuf,
-    // /// Set error log file [default: stderr]
-    // #[arg(short, default_value = None)]
-    // error_output: Option<PathBuf>,
     /// Send signal to a master process (only on Linux/MacOS)
     #[arg(short, default_value = None)]
     signal: Option<SignalType>,
     /// Test configuration and exit
     #[arg(short, default_value_t = false)]
     test_config: bool,
-    // /// Set global directives out of configuration file
-    // #[arg(short = 'g')]
-    // directives: Vec<String>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -49,8 +63,6 @@ pub enum SignalType {
 #[snafu::report]
 async fn main() -> Result<(), Whatever> {
     let args = Args::parse();
-
-    // TODO 将日志存储到 /var/pishoo/pishoo.log
 
     #[cfg(not(feature = "console_subscriber"))]
     {
@@ -72,8 +84,6 @@ async fn main() -> Result<(), Whatever> {
     let _genmeta_home = GenmetaHome::load_from_environment()
         .whatever_context("Failed to load Genmeta home directory")?;
 
-    // 遍历 genmeta_home 中所有的 identity 文件夹, 解析多个 pishoo 块, 合并启动 server 服务
-
     let config_file = args.config_file;
 
     let config = fs::read(&config_file).await.whatever_context(format!(
@@ -85,16 +95,8 @@ async fn main() -> Result<(), Whatever> {
         config_file.display()
     ))?;
 
-    let pishoo = if let Value::Nodes(pishoo) = config.get("pishoo").whatever_context(format!(
-        "Pishoo block not found in configuration file `{}`",
-        config_file.display()
-    ))? {
-        pishoo
-            .first()
-            .expect("No pishoo block found, but pishoo key exists")
-    } else {
-        unreachable!("Parse error")
-    };
+    let root_config = config::parse_root_config(&config)
+        .whatever_context("Failed to parse root worker configuration")?;
 
     if args.test_config {
         tracing::info!(
@@ -105,8 +107,16 @@ async fn main() -> Result<(), Whatever> {
         return Ok(());
     }
 
-    let pid_file = if let Some(Value::String(pid_file)) = pishoo.get("pid") {
-        pid_file
+    let pid_file = if let Some(gateway::parse::Value::Nodes(nodes)) = config.get("pishoo") {
+        if let Some(node) = nodes.first() {
+            if let Some(gateway::parse::Value::String(pid_file)) = node.get("pid") {
+                pid_file
+            } else {
+                PID_FILE_DEFAULT
+            }
+        } else {
+            PID_FILE_DEFAULT
+        }
     } else {
         PID_FILE_DEFAULT
     };
@@ -115,9 +125,142 @@ async fn main() -> Result<(), Whatever> {
         return signal::send_signal(pid_file, signal).await;
     }
 
-    let handler = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
-    start_services_from_pishoo_block(&handler, pishoo).await?;
-    signal::handle_signal(config_file, &handler).await?;
+    // --- Multi-process supervisor setup ---
+
+    // Create QuicListeners (empty — workers add servers via request_listen)
+    let roots = root_cert();
+    let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
+        .allow_unauthenticated()
+        .build()
+        .expect("Failed to build TLS client cert verifier");
+
+    let listeners = QuicListeners::builder()
+        .with_parameters(server_parameters())
+        .with_client_cert_verifier(tls_client_cert_verifier)
+        .with_alpns([b"h3".as_slice()])
+        .listen(1024)
+        .expect("Failed to create QuicListeners");
+
+    // Create QuicClient for outbound connectors
+    let root_store = root_cert();
+    let quic_client = gm_quic::prelude::QuicClient::builder()
+        .with_root_certificates(root_store)
+        .without_cert()
+        .with_alpns(vec!["h3"])
+        .build();
+    let quic_client = Arc::new(quic_client);
+
+    // Create RootState
+    let state = Arc::new(tokio::sync::Mutex::new(
+        pishoo::root_state::RootState::new(listeners.clone(), quic_client),
+    ));
+
+    // Write PID file (root only)
+    signal::init_pid_file(pid_file).await?;
+
+    let worker_targets = config::resolve_worker_targets(&root_config)
+        .whatever_context("Failed to resolve configured worker users")?;
+
+    let worker_bin = std::env::current_exe()
+        .whatever_context("Failed to determine current executable path")?;
+    let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
+
+    for target in worker_targets {
+        let spawned = pishoo::worker_spawn::spawn_worker(
+            &worker_bin,
+            target.uid,
+            target.gid,
+            target.username.clone(),
+            target.home.clone(),
+            target.log_dir.clone(),
+            state.clone(),
+        )
+        .await
+        .whatever_context(format!("Failed to spawn worker for user `{}`", target.username))?;
+        let pid = spawned
+            .handle
+            .child
+            .id()
+            .expect("worker must have pid");
+        let hello = spawned.hello;
+        if hello.pid != pid
+            || hello.uid != target.uid
+            || hello.euid != target.uid
+            || hello.gid != target.gid
+            || hello.egid != target.gid
+        {
+            snafu::whatever!(
+                "Worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
+                target.username,
+                pid,
+                hello.pid,
+                hello.uid,
+                hello.euid,
+                target.uid,
+                hello.gid,
+                hello.egid,
+                target.gid
+            );
+        }
+
+        tracing::info!(
+            pid,
+            uid = target.uid,
+            gid = target.gid,
+            user = %target.username,
+            "worker privilege separation verified"
+        );
+
+        let mut st = state.lock().await;
+        st.register_worker(pid, target.uid, spawned.handle);
+    }
+
+    // Central accept loop: route connections by server_name
+    let accept_state = state.clone();
+    let accept_listeners = listeners.clone();
+    let accept_handle = tokio::spawn(async move {
+        loop {
+            match accept_listeners.accept().await {
+                Ok((conn, server_name, _pathway, _link)) => {
+                    let st = accept_state.lock().await;
+                    if let Some(sender) = st.get_conn_sender(&server_name) {
+                        if sender.send(conn).await.is_err() {
+                            tracing::warn!(%server_name, "failed to route connection (channel closed)");
+                        }
+                    } else {
+                        tracing::warn!(%server_name, "no listener registered for connection");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("accept loop error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    let monitor_state = state.clone();
+    let monitor_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let mut st = monitor_state.lock().await;
+            let exited = st.collect_exited_workers();
+            for pid in exited {
+                st.cleanup_worker_with_reason(pid, "child_exit");
+            }
+        }
+    });
+
+    signal::handle_signal(state.clone()).await?;
+
+    accept_handle.abort();
+    monitor_handle.abort();
+    {
+        let mut st = state.lock().await;
+        for pid in st.worker_pids() {
+            st.cleanup_worker_with_reason(pid, "root_shutdown");
+        }
+    }
     _ = fs::remove_file(pid_file).await;
     Ok(())
 }
