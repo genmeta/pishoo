@@ -7,20 +7,61 @@
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
 use h3x::{dhttp::settings::Settings, remoc::quic::RemoteQuicListener};
 use h3x::quic::Listen;
 use pishoo::protocol::{OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello, RootToWorker, WorkerSignal};
+use rustls_pemfile::{certs, private_key};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+const MAX_CERT_PEM_BYTES: usize = 512 * 1024;
+const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
 
 struct ServerRuntime {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct WorkerPolicy {
+    access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum WorkerError {
+    #[error("access_rules not configured for worker" )]
+    MissingAccessRules,
+    #[error("invalid access_rules database uri `{0}`")]
+    InvalidAccessRules(String),
+    #[error("failed to connect access_rules database: {0}")]
+    AccessRulesDb(String),
+    #[error("failed to load location rules: {0}")]
+    AccessRulesLoad(String),
+    #[error("failed to read worker policy config `{path}`: {source}")]
+    ReadPolicy { path: String, source: std::io::Error },
+    #[error("failed to read cert `{path}`: {source}")]
+    ReadCert { path: String, source: std::io::Error },
+    #[error("failed to read key `{path}`: {source}")]
+    ReadKey { path: String, source: std::io::Error },
+    #[error("certificate file too large `{path}` ({actual} > {limit})")]
+    CertTooLarge { path: String, actual: usize, limit: usize },
+    #[error("private key file too large `{path}` ({actual} > {limit})")]
+    KeyTooLarge { path: String, actual: usize, limit: usize },
+    #[error("failed to parse certificate PEM `{path}`: {source}")]
+    ParseCert { path: String, source: std::io::Error },
+    #[error("certificate PEM contains no certificate `{path}`")]
+    EmptyCert { path: String },
+    #[error("failed to parse private key PEM `{path}`: {source}")]
+    ParseKey { path: String, source: std::io::Error },
+    #[error("private key PEM contains no key `{path}`")]
+    EmptyKey { path: String },
 }
 
 impl ServerRuntime {
@@ -94,6 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listeners: Arc<Mutex<HashMap<String, ServerRuntime>>> = Arc::new(Mutex::new(HashMap::new()));
     let h3_settings = Arc::new(Settings::default());
 
+    let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf")).await?;
+
     let identities = genmeta_home.identities();
     match identities.list().await {
         Ok(names) => {
@@ -103,13 +146,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let identity_dir = identities.join_name(name.borrow());
                 let cert_path = identity_dir.join("fullchain.crt");
                 let key_path = identity_dir.join("privkey.pem");
+                let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path).await?;
                 let server_name = name.as_str().to_string();
 
                 let request = RequestListen {
                     server_name: server_name.clone(),
                     bind: vec![],
-                    cert_path,
-                    key_path,
+                    cert_pem,
+                    key_pem,
                 };
 
                 match root_api.request_listen(request).await {
@@ -119,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             server_name.clone(),
                             h3_settings.clone(),
                             router.clone(),
+                            worker_policy.clone(),
                         );
                         tracing::info!(%server_name, "acquired listener");
                         listeners.lock().await.insert(server_name, runtime);
@@ -218,12 +263,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         identity_dir.join("fullchain.crt");
                                     let key_path =
                                         identity_dir.join("privkey.pem");
+                                    let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path).await?;
 
                                     let request = RequestListen {
                                         server_name: (*server_name).clone(),
                                         bind: vec![],
-                                        cert_path,
-                                        key_path,
+                                        cert_pem,
+                                        key_pem,
                                     };
 
                                     match root_api.request_listen(request).await {
@@ -233,6 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 (*server_name).clone(),
                                                 h3_settings.clone(),
                                                 router.clone(),
+                                                worker_policy.clone(),
                                             );
                                             tracing::info!(%server_name, "acquired listener");
                                             listeners.lock().await.insert((*server_name).clone(), runtime);
@@ -281,6 +328,7 @@ fn start_server_runtime(
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
+    worker_policy: WorkerPolicy,
 ) -> ServerRuntime {
     let cancel = CancellationToken::new();
     let cancel_child = cancel.clone();
@@ -297,12 +345,15 @@ fn start_server_runtime(
                             let h3_settings = h3_settings.clone();
                             let server_name = server_name.clone();
                             let router = router.clone();
+                            let worker_policy = worker_policy.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = gateway::reverse::handle_single_connection_for_worker_default(
+                                if let Err(e) = gateway::reverse::handle_single_connection_for_worker(
                                     conn,
                                     server_name,
                                     h3_settings,
                                     router,
+                                    worker_policy.access_rules,
+                                    gateway::reverse::MissingRulePolicy::Deny,
                                 ).await {
                                     tracing::warn!(%e, "worker connection handling failed");
                                 }
@@ -321,6 +372,95 @@ fn start_server_runtime(
         cancel,
         task,
     }
+}
+
+async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerError> {
+    let raw = tokio::fs::read(conf_path)
+        .await
+        .map_err(|e| WorkerError::ReadPolicy {
+            path: conf_path.display().to_string(),
+            source: e,
+        })?;
+    let parsed = gateway::parse::parse(&raw, conf_path.parent())
+        .map_err(|e| WorkerError::InvalidAccessRules(e.to_string()))?;
+    let pishoo = parsed
+        .get("pishoo")
+        .and_then(|v| match v { Value::Nodes(nodes) => nodes.first(), _ => None })
+        .ok_or(WorkerError::MissingAccessRules)?;
+    let uri = match pishoo.get("access_rules") {
+        Some(Value::String(uri)) => uri.clone(),
+        _ => return Err(WorkerError::MissingAccessRules),
+    };
+
+    let db = sea_orm::Database::connect(&uri)
+        .await
+        .map_err(|e| WorkerError::AccessRulesDb(e.to_string()))?;
+    let location_rules = LocationService::new(&db)
+        .list_all_rules()
+        .await
+        .map_err(|e| WorkerError::AccessRulesLoad(e.to_string()))?;
+
+    let _ = DomainService::new(&db)
+        .list_all_rules()
+        .await
+        .map_err(|e| WorkerError::AccessRulesLoad(e.to_string()))?;
+
+    Ok(WorkerPolicy {
+        access_rules: Arc::new(location_rules.into()),
+    })
+}
+
+async fn read_tls_material(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>, Vec<u8>), WorkerError> {
+    let cert_pem = tokio::fs::read(cert_path)
+        .await
+        .map_err(|e| WorkerError::ReadCert {
+            path: cert_path.display().to_string(),
+            source: e,
+        })?;
+    if cert_pem.len() > MAX_CERT_PEM_BYTES {
+        return Err(WorkerError::CertTooLarge {
+            path: cert_path.display().to_string(),
+            actual: cert_pem.len(),
+            limit: MAX_CERT_PEM_BYTES,
+        });
+    }
+    let cert_count = certs(&mut Cursor::new(&cert_pem))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| WorkerError::ParseCert {
+            path: cert_path.display().to_string(),
+            source: e,
+        })?
+        .len();
+    if cert_count == 0 {
+        return Err(WorkerError::EmptyCert {
+            path: cert_path.display().to_string(),
+        });
+    }
+
+    let key_pem = tokio::fs::read(key_path)
+        .await
+        .map_err(|e| WorkerError::ReadKey {
+            path: key_path.display().to_string(),
+            source: e,
+        })?;
+    if key_pem.len() > MAX_KEY_PEM_BYTES {
+        return Err(WorkerError::KeyTooLarge {
+            path: key_path.display().to_string(),
+            actual: key_pem.len(),
+            limit: MAX_KEY_PEM_BYTES,
+        });
+    }
+    let parsed_key = private_key(&mut Cursor::new(&key_pem)).map_err(|e| WorkerError::ParseKey {
+        path: key_path.display().to_string(),
+        source: e,
+    })?;
+    if parsed_key.is_none() {
+        return Err(WorkerError::EmptyKey {
+            path: key_path.display().to_string(),
+        });
+    }
+
+    Ok((cert_pem, key_pem))
 }
 
 async fn build_worker_router(
