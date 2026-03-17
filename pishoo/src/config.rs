@@ -10,6 +10,7 @@ pub struct WorkerTarget {
 
 #[derive(Debug, Clone)]
 pub struct RootConfig {
+    pub pid_file: String,
     pub workers: Vec<WorkerTarget>,
 }
 
@@ -20,6 +21,9 @@ pub enum ConfigError {
 
     #[snafu(display("invalid workers directive: expected string list"))]
     InvalidWorkers,
+
+    #[snafu(display("invalid pid directive: expected string"))]
+    InvalidPid,
 
     #[snafu(display("worker username cannot be empty"))]
     EmptyWorkerName,
@@ -46,6 +50,11 @@ pub struct ResolvedWorkerTarget {
     pub log_dir: PathBuf,
 }
 
+#[cfg(unix)]
+pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
+#[cfg(windows)]
+pub const PID_FILE_DEFAULT: &str = "NUL";
+
 pub fn parse_root_config(
     root: &std::sync::Arc<gateway::parse::Node>,
 ) -> Result<RootConfig, ConfigError> {
@@ -53,6 +62,12 @@ pub fn parse_root_config(
         nodes.first().cloned().context(MissingPishooSnafu)?
     } else {
         return MissingPishooSnafu.fail();
+    };
+
+    let pid_file = match pishoo.get("pid") {
+        Some(Value::String(pid_file)) => pid_file.clone(),
+        Some(_) => return InvalidPidSnafu.fail(),
+        None => PID_FILE_DEFAULT.to_string(),
     };
 
     let workers = match pishoo.get("workers") {
@@ -72,7 +87,7 @@ pub fn parse_root_config(
         None => vec![],
     };
 
-    Ok(RootConfig { workers })
+    Ok(RootConfig { pid_file, workers })
 }
 
 pub fn resolve_worker_targets(
@@ -107,13 +122,43 @@ pub fn resolve_worker_targets(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use gateway::parse::Node;
+
     use super::*;
+
+    #[test]
+    fn invalid_workers_type_is_rejected() {
+        let worker_node = Arc::new(Node::new(Value::ValueMap(HashMap::from([(
+            "workers".to_string(),
+            Value::Boolean(true),
+        )]))));
+        let root = Arc::new(Node::new(Value::ValueMap(HashMap::from([(
+            "pishoo".to_string(),
+            Value::Nodes(vec![worker_node]),
+        )]))));
+        let err = parse_root_config(&root).expect_err("workers must be a string list");
+        assert!(matches!(err, ConfigError::InvalidWorkers));
+    }
+
+    #[test]
+    fn extracts_pid_and_workers() {
+        let conf = b"pishoo { pid /tmp/pishoo-test.pid; workers alice bob; }";
+        let parsed = gateway::parse::parse(conf, None).expect("parse config");
+        let root = parse_root_config(&parsed).expect("parse root config");
+        assert_eq!(root.pid_file, "/tmp/pishoo-test.pid");
+        assert_eq!(root.workers.len(), 2);
+        assert_eq!(root.workers[0].username, "alice");
+        assert_eq!(root.workers[1].username, "bob");
+    }
 
     #[test]
     fn parse_workers_from_root_config() {
         let conf = b"pishoo { workers alice bob; }";
         let parsed = gateway::parse::parse(conf, None).expect("parse config");
         let root = parse_root_config(&parsed).expect("parse root config");
+        assert_eq!(root.pid_file, PID_FILE_DEFAULT);
         assert_eq!(root.workers.len(), 2);
         assert_eq!(root.workers[0].username, "alice");
         assert_eq!(root.workers[1].username, "bob");
@@ -125,6 +170,7 @@ mod tests {
             .expect("resolve current uid")
             .expect("current user exists");
         let cfg = RootConfig {
+            pid_file: PID_FILE_DEFAULT.to_string(),
             workers: vec![WorkerTarget { username: me.name }],
         };
         let resolved = resolve_worker_targets(&cfg).expect("resolve user target");

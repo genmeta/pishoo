@@ -4,18 +4,13 @@
 //! detection (first-come-first-served), and manages the lifecycle of
 //! per-server listen adapters routed from the central `QuicListeners`.
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::Cursor,
-    sync::Arc,
-};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use nix::{
     sys::signal::Signal,
     unistd::{Pid, Uid},
 };
 use remoc::prelude::ServerShared;
-use rustls_pemfile::{certs, private_key};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +24,7 @@ use crate::{
         ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
         ServedConnector, ServedListener,
     },
+    tls::{self, TlsMaterialError},
     worker_spawn::WorkerHandle,
 };
 
@@ -72,9 +68,6 @@ pub struct RootState {
     /// uid → pid mapping.
     users: HashMap<Uid, Pid>,
 }
-
-const MAX_CERT_PEM_BYTES: usize = 512 * 1024;
-const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct CleanupSummary {
@@ -143,9 +136,7 @@ impl RootState {
         let mut servers_cleaned = 0usize;
 
         for server_name in &record.owned_servers {
-            if let Some(server_record) = self.servers.remove(server_name) {
-                server_record.shutdown_token.cancel();
-                self.listeners.remove_server(server_name);
+            if self.retire_server(server_name).is_some() {
                 servers_cleaned += 1;
             }
         }
@@ -170,6 +161,13 @@ impl RootState {
             "worker cleanup complete"
         );
         Some(summary)
+    }
+
+    fn retire_server(&mut self, server_name: &str) -> Option<()> {
+        let server_record = self.servers.remove(server_name)?;
+        server_record.shutdown_token.cancel();
+        self.listeners.remove_server(server_name);
+        Some(())
     }
 
     /// Handle a `request_listen` call from a worker.
@@ -254,6 +252,7 @@ impl RootState {
 
     /// Handle an `open_connector` call from a worker.
     ///
+    /// connector root-owned: root 创建 connector 并统一托管生命周期，worker 只消费 handle。
     /// Creates a [`LocalQuicConnector`] wrapping the shared [`QuicClient`],
     /// converts it to a [`RemoteQuicConnector`] via RTC, spawns the serve
     /// future (with a cancellation token for cleanup), and tracks it per-pid.
@@ -318,13 +317,7 @@ impl RootState {
         }
 
         // Remove from servers map.
-        let server_record = self.servers.remove(server_name).unwrap();
-
-        // Cancel the per-server listen adapter.
-        server_record.shutdown_token.cancel();
-
-        // Remove from QuicListeners.
-        self.listeners.remove_server(server_name);
+        self.retire_server(server_name).expect("server must exist after ownership check");
 
         // Remove from process record.
         if let Some(process) = self.processes.get_mut(&caller_pid) {
@@ -393,45 +386,26 @@ impl RootState {
 }
 
 fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), ListenRequestError> {
-    if cert_pem.len() > MAX_CERT_PEM_BYTES {
-        return Err(ListenRequestError::InvalidRequest {
-            message: format!(
-                "certificate PEM too large ({} > {})",
-                cert_pem.len(),
-                MAX_CERT_PEM_BYTES
-            ),
-        });
-    }
-    if key_pem.len() > MAX_KEY_PEM_BYTES {
-        return Err(ListenRequestError::InvalidRequest {
-            message: format!(
-                "private key PEM too large ({} > {})",
-                key_pem.len(),
-                MAX_KEY_PEM_BYTES
-            ),
-        });
-    }
-    let cert_count = certs(&mut Cursor::new(cert_pem))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ListenRequestError::InvalidRequest {
-            message: format!("invalid certificate PEM: {e}"),
-        })?
-        .len();
-    if cert_count == 0 {
-        return Err(ListenRequestError::InvalidRequest {
+    tls::validate_tls_material(cert_pem, key_pem).map_err(|error| match error {
+        TlsMaterialError::CertTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
+            message: format!("certificate PEM too large ({actual} > {limit})"),
+        },
+        TlsMaterialError::KeyTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
+            message: format!("private key PEM too large ({actual} > {limit})"),
+        },
+        TlsMaterialError::InvalidCertificatePem { message } => ListenRequestError::InvalidRequest {
+            message: format!("invalid certificate PEM: {message}"),
+        },
+        TlsMaterialError::EmptyCertificate => ListenRequestError::InvalidRequest {
             message: "certificate PEM contains no certificates".to_string(),
-        });
-    }
-    let key =
-        private_key(&mut Cursor::new(key_pem)).map_err(|e| ListenRequestError::InvalidRequest {
-            message: format!("invalid private key PEM: {e}"),
-        })?;
-    if key.is_none() {
-        return Err(ListenRequestError::InvalidRequest {
+        },
+        TlsMaterialError::InvalidPrivateKeyPem { message } => ListenRequestError::InvalidRequest {
+            message: format!("invalid private key PEM: {message}"),
+        },
+        TlsMaterialError::EmptyPrivateKey => ListenRequestError::InvalidRequest {
             message: "private key PEM contains no key".to_string(),
-        });
-    }
-    Ok(())
+        },
+    })
 }
 
 #[cfg(test)]
@@ -440,12 +414,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cleanup_only_removes_uid_mapping_if_pid_matches() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut root_store = rustls::RootCertStore::empty();
-        let root_cert = include_bytes!("../../keychain/root.crt");
-        use gm_quic::prelude::handy::ToCertificate;
-        root_store.add_parsable_certificates(root_cert.to_certificate());
-        let roots = std::sync::Arc::new(root_store);
+        let roots = crate::tls::root_cert_store();
         let listeners = gm_quic::prelude::QuicListeners::builder()
             .with_parameters(gm_quic::prelude::handy::server_parameters())
             .with_client_cert_verifier(
@@ -492,9 +461,9 @@ mod tests {
     }
 
     #[test]
-    fn reject_invalid_listen_material() {
-        let cert = b"not-a-cert";
-        let key = b"not-a-key";
+    fn invalid_listen_material_is_rejected() {
+        let cert: &[u8] = b"not-a-cert";
+        let key: &[u8] = b"not-a-key";
         let err = validate_listen_material(cert, key).expect_err("must reject invalid pem");
         assert!(matches!(err, ListenRequestError::InvalidRequest { .. }));
     }

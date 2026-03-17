@@ -73,6 +73,14 @@ pub enum MissingRulePolicy {
     Deny,
 }
 
+#[derive(Clone)]
+struct RequestContext {
+    server_name: String,
+    servers: Arc<HashMap<String, Arc<Node>>>,
+    access_rules: Arc<LocationRulesMatcher>,
+    missing_rule_policy: MissingRulePolicy,
+}
+
 pub fn build_router_for_worker(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
     build_router(servers)
 }
@@ -444,10 +452,12 @@ async fn handle_single_connection(
         async move |request: Request<()>, recver: ReadStream, sender: WriteStream| {
             let span = info_span!("handle_request", uri=%request.uri());
             let handle_result = handle_request(
-                server_name.clone(),
-                router.clone(),
-                access_rules.clone(),
-                missing_rule_policy,
+                RequestContext {
+                    server_name: server_name.clone(),
+                    servers: router.clone(),
+                    access_rules: access_rules.clone(),
+                    missing_rule_policy,
+                },
                 h3_conn.clone(),
                 request,
                 recver,
@@ -506,15 +516,18 @@ async fn handle_single_connection(
 
 /// 处理单个HTTP请求
 async fn handle_request(
-    server_name: String,
-    servers: Arc<HashMap<String, Arc<Node>>>,
-    access_rules: Arc<LocationRulesMatcher>,
-    missing_rule_policy: MissingRulePolicy,
+    context: RequestContext,
     conn: Arc<H3Connection<impl h3x::quic::Connection + 'static>>,
     req: Request<()>,
     recver: ReadStream,
     sender: WriteStream,
 ) -> Result<()> {
+    let RequestContext {
+        server_name,
+        servers,
+        access_rules,
+        missing_rule_policy,
+    } = context;
     tracing::debug!(target: "request", ?req);
     // 查找匹配的路由规则
     // TODO 支持 泛域名匹配

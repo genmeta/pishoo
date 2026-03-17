@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use clap::Parser;
 use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
-use gm_quic::prelude::{QuicListeners, handy::{server_parameters, ToCertificate}};
+use gm_quic::prelude::{QuicListeners, handy::server_parameters};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs;
@@ -12,34 +12,7 @@ use nix::sys::signal::Signal;
 #[cfg(unix)]
 use nix::unistd::{Pid, Uid};
 
-mod config;
 mod signal;
-
-/// Load the root CA certificate from the bundled keychain.
-fn root_cert() -> Arc<rustls::RootCertStore> {
-    use std::sync::OnceLock;
-    static ROOT_CERT_STORE: OnceLock<Arc<rustls::RootCertStore>> = OnceLock::new();
-    let root_cert = include_bytes!("../../keychain/root.crt");
-
-    // Ensure the crypto provider is installed.
-    static INSTALL_CRYPTO_PROVIDER: std::sync::Once = std::sync::Once::new();
-    INSTALL_CRYPTO_PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-
-    ROOT_CERT_STORE
-        .get_or_init(|| {
-            let mut store = rustls::RootCertStore::empty();
-            store.add_parsable_certificates(root_cert.to_certificate());
-            Arc::new(store)
-        })
-        .clone()
-}
-
-#[cfg(unix)]
-const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
-#[cfg(windows)]
-const PID_FILE_DEFAULT: &str = "NUL"; // 占位，后续被 cfg(windows) 路径屏蔽，不会使用
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -99,7 +72,7 @@ async fn main() -> Result<(), Whatever> {
         config_file.display()
     ))?;
 
-    let root_config = config::parse_root_config(&config)
+    let root_config = pishoo::config::parse_root_config(&config)
         .whatever_context("Failed to parse root worker configuration")?;
 
     if args.test_config {
@@ -111,19 +84,7 @@ async fn main() -> Result<(), Whatever> {
         return Ok(());
     }
 
-    let pid_file = if let Some(gateway::parse::Value::Nodes(nodes)) = config.get("pishoo") {
-        if let Some(node) = nodes.first() {
-            if let Some(gateway::parse::Value::String(pid_file)) = node.get("pid") {
-                pid_file
-            } else {
-                PID_FILE_DEFAULT
-            }
-        } else {
-            PID_FILE_DEFAULT
-        }
-    } else {
-        PID_FILE_DEFAULT
-    };
+    let pid_file = root_config.pid_file.as_str();
 
     if let Some(signal) = args.signal {
         return signal::send_signal(pid_file, signal).await;
@@ -132,7 +93,7 @@ async fn main() -> Result<(), Whatever> {
     // --- Multi-process supervisor setup ---
 
     // Create QuicListeners (empty — workers add servers via request_listen)
-    let roots = root_cert();
+    let roots = pishoo::tls::root_cert_store();
     let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
         .allow_unauthenticated()
         .build()
@@ -146,7 +107,7 @@ async fn main() -> Result<(), Whatever> {
         .expect("Failed to create QuicListeners");
 
     // Create QuicClient for outbound connectors
-    let root_store = root_cert();
+    let root_store = pishoo::tls::root_cert_store();
     let quic_client = gm_quic::prelude::QuicClient::builder()
         .with_root_certificates(root_store)
         .without_cert()
@@ -162,7 +123,7 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(pid_file).await?;
 
-    let worker_targets = config::resolve_worker_targets(&root_config)
+    let worker_targets = pishoo::config::resolve_worker_targets(&root_config)
         .whatever_context("Failed to resolve configured worker users")?;
 
     let worker_bin = std::env::current_exe()

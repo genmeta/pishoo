@@ -37,6 +37,7 @@ log
 # Reference repos
 refs/
 .ace-tool/
+.sisyphus/
 
 doc
 tmp/

@@ -6,37 +6,22 @@
 //!
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
-use std::{
-    collections::{HashMap, HashSet},
-    io::Cursor,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
 use pishoo::{
-    protocol::{ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello},
-    remoc_bridge::{ConnectorHandle, ConnectorServerShared, ListenerHandle, ServedConnector},
+    protocol::{OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello},
+    remoc_bridge::ListenerHandle,
+    tls::{self, TlsMaterialError},
 };
-use remoc::prelude::ServerShared;
-use rustls_pemfile::{certs, private_key};
 use snafu::Snafu;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-const MAX_CERT_PEM_BYTES: usize = 512 * 1024;
-const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
-
 struct ServerRuntime {
-    cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
-}
-
-struct ConnectorRuntime {
-    _connector: ConnectorHandle,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -50,6 +35,12 @@ struct WorkerRouting {
 #[derive(Clone)]
 struct WorkerPolicy {
     access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
+}
+
+struct ReconcileStats {
+    added: usize,
+    removed: usize,
+    kept: usize,
 }
 
 #[derive(Debug, Snafu)]
@@ -106,13 +97,6 @@ enum WorkerError {
 }
 
 impl ServerRuntime {
-    fn stop(self) {
-        self.cancel.cancel();
-        self.task.abort();
-    }
-}
-
-impl ConnectorRuntime {
     fn stop(self) {
         self.cancel.cancel();
         self.task.abort();
@@ -183,51 +167,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let h3_settings = Arc::new(Settings::default());
 
     let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf")).await?;
-    let connector_runtime = start_connector_runtime().await?;
-    tracing::info!("worker-owned connector runtime started");
+    // connector root-owned: worker 不再本地创建 connector runtime.
+    let _connector_handle = root_api
+        .open_connector(OpenConnector {
+            profile: String::new(),
+        })
+        .await
+        .map_err(|e| format!("failed to open root-owned connector: {e}"))?;
+    tracing::info!("root-owned connector handle acquired");
 
     let identities = genmeta_home.identities();
-    match identities.list().await {
-        Ok(names) => {
-            let routing = build_worker_routing(&identities, &names).await;
-            let total = names.len();
-            for name in &names {
-                let identity_dir = identities.join_name(name.borrow());
-                let cert_path = identity_dir.join("fullchain.crt");
-                let key_path = identity_dir.join("privkey.pem");
-                let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path).await?;
-                let server_name = name.as_str().to_string();
-
-                let request = RequestListen {
-                    server_name: server_name.clone(),
-                    bind: routing.binds.get(&server_name).cloned().unwrap_or_default(),
-                    cert_pem,
-                    key_pem,
-                };
-                if request.bind.is_empty() {
-                    tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
-                    continue;
-                }
-
-                match root_api.request_listen(request).await {
-                    Ok(listener) => {
-                        let runtime = start_server_runtime(
-                            listener,
-                            server_name.clone(),
-                            h3_settings.clone(),
-                            routing.router.clone(),
-                            worker_policy.clone(),
-                        );
-                        tracing::info!(%server_name, "acquired listener");
-                        listeners.lock().await.insert(server_name, runtime);
-                    }
-                    Err(e) => {
-                        tracing::warn!(%server_name, %e, "failed to request listener");
-                    }
-                }
-            }
+    match reconcile_listener_set(
+        &root_api,
+        &listeners,
+        &identities,
+        None,
+        h3_settings.clone(),
+        worker_policy.clone(),
+    )
+    .await
+    {
+        Ok(stats) => {
             tracing::info!(
-                scanned = total,
+                scanned = stats.added,
                 acquired = listeners.lock().await.len(),
                 "identity scan complete"
             );
@@ -263,105 +225,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             _ = hup_signal.recv() => {
-                        tracing::info!("reloading identities");
-                        let genmeta_home = GenmetaHome::new(genmeta_home_path.clone());
-                        let identities = genmeta_home.identities();
-                        match identities.list().await {
-                            Ok(names) => {
-                                let routing = build_worker_routing(&identities, &names).await;
-                                let new_set: HashSet<String> = names
-                                    .iter()
-                                    .map(|n| n.as_str().to_string())
-                                    .collect();
-                                let old_set: HashSet<String> = listeners
-                                    .lock()
-                                    .await
-                                    .keys()
-                                    .cloned()
-                                    .collect();
-
-                                let added: Vec<&String> =
-                                    new_set.difference(&old_set).collect();
-                                let removed: Vec<&String> =
-                                    old_set.difference(&new_set).collect();
-                                let kept = old_set.intersection(&new_set).count();
-
-                                // Release listeners for removed identities.
-                                for server_name in &removed {
-                                    let request = ReleaseListen {
-                                        server_name: (*server_name).clone(),
-                                    };
-                                    match root_api.release_listen(request).await {
-                                        Ok(()) => {
-                                            tracing::info!(%server_name, "released listener");
-                                            if let Some(runtime) = listeners.lock().await.remove(*server_name) {
-                                                runtime.stop();
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(%server_name, %e, "failed to release listener");
-                                        }
-                                    }
-                                }
-
-                                // Request listeners for new identities.
-                                for server_name in &added {
-                                    let name = names
-                                        .iter()
-                                        .find(|n| n.as_str() == server_name.as_str())
-                                        .unwrap();
-                                    let identity_dir =
-                                        identities.join_name(name.borrow());
-                                    let cert_path =
-                                        identity_dir.join("fullchain.crt");
-                                    let key_path =
-                                        identity_dir.join("privkey.pem");
-                                    let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path).await?;
-
-                                    let request = RequestListen {
-                                        server_name: (*server_name).clone(),
-                                        bind: routing
-                                            .binds
-                                            .get(*server_name)
-                                            .cloned()
-                                            .unwrap_or_default(),
-                                        cert_pem,
-                                        key_pem,
-                                    };
-                                    if request.bind.is_empty() {
-                                        tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
-                                        continue;
-                                    }
-
-                                    match root_api.request_listen(request).await {
-                                        Ok(listener) => {
-                                            let runtime = start_server_runtime(
-                                                listener,
-                                                (*server_name).clone(),
-                                                h3_settings.clone(),
-                                                routing.router.clone(),
-                                                worker_policy.clone(),
-                                            );
-                                            tracing::info!(%server_name, "acquired listener");
-                                            listeners.lock().await.insert((*server_name).clone(), runtime);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(%server_name, %e, "failed to request listener");
-                                        }
-                                    }
-                                }
-
-                                tracing::info!(
-                                    added = added.len(),
-                                    removed = removed.len(),
-                                    kept,
-                                    "reload complete"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(%e, "failed to list identities during reload");
-                            }
-                        }
+                tracing::info!("reloading identities");
+                let genmeta_home = GenmetaHome::new(genmeta_home_path.clone());
+                let identities = genmeta_home.identities();
+                match reconcile_listener_set(
+                    &root_api,
+                    &listeners,
+                    &identities,
+                    Some(listeners.lock().await.keys().cloned().collect()),
+                    h3_settings.clone(),
+                    worker_policy.clone(),
+                ).await {
+                    Ok(stats) => {
+                        tracing::info!(
+                            added = stats.added,
+                            removed = stats.removed,
+                            kept = stats.kept,
+                            "reload complete"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "failed to list identities during reload");
+                    }
+                }
             }
             _ = usr1_signal.recv() => {
                 reopen_worker_log(&bootstrap.log_dir)?;
@@ -369,8 +255,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    connector_runtime.stop();
     tracing::info!("pishoo-worker exiting");
     Ok(())
 }
@@ -424,34 +308,84 @@ fn start_server_runtime(
     ServerRuntime { cancel, task }
 }
 
-async fn start_connector_runtime() -> Result<ConnectorRuntime, WorkerError> {
-    use gm_quic::prelude::handy::ToCertificate;
+async fn reconcile_listener_set(
+    root_api: &impl RootTransportApi,
+    listeners: &Arc<Mutex<HashMap<String, ServerRuntime>>>,
+    identities: &genmeta_home::identity::Identities,
+    current_servers: Option<HashSet<String>>,
+    h3_settings: Arc<Settings>,
+    worker_policy: WorkerPolicy,
+) -> Result<ReconcileStats, String> {
+    let names = identities.list().await.map_err(|e| e.to_string())?;
+    let routing = build_worker_routing(identities, &names).await;
+    let desired_servers: HashSet<String> = names.iter().map(|n| n.as_str().to_string()).collect();
+    let existing_servers = current_servers.unwrap_or_default();
 
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add_parsable_certificates(include_bytes!("../../../keychain/root.crt").to_certificate());
-    let client = gm_quic::prelude::QuicClient::builder()
-        .with_root_certificates(Arc::new(roots))
-        .without_cert()
-        .with_alpns(vec!["h3"])
-        .build();
+    let removed: Vec<String> = existing_servers.difference(&desired_servers).cloned().collect();
+    let kept = existing_servers.intersection(&desired_servers).count();
+    let added: Vec<String> = desired_servers.difference(&existing_servers).cloned().collect();
 
-    let (server, connector) =
-        ConnectorServerShared::new(Arc::new(ServedConnector::new(Arc::new(client))), 1);
-    let serve_fut = async move {
-        let _ = server.serve(true).await;
-    };
-    let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let task = tokio::spawn(async move {
-        tokio::select! {
-            () = serve_fut => {}
-            () = cancel_clone.cancelled() => {}
+    for server_name in &removed {
+        let request = ReleaseListen {
+            server_name: server_name.clone(),
+        };
+        match root_api.release_listen(request).await {
+            Ok(()) => {
+                tracing::info!(%server_name, "released listener");
+                if let Some(runtime) = listeners.lock().await.remove(server_name) {
+                    runtime.stop();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%server_name, %e, "failed to release listener");
+            }
         }
-    });
-    Ok(ConnectorRuntime {
-        _connector: ConnectorHandle::new(connector),
-        cancel,
-        task,
+    }
+
+    for server_name in &added {
+        let Some(name) = names.iter().find(|n| n.as_str() == server_name) else {
+            continue;
+        };
+        let identity_dir = identities.join_name(name.borrow());
+        let cert_path = identity_dir.join("fullchain.crt");
+        let key_path = identity_dir.join("privkey.pem");
+        let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let request = RequestListen {
+            server_name: server_name.clone(),
+            bind: routing.binds.get(server_name).cloned().unwrap_or_default(),
+            cert_pem,
+            key_pem,
+        };
+        if request.bind.is_empty() {
+            tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
+            continue;
+        }
+
+        match root_api.request_listen(request).await {
+            Ok(listener) => {
+                let runtime = start_server_runtime(
+                    listener,
+                    server_name.clone(),
+                    h3_settings.clone(),
+                    routing.router.clone(),
+                    worker_policy.clone(),
+                );
+                tracing::info!(%server_name, "acquired listener");
+                listeners.lock().await.insert(server_name.clone(), runtime);
+            }
+            Err(e) => {
+                tracing::warn!(%server_name, %e, "failed to request listener");
+            }
+        }
+    }
+
+    Ok(ReconcileStats {
+        added: added.len(),
+        removed: removed.len(),
+        kept,
     })
 }
 
@@ -513,49 +447,39 @@ async fn read_tls_material(
             path: cert_path.display().to_string(),
             source: e,
         })?;
-    if cert_pem.len() > MAX_CERT_PEM_BYTES {
-        return Err(WorkerError::CertTooLarge {
-            path: cert_path.display().to_string(),
-            actual: cert_pem.len(),
-            limit: MAX_CERT_PEM_BYTES,
-        });
-    }
-    let cert_count = certs(&mut Cursor::new(&cert_pem))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WorkerError::ParseCert {
-            path: cert_path.display().to_string(),
-            source: e,
-        })?
-        .len();
-    if cert_count == 0 {
-        return Err(WorkerError::EmptyCert {
-            path: cert_path.display().to_string(),
-        });
-    }
-
     let key_pem = tokio::fs::read(key_path)
         .await
         .map_err(|e| WorkerError::ReadKey {
             path: key_path.display().to_string(),
             source: e,
         })?;
-    if key_pem.len() > MAX_KEY_PEM_BYTES {
-        return Err(WorkerError::KeyTooLarge {
+
+    tls::validate_tls_material(&cert_pem, &key_pem).map_err(|error| match error {
+        TlsMaterialError::CertTooLarge { actual, limit } => WorkerError::CertTooLarge {
+            path: cert_path.display().to_string(),
+            actual,
+            limit,
+        },
+        TlsMaterialError::KeyTooLarge { actual, limit } => WorkerError::KeyTooLarge {
             path: key_path.display().to_string(),
-            actual: key_pem.len(),
-            limit: MAX_KEY_PEM_BYTES,
-        });
-    }
-    let parsed_key =
-        private_key(&mut Cursor::new(&key_pem)).map_err(|e| WorkerError::ParseKey {
+            actual,
+            limit,
+        },
+        TlsMaterialError::InvalidCertificatePem { message } => WorkerError::ParseCert {
+            path: cert_path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+        },
+        TlsMaterialError::EmptyCertificate => WorkerError::EmptyCert {
+            path: cert_path.display().to_string(),
+        },
+        TlsMaterialError::InvalidPrivateKeyPem { message } => WorkerError::ParseKey {
             path: key_path.display().to_string(),
-            source: e,
-        })?;
-    if parsed_key.is_none() {
-        return Err(WorkerError::EmptyKey {
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+        },
+        TlsMaterialError::EmptyPrivateKey => WorkerError::EmptyKey {
             path: key_path.display().to_string(),
-        });
-    }
+        },
+    })?;
 
     Ok((cert_pem, key_pem))
 }
