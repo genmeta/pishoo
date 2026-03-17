@@ -146,6 +146,7 @@ snafu = { workspace = true }
 # --- Async Runtime ---
 tokio = { workspace = true }
 futures = { workspace = true }
+http = { workspace = true }
 
 # --- CLI Parsing ---
 clap = { workspace = true }

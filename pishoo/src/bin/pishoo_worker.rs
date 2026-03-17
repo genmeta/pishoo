@@ -6,23 +6,22 @@
 //!
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
-use std::path::Path;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    io::Cursor,
+    path::Path,
+    sync::Arc,
+};
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
-use h3x::{
-    dhttp::settings::Settings,
-    remoc::quic::{ListenClient, RemoteConnectClient},
+use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
+use pishoo::{
+    protocol::{ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello},
+    remoc_bridge::{ConnectorHandle, ConnectorServerShared, ListenerHandle, ServedConnector},
 };
-use h3x::remoc::quic::connect::serve_quic_connector;
-use h3x::quic::Listen;
-use pishoo::protocol::{
-    ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
-};
+use remoc::prelude::ServerShared;
 use rustls_pemfile::{certs, private_key};
 use snafu::Snafu;
 use tokio::sync::Mutex;
@@ -37,7 +36,7 @@ struct ServerRuntime {
 }
 
 struct ConnectorRuntime {
-    _connector: RemoteConnectClient,
+    _connector: ConnectorHandle,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -64,21 +63,44 @@ enum WorkerError {
     #[snafu(display("failed to load location rules: {message}"))]
     AccessRulesLoad { message: String },
     #[snafu(display("failed to read worker policy config `{path}`: {source}"))]
-    ReadPolicy { path: String, source: std::io::Error },
+    ReadPolicy {
+        path: String,
+        source: std::io::Error,
+    },
     #[snafu(display("failed to read cert `{path}`: {source}"))]
-    ReadCert { path: String, source: std::io::Error },
+    ReadCert {
+        path: String,
+        source: std::io::Error,
+    },
     #[snafu(display("failed to read key `{path}`: {source}"))]
-    ReadKey { path: String, source: std::io::Error },
+    ReadKey {
+        path: String,
+        source: std::io::Error,
+    },
     #[snafu(display("certificate file too large `{path}` ({actual} > {limit})"))]
-    CertTooLarge { path: String, actual: usize, limit: usize },
+    CertTooLarge {
+        path: String,
+        actual: usize,
+        limit: usize,
+    },
     #[snafu(display("private key file too large `{path}` ({actual} > {limit})"))]
-    KeyTooLarge { path: String, actual: usize, limit: usize },
+    KeyTooLarge {
+        path: String,
+        actual: usize,
+        limit: usize,
+    },
     #[snafu(display("failed to parse certificate PEM `{path}`: {source}"))]
-    ParseCert { path: String, source: std::io::Error },
+    ParseCert {
+        path: String,
+        source: std::io::Error,
+    },
     #[snafu(display("certificate PEM contains no certificate `{path}`"))]
     EmptyCert { path: String },
     #[snafu(display("failed to parse private key PEM `{path}`: {source}"))]
-    ParseKey { path: String, source: std::io::Error },
+    ParseKey {
+        path: String,
+        source: std::io::Error,
+    },
     #[snafu(display("private key PEM contains no key `{path}`"))]
     EmptyKey { path: String },
 }
@@ -156,7 +178,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Identity scan: discover ~/.genmeta identities and request listeners ---
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
-    let listeners: Arc<Mutex<HashMap<String, ServerRuntime>>> = Arc::new(Mutex::new(HashMap::new()));
+    let listeners: Arc<Mutex<HashMap<String, ServerRuntime>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let h3_settings = Arc::new(Settings::default());
 
     let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf")).await?;
@@ -177,11 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let request = RequestListen {
                     server_name: server_name.clone(),
-                    bind: routing
-                        .binds
-                        .get(&server_name)
-                        .cloned()
-                        .unwrap_or_default(),
+                    bind: routing.binds.get(&server_name).cloned().unwrap_or_default(),
                     cert_pem,
                     key_pem,
                 };
@@ -223,8 +242,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())?;
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    let mut usr1_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
-    let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut usr1_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
+    let mut term_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     loop {
@@ -355,7 +376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn start_server_runtime(
-    listener: ListenClient,
+    listener: ListenerHandle,
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
@@ -373,6 +394,7 @@ fn start_server_runtime(
                 accepted = listener_for_task.accept() => {
                     match accepted {
                         Ok(conn) => {
+                            let conn: ConnectionClient = conn;
                             let h3_settings = h3_settings.clone();
                             let server_name = server_name.clone();
                             let router = router.clone();
@@ -399,10 +421,7 @@ fn start_server_runtime(
             }
         }
     });
-    ServerRuntime {
-        cancel,
-        task,
-    }
+    ServerRuntime { cancel, task }
 }
 
 async fn start_connector_runtime() -> Result<ConnectorRuntime, WorkerError> {
@@ -416,7 +435,11 @@ async fn start_connector_runtime() -> Result<ConnectorRuntime, WorkerError> {
         .with_alpns(vec!["h3"])
         .build();
 
-    let (connector, serve_fut) = serve_quic_connector(Arc::new(client));
+    let (server, connector) =
+        ConnectorServerShared::new(Arc::new(ServedConnector::new(Arc::new(client))), 1);
+    let serve_fut = async move {
+        let _ = server.serve(true).await;
+    };
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let task = tokio::spawn(async move {
@@ -426,7 +449,7 @@ async fn start_connector_runtime() -> Result<ConnectorRuntime, WorkerError> {
         }
     });
     Ok(ConnectorRuntime {
-        _connector: connector,
+        _connector: ConnectorHandle::new(connector),
         cancel,
         task,
     })
@@ -439,11 +462,17 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
             path: conf_path.display().to_string(),
             source: e,
         })?;
-    let parsed = gateway::parse::parse(&raw, conf_path.parent())
-        .map_err(|e| WorkerError::InvalidAccessRules { message: e.to_string() })?;
+    let parsed = gateway::parse::parse(&raw, conf_path.parent()).map_err(|e| {
+        WorkerError::InvalidAccessRules {
+            message: e.to_string(),
+        }
+    })?;
     let pishoo = parsed
         .get("pishoo")
-        .and_then(|v| match v { Value::Nodes(nodes) => nodes.first(), _ => None })
+        .and_then(|v| match v {
+            Value::Nodes(nodes) => nodes.first(),
+            _ => None,
+        })
         .ok_or(WorkerError::MissingAccessRules)?;
     let uri = match pishoo.get("access_rules") {
         Some(Value::String(uri)) => uri.clone(),
@@ -452,23 +481,32 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
 
     let db = sea_orm::Database::connect(&uri)
         .await
-        .map_err(|e| WorkerError::AccessRulesDb { message: e.to_string() })?;
+        .map_err(|e| WorkerError::AccessRulesDb {
+            message: e.to_string(),
+        })?;
     let location_rules = LocationService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad { message: e.to_string() })?;
+        .map_err(|e| WorkerError::AccessRulesLoad {
+            message: e.to_string(),
+        })?;
 
     let _ = DomainService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad { message: e.to_string() })?;
+        .map_err(|e| WorkerError::AccessRulesLoad {
+            message: e.to_string(),
+        })?;
 
     Ok(WorkerPolicy {
         access_rules: Arc::new(location_rules.into()),
     })
 }
 
-async fn read_tls_material(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>, Vec<u8>), WorkerError> {
+async fn read_tls_material(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<u8>, Vec<u8>), WorkerError> {
     let cert_pem = tokio::fs::read(cert_path)
         .await
         .map_err(|e| WorkerError::ReadCert {
@@ -508,10 +546,11 @@ async fn read_tls_material(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>
             limit: MAX_KEY_PEM_BYTES,
         });
     }
-    let parsed_key = private_key(&mut Cursor::new(&key_pem)).map_err(|e| WorkerError::ParseKey {
-        path: key_path.display().to_string(),
-        source: e,
-    })?;
+    let parsed_key =
+        private_key(&mut Cursor::new(&key_pem)).map_err(|e| WorkerError::ParseKey {
+            path: key_path.display().to_string(),
+            source: e,
+        })?;
     if parsed_key.is_none() {
         return Err(WorkerError::EmptyKey {
             path: key_path.display().to_string(),
@@ -591,8 +630,7 @@ async fn build_worker_routing(
 fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::os::fd::AsRawFd;
+        use std::{fs::OpenOptions, os::fd::AsRawFd};
 
         std::fs::create_dir_all(log_dir)?;
         let log_file = log_dir.join("worker.log");

@@ -4,24 +4,33 @@
 //! detection (first-come-first-served), and manages the lifecycle of
 //! per-server listen adapters routed from the central `QuicListeners`.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    io::Cursor,
+    sync::Arc,
+};
 
-use h3x::remoc::quic::{ListenClient, RemoteConnectClient};
-use h3x::remoc::quic::connect::serve_quic_connector;
-use h3x::remoc::quic::listen::serve_quic_listener;
-use nix::{sys::signal::Signal, unistd::{Pid, Uid}};
+use nix::{
+    sys::signal::Signal,
+    unistd::{Pid, Uid},
+};
+use remoc::prelude::ServerShared;
 use rustls_pemfile::{certs, private_key};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::per_server_listen::PerServerListenAdapter;
-use crate::protocol::{
-    ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
-    RequestListen, ServerName,
+use crate::{
+    per_server_listen::PerServerListenAdapter,
+    protocol::{
+        ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
+        RequestListen, ServerName,
+    },
+    remoc_bridge::{
+        ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
+        ServedConnector, ServedListener,
+    },
+    worker_spawn::WorkerHandle,
 };
-use crate::worker_spawn::WorkerHandle;
 
 /// Per-server ownership record stored in the root registry.
 pub struct ServerRecord {
@@ -77,7 +86,10 @@ pub struct CleanupSummary {
 
 impl RootState {
     /// Create a new root state with the given shared QUIC listeners.
-    pub fn new(listeners: Arc<gm_quic::prelude::QuicListeners>, quic_client: Arc<gm_quic::prelude::QuicClient>) -> Self {
+    pub fn new(
+        listeners: Arc<gm_quic::prelude::QuicListeners>,
+        quic_client: Arc<gm_quic::prelude::QuicClient>,
+    ) -> Self {
         Self {
             listeners,
             quic_client,
@@ -171,7 +183,7 @@ impl RootState {
         &mut self,
         caller_pid: Pid,
         request: RequestListen,
-    ) -> Result<ListenClient, ListenRequestError> {
+    ) -> Result<ListenerHandle, ListenRequestError> {
         let server_name = request.server_name;
 
         // 1. Conflict check: first-come-first-served.
@@ -211,7 +223,10 @@ impl RootState {
         let shutdown_token = CancellationToken::new();
         let adapter = PerServerListenAdapter::new(rx, shutdown_token.clone());
 
-        let (remote_listener, serve_fut) = serve_quic_listener(adapter);
+        let (server, client) = ListenerServerShared::new(Arc::new(ServedListener::new(adapter)), 1);
+        let serve_fut = async move {
+            let _ = server.serve(true).await;
+        };
 
         // 8. Spawn the serve future to drive the RTC server.
         tokio::spawn(serve_fut);
@@ -234,7 +249,7 @@ impl RootState {
         tracing::info!(caller_pid = %caller_pid, "request_listen success");
 
         // 11. Return the RemoteQuicListener for the worker.
-        Ok(remote_listener)
+        Ok(ListenerHandle::new(client))
     }
 
     /// Handle an `open_connector` call from a worker.
@@ -246,7 +261,7 @@ impl RootState {
         &mut self,
         caller_pid: Pid,
         _request: OpenConnector,
-    ) -> Result<RemoteConnectClient, OpenConnectorError> {
+    ) -> Result<ConnectorHandle, OpenConnectorError> {
         // Verify caller is a registered worker.
         if !self.processes.contains_key(&caller_pid) {
             return Err(OpenConnectorError::Internal {
@@ -254,7 +269,11 @@ impl RootState {
             });
         }
 
-        let (remote_connector, serve_fut) = serve_quic_connector(self.quic_client.clone());
+        let (server, client) =
+            ConnectorServerShared::new(Arc::new(ServedConnector::new(self.quic_client.clone())), 1);
+        let serve_fut = async move {
+            let _ = server.serve(true).await;
+        };
 
         // Create a cancellation token so we can stop the serve future on cleanup.
         let cancel = CancellationToken::new();
@@ -273,7 +292,7 @@ impl RootState {
 
         tracing::info!(caller_pid = %caller_pid, "open_connector success");
 
-        Ok(remote_connector)
+        Ok(ConnectorHandle::new(client))
     }
 
     /// Handle a `release_listen` call from a worker.
@@ -322,7 +341,7 @@ impl RootState {
         for (pid, process) in &mut self.processes {
             match process.worker_handle.child.try_wait() {
                 Ok(Some(status)) => {
-                tracing::warn!(pid = %pid, ?status, "worker exited");
+                    tracing::warn!(pid = %pid, ?status, "worker exited");
                     exited.push(*pid);
                 }
                 Ok(None) => {}
@@ -403,11 +422,10 @@ fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), Liste
             message: "certificate PEM contains no certificates".to_string(),
         });
     }
-    let key = private_key(&mut Cursor::new(key_pem)).map_err(|e| {
-        ListenRequestError::InvalidRequest {
+    let key =
+        private_key(&mut Cursor::new(key_pem)).map_err(|e| ListenRequestError::InvalidRequest {
             message: format!("invalid private key PEM: {e}"),
-        }
-    })?;
+        })?;
     if key.is_none() {
         return Err(ListenRequestError::InvalidRequest {
             message: "private key PEM contains no key".to_string(),
@@ -467,7 +485,10 @@ mod tests {
             .cleanup_worker_with_reason(Pid::from_raw(100), "test")
             .expect("cleanup summary");
         assert_eq!(summary.pid, Pid::from_raw(100));
-        assert_eq!(state.get_pid_for_uid(Uid::from_raw(1000)), Some(Pid::from_raw(200)));
+        assert_eq!(
+            state.get_pid_for_uid(Uid::from_raw(1000)),
+            Some(Pid::from_raw(200))
+        );
     }
 
     #[test]

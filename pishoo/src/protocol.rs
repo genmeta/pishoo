@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
-use h3x::remoc::quic::{ListenClient, RemoteConnectClient};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
+
+use crate::remoc_bridge::{ConnectorHandle, ListenerHandle};
 
 pub type ServerName = String;
 
@@ -111,17 +112,14 @@ pub trait RootTransportApi: Send + Sync {
     async fn request_listen(
         &self,
         request: RequestListen,
-    ) -> Result<ListenClient, ListenRequestError>;
+    ) -> Result<ListenerHandle, ListenRequestError>;
 
-    async fn release_listen(
-        &self,
-        request: ReleaseListen,
-    ) -> Result<(), ReleaseListenError>;
+    async fn release_listen(&self, request: ReleaseListen) -> Result<(), ReleaseListenError>;
 
     async fn open_connector(
         &self,
         request: OpenConnector,
-    ) -> Result<RemoteConnectClient, OpenConnectorError>;
+    ) -> Result<ConnectorHandle, OpenConnectorError>;
 }
 
 #[cfg(test)]

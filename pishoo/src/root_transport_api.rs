@@ -6,15 +6,17 @@
 
 use std::sync::Arc;
 
-use h3x::remoc::quic::{ListenClient, RemoteConnectClient};
 use nix::unistd::Pid;
 use tokio::sync::Mutex;
 
-use crate::protocol::{
-    ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
-    RequestListen, RootTransportApi,
+use crate::{
+    protocol::{
+        ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
+        RequestListen, RootTransportApi,
+    },
+    remoc_bridge::{ConnectorHandle, ListenerHandle},
+    root_state::RootState,
 };
-use crate::root_state::RootState;
 
 /// Per-worker [`RootTransportApi`] implementation.
 ///
@@ -38,15 +40,12 @@ impl RootTransportApi for RootTransportApiImpl {
     async fn request_listen(
         &self,
         request: RequestListen,
-    ) -> Result<ListenClient, ListenRequestError> {
+    ) -> Result<ListenerHandle, ListenRequestError> {
         let mut state = self.state.lock().await;
         state.request_listen(self.caller_pid, request).await
     }
 
-    async fn release_listen(
-        &self,
-        request: ReleaseListen,
-    ) -> Result<(), ReleaseListenError> {
+    async fn release_listen(&self, request: ReleaseListen) -> Result<(), ReleaseListenError> {
         let mut state = self.state.lock().await;
         state.release_listen(self.caller_pid, request)
     }
@@ -54,7 +53,7 @@ impl RootTransportApi for RootTransportApiImpl {
     async fn open_connector(
         &self,
         request: OpenConnector,
-    ) -> Result<RemoteConnectClient, OpenConnectorError> {
+    ) -> Result<ConnectorHandle, OpenConnectorError> {
         let mut state = self.state.lock().await;
         state.open_connector(self.caller_pid, request).await
     }
