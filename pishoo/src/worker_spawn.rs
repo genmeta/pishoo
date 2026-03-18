@@ -16,6 +16,7 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use remoc::rtc::ServerShared;
+use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::{process::Child, sync::Mutex};
 use tracing::Instrument;
 
@@ -41,6 +42,24 @@ struct UnixWorkerHandle {
 pub struct SpawnedWorker {
     pub handle: WorkerHandle,
     pub hello: WorkerHello,
+}
+
+#[derive(Debug, Snafu)]
+pub enum SpawnWorkerError {
+    #[snafu(display("failed to launch worker process"))]
+    LaunchWorker { source: std::io::Error },
+    #[snafu(display("failed to establish remoc transport"))]
+    ConnectTransport {
+        source: remoc::ConnectError<std::io::Error, std::io::Error>,
+    },
+    #[snafu(display("failed to send worker bootstrap"))]
+    SendBootstrap {
+        source: remoc::rch::base::SendError<WorkerBootstrap>,
+    },
+    #[snafu(display("failed to receive worker hello"))]
+    ReceiveHello { source: remoc::rch::base::RecvError },
+    #[snafu(display("worker closed channel without sending startup hello"))]
+    MissingHello,
 }
 
 impl Drop for WorkerHandle {
@@ -147,8 +166,9 @@ pub async fn spawn_worker(
     home: PathBuf,
     log_dir: PathBuf,
     state: Arc<Mutex<crate::root_state::RootState>>,
-) -> Result<SpawnedWorker, std::io::Error> {
-    let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username, &home)?;
+) -> Result<SpawnedWorker, SpawnWorkerError> {
+    let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username, &home)
+        .context(LaunchWorkerSnafu)?;
     let pid = launched.handle.pid().expect("child has pid");
     let transport = launched.transport;
 
@@ -158,7 +178,7 @@ pub async fn spawn_worker(
         remoc::rch::base::Receiver<WorkerHello>,
     ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
+        .context(ConnectTransportSnafu)?;
     tokio::spawn(conn.in_current_span());
     let (server, client) = RootTransportApiServerShared::new(
         Arc::new(crate::root_transport_api::RootTransportApiImpl::new(
@@ -180,15 +200,13 @@ pub async fn spawn_worker(
     base_tx
         .send(bootstrap)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        .context(SendBootstrapSnafu)?;
 
     let hello = base_rx
         .recv()
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?
-        .ok_or_else(|| {
-            std::io::Error::other("worker closed channel without sending startup hello")
-        })?;
+        .context(ReceiveHelloSnafu)?
+        .context(MissingHelloSnafu)?;
 
     Ok(SpawnedWorker {
         handle: launched.handle,

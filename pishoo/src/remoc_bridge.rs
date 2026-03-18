@@ -8,6 +8,23 @@ use tokio::task::JoinSet;
 use tracing::Instrument;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RemoteErrorMessage(String);
+
+impl RemoteErrorMessage {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for RemoteErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RemoteErrorMessage {}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ListenerHandle {
     client: ListenerClient,
 }
@@ -44,8 +61,8 @@ impl ConnectorHandle {
 #[derive(Debug, snafu::Snafu, Clone, serde::Serialize, serde::Deserialize)]
 #[snafu(module)]
 pub enum ListenError {
-    #[snafu(display("remote listener error: {message}"))]
-    Remote { message: String },
+    #[snafu(transparent)]
+    Remote { source: RemoteErrorMessage },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -53,8 +70,8 @@ pub enum ListenError {
 #[derive(Debug, snafu::Snafu, Clone, serde::Serialize, serde::Deserialize)]
 #[snafu(module)]
 pub enum ConnectError {
-    #[snafu(display("remote connector error: {message}"))]
-    Remote { message: String },
+    #[snafu(transparent)]
+    Remote { source: RemoteErrorMessage },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -96,8 +113,8 @@ where
             .listener
             .accept()
             .await
-            .map_err(|error| ListenError::Remote {
-                message: error.to_string(),
+            .map_err(|source| ListenError::Remote {
+                source: RemoteErrorMessage::new(source.to_string()),
             })?;
         let (client, fut) = serve_quic_connection(connection);
         self.tasks.spawn(fut);
@@ -108,8 +125,8 @@ where
         self.listener
             .shutdown()
             .await
-            .map_err(|error| ListenError::Remote {
-                message: error.to_string(),
+            .map_err(|source| ListenError::Remote {
+                source: RemoteErrorMessage::new(source.to_string()),
             })
     }
 }
@@ -136,16 +153,17 @@ where
     <C::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
 {
     async fn connect(&self, server: String) -> Result<ConnectionClient, ConnectError> {
-        let authority =
-            http::uri::Authority::try_from(server).map_err(|error| ConnectError::Remote {
-                message: error.to_string(),
-            })?;
+        let authority = http::uri::Authority::try_from(server).map_err(|source| {
+            ConnectError::Remote {
+                source: RemoteErrorMessage::new(source.to_string()),
+            }
+        })?;
         let connection =
             self.connector
                 .connect(&authority)
                 .await
-                .map_err(|error| ConnectError::Remote {
-                    message: error.to_string(),
+                .map_err(|source| ConnectError::Remote {
+                    source: RemoteErrorMessage::new(source.to_string()),
                 })?;
         let (client, fut) = serve_quic_connection(connection);
         self.tasks.spawn(fut);

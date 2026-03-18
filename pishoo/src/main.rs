@@ -130,10 +130,10 @@ async fn main() -> Result<(), Whatever> {
     signal::init_pid_file(pid_file).await?;
 
     let worker_targets = pishoo::config::resolve_worker_targets(&root_config)
-        .whatever_context("Failed to resolve configured worker users")?;
+        .whatever_context("failed to resolve configured worker users")?;
 
     let worker_bin =
-        std::env::current_exe().whatever_context("Failed to determine current executable path")?;
+        std::env::current_exe().whatever_context("failed to determine current executable path")?;
     let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
 
     for target in worker_targets {
@@ -147,10 +147,7 @@ async fn main() -> Result<(), Whatever> {
             state.clone(),
         )
         .await
-        .whatever_context(format!(
-            "Failed to spawn worker for user `{}`",
-            target.username
-        ))?;
+        .whatever_context(format!("failed to spawn worker for user `{}`", target.username))?;
         let pid = spawned.handle.pid().expect("worker must have pid");
         let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;
