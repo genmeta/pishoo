@@ -131,7 +131,7 @@ pub async fn serve(
     let (quic_listeners, server_listens) =
         create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
 
-    info!("DNS Resolvers initialized");
+    info!("dns resolvers initialized");
 
     // 启动 dns 上报（不含 stun.genmeta.net）
     let _publisher = Publisher::spawn(quic_listeners.clone(), publish_configs);
@@ -142,7 +142,7 @@ pub async fn serve(
             config,
         )),
         (Some(_), None) => {
-            warn!(target: "stun", "STUN configured but no DNS publisher for {STUN_DOMAIN}, STUN server manager disabled");
+            warn!("stun configured but no dns publisher for {STUN_DOMAIN}, stun server manager disabled");
             None
         }
         _ => None,
@@ -220,7 +220,7 @@ async fn create_quic_listeners(
 
     // collect & dedup
     let initial_bind_uris: HashSet<_> = server_bind_uris.values().flatten().cloned().collect();
-    debug!(?initial_bind_uris, "Binds");
+    debug!(?initial_bind_uris, "resolved initial bind uris");
 
     #[allow(unused_mut)]
     let mut builder =
@@ -327,7 +327,7 @@ async fn maintain_binding(
                     if bind_uris.is_empty() {
                         continue;
                     }
-                    debug!(target: "listen", server, ?bind_uris, "Add interfaces to server binding");
+                    debug!(server, ?bind_uris, "adding interfaces to server binding");
                     let Some(server) = quic_listeners.get_server(server) else {
                         unreachable!()
                     };
@@ -347,7 +347,7 @@ async fn maintain_binding(
                     if bind_uris.is_empty() {
                         continue;
                     }
-                    debug!(target: "listen", server, ?bind_uris, "Remove those interface from server binding");
+                    debug!(server, ?bind_uris, "removing interfaces from server binding");
                     let Some(server) = quic_listeners.get_server(server) else {
                         unreachable!()
                     };
@@ -372,7 +372,7 @@ async fn maintain_binding(
                     };
                     for bind_uri in bind_uris {
                         if server.get_iface(&bind_uri).is_none() {
-                            debug!(target: "listen", server_name, %bind_uri, "Interface changed, binding new address");
+                            debug!(server_name, %bind_uri, "interface changed, binding new address");
                             server.bind([bind_uri]).await;
                         }
                     }
@@ -415,8 +415,8 @@ async fn handle_connections(
                         .await
                 {
                     error!(
-                        target: "connect", "Failed to handle connection: {}",
-                        Report::from_error(error)
+                        error = %Report::from_error(error),
+                        "failed to handle connection"
                     );
                 }
             }
@@ -435,7 +435,7 @@ async fn handle_single_connection(
     access_rules: Arc<LocationRulesMatcher>,
     missing_rule_policy: MissingRulePolicy,
 ) -> Result<()> {
-    info!(target: "connect", "Accepted connection");
+    info!("accepted connection");
 
     // 建立H3连接
     let h3_conn = Arc::new(
@@ -444,8 +444,8 @@ async fn handle_single_connection(
             .whatever_context::<_, Whatever>("Failed to establish H3 connection")?,
     );
 
-    debug!(target: "connect", "H3 connection established");
-    debug!(target: "connect", "RouterMap: {:?}", router);
+    debug!("h3 connection established");
+    debug!(router = ?router, "router map");
 
     let h3_conn_for_accept = h3_conn.clone();
     let handle_request_fn = Arc::new(
@@ -466,12 +466,12 @@ async fn handle_single_connection(
             .await;
 
             async move {
-                info!(target: "request", "Resolved new request");
+                info!("resolved new request");
 
                 if let Err(handle_request_error) = handle_result {
                     error!(
-                        target: "request", "Failed to handle resolved request: {}",
-                        Report::from_error(handle_request_error)
+                        error = %Report::from_error(handle_request_error),
+                        "failed to handle resolved request"
                     );
                 }
             }
@@ -492,9 +492,9 @@ async fn handle_single_connection(
                                 let request = Request::from_parts(parts, ());
                                 handle_request_fn(request, read_stream, write_stream).await;
                             }
-                            Err(e) => error!(
-                                target: "request", "Failed to read request: {}",
-                                Report::from_error(e)
+                            Err(error) => error!(
+                                error = %Report::from_error(error),
+                                "failed to read request"
                             ),
                         }
                     };
@@ -502,8 +502,8 @@ async fn handle_single_connection(
                 }
                 Err(e) => {
                     error!(
-                        target: "connect", "Failed to accept more request: {}",
-                        Report::from_error(e)
+                        error = %Report::from_error(e),
+                        "failed to accept another request"
                     );
                     break;
                 }
@@ -528,7 +528,7 @@ async fn handle_request(
         access_rules,
         missing_rule_policy,
     } = context;
-    tracing::debug!(target: "request", ?req);
+    tracing::debug!(request = ?req, "received request");
     // 查找匹配的路由规则
     // TODO 支持 泛域名匹配
     let server = servers
@@ -566,7 +566,6 @@ async fn handle_request(
             Err(error) => {
                 let action = action_on_missing_rule(missing_rule_policy);
                 warn!(
-                    target: "request",
                     %server_name,
                     path = %req.uri().path(),
                     ?missing_rule_policy,
@@ -583,7 +582,12 @@ async fn handle_request(
     };
 
     if firewall_action == RequestAction::Deny {
-        info!(target: "request", "Firewall rules deny request from client `{client_name} to server `{server_name} with uri `{}`", req.uri());
+        info!(
+            client_name,
+            %server_name,
+            uri = %req.uri(),
+            "firewall rules denied request"
+        );
         send_status_and_close(sender, StatusCode::FORBIDDEN).await?;
         return Ok(());
     }

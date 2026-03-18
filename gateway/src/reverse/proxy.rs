@@ -11,7 +11,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
-use tracing::{debug, error};
+use tracing::{Instrument, debug, error};
 
 use crate::{
     command,
@@ -37,17 +37,13 @@ pub async fn handle(
         .and_then(|v| v.to_str().ok());
     let gzip = GzipConfig::from_location(location, accept_encoding);
 
-    debug!(
-        target: "reverse_proxy",
-        "Processing request headers: {:?}",
-        req.headers()
-    );
+    debug!(headers = ?req.headers(), "processing request headers");
 
     let resp = match pass(location, req, recver).await {
         Ok(resp) => resp,
-        Err(e) => {
-            let err_msg = format!("Proxy request error: {}", Report::from_error(e));
-            error!(target: "reverse_proxy", "{}", err_msg);
+        Err(error) => {
+            let err_msg = format!("proxy request error: {}", Report::from_error(error));
+            error!(error = %err_msg, "proxy request failed");
             req_info.log_error(&err_msg).await;
             req_info.log_access(500, 0).await;
 
@@ -56,7 +52,7 @@ pub async fn handle(
         }
     };
 
-    debug!(target: "reverse_proxy", "Sending response");
+    debug!("sending response");
     let (mut parts, body) = resp.into_parts();
 
     let content_length = parts
@@ -74,7 +70,7 @@ pub async fn handle(
     // 添加自定义响应头字段
     command::add_header(location, &mut parts);
 
-    debug!(target: "reverse_proxy", "Sending response headers: {parts:?}");
+    debug!(response = ?parts, "sending response headers");
 
     // 发送响应头
     let status_code = parts.status;
@@ -91,19 +87,22 @@ pub async fn handle(
     let mut writer = Box::pin(sender.into_writer());
     match tokio::io::copy(&mut reader, &mut writer).await {
         Ok(size) => {
-            debug!(target: "reverse_proxy", "Request body sent: size={size}");
+            debug!(size, "response body forwarded");
             req_info.log_access(status_code.as_u16(), size).await;
         }
-        Err(e) => {
-            let err_msg = format!("Error sending request body: {}", Report::from_error(e));
-            error!(target: "reverse_proxy", "{}", err_msg);
+        Err(error) => {
+            let err_msg = format!("error sending response body: {}", Report::from_error(error));
+            error!(error = %err_msg, "failed to forward response body");
             req_info.log_error(&err_msg).await;
         }
     }
     match writer.shutdown().await {
-        Ok(()) => debug!(target: "reverse_proxy", "Request finished sent"),
-        Err(e) => {
-            error!(target: "reverse_proxy", "Error sending request data end: {}", Report::from_error(e))
+        Ok(()) => debug!("finished forwarding response"),
+        Err(error) => {
+            error!(
+                error = %Report::from_error(error),
+                "failed to finish forwarding response"
+            )
         }
     }
     Ok(())
@@ -121,7 +120,7 @@ pub async fn pass(
         unreachable!("proxy_pass is required for reverse proxy");
     };
 
-    tracing::debug!(target: "reverse_proxy", "proxy_pass: {proxy_pass}");
+    tracing::debug!(%proxy_pass, "resolved proxy_pass target");
 
     let mut path_and_query = parts
         .uri
@@ -129,11 +128,7 @@ pub async fn pass(
         .map(|p| p.to_string())
         .unwrap_or_default();
 
-    tracing::debug!(
-        target: "reverse_proxy",
-        "Original request path and query: {}",
-        path_and_query
-    );
+    tracing::debug!(path_and_query, "original request path and query");
 
     if !proxy_pass.path().eq("/") {
         // 将匹配到的路径部分替换掉原始请求路径
@@ -156,11 +151,7 @@ pub async fn pass(
         }
     }
 
-    tracing::info!(
-        target: "reverse_proxy",
-        "Proxying request to target URI before path replacement: {}",
-        path_and_query
-    );
+    tracing::info!(path_and_query, "proxying request to upstream path and query");
 
     let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
         "Failed to generate target URI from `{path_and_query}`"
@@ -171,7 +162,7 @@ pub async fn pass(
     new_parts.uri = target_uri.clone();
     new_parts.version = Version::HTTP_11;
 
-    debug!(target: "reverse_proxy", "Preparing to proxy request: {new_parts:?}");
+    debug!(request = ?new_parts, "preparing upstream request");
 
     // 解析目标地址
     // Checked in configuration parsing phase
@@ -220,22 +211,20 @@ where
         .await
         .whatever_context::<_, Whatever>("Failed to establish HTTP/1.1 client connection")?;
 
-    debug!(
-        target: "reverse_proxy",
-        "HTTP client connection established: {:?}",
-        target_uri
-    );
+    debug!(%target_uri, "http client connection established");
 
     // 启动连接维护任务
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            error!(
-                target: "reverse_proxy",
-                "Maintenance failed: {}",
-                Report::from_error(e)
-            );
+    tokio::spawn(
+        async move {
+            if let Err(error) = conn.await {
+                error!(
+                    error = %Report::from_error(error),
+                    "connection maintenance failed"
+                );
+            }
         }
-    });
+        .in_current_span(),
+    );
 
     // 使用 h3x ReadStream 的 as_bytes_stream 将接收到的数据转换为 Stream
     let stream = receiver
@@ -249,6 +238,6 @@ where
         .await
         .whatever_context::<_, Whatever>("Failed to send request to target")?;
 
-    debug!(target: "reverse_proxy", "Finished sending request body");
+    debug!("finished sending request body");
     Ok(response)
 }

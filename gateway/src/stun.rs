@@ -269,11 +269,11 @@ fn reconcile_configured(
         }
         match start_configured_stun_pair(bind_cfg) {
             Some(handle) => {
-                info!(target: "stun", bind = %bind_cfg.bind_address, "Started configured STUN server pair");
+                info!(bind = %bind_cfg.bind_address, "started configured stun server pair");
                 handles.insert(bind_cfg.bind_address, handle);
             }
             None => {
-                warn!(target: "stun", bind = %bind_cfg.bind_address, "Failed to start configured STUN server pair, will retry");
+                warn!(bind = %bind_cfg.bind_address, "failed to start configured stun server pair, will retry");
             }
         }
     }
@@ -291,7 +291,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     let main_port = match main_iface.bound_addr() {
         Ok(BoundAddr::Internet(addr)) => addr.port(),
         _ => {
-            warn!(target: "stun", bind = %bind_cfg.bind_address, "Configured main iface has no internet bound addr");
+            warn!(bind = %bind_cfg.bind_address, "configured main iface has no internet bound addr");
             return None;
         }
     };
@@ -308,7 +308,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     let aux_port = match aux_iface.bound_addr() {
         Ok(BoundAddr::Internet(addr)) => addr.port(),
         _ => {
-            warn!(target: "stun", "Configured aux iface has no internet bound addr");
+            warn!("configured aux iface has no internet bound addr");
             return None;
         }
     };
@@ -384,11 +384,11 @@ async fn reconcile_dynamic(
 
             match start_dynamic_stun_pair(bind_uri, &bind_iface, expected_change_address) {
                 Some(handle) => {
-                    info!(target: "stun", %bind_uri, ?expected_change_address, "Restarted dynamic STUN server pair after change_address update");
+                    info!(%bind_uri, ?expected_change_address, "restarted dynamic stun server pair after change_address update");
                     handles.insert(bind_uri.clone(), handle);
                 }
                 None => {
-                    warn!(target: "stun", %bind_uri, "Failed to restart dynamic STUN server pair, will retry");
+                    warn!(%bind_uri, "failed to restart dynamic stun server pair, will retry");
                 }
             }
             continue;
@@ -405,11 +405,11 @@ async fn reconcile_dynamic(
 
         match start_dynamic_stun_pair(bind_uri, &bind_iface, change_address) {
             Some(handle) => {
-                info!(target: "stun", %bind_uri, "Started dynamic STUN server pair (FullCone)");
+                info!(%bind_uri, "started dynamic stun server pair for full cone nat");
                 handles.insert(bind_uri.clone(), handle);
             }
             None => {
-                warn!(target: "stun", %bind_uri, "Failed to start dynamic STUN server pair, will retry");
+                warn!(%bind_uri, "failed to start dynamic stun server pair, will retry");
             }
         }
     }
@@ -469,7 +469,7 @@ fn start_dynamic_stun_pair(
     let main_addr = match iface.bound_addr() {
         Ok(BoundAddr::Internet(addr)) => addr,
         _ => {
-            warn!(target: "stun", %bind_uri, "Main iface has no internet bound addr");
+            warn!(%bind_uri, "main iface has no internet bound addr");
             return None;
         }
     };
@@ -492,7 +492,7 @@ fn start_dynamic_stun_pair(
     let aux_port = match aux_iface.bound_addr() {
         Ok(BoundAddr::Internet(addr)) => addr.port(),
         _ => {
-            warn!(target: "stun", "Aux iface has no internet bound addr");
+            warn!("aux iface has no internet bound addr");
             return None;
         }
     };

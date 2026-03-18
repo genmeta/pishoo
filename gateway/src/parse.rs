@@ -14,7 +14,7 @@ use misc_conf::{
     nginx::Nginx,
 };
 use pattern::Pattern;
-use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
+use snafu::{ensure_whatever, whatever, OptionExt, ResultExt};
 use tokio::sync::OnceCell;
 
 use crate::error::Whatever;
@@ -147,7 +147,7 @@ impl IfaceRange {
             IfaceRange::Exact(name) => name == iface_name,
             IfaceRange::External | IfaceRange::Internal => {
                 tracing::warn!(
-                    "IfaceRange::External/Internal not yet implemented, treating as non-match"
+                    "iface range external/internal is not implemented yet, treating as non-match"
                 );
                 false
             }
@@ -341,7 +341,7 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
             .collect::<Result<Vec<_>, _>>()
             .whatever_context("Cannot resolve include in configuration")?;
     } else {
-        tracing::warn!(target:"config", "Config file has no parent, unable to resolve includes");
+        tracing::warn!("config file has no parent, unable to resolve includes");
     }
 
     // 解析配置

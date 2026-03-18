@@ -18,7 +18,7 @@ use rustls::{SignatureScheme, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::info;
+use tracing::{Instrument, info};
 
 use crate::{
     dns::{MDNS_SERVICE, resolve::DnsResolver},
@@ -46,7 +46,7 @@ impl PublishConfig {
         if let Some((key, scheme)) = &self.signing_key
             && let Err(e) = ep.sign_with(key.as_ref(), *scheme)
         {
-            tracing::warn!(target: "dns", "Failed to sign endpoint: {e}");
+            tracing::warn!(error = %Report::from_error(e), "failed to sign endpoint");
         }
     }
 }
@@ -60,12 +60,12 @@ pub async fn publish_host_endpoints(
     config: &PublishConfig,
 ) {
     if config.resolvers.is_empty() {
-        tracing::warn!(target: "dns", host, "No DNS publisher resolver available, cannot publish endpoints");
+        tracing::warn!(host, "no dns publisher resolver available, cannot publish endpoints");
         return;
     }
 
     if endpoints.is_empty() {
-        tracing::warn!(target: "dns", host, "No endpoints to publish");
+        tracing::warn!(host, "no endpoints to publish");
         return;
     }
 
@@ -78,13 +78,13 @@ pub async fn publish_host_endpoints(
     for resolver in &config.resolvers {
         if let Err(error) = resolver.publish(host, &packet).await {
             tracing::error!(
-                target: "dns",
                 host,
-                "Resolver `{resolver}` publish dns failed: {}",
-                Report::from_error(error)
+                resolver = %resolver,
+                error = %Report::from_error(error),
+                "dns publish failed"
             );
         } else {
-            tracing::info!(target: "dns", host, "Published endpoints");
+            tracing::info!(host, "published endpoints");
         }
     }
 }
@@ -94,10 +94,9 @@ fn build_publisher(
     config: &ServerIdentity,
 ) -> Arc<dyn DnsPublisher + Send + Sync> {
     info!(
-        target = "dns",
-        "Creating H3 DNS publisher for server {} base url {}",
-        config.server_name,
-        resolver.base_url
+        server_name = %config.server_name,
+        base_url = %resolver.base_url,
+        "creating h3 dns publisher"
     );
     Arc::new(
         H3Publisher::new(
@@ -135,10 +134,10 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
                 .expect("Missing ssl_certificate or ssl_certificate_key");
 
             let resolvers = if domain.ends_with("user.genmeta.net") {
-                tracing::warn!(target: "dns", server_name = %domain, "Domain excluded from publishing");
+                tracing::warn!(server_name = %domain, "domain excluded from publishing");
                 vec![]
             } else {
-                tracing::info!(target: "dns", server_name = %domain, server_id = identity.server_id, "Configuring DNS publisher");
+                tracing::info!(server_name = %domain, server_id = identity.server_id, "configuring dns publisher");
                 vec![build_publisher(&resolver, &identity)]
             };
 
@@ -184,8 +183,14 @@ fn ensure_mdns_resolver(
 
             Some((resolver, local_addr))
         }
-        Err(e) => {
-            tracing::warn!(target: "dns", "Mdns::new failed for {bind_uri} addr={local_addr} device={device}: {e}");
+        Err(error) => {
+            tracing::warn!(
+                %bind_uri,
+                %local_addr,
+                device,
+                error = %Report::from_error(error),
+                "failed to initialize mdns resolver"
+            );
             None
         }
     }
@@ -213,12 +218,12 @@ async fn publish_single_mdns(
 
         if let Err(error) = resolver.publish(server_name, &packet).await {
             tracing::error!(
-                target: "dns",
-                "Resolve `{resolver}` publish dns failed: {}",
-                Report::from_error(error)
+                resolver = %resolver,
+                error = %Report::from_error(error),
+                "dns publish failed"
             );
         } else {
-            tracing::trace!(target: "dns", %bind_uri, %addr, "Publishing local address to mDNS");
+            tracing::trace!(%bind_uri, %addr, "publishing local address to mdns");
         }
     }
 }
@@ -240,15 +245,15 @@ async fn publish_resolvers(
                             let outer = client.get_outer_addr()?.ok()?;
                             match client.get_nat_type() {
                                 Some(Ok(NatType::FullCone)) => {
-                                    tracing::debug!(target: "dns", outer = ?outer, "Client behind Full Cone NAT, suitable for DNS publication");
+                                    tracing::debug!(outer = ?outer, "client behind full cone nat, suitable for dns publication");
                                     Some(SocketEndpointAddr::direct(outer))
                                 }
                                 Some(Ok(_)) => {
-                                    tracing::debug!(target: "dns", outer = ?outer, "Found STUN client with unknown NAT type for DNS publication");
+                                    tracing::debug!(outer = ?outer, "found stun client with non-full-cone nat for dns publication");
                                     Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
                                 }
                                 _ => {
-                                    tracing::debug!(target: "dns", outer = ?outer, "Found STUN client with unknown NAT type for DNS publication");
+                                    tracing::debug!(outer = ?outer, "found stun client with unknown nat type for dns publication");
                                     Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
                                 }
                             }
@@ -268,11 +273,11 @@ async fn publish_resolvers(
     }
 
     if endpoints.is_empty() {
-        tracing::warn!(target: "dns", server_name, "No endpoints to publish for this server");
+        tracing::warn!(server_name, "no endpoints to publish for this server");
         return;
     }
 
-    tracing::debug!(target: "dns", server_name, server_id = config.server_id, count = endpoints.len(), "Publishing endpoints");
+    tracing::debug!(server_name, server_id = config.server_id, count = endpoints.len(), "publishing endpoints");
 
     let mut hosts = std::collections::HashMap::new();
     hosts.insert(server_name.to_string(), endpoints);
@@ -281,9 +286,9 @@ async fn publish_resolvers(
     for resolver in &config.resolvers {
         if let Err(error) = resolver.publish(server_name, &packet).await {
             tracing::error!(
-                target: "dns",
-                "Resolver `{resolver}` publish dns failed: {}",
-                Report::from_error(error)
+                resolver = %resolver,
+                error = %Report::from_error(error),
+                "dns publish failed"
             );
         }
     }
@@ -334,7 +339,7 @@ impl Publisher {
                 AbortOnDropHandle::new(tokio::spawn(async move {
                     time::sleep(Duration::from_millis(50)).await;
                     publish_all.await
-                }))
+                }.in_current_span()))
             };
 
             let mut interval = interval(DNS_PUBLISH_INTERVAL);
@@ -352,7 +357,7 @@ impl Publisher {
                 }
                 current_publish_task = new_publish_task();
             }
-        }));
+        }.in_current_span()));
         Self { _task }
     }
 }
