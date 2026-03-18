@@ -6,14 +6,20 @@
 //!
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
-use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
 use pishoo::{
-    protocol::{OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello},
+    protocol::{
+        OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
+    },
     remoc_bridge::ListenerHandle,
     tls::{self, TlsMaterialError},
 };
@@ -321,9 +327,15 @@ async fn reconcile_listener_set(
     let desired_servers: HashSet<String> = names.iter().map(|n| n.as_str().to_string()).collect();
     let existing_servers = current_servers.unwrap_or_default();
 
-    let removed: Vec<String> = existing_servers.difference(&desired_servers).cloned().collect();
+    let removed: Vec<String> = existing_servers
+        .difference(&desired_servers)
+        .cloned()
+        .collect();
     let kept = existing_servers.intersection(&desired_servers).count();
-    let added: Vec<String> = desired_servers.difference(&existing_servers).cloned().collect();
+    let added: Vec<String> = desired_servers
+        .difference(&existing_servers)
+        .cloned()
+        .collect();
 
     for server_name in &removed {
         let request = ReleaseListen {
@@ -552,20 +564,17 @@ async fn build_worker_routing(
 }
 
 fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    {
-        use std::{fs::OpenOptions, os::fd::AsRawFd};
+    use std::{fs::OpenOptions, os::fd::AsRawFd};
 
-        std::fs::create_dir_all(log_dir)?;
-        let log_file = log_dir.join("worker.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)?;
-        let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
-        if ret == -1 {
-            return Err(Box::new(std::io::Error::last_os_error()));
-        }
+    std::fs::create_dir_all(log_dir)?;
+    let log_file = log_dir.join("worker.log");
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)?;
+    let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    if ret == -1 {
+        return Err(Box::new(std::io::Error::last_os_error()));
     }
     Ok(())
 }

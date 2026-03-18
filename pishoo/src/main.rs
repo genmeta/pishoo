@@ -1,16 +1,21 @@
-use std::{path::{Path, PathBuf}, sync::Arc};
+#![cfg(unix)]
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::Parser;
 use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
 use gm_quic::prelude::{QuicListeners, handy::server_parameters};
+use nix::{
+    sys::signal::Signal,
+    unistd::{Pid, Uid},
+};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs;
-#[cfg(unix)]
-use nix::sys::signal::Signal;
-#[cfg(unix)]
-use nix::unistd::{Pid, Uid};
 
 mod signal;
 
@@ -116,9 +121,10 @@ async fn main() -> Result<(), Whatever> {
     let quic_client = Arc::new(quic_client);
 
     // Create RootState
-    let state = Arc::new(tokio::sync::Mutex::new(
-        pishoo::root_state::RootState::new(listeners.clone(), quic_client),
-    ));
+    let state = Arc::new(tokio::sync::Mutex::new(pishoo::root_state::RootState::new(
+        listeners.clone(),
+        quic_client,
+    )));
 
     // Write PID file (root only)
     signal::init_pid_file(pid_file).await?;
@@ -126,8 +132,8 @@ async fn main() -> Result<(), Whatever> {
     let worker_targets = pishoo::config::resolve_worker_targets(&root_config)
         .whatever_context("Failed to resolve configured worker users")?;
 
-    let worker_bin = std::env::current_exe()
-        .whatever_context("Failed to determine current executable path")?;
+    let worker_bin =
+        std::env::current_exe().whatever_context("Failed to determine current executable path")?;
     let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
 
     for target in worker_targets {
@@ -141,7 +147,10 @@ async fn main() -> Result<(), Whatever> {
             state.clone(),
         )
         .await
-        .whatever_context(format!("Failed to spawn worker for user `{}`", target.username))?;
+        .whatever_context(format!(
+            "Failed to spawn worker for user `{}`",
+            target.username
+        ))?;
         let pid = spawned.handle.pid().expect("worker must have pid");
         let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;
@@ -234,7 +243,9 @@ async fn main() -> Result<(), Whatever> {
         }
 
         match sig {
-            signal::RootSignal::SigTerm | signal::RootSignal::SigInt | signal::RootSignal::SigQuit => {
+            signal::RootSignal::SigTerm
+            | signal::RootSignal::SigInt
+            | signal::RootSignal::SigQuit => {
                 accept_handle.abort();
                 tracing::info!(?sig, "forwarded shutdown signal to workers");
 
@@ -280,7 +291,6 @@ async fn main() -> Result<(), Whatever> {
 
 const ROOT_LOG_DIR: &str = "/var/log/pishoo";
 
-#[cfg(unix)]
 fn reopen_root_log() {
     use std::{fs::OpenOptions, os::fd::AsRawFd};
 
