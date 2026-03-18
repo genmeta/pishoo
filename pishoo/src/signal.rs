@@ -71,23 +71,23 @@ pub async fn handle_signal() -> Result<Option<RootSignal>, Whatever> {
 
     tokio::select! {
         _ = term_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGTERM signal");
+            tracing::info!("received SIGTERM signal");
             Ok(Some(RootSignal::SigTerm))
         }
         _ = int_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGINT signal");
+            tracing::info!("received SIGINT signal");
             Ok(Some(RootSignal::SigInt))
         }
         _ = quit_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGQUIT signal");
+            tracing::info!("received SIGQUIT signal");
             Ok(Some(RootSignal::SigQuit))
         }
         _ = hup_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGHUP signal");
+            tracing::info!("received SIGHUP signal");
             Ok(Some(RootSignal::SigHup))
         }
         _ = usr1_signal.recv() => {
-            tracing::info!(target: "signal", "Received SIGUSR1 signal");
+            tracing::info!("received SIGUSR1 signal");
             Ok(Some(RootSignal::SigUsr1))
         }
     }
@@ -133,7 +133,7 @@ async fn handle_existing_pid_file(
     let old_pid_str = match fs::read_to_string(pid_file_path).await {
         Ok(content) => content,
         Err(_) => {
-            tracing::warn!(target: "signal", "Cannot read PID file, removing stale PID file");
+            tracing::warn!("cannot read PID file, removing stale PID file");
             return recreate_pid_file(pid_file_path).await;
         }
     };
@@ -142,7 +142,7 @@ async fn handle_existing_pid_file(
     let old_pid = match old_pid_str.trim().parse::<i32>() {
         Ok(pid) => pid,
         Err(_) => {
-            tracing::warn!(target: "signal", "PID file contains invalid PID, removing stale PID file");
+            tracing::warn!("pid file contains invalid PID, removing stale PID file");
             return recreate_pid_file(pid_file_path).await;
         }
     };
@@ -159,7 +159,9 @@ async fn handle_existing_pid_file(
         }
         Err(_) => {
             // 进程不存在，删除旧的 PID 文件
-            tracing::warn!(target: "signal", "PID file exists but process {old_pid} is not running, removing stale PID file");
+            tracing::warn!(
+                "pid file exists but process {old_pid} is not running, removing stale PID file"
+            );
             recreate_pid_file(pid_file_path).await
         }
     }
