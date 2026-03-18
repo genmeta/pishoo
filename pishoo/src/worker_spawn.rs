@@ -3,20 +3,21 @@
 //! Spawns the `pishoo-worker` binary as a target user, establishes a remoc
 //! connection over stdin/stdout pipes, and sends [`WorkerBootstrap`] to the child.
 //!
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use nix::{
     sys::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::Pid,
+    unistd::{Pid, Uid},
 };
-use nix::unistd::Uid;
 use remoc::rtc::ServerShared;
-use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::{process::Child, sync::Mutex};
+use tracing::Instrument;
 
 use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello};
 
@@ -158,7 +159,7 @@ pub async fn spawn_worker(
     ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
-    tokio::spawn(conn);
+    tokio::spawn(conn.in_current_span());
     let (server, client) = RootTransportApiServerShared::new(
         Arc::new(crate::root_transport_api::RootTransportApiImpl::new(
             Pid::from_raw(pid as i32),
@@ -166,7 +167,7 @@ pub async fn spawn_worker(
         )),
         1,
     );
-    tokio::spawn(async move { server.serve(true).await });
+    tokio::spawn(async move { server.serve(true).await }.in_current_span());
 
     let bootstrap = WorkerBootstrap {
         uid: uid.as_raw(),
@@ -185,7 +186,9 @@ pub async fn spawn_worker(
         .recv()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?
-        .ok_or_else(|| std::io::Error::other("worker closed channel without sending startup hello"))?;
+        .ok_or_else(|| {
+            std::io::Error::other("worker closed channel without sending startup hello")
+        })?;
 
     Ok(SpawnedWorker {
         handle: launched.handle,

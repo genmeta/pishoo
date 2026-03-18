@@ -4,15 +4,20 @@
 //! detection (first-come-first-served), and manages the lifecycle of
 //! per-server listen adapters routed from the central `QuicListeners`.
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
 };
 use remoc::prelude::ServerShared;
+use snafu::Report;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::{
     per_server_listen::PerServerListenAdapter,
@@ -227,7 +232,7 @@ impl RootState {
         };
 
         // 8. Spawn the serve future to drive the RTC server.
-        tokio::spawn(serve_fut);
+        tokio::spawn(serve_fut.in_current_span());
 
         // 9. Update registry: server record.
         self.servers.insert(
@@ -277,12 +282,15 @@ impl RootState {
         // Create a cancellation token so we can stop the serve future on cleanup.
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                () = serve_fut => {}
-                () = cancel_clone.cancelled() => {}
+        tokio::spawn(
+            async move {
+                tokio::select! {
+                    () = serve_fut => {}
+                    () = cancel_clone.cancelled() => {}
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         // Track the cancellation token in the worker's process record.
         if let Some(process) = self.processes.get_mut(&caller_pid) {
@@ -317,7 +325,8 @@ impl RootState {
         }
 
         // Remove from servers map.
-        self.retire_server(server_name).expect("server must exist after ownership check");
+        self.retire_server(server_name)
+            .expect("server must exist after ownership check");
 
         // Remove from process record.
         if let Some(process) = self.processes.get_mut(&caller_pid) {
@@ -333,18 +342,16 @@ impl RootState {
         let mut exited = Vec::new();
         for (pid, process) in &mut self.processes {
             match process.worker_handle.try_wait() {
-                Ok(Some(status)) => {
-                    match status {
-                        WaitStatus::StillAlive => {}
-                        _ => {
-                            tracing::warn!(pid = %pid, ?status, "worker exited");
-                            exited.push(*pid);
-                        }
+                Ok(Some(status)) => match status {
+                    WaitStatus::StillAlive => {}
+                    _ => {
+                        tracing::warn!(pid = %pid, ?status, "worker exited");
+                        exited.push(*pid);
                     }
-                }
+                },
                 Ok(None) => {}
-                Err(e) => {
-                    tracing::error!(pid = %pid, %e, "failed to poll worker status");
+                Err(error) => {
+                    tracing::error!(pid = %pid, error = %Report::from_error(&error), "failed to poll worker status");
                     exited.push(*pid);
                 }
             }
@@ -383,8 +390,8 @@ impl RootState {
                 continue;
             };
             let child_pid = Pid::from_raw(raw_pid as i32);
-            if let Err(e) = nix::sys::signal::kill(child_pid, signal) {
-                tracing::warn!(pid = %pid, %e, ?signal, "failed to forward unix signal to worker");
+            if let Err(error) = nix::sys::signal::kill(child_pid, signal) {
+                tracing::warn!(pid = %pid, error = %Report::from_error(&error), ?signal, "failed to forward unix signal to worker");
             }
         }
     }
