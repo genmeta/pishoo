@@ -66,12 +66,12 @@ fn test_root_state() -> RootState {
 }
 
 fn spawn_test_worker() -> WorkerHandle {
-    WorkerHandle {
-        child: tokio::process::Command::new("/bin/sleep")
+    WorkerHandle::new(
+        tokio::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .expect("spawn worker child"),
-    }
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

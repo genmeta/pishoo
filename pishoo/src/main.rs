@@ -142,11 +142,7 @@ async fn main() -> Result<(), Whatever> {
         )
         .await
         .whatever_context(format!("Failed to spawn worker for user `{}`", target.username))?;
-        let pid = spawned
-            .handle
-            .child
-            .id()
-            .expect("worker must have pid");
+        let pid = spawned.handle.pid().expect("worker must have pid");
         let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;
         if hello.pid != pid

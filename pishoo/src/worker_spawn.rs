@@ -18,6 +18,7 @@ use std::sync::Arc;
 use nix::unistd::{Gid, Pid, Uid};
 use remoc::rtc::ServerShared;
 use tokio::process::Child;
+use std::process::ExitStatus;
 use tokio::sync::Mutex;
 
 use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello};
@@ -26,7 +27,7 @@ use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello
 ///
 /// Holds the child process. Killing the child on drop ensures cleanup.
 pub struct WorkerHandle {
-    pub child: Child,
+    child: Child,
 }
 
 pub struct SpawnedWorker {
@@ -37,7 +38,25 @@ pub struct SpawnedWorker {
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
         // Best-effort kill — child may have already exited.
-        let _ = self.child.start_kill();
+        let _ = self.start_kill();
+    }
+}
+
+impl WorkerHandle {
+    pub fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
+        self.child.try_wait()
+    }
+
+    pub fn start_kill(&mut self) -> Result<(), std::io::Error> {
+        self.child.start_kill()
     }
 }
 
@@ -150,7 +169,7 @@ pub async fn spawn_worker(
         .ok_or_else(|| std::io::Error::other("worker closed channel without sending startup hello"))?;
 
     Ok(SpawnedWorker {
-        handle: WorkerHandle { child },
+        handle: WorkerHandle::new(child),
         hello,
     })
 }

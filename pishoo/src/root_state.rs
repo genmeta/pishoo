@@ -332,7 +332,7 @@ impl RootState {
     pub fn collect_exited_workers(&mut self) -> Vec<Pid> {
         let mut exited = Vec::new();
         for (pid, process) in &mut self.processes {
-            match process.worker_handle.child.try_wait() {
+            match process.worker_handle.try_wait() {
                 Ok(Some(status)) => {
                     tracing::warn!(pid = %pid, ?status, "worker exited");
                     exited.push(*pid);
@@ -374,7 +374,7 @@ impl RootState {
 
     pub fn forward_unix_signal(&mut self, signal: Signal) {
         for (pid, record) in &mut self.processes {
-            let Some(raw_pid) = record.worker_handle.child.id() else {
+            let Some(raw_pid) = record.worker_handle.pid() else {
                 continue;
             };
             let child_pid = Pid::from_raw(raw_pid as i32);
@@ -441,11 +441,11 @@ mod tests {
             WorkerProcessRecord {
                 uid: Uid::from_raw(1000),
                 owned_servers: HashSet::new(),
-                worker_handle: super::WorkerHandle {
-                    child: tokio::process::Command::new("/bin/true")
+                worker_handle: super::WorkerHandle::new(
+                    tokio::process::Command::new("/bin/true")
                         .spawn()
                         .expect("spawn child"),
-                },
+                ),
                 connector_shutdown_tokens: Vec::new(),
             },
         );
