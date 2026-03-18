@@ -5,10 +5,14 @@ use tokio::process::{ChildStdin, ChildStdout};
 
 use crate::worker_spawn::WorkerHandle;
 
-pub struct LaunchedWorker {
-    pub handle: WorkerHandle,
+pub struct WorkerTransport {
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
+}
+
+pub struct LaunchedWorker {
+    pub handle: WorkerHandle,
+    pub transport: WorkerTransport,
 }
 
 pub fn launch_worker(
@@ -61,8 +65,7 @@ pub fn launch_worker(
 
     Ok(LaunchedWorker {
         handle: WorkerHandle::new(child),
-        stdin,
-        stdout,
+        transport: WorkerTransport { stdin, stdout },
     })
 }
 

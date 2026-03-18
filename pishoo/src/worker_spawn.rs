@@ -84,26 +84,23 @@ pub async fn spawn_worker(
 ) -> Result<SpawnedWorker, std::io::Error> {
     let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username)?;
     let pid = launched.handle.pid().expect("child has pid");
-    let child_stdin = launched.stdin;
-    let child_stdout = launched.stdout;
+    let transport = launched.transport;
 
-    // Establish remoc connection over the child's stdio.
-    // reader = child_stdout (parent reads from child)
-    // writer = child_stdin  (parent writes to child)
-    //
-    // Base channel types (parent perspective):
-    //   Sender<WorkerBootstrap>  — parent sends bootstrap to child
     let (conn, mut base_tx, mut base_rx): (
         _,
         remoc::rch::base::Sender<WorkerBootstrap>,
         remoc::rch::base::Receiver<WorkerHello>,
-    ) = remoc::Connect::io(remoc::Cfg::default(), child_stdout, child_stdin)
+    ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     tokio::spawn(conn);
-    // Create per-worker RPC API server+client pair.
-    let api_impl = crate::root_transport_api::RootTransportApiImpl::new(Pid::from_raw(pid as i32), state.clone());
-    let (server, client) = RootTransportApiServerShared::new(Arc::new(api_impl), 1);
+    let (server, client) = RootTransportApiServerShared::new(
+        Arc::new(crate::root_transport_api::RootTransportApiImpl::new(
+            Pid::from_raw(pid as i32),
+            state.clone(),
+        )),
+        1,
+    );
     tokio::spawn(async move { server.serve(true).await });
 
     let bootstrap = WorkerBootstrap {
