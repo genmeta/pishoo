@@ -134,23 +134,30 @@ path = "src/bin/pishoo_worker.rs"
 gateway = { workspace = true }
 genmeta-home = { workspace = true }
 
-# --- IPC / RPC ---
-remoc = { workspace = true }
+# --- QUIC & HTTP/3 ---
+gm-quic = { workspace = true }
 h3x = { workspace = true, features = ["remoc"] }
+rustls = { workspace = true }
+rustls-pemfile = "2"
+
+# --- Serialization & IPC ---
+remoc = { workspace = true }
 serde = { workspace = true }
+
+# --- Error Handling ---
+snafu = { workspace = true }
 thiserror = { workspace = true }
 
-# --- Core & Error Handling ---
-snafu = { workspace = true }
-
 # --- Async Runtime ---
-tokio = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# --- HTTP ---
 http = { workspace = true }
 
 # --- CLI Parsing ---
 clap = { workspace = true }
-
 
 # --- Firewall ---
 firewall-db = { workspace = true }
@@ -158,23 +165,16 @@ firewall-db = { workspace = true }
 # --- Database & ORM ---
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
-rustls-pemfile = "2"
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
 
-# --- Terminal Detection ---
+# --- System / OS ---
 atty = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-# --- Signal Handling ---
-nix = { workspace = true, features = ["signal", "process", "user"] }
 libc = { workspace = true }
-gm-quic = { workspace = true }
-tokio-util = { workspace = true }
-rustls = { workspace = true }
+nix = { workspace = true, features = ["signal", "process", "user"] }
 
 [features]
 default = ["sqlx-sqlite"]
