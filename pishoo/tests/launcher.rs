@@ -1,5 +1,6 @@
 use std::{path::Path, time::{Duration, SystemTime, UNIX_EPOCH}};
 
+use nix::sys::wait::WaitStatus;
 use nix::unistd::{Uid, User};
 use pishoo::launcher::launch_worker;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,7 +60,7 @@ async fn unix_launcher_sets_explicit_exec_environment() {
     let mut output = Vec::new();
     stdout.read_to_end(&mut output).await.expect("read env output");
     let status = handle.try_wait().expect("poll env worker").expect("env worker exited");
-    assert!(status.success(), "env worker must exit successfully");
+    assert!(matches!(status, WaitStatus::Exited(_, 0)), "env worker must exit successfully");
 
     let output = String::from_utf8(output).expect("utf8 env output");
     assert!(output.contains(&format!("HOME={}", home.display())));

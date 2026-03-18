@@ -564,7 +564,7 @@ async fn build_worker_routing(
 }
 
 fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::{fs::OpenOptions, os::fd::AsRawFd};
+    use std::fs::OpenOptions;
 
     std::fs::create_dir_all(log_dir)?;
     let log_file = log_dir.join("worker.log");
@@ -572,9 +572,8 @@ fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .create(true)
         .append(true)
         .open(log_file)?;
-    let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
-    if ret == -1 {
-        return Err(Box::new(std::io::Error::last_os_error()));
+    if let Err(e) = nix::unistd::dup2_stderr(&file) {
+        return Err(Box::new(std::io::Error::from(e)));
     }
     Ok(())
 }

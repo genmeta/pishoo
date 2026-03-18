@@ -292,7 +292,7 @@ async fn main() -> Result<(), Whatever> {
 const ROOT_LOG_DIR: &str = "/var/log/pishoo";
 
 fn reopen_root_log() {
-    use std::{fs::OpenOptions, os::fd::AsRawFd};
+    use std::fs::OpenOptions;
 
     let log_dir = Path::new(ROOT_LOG_DIR);
     if let Err(e) = std::fs::create_dir_all(log_dir) {
@@ -307,10 +307,9 @@ fn reopen_root_log() {
             return;
         }
     };
-    let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
-    if ret == -1 {
+    if let Err(e) = nix::unistd::dup2_stderr(&file) {
         tracing::warn!(
-            error = %std::io::Error::last_os_error(),
+            error = %e,
             "failed to dup2 stderr for root log reopen"
         );
     }

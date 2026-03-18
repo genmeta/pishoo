@@ -7,7 +7,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use nix::{
-    sys::signal::Signal,
+    sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
 };
 use remoc::prelude::ServerShared;
@@ -334,8 +334,13 @@ impl RootState {
         for (pid, process) in &mut self.processes {
             match process.worker_handle.try_wait() {
                 Ok(Some(status)) => {
-                    tracing::warn!(pid = %pid, ?status, "worker exited");
-                    exited.push(*pid);
+                    match status {
+                        WaitStatus::StillAlive => {}
+                        _ => {
+                            tracing::warn!(pid = %pid, ?status, "worker exited");
+                            exited.push(*pid);
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {

@@ -1,13 +1,9 @@
-use std::{
-    ffi::CString,
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::ffi::OsStrExt,
-    },
-    path::Path,
-};
+use std::{ffi::CString, os::fd::OwnedFd, path::Path};
 
-use nix::unistd::Uid;
+use nix::unistd::{
+    execve, fork, getegid, geteuid, getgid, getgrouplist, getuid, pipe, setgid, setgroups, setuid,
+    sysconf, ForkResult, Gid, SysconfVar, Uid,
+};
 use tokio::fs::File;
 
 use crate::worker_spawn::WorkerHandle;
@@ -30,128 +26,111 @@ pub fn launch_worker(
     home: &Path,
 ) -> Result<LaunchedWorker, std::io::Error> {
     let supplementary_groups = resolve_supplementary_groups(username, gid)?;
-    let worker_bin = CString::new(worker_bin.as_os_str().as_bytes()).map_err(|_| {
+    let worker_bin = CString::new(worker_bin.as_os_str().as_encoded_bytes()).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "worker path contains NUL byte",
         )
     })?;
     let env = build_exec_env(username, home)?;
-    let argv = [worker_bin.as_ptr(), std::ptr::null()];
-    let envp = build_envp(&env);
+    let argv = vec![worker_bin.clone()];
     let max_fd = max_fd();
 
     let (child_stdin_read, parent_stdin_write) = pipe_pair()?;
     let (parent_stdout_read, child_stdout_write) = pipe_pair()?;
 
-    let pid = unsafe { libc::fork() };
-    if pid == -1 {
-        return Err(std::io::Error::last_os_error());
+    // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
+    match unsafe { fork() }.map_err(std::io::Error::from)? {
+        ForkResult::Child => {
+            child_exec(
+                &worker_bin,
+                &argv,
+                &env,
+                uid,
+                gid,
+                &supplementary_groups,
+                &child_stdin_read,
+                &child_stdout_write,
+                max_fd,
+            );
+        }
+        ForkResult::Parent { child } => {
+            drop(child_stdin_read);
+            drop(child_stdout_write);
+            let stdin = File::from_std(std::fs::File::from(parent_stdin_write));
+            let stdout = File::from_std(std::fs::File::from(parent_stdout_read));
+
+            Ok(LaunchedWorker {
+                handle: WorkerHandle::from_unix_pid(child.as_raw() as u32),
+                transport: WorkerTransport { stdin, stdout },
+            })
+        }
     }
-
-    if pid == 0 {
-        child_exec(
-            &worker_bin,
-            &argv,
-            &envp,
-            uid,
-            gid,
-            &supplementary_groups,
-            child_stdin_read.as_raw_fd(),
-            child_stdout_write.as_raw_fd(),
-            max_fd,
-        );
-    }
-
-    drop(child_stdin_read);
-    drop(child_stdout_write);
-    let stdin = File::from_std(std::fs::File::from(parent_stdin_write));
-    let stdout = File::from_std(std::fs::File::from(parent_stdout_read));
-
-    Ok(LaunchedWorker {
-        handle: WorkerHandle::from_unix_pid(pid as u32),
-        transport: WorkerTransport { stdin, stdout },
-    })
 }
 
 fn child_exec(
     worker_bin: &CString,
-    argv: &[*const libc::c_char; 2],
-    envp: &[*const libc::c_char],
+    argv: &[CString],
+    envp: &[CString],
     uid: Uid,
     gid: u32,
-    supplementary_groups: &[libc::gid_t],
-    stdin_fd: libc::c_int,
-    stdout_fd: libc::c_int,
-    max_fd: libc::c_int,
+    supplementary_groups: &[Gid],
+    stdin_fd: &OwnedFd,
+    stdout_fd: &OwnedFd,
+    max_fd: i32,
 ) -> ! {
-    if unsafe { libc::dup2(stdin_fd, libc::STDIN_FILENO) } == -1 {
-        unsafe { libc::_exit(126) };
+    if nix::unistd::dup2_stdin(stdin_fd).is_err() {
+        child_fail(126);
     }
-    if unsafe { libc::dup2(stdout_fd, libc::STDOUT_FILENO) } == -1 {
-        unsafe { libc::_exit(126) };
+    if nix::unistd::dup2_stdout(stdout_fd).is_err() {
+        child_fail(126);
     }
 
     let mut fd = 3;
     while fd < max_fd {
-        unsafe { libc::close(fd) };
+        let _ = nix::unistd::close(fd);
         fd += 1;
     }
 
-    let current_uid = unsafe { libc::getuid() };
-    let current_euid = unsafe { libc::geteuid() };
-    let current_gid = unsafe { libc::getgid() };
-    let current_egid = unsafe { libc::getegid() };
+    let current_uid = getuid();
+    let current_euid = geteuid();
+    let current_gid = getgid();
+    let current_egid = getegid();
+    let gid = Gid::from_raw(gid);
 
-    if current_euid == 0 {
-        if unsafe { libc::setgroups(supplementary_groups.len(), supplementary_groups.as_ptr()) }
-            != 0
-        {
-            unsafe { libc::_exit(126) };
+    if current_euid.is_root() {
+        if setgroups(supplementary_groups).is_err() {
+            child_fail(126);
         }
-        if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
-            unsafe { libc::_exit(126) };
+        if setgid(gid).is_err() {
+            child_fail(126);
         }
-        if unsafe { libc::setuid(uid.as_raw()) } != 0 {
-            unsafe { libc::_exit(126) };
+        if setuid(uid).is_err() {
+            child_fail(126);
         }
-        if unsafe { libc::getuid() } != uid.as_raw()
-            || unsafe { libc::geteuid() } != uid.as_raw()
-            || unsafe { libc::getgid() } != gid as libc::gid_t
-            || unsafe { libc::getegid() } != gid as libc::gid_t
-        {
-            unsafe { libc::_exit(126) };
+        if getuid() != uid || geteuid() != uid || getgid() != gid || getegid() != gid {
+            child_fail(126);
         }
-    } else if current_uid != uid.as_raw()
-        || current_euid != uid.as_raw()
-        || current_gid != gid as libc::gid_t
-        || current_egid != gid as libc::gid_t
+    } else if current_uid != uid || current_euid != uid || current_gid != gid || current_egid != gid
     {
-        unsafe { libc::_exit(126) };
+        child_fail(126);
     }
 
-    unsafe { libc::execve(worker_bin.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    unsafe { libc::_exit(127) };
+    let _ = execve(worker_bin, argv, envp);
+    child_fail(127);
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-    let write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-    Ok((read_end, write_end))
+    pipe().map_err(std::io::Error::from)
 }
 
 fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, std::io::Error> {
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
     [
-        [b"HOME=".as_slice(), home.as_os_str().as_bytes()].concat(),
+        [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
         [b"USER=".as_slice(), username.as_bytes()].concat(),
         [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
-        [b"PATH=".as_slice(), path.as_os_str().as_bytes()].concat(),
+        [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
     ]
     .into_iter()
     .map(|entry| {
@@ -165,57 +144,23 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, std::io::
     .collect()
 }
 
-fn build_envp(env: &[CString]) -> Vec<*const libc::c_char> {
-    let mut envp = env.iter().map(|entry| entry.as_ptr()).collect::<Vec<_>>();
-    envp.push(std::ptr::null());
-    envp
+fn child_fail(code: i32) -> ! {
+    std::process::exit(code);
 }
 
-fn max_fd() -> libc::c_int {
-    let open_max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    if open_max > 0 {
-        open_max as libc::c_int
-    } else {
-        1024
+fn max_fd() -> i32 {
+    match sysconf(SysconfVar::OPEN_MAX) {
+        Ok(Some(open_max)) if open_max > 0 => open_max as i32,
+        _ => 1024,
     }
 }
 
-fn resolve_supplementary_groups(
-    username: &str,
-    gid: u32,
-) -> Result<Vec<libc::gid_t>, std::io::Error> {
+fn resolve_supplementary_groups(username: &str, gid: u32) -> Result<Vec<Gid>, std::io::Error> {
     let username = CString::new(username).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "username contains NUL byte",
         )
     })?;
-    let mut ngroups: libc::c_int = 0;
-    let _ = unsafe {
-        libc::getgrouplist(
-            username.as_ptr(),
-            gid as libc::gid_t,
-            std::ptr::null_mut(),
-            &mut ngroups,
-        )
-    };
-    if ngroups <= 0 {
-        return Ok(vec![gid as libc::gid_t]);
-    }
-    let mut groups = vec![0 as libc::gid_t; ngroups as usize];
-    let ret = unsafe {
-        libc::getgrouplist(
-            username.as_ptr(),
-            gid as libc::gid_t,
-            groups.as_mut_ptr(),
-            &mut ngroups,
-        )
-    };
-    if ret == -1 {
-        return Err(std::io::Error::other(
-            "failed to resolve supplementary groups",
-        ));
-    }
-    groups.truncate(ngroups as usize);
-    Ok(groups)
+    getgrouplist(&username, Gid::from_raw(gid)).map_err(std::io::Error::from)
 }

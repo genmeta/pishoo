@@ -5,9 +5,14 @@
 //!
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
 
-use nix::{sys::signal::Signal, unistd::Pid};
+use nix::{
+    sys::{
+        signal::Signal,
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
+    unistd::Pid,
+};
 use nix::unistd::Uid;
 use remoc::rtc::ServerShared;
 use tokio::process::Child;
@@ -29,7 +34,7 @@ enum WorkerHandleInner {
 
 struct UnixWorkerHandle {
     pid: u32,
-    exit_status: Option<ExitStatus>,
+    exit_status: Option<WaitStatus>,
 }
 
 pub struct SpawnedWorker {
@@ -67,9 +72,17 @@ impl WorkerHandle {
         }
     }
 
-    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
+    pub fn try_wait(&mut self) -> Result<Option<WaitStatus>, std::io::Error> {
         match &mut self.inner {
-            WorkerHandleInner::Tokio(child) => child.try_wait(),
+            WorkerHandleInner::Tokio(child) => child.try_wait().map(|status| {
+                status.map(|s| {
+                    let pid = child
+                        .id()
+                        .map(|id| Pid::from_raw(id as i32))
+                        .unwrap_or_else(|| Pid::from_raw(0));
+                    WaitStatus::Exited(pid, s.code().unwrap_or_default())
+                })
+            }),
             WorkerHandleInner::Unix(child) => child.try_wait(),
         }
     }
@@ -83,21 +96,17 @@ impl WorkerHandle {
 }
 
 impl UnixWorkerHandle {
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
+    fn try_wait(&mut self) -> Result<Option<WaitStatus>, std::io::Error> {
         if let Some(status) = self.exit_status {
             return Ok(Some(status));
         }
 
-        let mut raw_status = 0;
-        let waited = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut raw_status, libc::WNOHANG) };
-        if waited == 0 {
-            return Ok(None);
-        }
-        if waited == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
+        let status = match waitpid(Pid::from_raw(self.pid as i32), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => return Ok(None),
+            Ok(status) => status,
+            Err(err) => return Err(std::io::Error::from(err)),
+        };
 
-        let status = ExitStatus::from_raw(raw_status);
         self.exit_status = Some(status);
         Ok(Some(status))
     }
