@@ -2,12 +2,15 @@ use http::Request;
 use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use snafu::Report;
+use snafu::{FromString, Report};
 use tokio::{io, net::TcpStream};
 use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
-use crate::forward::{build_empty_response, build_error_response, tunnel_upgrade};
+use crate::{
+    error::Whatever,
+    forward::{build_empty_response, build_error_response, tunnel_upgrade},
+};
 
 /// 普通代理 HTTP 请求
 pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
@@ -16,8 +19,9 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let host = match original_uri.host() {
         Some(host) => host,
         None => {
-            error!(target: "forward_proxy", "Missing host in uri");
-            return Ok(build_error_response("Missing host in uri".to_string()));
+            let error = Whatever::without_source("missing host in uri".to_string());
+            error!(error = %Report::from_error(&error), "missing host in uri");
+            return Ok(build_error_response(error.to_string()));
         }
     };
 
@@ -26,7 +30,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let stream = match TcpStream::connect((host, port)).await {
         Ok(stream) => stream,
         Err(error) => {
-            error!(target: "forward_proxy", "Connect to {host}:{port} error {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), %host, port, "connect to upstream failed");
             return Ok(build_error_response(error.to_string()));
         }
     };
@@ -41,7 +45,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         async move {
             // 启用连接升级支持,用于处理 WebSocket
             if let Err(error) = conn.with_upgrades().await {
-                error!(target: "forward_proxy", "Connection failed: {}", Report::from_error(error));
+                error!(error = %Report::from_error(&error), "connection failed");
             }
         }
         .in_current_span(),
@@ -63,7 +67,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 
     *req.uri_mut() = relative_uri;
 
-    debug!(target: "forward_proxy", "Forwarding request to {}:{}{}", host, port, path_and_query);
+    debug!(%host, port, path_and_query, "forwarding request");
 
     let request_upgrade = hyper::upgrade::on(&mut req);
     let mut resp = sender.send_request(req).await?;
@@ -76,8 +80,9 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 
 pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) else {
-        error!(target: "forward_proxy", "Missing host in uri");
-        let mut resp = build_error_response("CONNECT must be to a valid host".to_string());
+        let error = Whatever::without_source("CONNECT must target a valid host".to_string());
+        error!(error = %Report::from_error(&error), "missing host in CONNECT uri");
+        let mut resp = build_error_response(error.to_string());
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
         return Ok(resp);
     };
@@ -87,11 +92,11 @@ pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse,
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     if let Err(error) = tunnel(upgraded, addr).await {
-                        error!(target: "forward_proxy", "CONNECT proxy aborted: {}", Report::from_error(error));
+                        error!(error = %Report::from_error(&error), "CONNECT proxy aborted");
                     }
                 }
                 Err(error) => {
-                    error!(target: "forward_proxy", "Connection upgrade failed: {}", Report::from_error(error))
+                    error!(error = %Report::from_error(&error), "connection upgrade failed")
                 }
             }
         }
@@ -113,10 +118,7 @@ async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
         tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
 
     // Print message when done
-    info!(
-        target: "forward_proxy",
-        "Client wrote {from_client} bytes and received {from_server} bytes",
-    );
+    info!(from_client, from_server, "CONNECT tunnel completed");
 
     Ok(())
 }

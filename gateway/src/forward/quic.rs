@@ -17,9 +17,9 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     // 验证主机合法性
     let host = match validate_host(&mut req) {
         Ok(host) => host,
-        Err(reason) => {
-            error!(target: "forward_proxy", "Invalid host: {reason}");
-            return Ok(build_error_response(reason));
+        Err(error) => {
+            error!(error = %Report::from_error(&error), "invalid host");
+            return Ok(build_error_response(error.to_string()));
         }
     };
     let client = super::h3_client::global().await;
@@ -27,9 +27,8 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let h3_conn = match connect(&client, &host).await {
         Ok(conn) => conn,
         Err(error) => {
-            let report = Report::from_error(error).to_string();
-            error!(target: "forward_proxy", "Failed to create QUIC connection: {report}");
-            return Ok(build_error_response(report));
+            error!(error = %Report::from_error(&error), "failed to create QUIC connection");
+            return Ok(build_error_response(error.to_string()));
         }
     };
 
@@ -40,26 +39,23 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         Ok(mut response) => {
             let response_upgrade = hyper::upgrade::on(&mut response);
             tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
-            info!(target: "forward_proxy", "Request proxied successfully: {:?}", response);
+            info!(?response, "request proxied successfully");
             Ok(response)
         }
         Err(error) => {
-            let reason = Report::from_error(io::Error::other(error)).to_string();
-            error!(target: "forward_proxy", "Forward request failed: {reason}");
-            Ok(build_error_response(reason))
+            error!(error = %error, "forward request failed");
+            Ok(build_error_response(error.to_string()))
         }
     }
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect_tunnel(
-    req: Request<hyper::body::Incoming>,
-) -> Result<BoxResponse, hyper::Error> {
+pub async fn connect_tunnel(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     tokio::spawn(async move {
         // 升级连接并处理后续请求
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                info!(target: "forward_proxy", "Establishing tunnel to the request uri");
+                info!("establishing tunnel to request uri");
                 let service = service_fn(proxy);
                 if let Err(error) = http1::Builder::new()
                     .preserve_header_case(true)
@@ -67,12 +63,13 @@ pub async fn connect_tunnel(
                     .serve_connection(upgraded, service)
                     .await
                 {
-                    error!(target: "forward_proxy", "Connection handling failed: {}", Report::from_error(error));
+                    error!(error = %Report::from_error(&error), "connection handling failed");
                 }
             }
-            Err(error) => error!("Connection upgrade failed: {}", Report::from_error(error)),
+            Err(error) => error!(error = %Report::from_error(&error), "connection upgrade failed"),
         }
-    });
+    }
+    .in_current_span());
 
     Ok(build_empty_response())
 }
@@ -83,10 +80,10 @@ async fn send(
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, Box<dyn std::error::Error + Send + Sync>> {
     // 使用 h3x 的 execute_hyper_request 一步完成：打开流、发送请求、接收响应
-    let response = h3_conn.execute_hyper_request(req).await.map_err(|e| {
-        error!(target: "forward_proxy", "execute_hyper_request failed: {e}");
-        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-    })?;
+    let response = h3_conn
+        .execute_hyper_request(req)
+        .await
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
 
     // 将响应体转换为 BoxBody
     let (mut parts, body) = response.into_parts();
@@ -102,10 +99,10 @@ async fn connect(
 ) -> Result<Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>, Whatever> {
     let authority: Authority = host
         .parse()
-        .whatever_context(format!("Invalid host: {host}"))?;
+        .whatever_context(format!("invalid host: {host}"))?;
     let conn = client
         .connect(authority)
         .await
-        .whatever_context(format!("Connect to {host} failed"))?;
+        .whatever_context(format!("connect to {host} failed"))?;
     Ok(conn)
 }

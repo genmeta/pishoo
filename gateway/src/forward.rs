@@ -5,7 +5,7 @@ use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use snafu::{Report, ResultExt};
+use snafu::{FromString, Report, ResultExt};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
@@ -39,7 +39,7 @@ fn setup_client_config(node: &Node) -> Result<()> {
         if let Value::Path(path) = v {
             Some(path)
         } else {
-            warn!(target: "forward", "ssl_certificate must be a path, ignoring");
+            warn!("ssl_certificate must be a path, ignoring");
             None
         }
     });
@@ -48,7 +48,7 @@ fn setup_client_config(node: &Node) -> Result<()> {
         if let Value::Path(path) = v {
             Some(path)
         } else {
-            warn!(target: "forward", "ssl_certificate_key must be a path, ignoring");
+            warn!("ssl_certificate_key must be a path, ignoring");
             None
         }
     });
@@ -57,7 +57,7 @@ fn setup_client_config(node: &Node) -> Result<()> {
         if let Value::String(name) = v {
             Some(name.clone())
         } else {
-            warn!(target: "forward", "client_name must be a string, ignoring");
+            warn!("client_name must be a string, ignoring");
             None
         }
     });
@@ -67,22 +67,22 @@ fn setup_client_config(node: &Node) -> Result<()> {
     {
         // 读取证书和密钥
         let cert_chain = std::fs::read(cert_path).whatever_context::<_, Whatever>(format!(
-            "Failed to read client certificate from {}",
+            "failed to read client certificate from {}",
             cert_path.display()
         ))?;
         let private_key = std::fs::read(key_path).whatever_context::<_, Whatever>(format!(
-            "Failed to read client private key from {}",
+            "failed to read client private key from {}",
             key_path.display()
         ))?;
 
         // 设置客户端配置
-        if let Err(e) = h3_client::set_client_config(cert_chain, private_key, client_name.clone()) {
-            info!(target: "forward", "Client config already set: {e}, will reinitialize connection pool");
+        if let Err(error) = h3_client::set_client_config(cert_chain, private_key, client_name.clone()) {
+            info!(error = %error, "client config already set, reinitializing connection pool");
         } else {
-            info!(target: "forward", "Client config set with name: {client_name}");
+            info!(%client_name, "client config set");
         }
     } else {
-        info!(target: "forward", "Client authentication not configured, using connection pool without client auth");
+        info!("client authentication not configured, using connection pool without client auth");
     }
 
     Ok(())
@@ -101,7 +101,7 @@ pub async fn serve(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
-    tracing::info!(target: "forward", "Starting forward proxy server");
+    tracing::info!("starting forward proxy server");
     let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
         unreachable!()
     };
@@ -112,9 +112,9 @@ pub async fn serve(
         io::Result::Ok((listener, local_addr))
     }
     .await
-    .whatever_context::<_, Whatever>(format!("Failed to listen to TCP address: {}", addr))?;
+    .whatever_context::<_, Whatever>(format!("failed to listen to TCP address: {}", addr))?;
 
-    info!(target: "forward_proxy", "Listening on: http://{local_addr}");
+    info!(%local_addr, "listening on http endpoint");
 
     let resolvers =
         build_query_resolvers(&node, "client_name").with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
@@ -133,14 +133,14 @@ pub async fn serve(
         // 为每个连接创建服务处理器
         let service = service_fn(move |mut req| {
             let acl = acl.clone();
-            let span = info_span!(target: "forward_proxy", "forward_proxy", uri=%req.uri(), method=%req.method());
+            let span = info_span!("forward_proxy", uri=%req.uri(), method=%req.method());
             async move {
-                debug!(target: "forward_proxy", request=?req);
+                debug!(request=?req);
                 let host = match validate_host(&mut req) {
                     Ok(host) => host,
-                    Err(reason) => {
-                        error!(target: "forward_proxy", "Invalid host: {reason}");
-                        return Ok(build_error_response(reason));
+                    Err(error) => {
+                        error!(error = %Report::from_error(&error), "invalid host");
+                        return Ok(build_error_response(error.to_string()));
                     }
                 };
 
@@ -148,19 +148,19 @@ pub async fn serve(
 
                 match acl.check(&host) {
                     true if is_connect => {
-                        debug!(target: "forward_proxy", "QUIC proxying CONNECT request to {host}",);
+                        debug!(%host, "quic proxying CONNECT request");
                         forward::quic::connect_tunnel(req).await
                     }
                     true => {
-                        debug!(target: "forward_proxy", "QUIC proxying request to {host}");
+                        debug!(%host, "quic proxying request");
                         forward::quic::proxy(req).await
                     }
                     false if is_connect => {
-                        debug!(target: "forward_proxy", "Normal proxying CONNECT request to {host}");
+                        debug!(%host, "normal proxying CONNECT request");
                         forward::normal::connect(req).await
                     }
                     false => {
-                        debug!(target: "forward_proxy", "Normal proxying request to {host}");
+                        debug!(%host, "normal proxying request");
                         forward::normal::proxy(req).await
                     }
                 }
@@ -177,19 +177,21 @@ pub async fn serve(
                 .with_upgrades()
                 .await;
             match &result {
-                Ok(()) => info!(target: "forward_proxy", "HTTP/1.1 serve_connection completed"),
+                Ok(()) => info!("http/1.1 serve_connection completed"),
                 Err(error) => {
-                    error!(target: "forward_proxy", "HTTP/1.1 serve_connection failed: {}, is_canceled={}, is_closed={}, is_parse={}, is_user={}, is_incomplete_message={}",
-                        Report::from_error(error),
-                        error.is_canceled(),
-                        error.is_closed(),
-                        error.is_parse(),
-                        error.is_user(),
-                        error.is_incomplete_message(),
+                    error!(
+                        error = %Report::from_error(error),
+                        canceled = error.is_canceled(),
+                        closed = error.is_closed(),
+                        parse = error.is_parse(),
+                        user = error.is_user(),
+                        incomplete_message = error.is_incomplete_message(),
+                        "http/1.1 serve_connection failed"
                     );
                 }
             }
-        });
+        }
+        .in_current_span());
     };
 
     let task = async move {
@@ -197,11 +199,11 @@ pub async fn serve(
             match listener.accept().await {
                 Ok((stream, from)) => {
                     accept_tcp_stream(stream)
-                        .instrument(info_span!(target: "forward_proxy", "accept", %from))
+                        .instrument(info_span!("accept", %from))
                         .await
                 }
-                Err(e) => {
-                    error!(target: "forward_proxy", "listener.accept() error: {e}");
+                Err(error) => {
+                    error!(error = %Report::from_error(&error), "listener accept failed");
                 }
             }
         }
@@ -220,22 +222,23 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             tokio::spawn(async move {
                 // QuicInterfaces::global().clear();
                 if let Err(error) = forward_proxy.await {
-                    error!(target: "forward_proxy", "Forward proxy failed: {}", Report::from_error(&error));
+                    error!(error = %Report::from_error(&error), "forward proxy failed");
                 }
-            });
+            }
+            .in_current_span());
             Ok(())
         }
         Err(launch_error) => {
             // 重新初始化 H3Client，清除旧连接状态
             h3_client::reinitialize(None).await;
-            error!(target: "forward_proxy", "Failed to launch forward proxy, restart all interfaces: {}.", Report::from_error(&launch_error));
+            error!(error = %Report::from_error(&launch_error), "failed to launch forward proxy, restarting all interfaces");
             Err(launch_error)
         }
     }
 }
 
 /// 验证请求中的 Host 头合法性
-fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, String> {
+fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Whatever> {
     let mut host = req.uri().host().map(String::from);
     if host.is_none() {
         host = req
@@ -247,9 +250,7 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Str
     let mut host = match host {
         Some(h) => h,
         None => {
-            let reason = format!("Invalid Host header: {req:?}");
-            warn!(target: "forward_proxy", "{}", reason);
-            return Err(reason);
+            return Err(Whatever::without_source(format!("invalid Host header: {req:?}")));
         }
     };
 
@@ -282,7 +283,6 @@ fn build_empty_response() -> BoxResponse {
 
 /// 创建错误响应
 fn build_error_response(message: String) -> BoxResponse {
-    error!("[Forward] Error response: {}", message);
     let body = Full::new(Bytes::from(message))
         .map_err(|_| unreachable!())
         .boxed_unsync();
@@ -297,36 +297,37 @@ async fn tunnel_upgrade(request_upgrade: OnUpgrade, response_upgrade: OnUpgrade)
     let client_io = match request_upgrade.await {
         Ok(client_io) => client_io,
         Err(error) if error.is_user() => {
-            debug!(target: "forward_proxy", "Client request upgrade failed: {}", Report::from_error(&error));
+            debug!(error = %Report::from_error(&error), "client request upgrade failed");
             return;
         }
         Err(error) => {
-            error!(target: "forward_proxy", "Client request upgrade failed: {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), "client request upgrade failed");
             return;
         }
     };
     let server_io = match response_upgrade.await {
         Ok(server_io) => server_io,
         Err(error) if error.is_user() => {
-            debug!(target: "forward_proxy", "Server response upgrade failed: {}", Report::from_error(&error));
+            debug!(error = %Report::from_error(&error), "server response upgrade failed");
             return;
         }
         Err(error) => {
-            error!(target: "forward_proxy", "Server response upgrade failed: {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), "server response upgrade failed");
             return;
         }
     };
 
-    tracing::debug!(target: "forward_proxy", "Upgraded proxy started");
+    tracing::debug!("upgraded proxy started");
     match io::copy_bidirectional(&mut TokioIo::new(client_io), &mut TokioIo::new(server_io)).await {
         Ok((from_client, from_server)) => {
             info!(
-                target: "forward_proxy",
-                "Upgraded proxy done: client wrote {from_client} bytes and received {from_server} bytes",
+                from_client,
+                from_server,
+                "upgraded proxy completed"
             );
         }
         Err(error) => {
-            error!(target: "forward_proxy", "Upgraded proxy aborted: {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), "upgraded proxy aborted");
         }
     }
 }
