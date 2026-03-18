@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use crate::SignalType;
-use crate::signal::ShutdownSignal;
+use crate::signal::RootSignal;
 
 pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
     use nix::{sys::signal::Signal, unistd::Pid};
@@ -40,8 +40,7 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 }
 
 pub async fn handle_signal(
-) -> Result<Option<ShutdownSignal>, Whatever> {
-    // 设置信号处理器（仅 Unix 可用）
+) -> Result<Option<RootSignal>, Whatever> {
     let mut term_signal =
         signal(SignalKind::terminate()).whatever_context("Failed to create SIGTERM listener")?;
     let mut int_signal =
@@ -53,25 +52,26 @@ pub async fn handle_signal(
     let mut usr1_signal = signal(SignalKind::user_defined1())
         .whatever_context("Failed to create SIGUSR1 listener")?;
 
-    loop {
-        tokio::select! {
-            _ = term_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGTERM signal, exiting immediately...");
-                return Ok(Some(ShutdownSignal::SigTerm));
-            }
-            _ = int_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGINT signal (Ctrl+C), exiting immediately...");
-                return Ok(Some(ShutdownSignal::SigInt));
-            }
-            _ = quit_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGQUIT signal");
-            }
-            _ = hup_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGHUP signal");
-            }
-            _ = usr1_signal.recv() => {
-                tracing::info!(target: "signal", "Received SIGUSR1 signal");
-            }
+    tokio::select! {
+        _ = term_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGTERM signal");
+            Ok(Some(RootSignal::SigTerm))
+        }
+        _ = int_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGINT signal");
+            Ok(Some(RootSignal::SigInt))
+        }
+        _ = quit_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGQUIT signal");
+            Ok(Some(RootSignal::SigQuit))
+        }
+        _ = hup_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGHUP signal");
+            Ok(Some(RootSignal::SigHup))
+        }
+        _ = usr1_signal.recv() => {
+            tracing::info!(target: "signal", "Received SIGUSR1 signal");
+            Ok(Some(RootSignal::SigUsr1))
         }
     }
 }

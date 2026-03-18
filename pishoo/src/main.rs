@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::{Path, PathBuf}, sync::Arc};
 
 use clap::Parser;
 use gateway::error::Whatever;
@@ -217,35 +217,57 @@ async fn main() -> Result<(), Whatever> {
         }
     });
 
-    if let Some(sig) = signal::handle_signal().await? {
+    loop {
+        let Some(sig) = signal::handle_signal().await? else {
+            break;
+        };
+
         let forwarded = match sig {
-            signal::ShutdownSignal::SigTerm => Signal::SIGTERM,
-            signal::ShutdownSignal::SigInt => Signal::SIGINT,
+            signal::RootSignal::SigTerm => Signal::SIGTERM,
+            signal::RootSignal::SigInt => Signal::SIGINT,
+            signal::RootSignal::SigQuit => Signal::SIGQUIT,
+            signal::RootSignal::SigHup => Signal::SIGHUP,
+            signal::RootSignal::SigUsr1 => {
+                reopen_root_log();
+                Signal::SIGUSR1
+            }
         };
         {
             let mut st = state.lock().await;
             st.forward_unix_signal(forwarded);
         }
-        accept_handle.abort();
-        tracing::info!(?sig, "forwarded unix shutdown signal to workers");
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let mut done = false;
-            {
-                let mut st = state.lock().await;
-                let exited = st.collect_exited_workers();
-                for pid in exited {
-                    st.cleanup_worker_with_reason(pid, "signal_terminate");
+        match sig {
+            signal::RootSignal::SigTerm | signal::RootSignal::SigInt | signal::RootSignal::SigQuit => {
+                accept_handle.abort();
+                tracing::info!(?sig, "forwarded shutdown signal to workers");
+
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    let mut done = false;
+                    {
+                        let mut st = state.lock().await;
+                        let exited = st.collect_exited_workers();
+                        for pid in exited {
+                            st.cleanup_worker_with_reason(pid, "signal_terminate");
+                        }
+                        if st.worker_pids().is_empty() {
+                            done = true;
+                        }
+                    }
+                    if done || tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                if st.worker_pids().is_empty() {
-                    done = true;
-                }
-            }
-            if done || tokio::time::Instant::now() >= deadline {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            signal::RootSignal::SigHup => {
+                tracing::info!("forwarded reload signal to workers");
+            }
+            signal::RootSignal::SigUsr1 => {
+                tracing::info!("root log reopened, forwarded reopen signal to workers");
+            }
         }
     }
 
@@ -258,4 +280,32 @@ async fn main() -> Result<(), Whatever> {
     }
     _ = fs::remove_file(pid_file).await;
     Ok(())
+}
+
+const ROOT_LOG_DIR: &str = "/var/log/pishoo";
+
+#[cfg(unix)]
+fn reopen_root_log() {
+    use std::{fs::OpenOptions, os::fd::AsRawFd};
+
+    let log_dir = Path::new(ROOT_LOG_DIR);
+    if let Err(e) = std::fs::create_dir_all(log_dir) {
+        tracing::warn!(%e, dir = %log_dir.display(), "failed to create root log directory");
+        return;
+    }
+    let log_file = log_dir.join("root.log");
+    let file = match OpenOptions::new().create(true).append(true).open(&log_file) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(%e, path = %log_file.display(), "failed to open root log file");
+            return;
+        }
+    };
+    let ret = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    if ret == -1 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "failed to dup2 stderr for root log reopen"
+        );
+    }
 }

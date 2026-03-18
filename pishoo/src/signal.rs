@@ -2,10 +2,23 @@ use gateway::error::Whatever;
 
 use crate::SignalType;
 
+/// Signal received by the root supervisor process.
+///
+/// Represents every Unix signal the root listens for. The root is responsible
+/// for forwarding the appropriate signal to workers and managing its own
+/// lifecycle (shutdown vs. stay-alive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShutdownSignal {
+pub enum RootSignal {
+    /// SIGTERM — fast shutdown.
     SigTerm,
+    /// SIGINT — fast shutdown (Ctrl+C).
     SigInt,
+    /// SIGQUIT — graceful shutdown.
+    SigQuit,
+    /// SIGHUP — reload (forward to workers, root stays alive).
+    SigHup,
+    /// SIGUSR1 — reopen logs (root reopens its own, then forwards to workers).
+    SigUsr1,
 }
 
 #[cfg(unix)]
@@ -27,8 +40,7 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
     }
 }
 
-pub async fn handle_signal(
-) -> Result<Option<ShutdownSignal>, Whatever> {
+pub async fn handle_signal() -> Result<Option<RootSignal>, Whatever> {
     #[cfg(unix)]
     {
         unix::handle_signal().await
