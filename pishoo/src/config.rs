@@ -50,10 +50,7 @@ pub struct ResolvedWorkerTarget {
     pub log_dir: PathBuf,
 }
 
-#[cfg(unix)]
 pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
-#[cfg(windows)]
-pub const PID_FILE_DEFAULT: &str = "NUL";
 
 pub fn parse_root_config(
     root: &std::sync::Arc<gateway::parse::Node>,
