@@ -31,7 +31,7 @@ pub enum ConfigError {
     #[snafu(display("failed to resolve user `{username}` via system passwd database"))]
     UserNotFound { username: String },
 
-    #[snafu(display("failed to resolve user `{username}`: {source}"))]
+    #[snafu(display("failed to resolve user `{username}`"))]
     UserResolve {
         username: String,
         source: nix::Error,

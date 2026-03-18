@@ -58,7 +58,7 @@ pub enum ListenRequestError {
     InvalidRequest { message: String },
     #[snafu(display("internal error: {message}"))]
     Internal { message: String },
-    #[snafu(display("RPC call error: {source}"))]
+    #[snafu(display("rpc call error"))]
     Call { source: remoc::rtc::CallError },
 }
 
@@ -77,7 +77,7 @@ pub enum ReleaseListenError {
     NotFound,
     #[snafu(display("internal error: {message}"))]
     Internal { message: String },
-    #[snafu(display("RPC call error: {source}"))]
+    #[snafu(display("rpc call error"))]
     Call { source: remoc::rtc::CallError },
 }
 
@@ -94,7 +94,7 @@ pub enum OpenConnectorError {
     InvalidProfile,
     #[snafu(display("internal error: {message}"))]
     Internal { message: String },
-    #[snafu(display("RPC call error: {source}"))]
+    #[snafu(display("rpc call error"))]
     Call { source: remoc::rtc::CallError },
 }
 

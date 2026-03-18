@@ -5,17 +5,24 @@ use std::{
 
 use gm_quic::prelude::handy::ToCertificate;
 use rustls_pemfile::{certs, private_key};
+use snafu::Snafu;
 
 pub const MAX_CERT_PEM_BYTES: usize = 512 * 1024;
 pub const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Snafu)]
 pub enum TlsMaterialError {
+    #[snafu(display("certificate PEM is too large ({actual} > {limit})"))]
     CertTooLarge { actual: usize, limit: usize },
+    #[snafu(display("private key PEM is too large ({actual} > {limit})"))]
     KeyTooLarge { actual: usize, limit: usize },
-    InvalidCertificatePem { message: String },
+    #[snafu(display("invalid certificate PEM"))]
+    InvalidCertificatePem { source: std::io::Error },
+    #[snafu(display("certificate PEM contains no certificate"))]
     EmptyCertificate,
-    InvalidPrivateKeyPem { message: String },
+    #[snafu(display("invalid private key PEM"))]
+    InvalidPrivateKeyPem { source: std::io::Error },
+    #[snafu(display("private key PEM contains no key"))]
     EmptyPrivateKey,
 }
 
@@ -57,19 +64,14 @@ pub fn validate_tls_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), TlsM
 
     let cert_count = certs(&mut Cursor::new(cert_pem))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsMaterialError::InvalidCertificatePem {
-            message: e.to_string(),
-        })?
+        .map_err(|source| TlsMaterialError::InvalidCertificatePem { source })?
         .len();
     if cert_count == 0 {
         return Err(TlsMaterialError::EmptyCertificate);
     }
 
-    let key = private_key(&mut Cursor::new(key_pem)).map_err(|e| {
-        TlsMaterialError::InvalidPrivateKeyPem {
-            message: e.to_string(),
-        }
-    })?;
+    let key = private_key(&mut Cursor::new(key_pem))
+        .map_err(|source| TlsMaterialError::InvalidPrivateKeyPem { source })?;
     if key.is_none() {
         return Err(TlsMaterialError::EmptyPrivateKey);
     }
