@@ -23,9 +23,10 @@ use pishoo::{
     remoc_bridge::ListenerHandle,
     tls::{self, TlsMaterialError},
 };
-use snafu::Snafu;
+use snafu::{Report, Snafu};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 struct ServerRuntime {
     cancel: CancellationToken,
@@ -123,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remoc::rch::base::Sender<WorkerHello>,
         remoc::rch::base::Receiver<WorkerBootstrap>,
     ) = remoc::Connect::io(remoc::Cfg::default(), stdin, stdout).await?;
-    tokio::spawn(conn);
+    tokio::spawn(conn.in_current_span());
 
     tracing::debug!("remoc connection established, waiting for bootstrap");
 
@@ -200,8 +201,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "identity scan complete"
             );
         }
-        Err(e) => {
-            tracing::warn!(%e, "failed to list identities, continuing without listeners");
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to list identities, continuing without listeners");
         }
     }
 
@@ -250,8 +251,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "reload complete"
                         );
                     }
-                    Err(e) => {
-                        tracing::warn!(%e, "failed to list identities during reload");
+                    Err(error) => {
+                        tracing::warn!(error = %error, "failed to list identities during reload");
                     }
                 }
             }
@@ -290,7 +291,7 @@ fn start_server_runtime(
                             let router = router.clone();
                             let worker_policy = worker_policy.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = gateway::reverse::handle_single_connection_for_worker(
+                                if let Err(error) = gateway::reverse::handle_single_connection_for_worker(
                                     conn,
                                     server_name,
                                     h3_settings,
@@ -298,19 +299,21 @@ fn start_server_runtime(
                                     worker_policy.access_rules,
                                     gateway::reverse::MissingRulePolicy::Deny,
                                 ).await {
-                                    tracing::warn!(%e, "worker connection handling failed");
+                                    tracing::warn!(error = %Report::from_error(&error), "worker connection handling failed");
                                 }
-                            });
+                            }
+                            .in_current_span());
                         }
-                        Err(e) => {
-                            tracing::warn!(%e, %server_name, "listener accept failed");
+                        Err(error) => {
+                            tracing::warn!(error = %Report::from_error(&error), %server_name, "listener accept failed");
                             break;
                         }
                     }
                 }
             }
         }
-    });
+    }
+    .in_current_span());
     ServerRuntime { cancel, task }
 }
 
@@ -348,8 +351,8 @@ async fn reconcile_listener_set(
                     runtime.stop();
                 }
             }
-            Err(e) => {
-                tracing::warn!(%server_name, %e, "failed to release listener");
+            Err(error) => {
+                tracing::warn!(%server_name, error = %Report::from_error(&error), "failed to release listener");
             }
         }
     }
@@ -388,8 +391,8 @@ async fn reconcile_listener_set(
                 tracing::info!(%server_name, "acquired listener");
                 listeners.lock().await.insert(server_name.clone(), runtime);
             }
-            Err(e) => {
-                tracing::warn!(%server_name, %e, "failed to request listener");
+            Err(error) => {
+                tracing::warn!(%server_name, error = %Report::from_error(&error), "failed to request listener");
             }
         }
     }

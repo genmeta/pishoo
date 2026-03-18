@@ -14,8 +14,9 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use rustls::server::WebPkiClientVerifier;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
+use tracing::Instrument;
 
 mod signal;
 
@@ -82,9 +83,8 @@ async fn main() -> Result<(), Whatever> {
 
     if args.test_config {
         tracing::info!(
-            target: "config",
-            "Configuration file `{}` syntax is ok",
-            config_file.display()
+            path = %config_file.display(),
+            "configuration syntax is ok"
         );
         return Ok(());
     }
@@ -202,25 +202,29 @@ async fn main() -> Result<(), Whatever> {
                         tracing::warn!(%server_name, "no listener registered for connection");
                     }
                 }
-                Err(e) => {
-                    tracing::error!("accept loop error: {e}");
+                Err(error) => {
+                    tracing::error!(error = %Report::from_error(&error), "accept loop error");
                     break;
                 }
             }
         }
-    });
+    }
+    .in_current_span());
 
     let monitor_state = state.clone();
-    let monitor_handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let mut st = monitor_state.lock().await;
-            let exited = st.collect_exited_workers();
-            for pid in exited {
-                st.cleanup_worker_with_reason(pid, "child_exit");
+    let monitor_handle = tokio::spawn(
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let mut st = monitor_state.lock().await;
+                let exited = st.collect_exited_workers();
+                for pid in exited {
+                    st.cleanup_worker_with_reason(pid, "child_exit");
+                }
             }
         }
-    });
+        .in_current_span(),
+    );
 
     loop {
         let Some(sig) = signal::handle_signal().await? else {
@@ -295,21 +299,21 @@ fn reopen_root_log() {
     use std::fs::OpenOptions;
 
     let log_dir = Path::new(ROOT_LOG_DIR);
-    if let Err(e) = std::fs::create_dir_all(log_dir) {
-        tracing::warn!(%e, dir = %log_dir.display(), "failed to create root log directory");
+    if let Err(error) = std::fs::create_dir_all(log_dir) {
+        tracing::warn!(error = %Report::from_error(&error), dir = %log_dir.display(), "failed to create root log directory");
         return;
     }
     let log_file = log_dir.join("root.log");
     let file = match OpenOptions::new().create(true).append(true).open(&log_file) {
         Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(%e, path = %log_file.display(), "failed to open root log file");
+        Err(error) => {
+            tracing::warn!(error = %Report::from_error(&error), path = %log_file.display(), "failed to open root log file");
             return;
         }
     };
-    if let Err(e) = nix::unistd::dup2_stderr(&file) {
+    if let Err(error) = nix::unistd::dup2_stderr(&file) {
         tracing::warn!(
-            error = %e,
+            error = %Report::from_error(&error),
             "failed to dup2 stderr for root log reopen"
         );
     }
