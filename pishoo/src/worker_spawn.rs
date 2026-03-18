@@ -3,21 +3,14 @@
 //! Spawns the `pishoo-worker` binary as a target user, establishes a remoc
 //! connection over stdin/stdout pipes, and sends [`WorkerBootstrap`] to the child.
 //!
-//! # Protocol
-//!
-//! 1. Root spawns `pishoo-worker` with stdin/stdout piped, stderr inherited.
-//! 2. `pre_exec` drops privileges: `setgid` → `initgroups` → `setuid`.
-//! 3. Root establishes remoc connection: reads from child's stdout, writes to child's stdin.
-//! 4. Root sends [`WorkerBootstrap`] via base channel.
-//! 5. Child receives bootstrap and sends `()` ack back.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
 
-use nix::unistd::{Pid, Uid};
+use nix::{sys::signal::Signal, unistd::Pid};
+use nix::unistd::Uid;
 use remoc::rtc::ServerShared;
 use tokio::process::Child;
-use std::process::ExitStatus;
 use tokio::sync::Mutex;
 
 use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello};
@@ -26,7 +19,17 @@ use crate::protocol::{RootTransportApiServerShared, WorkerBootstrap, WorkerHello
 ///
 /// Holds the child process. Killing the child on drop ensures cleanup.
 pub struct WorkerHandle {
-    child: Child,
+    inner: WorkerHandleInner,
+}
+
+enum WorkerHandleInner {
+    Tokio(Child),
+    Unix(UnixWorkerHandle),
+}
+
+struct UnixWorkerHandle {
+    pid: u32,
+    exit_status: Option<ExitStatus>,
 }
 
 pub struct SpawnedWorker {
@@ -43,19 +46,72 @@ impl Drop for WorkerHandle {
 
 impl WorkerHandle {
     pub fn new(child: Child) -> Self {
-        Self { child }
+        Self {
+            inner: WorkerHandleInner::Tokio(child),
+        }
+    }
+
+    pub(crate) fn from_unix_pid(pid: u32) -> Self {
+        Self {
+            inner: WorkerHandleInner::Unix(UnixWorkerHandle {
+                pid,
+                exit_status: None,
+            }),
+        }
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.child.id()
+        match &self.inner {
+            WorkerHandleInner::Tokio(child) => child.id(),
+            WorkerHandleInner::Unix(child) => Some(child.pid),
+        }
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
-        self.child.try_wait()
+        match &mut self.inner {
+            WorkerHandleInner::Tokio(child) => child.try_wait(),
+            WorkerHandleInner::Unix(child) => child.try_wait(),
+        }
     }
 
     pub fn start_kill(&mut self) -> Result<(), std::io::Error> {
-        self.child.start_kill()
+        match &mut self.inner {
+            WorkerHandleInner::Tokio(child) => child.start_kill(),
+            WorkerHandleInner::Unix(child) => child.start_kill(),
+        }
+    }
+}
+
+impl UnixWorkerHandle {
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
+        if let Some(status) = self.exit_status {
+            return Ok(Some(status));
+        }
+
+        let mut raw_status = 0;
+        let waited = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut raw_status, libc::WNOHANG) };
+        if waited == 0 {
+            return Ok(None);
+        }
+        if waited == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let status = ExitStatus::from_raw(raw_status);
+        self.exit_status = Some(status);
+        Ok(Some(status))
+    }
+
+    fn start_kill(&mut self) -> Result<(), std::io::Error> {
+        if self.exit_status.is_some() {
+            return Ok(());
+        }
+
+        match nix::sys::signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL) {
+            Ok(()) => Ok(()),
+            Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(err) => Err(std::io::Error::from_raw_os_error(err as i32)),
+        }
     }
 }
 
@@ -82,7 +138,7 @@ pub async fn spawn_worker(
     log_dir: PathBuf,
     state: Arc<Mutex<crate::root_state::RootState>>,
 ) -> Result<SpawnedWorker, std::io::Error> {
-    let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username)?;
+    let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username, &home)?;
     let pid = launched.handle.pid().expect("child has pid");
     let transport = launched.transport;
 
