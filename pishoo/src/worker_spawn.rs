@@ -11,11 +11,10 @@
 //! 4. Root sends [`WorkerBootstrap`] via base channel.
 //! 5. Child receives bootstrap and sends `()` ack back.
 
-use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nix::unistd::{Gid, Pid, Uid};
+use nix::unistd::{Pid, Uid};
 use remoc::rtc::ServerShared;
 use tokio::process::Child;
 use std::process::ExitStatus;
@@ -83,51 +82,10 @@ pub async fn spawn_worker(
     log_dir: PathBuf,
     state: Arc<Mutex<crate::root_state::RootState>>,
 ) -> Result<SpawnedWorker, std::io::Error> {
-    let supplementary_groups = resolve_supplementary_groups(&username, gid)?;
-
-    let mut command = tokio::process::Command::new(worker_bin.as_ref());
-    command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit());
-
-    // Pre-exec: drop privileges to target user before exec.
-    // Safety: setgid/initgroups/setuid are async-signal-safe on Linux.
-    unsafe {
-        let groups = supplementary_groups.clone();
-        let nix_gid = Gid::from_raw(gid);
-        let nix_uid = uid;
-        command.pre_exec(move || {
-            if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            nix::unistd::setgid(nix_gid)?;
-            nix::unistd::setuid(nix_uid)?;
-            if libc::getuid() != nix_uid.as_raw()
-                || libc::geteuid() != nix_uid.as_raw()
-                || libc::getgid() != nix_gid.as_raw()
-                || libc::getegid() != nix_gid.as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "credential verification failed after setuid/setgid",
-                ));
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = command.spawn()?;
-
-    // Take ownership of the piped handles.
-    let child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| std::io::Error::other("failed to capture child stdin"))?;
-    let child_stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("failed to capture child stdout"))?;
+    let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username)?;
+    let pid = launched.handle.pid().expect("child has pid");
+    let child_stdin = launched.stdin;
+    let child_stdout = launched.stdout;
 
     // Establish remoc connection over the child's stdio.
     // reader = child_stdout (parent reads from child)
@@ -144,7 +102,6 @@ pub async fn spawn_worker(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     tokio::spawn(conn);
     // Create per-worker RPC API server+client pair.
-    let pid = child.id().expect("child has pid");
     let api_impl = crate::root_transport_api::RootTransportApiImpl::new(Pid::from_raw(pid as i32), state.clone());
     let (server, client) = RootTransportApiServerShared::new(Arc::new(api_impl), 1);
     tokio::spawn(async move { server.serve(true).await });
@@ -169,38 +126,7 @@ pub async fn spawn_worker(
         .ok_or_else(|| std::io::Error::other("worker closed channel without sending startup hello"))?;
 
     Ok(SpawnedWorker {
-        handle: WorkerHandle::new(child),
+        handle: launched.handle,
         hello,
     })
-}
-
-fn resolve_supplementary_groups(username: &str, gid: u32) -> Result<Vec<libc::gid_t>, std::io::Error> {
-    let username = CString::new(username)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "username contains NUL byte"))?;
-    let mut ngroups: libc::c_int = 0;
-    let _ = unsafe {
-        libc::getgrouplist(
-            username.as_ptr(),
-            gid as libc::gid_t,
-            std::ptr::null_mut(),
-            &mut ngroups,
-        )
-    };
-    if ngroups <= 0 {
-        return Ok(vec![gid as libc::gid_t]);
-    }
-    let mut groups = vec![0 as libc::gid_t; ngroups as usize];
-    let ret = unsafe {
-        libc::getgrouplist(
-            username.as_ptr(),
-            gid as libc::gid_t,
-            groups.as_mut_ptr(),
-            &mut ngroups,
-        )
-    };
-    if ret == -1 {
-        return Err(std::io::Error::other("failed to resolve supplementary groups"));
-    }
-    groups.truncate(ngroups as usize);
-    Ok(groups)
 }
