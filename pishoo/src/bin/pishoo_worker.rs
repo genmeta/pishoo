@@ -23,7 +23,7 @@ use pishoo::{
     remoc_bridge::ListenerHandle,
     tls::{self, TlsMaterialError},
 };
-use snafu::{Report, Snafu};
+use snafu::{Report, ResultExt, Snafu};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -54,23 +54,26 @@ struct ReconcileStats {
 enum WorkerError {
     #[snafu(display("access_rules not configured for worker"))]
     MissingAccessRules,
-    #[snafu(display("invalid access_rules database uri `{message}`"))]
-    InvalidAccessRules { message: String },
-    #[snafu(display("failed to connect access_rules database: {message}"))]
-    AccessRulesDb { message: String },
-    #[snafu(display("failed to load location rules: {message}"))]
-    AccessRulesLoad { message: String },
-    #[snafu(display("failed to read worker policy config `{path}`: {source}"))]
+    #[snafu(display("failed to parse worker policy config `{path}`"))]
+    ParsePolicy {
+        path: String,
+        source: gateway::error::Whatever,
+    },
+    #[snafu(display("failed to connect access_rules database"))]
+    AccessRulesDb { source: sea_orm::DbErr },
+    #[snafu(display("failed to load location rules"))]
+    AccessRulesLoad { source: sea_orm::DbErr },
+    #[snafu(display("failed to read worker policy config `{path}`"))]
     ReadPolicy {
         path: String,
         source: std::io::Error,
     },
-    #[snafu(display("failed to read cert `{path}`: {source}"))]
+    #[snafu(display("failed to read cert `{path}`"))]
     ReadCert {
         path: String,
         source: std::io::Error,
     },
-    #[snafu(display("failed to read key `{path}`: {source}"))]
+    #[snafu(display("failed to read key `{path}`"))]
     ReadKey {
         path: String,
         source: std::io::Error,
@@ -87,14 +90,14 @@ enum WorkerError {
         actual: usize,
         limit: usize,
     },
-    #[snafu(display("failed to parse certificate PEM `{path}`: {source}"))]
+    #[snafu(display("failed to parse certificate PEM `{path}`"))]
     ParseCert {
         path: String,
         source: std::io::Error,
     },
     #[snafu(display("certificate PEM contains no certificate `{path}`"))]
     EmptyCert { path: String },
-    #[snafu(display("failed to parse private key PEM `{path}`: {source}"))]
+    #[snafu(display("failed to parse private key PEM `{path}`"))]
     ParseKey {
         path: String,
         source: std::io::Error,
@@ -405,16 +408,12 @@ async fn reconcile_listener_set(
 }
 
 async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerError> {
+    let path = conf_path.display().to_string();
     let raw = tokio::fs::read(conf_path)
         .await
-        .map_err(|e| WorkerError::ReadPolicy {
-            path: conf_path.display().to_string(),
-            source: e,
-        })?;
-    let parsed = gateway::parse::parse(&raw, conf_path.parent()).map_err(|e| {
-        WorkerError::InvalidAccessRules {
-            message: e.to_string(),
-        }
+        .context(ReadPolicySnafu { path: &path })?;
+    let parsed = gateway::parse::parse(&raw, conf_path.parent()).context(ParsePolicySnafu {
+        path: &path,
     })?;
     let pishoo = parsed
         .get("pishoo")
@@ -430,22 +429,16 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
 
     let db = sea_orm::Database::connect(&uri)
         .await
-        .map_err(|e| WorkerError::AccessRulesDb {
-            message: e.to_string(),
-        })?;
+        .context(AccessRulesDbSnafu)?;
     let location_rules = LocationService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad {
-            message: e.to_string(),
-        })?;
+        .context(AccessRulesLoadSnafu)?;
 
     let _ = DomainService::new(&db)
         .list_all_rules()
         .await
-        .map_err(|e| WorkerError::AccessRulesLoad {
-            message: e.to_string(),
-        })?;
+        .context(AccessRulesLoadSnafu)?;
 
     Ok(WorkerPolicy {
         access_rules: Arc::new(location_rules.into()),
@@ -480,16 +473,16 @@ async fn read_tls_material(
             actual,
             limit,
         },
-        TlsMaterialError::InvalidCertificatePem { message } => WorkerError::ParseCert {
+        TlsMaterialError::InvalidCertificatePem { source } => WorkerError::ParseCert {
             path: cert_path.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+            source,
         },
         TlsMaterialError::EmptyCertificate => WorkerError::EmptyCert {
             path: cert_path.display().to_string(),
         },
-        TlsMaterialError::InvalidPrivateKeyPem { message } => WorkerError::ParseKey {
+        TlsMaterialError::InvalidPrivateKeyPem { source } => WorkerError::ParseKey {
             path: key_path.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+            source,
         },
         TlsMaterialError::EmptyPrivateKey => WorkerError::EmptyKey {
             path: key_path.display().to_string(),

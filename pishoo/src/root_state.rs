@@ -325,8 +325,7 @@ impl RootState {
         }
 
         // Remove from servers map.
-        self.retire_server(server_name)
-            .expect("server must exist after ownership check");
+        self.retire_server(server_name).expect("server must exist after ownership check");
 
         // Remove from process record.
         if let Some(process) = self.processes.get_mut(&caller_pid) {
@@ -405,14 +404,14 @@ fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), Liste
         TlsMaterialError::KeyTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
             message: format!("private key PEM too large ({actual} > {limit})"),
         },
-        TlsMaterialError::InvalidCertificatePem { message } => ListenRequestError::InvalidRequest {
-            message: format!("invalid certificate PEM: {message}"),
+        TlsMaterialError::InvalidCertificatePem { .. } => ListenRequestError::InvalidRequest {
+            message: "invalid certificate PEM".to_string(),
         },
         TlsMaterialError::EmptyCertificate => ListenRequestError::InvalidRequest {
             message: "certificate PEM contains no certificates".to_string(),
         },
-        TlsMaterialError::InvalidPrivateKeyPem { message } => ListenRequestError::InvalidRequest {
-            message: format!("invalid private key PEM: {message}"),
+        TlsMaterialError::InvalidPrivateKeyPem { .. } => ListenRequestError::InvalidRequest {
+            message: "invalid private key PEM".to_string(),
         },
         TlsMaterialError::EmptyPrivateKey => ListenRequestError::InvalidRequest {
             message: "private key PEM contains no key".to_string(),
