@@ -98,19 +98,34 @@ fn child_exec(
         fd += 1;
     }
 
-    if unsafe { libc::setgroups(supplementary_groups.len(), supplementary_groups.as_ptr()) } != 0 {
-        unsafe { libc::_exit(126) };
-    }
-    if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
-        unsafe { libc::_exit(126) };
-    }
-    if unsafe { libc::setuid(uid.as_raw()) } != 0 {
-        unsafe { libc::_exit(126) };
-    }
-    if unsafe { libc::getuid() } != uid.as_raw()
-        || unsafe { libc::geteuid() } != uid.as_raw()
-        || unsafe { libc::getgid() } != gid as libc::gid_t
-        || unsafe { libc::getegid() } != gid as libc::gid_t
+    let current_uid = unsafe { libc::getuid() };
+    let current_euid = unsafe { libc::geteuid() };
+    let current_gid = unsafe { libc::getgid() };
+    let current_egid = unsafe { libc::getegid() };
+
+    if current_euid == 0 {
+        if unsafe { libc::setgroups(supplementary_groups.len(), supplementary_groups.as_ptr()) }
+            != 0
+        {
+            unsafe { libc::_exit(126) };
+        }
+        if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+            unsafe { libc::_exit(126) };
+        }
+        if unsafe { libc::setuid(uid.as_raw()) } != 0 {
+            unsafe { libc::_exit(126) };
+        }
+        if unsafe { libc::getuid() } != uid.as_raw()
+            || unsafe { libc::geteuid() } != uid.as_raw()
+            || unsafe { libc::getgid() } != gid as libc::gid_t
+            || unsafe { libc::getegid() } != gid as libc::gid_t
+        {
+            unsafe { libc::_exit(126) };
+        }
+    } else if current_uid != uid.as_raw()
+        || current_euid != uid.as_raw()
+        || current_gid != gid as libc::gid_t
+        || current_egid != gid as libc::gid_t
     {
         unsafe { libc::_exit(126) };
     }
