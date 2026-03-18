@@ -122,7 +122,7 @@ impl UnixWorkerHandle {
 /// * `worker_bin` — Path to the `pishoo-worker` binary.
 /// * `uid` — Target user's UID (for privilege drop).
 /// * `gid` — Target user's primary GID (for privilege drop).
-/// * `username` — Target username (for `initgroups` and bootstrap).
+/// * `username` — Target username.
 /// * `home` — Target user's home directory.
 /// * `log_dir` — Directory where the worker should write logs.
 /// * `state` — Shared root state for creating per-worker transport API.
