@@ -10,7 +10,9 @@ use crate::error::Result;
 
 // Returns None on Android (no logging)
 fn get_log_dir() -> Option<PathBuf> {
-    GenmetaHome::load_from_environment().map(|home| home.join("logs"))
+    GenmetaHome::load_from_environment()
+        .map(|home| home.join("logs"))
+        .ok()
 }
 
 fn get_access_log_path() -> Option<PathBuf> {
@@ -127,6 +129,7 @@ pub async fn write_access_log(line: String) {
     }
 }
 
+// TODO: avoid open log file on every error log write, keep it open and rotate by size or time
 pub async fn write_error_log(line: impl Display) {
     let Some(path) = get_error_log_path() else {
         return;
