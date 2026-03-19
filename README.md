@@ -41,9 +41,3 @@ cargo run -p gateway --example forward config/forward.conf
 ```sh
 curl -x http://127.0.0.1:5379 http://test2.genmeta.net/static/TODO.md
 ```
-
-### HTTPS upstream 端到端验证
-
-```sh
-scripts/e2e_proxy_https_chain.sh
-```
