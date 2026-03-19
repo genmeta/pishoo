@@ -148,11 +148,9 @@ pub async fn serve(
         _ => None,
     };
     let _guard = ShutdownListenersOnDrop(quic_listeners.clone());
-    let _maintain_binding = tokio::spawn(maintain_binding(
-        monitor,
-        quic_listeners.clone(),
-        server_listens,
-    ));
+    let _maintain_binding = tokio::spawn(
+        maintain_binding(monitor, quic_listeners.clone(), server_listens).in_current_span(),
+    );
 
     // 主接受循环
     handle_connections(quic_listeners, access_rules.1, router).await
@@ -269,13 +267,13 @@ async fn create_quic_listeners(
         let cert = fs::read(cert_path)
             .await
             .whatever_context::<_, Whatever>(format!(
-                "Failed to read certificate file `{}`",
+                "failed to read certificate file `{}`",
                 cert_path.display()
             ))?;
         let key = fs::read(key_path)
             .await
             .whatever_context::<_, Whatever>(format!(
-                "Failed to read private key file `{}`",
+                "failed to read private key file `{}`",
                 key_path.display()
             ))?;
         for server_name_struct in server_names {
@@ -286,9 +284,9 @@ async fn create_quic_listeners(
             let bind_uris = server_bind_uris
                 .get(&server_name)
                 .whatever_context::<_, Whatever>(format!(
-                    "No bind URIs found for server `{server_name}`"
+                    "no bind URIs found for server `{server_name}`"
                 ))?;
-            debug!(server_name, ?bind_uris, "Adding server");
+            debug!(server_name, ?bind_uris, "adding server");
             listeners
                 .add_server(
                     &server_name,
@@ -414,9 +412,8 @@ async fn handle_connections(
                     )
                         .await
                 {
-                    let report = Report::from_error(error).to_string();
                     error!(
-                        error = report,
+                        error = %Report::from_error(error),
                         "failed to handle connection"
                     );
                 }
@@ -470,9 +467,8 @@ async fn handle_single_connection(
                 info!("resolved new request");
 
                 if let Err(handle_request_error) = handle_result {
-                    let report = Report::from_error(handle_request_error).to_string();
                     error!(
-                        error = report,
+                        error = %Report::from_error(handle_request_error),
                         "failed to handle resolved request"
                     );
                 }

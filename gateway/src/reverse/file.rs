@@ -118,11 +118,10 @@ async fn serve_static_file(
     let (file, file_size, file_path) = match index(location, file_path).await {
         Ok(result) => result,
         Err(index_error @ (IndexError::MissingIndexFiles | IndexError::FileNotFound { .. })) => {
-            let report = Report::from_error(&index_error).to_string();
             tracing::info!(
                 uri = %uri,
                 path = file_path,
-                error = report,
+                error = %Report::from_error(&index_error),
                 "static file was not found"
             );
             super::send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
@@ -130,11 +129,10 @@ async fn serve_static_file(
             return Ok(());
         }
         Err(error) => {
-            let report = Report::from_error(&error).to_string();
             error!(
                 uri = %uri,
                 path = file_path,
-                error = report,
+                error = %Report::from_error(&error),
                 "failed to resolve static file"
             );
             return Err(error).whatever_context::<_, Whatever>("failed to resolve static file")?;

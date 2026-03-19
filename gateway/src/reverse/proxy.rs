@@ -42,8 +42,8 @@ pub async fn handle(
     let resp = match pass(location, req, recver).await {
         Ok(resp) => resp,
         Err(error) => {
-            let err_msg = format!("proxy request error: {}", Report::from_error(error));
-            error!(error = %err_msg, "proxy request failed");
+            let err_msg = format!("proxy request error: {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), "proxy request failed");
             req_info.log_error(&err_msg).await;
             req_info.log_access(500, 0).await;
 
@@ -91,8 +91,8 @@ pub async fn handle(
             req_info.log_access(status_code.as_u16(), size).await;
         }
         Err(error) => {
-            let err_msg = format!("error sending response body: {}", Report::from_error(error));
-            error!(error = %err_msg, "failed to forward response body");
+            let err_msg = format!("error sending response body: {}", Report::from_error(&error));
+            error!(error = %Report::from_error(&error), "failed to forward response body");
             req_info.log_error(&err_msg).await;
         }
     }

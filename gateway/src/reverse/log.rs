@@ -120,9 +120,8 @@ pub async fn write_access_log(line: String) {
     .await;
 
     if let Err(e) = result {
-        let report = Report::from_error(e).to_string();
         tracing::error!(
-            error = report,
+            error = %Report::from_error(e),
             "failed to write access log"
         );
     }
@@ -157,9 +156,8 @@ pub async fn write_error_log(line: String) {
     .await;
 
     if let Err(e) = result {
-        let report = Report::from_error(e).to_string();
         tracing::error!(
-            error = report,
+            error = %Report::from_error(e),
             "failed to write error log"
         );
     }
