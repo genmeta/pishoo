@@ -23,7 +23,7 @@ pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {
 
     ensure_whatever!(
         values.contains_key("listen"),
-        "Missing directive listen in proxy block"
+        "missing directive listen in proxy block"
     );
 
     Ok(Value::ValueMap(values))
