@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use gateway::parse::Value;
+use nix::unistd::{Gid, Uid};
 use snafu::{OptionExt, ResultExt, Snafu};
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,14 @@ pub enum ConfigError {
     #[snafu(display("worker username cannot be empty"))]
     EmptyWorkerName,
 
+    #[snafu(display("failde to reolsver users in user group `{WORKER_GROUP}`"))]
+    GroupResolve { source: nix::Error },
+
+    #[snafu(display(
+        "failde to reolsver users in user group `{WORKER_GROUP}` as user group not found"
+    ))]
+    GroupNotFound,
+
     #[snafu(display("failed to resolve user `{username}` via system passwd database"))]
     UserNotFound { username: String },
 
@@ -41,13 +50,14 @@ pub enum ConfigError {
     MissingHome { username: String },
 }
 
+const WORKER_GROUP: &str = "pishoo";
+
 #[derive(Debug, Clone)]
 pub struct ResolvedWorkerTarget {
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: Uid,
+    pub gid: Gid,
     pub username: String,
     pub home: PathBuf,
-    pub log_dir: PathBuf,
 }
 
 pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
@@ -81,7 +91,21 @@ pub fn parse_root_config(
             })
             .collect::<Result<Vec<_>, ConfigError>>()?,
         Some(_) => return InvalidWorkersSnafu.fail(),
-        None => vec![],
+        None => nix::unistd::Group::from_name("pishoo")
+            .context(GroupResolveSnafu)?
+            .context(GroupNotFoundSnafu)?
+            .mem
+            .iter()
+            .map(|name| {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    return EmptyWorkerNameSnafu.fail();
+                }
+                Ok(WorkerTarget {
+                    username: trimmed.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?,
     };
 
     Ok(RootConfig { pid_file, workers })
@@ -107,10 +131,9 @@ pub fn resolve_worker_targets(
             .fail();
         }
         resolved.push(ResolvedWorkerTarget {
-            uid: user.uid.as_raw(),
-            gid: user.gid.as_raw(),
+            uid: user.uid,
+            gid: user.gid,
             username: user.name,
-            log_dir: home.join(".genmeta/pishoo/logs"),
             home,
         });
     }
@@ -173,9 +196,5 @@ mod tests {
         let resolved = resolve_worker_targets(&cfg).expect("resolve user target");
         assert_eq!(resolved.len(), 1);
         assert!(!resolved[0].home.as_os_str().is_empty());
-        assert_eq!(
-            resolved[0].log_dir,
-            resolved[0].home.join(".genmeta/pishoo/logs")
-        );
     }
 }

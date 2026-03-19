@@ -9,10 +9,7 @@ use clap::Parser;
 use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
 use gm_quic::prelude::{QuicListeners, handy::server_parameters};
-use nix::{
-    sys::signal::Signal,
-    unistd::{Pid, Uid},
-};
+use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{OptionExt, Report, ResultExt};
 use tokio::fs;
@@ -139,11 +136,10 @@ async fn main() -> Result<(), Whatever> {
     for target in worker_targets {
         let spawned = pishoo::worker_spawn::spawn_worker(
             &worker_bin,
-            Uid::from_raw(target.uid),
+            target.uid,
             target.gid,
             target.username.clone(),
             target.home.clone(),
-            target.log_dir.clone(),
             state.clone(),
         )
         .await
@@ -152,13 +148,12 @@ async fn main() -> Result<(), Whatever> {
             target.username
         ))?;
         let pid = spawned.handle.pid().expect("worker must have pid");
-        let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;
         if hello.pid != pid
-            || hello.uid != target_uid.as_raw()
-            || hello.euid != target_uid.as_raw()
-            || hello.gid != target.gid
-            || hello.egid != target.gid
+            || hello.uid != target.uid.as_raw()
+            || hello.euid != target.uid.as_raw()
+            || hello.gid != target.gid.as_raw()
+            || hello.egid != target.gid.as_raw()
         {
             snafu::whatever!(
                 "worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
@@ -167,7 +162,7 @@ async fn main() -> Result<(), Whatever> {
                 hello.pid,
                 hello.uid,
                 hello.euid,
-                target_uid.as_raw(),
+                target.uid,
                 hello.gid,
                 hello.egid,
                 target.gid
@@ -176,14 +171,14 @@ async fn main() -> Result<(), Whatever> {
 
         tracing::info!(
             pid,
-            uid = target_uid.as_raw(),
-            gid = target.gid,
+            uid = target.uid.as_raw(),
+            gid = target.gid.as_raw(),
             user = %target.username,
             "worker privilege separation verified"
         );
 
         let mut st = state.lock().await;
-        st.register_worker(Pid::from_raw(pid as i32), target_uid, spawned.handle);
+        st.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
     }
 
     // Central accept loop: route connections by server_name

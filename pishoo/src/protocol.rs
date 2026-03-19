@@ -15,7 +15,6 @@ pub struct WorkerBootstrap {
     pub uid: u32,
     pub username: String,
     pub home: PathBuf,
-    pub log_dir: PathBuf,
     /// RPC client for calling root transport API from the worker.
     pub root_api: RootTransportApiClient,
 }

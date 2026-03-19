@@ -61,7 +61,7 @@ pub enum ResolveSupplementaryGroupsError {
 pub fn launch_worker(
     worker_bin: &Path,
     uid: Uid,
-    gid: u32,
+    gid: Gid,
     username: &str,
     home: &Path,
 ) -> Result<LaunchedWorker, LaunchWorkerError> {
@@ -110,7 +110,7 @@ fn child_exec(
     argv: &[CString],
     envp: &[CString],
     uid: Uid,
-    gid: u32,
+    gid: Gid,
     supplementary_groups: &[Gid],
     stdin_fd: &OwnedFd,
     stdout_fd: &OwnedFd,
@@ -133,7 +133,6 @@ fn child_exec(
     let current_euid = geteuid();
     let current_gid = getgid();
     let current_egid = getegid();
-    let gid = Gid::from_raw(gid);
 
     if current_euid.is_root() {
         if setgroups(supplementary_groups).is_err() {
@@ -187,10 +186,10 @@ fn max_fd() -> i32 {
 
 fn resolve_supplementary_groups(
     username: &str,
-    gid: u32,
+    gid: Gid,
 ) -> Result<Vec<Gid>, ResolveSupplementaryGroupsError> {
     let username_cstr = CString::new(username).context(InvalidUsernameSnafu)?;
-    getgrouplist(&username_cstr, Gid::from_raw(gid)).context(GetGroupListSnafu {
+    getgrouplist(&username_cstr, gid).context(GetGroupListSnafu {
         username: username.to_string(),
     })
 }

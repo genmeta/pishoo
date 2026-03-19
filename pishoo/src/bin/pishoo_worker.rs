@@ -149,11 +149,11 @@ async fn main() -> Result<(), Whatever> {
         uid = bootstrap.uid,
         username = %bootstrap.username,
         home = %bootstrap.home.display(),
-        log_dir = %bootstrap.log_dir.display(),
         "worker bootstrap received"
     );
 
-    reopen_worker_log(&bootstrap.log_dir).whatever_context("failed to reopen worker log")?;
+    // TODO: domain logs
+    // reopen_worker_log(&bootstrap.log_dir).whatever_context("failed to reopen worker log")?;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
@@ -279,8 +279,8 @@ async fn main() -> Result<(), Whatever> {
                 }
             }
             _ = usr1_signal.recv() => {
-                reopen_worker_log(&bootstrap.log_dir)
-                    .whatever_context("failed to reopen worker log")?;
+                // reopen_worker_log(&bootstrap.log_dir)
+                //     .whatever_context("failed to reopen worker log")?;
                 tracing::info!("worker log reopened");
             }
         }

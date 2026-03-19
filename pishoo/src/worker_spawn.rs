@@ -15,7 +15,7 @@ use nix::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{Pid, Uid},
+    unistd::{Gid, Pid, Uid},
 };
 use remoc::rtc::ServerShared;
 use snafu::{OptionExt, ResultExt, Snafu};
@@ -184,10 +184,9 @@ impl UnixWorkerHandle {
 pub async fn spawn_worker(
     worker_bin: impl AsRef<Path>,
     uid: Uid,
-    gid: u32,
+    gid: Gid,
     username: String,
     home: PathBuf,
-    log_dir: PathBuf,
     state: Arc<Mutex<crate::root_state::RootState>>,
 ) -> Result<SpawnedWorker, SpawnWorkerError> {
     let launched = crate::launcher::launch_worker(worker_bin.as_ref(), uid, gid, &username, &home)
@@ -216,7 +215,6 @@ pub async fn spawn_worker(
         uid: uid.as_raw(),
         username,
         home,
-        log_dir,
         root_api: client,
     };
 

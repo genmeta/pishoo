@@ -3,10 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use nix::{
-    sys::wait::WaitStatus,
-    unistd::{Uid, User},
-};
+use nix::{sys::wait::WaitStatus, unistd::User};
 use pishoo::launcher::launch_worker;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -30,14 +27,8 @@ async fn unix_launcher_wires_stdio_and_handle_lifecycle() {
     let home = unique_home_dir("pishoo-launcher-stdio");
     std::fs::create_dir_all(&home).expect("create temp home");
 
-    let launched = launch_worker(
-        Path::new("/bin/cat"),
-        Uid::from_raw(user.uid.as_raw()),
-        user.gid.as_raw(),
-        &user.name,
-        &home,
-    )
-    .expect("launch worker");
+    let launched = launch_worker(Path::new("/bin/cat"), user.uid, user.gid, &user.name, &home)
+        .expect("launch worker");
 
     let mut handle = launched.handle;
     let mut transport = launched.transport;
@@ -73,8 +64,8 @@ async fn unix_launcher_sets_explicit_exec_environment() {
 
     let launched = launch_worker(
         Path::new("/usr/bin/env"),
-        Uid::from_raw(user.uid.as_raw()),
-        user.gid.as_raw(),
+        user.uid,
+        user.gid,
         &user.name,
         &home,
     )
