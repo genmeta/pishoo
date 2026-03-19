@@ -9,6 +9,8 @@ use std::{
 };
 
 use nix::{
+    errno::Errno,
+    libc,
     sys::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus, waitpid},
@@ -42,6 +44,14 @@ struct UnixWorkerHandle {
 pub struct SpawnedWorker {
     pub handle: WorkerHandle,
     pub hello: WorkerHello,
+}
+
+#[derive(Debug, Snafu)]
+pub enum WorkerHandleError {
+    #[snafu(display("failed to wait for worker process"))]
+    Wait { source: Errno },
+    #[snafu(display("failed to signal worker process"))]
+    Signal { source: Errno },
 }
 
 #[derive(Debug, Snafu)]
@@ -92,31 +102,40 @@ impl WorkerHandle {
         }
     }
 
-    pub fn try_wait(&mut self) -> Result<Option<WaitStatus>, std::io::Error> {
+    pub fn try_wait(&mut self) -> Result<Option<WaitStatus>, WorkerHandleError> {
         match &mut self.inner {
-            WorkerHandleInner::Tokio(child) => child.try_wait().map(|status| {
-                status.map(|s| {
-                    let pid = child
-                        .id()
-                        .map(|id| Pid::from_raw(id as i32))
-                        .unwrap_or_else(|| Pid::from_raw(0));
-                    WaitStatus::Exited(pid, s.code().unwrap_or_default())
+            WorkerHandleInner::Tokio(child) => child
+                .try_wait()
+                .map_err(|source| WorkerHandleError::Wait {
+                    source: Errno::from_raw(source.raw_os_error().unwrap_or(libc::EIO)),
                 })
-            }),
+                .map(|status| {
+                    status.map(|s| {
+                        let pid = child
+                            .id()
+                            .map(|id| Pid::from_raw(id as i32))
+                            .unwrap_or_else(|| Pid::from_raw(0));
+                        WaitStatus::Exited(pid, s.code().unwrap_or_default())
+                    })
+                }),
             WorkerHandleInner::Unix(child) => child.try_wait(),
         }
     }
 
-    pub fn start_kill(&mut self) -> Result<(), std::io::Error> {
+    pub fn start_kill(&mut self) -> Result<(), WorkerHandleError> {
         match &mut self.inner {
-            WorkerHandleInner::Tokio(child) => child.start_kill(),
+            WorkerHandleInner::Tokio(child) => child.start_kill().map_err(|source| {
+                WorkerHandleError::Signal {
+                    source: Errno::from_raw(source.raw_os_error().unwrap_or(libc::EIO)),
+                }
+            }),
             WorkerHandleInner::Unix(child) => child.start_kill(),
         }
     }
 }
 
 impl UnixWorkerHandle {
-    fn try_wait(&mut self) -> Result<Option<WaitStatus>, std::io::Error> {
+    fn try_wait(&mut self) -> Result<Option<WaitStatus>, WorkerHandleError> {
         if let Some(status) = self.exit_status {
             return Ok(Some(status));
         }
@@ -124,14 +143,14 @@ impl UnixWorkerHandle {
         let status = match waitpid(Pid::from_raw(self.pid as i32), Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => return Ok(None),
             Ok(status) => status,
-            Err(err) => return Err(std::io::Error::from(err)),
+            Err(source) => return Err(WorkerHandleError::Wait { source }),
         };
 
         self.exit_status = Some(status);
         Ok(Some(status))
     }
 
-    fn start_kill(&mut self) -> Result<(), std::io::Error> {
+    fn start_kill(&mut self) -> Result<(), WorkerHandleError> {
         if self.exit_status.is_some() {
             return Ok(());
         }
@@ -139,7 +158,7 @@ impl UnixWorkerHandle {
         match nix::sys::signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL) {
             Ok(()) => Ok(()),
             Err(nix::errno::Errno::ESRCH) => Ok(()),
-            Err(err) => Err(std::io::Error::from_raw_os_error(err as i32)),
+            Err(source) => Err(WorkerHandleError::Signal { source }),
         }
     }
 }

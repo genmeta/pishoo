@@ -63,15 +63,15 @@ impl std::fmt::Display for ListenRequestInvalidReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CertTooLarge { actual, limit } => {
-                write!(f, "certificate PEM too large ({actual} > {limit})")
+                write!(f, "certificate pem too large ({actual} > {limit})")
             }
             Self::KeyTooLarge { actual, limit } => {
-                write!(f, "private key PEM too large ({actual} > {limit})")
+                write!(f, "private key pem too large ({actual} > {limit})")
             }
-            Self::InvalidCertificatePem => write!(f, "invalid certificate PEM"),
-            Self::EmptyCertificate => write!(f, "certificate PEM contains no certificates"),
-            Self::InvalidPrivateKeyPem => write!(f, "invalid private key PEM"),
-            Self::EmptyPrivateKey => write!(f, "private key PEM contains no key"),
+            Self::InvalidCertificatePem => write!(f, "invalid certificate pem"),
+            Self::EmptyCertificate => write!(f, "certificate pem contains no certificates"),
+            Self::InvalidPrivateKeyPem => write!(f, "invalid private key pem"),
+            Self::EmptyPrivateKey => write!(f, "private key pem contains no key"),
         }
     }
 }

@@ -102,7 +102,7 @@ async fn main() -> Result<(), Whatever> {
     let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
         .allow_unauthenticated()
         .build()
-        .expect("failed to build TLS client cert verifier");
+        .expect("failed to build tls client cert verifier");
 
     let listeners = QuicListeners::builder()
         .with_parameters(server_parameters())

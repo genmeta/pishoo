@@ -12,17 +12,17 @@ pub const MAX_KEY_PEM_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Snafu)]
 pub enum TlsMaterialError {
-    #[snafu(display("certificate PEM is too large ({actual} > {limit})"))]
+    #[snafu(display("certificate pem is too large ({actual} > {limit})"))]
     CertTooLarge { actual: usize, limit: usize },
-    #[snafu(display("private key PEM is too large ({actual} > {limit})"))]
+    #[snafu(display("private key pem is too large ({actual} > {limit})"))]
     KeyTooLarge { actual: usize, limit: usize },
-    #[snafu(display("invalid certificate PEM"))]
+    #[snafu(display("invalid certificate pem"))]
     InvalidCertificatePem { source: std::io::Error },
-    #[snafu(display("certificate PEM contains no certificate"))]
+    #[snafu(display("certificate pem contains no certificate"))]
     EmptyCertificate,
-    #[snafu(display("invalid private key PEM"))]
+    #[snafu(display("invalid private key pem"))]
     InvalidPrivateKeyPem { source: std::io::Error },
-    #[snafu(display("private key PEM contains no key"))]
+    #[snafu(display("private key pem contains no key"))]
     EmptyPrivateKey,
 }
 

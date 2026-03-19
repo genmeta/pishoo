@@ -92,19 +92,19 @@ enum WorkerError {
         actual: usize,
         limit: usize,
     },
-    #[snafu(display("failed to parse certificate PEM `{path}`"))]
+    #[snafu(display("failed to parse certificate pem `{path}`"))]
     ParseCert {
         path: String,
         source: std::io::Error,
     },
-    #[snafu(display("certificate PEM contains no certificate `{path}`"))]
+    #[snafu(display("certificate pem contains no certificate `{path}`"))]
     EmptyCert { path: String },
-    #[snafu(display("failed to parse private key PEM `{path}`"))]
+    #[snafu(display("failed to parse private key pem `{path}`"))]
     ParseKey {
         path: String,
         source: std::io::Error,
     },
-    #[snafu(display("private key PEM contains no key `{path}`"))]
+    #[snafu(display("private key pem contains no key `{path}`"))]
     EmptyKey { path: String },
 }
 
@@ -223,30 +223,30 @@ async fn main() -> Result<(), Whatever> {
     let genmeta_home_path = bootstrap.home.join(".genmeta");
 
     let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
-        .whatever_context("failed to create SIGQUIT listener")?;
+        .whatever_context("failed to create sigquit listener")?;
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .whatever_context("failed to create SIGHUP listener")?;
+        .whatever_context("failed to create sighup listener")?;
     let mut usr1_signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-            .whatever_context("failed to create SIGUSR1 listener")?;
+            .whatever_context("failed to create sigusr1 listener")?;
     let mut term_signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .whatever_context("failed to create SIGTERM listener")?;
+        .whatever_context("failed to create sigterm listener")?;
     let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .whatever_context("failed to create SIGINT listener")?;
+        .whatever_context("failed to create sigint listener")?;
 
     loop {
         tokio::select! {
             _ = term_signal.recv() => {
-                tracing::info!("received SIGTERM; shutting down worker");
+                tracing::info!("received sigterm; shutting down worker");
                 break;
             }
             _ = int_signal.recv() => {
-                tracing::info!("received SIGINT; shutting down worker");
+                tracing::info!("received sigint; shutting down worker");
                 break;
             }
             _ = quit_signal.recv() => {
-                tracing::info!("received SIGQUIT; shutting down worker");
+                tracing::info!("received sigquit; shutting down worker");
                 break;
             }
             _ = hup_signal.recv() => {
@@ -391,7 +391,7 @@ async fn reconcile_listener_set(
         let key_path = identity_dir.join("privkey.pem");
         let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path)
             .await
-            .whatever_context(format!("failed to read TLS material for server `{server_name}`"))?;
+            .whatever_context(format!("failed to read tls material for server `{server_name}`"))?;
 
         let request = RequestListen {
             server_name: server_name.clone(),
@@ -400,7 +400,7 @@ async fn reconcile_listener_set(
             key_pem,
         };
         if request.bind.is_empty() {
-            tracing::warn!(%server_name, "skip listener request: no resolved bind URIs");
+            tracing::warn!(%server_name, "skip listener request: no resolved bind uris");
             continue;
         }
 

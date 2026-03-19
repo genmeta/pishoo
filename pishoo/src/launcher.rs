@@ -29,7 +29,7 @@ pub enum LaunchWorkerError {
         username: String,
         source: ResolveSupplementaryGroupsError,
     },
-    #[snafu(display("worker path contains NUL byte"))]
+    #[snafu(display("worker path contains nul byte"))]
     InvalidWorkerPath { source: std::ffi::NulError },
     #[snafu(display("failed to build exec environment for user `{username}`"))]
     BuildExecEnv {
@@ -46,13 +46,13 @@ pub enum LaunchWorkerError {
 
 #[derive(Debug, Snafu)]
 pub enum BuildExecEnvError {
-    #[snafu(display("exec environment contains NUL byte"))]
+    #[snafu(display("exec environment contains nul byte"))]
     EntryContainsNul { source: std::ffi::NulError },
 }
 
 #[derive(Debug, Snafu)]
 pub enum ResolveSupplementaryGroupsError {
-    #[snafu(display("username contains NUL byte"))]
+    #[snafu(display("username contains nul byte"))]
     InvalidUsername { source: std::ffi::NulError },
     #[snafu(display("failed to query supplementary groups for user `{username}`"))]
     GetGroupList { username: String, source: Errno },

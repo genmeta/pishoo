@@ -34,12 +34,12 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
     // 读取 PID 文件
     let pid_str = fs::read_to_string(pid_file)
         .await
-        .whatever_context(format!("failed to read PID file at `{pid_file}`",))?;
+        .whatever_context(format!("failed to read pid file at `{pid_file}`",))?;
 
     let pid = pid_str
         .trim()
         .parse::<i32>()
-        .whatever_context(format!("invalid PID in file `{pid_file}`"))?;
+        .whatever_context(format!("invalid pid in file `{pid_file}`"))?;
 
     // 根据信号类型发送对应的系统信号
     let signal = match signal_type {
@@ -59,35 +59,35 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
 
 pub async fn handle_signal() -> Result<Option<RootSignal>, Whatever> {
     let mut term_signal =
-        signal(SignalKind::terminate()).whatever_context("failed to create SIGTERM listener")?;
+        signal(SignalKind::terminate()).whatever_context("failed to create sigterm listener")?;
     let mut int_signal =
-        signal(SignalKind::interrupt()).whatever_context("failed to create SIGINT listener")?;
+        signal(SignalKind::interrupt()).whatever_context("failed to create sigint listener")?;
     let mut quit_signal =
-        signal(SignalKind::quit()).whatever_context("failed to create SIGQUIT listener")?;
+        signal(SignalKind::quit()).whatever_context("failed to create sigquit listener")?;
     let mut hup_signal =
-        signal(SignalKind::hangup()).whatever_context("failed to create SIGHUP listener")?;
+        signal(SignalKind::hangup()).whatever_context("failed to create sighup listener")?;
     let mut usr1_signal = signal(SignalKind::user_defined1())
-        .whatever_context("failed to create SIGUSR1 listener")?;
+        .whatever_context("failed to create sigusr1 listener")?;
 
     tokio::select! {
         _ = term_signal.recv() => {
-            tracing::info!("received SIGTERM signal");
+            tracing::info!("received sigterm signal");
             Ok(Some(RootSignal::SigTerm))
         }
         _ = int_signal.recv() => {
-            tracing::info!("received SIGINT signal");
+            tracing::info!("received sigint signal");
             Ok(Some(RootSignal::SigInt))
         }
         _ = quit_signal.recv() => {
-            tracing::info!("received SIGQUIT signal");
+            tracing::info!("received sigquit signal");
             Ok(Some(RootSignal::SigQuit))
         }
         _ = hup_signal.recv() => {
-            tracing::info!("received SIGHUP signal");
+            tracing::info!("received sighup signal");
             Ok(Some(RootSignal::SigHup))
         }
         _ = usr1_signal.recv() => {
-            tracing::info!("received SIGUSR1 signal");
+            tracing::info!("received sigusr1 signal");
             Ok(Some(RootSignal::SigUsr1))
         }
     }
@@ -104,7 +104,7 @@ pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
         Err(error) => {
             return whatever!(
                 Err(error),
-                "failed to create new PID file at `{pid_file_path}`\n\
+                "failed to create new pid file at `{pid_file_path}`\n\
                     please either:\n\
                     - run as root user, or\n\
                     - change the `pid_file` directive in your config to a writable path",
@@ -115,11 +115,11 @@ pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
     pid_file
         .write_all(pid.as_bytes())
         .await
-        .whatever_context(format!("failed to write PID to file `{pid_file_path}`"))?;
+        .whatever_context(format!("failed to write pid to file `{pid_file_path}`"))?;
     pid_file
         .shutdown()
         .await
-        .whatever_context(format!("failed to close PID file `{pid_file_path}`"))
+        .whatever_context(format!("failed to close pid file `{pid_file_path}`"))
 }
 
 // 处理已存在的 PID 文件
@@ -133,7 +133,7 @@ async fn handle_existing_pid_file(
     let old_pid_str = match fs::read_to_string(pid_file_path).await {
         Ok(content) => content,
         Err(_) => {
-            tracing::warn!("cannot read PID file, removing stale PID file");
+            tracing::warn!("cannot read pid file, removing stale pid file");
             return recreate_pid_file(pid_file_path).await;
         }
     };
@@ -142,7 +142,7 @@ async fn handle_existing_pid_file(
     let old_pid = match old_pid_str.trim().parse::<i32>() {
         Ok(pid) => pid,
         Err(_) => {
-            tracing::warn!("pid file contains invalid PID, removing stale PID file");
+            tracing::warn!("pid file contains invalid pid, removing stale pid file");
             return recreate_pid_file(pid_file_path).await;
         }
     };
@@ -160,7 +160,7 @@ async fn handle_existing_pid_file(
         Err(_) => {
             // 进程不存在，删除旧的 PID 文件
             tracing::warn!(
-                "pid file exists but process {old_pid} is not running, removing stale PID file"
+                "pid file exists but process {old_pid} is not running, removing stale pid file"
             );
             recreate_pid_file(pid_file_path).await
         }
@@ -172,10 +172,10 @@ async fn recreate_pid_file(pid_file_path: &str) -> Result<fs::File, Whatever> {
     fs::remove_file(pid_file_path)
         .await
         .whatever_context(format!(
-            "failed to remove stale PID file at `{pid_file_path}`"
+            "failed to remove stale pid file at `{pid_file_path}`"
         ))?;
 
     fs::File::create(pid_file_path)
         .await
-        .whatever_context(format!("failed to create PID file at `{pid_file_path}`"))
+        .whatever_context(format!("failed to create pid file at `{pid_file_path}`"))
 }
