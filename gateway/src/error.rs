@@ -9,13 +9,13 @@ pub type BoxError = Box<AnyError>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum CustomError {
-    #[snafu(display("Invalid configuration"))]
+    #[snafu(display("invalid configuration"))]
     InvalidConfig {
         #[snafu(source(from(BoxError, std::convert::identity)))]
         source: BoxError,
     },
 
-    #[snafu(display("Http3 stream I/O error"))]
+    #[snafu(display("http3 stream I/O error"))]
     Stream {
         source: h3x::message::stream::MessageStreamError,
     },
@@ -23,7 +23,7 @@ pub enum CustomError {
     #[snafu(transparent)]
     Whatever { source: Whatever },
 
-    #[snafu(display("Unknown error"))]
+    #[snafu(display("unknown error"))]
     Unknown,
 }
 

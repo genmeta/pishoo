@@ -154,7 +154,7 @@ pub async fn pass(
     tracing::info!(path_and_query, "proxying request to upstream path and query");
 
     let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
-        "Failed to generate target URI from `{path_and_query}`"
+        "failed to generate target URI from `{path_and_query}`"
     ))?;
 
     // 准备请求参数
@@ -181,7 +181,7 @@ pub async fn pass(
             let io = TcpStream::connect((host, port))
                 .await
                 .whatever_context::<_, Whatever>(format!(
-                    "Cannot connect to target server {host}:{port}"
+                    "cannot connect to target server {host}:{port}"
                 ))?;
             send_request(io, new_parts, receiver, target_uri).await
         }
@@ -209,7 +209,7 @@ where
         .title_case_headers(true) // 标题首字母大写
         .handshake(io)
         .await
-        .whatever_context::<_, Whatever>("Failed to establish HTTP/1.1 client connection")?;
+        .whatever_context::<_, Whatever>("failed to establish HTTP/1.1 client connection")?;
 
     debug!(%target_uri, "http client connection established");
 
@@ -236,7 +236,7 @@ where
     let response = sender
         .send_request(Request::from_parts(new_parts, StreamBody::new(stream)))
         .await
-        .whatever_context::<_, Whatever>("Failed to send request to target")?;
+        .whatever_context::<_, Whatever>("failed to send request to target")?;
 
     debug!("finished sending request body");
     Ok(response)

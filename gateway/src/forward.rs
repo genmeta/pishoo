@@ -235,7 +235,8 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
             tokio::spawn(async move {
                 // QuicInterfaces::global().clear();
                 if let Err(error) = forward_proxy.await {
-                    error!(error = %Report::from_error(&error), "forward proxy failed");
+                    let report = Report::from_error(&error).to_string();
+                    error!(error = report, "forward proxy failed");
                 }
             }
             .in_current_span());
@@ -244,7 +245,8 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
         Err(launch_error) => {
             // 重新初始化 H3Client，清除旧连接状态
             h3_client::reinitialize(None).await;
-            error!(error = %Report::from_error(&launch_error), "failed to launch forward proxy, restarting all interfaces");
+            let report = Report::from_error(&launch_error).to_string();
+            error!(error = report, "failed to launch forward proxy, restarting all interfaces");
             Err(launch_error)
         }
     }

@@ -173,7 +173,7 @@ async fn serve_static_file(
                 "failed to send file content"
             );
             req_info.log_error(&err_msg).await;
-            return Err(error).whatever_context::<_, Whatever>("Failed to send file content")?;
+            return Err(error).whatever_context::<_, Whatever>("failed to send file content")?;
         }
     }
 
