@@ -53,7 +53,7 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
     nix::sys::signal::kill(Pid::from_raw(pid), signal)
         .whatever_context(format!("failed to send {signal} signal to process {pid}"))?;
 
-    println!("sent {signal} signal to process {pid}");
+    tracing::info!(%signal, pid, "sent signal to process");
     Ok(())
 }
 

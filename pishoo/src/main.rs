@@ -70,11 +70,11 @@ async fn main() -> Result<(), Whatever> {
     let config_file = args.config_file;
 
     let config = fs::read(&config_file).await.whatever_context(format!(
-        "Failed to read configuration file at `{}`",
+        "failed to read configuration file at `{}`",
         config_file.display()
     ))?;
     let config = gateway::parse::parse(&config, config_file.parent()).whatever_context(format!(
-        "Failed to parse configuration file at `{}`",
+        "failed to parse configuration file at `{}`",
         config_file.display()
     ))?;
 
@@ -102,14 +102,14 @@ async fn main() -> Result<(), Whatever> {
     let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
         .allow_unauthenticated()
         .build()
-        .expect("Failed to build TLS client cert verifier");
+        .expect("failed to build TLS client cert verifier");
 
     let listeners = QuicListeners::builder()
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_alpns([b"h3".as_slice()])
         .listen(1024)
-        .expect("Failed to create QuicListeners");
+        .expect("failed to create QuicListeners");
 
     // Create QuicClient for outbound connectors
     let root_store = pishoo::tls::root_cert_store();
