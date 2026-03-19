@@ -7,7 +7,7 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info};
 
 use crate::{
-    command::{self, content_type, index},
+    command::{self, IndexError, content_type, index},
     error::{Result, StreamSnafu, Whatever},
     parse::{Node, Value},
     reverse::{gzip::GzipConfig, log::RequestInfo},
@@ -117,16 +117,27 @@ async fn serve_static_file(
 
     let (file, file_size, file_path) = match index(location, file_path).await {
         Ok(result) => result,
-        Err(index_error) => {
+        Err(index_error @ (IndexError::MissingIndexFiles | IndexError::FileNotFound { .. })) => {
+            let report = Report::from_error(&index_error).to_string();
             tracing::info!(
                 uri = %uri,
                 path = file_path,
-                error = %Report::from_error(&index_error),
+                error = report,
                 "static file was not found"
             );
             super::send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
             req_info.log_access(404, 0).await;
             return Ok(());
+        }
+        Err(error) => {
+            let report = Report::from_error(&error).to_string();
+            error!(
+                uri = %uri,
+                path = file_path,
+                error = report,
+                "failed to resolve static file"
+            );
+            return Err(error).whatever_context::<_, Whatever>("failed to resolve static file")?;
         }
     };
 

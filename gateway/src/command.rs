@@ -2,12 +2,29 @@ use std::{collections::HashMap, io, sync::Arc};
 
 use acl::Acl;
 use http::{HeaderValue, Request, Uri, header, response::Parts};
+use snafu::Snafu;
 use tokio::fs::File;
 
 use crate::parse::{Node, Value};
 
 pub(crate) mod acl;
 pub(crate) mod variables;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum IndexError {
+    #[snafu(display("missing index files while serving directory"))]
+    MissingIndexFiles,
+
+    #[snafu(display("file was not found at `{path}`"))]
+    FileNotFound { path: String },
+
+    #[snafu(display("failed to read file metadata at `{path}`"))]
+    ReadMetadata { source: io::Error, path: String },
+
+    #[snafu(display("failed to open file at `{path}`"))]
+    OpenFile { source: io::Error, path: String },
+}
 
 /// Attempts to open a file directly or serve an index file if the path points to a directory.
 ///
@@ -30,14 +47,23 @@ pub(crate) mod variables;
 pub(crate) async fn index(
     node: &Arc<Node>,
     file_path: impl Into<String>,
-) -> io::Result<(File, u64, String)> {
+) -> Result<(File, u64, String), IndexError> {
     let mut file_path = file_path.into();
-    let metadata = tokio::fs::metadata(&file_path).await?;
+    let metadata = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|source| IndexError::ReadMetadata {
+            source,
+            path: file_path.clone(),
+        })?;
 
     if metadata.is_file() {
         return File::open(&file_path)
             .await
-            .map(|file| (file, metadata.len(), file_path));
+            .map(|file| (file, metadata.len(), file_path.clone()))
+            .map_err(|source| IndexError::OpenFile {
+                source,
+                path: file_path,
+            });
     }
 
     // 2. 检查是否是目录
@@ -52,10 +78,7 @@ pub(crate) async fn index(
         let index_files = if let Some(index_files) = index_files {
             index_files
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "No index files found while trying to serve directory",
-            ));
+            return Err(IndexError::MissingIndexFiles);
         };
 
         for index_filename in index_files {
@@ -67,15 +90,16 @@ pub(crate) async fn index(
             {
                 return File::open(&*potential_path)
                     .await
-                    .map(|file| (file, metadata.len(), potential_path));
+                    .map(|file| (file, metadata.len(), potential_path.clone()))
+                    .map_err(|source| IndexError::OpenFile {
+                        source,
+                        path: potential_path,
+                    });
             }
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("File not found: {file_path}"),
-    ))
+    Err(IndexError::FileNotFound { path: file_path })
 }
 
 pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<T> {
