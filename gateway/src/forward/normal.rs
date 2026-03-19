@@ -85,7 +85,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) else {
         let error = ForwardRequestError::MissingConnectAuthority;
-        error!(error = %Report::from_error(&error), "missing host in CONNECT uri");
+        error!(error = %Report::from_error(&error), "missing host in connect uri");
         let mut resp = build_error_response(Report::from_error(&error).to_string());
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
         return Ok(resp);

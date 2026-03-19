@@ -128,7 +128,7 @@ pub async fn serve(
         io::Result::Ok((listener, local_addr))
     }
     .await
-    .whatever_context::<_, Whatever>(format!("failed to listen to TCP address: {}", addr))?;
+    .whatever_context::<_, Whatever>(format!("failed to listen to tcp address: {}", addr))?;
 
     info!(%local_addr, "listening on http endpoint");
 
@@ -164,7 +164,7 @@ pub async fn serve(
 
                 match acl.check(&host) {
                     true if is_connect => {
-                        debug!(%host, "quic proxying CONNECT request");
+                        debug!(%host, "quic proxying connect request");
                         forward::quic::connect_tunnel(req).await
                     }
                     true => {
@@ -172,7 +172,7 @@ pub async fn serve(
                         forward::quic::proxy(req).await
                     }
                     false if is_connect => {
-                        debug!(%host, "normal proxying CONNECT request");
+                        debug!(%host, "normal proxying connect request");
                         forward::normal::connect(req).await
                     }
                     false => {

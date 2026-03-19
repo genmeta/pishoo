@@ -19,7 +19,7 @@ pub struct DnsResolver {
 impl DnsResolver {
     pub fn default_h3() -> Self {
         Self {
-            base_url: H3_DNS_SERVER.parse().expect("invalid H3_DNS_SERVER"),
+            base_url: H3_DNS_SERVER.parse().expect("invalid h3 dns server"),
         }
     }
 

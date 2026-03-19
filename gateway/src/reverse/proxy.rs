@@ -152,7 +152,7 @@ pub async fn pass(
     tracing::info!(path_and_query, "proxying request to upstream path and query");
 
     let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
-        "failed to generate target URI from `{path_and_query}`"
+        "failed to generate target uri from `{path_and_query}`"
     ))?;
 
     // 准备请求参数
@@ -166,8 +166,8 @@ pub async fn pass(
     // Checked in configuration parsing phase
     let scheme = proxy_pass
         .scheme_str()
-        .expect("missing scheme in proxy_pass URI");
-    let host = proxy_pass.host().expect("missing host in proxy_pass URI");
+        .expect("missing scheme in proxy_pass uri");
+    let host = proxy_pass.host().expect("missing host in proxy_pass uri");
     let port = proxy_pass.port_u16().unwrap_or(match scheme {
         "http" => 80,
         "https" => 443,
@@ -207,7 +207,7 @@ where
         .title_case_headers(true) // 标题首字母大写
         .handshake(io)
         .await
-        .whatever_context::<_, Whatever>("failed to establish HTTP/1.1 client connection")?;
+        .whatever_context::<_, Whatever>("failed to establish http/1.1 client connection")?;
 
     debug!(%target_uri, "http client connection established");
 

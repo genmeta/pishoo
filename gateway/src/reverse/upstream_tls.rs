@@ -46,7 +46,7 @@ pub(super) async fn connect_https(
     proxy_pass: &Uri,
 ) -> Result<TlsStream<TcpStream>> {
     // 先从 proxy_pass 中解析服务端主机名和端口，作为 TCP 连接与 SNI 的输入。
-    let host = proxy_pass.host().expect("missing host in proxy_pass URI");
+    let host = proxy_pass.host().expect("missing host in proxy_pass uri");
     let port = proxy_pass.port_u16().unwrap_or(443);
     let server_name = ServerName::try_from(host.to_string())
         .whatever_context::<_, Whatever>(format!("invalid upstream tls server name `{host}`"))?;

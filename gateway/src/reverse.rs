@@ -142,7 +142,7 @@ pub async fn serve(
             config,
         )),
         (Some(_), None) => {
-            warn!("stun configured but no dns publisher for {STUN_DOMAIN}, stun server manager disabled");
+            warn!("stun configured but no dns publisher for {STUN_DOMAIN:?}, stun server manager disabled");
             None
         }
         _ => None,
@@ -438,7 +438,7 @@ async fn handle_single_connection(
     let h3_conn = Arc::new(
         H3Connection::new(h3_settings, conn)
             .await
-            .whatever_context::<_, Whatever>("failed to establish H3 connection")?,
+            .whatever_context::<_, Whatever>("failed to establish h3 connection")?,
     );
 
     debug!("h3 connection established");

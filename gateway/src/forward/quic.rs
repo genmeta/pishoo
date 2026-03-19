@@ -27,7 +27,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let h3_conn = match connect(&client, &host).await {
         Ok(conn) => conn,
         Err(error) => {
-            error!(error = %Report::from_error(&error), "failed to create QUIC connection");
+            error!(error = %Report::from_error(&error), "failed to create quic connection");
             return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
@@ -83,7 +83,7 @@ async fn send(
     let response = h3_conn
         .execute_hyper_request(req)
         .await
-        .whatever_context::<_, Whatever>("failed to execute QUIC request")?;
+        .whatever_context::<_, Whatever>("failed to execute quic request")?;
 
     // 将响应体转换为 BoxBody
     let (mut parts, body) = response.into_parts();
