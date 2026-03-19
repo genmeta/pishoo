@@ -5,10 +5,10 @@ use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
 use snafu::{Report, ResultExt, Whatever};
-use tokio::io;
 use tracing::{Instrument, error, info};
 
 use super::BoxResponse;
+use crate::error::BoxError;
 use crate::forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host};
 
 /// 处理普通 HTTP 请求
@@ -88,7 +88,7 @@ async fn send(
     // 将响应体转换为 BoxBody
     let (mut parts, body) = response.into_parts();
     parts.version = http::Version::HTTP_11;
-    let body = BodyExt::boxed_unsync(body.map_err(io::Error::other));
+    let body = BodyExt::boxed_unsync(body.map_err(BoxError::from));
     Ok(Response::from_parts(parts, body))
 }
 

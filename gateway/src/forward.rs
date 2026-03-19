@@ -15,7 +15,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use crate::{
     command,
     dns::{MDNS_SERVICE, build_query_resolvers},
-    error::{Result, Whatever},
+    error::{BoxError, Result, Whatever},
     forward,
     parse::{Node, Value},
 };
@@ -27,7 +27,7 @@ mod quic;
 #[allow(dead_code)]
 pub static ALPN: &[u8] = b"h3";
 
-type BoxResponse = Response<UnsyncBoxBody<Bytes, io::Error>>;
+type BoxResponse = Response<UnsyncBoxBody<Bytes, BoxError>>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]

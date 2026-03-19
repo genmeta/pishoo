@@ -3,11 +3,12 @@ use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use snafu::{Report, ResultExt};
-use tokio::{io, net::TcpStream};
+use tokio::net::TcpStream;
 use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
 use crate::{
+    error::BoxError,
     error::Whatever,
     forward::{ForwardRequestError, build_empty_response, build_error_response, tunnel_upgrade},
 };
@@ -78,7 +79,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 
     tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
 
-    Ok(resp.map(|b| UnsyncBoxBody::new(b.map_err(io::Error::other))))
+    Ok(resp.map(|b| UnsyncBoxBody::new(b.map_err(BoxError::from))))
 }
 
 pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
