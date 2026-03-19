@@ -65,7 +65,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
         .entry("add_header".to_string())
         .or_insert_with(|| Value::Header(vec![]))
     else {
-        unreachable!("Unexpected value type, should be `Header`");
+        unreachable!("unexpected value type, should be `Header`");
     };
     exist_headers.extend(cors_headers);
 

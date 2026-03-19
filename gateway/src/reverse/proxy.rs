@@ -137,7 +137,7 @@ pub async fn pass(
         let pattern = if let Value::Pattern(pattern, _) = location.value() {
             pattern
         } else {
-            unreachable!("Invalid location pattern");
+            unreachable!("invalid location pattern");
         };
 
         match pattern {
@@ -170,12 +170,12 @@ pub async fn pass(
     // Checked in configuration parsing phase
     let scheme = proxy_pass
         .scheme_str()
-        .expect("Missing scheme in proxy_pass URI");
-    let host = proxy_pass.host().expect("Missing host in proxy_pass URI");
+        .expect("missing scheme in proxy_pass URI");
+    let host = proxy_pass.host().expect("missing host in proxy_pass URI");
     let port = proxy_pass.port_u16().unwrap_or(match scheme {
         "http" => 80,
         "https" => 443,
-        _ => unreachable!("Unsupported proxy_pass scheme"),
+        _ => unreachable!("unsupported proxy_pass scheme"),
     });
 
     match scheme {
@@ -191,7 +191,7 @@ pub async fn pass(
             let io = super::upstream_tls::connect_https(location, proxy_pass).await?;
             send_request(io, new_parts, receiver, target_uri).await
         }
-        _ => unreachable!("Unsupported proxy_pass scheme"),
+        _ => unreachable!("unsupported proxy_pass scheme"),
     }
 }
 

@@ -103,7 +103,7 @@ fn build_publisher(
             resolver.base_url.to_string(),
             resolver.create_h3_client(config),
         )
-        .expect("H3 dns server base_url has been checked"),
+        .expect("h3 dns server base_url has been checked"),
     )
 }
 
@@ -113,7 +113,7 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
     for server in servers {
         let key_path = match server.get("ssl_certificate_key") {
             Some(Value::Path(path)) => path,
-            _ => whatever!("Missing or invalid ssl_certificate_key for server"),
+            _ => whatever!("missing or invalid ssl_certificate_key for server"),
         };
 
         let resolver = DnsResolver::from_node_or_default(server);
@@ -121,7 +121,7 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
 
         let server_names = match server.get("server_name") {
             Some(Value::ServerName(names)) => names,
-            _ => unreachable!("Invalid server name"),
+            _ => unreachable!("invalid server name"),
         };
 
         for server_name in server_names {
@@ -131,7 +131,7 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
             };
 
             let identity = server_identity(server, domain.clone())
-                .expect("Missing ssl_certificate or ssl_certificate_key");
+                .expect("missing ssl_certificate or ssl_certificate_key");
 
             let resolvers = if domain.ends_with("user.genmeta.net") {
                 tracing::warn!(server_name = %domain, "domain excluded from publishing");

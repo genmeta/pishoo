@@ -91,11 +91,11 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
                 cert_chain.to_certificate(),
                 key_der.as_slice(),
             )
-            .expect("Failed to create client builder with identity")
+            .expect("failed to create client builder with identity")
     } else {
         tls_builder
             .without_identity()
-            .expect("Failed to create client builder")
+            .expect("failed to create client builder")
     };
 
     let iface_factory: Arc<dyn ProductIO> = Arc::new(gm_quic::prelude::handy::DEFAULT_IO_FACTORY);

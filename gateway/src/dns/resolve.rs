@@ -9,7 +9,7 @@ use h3x::client::Client;
 use http::Uri;
 
 use super::H3_DNS_SERVER;
-use crate::parse::{Node, ServerIdentity, Value, optional_server_identity, server_identity};
+use crate::parse::{optional_server_identity, server_identity, Node, ServerIdentity, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolver {
@@ -19,7 +19,7 @@ pub struct DnsResolver {
 impl DnsResolver {
     pub fn default_h3() -> Self {
         Self {
-            base_url: H3_DNS_SERVER.parse().expect("Invalid H3_DNS_SERVER"),
+            base_url: H3_DNS_SERVER.parse().expect("invalid H3_DNS_SERVER"),
         }
     }
 
@@ -44,7 +44,7 @@ impl DnsResolver {
 
         Arc::new(
             H3Resolver::new(self.base_url.to_string(), client)
-                .expect("H3 dns server base_url has been checked"),
+                .expect("h3 dns server base_url has been checked"),
         )
     }
 
@@ -53,7 +53,7 @@ impl DnsResolver {
         Client::<Arc<QuicClient>>::builder()
             .with_root_certificates(root_store)
             .without_identity()
-            .expect("Failed to create client builder")
+            .expect("failed to create client builder")
             .build()
     }
 
@@ -76,15 +76,15 @@ impl DnsResolver {
 
         let cert_chain: Vec<_> = certs(&mut Cursor::new(&cert_data))
             .collect::<Result<Vec<_>, _>>()
-            .expect("Failed to parse certificates");
+            .expect("failed to parse certificates");
 
         let private_key = private_key(&mut Cursor::new(&key_data))
-            .expect("Failed to parse private key")
-            .expect("No private key found");
+            .expect("failed to parse private key")
+            .expect("no private key found");
 
         client_builder
             .with_identity(name.clone(), cert_chain, private_key)
-            .expect("Failed to configure client identity")
+            .expect("failed to configure client identity")
             .build()
     }
 }
@@ -106,7 +106,7 @@ pub fn build_query_resolver_chain(servers: &[Arc<Node>]) -> Resolvers {
         let resolver = DnsResolver::from_node_or_default(server);
         let server_names = match server.get("server_name") {
             Some(Value::ServerName(names)) => names,
-            _ => unreachable!("Invalid server name"),
+            _ => unreachable!("invalid server name"),
         };
 
         for server_name in server_names {
@@ -117,7 +117,7 @@ pub fn build_query_resolver_chain(servers: &[Arc<Node>]) -> Resolvers {
             let resolver_key = (resolver.base_url.to_string(), domain.clone());
             if seen.insert(resolver_key) {
                 let identity = server_identity(server, domain)
-                    .expect("Missing ssl_certificate or ssl_certificate_key");
+                    .expect("missing ssl_certificate or ssl_certificate_key");
                 resolvers = resolvers.with(resolver.build_query_resolver(Some(&identity)));
             }
         }

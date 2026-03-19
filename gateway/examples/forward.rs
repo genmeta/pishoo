@@ -23,7 +23,7 @@ async fn main() -> Result<(), Whatever> {
     let config_file = if args.len() > 1 {
         &args[1]
     } else {
-        eprintln!("Usage: {} <config file>", args[0]);
+        eprintln!("usage: {} <config file>", args[0]);
         std::process::exit(1);
     };
     let config_file = std::path::Path::new(config_file);
@@ -36,9 +36,9 @@ async fn main() -> Result<(), Whatever> {
     let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
         pishoo
             .first()
-            .expect("No pishoo block found, but pishoo key exists")
+            .expect("no pishoo block found, but pishoo key exists")
     } else {
-        unreachable!("Parse error")
+        unreachable!("parse error")
     };
 
     let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {

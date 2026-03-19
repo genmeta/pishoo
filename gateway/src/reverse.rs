@@ -163,7 +163,7 @@ fn build_router(servers: &[Arc<Node>]) -> RouterMap {
     for server in servers {
         let server_names = match server.get("server_name") {
             Some(Value::ServerName(names)) => names.clone(),
-            _ => unreachable!("Invalid server name"),
+            _ => unreachable!("invalid server name"),
         };
 
         for server_name in server_names {
@@ -188,11 +188,11 @@ async fn create_quic_listeners(
 
     for server in servers {
         let Some(Value::Listen(listens)) = server.get("listen") else {
-            unreachable!("Invalid listen address");
+            unreachable!("invalid listen address");
         };
 
         let Some(Value::ServerName(server_names)) = server.get("server_name").cloned() else {
-            unreachable!("Invalid server name");
+            unreachable!("invalid server name");
         };
 
         for server_name_struct in server_names {
@@ -253,15 +253,15 @@ async fn create_quic_listeners(
     // 为每个服务器添加TLS证书
     for server in servers {
         let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
-            unreachable!("Invalid ssl_certificate path");
+            unreachable!("invalid ssl_certificate path");
         };
 
         let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
-            unreachable!("Invalid ssl_certificate_key path");
+            unreachable!("invalid ssl_certificate_key path");
         };
 
         let Some(Value::ServerName(server_names)) = server.get("server_name").cloned() else {
-            unreachable!("Invalid server name");
+            unreachable!("invalid server name");
         };
 
         let cert = fs::read(cert_path)
@@ -590,7 +590,7 @@ async fn handle_request(
     }
 
     let Value::Pattern(_, location_values) = location.value() else {
-        unreachable!("Invalid location value");
+        unreachable!("invalid location value");
     };
 
     let (mut parts, body) = req.into_parts();
@@ -639,7 +639,7 @@ fn match_location<'l: 's, 's>(
         let pattern = if let Value::Pattern(pattern, _) = location.value() {
             pattern
         } else {
-            unreachable!("Invalid location pattern");
+            unreachable!("invalid location pattern");
         };
 
         if pattern.priority() < pattern_level {
@@ -663,7 +663,7 @@ fn build_response(status: StatusCode) -> Response<()> {
     Response::builder()
         .status(status)
         .body(())
-        .expect("Failed to build response")
+        .expect("failed to build response")
 }
 
 fn action_on_missing_rule(policy: MissingRulePolicy) -> RequestAction {

@@ -127,7 +127,7 @@ impl FromStr for IpFamilies {
             "v4only" => Ok(IpFamilies::V4),
             "v6only" => Ok(IpFamilies::V6),
             "dual" => Ok(IpFamilies::Dual),
-            _ => whatever!("Invalid IP families: {s}, expected `v4only`, `v6only` or `dual`"),
+            _ => whatever!("invalid IP families: {s}, expected `v4only`, `v6only` or `dual`"),
         }
     }
 }
@@ -273,7 +273,7 @@ impl Node {
     }
 
     fn set_parent(&self, parent: Option<Weak<Node>>) {
-        self.parent.set(parent).expect("Parent link set multiple times for the same node. This indicates a bug in the tree transformation logic.");
+        self.parent.set(parent).expect("parent link set multiple times for the same node. this indicates a bug in the tree transformation logic.");
     }
 
     pub fn backtrack_node(self: &Arc<Self>, key: &str) -> Option<Arc<Node>> {
@@ -368,7 +368,7 @@ impl Commands {
         for directive in directives {
             let name = directive.name.clone();
             let Some(command) = self.0.get(name.as_str()) else {
-                whatever!("Unknown directive `{name}`",)
+                whatever!("unknown directive `{name}`",)
             };
 
             match command(directive)? {
@@ -376,7 +376,7 @@ impl Commands {
                     let Value::Nodes(nodes) =
                         values.entry(name).or_insert_with(|| Value::Nodes(vec![]))
                     else {
-                        unreachable!("Unexpected value type, should be `Nodes`");
+                        unreachable!("unexpected value type, should be `Nodes`");
                     };
                     nodes.push(Arc::new(Node::new(value)));
                 }
@@ -384,7 +384,7 @@ impl Commands {
                     let Value::Header(exist_headers) =
                         values.entry(name).or_insert_with(|| Value::Header(vec![]))
                     else {
-                        unreachable!("Unexpected value type, should be `Header`");
+                        unreachable!("unexpected value type, should be `Header`");
                     };
                     exist_headers.extend(headers);
                 }
@@ -393,7 +393,7 @@ impl Commands {
                         .entry(name)
                         .or_insert_with(|| Value::SshSslUser(vec![]))
                     else {
-                        unreachable!("Unexpected value type, should be `SshSslUser`");
+                        unreachable!("unexpected value type, should be `SshSslUser`");
                     };
                     exist_users.extend(users);
                 }
@@ -403,7 +403,7 @@ impl Commands {
                         .and_modify(|v| match v {
                             Value::Addr(old_addr) => *v = Value::AddrVec(vec![*old_addr, addr]),
                             Value::AddrVec(vec) => vec.push(addr),
-                            _ => unreachable!("Unexpected value type for Addr aggregation"),
+                            _ => unreachable!("unexpected value type for Addr aggregation"),
                         })
                         .or_insert(Value::Addr(addr));
                 }
@@ -434,7 +434,7 @@ pub(crate) fn parse_boolean(directive: Directive<Nginx>) -> Result<Value> {
         [flag] => match flag.as_str() {
             "on" => Ok(Value::Boolean(true)),
             "off" => Ok(Value::Boolean(false)),
-            _ => whatever!("Invalid boolean value `{flag}`, expected `on` or `off`"),
+            _ => whatever!("invalid boolean value `{flag}`, expected `on` or `off`"),
         },
         _ => whatever!(
             "Invalid number of arguments for directive: {}",
@@ -670,7 +670,7 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
 
                 Ok(Value::Resolver(base_url))
             }
-            _ => whatever!("Unknown resolver kind: {kind}, expected `h3`"),
+            _ => whatever!("unknown resolver kind: {kind}, expected `h3`"),
         },
         _ => whatever!(
             "Invalid number of arguments for directive: {}",

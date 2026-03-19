@@ -46,18 +46,16 @@ pub(super) async fn connect_https(
     proxy_pass: &Uri,
 ) -> Result<TlsStream<TcpStream>> {
     // 先从 proxy_pass 中解析服务端主机名和端口，作为 TCP 连接与 SNI 的输入。
-    let host = proxy_pass.host().expect("Missing host in proxy_pass URI");
+    let host = proxy_pass.host().expect("missing host in proxy_pass URI");
     let port = proxy_pass.port_u16().unwrap_or(443);
     let server_name = ServerName::try_from(host.to_string())
-        .whatever_context::<_, Whatever>(format!("Invalid upstream TLS server name `{host}`"))?;
+        .whatever_context::<_, Whatever>(format!("invalid upstream TLS server name `{host}`"))?;
 
     debug!(host, port, "connecting to https upstream");
 
     let tcp_stream = TcpStream::connect((host, port))
         .await
-        .whatever_context::<_, Whatever>(format!(
-            "Cannot connect to HTTPS upstream {host}:{port}"
-        ))?;
+        .whatever_context::<_, Whatever>(format!("cannot connect to HTTPS upstream {host}:{port}"))?;
 
     // 根据 location 中的 TLS 配置构造客户端配置，再执行 TLS 握手。
     let tls_config = build_client_config(location)?;
@@ -67,7 +65,7 @@ pub(super) async fn connect_https(
         .connect(server_name, tcp_stream)
         .await
         .whatever_context::<_, Whatever>(format!(
-            "Failed to establish TLS connection to upstream {host}:{port}"
+            "failed to establish TLS connection to upstream {host}:{port}"
         ))?;
 
     Ok(tls_stream)
@@ -179,7 +177,7 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
         .map(|private_key| private_key.clone_key());
 
     let Some(private_key) = parsed_key else {
-        whatever!("No private key found in `{}`", path.display());
+            whatever!("no private key found in `{}`", path.display());
     };
 
     Ok(private_key)
