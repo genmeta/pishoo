@@ -240,7 +240,7 @@ async fn create_quic_listeners(
         // 允许client不带证书
         .allow_unauthenticated()
         .build()
-        .whatever_context::<_, Whatever>("failed to build TLS client cert verifier")?;
+        .whatever_context::<_, Whatever>("failed to build tls client cert verifier")?;
 
     let listeners = builder
         .with_parameters(server_parameters())
@@ -284,7 +284,7 @@ async fn create_quic_listeners(
             let bind_uris = server_bind_uris
                 .get(&server_name)
                 .whatever_context::<_, Whatever>(format!(
-                    "no bind URIs found for server `{server_name}`"
+                    "no bind uris found for server `{server_name}`"
                 ))?;
             debug!(server_name, ?bind_uris, "adding server");
             listeners

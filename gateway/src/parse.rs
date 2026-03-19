@@ -127,7 +127,7 @@ impl FromStr for IpFamilies {
             "v4only" => Ok(IpFamilies::V4),
             "v6only" => Ok(IpFamilies::V6),
             "dual" => Ok(IpFamilies::Dual),
-            _ => whatever!("invalid IP families: {s}, expected `v4only`, `v6only` or `dual`"),
+            _ => whatever!("invalid ip families: {s}, expected `v4only`, `v6only` or `dual`"),
         }
     }
 }
@@ -504,15 +504,15 @@ fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [s] => {
             let uri = s.parse::<Uri>().whatever_context(format!(
-                "invalid URI `{s}` while parsing directive {}",
+                "invalid uri `{s}` while parsing directive {}",
                 directive.name
             ))?;
 
             let scheme = uri
                 .scheme_str()
-                .whatever_context::<_, Whatever>("missing scheme in proxy_pass URI")
+                .whatever_context::<_, Whatever>("missing scheme in proxy_pass uri")
                 .whatever_context(format!(
-                    "invalid URI `{s}` while parsing directive {}",
+                    "invalid uri `{s}` while parsing directive {}",
                     directive.name
                 ))?;
 
@@ -522,9 +522,9 @@ fn parse_proxy_pass(directive: Directive<Nginx>) -> Result<Value> {
             );
 
             uri.host()
-                .whatever_context::<_, Whatever>("missing host in proxy_pass URI")
+                .whatever_context::<_, Whatever>("missing host in proxy_pass uri")
                 .whatever_context(format!(
-                    "invalid URI `{s}` while parsing directive {}",
+                    "invalid uri `{s}` while parsing directive {}",
                     directive.name
                 ))?;
 
@@ -660,7 +660,7 @@ fn parse_resolver(directive: Directive<Nginx>) -> Result<Value> {
             }
             "h3" => {
                 let base_url = resolver.parse::<Uri>().whatever_context(format!(
-                    "invalid base URL `{resolver}` whiling parsing h3 resolver",
+                    "invalid base url `{resolver}` whiling parsing h3 resolver",
                 ))?;
 
                 Ok(Value::Resolver(base_url))
@@ -705,7 +705,7 @@ pub(crate) fn parse_server_id(directive: Directive<Nginx>) -> Result<Value> {
     match &directive.args[..] {
         [id_str] => {
             let id = id_str.parse::<u8>().whatever_context(format!(
-                "invalid server ID `{id_str}` while parsing directive {}",
+                "invalid server id `{id_str}` while parsing directive {}",
                 directive.name
             ))?;
             Ok(Value::ServerId(id))

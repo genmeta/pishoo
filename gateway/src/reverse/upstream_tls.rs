@@ -49,13 +49,13 @@ pub(super) async fn connect_https(
     let host = proxy_pass.host().expect("missing host in proxy_pass URI");
     let port = proxy_pass.port_u16().unwrap_or(443);
     let server_name = ServerName::try_from(host.to_string())
-        .whatever_context::<_, Whatever>(format!("invalid upstream TLS server name `{host}`"))?;
+        .whatever_context::<_, Whatever>(format!("invalid upstream tls server name `{host}`"))?;
 
     debug!(host, port, "connecting to https upstream");
 
     let tcp_stream = TcpStream::connect((host, port))
         .await
-        .whatever_context::<_, Whatever>(format!("cannot connect to HTTPS upstream {host}:{port}"))?;
+        .whatever_context::<_, Whatever>(format!("cannot connect to https upstream {host}:{port}"))?;
 
     // 根据 location 中的 TLS 配置构造客户端配置，再执行 TLS 握手。
     let tls_config = build_client_config(location)?;
@@ -65,7 +65,7 @@ pub(super) async fn connect_https(
         .connect(server_name, tcp_stream)
         .await
         .whatever_context::<_, Whatever>(format!(
-            "failed to establish TLS connection to upstream {host}:{port}"
+            "failed to establish tls connection to upstream {host}:{port}"
         ))?;
 
     Ok(tls_stream)
@@ -101,7 +101,7 @@ fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
         builder
             .with_client_auth_cert(cert_chain, private_key)
             .whatever_context::<_, Whatever>(format!(
-                "failed to configure upstream TLS client identity from `{}` and `{}`",
+                "failed to configure upstream tls client identity from `{}` and `{}`",
                 cert_path.display(),
                 key_path.display()
             ))?
@@ -118,14 +118,14 @@ fn build_root_store(trusted_ca: Option<&Path>) -> Result<RootCertStore> {
     let mut root_store = crate::common::root_cert().as_ref().clone();
 
     if let Some(ca_path) = trusted_ca {
-        let trusted_certs = load_cert_chain(ca_path, "upstream trusted CA certificate")?;
+        let trusted_certs = load_cert_chain(ca_path, "upstream trusted ca certificate")?;
 
         // 自定义 CA 证书链中的每一张证书都加入根证书池，供后续校验上游证书使用。
         for cert in trusted_certs {
             root_store
                 .add(cert)
                 .whatever_context::<_, Whatever>(format!(
-                    "failed to add upstream trusted CA certificate from `{}`",
+                    "failed to add upstream trusted ca certificate from `{}`",
                     ca_path.display()
                 ))?;
         }
