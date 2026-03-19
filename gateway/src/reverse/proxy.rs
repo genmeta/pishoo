@@ -43,9 +43,7 @@ pub async fn handle(
         Ok(resp) => resp,
         Err(error) => {
             error!(error = %Report::from_error(&error), "proxy request failed");
-            req_info
-                .log_error(Report::from_error(&error).to_string())
-                .await;
+            req_info.log_error(Report::from_error(&error)).await;
             req_info.log_access(500, 0).await;
 
             super::send_status_and_close(sender, http::StatusCode::INTERNAL_SERVER_ERROR).await?;
@@ -93,9 +91,7 @@ pub async fn handle(
         }
         Err(error) => {
             error!(error = %Report::from_error(&error), "failed to forward response body");
-            req_info
-                .log_error(Report::from_error(&error).to_string())
-                .await;
+            req_info.log_error(Report::from_error(&error)).await;
         }
     }
     match writer.shutdown().await {

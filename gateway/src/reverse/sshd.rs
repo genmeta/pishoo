@@ -149,9 +149,7 @@ pub async fn serve(
             req_info.log_access(200, 0).await;
         }
         Err(e) => {
-            req_info
-                .log_error(Report::from_error(&e).to_string())
-                .await;
+            req_info.log_error(Report::from_error(&e)).await;
             req_info.log_access(500, 0).await;
         }
     }

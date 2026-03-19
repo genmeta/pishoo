@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{fmt::Display, net::SocketAddr, path::PathBuf};
 
 use chrono::Local;
 use genmeta_home::GenmetaHome;
@@ -86,8 +86,8 @@ impl RequestInfo {
         write_access_log(log_line).await;
     }
 
-    pub async fn log_error(&self, message: impl AsRef<str>) {
-        write_error_log(message.as_ref().to_string()).await;
+    pub async fn log_error(&self, message: impl Display) {
+        write_error_log(message).await;
     }
 }
 
@@ -127,7 +127,7 @@ pub async fn write_access_log(line: String) {
     }
 }
 
-pub async fn write_error_log(line: String) {
+pub async fn write_error_log(line: impl Display) {
     let Some(path) = get_error_log_path() else {
         return;
     };

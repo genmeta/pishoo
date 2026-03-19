@@ -180,9 +180,7 @@ async fn serve_static_file(
                 error = %Report::from_error(&error),
                 "failed to send file content"
             );
-            req_info
-                .log_error(Report::from_error(&error).to_string())
-                .await;
+            req_info.log_error(Report::from_error(&error)).await;
             return Err(error).whatever_context::<_, Whatever>("failed to send file content")?;
         }
     }
