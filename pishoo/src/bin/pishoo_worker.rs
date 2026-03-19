@@ -321,8 +321,7 @@ fn start_server_runtime(
                                     worker_policy.access_rules,
                                     gateway::reverse::MissingRulePolicy::Deny,
                                 ).await {
-                                    let error_report = Report::from_error(&error).to_string();
-                                    tracing::warn!(error = %error_report, "worker connection handling failed");
+                                    tracing::warn!(error = %Report::from_error(&error), "worker connection handling failed");
                                 }
                             }
                             .in_current_span());
