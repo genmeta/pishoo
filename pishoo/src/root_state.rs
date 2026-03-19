@@ -215,8 +215,16 @@ impl RootState {
                 None::<Vec<u8>>,
             )
             .await
-            .map_err(|e| ListenRequestError::Internal {
-                message: format!("failed to add server `{server_name}`: {e}"),
+            .map_err(|error| {
+                tracing::warn!(
+                    caller_pid = %caller_pid,
+                    %server_name,
+                    error = %Report::from_error(&error),
+                    "failed to add server to listeners"
+                );
+                ListenRequestError::Internal {
+                    message: format!("failed to add server `{server_name}`"),
+                }
             })?;
 
         // 5. Create mpsc channel for routing connections to this server.

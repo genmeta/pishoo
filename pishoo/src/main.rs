@@ -64,8 +64,8 @@ async fn main() -> Result<(), Whatever> {
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
 
-    let _genmeta_home = GenmetaHome::load_from_environment()
-        .whatever_context("Failed to load Genmeta home directory")?;
+    let _genmeta_home =
+        GenmetaHome::load_from_environment().whatever_context("failed to load Genmeta home directory")?;
 
     let config_file = args.config_file;
 
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Whatever> {
     ))?;
 
     let root_config = pishoo::config::parse_root_config(&config)
-        .whatever_context("Failed to parse root worker configuration")?;
+        .whatever_context("failed to parse root worker configuration")?;
 
     if args.test_config {
         tracing::info!(
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Whatever> {
             || hello.egid != target.gid
         {
             snafu::whatever!(
-                "Worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
+                "worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
                 target.username,
                 pid,
                 hello.pid,
