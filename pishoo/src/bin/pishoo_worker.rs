@@ -8,11 +8,13 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io,
     path::Path,
     sync::Arc,
 };
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
+use gateway::error::Whatever;
 use gateway::parse::{Node, Value};
 use genmeta_home::GenmetaHome;
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
@@ -23,7 +25,7 @@ use pishoo::{
     remoc_bridge::ListenerHandle,
     tls::{self, TlsMaterialError},
 };
-use snafu::{Report, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -114,7 +116,8 @@ impl ServerRuntime {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[snafu::report]
+async fn main() -> Result<(), Whatever> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
@@ -126,7 +129,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _,
         remoc::rch::base::Sender<WorkerHello>,
         remoc::rch::base::Receiver<WorkerBootstrap>,
-    ) = remoc::Connect::io(remoc::Cfg::default(), stdin, stdout).await?;
+    ) = remoc::Connect::io(remoc::Cfg::default(), stdin, stdout)
+        .await
+        .whatever_context("failed to establish remoc transport")?;
     tokio::spawn(conn.in_current_span());
 
     tracing::debug!("remoc connection established, waiting for bootstrap");
@@ -135,8 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = base_rx
         .recv()
         .await
-        .map_err(|e| format!("failed to receive WorkerBootstrap: {e}"))?
-        .ok_or("root closed base channel without sending WorkerBootstrap")?;
+        .whatever_context("failed to receive worker bootstrap")?
+        .whatever_context("root closed base channel without sending worker bootstrap")?;
 
     tracing::info!(
         uid = bootstrap.uid,
@@ -146,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "worker bootstrap received"
     );
 
-    reopen_worker_log(&bootstrap.log_dir)?;
+    reopen_worker_log(&bootstrap.log_dir).whatever_context("failed to reopen worker log")?;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
@@ -164,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     base_tx
         .send(hello)
         .await
-        .map_err(|e| format!("failed to send startup hello: {e}"))?;
+        .whatever_context("failed to send startup hello")?;
 
     tracing::info!("startup hello sent to root, worker ready");
 
@@ -176,14 +181,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(HashMap::new()));
     let h3_settings = Arc::new(Settings::default());
 
-    let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf")).await?;
+    let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf"))
+        .await
+        .whatever_context("failed to load worker policy")?;
     // connector root-owned: worker 不再本地创建 connector runtime.
     let _connector_handle = root_api
         .open_connector(OpenConnector {
             profile: String::new(),
         })
         .await
-        .map_err(|e| format!("failed to open root-owned connector: {e}"))?;
+        .whatever_context("failed to open root-owned connector")?;
     tracing::info!("root-owned connector handle acquired");
 
     let identities = genmeta_home.identities();
@@ -205,20 +212,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Err(error) => {
-            tracing::warn!(error = %error, "failed to list identities, continuing without listeners");
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "failed to list identities, continuing without listeners"
+            );
         }
     }
 
     // Keep root_api and identity state alive for Reload handling.
     let genmeta_home_path = bootstrap.home.join(".genmeta");
 
-    let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())?;
-    let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
+        .whatever_context("failed to create SIGQUIT listener")?;
+    let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .whatever_context("failed to create SIGHUP listener")?;
     let mut usr1_signal =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            .whatever_context("failed to create SIGUSR1 listener")?;
     let mut term_signal =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .whatever_context("failed to create SIGTERM listener")?;
+    let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .whatever_context("failed to create SIGINT listener")?;
 
     loop {
         tokio::select! {
@@ -255,12 +270,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     Err(error) => {
-                        tracing::warn!(error = %error, "failed to list identities during reload");
+                        tracing::warn!(
+                            error = %Report::from_error(&error),
+                            "failed to list identities during reload"
+                        );
                     }
                 }
             }
             _ = usr1_signal.recv() => {
-                reopen_worker_log(&bootstrap.log_dir)?;
+                reopen_worker_log(&bootstrap.log_dir)
+                    .whatever_context("failed to reopen worker log")?;
                 tracing::info!("worker log reopened");
             }
         }
@@ -293,7 +312,7 @@ fn start_server_runtime(
                             let server_name = server_name.clone();
                             let router = router.clone();
                             let worker_policy = worker_policy.clone();
-                            tokio::spawn(async move {
+                        tokio::spawn(async move {
                                 if let Err(error) = gateway::reverse::handle_single_connection_for_worker(
                                     conn,
                                     server_name,
@@ -302,7 +321,8 @@ fn start_server_runtime(
                                     worker_policy.access_rules,
                                     gateway::reverse::MissingRulePolicy::Deny,
                                 ).await {
-                                    tracing::warn!(error = %Report::from_error(&error), "worker connection handling failed");
+                                    let error_report = Report::from_error(&error).to_string();
+                                    tracing::warn!(error = %error_report, "worker connection handling failed");
                                 }
                             }
                             .in_current_span());
@@ -327,8 +347,11 @@ async fn reconcile_listener_set(
     current_servers: Option<HashSet<String>>,
     h3_settings: Arc<Settings>,
     worker_policy: WorkerPolicy,
-) -> Result<ReconcileStats, String> {
-    let names = identities.list().await.map_err(|e| e.to_string())?;
+) -> Result<ReconcileStats, Whatever> {
+    let names = identities
+        .list()
+        .await
+        .whatever_context("failed to list identities")?;
     let routing = build_worker_routing(identities, &names).await;
     let desired_servers: HashSet<String> = names.iter().map(|n| n.as_str().to_string()).collect();
     let existing_servers = current_servers.unwrap_or_default();
@@ -369,7 +392,7 @@ async fn reconcile_listener_set(
         let key_path = identity_dir.join("privkey.pem");
         let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path)
             .await
-            .map_err(|e| e.to_string())?;
+            .whatever_context(format!("failed to read TLS material for server `{server_name}`"))?;
 
         let request = RequestListen {
             server_name: server_name.clone(),
@@ -559,17 +582,30 @@ async fn build_worker_routing(
     }
 }
 
-fn reopen_worker_log(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Snafu)]
+enum ReopenWorkerLogError {
+    #[snafu(display("failed to create worker log directory `{path}`"))]
+    CreateLogDir { path: String, source: io::Error },
+    #[snafu(display("failed to open worker log file `{path}`"))]
+    OpenLogFile { path: String, source: io::Error },
+    #[snafu(display("failed to dup2 stderr for worker log reopen"))]
+    DupStderr { source: nix::errno::Errno },
+}
+
+fn reopen_worker_log(log_dir: &Path) -> Result<(), ReopenWorkerLogError> {
     use std::fs::OpenOptions;
 
-    std::fs::create_dir_all(log_dir)?;
+    std::fs::create_dir_all(log_dir).context(CreateLogDirSnafu {
+        path: log_dir.display().to_string(),
+    })?;
     let log_file = log_dir.join("worker.log");
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_file)?;
-    if let Err(e) = nix::unistd::dup2_stderr(&file) {
-        return Err(Box::new(std::io::Error::from(e)));
-    }
+        .open(&log_file)
+        .context(OpenLogFileSnafu {
+            path: log_file.display().to_string(),
+        })?;
+    nix::unistd::dup2_stderr(&file).context(DupStderrSnafu)?;
     Ok(())
 }

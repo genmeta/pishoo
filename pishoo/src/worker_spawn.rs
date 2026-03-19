@@ -47,7 +47,7 @@ pub struct SpawnedWorker {
 #[derive(Debug, Snafu)]
 pub enum SpawnWorkerError {
     #[snafu(display("failed to launch worker process"))]
-    LaunchWorker { source: std::io::Error },
+    LaunchWorker { source: crate::launcher::LaunchWorkerError },
     #[snafu(display("failed to establish remoc transport"))]
     ConnectTransport {
         source: remoc::ConnectError<std::io::Error, std::io::Error>,

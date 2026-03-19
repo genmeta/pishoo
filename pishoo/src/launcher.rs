@@ -1,9 +1,13 @@
 use std::{ffi::CString, os::fd::OwnedFd, path::Path};
 
-use nix::unistd::{
-    execve, fork, getegid, geteuid, getgid, getgrouplist, getuid, pipe, setgid, setgroups, setuid,
-    sysconf, ForkResult, Gid, SysconfVar, Uid,
+use nix::{
+    errno::Errno,
+    unistd::{
+        execve, fork, getegid, geteuid, getgid, getgrouplist, getuid, pipe, setgid, setgroups,
+        setuid, sysconf, ForkResult, Gid, SysconfVar, Uid,
+    },
 };
+use snafu::{ResultExt, Snafu};
 use tokio::fs::File;
 
 use crate::worker_spawn::WorkerHandle;
@@ -18,29 +22,62 @@ pub struct LaunchedWorker {
     pub transport: WorkerTransport,
 }
 
+#[derive(Debug, Snafu)]
+pub enum LaunchWorkerError {
+    #[snafu(display("failed to resolve supplementary groups for user `{username}`"))]
+    ResolveSupplementaryGroups {
+        username: String,
+        source: ResolveSupplementaryGroupsError,
+    },
+    #[snafu(display("worker path contains NUL byte"))]
+    InvalidWorkerPath { source: std::ffi::NulError },
+    #[snafu(display("failed to build exec environment for user `{username}`"))]
+    BuildExecEnv {
+        username: String,
+        source: BuildExecEnvError,
+    },
+    #[snafu(display("failed to create worker stdin pipe"))]
+    CreateStdinPipe { source: Errno },
+    #[snafu(display("failed to create worker stdout pipe"))]
+    CreateStdoutPipe { source: Errno },
+    #[snafu(display("failed to fork worker process"))]
+    ForkWorker { source: Errno },
+}
+
+#[derive(Debug, Snafu)]
+pub enum BuildExecEnvError {
+    #[snafu(display("exec environment contains NUL byte"))]
+    EntryContainsNul { source: std::ffi::NulError },
+}
+
+#[derive(Debug, Snafu)]
+pub enum ResolveSupplementaryGroupsError {
+    #[snafu(display("username contains NUL byte"))]
+    InvalidUsername { source: std::ffi::NulError },
+    #[snafu(display("failed to query supplementary groups for user `{username}`"))]
+    GetGroupList { username: String, source: Errno },
+}
+
 pub fn launch_worker(
     worker_bin: &Path,
     uid: Uid,
     gid: u32,
     username: &str,
     home: &Path,
-) -> Result<LaunchedWorker, std::io::Error> {
-    let supplementary_groups = resolve_supplementary_groups(username, gid)?;
-    let worker_bin = CString::new(worker_bin.as_os_str().as_encoded_bytes()).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "worker path contains NUL byte",
-        )
-    })?;
-    let env = build_exec_env(username, home)?;
+) -> Result<LaunchedWorker, LaunchWorkerError> {
+    let supplementary_groups = resolve_supplementary_groups(username, gid)
+        .context(ResolveSupplementaryGroupsSnafu { username })?;
+    let worker_bin =
+        CString::new(worker_bin.as_os_str().as_encoded_bytes()).context(InvalidWorkerPathSnafu)?;
+    let env = build_exec_env(username, home).context(BuildExecEnvSnafu { username })?;
     let argv = vec![worker_bin.clone()];
     let max_fd = max_fd();
 
-    let (child_stdin_read, parent_stdin_write) = pipe_pair()?;
-    let (parent_stdout_read, child_stdout_write) = pipe_pair()?;
+    let (child_stdin_read, parent_stdin_write) = pipe_pair().context(CreateStdinPipeSnafu)?;
+    let (parent_stdout_read, child_stdout_write) = pipe_pair().context(CreateStdoutPipeSnafu)?;
 
     // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
-    match unsafe { fork() }.map_err(std::io::Error::from)? {
+    match unsafe { fork() }.context(ForkWorkerSnafu)? {
         ForkResult::Child => {
             child_exec(
                 &worker_bin,
@@ -120,11 +157,11 @@ fn child_exec(
     child_fail(127);
 }
 
-fn pipe_pair() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
-    pipe().map_err(std::io::Error::from)
+fn pipe_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
+    pipe()
 }
 
-fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, std::io::Error> {
+fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExecEnvError> {
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
     [
         [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
@@ -133,14 +170,7 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, std::io::
         [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
     ]
     .into_iter()
-    .map(|entry| {
-        CString::new(entry).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "environment contains NUL byte",
-            )
-        })
-    })
+    .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))
     .collect()
 }
 
@@ -155,12 +185,12 @@ fn max_fd() -> i32 {
     }
 }
 
-fn resolve_supplementary_groups(username: &str, gid: u32) -> Result<Vec<Gid>, std::io::Error> {
-    let username = CString::new(username).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "username contains NUL byte",
-        )
-    })?;
-    getgrouplist(&username, Gid::from_raw(gid)).map_err(std::io::Error::from)
+fn resolve_supplementary_groups(
+    username: &str,
+    gid: u32,
+) -> Result<Vec<Gid>, ResolveSupplementaryGroupsError> {
+    let username_cstr = CString::new(username).context(InvalidUsernameSnafu)?;
+    getgrouplist(&username_cstr, Gid::from_raw(gid)).context(GetGroupListSnafu {
+        username: username.to_string(),
+    })
 }
