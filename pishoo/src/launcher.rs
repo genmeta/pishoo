@@ -3,8 +3,8 @@ use std::{ffi::CString, os::fd::OwnedFd, path::Path};
 use nix::{
     errno::Errno,
     unistd::{
-        execve, fork, getegid, geteuid, getgid, getgrouplist, getuid, pipe, setgid, setgroups,
-        setuid, sysconf, ForkResult, Gid, SysconfVar, Uid,
+        ForkResult, Gid, SysconfVar, Uid, execve, fork, getegid, geteuid, getgid, getgrouplist,
+        getuid, pipe, setgid, setgroups, setuid, sysconf,
     },
 };
 use snafu::{ResultExt, Snafu};

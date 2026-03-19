@@ -93,7 +93,9 @@ async fn registered_worker_open_connector_tracks_shutdown_token() {
         .await
         .expect("registered worker should open connector");
 
-    let process = state.get_process(pid).expect("process must remain registered");
+    let process = state
+        .get_process(pid)
+        .expect("process must remain registered");
     assert_eq!(process.connector_shutdown_tokens.len(), 1);
 
     drop(connector);
@@ -221,7 +223,10 @@ async fn cleanup_regression_removes_process_and_uid_mapping() {
     assert_eq!(summary.uid, uid);
     assert_eq!(summary.servers_cleaned, 0);
     assert_eq!(summary.connectors_cleaned, 1);
-    assert!(state.get_process(pid).is_none(), "cleanup must remove process record");
+    assert!(
+        state.get_process(pid).is_none(),
+        "cleanup must remove process record"
+    );
     assert!(
         state.get_pid_for_uid(uid).is_none(),
         "cleanup must remove uid mapping for cleaned pid"

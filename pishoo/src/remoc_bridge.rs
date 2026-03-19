@@ -151,11 +151,10 @@ where
     <C::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
 {
     async fn connect(&self, server: String) -> Result<ConnectionClient, ConnectError> {
-        let authority = http::uri::Authority::try_from(server).map_err(|source| {
-            ConnectError::Remote {
+        let authority =
+            http::uri::Authority::try_from(server).map_err(|source| ConnectError::Remote {
                 message: RemoteErrorMessage::new(source.to_string()),
-            }
-        })?;
+            })?;
         let connection =
             self.connector
                 .connect(&authority)

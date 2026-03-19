@@ -64,8 +64,8 @@ async fn main() -> Result<(), Whatever> {
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
 
-    let _genmeta_home =
-        GenmetaHome::load_from_environment().whatever_context("failed to load Genmeta home directory")?;
+    let _genmeta_home = GenmetaHome::load_from_environment()
+        .whatever_context("failed to load Genmeta home directory")?;
 
     let config_file = args.config_file;
 
@@ -147,7 +147,10 @@ async fn main() -> Result<(), Whatever> {
             state.clone(),
         )
         .await
-        .whatever_context(format!("failed to spawn worker for user `{}`", target.username))?;
+        .whatever_context(format!(
+            "failed to spawn worker for user `{}`",
+            target.username
+        ))?;
         let pid = spawned.handle.pid().expect("worker must have pid");
         let target_uid = Uid::from_raw(target.uid);
         let hello = spawned.hello;

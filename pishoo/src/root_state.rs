@@ -333,7 +333,8 @@ impl RootState {
         }
 
         // Remove from servers map.
-        self.retire_server(server_name).expect("server must exist after ownership check");
+        self.retire_server(server_name)
+            .expect("server must exist after ownership check");
 
         // Remove from process record.
         if let Some(process) = self.processes.get_mut(&caller_pid) {

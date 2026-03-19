@@ -57,7 +57,9 @@ pub enum WorkerHandleError {
 #[derive(Debug, Snafu)]
 pub enum SpawnWorkerError {
     #[snafu(display("failed to launch worker process"))]
-    LaunchWorker { source: crate::launcher::LaunchWorkerError },
+    LaunchWorker {
+        source: crate::launcher::LaunchWorkerError,
+    },
     #[snafu(display("failed to establish remoc transport"))]
     ConnectTransport {
         source: remoc::ConnectError<std::io::Error, std::io::Error>,
@@ -124,11 +126,13 @@ impl WorkerHandle {
 
     pub fn start_kill(&mut self) -> Result<(), WorkerHandleError> {
         match &mut self.inner {
-            WorkerHandleInner::Tokio(child) => child.start_kill().map_err(|source| {
-                WorkerHandleError::Signal {
-                    source: Errno::from_raw(source.raw_os_error().unwrap_or(libc::EIO)),
-                }
-            }),
+            WorkerHandleInner::Tokio(child) => {
+                child
+                    .start_kill()
+                    .map_err(|source| WorkerHandleError::Signal {
+                        source: Errno::from_raw(source.raw_os_error().unwrap_or(libc::EIO)),
+                    })
+            }
             WorkerHandleInner::Unix(child) => child.start_kill(),
         }
     }
@@ -216,10 +220,7 @@ pub async fn spawn_worker(
         root_api: client,
     };
 
-    base_tx
-        .send(bootstrap)
-        .await
-        .context(SendBootstrapSnafu)?;
+    base_tx.send(bootstrap).await.context(SendBootstrapSnafu)?;
 
     let hello = base_rx
         .recv()

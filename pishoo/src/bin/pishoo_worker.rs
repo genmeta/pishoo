@@ -14,8 +14,10 @@ use std::{
 };
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
-use gateway::error::Whatever;
-use gateway::parse::{Node, Value};
+use gateway::{
+    error::Whatever,
+    parse::{Node, Value},
+};
 use genmeta_home::GenmetaHome;
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
 use pishoo::{
@@ -229,8 +231,7 @@ async fn main() -> Result<(), Whatever> {
     let mut usr1_signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
             .whatever_context("failed to create sigusr1 listener")?;
-    let mut term_signal =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create sigterm listener")?;
     let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .whatever_context("failed to create sigint listener")?;
@@ -391,7 +392,9 @@ async fn reconcile_listener_set(
         let key_path = identity_dir.join("privkey.pem");
         let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path)
             .await
-            .whatever_context(format!("failed to read tls material for server `{server_name}`"))?;
+            .whatever_context(format!(
+                "failed to read tls material for server `{server_name}`"
+            ))?;
 
         let request = RequestListen {
             server_name: server_name.clone(),
@@ -434,9 +437,8 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
     let raw = tokio::fs::read(conf_path)
         .await
         .context(ReadPolicySnafu { path: &path })?;
-    let parsed = gateway::parse::parse(&raw, conf_path.parent()).context(ParsePolicySnafu {
-        path: &path,
-    })?;
+    let parsed = gateway::parse::parse(&raw, conf_path.parent())
+        .context(ParsePolicySnafu { path: &path })?;
     let pishoo = parsed
         .get("pishoo")
         .and_then(|v| match v {

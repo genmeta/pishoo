@@ -50,7 +50,10 @@ impl PerServerListenAdapter {
     ///
     /// * `rx` — receives connections routed by server_name from the central accept loop
     /// * `shutdown_token` — signals shutdown of this adapter
-    pub fn new(rx: mpsc::Receiver<gm_quic::prelude::Connection>, shutdown_token: CancellationToken) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<gm_quic::prelude::Connection>,
+        shutdown_token: CancellationToken,
+    ) -> Self {
         Self {
             rx: Mutex::new(rx),
             shutdown_token,
