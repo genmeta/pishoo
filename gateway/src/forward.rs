@@ -5,7 +5,7 @@ use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use snafu::{FromString, Report, ResultExt};
+use snafu::{Report, ResultExt, Snafu};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
@@ -28,6 +28,19 @@ mod quic;
 pub static ALPN: &[u8] = b"h3";
 
 type BoxResponse = Response<UnsyncBoxBody<Bytes, io::Error>>;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum ForwardRequestError {
+    #[snafu(display("invalid host header in request"))]
+    InvalidHostHeader,
+
+    #[snafu(display("missing host in request uri"))]
+    MissingHostInUri,
+
+    #[snafu(display("CONNECT request must target a valid host"))]
+    MissingConnectAuthority,
+}
 
 /// 从配置节点中读取并设置客户端认证配置
 ///
@@ -238,7 +251,7 @@ pub async fn resume(node: Arc<Node>) -> Result<()> {
 }
 
 /// 验证请求中的 Host 头合法性
-fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Whatever> {
+fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, ForwardRequestError> {
     let mut host = req.uri().host().map(String::from);
     if host.is_none() {
         host = req
@@ -250,7 +263,7 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, Wha
     let mut host = match host {
         Some(h) => h,
         None => {
-            return Err(Whatever::without_source(format!("invalid Host header: {req:?}")));
+            return Err(ForwardRequestError::InvalidHostHeader);
         }
     };
 

@@ -2,14 +2,14 @@ use http::Request;
 use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use snafu::{FromString, Report, ResultExt};
+use snafu::{Report, ResultExt};
 use tokio::{io, net::TcpStream};
 use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
 use crate::{
     error::Whatever,
-    forward::{build_empty_response, build_error_response, tunnel_upgrade},
+    forward::{ForwardRequestError, build_empty_response, build_error_response, tunnel_upgrade},
 };
 
 /// 普通代理 HTTP 请求
@@ -19,7 +19,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let host = match original_uri.host() {
         Some(host) => host,
         None => {
-            let error = Whatever::without_source("missing host in uri".to_string());
+            let error = ForwardRequestError::MissingHostInUri;
             error!(error = %Report::from_error(&error), "missing host in uri");
             return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
@@ -83,7 +83,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 
 pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
     let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) else {
-        let error = Whatever::without_source("CONNECT must target a valid host".to_string());
+        let error = ForwardRequestError::MissingConnectAuthority;
         error!(error = %Report::from_error(&error), "missing host in CONNECT uri");
         let mut resp = build_error_response(Report::from_error(&error).to_string());
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
