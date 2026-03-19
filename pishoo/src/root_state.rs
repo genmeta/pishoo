@@ -22,8 +22,8 @@ use tracing::Instrument;
 use crate::{
     per_server_listen::PerServerListenAdapter,
     protocol::{
-        ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
-        RequestListen, ServerName,
+        ListenRequestError, ListenRequestInvalidReason, OpenConnector, OpenConnectorError,
+        ReleaseListen, ReleaseListenError, RequestListen, ServerName,
     },
     remoc_bridge::{
         ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
@@ -407,22 +407,22 @@ impl RootState {
 fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), ListenRequestError> {
     tls::validate_tls_material(cert_pem, key_pem).map_err(|error| match error {
         TlsMaterialError::CertTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
-            message: format!("certificate PEM too large ({actual} > {limit})"),
+            reason: ListenRequestInvalidReason::CertTooLarge { actual, limit },
         },
         TlsMaterialError::KeyTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
-            message: format!("private key PEM too large ({actual} > {limit})"),
+            reason: ListenRequestInvalidReason::KeyTooLarge { actual, limit },
         },
         TlsMaterialError::InvalidCertificatePem { .. } => ListenRequestError::InvalidRequest {
-            message: "invalid certificate PEM".to_string(),
+            reason: ListenRequestInvalidReason::InvalidCertificatePem,
         },
         TlsMaterialError::EmptyCertificate => ListenRequestError::InvalidRequest {
-            message: "certificate PEM contains no certificates".to_string(),
+            reason: ListenRequestInvalidReason::EmptyCertificate,
         },
         TlsMaterialError::InvalidPrivateKeyPem { .. } => ListenRequestError::InvalidRequest {
-            message: "invalid private key PEM".to_string(),
+            reason: ListenRequestInvalidReason::InvalidPrivateKeyPem,
         },
         TlsMaterialError::EmptyPrivateKey => ListenRequestError::InvalidRequest {
-            message: "private key PEM contains no key".to_string(),
+            reason: ListenRequestInvalidReason::EmptyPrivateKey,
         },
     })
 }

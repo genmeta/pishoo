@@ -49,13 +49,40 @@ pub struct OpenConnector {
 }
 
 // --- Error types ---
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ListenRequestInvalidReason {
+    CertTooLarge { actual: usize, limit: usize },
+    KeyTooLarge { actual: usize, limit: usize },
+    InvalidCertificatePem,
+    EmptyCertificate,
+    InvalidPrivateKeyPem,
+    EmptyPrivateKey,
+}
+
+impl std::fmt::Display for ListenRequestInvalidReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CertTooLarge { actual, limit } => {
+                write!(f, "certificate PEM too large ({actual} > {limit})")
+            }
+            Self::KeyTooLarge { actual, limit } => {
+                write!(f, "private key PEM too large ({actual} > {limit})")
+            }
+            Self::InvalidCertificatePem => write!(f, "invalid certificate PEM"),
+            Self::EmptyCertificate => write!(f, "certificate PEM contains no certificates"),
+            Self::InvalidPrivateKeyPem => write!(f, "invalid private key PEM"),
+            Self::EmptyPrivateKey => write!(f, "private key PEM contains no key"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
 pub enum ListenRequestError {
     #[snafu(display("listener conflicts with an existing listener"))]
     Conflict,
-    #[snafu(display("invalid listen request: {message}"))]
-    InvalidRequest { message: String },
+    #[snafu(display("invalid listen request: {reason}"))]
+    InvalidRequest { reason: ListenRequestInvalidReason },
     #[snafu(display("internal error: {message}"))]
     Internal { message: String },
     #[snafu(display("rpc call error"))]
