@@ -366,10 +366,10 @@ fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, Sign
     use gm_quic::prelude::handy::ToPrivateKey;
 
     let key_bytes = std::fs::read(path)
-        .whatever_context::<_, Whatever>(format!("Failed to read key file {}", path.display()))?;
+        .whatever_context::<_, Whatever>(format!("failed to read key file {}", path.display()))?;
     let key_der = key_bytes.to_private_key();
     let key = rustls::crypto::ring::sign::any_supported_type(&key_der)
-        .whatever_context::<_, Whatever>("Unsupported key type")?;
+        .whatever_context::<_, Whatever>("unsupported key type")?;
 
     let supported_schemes = [
         SignatureScheme::ECDSA_NISTP256_SHA256,
@@ -387,7 +387,7 @@ fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, Sign
         .iter()
         .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
         .copied()
-        .whatever_context::<_, Whatever>("No supported signature scheme found for key")?;
+        .whatever_context::<_, Whatever>("no supported signature scheme found for key")?;
 
     Ok((key, scheme))
 }

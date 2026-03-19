@@ -101,7 +101,7 @@ fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
         builder
             .with_client_auth_cert(cert_chain, private_key)
             .whatever_context::<_, Whatever>(format!(
-                "Failed to configure upstream TLS client identity from `{}` and `{}`",
+                "failed to configure upstream TLS client identity from `{}` and `{}`",
                 cert_path.display(),
                 key_path.display()
             ))?
@@ -125,7 +125,7 @@ fn build_root_store(trusted_ca: Option<&Path>) -> Result<RootCertStore> {
             root_store
                 .add(cert)
                 .whatever_context::<_, Whatever>(format!(
-                    "Failed to add upstream trusted CA certificate from `{}`",
+                    "failed to add upstream trusted CA certificate from `{}`",
                     ca_path.display()
                 ))?;
         }
@@ -140,20 +140,20 @@ fn load_cert_chain(
     label: &str,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
     let cert_bytes = std::fs::read(path).whatever_context::<_, Whatever>(format!(
-        "Failed to read {label} from `{}`",
+        "failed to read {label} from `{}`",
         path.display()
     ))?;
 
     let cert_chain = certs(&mut Cursor::new(cert_bytes))
         .collect::<std::result::Result<Vec<_>, _>>()
         .whatever_context::<_, Whatever>(format!(
-            "Failed to parse {label} from `{}`",
+            "failed to parse {label} from `{}`",
             path.display()
         ))?;
 
     ensure_whatever!(
         !cert_chain.is_empty(),
-        "No certificates found in {} `{}`",
+        "no certificates found in {} `{}`",
         label,
         path.display()
     );
@@ -164,20 +164,20 @@ fn load_cert_chain(
 /// 从 PEM 文件中读取私钥，用于配置上游双向 TLS 的客户端身份。
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let key_bytes = std::fs::read(path).whatever_context::<_, Whatever>(format!(
-        "Failed to read upstream client private key from `{}`",
+        "failed to read upstream client private key from `{}`",
         path.display()
     ))?;
 
     let mut cursor = Cursor::new(key_bytes);
     let parsed_key = private_key(&mut cursor)
         .whatever_context::<_, Whatever>(format!(
-            "Failed to parse upstream client private key from `{}`",
+            "failed to parse upstream client private key from `{}`",
             path.display()
         ))?
         .map(|private_key| private_key.clone_key());
 
     let Some(private_key) = parsed_key else {
-            whatever!("no private key found in `{}`", path.display());
+        whatever!("no private key found in `{}`", path.display());
     };
 
     Ok(private_key)
