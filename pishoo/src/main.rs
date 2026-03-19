@@ -7,11 +7,11 @@ use std::{
 
 use clap::Parser;
 use gateway::error::Whatever;
-use genmeta_home::GenmetaHome;
+use genmeta_home::{GenmetaHome, identity::Name};
 use gm_quic::prelude::{QuicListeners, handy::server_parameters};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
-use snafu::{OptionExt, Report, ResultExt};
+use snafu::{Report, ResultExt};
 use tokio::fs;
 use tracing::Instrument;
 
@@ -184,27 +184,38 @@ async fn main() -> Result<(), Whatever> {
     // Central accept loop: route connections by server_name
     let accept_state = state.clone();
     let accept_listeners = listeners.clone();
-    let accept_handle = tokio::spawn(async move {
-        loop {
-            match accept_listeners.accept().await {
-                Ok((conn, server_name, _pathway, _link)) => {
-                    let st = accept_state.lock().await;
-                    if let Some(sender) = st.get_conn_sender(&server_name) {
-                        if sender.send(conn).await.is_err() {
-                            tracing::warn!(%server_name, "failed to route connection (channel closed)");
-                        }
-                    } else {
-                        tracing::warn!(%server_name, "no listener registered for connection");
+    let accept_handle = tokio::spawn(
+        async move {
+            loop {
+                let (conn, server_name, _pathway, _link) = match accept_listeners.accept().await {
+                    Ok(incoming) => incoming,
+                    Err(error) => {
+                        tracing::error!(error = %Report::from_error(&error), "accept loop error");
+                        break;
                     }
-                }
-                Err(error) => {
-                    tracing::error!(error = %Report::from_error(&error), "accept loop error");
-                    break;
+                };
+
+                let st = accept_state.lock().await;
+                let server_name = match Name::try_from_str_full(server_name) {
+                    Ok(server_name) => server_name,
+                    Err(error) => {
+                        tracing::warn!(error = %Report::from_error(&error), "invalid server name in connection, this shound not happen");
+                        continue;
+                    }
+                };
+
+                let Some(sender) = st.get_conn_sender(&server_name) else {
+                    tracing::warn!(%server_name, "no listener registered for connection");
+                    continue;
+                };
+
+                if sender.send(conn).await.is_err() {
+                    tracing::warn!(%server_name, "failed to route connection (channel closed)");
                 }
             }
         }
-    }
-    .in_current_span());
+        .in_current_span(),
+    );
 
     let monitor_state = state.clone();
     let monitor_handle = tokio::spawn(

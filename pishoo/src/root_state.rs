@@ -9,12 +9,13 @@ use std::{
     sync::Arc,
 };
 
+use genmeta_home::identity::Name;
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
 };
 use remoc::prelude::ServerShared;
-use snafu::Report;
+use snafu::{FromString, Report, Whatever};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -22,14 +23,13 @@ use tracing::Instrument;
 use crate::{
     per_server_listen::PerServerListenAdapter,
     protocol::{
-        ListenRequestError, ListenRequestInvalidReason, OpenConnector, OpenConnectorError,
-        ReleaseListen, ReleaseListenError, RequestListen, ServerName,
+        ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
+        RequestListen,
     },
     remoc_bridge::{
         ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
         ServedConnector, ServedListener,
     },
-    tls::{self, TlsMaterialError},
     worker_spawn::WorkerHandle,
 };
 
@@ -49,7 +49,7 @@ pub struct WorkerProcessRecord {
     /// The UID this worker runs as.
     pub uid: Uid,
     /// Set of server_names owned by this worker.
-    pub owned_servers: HashSet<ServerName>,
+    pub owned_servers: HashSet<Name<'static>>,
     /// Handle to the spawned worker process.
     pub worker_handle: WorkerHandle,
     /// Cancellation tokens for connector serve futures owned by this worker.
@@ -67,7 +67,7 @@ pub struct RootState {
     /// Shared QUIC client for creating outbound connectors.
     pub quic_client: Arc<gm_quic::prelude::QuicClient>,
     /// server_name → ownership + routing sender.
-    servers: HashMap<ServerName, ServerRecord>,
+    servers: HashMap<Name<'static>, ServerRecord>,
     /// pid → worker process info.
     processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping.
@@ -168,10 +168,10 @@ impl RootState {
         Some(summary)
     }
 
-    fn retire_server(&mut self, server_name: &str) -> Option<()> {
+    fn retire_server(&mut self, server_name: &Name<'static>) -> Option<()> {
         let server_record = self.servers.remove(server_name)?;
         server_record.shutdown_token.cancel();
-        self.listeners.remove_server(server_name);
+        self.listeners.remove_server(server_name.as_full());
         Some(())
     }
 
@@ -187,7 +187,7 @@ impl RootState {
         caller_pid: Pid,
         request: RequestListen,
     ) -> Result<ListenerHandle, ListenRequestError> {
-        let server_name = request.server_name;
+        let server_name = request.name;
 
         // 1. Conflict check: first-come-first-served.
         if self.servers.contains_key(&server_name) {
@@ -202,15 +202,14 @@ impl RootState {
             });
         }
 
-        validate_listen_material(&request.cert_pem, &request.key_pem)?;
-
+        // TODO: mataining bindings on network changed.
         // 4. Add server to QuicListeners.
         //    bind_uris is Vec<String>; BindUri implements From<String>.
         self.listeners
             .add_server(
-                &server_name,
-                request.cert_pem.as_slice(),
-                request.key_pem.as_slice(),
+                server_name.as_full(),
+                request.certs.as_slice(),
+                &request.key,
                 request.bind,
                 None::<Vec<u8>>,
             )
@@ -223,7 +222,11 @@ impl RootState {
                     "failed to add server to listeners"
                 );
                 ListenRequestError::Internal {
-                    message: format!("failed to add server `{server_name}`"),
+                    message: Report::from_error(Whatever::with_source(
+                        Box::new(error),
+                        format!("failed to add server `{server_name}`"),
+                    ))
+                    .to_string(),
                 }
             })?;
 
@@ -373,7 +376,7 @@ impl RootState {
     /// per-server adapter.
     pub fn get_conn_sender(
         &self,
-        server_name: &str,
+        server_name: &Name<'static>,
     ) -> Option<&mpsc::Sender<gm_quic::prelude::Connection>> {
         self.servers.get(server_name).map(|r| &r.conn_tx)
     }
@@ -403,29 +406,6 @@ impl RootState {
             }
         }
     }
-}
-
-fn validate_listen_material(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), ListenRequestError> {
-    tls::validate_tls_material(cert_pem, key_pem).map_err(|error| match error {
-        TlsMaterialError::CertTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::CertTooLarge { actual, limit },
-        },
-        TlsMaterialError::KeyTooLarge { actual, limit } => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::KeyTooLarge { actual, limit },
-        },
-        TlsMaterialError::InvalidCertificatePem { .. } => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::InvalidCertificatePem,
-        },
-        TlsMaterialError::EmptyCertificate => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::EmptyCertificate,
-        },
-        TlsMaterialError::InvalidPrivateKeyPem { .. } => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::InvalidPrivateKeyPem,
-        },
-        TlsMaterialError::EmptyPrivateKey => ListenRequestError::InvalidRequest {
-            reason: ListenRequestInvalidReason::EmptyPrivateKey,
-        },
-    })
 }
 
 #[cfg(test)]
@@ -478,13 +458,5 @@ mod tests {
             state.get_pid_for_uid(Uid::from_raw(1000)),
             Some(Pid::from_raw(200))
         );
-    }
-
-    #[test]
-    fn invalid_listen_material_is_rejected() {
-        let cert: &[u8] = b"not-a-cert";
-        let key: &[u8] = b"not-a-key";
-        let err = validate_listen_material(cert, key).expect_err("must reject invalid pem");
-        assert!(matches!(err, ListenRequestError::InvalidRequest { .. }));
     }
 }

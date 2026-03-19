@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
+use genmeta_home::identity::Name;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
 use crate::remoc_bridge::{ConnectorHandle, ListenerHandle};
-
-pub type ServerName = String;
 
 // --- Worker bootstrap (sent root → worker at startup) ---
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,17 +29,77 @@ pub struct WorkerHello {
 }
 
 // --- Worker → Root request types ---
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct RequestListen {
-    pub server_name: ServerName,
+    pub name: Name<'static>,
     pub bind: Vec<String>,
-    pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
+    pub certs: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
+}
+
+mod request_listen_serde {
+    use super::*;
+
+    // TODO: avoid clones in (de)serialization
+    #[derive(Debug, Serialize, Deserialize)]
+    struct RequestListenSerdeHelper {
+        name: Name<'static>,
+        bind: Vec<String>,
+        certs: Vec<Vec<u8>>,
+        key: Vec<u8>,
+    }
+
+    impl From<&RequestListen> for RequestListenSerdeHelper {
+        fn from(req: &RequestListen) -> Self {
+            Self {
+                name: req.name.clone(),
+                bind: req.bind.clone(),
+                certs: req.certs.iter().map(|cert| cert.to_vec()).collect(),
+                key: req.key.secret_der().to_vec(),
+            }
+        }
+    }
+
+    impl TryFrom<RequestListenSerdeHelper> for RequestListen {
+        type Error = &'static str;
+
+        fn try_from(helper: RequestListenSerdeHelper) -> Result<Self, Self::Error> {
+            Ok(Self {
+                name: helper.name,
+                bind: helper.bind,
+                certs: helper
+                    .certs
+                    .into_iter()
+                    .map(|cert| CertificateDer::from(cert))
+                    .collect(),
+                key: PrivateKeyDer::try_from(helper.key)?,
+            })
+        }
+    }
+
+    impl Serialize for RequestListen {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            RequestListenSerdeHelper::from(self).serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for RequestListen {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let helper = RequestListenSerdeHelper::deserialize(deserializer)?;
+            Self::try_from(helper).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReleaseListen {
-    pub server_name: ServerName,
+    pub server_name: Name<'static>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,22 +206,4 @@ pub trait RootTransportApi: Send + Sync {
         &self,
         request: OpenConnector,
     ) -> Result<ConnectorHandle, OpenConnectorError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_listen_payload_is_material_not_paths() {
-        let req = RequestListen {
-            server_name: "example.test".to_string(),
-            bind: vec![],
-            cert_pem: b"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----".to_vec(),
-            key_pem: b"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".to_vec(),
-        };
-        assert_eq!(req.server_name, "example.test");
-        assert!(!req.cert_pem.is_empty());
-        assert!(!req.key_pem.is_empty());
-    }
 }

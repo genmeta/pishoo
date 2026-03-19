@@ -14,18 +14,18 @@ use std::{
 };
 
 use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
+use futures::TryStreamExt;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
 };
-use genmeta_home::GenmetaHome;
+use genmeta_home::{GenmetaHome, identity::Name};
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
 use pishoo::{
     protocol::{
         OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
     },
     remoc_bridge::ListenerHandle,
-    tls::{self, TlsMaterialError},
 };
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::sync::Mutex;
@@ -40,6 +40,7 @@ struct ServerRuntime {
 #[derive(Clone)]
 struct WorkerRouting {
     router: Arc<HashMap<String, Arc<Node>>>,
+    // TODO: check
     binds: Arc<HashMap<String, Vec<String>>>,
 }
 
@@ -72,42 +73,6 @@ enum WorkerError {
         path: String,
         source: std::io::Error,
     },
-    #[snafu(display("failed to read cert `{path}`"))]
-    ReadCert {
-        path: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("failed to read key `{path}`"))]
-    ReadKey {
-        path: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("certificate file too large `{path}` ({actual} > {limit})"))]
-    CertTooLarge {
-        path: String,
-        actual: usize,
-        limit: usize,
-    },
-    #[snafu(display("private key file too large `{path}` ({actual} > {limit})"))]
-    KeyTooLarge {
-        path: String,
-        actual: usize,
-        limit: usize,
-    },
-    #[snafu(display("failed to parse certificate pem `{path}`"))]
-    ParseCert {
-        path: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("certificate pem contains no certificate `{path}`"))]
-    EmptyCert { path: String },
-    #[snafu(display("failed to parse private key pem `{path}`"))]
-    ParseKey {
-        path: String,
-        source: std::io::Error,
-    },
-    #[snafu(display("private key pem contains no key `{path}`"))]
-    EmptyKey { path: String },
 }
 
 impl ServerRuntime {
@@ -179,7 +144,7 @@ async fn main() -> Result<(), Whatever> {
 
     // --- Identity scan: discover ~/.genmeta identities and request listeners ---
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
-    let listeners: Arc<Mutex<HashMap<String, ServerRuntime>>> =
+    let listeners: Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let h3_settings = Arc::new(Settings::default());
 
@@ -195,11 +160,10 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to open root-owned connector")?;
     tracing::info!("root-owned connector handle acquired");
 
-    let identities = genmeta_home.identities();
     match reconcile_listener_set(
         &root_api,
         &listeners,
-        &identities,
+        &genmeta_home,
         None,
         h3_settings.clone(),
         worker_policy.clone(),
@@ -222,7 +186,8 @@ async fn main() -> Result<(), Whatever> {
     }
 
     // Keep root_api and identity state alive for Reload handling.
-    let genmeta_home_path = bootstrap.home.join(".genmeta");
+    let genmeta_home = GenmetaHome::load_from_environment()
+        .whatever_context("failed to locate genmeta home from environment")?;
 
     let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
         .whatever_context("failed to create sigquit listener")?;
@@ -252,12 +217,10 @@ async fn main() -> Result<(), Whatever> {
             }
             _ = hup_signal.recv() => {
                 tracing::info!("reloading identities");
-                let genmeta_home = GenmetaHome::new(genmeta_home_path.clone());
-                let identities = genmeta_home.identities();
                 match reconcile_listener_set(
                     &root_api,
                     &listeners,
-                    &identities,
+                    &genmeta_home,
                     Some(listeners.lock().await.keys().cloned().collect()),
                     h3_settings.clone(),
                     worker_policy.clone(),
@@ -342,29 +305,23 @@ fn start_server_runtime(
 
 async fn reconcile_listener_set(
     root_api: &impl RootTransportApi,
-    listeners: &Arc<Mutex<HashMap<String, ServerRuntime>>>,
-    identities: &genmeta_home::identity::Identities,
-    current_servers: Option<HashSet<String>>,
+    listeners: &Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>>,
+    genmeta_home: &GenmetaHome,
+    current_servers: Option<HashSet<Name<'static>>>,
     h3_settings: Arc<Settings>,
     worker_policy: WorkerPolicy,
 ) -> Result<ReconcileStats, Whatever> {
-    let names = identities
-        .list()
+    let names: HashSet<Name<'static>> = genmeta_home
+        .identities()
+        .try_collect()
         .await
         .whatever_context("failed to list identities")?;
-    let routing = build_worker_routing(identities, &names).await;
-    let desired_servers: HashSet<String> = names.iter().map(|n| n.as_str().to_string()).collect();
+    let routing = build_worker_routing(genmeta_home, &names).await;
     let existing_servers = current_servers.unwrap_or_default();
 
-    let removed: Vec<String> = existing_servers
-        .difference(&desired_servers)
-        .cloned()
-        .collect();
-    let kept = existing_servers.intersection(&desired_servers).count();
-    let added: Vec<String> = desired_servers
-        .difference(&existing_servers)
-        .cloned()
-        .collect();
+    let removed: Vec<Name> = existing_servers.difference(&names).cloned().collect();
+    let kept = existing_servers.intersection(&names).count();
+    let added: Vec<Name> = names.difference(&existing_servers).cloned().collect();
 
     for server_name in &removed {
         let request = ReleaseListen {
@@ -384,23 +341,22 @@ async fn reconcile_listener_set(
     }
 
     for server_name in &added {
-        let Some(name) = names.iter().find(|n| n.as_str() == server_name) else {
-            continue;
-        };
-        let identity_dir = identities.join_name(name.borrow());
-        let cert_path = identity_dir.join("fullchain.crt");
-        let key_path = identity_dir.join("privkey.pem");
-        let (cert_pem, key_pem) = read_tls_material(&cert_path, &key_path)
+        let identity = genmeta_home
+            .load_identity(server_name.borrow())
             .await
             .whatever_context(format!(
-                "failed to read tls material for server `{server_name}`"
+                "failed to read tls material for identity `{server_name}`"
             ))?;
 
         let request = RequestListen {
-            server_name: server_name.clone(),
-            bind: routing.binds.get(server_name).cloned().unwrap_or_default(),
-            cert_pem,
-            key_pem,
+            name: server_name.clone(),
+            bind: routing
+                .binds
+                .get(server_name.as_full())
+                .cloned()
+                .unwrap_or_default(),
+            certs: identity.certs().to_vec(),
+            key: identity.key().clone_key(),
         };
         if request.bind.is_empty() {
             tracing::warn!(%server_name, "skip listener request: no resolved bind uris");
@@ -411,7 +367,7 @@ async fn reconcile_listener_set(
             Ok(listener) => {
                 let runtime = start_server_runtime(
                     listener,
-                    server_name.clone(),
+                    server_name.as_full().to_owned(),
                     h3_settings.clone(),
                     routing.router.clone(),
                     worker_policy.clone(),
@@ -469,56 +425,9 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
     })
 }
 
-async fn read_tls_material(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<(Vec<u8>, Vec<u8>), WorkerError> {
-    let cert_pem = tokio::fs::read(cert_path)
-        .await
-        .map_err(|e| WorkerError::ReadCert {
-            path: cert_path.display().to_string(),
-            source: e,
-        })?;
-    let key_pem = tokio::fs::read(key_path)
-        .await
-        .map_err(|e| WorkerError::ReadKey {
-            path: key_path.display().to_string(),
-            source: e,
-        })?;
-
-    tls::validate_tls_material(&cert_pem, &key_pem).map_err(|error| match error {
-        TlsMaterialError::CertTooLarge { actual, limit } => WorkerError::CertTooLarge {
-            path: cert_path.display().to_string(),
-            actual,
-            limit,
-        },
-        TlsMaterialError::KeyTooLarge { actual, limit } => WorkerError::KeyTooLarge {
-            path: key_path.display().to_string(),
-            actual,
-            limit,
-        },
-        TlsMaterialError::InvalidCertificatePem { source } => WorkerError::ParseCert {
-            path: cert_path.display().to_string(),
-            source,
-        },
-        TlsMaterialError::EmptyCertificate => WorkerError::EmptyCert {
-            path: cert_path.display().to_string(),
-        },
-        TlsMaterialError::InvalidPrivateKeyPem { source } => WorkerError::ParseKey {
-            path: key_path.display().to_string(),
-            source,
-        },
-        TlsMaterialError::EmptyPrivateKey => WorkerError::EmptyKey {
-            path: key_path.display().to_string(),
-        },
-    })?;
-
-    Ok((cert_pem, key_pem))
-}
-
 async fn build_worker_routing(
-    identities: &genmeta_home::identity::Identities,
-    names: &[genmeta_home::identity::Name<'_>],
+    genemta_home: &GenmetaHome,
+    names: &HashSet<Name<'_>>,
 ) -> WorkerRouting {
     let device_names = gm_quic::qinterface::device::Devices::global()
         .interfaces()
@@ -531,10 +440,10 @@ async fn build_worker_routing(
     let mut binds: HashMap<String, Vec<String>> = HashMap::new();
 
     for name in names {
-        let identity_dir = identities.join_name(name.borrow());
-        let server_name = name.as_str().to_string();
+        let server_name = name.as_full().to_string();
         let fallback = Arc::new(Node::new(Value::ValueMap(HashMap::new())));
         fallback_entries.insert(server_name, fallback);
+        let identity_dir = genemta_home.join_identity_name(name.borrow());
 
         let conf_path = identity_dir.join("pishoo.conf");
         if !conf_path.is_file() {
