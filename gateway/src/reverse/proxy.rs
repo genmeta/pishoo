@@ -149,7 +149,10 @@ pub async fn pass(
         }
     }
 
-    tracing::info!(path_and_query, "proxying request to upstream path and query");
+    tracing::info!(
+        path_and_query,
+        "proxying request to upstream path and query"
+    );
 
     let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
         "failed to generate target uri from `{path_and_query}`"

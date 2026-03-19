@@ -8,8 +8,7 @@ use tracing::{Instrument, debug, error, info};
 
 use super::BoxResponse;
 use crate::{
-    error::BoxError,
-    error::Whatever,
+    error::{BoxError, Whatever},
     forward::{ForwardRequestError, build_empty_response, build_error_response, tunnel_upgrade},
 };
 

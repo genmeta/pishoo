@@ -89,7 +89,9 @@ fn setup_client_config(node: &Node) -> Result<()> {
         ))?;
 
         // 设置客户端配置
-        if let Err(error) = h3_client::set_client_config(cert_chain, private_key, client_name.clone()) {
+        if let Err(error) =
+            h3_client::set_client_config(cert_chain, private_key, client_name.clone())
+        {
             info!(
                 error = %Report::from_error(&error),
                 "client config already set, reinitializing connection pool"
@@ -184,30 +186,32 @@ pub async fn serve(
             .instrument(span)
         });
 
-        tokio::task::spawn(async move {
-            // 启动 HTTP/1.1 服务
-            let result = http1::Builder::new()
-                .preserve_header_case(true)
-                .title_case_headers(true)
-                .serve_connection(io, service)
-                .with_upgrades()
-                .await;
-            match &result {
-                Ok(()) => info!("http/1.1 serve_connection completed"),
-                Err(error) => {
-                    error!(
-                        error = %Report::from_error(error),
-                        canceled = error.is_canceled(),
-                        closed = error.is_closed(),
-                        parse = error.is_parse(),
-                        user = error.is_user(),
-                        incomplete_message = error.is_incomplete_message(),
-                        "http/1.1 serve_connection failed"
-                    );
+        tokio::task::spawn(
+            async move {
+                // 启动 HTTP/1.1 服务
+                let result = http1::Builder::new()
+                    .preserve_header_case(true)
+                    .title_case_headers(true)
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+                match &result {
+                    Ok(()) => info!("http/1.1 serve_connection completed"),
+                    Err(error) => {
+                        error!(
+                            error = %Report::from_error(error),
+                            canceled = error.is_canceled(),
+                            closed = error.is_closed(),
+                            parse = error.is_parse(),
+                            user = error.is_user(),
+                            incomplete_message = error.is_incomplete_message(),
+                            "http/1.1 serve_connection failed"
+                        );
+                    }
                 }
             }
-        }
-        .in_current_span());
+            .in_current_span(),
+        );
     };
 
     let task = async move {
@@ -235,13 +239,15 @@ pub async fn serve(
 pub async fn resume(node: Arc<Node>) -> Result<()> {
     match serve(node).await {
         Ok((_local_addr, forward_proxy)) => {
-            tokio::spawn(async move {
-                // QuicInterfaces::global().clear();
-                if let Err(error) = forward_proxy.await {
-                    error!(error = %Report::from_error(&error), "forward proxy failed");
+            tokio::spawn(
+                async move {
+                    // QuicInterfaces::global().clear();
+                    if let Err(error) = forward_proxy.await {
+                        error!(error = %Report::from_error(&error), "forward proxy failed");
+                    }
                 }
-            }
-            .in_current_span());
+                .in_current_span(),
+            );
             Ok(())
         }
         Err(launch_error) => {
@@ -339,11 +345,7 @@ async fn tunnel_upgrade(request_upgrade: OnUpgrade, response_upgrade: OnUpgrade)
     tracing::debug!("upgraded proxy started");
     match io::copy_bidirectional(&mut TokioIo::new(client_io), &mut TokioIo::new(server_io)).await {
         Ok((from_client, from_server)) => {
-            info!(
-                from_client,
-                from_server,
-                "upgraded proxy completed"
-            );
+            info!(from_client, from_server, "upgraded proxy completed");
         }
         Err(error) => {
             error!(error = %Report::from_error(&error), "upgraded proxy aborted");

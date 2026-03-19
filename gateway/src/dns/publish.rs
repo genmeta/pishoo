@@ -60,7 +60,10 @@ pub async fn publish_host_endpoints(
     config: &PublishConfig,
 ) {
     if config.resolvers.is_empty() {
-        tracing::warn!(host, "no dns publisher resolver available, cannot publish endpoints");
+        tracing::warn!(
+            host,
+            "no dns publisher resolver available, cannot publish endpoints"
+        );
         return;
     }
 
@@ -277,7 +280,12 @@ async fn publish_resolvers(
         return;
     }
 
-    tracing::debug!(server_name, server_id = config.server_id, count = endpoints.len(), "publishing endpoints");
+    tracing::debug!(
+        server_name,
+        server_id = config.server_id,
+        count = endpoints.len(),
+        "publishing endpoints"
+    );
 
     let mut hosts = std::collections::HashMap::new();
     hosts.insert(server_name.to_string(), endpoints);
@@ -333,31 +341,37 @@ impl Publisher {
                 publish_once(&listeners, &resolvers).await
             };
 
-        let _task = AbortOnDropHandle::new(tokio::spawn(async move {
-            let new_publish_task = || {
-                let publish_all = publish_all(listeners.clone(), resolvers.clone());
-                AbortOnDropHandle::new(tokio::spawn(async move {
-                    time::sleep(Duration::from_millis(50)).await;
-                    publish_all.await
-                }.in_current_span()))
-            };
+        let _task = AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                let new_publish_task = || {
+                    let publish_all = publish_all(listeners.clone(), resolvers.clone());
+                    AbortOnDropHandle::new(tokio::spawn(
+                        async move {
+                            time::sleep(Duration::from_millis(50)).await;
+                            publish_all.await
+                        }
+                        .in_current_span(),
+                    ))
+                };
 
-            let mut interval = interval(DNS_PUBLISH_INTERVAL);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            let mut current_publish_task = new_publish_task();
-            let mut observer = Locations::global().subscribe();
-            loop {
-                tokio::select! {
-                    _ = observer.recv() => {
-                        current_publish_task.abort();
+                let mut interval = interval(DNS_PUBLISH_INTERVAL);
+                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                let mut current_publish_task = new_publish_task();
+                let mut observer = Locations::global().subscribe();
+                loop {
+                    tokio::select! {
+                        _ = observer.recv() => {
+                            current_publish_task.abort();
+                        }
+                        _ = interval.tick() => {
+                            current_publish_task.abort();
+                        }
                     }
-                    _ = interval.tick() => {
-                        current_publish_task.abort();
-                    }
+                    current_publish_task = new_publish_task();
                 }
-                current_publish_task = new_publish_task();
             }
-        }.in_current_span()));
+            .in_current_span(),
+        ));
         Self { _task }
     }
 }

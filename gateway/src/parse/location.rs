@@ -1,11 +1,11 @@
 use http::{HeaderName, HeaderValue};
 use misc_conf::{ast::Directive, nginx::Nginx};
-use snafu::{ensure_whatever, ResultExt};
+use snafu::{ResultExt, ensure_whatever};
 
 use crate::parse::{
-    parse_boolean, parse_header, parse_header_always, parse_path, parse_proxy_pass,
-    parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_vec, parse_types,
-    pattern::parse_pattern, Commands, Result, Value,
+    Commands, Result, Value, parse_boolean, parse_header, parse_header_always, parse_path,
+    parse_proxy_pass, parse_ssh_login, parse_ssh_ssl_user, parse_string, parse_string_vec,
+    parse_types, pattern::parse_pattern,
 };
 
 pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {

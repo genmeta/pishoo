@@ -14,7 +14,7 @@ use misc_conf::{
     nginx::Nginx,
 };
 use pattern::Pattern;
-use snafu::{ensure_whatever, whatever, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure_whatever, whatever};
 use tokio::sync::OnceCell;
 
 use crate::error::Whatever;

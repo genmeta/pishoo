@@ -49,12 +49,13 @@ pub(crate) async fn index(
     file_path: impl Into<String>,
 ) -> Result<(File, u64, String), IndexError> {
     let mut file_path = file_path.into();
-    let metadata = tokio::fs::metadata(&file_path)
-        .await
-        .map_err(|source| IndexError::ReadMetadata {
-            source,
-            path: file_path.clone(),
-        })?;
+    let metadata =
+        tokio::fs::metadata(&file_path)
+            .await
+            .map_err(|source| IndexError::ReadMetadata {
+                source,
+                path: file_path.clone(),
+            })?;
 
     if metadata.is_file() {
         return File::open(&file_path)

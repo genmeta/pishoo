@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use misc_conf::{ast::Directive, nginx::Nginx};
 
-use crate::parse::{pishoo::parse_pishoo, Commands, Node, Result, Value};
+use crate::parse::{Commands, Node, Result, Value, pishoo::parse_pishoo};
 
 pub fn parse_conf(directives: Vec<Directive<Nginx>>) -> Result<Arc<Node>> {
     let mut commands = Commands::new();

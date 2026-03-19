@@ -142,7 +142,9 @@ pub async fn serve(
             config,
         )),
         (Some(_), None) => {
-            warn!("stun configured but no dns publisher for {STUN_DOMAIN:?}, stun server manager disabled");
+            warn!(
+                "stun configured but no dns publisher for {STUN_DOMAIN:?}, stun server manager disabled"
+            );
             None
         }
         _ => None,
@@ -344,7 +346,11 @@ async fn maintain_binding(
                     if bind_uris.is_empty() {
                         continue;
                     }
-                    debug!(server, ?bind_uris, "removing interfaces from server binding");
+                    debug!(
+                        server,
+                        ?bind_uris,
+                        "removing interfaces from server binding"
+                    );
                     let Some(server) = quic_listeners.get_server(server) else {
                         unreachable!()
                     };
@@ -400,16 +406,15 @@ async fn handle_connections(
         let access_rules = access_rules.clone();
         tokio::spawn(
             async move {
-                if let Err(error) =
-                    handle_single_connection(
-                        conn,
-                        server_name,
-                        h3_settings,
-                        router,
-                        access_rules,
-                        MissingRulePolicy::Allow,
-                    )
-                        .await
+                if let Err(error) = handle_single_connection(
+                    conn,
+                    server_name,
+                    h3_settings,
+                    router,
+                    access_rules,
+                    MissingRulePolicy::Allow,
+                )
+                .await
                 {
                     error!(
                         error = %Report::from_error(error),
@@ -698,6 +703,9 @@ mod tests {
 
     #[test]
     fn missing_rule_policy_deny_is_fail_closed() {
-        assert_eq!(action_on_missing_rule(MissingRulePolicy::Deny), RequestAction::Deny);
+        assert_eq!(
+            action_on_missing_rule(MissingRulePolicy::Deny),
+            RequestAction::Deny
+        );
     }
 }

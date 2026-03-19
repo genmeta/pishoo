@@ -1926,6 +1926,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "shellexpand",
  "snafu 0.8.9",
  "socket2 0.5.10",
  "thiserror 2.0.18",
@@ -3328,7 +3329,6 @@ dependencies = [
  "gm-quic",
  "h3x",
  "http",
- "libc",
  "nix 0.30.1",
  "remoc",
  "rustls",
@@ -4850,6 +4850,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]

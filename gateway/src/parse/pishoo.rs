@@ -1,8 +1,8 @@
 use misc_conf::{ast::Directive, nginx::Nginx};
 
 use crate::parse::{
-    parse_boolean, parse_header_value, parse_string, parse_string_vec, parse_types,
-    proxy::parse_proxy, server::parse_server, Commands, Result, Value,
+    Commands, Result, Value, parse_boolean, parse_header_value, parse_string, parse_string_vec,
+    parse_types, proxy::parse_proxy, server::parse_server,
 };
 
 pub(super) fn parse_pishoo(directive: Directive<Nginx>) -> Result<Value> {

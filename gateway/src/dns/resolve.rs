@@ -9,7 +9,7 @@ use h3x::client::Client;
 use http::Uri;
 
 use super::H3_DNS_SERVER;
-use crate::parse::{optional_server_identity, server_identity, Node, ServerIdentity, Value};
+use crate::parse::{Node, ServerIdentity, Value, optional_server_identity, server_identity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolver {

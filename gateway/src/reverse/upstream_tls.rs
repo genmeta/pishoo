@@ -55,7 +55,9 @@ pub(super) async fn connect_https(
 
     let tcp_stream = TcpStream::connect((host, port))
         .await
-        .whatever_context::<_, Whatever>(format!("cannot connect to https upstream {host}:{port}"))?;
+        .whatever_context::<_, Whatever>(format!(
+            "cannot connect to https upstream {host}:{port}"
+        ))?;
 
     // 根据 location 中的 TLS 配置构造客户端配置，再执行 TLS 握手。
     let tls_config = build_client_config(location)?;

@@ -8,8 +8,10 @@ use snafu::{Report, ResultExt, Whatever};
 use tracing::{Instrument, error, info};
 
 use super::BoxResponse;
-use crate::error::BoxError;
-use crate::forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host};
+use crate::{
+    error::BoxError,
+    forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host},
+};
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
@@ -50,26 +52,32 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect_tunnel(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
-    tokio::spawn(async move {
-        // 升级连接并处理后续请求
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                info!("establishing tunnel to request uri");
-                let service = service_fn(proxy);
-                if let Err(error) = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(upgraded, service)
-                    .await
-                {
-                    error!(error = %Report::from_error(&error), "connection handling failed");
+pub async fn connect_tunnel(
+    req: Request<hyper::body::Incoming>,
+) -> Result<BoxResponse, hyper::Error> {
+    tokio::spawn(
+        async move {
+            // 升级连接并处理后续请求
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    info!("establishing tunnel to request uri");
+                    let service = service_fn(proxy);
+                    if let Err(error) = http1::Builder::new()
+                        .preserve_header_case(true)
+                        .title_case_headers(true)
+                        .serve_connection(upgraded, service)
+                        .await
+                    {
+                        error!(error = %Report::from_error(&error), "connection handling failed");
+                    }
+                }
+                Err(error) => {
+                    error!(error = %Report::from_error(&error), "connection upgrade failed")
                 }
             }
-            Err(error) => error!(error = %Report::from_error(&error), "connection upgrade failed"),
         }
-    }
-    .in_current_span());
+        .in_current_span(),
+    );
 
     Ok(build_empty_response())
 }
