@@ -10,7 +10,7 @@ use firewall_base::pattern::{LocationPattern, LocationPatternKind};
 use futures::Stream;
 use h3x::message::stream::{ReadStream, WriteStream};
 use http::Request;
-use snafu::ResultExt;
+use snafu::{Report, ResultExt};
 
 use crate::{
     error::{Result, StreamSnafu},
@@ -150,7 +150,7 @@ pub async fn serve(
         }
         Err(e) => {
             req_info
-                .log_error(format!("SSH session error: {:?}", e))
+                .log_error(Report::from_error(&e).to_string())
                 .await;
             req_info.log_access(500, 0).await;
         }

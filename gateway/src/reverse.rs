@@ -531,7 +531,7 @@ async fn handle_request(
     let server = servers
         .get(&server_name)
         .whatever_context::<_, Whatever>(format!(
-            "No matched server for request's host `{server_name}`",
+            "no matched server for request's host `{server_name}`",
         ))?;
 
     let locations = if let Some(Value::Nodes(locations)) = server.get("location") {
@@ -542,7 +542,7 @@ async fn handle_request(
 
     let (location, final_pattern) = match_location(locations, req.uri().path())
         .whatever_context::<_, Whatever>(format!(
-            "No matched location for path `{}` in server `{}`",
+            "no matched location for path `{}` in server `{}`",
             req.uri().path(),
             server_name
         ))?;
@@ -566,7 +566,7 @@ async fn handle_request(
                     %server_name,
                     path = %req.uri().path(),
                     ?missing_rule_policy,
-                    %error,
+                    error = %Report::from_error(&error),
                     "firewall rule matching failed"
                 );
                 (None, None, action)
