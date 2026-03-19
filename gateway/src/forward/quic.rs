@@ -19,7 +19,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         Ok(host) => host,
         Err(error) => {
             error!(error = %Report::from_error(&error), "invalid host");
-            return Ok(build_error_response(error.to_string()));
+            return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
     let client = super::h3_client::global().await;
@@ -28,7 +28,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         Ok(conn) => conn,
         Err(error) => {
             error!(error = %Report::from_error(&error), "failed to create QUIC connection");
-            return Ok(build_error_response(error.to_string()));
+            return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
 
@@ -43,8 +43,8 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
             Ok(response)
         }
         Err(error) => {
-            error!(error = %error, "forward request failed");
-            Ok(build_error_response(error.to_string()))
+            error!(error = %Report::from_error(&error), "forward request failed");
+            Ok(build_error_response(Report::from_error(&error).to_string()))
         }
     }
 }
@@ -78,12 +78,12 @@ pub async fn connect_tunnel(req: Request<hyper::body::Incoming>) -> Result<BoxRe
 async fn send(
     h3_conn: Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>,
     req: Request<hyper::body::Incoming>,
-) -> Result<BoxResponse, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BoxResponse, Whatever> {
     // 使用 h3x 的 execute_hyper_request 一步完成：打开流、发送请求、接收响应
     let response = h3_conn
         .execute_hyper_request(req)
         .await
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+        .whatever_context::<_, Whatever>("failed to execute QUIC request")?;
 
     // 将响应体转换为 BoxBody
     let (mut parts, body) = response.into_parts();

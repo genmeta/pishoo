@@ -2,7 +2,7 @@ use http::Request;
 use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use snafu::{FromString, Report};
+use snafu::{FromString, Report, ResultExt};
 use tokio::{io, net::TcpStream};
 use tracing::{Instrument, debug, error, info};
 
@@ -21,17 +21,20 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         None => {
             let error = Whatever::without_source("missing host in uri".to_string());
             error!(error = %Report::from_error(&error), "missing host in uri");
-            return Ok(build_error_response(error.to_string()));
+            return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
 
     let port = original_uri.port_u16().unwrap_or(80);
 
-    let stream = match TcpStream::connect((host, port)).await {
+    let stream = match TcpStream::connect((host, port))
+        .await
+        .whatever_context::<_, Whatever>(format!("failed to connect to upstream {host}:{port}"))
+    {
         Ok(stream) => stream,
         Err(error) => {
             error!(error = %Report::from_error(&error), %host, port, "connect to upstream failed");
-            return Ok(build_error_response(error.to_string()));
+            return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
 
@@ -82,7 +85,7 @@ pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse,
     let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) else {
         let error = Whatever::without_source("CONNECT must target a valid host".to_string());
         error!(error = %Report::from_error(&error), "missing host in CONNECT uri");
-        let mut resp = build_error_response(error.to_string());
+        let mut resp = build_error_response(Report::from_error(&error).to_string());
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
         return Ok(resp);
     };

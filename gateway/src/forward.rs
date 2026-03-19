@@ -140,7 +140,7 @@ pub async fn serve(
                     Ok(host) => host,
                     Err(error) => {
                         error!(error = %Report::from_error(&error), "invalid host");
-                        return Ok(build_error_response(error.to_string()));
+                        return Ok(build_error_response(Report::from_error(&error).to_string()));
                     }
                 };
 
