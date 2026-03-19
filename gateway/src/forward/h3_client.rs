@@ -6,12 +6,20 @@ use gm_quic::{
 };
 use gmdns::resolvers::Resolvers;
 use h3x::gm_quic::H3Client;
+use snafu::Snafu;
 use tracing::debug;
 
 use crate::parse::{IfaceRange, IpFamilies, Listens};
 
 /// 客户端配置类型: (证书链, 私钥, 客户端名称)
 type ClientConfig = (Vec<u8>, Vec<u8>, String);
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum SetClientConfigError {
+    #[snafu(display("failed to acquire h3 client config write lock"))]
+    WriteLockPoisoned,
+}
 
 /// 全局客户端配置存储
 static CLIENT_CONFIG: RwLock<Option<ClientConfig>> = RwLock::new(None);
@@ -23,10 +31,10 @@ pub fn set_client_config(
     cert_chain: Vec<u8>,
     private_key: Vec<u8>,
     client_name: String,
-) -> Result<(), &'static str> {
+) -> Result<(), SetClientConfigError> {
     let mut config = CLIENT_CONFIG
         .write()
-        .map_err(|_| "Failed to acquire write lock")?;
+        .map_err(|_| SetClientConfigError::WriteLockPoisoned)?;
     *config = Some((cert_chain, private_key, client_name));
     Ok(())
 }
