@@ -51,7 +51,7 @@ pub(super) async fn connect_https(
     let server_name = ServerName::try_from(host.to_string())
         .whatever_context::<_, Whatever>(format!("Invalid upstream TLS server name `{host}`"))?;
 
-    debug!(target: "upstream_tls", host, port, "Connecting to HTTPS upstream");
+    debug!(host, port, "connecting to https upstream");
 
     let tcp_stream = TcpStream::connect((host, port))
         .await
@@ -84,10 +84,9 @@ fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
     );
 
     debug!(
-        target: "upstream_tls",
         client_auth_enabled = settings.client_cert.is_some(),
         custom_trusted_ca = settings.trusted_ca.is_some(),
-        "Building upstream TLS client config"
+        "building upstream tls client config"
     );
 
     let root_store = build_root_store(settings.trusted_ca.as_deref())?;

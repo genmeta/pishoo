@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use h3x::message::stream::WriteStream;
 use http::{Request, Response, StatusCode, header::CONTENT_LENGTH};
-use snafu::ResultExt;
+use snafu::{Report, ResultExt};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info};
 
@@ -113,12 +113,17 @@ async fn serve_static_file(
     let req_info = RequestInfo::from_request(req);
     let uri = req.uri();
 
-    debug!(target: "static_file", "[Response handling][{}] Processing static file", uri);
+    debug!(uri = %uri, "processing static file");
 
     let (file, file_size, file_path) = match index(location, file_path).await {
         Ok(result) => result,
         Err(index_error) => {
-            tracing::info!(target: "static_file", "[Proxy][{}] File not found: {}, error: {}", uri, file_path, index_error);
+            tracing::info!(
+                uri = %uri,
+                path = file_path,
+                error = %Report::from_error(&index_error),
+                "static file was not found"
+            );
             super::send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
             req_info.log_access(404, 0).await;
             return Ok(());
@@ -160,18 +165,26 @@ async fn serve_static_file(
         Ok(size) => {
             req_info.log_access(200, size).await;
         }
-        Err(e) => {
-            let err_msg = format!("Failed to send file content: {}", e);
-            error!(target: "static_file", "[Proxy][{}] {}", uri, err_msg);
+        Err(error) => {
+            let err_msg = format!("failed to send file content: {}", Report::from_error(&error));
+            error!(
+                uri = %uri,
+                error = %Report::from_error(&error),
+                "failed to send file content"
+            );
             req_info.log_error(&err_msg).await;
-            return Err(e).whatever_context::<_, Whatever>("Failed to send file content")?;
+            return Err(error).whatever_context::<_, Whatever>("Failed to send file content")?;
         }
     }
 
     match writer.shutdown().await {
-        Ok(()) => info!(target: "static_file", "[Proxy][{}] Request finished sent", uri),
-        Err(e) => {
-            error!(target: "static_file", "[Proxy][{}] Error sending request data end: {}", uri, e)
+        Ok(()) => info!(uri = %uri, "finished sending static file response"),
+        Err(error) => {
+            error!(
+                uri = %uri,
+                error = %Report::from_error(&error),
+                "failed to finish sending static file response"
+            )
         }
     }
     Ok(())

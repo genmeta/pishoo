@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use chrono::Local;
 use genmeta_home::GenmetaHome;
 use http::{Method, Request, Version};
-use snafu::ResultExt;
+use snafu::{Report, ResultExt};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 use crate::error::Result;
@@ -120,7 +120,10 @@ pub async fn write_access_log(line: String) {
     .await;
 
     if let Err(e) = result {
-        tracing::error!(target: "access_log", "Failed to write access log: {:?}", e);
+        tracing::error!(
+            error = %Report::from_error(e),
+            "failed to write access log"
+        );
     }
 }
 
@@ -153,6 +156,9 @@ pub async fn write_error_log(line: String) {
     .await;
 
     if let Err(e) = result {
-        tracing::error!(target: "error_log", "Failed to write error log: {:?}", e);
+        tracing::error!(
+            error = %Report::from_error(e),
+            "failed to write error log"
+        );
     }
 }

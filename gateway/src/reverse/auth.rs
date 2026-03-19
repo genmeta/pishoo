@@ -30,10 +30,10 @@ impl AuthClient for ClientAuther {
                 ConnectionAction::Allow => ClientNameVerifyResult::Accept,
                 ConnectionAction::Deny => {
                     tracing::info!(
-                        target: "connect",
-                        "Refuse client `{client_name}` connection to `{}` silently: matched access rule for domain `{rule_matched_domain}`",
-                        host.name(),
-                        client_name = client_name.unwrap_or("<anonymous>")
+                        client_name = client_name.unwrap_or("<anonymous>"),
+                        host = host.name(),
+                        matched_domain = %rule_matched_domain,
+                        "silently refused client connection because an access rule matched"
                     );
                     ClientNameVerifyResult::SilentRefuse("access firewall rules".to_owned())
                 }
@@ -60,9 +60,14 @@ impl AuthClient for ClientAuther {
             true => ClientAgentVerifyResult::Accept,
             false => {
                 let reason = format!(
-                    "Client name `{client_name}` does not match any names in the provided client certificates",
+                    "client name `{client_name}` does not match any names in the provided client certificates",
                 );
-                tracing::info!(target: "connect", "Refuse client `{client_name}` connection to {}: {reason}", host.name() );
+                tracing::info!(
+                    client_name,
+                    host = host.name(),
+                    reason,
+                    "refused client connection"
+                );
                 ClientAgentVerifyResult::Refuse(reason)
             }
         }
