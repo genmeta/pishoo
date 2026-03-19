@@ -310,7 +310,6 @@ async fn maintain_binding(
     server_listens: HashMap<String, Vec<Listens>>,
 ) {
     while let Some((_currnet_interfaces, event)) = monitor.update().await {
-        //tracing::debug!(target: "listen", ?event, "Interface event received");
         match event.as_ref() {
             InterfaceEvent::Added { device, .. } => {
                 let mut main_bind_uris = HashSet::new();

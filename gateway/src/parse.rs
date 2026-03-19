@@ -331,7 +331,7 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
     CONFIG_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
 
     let mut directives =
-        Directive::<Nginx>::parse(configure).whatever_context("Cannot parse configuration")?;
+        Directive::<Nginx>::parse(configure).whatever_context("cannot parse configuration")?;
 
     // 预处理
     if let Some(root) = root {
@@ -339,7 +339,7 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
             .into_iter()
             .map(|mut directive| directive.resolve_include(root).map(|_| directive))
             .collect::<Result<Vec<_>, _>>()
-            .whatever_context("Cannot resolve include in configuration")?;
+            .whatever_context("cannot resolve include in configuration")?;
     } else {
         tracing::warn!("config file has no parent, unable to resolve includes");
     }

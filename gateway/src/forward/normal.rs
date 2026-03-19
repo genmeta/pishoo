@@ -95,7 +95,7 @@ pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse,
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     if let Err(error) = tunnel(upgraded, addr).await {
-                        error!(error = %Report::from_error(&error), "CONNECT proxy aborted");
+                        error!(error = %Report::from_error(&error), "connect proxy aborted");
                     }
                 }
                 Err(error) => {
@@ -121,7 +121,7 @@ async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
         tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
 
     // Print message when done
-    info!(from_client, from_server, "CONNECT tunnel completed");
+    info!(from_client, from_server, "connect tunnel completed");
 
     Ok(())
 }

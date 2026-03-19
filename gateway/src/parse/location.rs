@@ -31,7 +31,7 @@ pub(super) fn parse_location(directive: Directive<Nginx>) -> Result<Value> {
     commands.insert("ssh_deny", parse_string_vec);
 
     let pattern =
-        parse_pattern(&directive.args).whatever_context("Failed to parse location pattern")?;
+        parse_pattern(&directive.args).whatever_context("failed to parse location pattern")?;
     let mut values = commands.parse(directive.children.into_iter().flatten())?;
 
     let proxy_ssl_certificate = values.contains_key("proxy_ssl_certificate");
