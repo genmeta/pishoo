@@ -42,9 +42,10 @@ pub async fn handle(
     let resp = match pass(location, req, recver).await {
         Ok(resp) => resp,
         Err(error) => {
-            let err_msg = format!("proxy request error: {}", Report::from_error(&error));
             error!(error = %Report::from_error(&error), "proxy request failed");
-            req_info.log_error(&err_msg).await;
+            req_info
+                .log_error(Report::from_error(&error).to_string())
+                .await;
             req_info.log_access(500, 0).await;
 
             super::send_status_and_close(sender, http::StatusCode::INTERNAL_SERVER_ERROR).await?;
@@ -91,9 +92,10 @@ pub async fn handle(
             req_info.log_access(status_code.as_u16(), size).await;
         }
         Err(error) => {
-            let err_msg = format!("error sending response body: {}", Report::from_error(&error));
             error!(error = %Report::from_error(&error), "failed to forward response body");
-            req_info.log_error(&err_msg).await;
+            req_info
+                .log_error(Report::from_error(&error).to_string())
+                .await;
         }
     }
     match writer.shutdown().await {

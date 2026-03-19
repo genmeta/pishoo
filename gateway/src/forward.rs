@@ -90,7 +90,10 @@ fn setup_client_config(node: &Node) -> Result<()> {
 
         // 设置客户端配置
         if let Err(error) = h3_client::set_client_config(cert_chain, private_key, client_name.clone()) {
-            info!(error = %error, "client config already set, reinitializing connection pool");
+            info!(
+                error = %Report::from_error(&error),
+                "client config already set, reinitializing connection pool"
+            );
         } else {
             info!(%client_name, "client config set");
         }

@@ -4,6 +4,7 @@ use gateway::{
 };
 use snafu::{ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 #[tokio::main]
 #[snafu::report]
@@ -47,19 +48,23 @@ async fn main() -> Result<(), Whatever> {
     let mut handler = JoinSet::new();
 
     for proxy in proxies {
-        handler.spawn(async move {
-            match forward::serve(proxy).await {
-                Ok((bind_addr, forward_proxy)) => {
-                    tracing::info!(%bind_addr, "forward proxy started");
-                    if let Err(error) = forward_proxy.await {
-                        tracing::error!(error = %snafu::Report::from_error(&error), "forward proxy failed");
+        let span = tracing::info_span!("forward_example_proxy");
+        handler.spawn(
+            async move {
+                match forward::serve(proxy).await {
+                    Ok((bind_addr, forward_proxy)) => {
+                        tracing::info!(%bind_addr, "forward proxy started");
+                        if let Err(error) = forward_proxy.await {
+                            tracing::error!(error = %snafu::Report::from_error(&error), "forward proxy failed");
+                        }
+                    }
+                    Err(launch_error) => {
+                        tracing::error!(error = %snafu::Report::from_error(&launch_error), "failed to launch forward proxy");
                     }
                 }
-                Err(launch_error) => {
-                    tracing::error!(error = %snafu::Report::from_error(&launch_error), "failed to launch forward proxy");
-                }
-            };
-        });
+            }
+            .instrument(span),
+        );
     }
     handler.join_all().await;
 

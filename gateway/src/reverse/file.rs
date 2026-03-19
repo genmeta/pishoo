@@ -175,13 +175,14 @@ async fn serve_static_file(
             req_info.log_access(200, size).await;
         }
         Err(error) => {
-            let err_msg = format!("failed to send file content: {}", Report::from_error(&error));
             error!(
                 uri = %uri,
                 error = %Report::from_error(&error),
                 "failed to send file content"
             );
-            req_info.log_error(&err_msg).await;
+            req_info
+                .log_error(Report::from_error(&error).to_string())
+                .await;
             return Err(error).whatever_context::<_, Whatever>("failed to send file content")?;
         }
     }
