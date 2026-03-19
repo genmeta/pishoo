@@ -22,8 +22,6 @@ impl std::fmt::Display for RemoteErrorMessage {
     }
 }
 
-impl std::error::Error for RemoteErrorMessage {}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ListenerHandle {
     client: ListenerClient,
@@ -61,8 +59,8 @@ impl ConnectorHandle {
 #[derive(Debug, snafu::Snafu, Clone, serde::Serialize, serde::Deserialize)]
 #[snafu(module)]
 pub enum ListenError {
-    #[snafu(transparent)]
-    Remote { source: RemoteErrorMessage },
+    #[snafu(display("remote listener error: {message}"))]
+    Remote { message: RemoteErrorMessage },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -70,8 +68,8 @@ pub enum ListenError {
 #[derive(Debug, snafu::Snafu, Clone, serde::Serialize, serde::Deserialize)]
 #[snafu(module)]
 pub enum ConnectError {
-    #[snafu(transparent)]
-    Remote { source: RemoteErrorMessage },
+    #[snafu(display("remote connector error: {message}"))]
+    Remote { message: RemoteErrorMessage },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -114,7 +112,7 @@ where
             .accept()
             .await
             .map_err(|source| ListenError::Remote {
-                source: RemoteErrorMessage::new(source.to_string()),
+                message: RemoteErrorMessage::new(source.to_string()),
             })?;
         let (client, fut) = serve_quic_connection(connection);
         self.tasks.spawn(fut);
@@ -126,7 +124,7 @@ where
             .shutdown()
             .await
             .map_err(|source| ListenError::Remote {
-                source: RemoteErrorMessage::new(source.to_string()),
+                message: RemoteErrorMessage::new(source.to_string()),
             })
     }
 }
@@ -155,7 +153,7 @@ where
     async fn connect(&self, server: String) -> Result<ConnectionClient, ConnectError> {
         let authority = http::uri::Authority::try_from(server).map_err(|source| {
             ConnectError::Remote {
-                source: RemoteErrorMessage::new(source.to_string()),
+                message: RemoteErrorMessage::new(source.to_string()),
             }
         })?;
         let connection =
@@ -163,7 +161,7 @@ where
                 .connect(&authority)
                 .await
                 .map_err(|source| ConnectError::Remote {
-                    source: RemoteErrorMessage::new(source.to_string()),
+                    message: RemoteErrorMessage::new(source.to_string()),
                 })?;
         let (client, fut) = serve_quic_connection(connection);
         self.tasks.spawn(fut);
