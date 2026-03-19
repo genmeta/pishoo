@@ -67,7 +67,7 @@ pub async fn global() -> Arc<H3Client> {
 
 /// 重新初始化全局 H3Client
 pub async fn reinitialize(resolver: Option<Arc<Resolvers>>) -> Arc<H3Client> {
-    debug!(target: "h3_client", "Reinitializing H3Client");
+    debug!("reinitializing h3 client");
     let client: Arc<H3Client> = Arc::new(build_client(get_client_config(), resolver).await);
     let Ok(mut guard) = GLOBAL_CLIENT.write() else {
         return client;
@@ -103,7 +103,7 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
     let monitor = Devices::global().monitor();
 
     for i in monitor.interfaces() {
-        debug!(target: "h3_client", "Initial interface detected: {:?}", i.0);
+        debug!(interface = ?i.0, "initial interface detected");
     }
 
     let listen_all = Listens::new(IfaceRange::All, IpFamilies::Dual, 0);

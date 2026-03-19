@@ -242,7 +242,7 @@ async fn create_quic_listeners(
         // 允许client不带证书
         .allow_unauthenticated()
         .build()
-        .whatever_context::<_, Whatever>("Failed to build TLS client cert verifier")?;
+        .whatever_context::<_, Whatever>("failed to build TLS client cert verifier")?;
 
     let listeners = builder
         .with_parameters(server_parameters())
@@ -250,7 +250,7 @@ async fn create_quic_listeners(
         .with_alpns([b"h3".as_slice()])
         .with_client_auther(auth::ClientAuther::from(domain_access_rules))
         .listen(1024)
-        .whatever_context::<_, Whatever>("Failed to listen quic")?;
+        .whatever_context::<_, Whatever>("failed to listen quic")?;
 
     // 为每个服务器添加TLS证书
     for server in servers {
@@ -298,7 +298,7 @@ async fn create_quic_listeners(
                     None,
                 )
                 .await
-                .whatever_context::<_, Whatever>("Failed to initial quic listeners")?;
+                .whatever_context::<_, Whatever>("failed to initialize quic listeners")?;
         }
     }
 
@@ -414,8 +414,9 @@ async fn handle_connections(
                     )
                         .await
                 {
+                    let report = Report::from_error(error).to_string();
                     error!(
-                        error = %Report::from_error(error),
+                        error = report,
                         "failed to handle connection"
                     );
                 }
@@ -441,7 +442,7 @@ async fn handle_single_connection(
     let h3_conn = Arc::new(
         H3Connection::new(h3_settings, conn)
             .await
-            .whatever_context::<_, Whatever>("Failed to establish H3 connection")?,
+            .whatever_context::<_, Whatever>("failed to establish H3 connection")?,
     );
 
     debug!("h3 connection established");
@@ -469,8 +470,9 @@ async fn handle_single_connection(
                 info!("resolved new request");
 
                 if let Err(handle_request_error) = handle_result {
+                    let report = Report::from_error(handle_request_error).to_string();
                     error!(
-                        error = %Report::from_error(handle_request_error),
+                        error = report,
                         "failed to handle resolved request"
                     );
                 }

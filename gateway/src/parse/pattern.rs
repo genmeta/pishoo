@@ -50,14 +50,14 @@ impl Pattern {
 
 #[derive(snafu::Snafu, Debug)]
 pub enum ParsePatternError {
-    #[snafu(display("Unsupported location symbol `{symbol}`"))]
+    #[snafu(display("unsupported location symbol `{symbol}`"))]
     UnsupportedSymbol { symbol: String },
-    #[snafu(display("Invalid regex `{pattern}`"))]
+    #[snafu(display("invalid regex `{pattern}`"))]
     RegexError {
         source: regex::Error,
         pattern: String,
     },
-    #[snafu(display("Number of location args must be 1 or 2, got {nargs}"))]
+    #[snafu(display("number of location args must be 1 or 2, got {nargs}"))]
     UnexpectedArgs { nargs: usize },
 }
 

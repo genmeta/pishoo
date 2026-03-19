@@ -14,7 +14,7 @@ async fn main() -> Result<(), Whatever> {
         .with_line_number(true)
         .with_ansi(false)
         .init();
-    tracing::info!("Tracing initialized.");
+    tracing::info!("tracing initialized");
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Whatever> {
     let config_file = std::path::Path::new(config_file);
     let configure = std::fs::read(config_file).unwrap();
     let config =
-        parse::parse(&configure, config_file.parent()).whatever_context("Parse config failed")?;
+        parse::parse(&configure, config_file.parent()).whatever_context("parse config failed")?;
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Whatever> {
     };
 
     let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {
-        whatever!("No proxy found in pishoo configuration");
+        whatever!("no proxy found in pishoo configuration");
     };
 
     let mut handler = JoinSet::new();
@@ -50,13 +50,13 @@ async fn main() -> Result<(), Whatever> {
         handler.spawn(async move {
             match forward::serve(proxy).await {
                 Ok((bind_addr, forward_proxy)) => {
-                    tracing::info!(target: "forward_proxy", "Forward proxy started at {bind_addr}", );
+                    tracing::info!(%bind_addr, "forward proxy started");
                     if let Err(error) = forward_proxy.await {
-                        tracing::error!(target: "forward_proxy", "Forward proxy error: {error:?}", );
+                        tracing::error!(error = %snafu::Report::from_error(&error), "forward proxy failed");
                     }
                 }
                 Err(launch_error) => {
-                    tracing::error!(target: "forward_proxy", "Failed to launch forward proxy: {launch_error:?}", );
+                    tracing::error!(error = %snafu::Report::from_error(&launch_error), "failed to launch forward proxy");
                 }
             };
         });

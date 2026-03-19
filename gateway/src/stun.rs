@@ -26,7 +26,7 @@ use gm_quic::{
 use gmdns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 
 use crate::{
     dns::{PublishConfig, publish_host_endpoints},
@@ -244,7 +244,7 @@ impl StunServerManager {
                     }
                 }
             }
-        }));
+        }.in_current_span()));
         Self { _task }
     }
 }

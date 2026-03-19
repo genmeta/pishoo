@@ -38,7 +38,7 @@ pub enum ForwardRequestError {
     #[snafu(display("missing host in request uri"))]
     MissingHostInUri,
 
-    #[snafu(display("CONNECT request must target a valid host"))]
+    #[snafu(display("connect request must target a valid host"))]
     MissingConnectAuthority,
 }
 
@@ -152,8 +152,9 @@ pub async fn serve(
                 let host = match validate_host(&mut req) {
                     Ok(host) => host,
                     Err(error) => {
-                        error!(error = %Report::from_error(&error), "invalid host");
-                        return Ok(build_error_response(Report::from_error(&error).to_string()));
+                        let report = Report::from_error(&error).to_string();
+                        error!(error = report.clone(), "invalid host");
+                        return Ok(build_error_response(report));
                     }
                 };
 

@@ -26,7 +26,7 @@ async fn ensure_log_dir() -> Result<()> {
         tokio::fs::create_dir_all(&dir)
             .await
             .whatever_context::<_, crate::error::CustomError>(format!(
-                "Failed to create log directory: {:?}",
+                "failed to create log directory: {:?}",
                 dir
             ))?;
     }
@@ -105,23 +105,24 @@ pub async fn write_access_log(line: String) {
             .open(&path)
             .await
             .whatever_context::<_, crate::error::CustomError>(format!(
-                "Failed to open access log file: {:?}",
+                "failed to open access log file: {:?}",
                 path
             ))?;
 
         file.write_all(line.as_bytes())
             .await
-            .whatever_context::<_, crate::error::CustomError>("Failed to write to access log")?;
+            .whatever_context::<_, crate::error::CustomError>("failed to write to access log")?;
         file.write_all(b"\n")
             .await
-            .whatever_context::<_, crate::error::CustomError>("Failed to write to access log")?;
+            .whatever_context::<_, crate::error::CustomError>("failed to write to access log")?;
         Ok(())
     }
     .await;
 
     if let Err(e) = result {
+        let report = Report::from_error(e).to_string();
         tracing::error!(
-            error = %Report::from_error(e),
+            error = report,
             "failed to write access log"
         );
     }
@@ -141,7 +142,7 @@ pub async fn write_error_log(line: String) {
             .open(&path)
             .await
             .whatever_context::<_, crate::error::CustomError>(format!(
-                "Failed to open error log file: {:?}",
+                "failed to open error log file: {:?}",
                 path
             ))?;
 
@@ -150,14 +151,15 @@ pub async fn write_error_log(line: String) {
 
         file.write_all(formatted_line.as_bytes())
             .await
-            .whatever_context::<_, crate::error::CustomError>("Failed to write to error log")?;
+            .whatever_context::<_, crate::error::CustomError>("failed to write to error log")?;
         Ok(())
     }
     .await;
 
     if let Err(e) = result {
+        let report = Report::from_error(e).to_string();
         tracing::error!(
-            error = %Report::from_error(e),
+            error = report,
             "failed to write error log"
         );
     }
