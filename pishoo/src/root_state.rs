@@ -1,4 +1,4 @@
-//! Root-side ownership registry for server_name → worker process mappings.
+//! Root-side ownership registry for server_name → local/worker mappings.
 //!
 //! Tracks which worker process owns which server names, provides conflict
 //! detection (first-come-first-served), and manages the lifecycle of
@@ -9,7 +9,6 @@ use std::{
     sync::Arc,
 };
 
-use genmeta_home::identity::Name;
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
@@ -30,13 +29,20 @@ use crate::{
         ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
         ServedConnector, ServedListener,
     },
+    tls,
     worker_spawn::WorkerHandle,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceOwner {
+    Local,
+    Worker(Pid),
+}
+
 /// Per-server ownership record stored in the root registry.
 pub struct ServerRecord {
-    /// PID of the worker process that owns this server_name.
-    pub owner_pid: Pid,
+    /// Owner kind of this server_name.
+    pub owner: ServiceOwner,
     /// Sender for routing connections from the central accept loop to this
     /// server's [`PerServerListenAdapter`].
     pub conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
@@ -49,7 +55,7 @@ pub struct WorkerProcessRecord {
     /// The UID this worker runs as.
     pub uid: Uid,
     /// Set of server_names owned by this worker.
-    pub owned_servers: HashSet<Name<'static>>,
+    pub owned_servers: HashSet<String>,
     /// Handle to the spawned worker process.
     pub worker_handle: WorkerHandle,
     /// Cancellation tokens for connector serve futures owned by this worker.
@@ -67,7 +73,7 @@ pub struct RootState {
     /// Shared QUIC client for creating outbound connectors.
     pub quic_client: Arc<gm_quic::prelude::QuicClient>,
     /// server_name → ownership + routing sender.
-    servers: HashMap<Name<'static>, ServerRecord>,
+    servers: HashMap<String, ServerRecord>,
     /// pid → worker process info.
     processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping.
@@ -168,11 +174,49 @@ impl RootState {
         Some(summary)
     }
 
-    fn retire_server(&mut self, server_name: &Name<'static>) -> Option<()> {
+    fn retire_server(&mut self, server_name: &str) -> Option<()> {
         let server_record = self.servers.remove(server_name)?;
         server_record.shutdown_token.cancel();
-        self.listeners.remove_server(server_name.as_full());
+        self.listeners.remove_server(server_name);
         Some(())
+    }
+
+    pub async fn register_local_server(
+        &mut self,
+        server_name: String,
+        bind: Vec<String>,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+        conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), Whatever> {
+        if self.servers.contains_key(&server_name) {
+            snafu::whatever!("server `{server_name}` conflicts with an existing listener");
+        }
+
+        let (certs, key) = tls::validate_tls_material(cert_pem, key_pem).map_err(|error| {
+            Whatever::with_source(Box::new(error), "invalid local tls material".to_string())
+        })?;
+
+        self.listeners
+            .add_server(&server_name, certs.as_slice(), &key, bind, None::<Vec<u8>>)
+            .await
+            .map_err(|error| {
+                Whatever::with_source(
+                    Box::new(error),
+                    format!("failed to add local server `{server_name}` to listeners"),
+                )
+            })?;
+
+        self.servers.insert(
+            server_name,
+            ServerRecord {
+                owner: ServiceOwner::Local,
+                conn_tx,
+                shutdown_token,
+            },
+        );
+        Ok(())
     }
 
     /// Handle a `request_listen` call from a worker.
@@ -187,7 +231,7 @@ impl RootState {
         caller_pid: Pid,
         request: RequestListen,
     ) -> Result<ListenerHandle, ListenRequestError> {
-        let server_name = request.name;
+        let server_name = request.name.as_full().to_owned();
 
         // 1. Conflict check: first-come-first-served.
         if self.servers.contains_key(&server_name) {
@@ -207,7 +251,7 @@ impl RootState {
         //    bind_uris is Vec<String>; BindUri implements From<String>.
         self.listeners
             .add_server(
-                server_name.as_full(),
+                &server_name,
                 request.certs.as_slice(),
                 &request.key,
                 request.bind,
@@ -249,7 +293,7 @@ impl RootState {
         self.servers.insert(
             server_name.clone(),
             ServerRecord {
-                owner_pid: caller_pid,
+                owner: ServiceOwner::Worker(caller_pid),
                 conn_tx: tx,
                 shutdown_token,
             },
@@ -322,7 +366,7 @@ impl RootState {
         caller_pid: Pid,
         request: ReleaseListen,
     ) -> Result<(), ReleaseListenError> {
-        let server_name = &request.server_name;
+        let server_name = request.server_name.as_full();
 
         // Check the server exists.
         let Some(server_record) = self.servers.get(server_name) else {
@@ -330,7 +374,7 @@ impl RootState {
         };
 
         // Ownership check.
-        if server_record.owner_pid != caller_pid {
+        if server_record.owner != ServiceOwner::Worker(caller_pid) {
             tracing::warn!(caller_pid = %caller_pid, %server_name, "release_listen not owner");
             return Err(ReleaseListenError::NotOwner);
         }
@@ -376,9 +420,13 @@ impl RootState {
     /// per-server adapter.
     pub fn get_conn_sender(
         &self,
-        server_name: &Name<'static>,
-    ) -> Option<&mpsc::Sender<gm_quic::prelude::Connection>> {
-        self.servers.get(server_name).map(|r| &r.conn_tx)
+        server_name: &str,
+    ) -> Option<mpsc::Sender<gm_quic::prelude::Connection>> {
+        self.servers.get(server_name).map(|r| r.conn_tx.clone())
+    }
+
+    pub fn server_owner(&self, server_name: &str) -> Option<ServiceOwner> {
+        self.servers.get(server_name).map(|record| record.owner)
     }
 
     /// Get the PID for a given UID, if a worker is registered.
@@ -442,7 +490,7 @@ mod tests {
                 uid: Uid::from_raw(1000),
                 owned_servers: HashSet::new(),
                 worker_handle: super::WorkerHandle::new(
-                    tokio::process::Command::new("/bin/true")
+                    tokio::process::Command::new("/usr/bin/true")
                         .spawn()
                         .expect("spawn child"),
                 ),

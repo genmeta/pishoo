@@ -1,10 +1,14 @@
-use std::{ffi::CString, os::fd::OwnedFd, path::Path};
+use std::{
+    ffi::{CStr, CString},
+    os::fd::OwnedFd,
+    path::Path,
+};
 
 use nix::{
     errno::Errno,
     unistd::{
-        ForkResult, Gid, SysconfVar, Uid, execve, fork, getegid, geteuid, getgid, getgrouplist,
-        getuid, pipe, setgid, setgroups, setuid, sysconf,
+        ForkResult, Gid, SysconfVar, Uid, execve, fork, getegid, geteuid, getgid, getuid, pipe,
+        setgid, setuid, sysconf,
     },
 };
 use snafu::{ResultExt, Snafu};
@@ -192,4 +196,65 @@ fn resolve_supplementary_groups(
     getgrouplist(&username_cstr, gid).context(GetGroupListSnafu {
         username: username.to_string(),
     })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn getgrouplist(username: &CStr, group: Gid) -> Result<Vec<Gid>, Errno> {
+    nix::unistd::getgrouplist(username, group)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
+    nix::unistd::setgroups(groups)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn getgrouplist(username: &CStr, group: Gid) -> Result<Vec<Gid>, Errno> {
+    let basegid = libc::c_int::try_from(group.as_raw()).map_err(|_| Errno::EINVAL)?;
+    let mut ngroups: libc::c_int = 16;
+    let mut groups: Vec<libc::c_int> = vec![0; ngroups as usize];
+
+    loop {
+        let mut ngroups_attempt = ngroups;
+        let rc = unsafe {
+            libc::getgrouplist(
+                username.as_ptr(),
+                basegid,
+                groups.as_mut_ptr(),
+                &mut ngroups_attempt,
+            )
+        };
+
+        if rc >= 0 {
+            groups.truncate(ngroups_attempt as usize);
+            return Ok(groups
+                .into_iter()
+                .map(|gid| Gid::from_raw(gid as libc::gid_t))
+                .collect());
+        }
+
+        if ngroups_attempt <= 0 {
+            return Err(Errno::last());
+        }
+
+        if ngroups_attempt > ngroups {
+            ngroups = ngroups_attempt;
+        } else {
+            ngroups = ngroups.saturating_mul(2).max(16);
+        }
+        groups.resize(ngroups as usize, 0);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
+    let raw_groups: Vec<libc::gid_t> = groups.iter().map(|gid| gid.as_raw()).collect();
+    let (ptr, len) = if raw_groups.is_empty() {
+        (std::ptr::null(), 0)
+    } else {
+        (raw_groups.as_ptr(), raw_groups.len() as libc::c_int)
+    };
+
+    let rc = unsafe { libc::setgroups(len, ptr) };
+    if rc == 0 { Ok(()) } else { Err(Errno::last()) }
 }

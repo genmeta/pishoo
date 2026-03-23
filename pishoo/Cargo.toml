@@ -173,6 +173,7 @@ console-subscriber = { workspace = true, optional = true }
 
 # --- System / OS ---
 atty = { workspace = true }
+libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 
 [features]

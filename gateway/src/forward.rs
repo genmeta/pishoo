@@ -1,6 +1,10 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use bytes::Bytes;
+use genmeta_home::identity::Name;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -279,19 +283,55 @@ fn validate_host(req: &mut Request<hyper::body::Incoming>) -> Result<String, For
         }
     };
 
-    if host.ends_with("~") {
-        host = host.replacen("~", ".genmeta.net", 1);
+    if let Some(canonical_host) = canonicalize_forward_host(&host) {
+        host = canonical_host;
         if let Ok(hv) = http::HeaderValue::from_str(&host) {
             req.headers_mut().insert(http::header::HOST, hv);
         }
         let old_uri = req.uri().to_string();
-        let new_uri = old_uri.replacen("~", ".genmeta.net", 1);
+        let new_uri = rewrite_request_uri_host(&old_uri, &host);
         if let Ok(parsed) = new_uri.parse() {
             *req.uri_mut() = parsed;
         }
     }
 
     Ok(host)
+}
+
+fn canonicalize_forward_host(host: &str) -> Option<String> {
+    if host.parse::<IpAddr>().is_ok() || host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+
+    if host.ends_with(Name::SUFFIX) {
+        return None;
+    }
+
+    if let Ok(Some(name)) = Name::try_expand_from(host) {
+        return Some(name.as_full().to_string());
+    }
+
+    Name::try_from_str_partial(host)
+        .ok()
+        .map(|name| name.as_full().to_string())
+}
+
+fn rewrite_request_uri_host(uri: &str, host: &str) -> String {
+    if let Some(stripped) = uri.strip_prefix("http://") {
+        if let Some((_, remain)) = stripped.split_once('/') {
+            return format!("http://{host}/{}", remain);
+        }
+        return format!("http://{host}");
+    }
+
+    if let Some(stripped) = uri.strip_prefix("https://") {
+        if let Some((_, remain)) = stripped.split_once('/') {
+            return format!("https://{host}/{}", remain);
+        }
+        return format!("https://{host}");
+    }
+
+    uri.to_string()
 }
 
 /// 创建空响应
@@ -350,5 +390,32 @@ async fn tunnel_upgrade(request_upgrade: OnUpgrade, response_upgrade: OnUpgrade)
         Err(error) => {
             error!(error = %Report::from_error(&error), "upgraded proxy aborted");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_forward_host_expands_partial_and_tilde() {
+        assert_eq!(
+            canonicalize_forward_host("borber.pilot").as_deref(),
+            Some("borber.pilot.genmeta.net")
+        );
+        assert_eq!(
+            canonicalize_forward_host("borber.pilot~").as_deref(),
+            Some("borber.pilot.genmeta.net")
+        );
+        assert_eq!(canonicalize_forward_host("127.0.0.1"), None);
+        assert_eq!(canonicalize_forward_host("borber.pilot.genmeta.net"), None);
+    }
+
+    #[test]
+    fn rewrite_request_uri_host_replaces_absolute_uri_host() {
+        assert_eq!(
+            rewrite_request_uri_host("http://borber.pilot/path?q=1", "borber.pilot.genmeta.net"),
+            "http://borber.pilot.genmeta.net/path?q=1"
+        );
     }
 }

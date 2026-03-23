@@ -7,7 +7,6 @@ use std::{
 
 use clap::Parser;
 use gateway::error::Whatever;
-use genmeta_home::{GenmetaHome, identity::Name};
 use gm_quic::prelude::{QuicListeners, handy::server_parameters};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
@@ -61,9 +60,6 @@ async fn main() -> Result<(), Whatever> {
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
 
-    let _genmeta_home = GenmetaHome::load_from_environment()
-        .whatever_context("failed to load Genmeta home directory")?;
-
     let config_file = args.config_file;
 
     let config = fs::read(&config_file).await.whatever_context(format!(
@@ -75,18 +71,28 @@ async fn main() -> Result<(), Whatever> {
         config_file.display()
     ))?;
 
-    let root_config = pishoo::config::parse_root_config(&config)
-        .whatever_context("failed to parse root worker configuration")?;
+    let entry_config = pishoo::config::parse_entry_config(&config)
+        .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {
+        let summary = pishoo::config::validate_entry_tree(&entry_config)
+            .await
+            .whatever_context("configuration validation failed")?;
         tracing::info!(
             path = %config_file.display(),
-            "configuration syntax is ok"
+            shape = ?summary.shape,
+            workers = summary.workers,
+            local_servers = summary.local_servers,
+            worker_servers = summary.worker_servers,
+            "configuration is valid"
         );
         return Ok(());
     }
 
-    let pid_file = root_config.pid_file.as_str();
+    let pid_file = entry_config.pid_file.as_str();
+    let publishable_servers = pishoo::config::discover_entry_servers(&entry_config)
+        .await
+        .whatever_context("failed to discover servers for dns publishing")?;
 
     if let Some(signal) = args.signal {
         return signal::send_signal(pid_file, signal).await;
@@ -102,6 +108,10 @@ async fn main() -> Result<(), Whatever> {
         .expect("failed to build tls client cert verifier");
 
     let listeners = QuicListeners::builder()
+        .with_resolver(Arc::new(gateway::dns::build_query_resolver_chain(
+            &publishable_servers,
+        )))
+        .with_stun("stun.genmeta.net")
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_alpns([b"h3".as_slice()])
@@ -126,60 +136,26 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(pid_file).await?;
 
-    let worker_targets = pishoo::config::resolve_worker_targets(&root_config)
+    let mut local_runtimes = register_local_runtimes(&state, &entry_config).await?;
+
+    let worker_targets = pishoo::config::resolve_entry_worker_targets(&entry_config)
         .whatever_context("failed to resolve configured worker users")?;
+    spawn_configured_workers(&state, worker_targets).await?;
 
-    let worker_bin =
-        std::env::current_exe().whatever_context("failed to determine current executable path")?;
-    let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
-
-    for target in worker_targets {
-        let spawned = pishoo::worker_spawn::spawn_worker(
-            &worker_bin,
-            target.uid,
-            target.gid,
-            target.username.clone(),
-            target.home.clone(),
-            state.clone(),
-        )
-        .await
-        .whatever_context(format!(
-            "failed to spawn worker for user `{}`",
-            target.username
-        ))?;
-        let pid = spawned.handle.pid().expect("worker must have pid");
-        let hello = spawned.hello;
-        if hello.pid != pid
-            || hello.uid != target.uid.as_raw()
-            || hello.euid != target.uid.as_raw()
-            || hello.gid != target.gid.as_raw()
-            || hello.egid != target.gid.as_raw()
-        {
-            snafu::whatever!(
-                "worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
-                target.username,
-                pid,
-                hello.pid,
-                hello.uid,
-                hello.euid,
-                target.uid,
-                hello.gid,
-                hello.egid,
-                target.gid
-            );
-        }
-
+    let _publisher = if publishable_servers.is_empty() {
+        None
+    } else {
+        let publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
+            .whatever_context("failed to build dns publish configs")?;
         tracing::info!(
-            pid,
-            uid = target.uid.as_raw(),
-            gid = target.gid.as_raw(),
-            user = %target.username,
-            "worker privilege separation verified"
+            servers = publish_configs.len(),
+            "starting dns publisher for pishoo"
         );
-
-        let mut st = state.lock().await;
-        st.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
-    }
+        Some(gateway::dns::Publisher::spawn(
+            listeners.clone(),
+            publish_configs,
+        ))
+    };
 
     // Central accept loop: route connections by server_name
     let accept_state = state.clone();
@@ -195,16 +171,11 @@ async fn main() -> Result<(), Whatever> {
                     }
                 };
 
-                let st = accept_state.lock().await;
-                let server_name = match Name::try_from_str_full(server_name) {
-                    Ok(server_name) => server_name,
-                    Err(error) => {
-                        tracing::warn!(error = %Report::from_error(&error), "invalid server name in connection, this shound not happen");
-                        continue;
-                    }
+                let sender = {
+                    let st = accept_state.lock().await;
+                    st.get_conn_sender(&server_name)
                 };
-
-                let Some(sender) = st.get_conn_sender(&server_name) else {
+                let Some(sender) = sender else {
                     tracing::warn!(%server_name, "no listener registered for connection");
                     continue;
                 };
@@ -280,7 +251,9 @@ async fn main() -> Result<(), Whatever> {
                 break;
             }
             signal::RootSignal::SigHup => {
-                tracing::info!("forwarded reload signal to workers");
+                tracing::info!(
+                    "forwarded reload signal to workers; root-local servers keep current config"
+                );
             }
             signal::RootSignal::SigUsr1 => {
                 tracing::info!("root log reopened, forwarded reopen signal to workers");
@@ -289,6 +262,9 @@ async fn main() -> Result<(), Whatever> {
     }
 
     monitor_handle.abort();
+    for runtime in local_runtimes.drain(..) {
+        runtime.stop();
+    }
     {
         let mut st = state.lock().await;
         for pid in st.worker_pids() {
@@ -323,4 +299,99 @@ fn reopen_root_log() {
             "failed to dup2 stderr for root log reopen"
         );
     }
+}
+
+async fn register_local_runtimes(
+    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
+    entry_config: &pishoo::config::EntryConfig,
+) -> Result<Vec<pishoo::local_service::LocalServerRuntime>, Whatever> {
+    let local_policy =
+        pishoo::policy::load_policy_bundle(entry_config.local_access_rules_uri.as_deref())
+            .await
+            .whatever_context("failed to load root-local access rules")?;
+
+    if entry_config.local_servers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    pishoo::local_service::register_local_servers(
+        state,
+        &entry_config.local_servers,
+        local_policy.location_rules,
+    )
+    .await
+    .whatever_context("failed to register root-local servers")
+}
+
+async fn spawn_configured_workers(
+    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
+    worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
+) -> Result<(), Whatever> {
+    if worker_targets.is_empty() {
+        return Ok(());
+    }
+
+    let worker_bin =
+        std::env::current_exe().whatever_context("failed to determine current executable path")?;
+    let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
+
+    for target in worker_targets {
+        let spawned = pishoo::worker_spawn::spawn_worker(
+            &worker_bin,
+            target.uid,
+            target.gid,
+            target.username.clone(),
+            target.home.clone(),
+            state.clone(),
+        )
+        .await
+        .whatever_context(format!(
+            "failed to spawn worker for user `{}`",
+            target.username
+        ))?;
+        let pid = spawned.handle.pid().expect("worker must have pid");
+
+        ensure_worker_identity(&target, pid, &spawned.hello)?;
+
+        let mut st = state.lock().await;
+        st.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
+    }
+
+    Ok(())
+}
+
+fn ensure_worker_identity(
+    target: &pishoo::config::ResolvedWorkerTarget,
+    pid: u32,
+    hello: &pishoo::protocol::WorkerHello,
+) -> Result<(), Whatever> {
+    if hello.pid != pid
+        || hello.uid != target.uid.as_raw()
+        || hello.euid != target.uid.as_raw()
+        || hello.gid != target.gid.as_raw()
+        || hello.egid != target.gid.as_raw()
+    {
+        snafu::whatever!(
+            "worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
+            target.username,
+            pid,
+            hello.pid,
+            hello.uid,
+            hello.euid,
+            target.uid,
+            hello.gid,
+            hello.egid,
+            target.gid
+        );
+    }
+
+    tracing::info!(
+        pid,
+        uid = target.uid.as_raw(),
+        gid = target.gid.as_raw(),
+        user = %target.username,
+        "worker privilege separation verified"
+    );
+
+    Ok(())
 }

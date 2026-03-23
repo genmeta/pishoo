@@ -73,6 +73,13 @@ pub enum MissingRulePolicy {
     Deny,
 }
 
+pub fn normalize_server_name(server_name: &str) -> String {
+    match server_name.strip_suffix('~') {
+        Some(prefix) => format!("{prefix}.genmeta.net"),
+        None => server_name.to_string(),
+    }
+}
+
 #[derive(Clone)]
 struct RequestContext {
     server_name: String,
@@ -81,8 +88,31 @@ struct RequestContext {
     missing_rule_policy: MissingRulePolicy,
 }
 
-pub fn build_router_for_worker(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
+pub fn build_router_for_servers(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
     build_router(servers)
+}
+
+pub fn build_router_for_worker(servers: &[Arc<Node>]) -> Arc<HashMap<String, Arc<Node>>> {
+    build_router_for_servers(servers)
+}
+
+pub async fn handle_single_connection_for_server(
+    conn: impl h3x::quic::Connection + 'static,
+    server_name: String,
+    h3_settings: Arc<Settings>,
+    router: Arc<HashMap<String, Arc<Node>>>,
+    access_rules: Arc<LocationRulesMatcher>,
+    missing_rule_policy: MissingRulePolicy,
+) -> Result<()> {
+    handle_single_connection(
+        conn,
+        server_name,
+        h3_settings,
+        router,
+        access_rules,
+        missing_rule_policy,
+    )
+    .await
 }
 
 pub async fn handle_single_connection_for_worker(
@@ -93,7 +123,7 @@ pub async fn handle_single_connection_for_worker(
     access_rules: Arc<LocationRulesMatcher>,
     missing_rule_policy: MissingRulePolicy,
 ) -> Result<()> {
-    handle_single_connection(
+    handle_single_connection_for_server(
         conn,
         server_name,
         h3_settings,
@@ -169,10 +199,7 @@ fn build_router(servers: &[Arc<Node>]) -> RouterMap {
         };
 
         for server_name in server_names {
-            let domain = match server_name.name.strip_suffix('~') {
-                Some(prefix) => format!("{prefix}.genmeta.net"),
-                None => server_name.name.clone(),
-            };
+            let domain = normalize_server_name(&server_name.name);
             routers.insert(domain, Arc::clone(server));
         }
     }

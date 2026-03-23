@@ -13,8 +13,6 @@ use std::{
     sync::Arc,
 };
 
-use firewall_db::service::{domain_service::DomainService, location_service::LocationService};
-use futures::TryStreamExt;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
@@ -22,6 +20,9 @@ use gateway::{
 use genmeta_home::{GenmetaHome, identity::Name};
 use h3x::{dhttp::settings::Settings, remoc::quic::ConnectionClient};
 use pishoo::{
+    bind::resolve_bind_uris,
+    config::load_identity_servers,
+    policy,
     protocol::{
         OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
     },
@@ -65,9 +66,7 @@ enum WorkerError {
         source: gateway::error::Whatever,
     },
     #[snafu(display("failed to connect access_rules database"))]
-    AccessRulesDb { source: sea_orm::DbErr },
-    #[snafu(display("failed to load location rules"))]
-    AccessRulesLoad { source: sea_orm::DbErr },
+    AccessRulesDb { source: policy::PolicyError },
     #[snafu(display("failed to read worker policy config `{path}`"))]
     ReadPolicy {
         path: String,
@@ -186,9 +185,6 @@ async fn main() -> Result<(), Whatever> {
     }
 
     // Keep root_api and identity state alive for Reload handling.
-    let genmeta_home = GenmetaHome::load_from_environment()
-        .whatever_context("failed to locate genmeta home from environment")?;
-
     let mut quit_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
         .whatever_context("failed to create sigquit listener")?;
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -313,9 +309,11 @@ async fn reconcile_listener_set(
 ) -> Result<ReconcileStats, Whatever> {
     let names: HashSet<Name<'static>> = genmeta_home
         .identities()
-        .try_collect()
+        .list()
         .await
-        .whatever_context("failed to list identities")?;
+        .whatever_context("failed to list identities")?
+        .into_iter()
+        .collect();
     let routing = build_worker_routing(genmeta_home, &names).await;
     let existing_servers = current_servers.unwrap_or_default();
 
@@ -342,7 +340,8 @@ async fn reconcile_listener_set(
 
     for server_name in &added {
         let identity = genmeta_home
-            .load_identity(server_name.borrow())
+            .identities()
+            .load(server_name.borrow())
             .await
             .whatever_context(format!(
                 "failed to read tls material for identity `{server_name}`"
@@ -407,21 +406,12 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
         _ => return Err(WorkerError::MissingAccessRules),
     };
 
-    let db = sea_orm::Database::connect(&uri)
+    let bundle = policy::load_policy_bundle(Some(uri.as_str()))
         .await
         .context(AccessRulesDbSnafu)?;
-    let location_rules = LocationService::new(&db)
-        .list_all_rules()
-        .await
-        .context(AccessRulesLoadSnafu)?;
-
-    let _ = DomainService::new(&db)
-        .list_all_rules()
-        .await
-        .context(AccessRulesLoadSnafu)?;
 
     Ok(WorkerPolicy {
-        access_rules: Arc::new(location_rules.into()),
+        access_rules: bundle.location_rules,
     })
 }
 
@@ -443,44 +433,33 @@ async fn build_worker_routing(
         let server_name = name.as_full().to_string();
         let fallback = Arc::new(Node::new(Value::ValueMap(HashMap::new())));
         fallback_entries.insert(server_name, fallback);
-        let identity_dir = genemta_home.join_identity_name(name.borrow());
+        let identity_dir = genemta_home.identities().join_name(name.borrow());
 
         let conf_path = identity_dir.join("pishoo.conf");
         if !conf_path.is_file() {
             continue;
         }
-        if let Ok(raw) = tokio::fs::read(&conf_path).await
-            && let Ok(parsed) = gateway::parse::parse(&raw, conf_path.parent())
-            && let Some(Value::Nodes(pishoo_nodes)) = parsed.get("pishoo")
-            && let Some(pishoo_node) = pishoo_nodes.first()
-            && let Some(Value::Nodes(server_nodes)) = pishoo_node.get("server")
-        {
-            for server_node in server_nodes {
-                if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
-                    (server_node.get("server_name"), server_node.get("listen"))
-                {
-                    for server_name in server_names {
-                        let normalized = match server_name.name.strip_suffix('~') {
-                            Some(prefix) => format!("{prefix}.genmeta.net"),
-                            None => server_name.name.clone(),
-                        };
-                        let bind_set = listens
-                            .iter()
-                            .flat_map(|listen| {
-                                listen.resolve(device_names.iter().map(|s| s.as_str()))
-                            })
-                            .filter(|uri| uri.resolve().is_ok())
-                            .map(|uri| uri.to_string())
-                            .collect::<std::collections::HashSet<_>>();
-                        binds.insert(normalized, bind_set.into_iter().collect());
-                    }
+        let canonicalized_server_nodes = match load_identity_servers(&conf_path).await {
+            Ok(nodes) => nodes,
+            Err(_) => continue,
+        };
+
+        for server_node in &canonicalized_server_nodes {
+            if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
+                (server_node.get("server_name"), server_node.get("listen"))
+            {
+                for server_name in server_names {
+                    binds.insert(
+                        server_name.name.clone(),
+                        resolve_bind_uris(listens, &device_names),
+                    );
                 }
             }
-            servers.extend(server_nodes.iter().cloned());
         }
+        servers.extend(canonicalized_server_nodes);
     }
 
-    let mut router = gateway::reverse::build_router_for_worker(&servers)
+    let mut router = gateway::reverse::build_router_for_servers(&servers)
         .as_ref()
         .clone();
     for (name, node) in fallback_entries {
@@ -492,6 +471,16 @@ async fn build_worker_routing(
     }
 }
 
+#[allow(dead_code)]
+fn validate_identity_tls_material(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<(), pishoo::tls::TlsMaterialError> {
+    let _ = pishoo::tls::validate_tls_material(&cert_pem, &key_pem)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Snafu)]
 enum ReopenWorkerLogError {
     #[snafu(display("failed to create worker log directory `{path}`"))]
@@ -502,6 +491,7 @@ enum ReopenWorkerLogError {
     DupStderr { source: nix::errno::Errno },
 }
 
+#[allow(dead_code)]
 fn reopen_worker_log(log_dir: &Path) -> Result<(), ReopenWorkerLogError> {
     use std::fs::OpenOptions;
 

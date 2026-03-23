@@ -78,10 +78,15 @@ async fn unix_launcher_sets_explicit_exec_environment() {
         .read_to_end(&mut output)
         .await
         .expect("read env output");
-    let status = handle
-        .try_wait()
-        .expect("poll env worker")
-        .expect("env worker exited");
+    let mut exit_status = None;
+    for _ in 0..20 {
+        if let Some(status) = handle.try_wait().expect("poll env worker") {
+            exit_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let status = exit_status.expect("env worker exited");
     assert!(
         matches!(status, WaitStatus::Exited(_, 0)),
         "env worker must exit successfully"
