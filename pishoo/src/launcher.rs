@@ -26,6 +26,18 @@ pub struct LaunchedWorker {
     pub transport: WorkerTransport,
 }
 
+struct ChildExecSpec<'a> {
+    worker_bin: &'a CString,
+    argv: &'a [CString],
+    envp: &'a [CString],
+    uid: Uid,
+    gid: Gid,
+    supplementary_groups: &'a [Gid],
+    stdin_fd: &'a OwnedFd,
+    stdout_fd: &'a OwnedFd,
+    max_fd: i32,
+}
+
 #[derive(Debug, Snafu)]
 pub enum LaunchWorkerError {
     #[snafu(display("failed to resolve supplementary groups for user `{username}`"))]
@@ -60,6 +72,12 @@ pub enum ResolveSupplementaryGroupsError {
     InvalidUsername { source: std::ffi::NulError },
     #[snafu(display("failed to query supplementary groups for user `{username}`"))]
     GetGroupList { username: String, source: Errno },
+    #[snafu(display("user `{username}` has too many supplementary groups ({actual} > {limit})"))]
+    TooManyGroups {
+        username: String,
+        actual: usize,
+        limit: usize,
+    },
 }
 
 pub fn launch_worker(
@@ -83,17 +101,17 @@ pub fn launch_worker(
     // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
     match unsafe { fork() }.context(ForkWorkerSnafu)? {
         ForkResult::Child => {
-            child_exec(
-                &worker_bin,
-                &argv,
-                &env,
+            child_exec(ChildExecSpec {
+                worker_bin: &worker_bin,
+                argv: &argv,
+                envp: &env,
                 uid,
                 gid,
-                &supplementary_groups,
-                &child_stdin_read,
-                &child_stdout_write,
+                supplementary_groups: &supplementary_groups,
+                stdin_fd: &child_stdin_read,
+                stdout_fd: &child_stdout_write,
                 max_fd,
-            );
+            });
         }
         ForkResult::Parent { child } => {
             drop(child_stdin_read);
@@ -109,17 +127,19 @@ pub fn launch_worker(
     }
 }
 
-fn child_exec(
-    worker_bin: &CString,
-    argv: &[CString],
-    envp: &[CString],
-    uid: Uid,
-    gid: Gid,
-    supplementary_groups: &[Gid],
-    stdin_fd: &OwnedFd,
-    stdout_fd: &OwnedFd,
-    max_fd: i32,
-) -> ! {
+fn child_exec(spec: ChildExecSpec<'_>) -> ! {
+    let ChildExecSpec {
+        worker_bin,
+        argv,
+        envp,
+        uid,
+        gid,
+        supplementary_groups,
+        stdin_fd,
+        stdout_fd,
+        max_fd,
+    } = spec;
+
     if nix::unistd::dup2_stdin(stdin_fd).is_err() {
         child_fail(126);
     }
@@ -193,9 +213,39 @@ fn resolve_supplementary_groups(
     gid: Gid,
 ) -> Result<Vec<Gid>, ResolveSupplementaryGroupsError> {
     let username_cstr = CString::new(username).context(InvalidUsernameSnafu)?;
-    getgrouplist(&username_cstr, gid).context(GetGroupListSnafu {
+    let groups = getgrouplist(&username_cstr, gid).context(GetGroupListSnafu {
         username: username.to_string(),
-    })
+    })?;
+    let groups = normalize_supplementary_groups(groups, gid);
+    let limit = supplementary_groups_max();
+    if groups.len() > limit {
+        return TooManyGroupsSnafu {
+            username: username.to_string(),
+            actual: groups.len(),
+            limit,
+        }
+        .fail();
+    }
+
+    Ok(groups)
+}
+
+fn normalize_supplementary_groups(groups: Vec<Gid>, primary_gid: Gid) -> Vec<Gid> {
+    let mut normalized = Vec::with_capacity(groups.len());
+    for group in groups {
+        if group == primary_gid || normalized.contains(&group) {
+            continue;
+        }
+        normalized.push(group);
+    }
+    normalized
+}
+
+fn supplementary_groups_max() -> usize {
+    match sysconf(SysconfVar::NGROUPS_MAX) {
+        Ok(Some(limit)) if limit > 0 => limit as usize,
+        _ => 16,
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
@@ -257,4 +307,30 @@ fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
 
     let rc = unsafe { libc::setgroups(len, ptr) };
     if rc == 0 { Ok(()) } else { Err(Errno::last()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_supplementary_groups_drops_primary_and_duplicates() {
+        let primary_gid = Gid::from_raw(20);
+        let normalized = normalize_supplementary_groups(
+            vec![
+                primary_gid,
+                Gid::from_raw(501),
+                Gid::from_raw(12),
+                Gid::from_raw(501),
+                Gid::from_raw(79),
+                primary_gid,
+            ],
+            primary_gid,
+        );
+
+        assert_eq!(
+            normalized,
+            vec![Gid::from_raw(501), Gid::from_raw(12), Gid::from_raw(79)]
+        );
+    }
 }

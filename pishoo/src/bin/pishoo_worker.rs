@@ -476,7 +476,7 @@ fn validate_identity_tls_material(
     cert_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<(), pishoo::tls::TlsMaterialError> {
-    let _ = pishoo::tls::validate_tls_material(&cert_pem, &key_pem)?;
+    let _ = pishoo::tls::validate_tls_material(cert_pem, key_pem)?;
     Ok(())
 }
 

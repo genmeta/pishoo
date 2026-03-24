@@ -133,7 +133,7 @@ fn register_server_names(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use nix::unistd::{Gid, Uid};
 
@@ -173,7 +173,7 @@ mod tests {
         home
     }
 
-    fn write_worker_layout(home: &PathBuf, server_name: &str) {
+    fn write_worker_layout(home: &Path, server_name: &str) {
         let (cert, key) = repo_tls_paths();
         let genmeta_dir = home.join(".genmeta");
         let identity_dir = genmeta_dir.join("identity/borber.pilot.genmeta.net");

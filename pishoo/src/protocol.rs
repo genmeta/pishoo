@@ -67,11 +67,7 @@ mod request_listen_serde {
             Ok(Self {
                 name: helper.name,
                 bind: helper.bind,
-                certs: helper
-                    .certs
-                    .into_iter()
-                    .map(|cert| CertificateDer::from(cert))
-                    .collect(),
+                certs: helper.certs.into_iter().map(CertificateDer::from).collect(),
                 key: PrivateKeyDer::try_from(helper.key)?,
             })
         }
