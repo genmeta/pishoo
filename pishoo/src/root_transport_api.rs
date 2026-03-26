@@ -41,8 +41,40 @@ impl RootTransportApi for RootTransportApiImpl {
         &self,
         request: RequestListen,
     ) -> Result<ListenerHandle, ListenRequestError> {
+        let server_name = request.name.as_full().to_owned();
+
+        // Phase 1: validate under lock (fast, no I/O).
+        let listeners = {
+            let state = self.state.lock().await;
+            state.validate_listen_request(self.caller_pid, &server_name)?
+        };
+
+        // Phase 2: bind the server to the QUIC listeners (slow, involves
+        // network I/O).  The state mutex is NOT held during this operation,
+        // so shutdown signals and other RPCs can proceed concurrently.
+        listeners
+            .add_server(
+                &server_name,
+                request.certs.as_slice(),
+                &request.key,
+                request.bind,
+                None::<Vec<u8>>,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %server_name,
+                    error = %snafu::Report::from_error(&error),
+                    "failed to add server to listeners"
+                );
+                ListenRequestError::Internal {
+                    message: format!("failed to add server `{server_name}`: {error}"),
+                }
+            })?;
+
+        // Phase 3: commit the registration under the lock (fast, no I/O).
         let mut state = self.state.lock().await;
-        state.request_listen(self.caller_pid, request).await
+        state.commit_listen_request(self.caller_pid, server_name)
     }
 
     async fn release_listen(&self, request: ReleaseListen) -> Result<(), ReleaseListenError> {

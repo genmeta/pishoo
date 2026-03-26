@@ -165,19 +165,20 @@ fn root_state_uses_shared_tls_validation() {
 #[test]
 fn release_and_cleanup_share_retire_server_helper() {
     let root_state_source = include_str!("../src/root_state.rs");
+    let normalized: String = root_state_source.split_whitespace().collect();
 
     assert_eq!(
         root_state_source.matches("retire_server(").count(),
-        3,
-        "root_state should have one retire helper definition and two call sites"
+        4,
+        "root_state should have one retire helper definition and three call sites"
     );
     assert!(
         root_state_source.contains("if self.retire_server(server_name).is_some()"),
         "cleanup path must use retire_server helper"
     );
     assert!(
-        root_state_source.contains(
-            "self.retire_server(server_name).expect(\"server must exist after ownership check\")"
+        normalized.contains(
+            "self.retire_server(server_name).expect(\"servermustexistafterownershipcheck\");"
         ),
         "release_listen path must use retire_server helper"
     );

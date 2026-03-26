@@ -331,6 +331,13 @@ async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String
         .await;
 }
 
+pub async fn publish_now(
+    listeners: &Arc<QuicListeners>,
+    resolvers: &HashMap<String, PublishConfig>,
+) {
+    publish_once(listeners, resolvers).await;
+}
+
 impl Publisher {
     pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, PublishConfig>) -> Self {
         let resolvers = Arc::new(resolvers);

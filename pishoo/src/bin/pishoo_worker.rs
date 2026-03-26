@@ -26,7 +26,6 @@ use pishoo::{
     protocol::{
         OpenConnector, ReleaseListen, RequestListen, RootTransportApi, WorkerBootstrap, WorkerHello,
     },
-    remoc_bridge::ListenerHandle,
 };
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::sync::Mutex;
@@ -38,14 +37,14 @@ struct ServerRuntime {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct WorkerRouting {
     router: Arc<HashMap<String, Arc<Node>>>,
     // TODO: check
     binds: Arc<HashMap<String, Vec<String>>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct WorkerPolicy {
     access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
 }
@@ -54,6 +53,13 @@ struct ReconcileStats {
     added: usize,
     removed: usize,
     kept: usize,
+}
+
+struct WorkerReloadPlan {
+    desired_listeners: Vec<RequestListen>,
+    routing: WorkerRouting,
+    worker_policy: WorkerPolicy,
+    stats: ReconcileStats,
 }
 
 #[derive(Debug, Snafu)]
@@ -146,8 +152,9 @@ async fn main() -> Result<(), Whatever> {
     let listeners: Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let h3_settings = Arc::new(Settings::default());
+    let worker_policy_path = bootstrap.home.join(".genmeta/pishoo.conf");
 
-    let worker_policy = load_worker_policy(&bootstrap.home.join(".genmeta/pishoo.conf"))
+    let worker_policy = load_worker_policy(&worker_policy_path)
         .await
         .whatever_context("failed to load worker policy")?;
     // connector root-owned: worker 不再本地创建 connector runtime.
@@ -159,27 +166,29 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to open root-owned connector")?;
     tracing::info!("root-owned connector handle acquired");
 
-    match reconcile_listener_set(
-        &root_api,
-        &listeners,
-        &genmeta_home,
-        None,
-        h3_settings.clone(),
-        worker_policy.clone(),
-    )
-    .await
-    {
-        Ok(stats) => {
-            tracing::info!(
-                scanned = stats.added,
-                acquired = listeners.lock().await.len(),
-                "identity scan complete"
-            );
+    let current_servers = HashSet::new();
+    match build_worker_reload_plan(&genmeta_home, current_servers, worker_policy.clone()).await {
+        Ok(plan) => {
+            match apply_worker_reload_plan(&root_api, &listeners, plan, h3_settings.clone()).await {
+                Ok(stats) => {
+                    tracing::info!(
+                        scanned = stats.added,
+                        acquired = listeners.lock().await.len(),
+                        "identity scan complete"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %Report::from_error(&error),
+                        "failed to apply initial listener plan, continuing without listeners"
+                    );
+                }
+            }
         }
         Err(error) => {
             tracing::warn!(
                 error = %Report::from_error(&error),
-                "failed to list identities, continuing without listeners"
+                "failed to build initial listener plan, continuing without listeners"
             );
         }
     }
@@ -213,14 +222,34 @@ async fn main() -> Result<(), Whatever> {
             }
             _ = hup_signal.recv() => {
                 tracing::info!("reloading identities");
-                match reconcile_listener_set(
-                    &root_api,
-                    &listeners,
+                let current_servers = listeners.lock().await.keys().cloned().collect();
+                let worker_policy = match load_worker_policy(&worker_policy_path).await {
+                    Ok(worker_policy) => worker_policy,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %Report::from_error(&error),
+                            "worker policy reload failed; keeping current listeners"
+                        );
+                        continue;
+                    }
+                };
+
+                let plan = match build_worker_reload_plan(
                     &genmeta_home,
-                    Some(listeners.lock().await.keys().cloned().collect()),
-                    h3_settings.clone(),
-                    worker_policy.clone(),
+                    current_servers,
+                    worker_policy,
                 ).await {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %Report::from_error(&error),
+                            "failed to build reload plan; keeping current listeners"
+                        );
+                        continue;
+                    }
+                };
+
+                match apply_worker_reload_plan(&root_api, &listeners, plan, h3_settings.clone()).await {
                     Ok(stats) => {
                         tracing::info!(
                             added = stats.added,
@@ -232,7 +261,7 @@ async fn main() -> Result<(), Whatever> {
                     Err(error) => {
                         tracing::warn!(
                             error = %Report::from_error(&error),
-                            "failed to list identities during reload"
+                            "failed to apply reload plan"
                         );
                     }
                 }
@@ -244,12 +273,27 @@ async fn main() -> Result<(), Whatever> {
             }
         }
     }
+    stop_server_runtimes(&listeners).await;
     tracing::info!("pishoo-worker exiting");
     Ok(())
 }
 
+async fn stop_server_runtimes(listeners: &Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>>) {
+    let runtimes = {
+        let mut listeners = listeners.lock().await;
+        listeners
+            .drain()
+            .map(|(_, runtime)| runtime)
+            .collect::<Vec<_>>()
+    };
+
+    for runtime in runtimes {
+        runtime.stop();
+    }
+}
+
 fn start_server_runtime(
-    listener: ListenerHandle,
+    listener: pishoo::remoc_bridge::ListenerHandle,
     server_name: String,
     h3_settings: Arc<Settings>,
     router: Arc<HashMap<String, Arc<Node>>>,
@@ -299,14 +343,11 @@ fn start_server_runtime(
     ServerRuntime { cancel, task }
 }
 
-async fn reconcile_listener_set(
-    root_api: &impl RootTransportApi,
-    listeners: &Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>>,
+async fn build_worker_reload_plan(
     genmeta_home: &GenmetaHome,
-    current_servers: Option<HashSet<Name<'static>>>,
-    h3_settings: Arc<Settings>,
+    current_servers: HashSet<Name<'static>>,
     worker_policy: WorkerPolicy,
-) -> Result<ReconcileStats, Whatever> {
+) -> Result<WorkerReloadPlan, Whatever> {
     let names: HashSet<Name<'static>> = genmeta_home
         .identities()
         .list()
@@ -314,31 +355,11 @@ async fn reconcile_listener_set(
         .whatever_context("failed to list identities")?
         .into_iter()
         .collect();
-    let routing = build_worker_routing(genmeta_home, &names).await;
-    let existing_servers = current_servers.unwrap_or_default();
+    let routing = build_worker_routing(genmeta_home, &names).await?;
+    let mut desired_servers = HashSet::new();
+    let mut desired_listeners = Vec::new();
 
-    let removed: Vec<Name> = existing_servers.difference(&names).cloned().collect();
-    let kept = existing_servers.intersection(&names).count();
-    let added: Vec<Name> = names.difference(&existing_servers).cloned().collect();
-
-    for server_name in &removed {
-        let request = ReleaseListen {
-            server_name: server_name.clone(),
-        };
-        match root_api.release_listen(request).await {
-            Ok(()) => {
-                tracing::info!(%server_name, "released listener");
-                if let Some(runtime) = listeners.lock().await.remove(server_name) {
-                    runtime.stop();
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%server_name, error = %Report::from_error(&error), "failed to release listener");
-            }
-        }
-    }
-
-    for server_name in &added {
+    for server_name in &names {
         let identity = genmeta_home
             .identities()
             .load(server_name.borrow())
@@ -362,29 +383,88 @@ async fn reconcile_listener_set(
             continue;
         }
 
-        match root_api.request_listen(request).await {
-            Ok(listener) => {
-                let runtime = start_server_runtime(
-                    listener,
-                    server_name.as_full().to_owned(),
-                    h3_settings.clone(),
-                    routing.router.clone(),
-                    worker_policy.clone(),
-                );
-                tracing::info!(%server_name, "acquired listener");
-                listeners.lock().await.insert(server_name.clone(), runtime);
-            }
-            Err(error) => {
-                tracing::warn!(%server_name, error = %Report::from_error(&error), "failed to request listener");
-            }
-        }
+        desired_servers.insert(server_name.clone());
+        desired_listeners.push(request);
     }
 
-    Ok(ReconcileStats {
-        added: added.len(),
-        removed: removed.len(),
-        kept,
+    let added = desired_servers.difference(&current_servers).count();
+    let removed = current_servers.difference(&desired_servers).count();
+    let kept = current_servers.intersection(&desired_servers).count();
+
+    desired_listeners.sort_by(|left, right| left.name.as_full().cmp(right.name.as_full()));
+
+    Ok(WorkerReloadPlan {
+        desired_listeners,
+        routing,
+        worker_policy,
+        stats: ReconcileStats {
+            added,
+            removed,
+            kept,
+        },
     })
+}
+
+async fn apply_worker_reload_plan(
+    root_api: &impl RootTransportApi,
+    listeners: &Arc<Mutex<HashMap<Name<'static>, ServerRuntime>>>,
+    plan: WorkerReloadPlan,
+    h3_settings: Arc<Settings>,
+) -> Result<ReconcileStats, Whatever> {
+    let WorkerReloadPlan {
+        desired_listeners,
+        routing,
+        worker_policy,
+        stats,
+    } = plan;
+
+    let desired_by_name = desired_listeners
+        .into_iter()
+        .map(|request| (request.name.clone(), request))
+        .collect::<HashMap<_, _>>();
+
+    let current_runtimes = {
+        let mut listeners = listeners.lock().await;
+        listeners.drain().collect::<Vec<_>>()
+    };
+
+    let mut next_runtimes = HashMap::new();
+
+    for (server_name, runtime) in current_runtimes {
+        root_api
+            .release_listen(ReleaseListen {
+                server_name: server_name.clone(),
+            })
+            .await
+            .whatever_context(format!(
+                "failed to release listener `{server_name}` during reload"
+            ))?;
+        tracing::info!(%server_name, "released listener");
+        runtime.stop();
+    }
+
+    for (server_name, request) in desired_by_name {
+        let listener = root_api
+            .request_listen(request)
+            .await
+            .whatever_context(format!(
+                "failed to request listener `{server_name}` during reload"
+            ))?;
+        let runtime = start_server_runtime(
+            listener,
+            server_name.as_full().to_owned(),
+            h3_settings.clone(),
+            routing.router.clone(),
+            worker_policy.clone(),
+        );
+        tracing::info!(%server_name, "acquired listener");
+        next_runtimes.insert(server_name, runtime);
+    }
+
+    let mut listeners = listeners.lock().await;
+    *listeners = next_runtimes;
+
+    Ok(stats)
 }
 
 async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerError> {
@@ -418,7 +498,7 @@ async fn load_worker_policy(conf_path: &Path) -> Result<WorkerPolicy, WorkerErro
 async fn build_worker_routing(
     genemta_home: &GenmetaHome,
     names: &HashSet<Name<'_>>,
-) -> WorkerRouting {
+) -> Result<WorkerRouting, Whatever> {
     let device_names = gm_quic::qinterface::device::Devices::global()
         .interfaces()
         .keys()
@@ -439,10 +519,14 @@ async fn build_worker_routing(
         if !conf_path.is_file() {
             continue;
         }
-        let canonicalized_server_nodes = match load_identity_servers(&conf_path).await {
-            Ok(nodes) => nodes,
-            Err(_) => continue,
-        };
+        let canonicalized_server_nodes =
+            load_identity_servers(&conf_path)
+                .await
+                .whatever_context(format!(
+                    "failed to load identity servers from `{}` for `{}`",
+                    conf_path.display(),
+                    name.as_full()
+                ))?;
 
         for server_node in &canonicalized_server_nodes {
             if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
@@ -465,10 +549,10 @@ async fn build_worker_routing(
     for (name, node) in fallback_entries {
         router.entry(name).or_insert(node);
     }
-    WorkerRouting {
+    Ok(WorkerRouting {
         router: Arc::new(router),
         binds: Arc::new(binds),
-    }
+    })
 }
 
 #[allow(dead_code)]
@@ -508,4 +592,138 @@ fn reopen_worker_log(log_dir: &Path) -> Result<(), ReopenWorkerLogError> {
         })?;
     nix::unistd::dup2_stderr(&file).context(DupStderrSnafu)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("pishoo crate should live under repo root")
+            .to_path_buf()
+    }
+
+    fn repo_rules_db_uri() -> String {
+        format!(
+            "sqlite://{}?mode=rw",
+            repo_root().join("rules.db").display()
+        )
+    }
+
+    fn repo_tls_paths() -> (PathBuf, PathBuf) {
+        let base = repo_root().join("keychain/borber.pilot.genmeta.net");
+        (
+            base.join("borber.pilot.genmeta.net.pem"),
+            base.join("borber.pilot.genmeta.net.key"),
+        )
+    }
+
+    fn temp_home() -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "pishoo-worker-reload-{}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&home).expect("create temp home");
+        home
+    }
+
+    fn write_worker_layout(home: &std::path::Path, identity_dir_name: &str, server_name: &str) {
+        let (cert, key) = repo_tls_paths();
+        let genmeta_dir = home.join(".genmeta");
+        let identity_dir = genmeta_dir.join("identity").join(identity_dir_name);
+        std::fs::create_dir_all(&identity_dir).expect("create identity dir");
+        std::fs::write(
+            genmeta_dir.join("pishoo.conf"),
+            format!("pishoo {{ access_rules {}; }}", repo_rules_db_uri()),
+        )
+        .expect("write worker policy");
+        std::fs::write(
+            identity_dir.join("pishoo.conf"),
+            format!(
+                "pishoo {{ server {{ listen all 443; server_name {server_name}; ssl_certificate {}; ssl_certificate_key {}; location / {{ root {}; }} }} }}",
+                cert.display(),
+                key.display(),
+                home.display(),
+            ),
+        )
+        .expect("write identity config");
+        std::fs::copy(&cert, identity_dir.join("fullchain.crt")).expect("copy identity cert");
+        let key_path = identity_dir.join("privkey.pem");
+        std::fs::copy(&key, &key_path).expect("copy identity key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o400))
+                .expect("tighten identity key permissions");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_worker_reload_plan_keeps_existing_identity_in_rebuild_set() {
+        let home = temp_home();
+        write_worker_layout(&home, "borber.pilot", "borber.pilot.genmeta.net");
+        let genmeta_home = GenmetaHome::new(home.join(".genmeta"));
+        let worker_policy = load_worker_policy(&home.join(".genmeta/pishoo.conf"))
+            .await
+            .expect("load worker policy");
+        let current_servers = HashSet::from([Name::try_from_str_partial("borber.pilot")
+            .expect("valid identity name")
+            .into_owned()]);
+
+        let plan = build_worker_reload_plan(&genmeta_home, current_servers, worker_policy)
+            .await
+            .expect("build reload plan");
+
+        assert_eq!(plan.stats.added, 0);
+        assert_eq!(plan.stats.removed, 0);
+        assert_eq!(plan.stats.kept, 1);
+        assert_eq!(plan.desired_listeners.len(), 1);
+        assert_eq!(
+            plan.desired_listeners[0].name.as_full(),
+            "borber.pilot.genmeta.net"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_worker_routing_surfaces_invalid_identity_config() {
+        let home = temp_home();
+        let genmeta_dir = home.join(".genmeta");
+        let identity_dir = genmeta_dir.join("identity/borber.pilot");
+        std::fs::create_dir_all(&identity_dir).expect("create identity dir");
+        std::fs::write(
+            genmeta_dir.join("pishoo.conf"),
+            format!("pishoo {{ access_rules {}; }}", repo_rules_db_uri()),
+        )
+        .expect("write worker policy");
+        std::fs::write(
+            identity_dir.join("pishoo.conf"),
+            b"server { listen all 443; }",
+        )
+        .expect("write invalid identity config");
+
+        let genmeta_home = GenmetaHome::new(genmeta_dir);
+        let names = HashSet::from([Name::try_from_str_partial("borber.pilot")
+            .expect("valid identity name")
+            .into_owned()]);
+
+        let err = build_worker_routing(&genmeta_home, &names)
+            .await
+            .expect_err("invalid identity config should fail reload plan build");
+
+        assert!(err.to_string().contains("failed to load identity servers"));
+    }
 }

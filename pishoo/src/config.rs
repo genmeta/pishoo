@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
 use gateway::parse::{Node, Value};
 use nix::unistd::{Gid, Uid};
@@ -7,7 +7,10 @@ use snafu::{OptionExt, ResultExt, Snafu};
 mod discovery;
 mod validate;
 
-pub use discovery::{discover_entry_servers, discover_worker_servers, load_identity_servers};
+pub use discovery::{
+    discover_entry_server_owners, discover_entry_servers, discover_worker_servers,
+    load_identity_servers,
+};
 pub use validate::{ValidationSummary, validate_entry_tree};
 
 #[derive(Debug, Clone)]
@@ -86,6 +89,21 @@ pub struct ResolvedWorkerTarget {
     pub gid: Gid,
     pub username: String,
     pub home: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryServerOwner {
+    Local,
+    Worker(String),
+}
+
+impl fmt::Display for EntryServerOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => write!(f, "root-local"),
+            Self::Worker(username) => write!(f, "worker `{username}`"),
+        }
+    }
 }
 
 pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
@@ -229,6 +247,80 @@ pub fn resolve_worker_targets(
     Ok(resolved)
 }
 
+pub fn worker_targets_equivalent(
+    current: &[ResolvedWorkerTarget],
+    next: &[ResolvedWorkerTarget],
+) -> bool {
+    if current.len() != next.len() {
+        return false;
+    }
+
+    let current_map: HashMap<_, _> = current
+        .iter()
+        .map(|target| {
+            (
+                target.username.as_str(),
+                (
+                    target.uid.as_raw(),
+                    target.gid.as_raw(),
+                    target.home.as_path(),
+                ),
+            )
+        })
+        .collect();
+    let next_map: HashMap<_, _> = next
+        .iter()
+        .map(|target| {
+            (
+                target.username.as_str(),
+                (
+                    target.uid.as_raw(),
+                    target.gid.as_raw(),
+                    target.home.as_path(),
+                ),
+            )
+        })
+        .collect();
+
+    current_map.len() == current.len() && next_map.len() == next.len() && current_map == next_map
+}
+
+pub fn ensure_reload_supported(
+    current_entry_config: &EntryConfig,
+    current_worker_targets: &[ResolvedWorkerTarget],
+    current_owners: &HashMap<String, EntryServerOwner>,
+    next_entry_config: &EntryConfig,
+    next_worker_targets: &[ResolvedWorkerTarget],
+    next_owners: &HashMap<String, EntryServerOwner>,
+) -> Result<(), gateway::error::Whatever> {
+    if current_entry_config.pid_file != next_entry_config.pid_file {
+        snafu::whatever!(
+            "hot reload does not support changing `pid_file` from `{}` to `{}`",
+            current_entry_config.pid_file,
+            next_entry_config.pid_file,
+        );
+    }
+
+    if !worker_targets_equivalent(current_worker_targets, next_worker_targets) {
+        snafu::whatever!(
+            "hot reload does not support changing configured workers; restart is required"
+        );
+    }
+
+    for (server_name, current_owner) in current_owners {
+        let Some(next_owner) = next_owners.get(server_name) else {
+            continue;
+        };
+        if current_owner != next_owner {
+            snafu::whatever!(
+                "hot reload does not support changing owner of server `{server_name}` from {current_owner} to {next_owner}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -333,5 +425,123 @@ mod tests {
         assert_eq!(entry.shape, RuntimeShape::Mixed);
         assert_eq!(entry.workers.len(), 1);
         assert_eq!(entry.local_servers.len(), 1);
+    }
+
+    #[test]
+    fn worker_targets_equivalent_ignores_order() {
+        let home_a = PathBuf::from("/tmp/alice");
+        let home_b = PathBuf::from("/tmp/bob");
+        let current = vec![
+            ResolvedWorkerTarget {
+                uid: Uid::from_raw(1),
+                gid: Gid::from_raw(11),
+                username: "alice".to_string(),
+                home: home_a.clone(),
+            },
+            ResolvedWorkerTarget {
+                uid: Uid::from_raw(2),
+                gid: Gid::from_raw(22),
+                username: "bob".to_string(),
+                home: home_b.clone(),
+            },
+        ];
+        let next = vec![
+            ResolvedWorkerTarget {
+                uid: Uid::from_raw(2),
+                gid: Gid::from_raw(22),
+                username: "bob".to_string(),
+                home: home_b,
+            },
+            ResolvedWorkerTarget {
+                uid: Uid::from_raw(1),
+                gid: Gid::from_raw(11),
+                username: "alice".to_string(),
+                home: home_a,
+            },
+        ];
+
+        assert!(worker_targets_equivalent(&current, &next));
+    }
+
+    #[test]
+    fn ensure_reload_supported_rejects_pid_file_change() {
+        let current = EntryConfig {
+            pid_file: "/tmp/a.pid".to_string(),
+            workers: Vec::new(),
+            local_access_rules_uri: None,
+            local_servers: Vec::new(),
+            shape: RuntimeShape::Direct,
+        };
+        let next = EntryConfig {
+            pid_file: "/tmp/b.pid".to_string(),
+            workers: Vec::new(),
+            local_access_rules_uri: None,
+            local_servers: Vec::new(),
+            shape: RuntimeShape::Direct,
+        };
+
+        let err =
+            ensure_reload_supported(&current, &[], &HashMap::new(), &next, &[], &HashMap::new())
+                .expect_err("pid_file change should require restart");
+
+        assert!(err.to_string().contains("pid_file"));
+    }
+
+    #[test]
+    fn ensure_reload_supported_rejects_worker_changes() {
+        let current_entry = EntryConfig {
+            pid_file: "/tmp/a.pid".to_string(),
+            workers: Vec::new(),
+            local_access_rules_uri: None,
+            local_servers: Vec::new(),
+            shape: RuntimeShape::Supervisor,
+        };
+        let next_entry = current_entry.clone();
+        let current_workers = vec![ResolvedWorkerTarget {
+            uid: Uid::from_raw(1),
+            gid: Gid::from_raw(11),
+            username: "alice".to_string(),
+            home: PathBuf::from("/tmp/alice"),
+        }];
+        let next_workers = vec![ResolvedWorkerTarget {
+            uid: Uid::from_raw(2),
+            gid: Gid::from_raw(22),
+            username: "bob".to_string(),
+            home: PathBuf::from("/tmp/bob"),
+        }];
+
+        let err = ensure_reload_supported(
+            &current_entry,
+            &current_workers,
+            &HashMap::new(),
+            &next_entry,
+            &next_workers,
+            &HashMap::new(),
+        )
+        .expect_err("worker target change should require restart");
+
+        assert!(err.to_string().contains("configured workers"));
+    }
+
+    #[test]
+    fn ensure_reload_supported_rejects_server_owner_handoff() {
+        let entry = EntryConfig {
+            pid_file: "/tmp/a.pid".to_string(),
+            workers: Vec::new(),
+            local_access_rules_uri: None,
+            local_servers: Vec::new(),
+            shape: RuntimeShape::Mixed,
+        };
+        let current_owners =
+            HashMap::from([("demo.genmeta.net".to_string(), EntryServerOwner::Local)]);
+        let next_owners = HashMap::from([(
+            "demo.genmeta.net".to_string(),
+            EntryServerOwner::Worker("alice".to_string()),
+        )]);
+
+        let err = ensure_reload_supported(&entry, &[], &current_owners, &entry, &[], &next_owners)
+            .expect_err("owner handoff should require restart");
+
+        assert!(err.to_string().contains("changing owner of server"));
     }
 }

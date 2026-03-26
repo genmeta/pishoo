@@ -1,8 +1,10 @@
 #![cfg(unix)]
 
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use clap::Parser;
@@ -15,6 +17,13 @@ use tokio::fs;
 use tracing::Instrument;
 
 mod signal;
+
+struct RootReloadSnapshot {
+    entry_config: pishoo::config::EntryConfig,
+    worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
+    owner_map: HashMap<String, pishoo::config::EntryServerOwner>,
+    publish_configs: HashMap<String, gateway::dns::PublishConfig>,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -89,14 +98,22 @@ async fn main() -> Result<(), Whatever> {
         return Ok(());
     }
 
-    let pid_file = entry_config.pid_file.as_str();
+    let pid_file = entry_config.pid_file.clone();
     let publishable_servers = pishoo::config::discover_entry_servers(&entry_config)
         .await
         .whatever_context("failed to discover servers for dns publishing")?;
 
     if let Some(signal) = args.signal {
-        return signal::send_signal(pid_file, signal).await;
+        return signal::send_signal(&pid_file, signal).await;
     }
+
+    let mut current_entry_config = entry_config;
+    let mut current_worker_targets =
+        pishoo::config::resolve_entry_worker_targets(&current_entry_config)
+            .whatever_context("failed to resolve configured worker users")?;
+    let mut current_owner_map = pishoo::config::discover_entry_server_owners(&current_entry_config)
+        .await
+        .whatever_context("failed to discover current server ownership")?;
 
     // --- Multi-process supervisor setup ---
 
@@ -134,28 +151,19 @@ async fn main() -> Result<(), Whatever> {
     )));
 
     // Write PID file (root only)
-    signal::init_pid_file(pid_file).await?;
+    signal::init_pid_file(&pid_file).await?;
 
-    let mut local_runtimes = register_local_runtimes(&state, &entry_config).await?;
+    let mut local_runtimes = register_local_runtimes(&state, &current_entry_config).await?;
 
-    let worker_targets = pishoo::config::resolve_entry_worker_targets(&entry_config)
-        .whatever_context("failed to resolve configured worker users")?;
-    spawn_configured_workers(&state, worker_targets).await?;
+    spawn_configured_workers(&state, current_worker_targets.clone()).await?;
 
-    let _publisher = if publishable_servers.is_empty() {
-        None
-    } else {
-        let publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
-            .whatever_context("failed to build dns publish configs")?;
-        tracing::info!(
-            servers = publish_configs.len(),
-            "starting dns publisher for pishoo"
-        );
-        Some(gateway::dns::Publisher::spawn(
-            listeners.clone(),
-            publish_configs,
-        ))
-    };
+    let initial_publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
+        .whatever_context("failed to build dns publish configs")?;
+    let mut _publisher = spawn_publisher(listeners.clone(), initial_publish_configs).await;
+
+    // Create signal handler once — reused across the main loop so that signals
+    // arriving during reload are never lost.
+    let mut signals = signal::RootSignalHandler::new()?;
 
     // Central accept loop: route connections by server_name
     let accept_state = state.clone();
@@ -204,29 +212,33 @@ async fn main() -> Result<(), Whatever> {
     );
 
     loop {
-        let Some(sig) = signal::handle_signal().await? else {
-            break;
-        };
-
-        let forwarded = match sig {
-            signal::RootSignal::SigTerm => Signal::SIGTERM,
-            signal::RootSignal::SigInt => Signal::SIGINT,
-            signal::RootSignal::SigQuit => Signal::SIGQUIT,
-            signal::RootSignal::SigHup => Signal::SIGHUP,
-            signal::RootSignal::SigUsr1 => {
-                reopen_root_log();
-                Signal::SIGUSR1
-            }
-        };
-        {
-            let mut st = state.lock().await;
-            st.forward_unix_signal(forwarded);
-        }
+        let sig = signals.wait().await;
 
         match sig {
             signal::RootSignal::SigTerm
             | signal::RootSignal::SigInt
             | signal::RootSignal::SigQuit => {
+                let forwarded = match sig {
+                    signal::RootSignal::SigTerm => Signal::SIGTERM,
+                    signal::RootSignal::SigInt => Signal::SIGINT,
+                    signal::RootSignal::SigQuit => Signal::SIGQUIT,
+                    _ => unreachable!("matched shutdown signals only"),
+                };
+                // Try to forward the shutdown signal to workers.  Use try_lock
+                // to avoid blocking when the state mutex is held by a slow
+                // operation (e.g. add_server during request_listen).  Workers
+                // running in the same process group already receive the terminal
+                // signal directly; the explicit forward is a best-effort courtesy.
+                match state.try_lock() {
+                    Ok(mut st) => {
+                        st.forward_unix_signal(forwarded);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "state mutex held; skipping signal forward (workers will be force-killed)"
+                        );
+                    }
+                }
                 accept_handle.abort();
                 tracing::info!(?sig, "forwarded shutdown signal to workers");
 
@@ -248,30 +260,129 @@ async fn main() -> Result<(), Whatever> {
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
+
+                let force_killed = {
+                    let mut st = state.lock().await;
+                    if st.worker_pids().is_empty() {
+                        Vec::new()
+                    } else {
+                        st.force_kill_workers("shutdown_timeout")
+                    }
+                };
+                if !force_killed.is_empty() {
+                    tracing::warn!(
+                        workers = force_killed.len(),
+                        "force-killed lingering workers after shutdown timeout"
+                    );
+
+                    let force_kill_deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                    loop {
+                        let mut done = false;
+                        {
+                            let mut st = state.lock().await;
+                            let exited = st.collect_exited_workers();
+                            for pid in exited {
+                                st.cleanup_worker_with_reason(pid, "forced_shutdown");
+                            }
+                            if st.worker_pids().is_empty() {
+                                done = true;
+                            }
+                        }
+                        if done || tokio::time::Instant::now() >= force_kill_deadline {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
                 break;
             }
             signal::RootSignal::SigHup => {
-                tracing::info!(
-                    "forwarded reload signal to workers; root-local servers keep current config"
-                );
+                let next_snapshot = match load_root_reload_snapshot(&config_file).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %Report::from_error(&error),
+                            path = %config_file.display(),
+                            "reload preflight failed; keeping current root state"
+                        );
+                        continue;
+                    }
+                };
+
+                if let Err(error) = pishoo::config::ensure_reload_supported(
+                    &current_entry_config,
+                    &current_worker_targets,
+                    &current_owner_map,
+                    &next_snapshot.entry_config,
+                    &next_snapshot.worker_targets,
+                    &next_snapshot.owner_map,
+                ) {
+                    tracing::warn!(
+                        error = %Report::from_error(&error),
+                        "reload rejected because it requires a full restart"
+                    );
+                    continue;
+                }
+
+                if let Err(error) =
+                    replace_local_runtimes(&state, &mut local_runtimes, &next_snapshot.entry_config)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %Report::from_error(&error),
+                        "failed to reload root-local servers; keeping previous worker state"
+                    );
+                    continue;
+                }
+
+                {
+                    let mut st = state.lock().await;
+                    st.forward_unix_signal(Signal::SIGHUP);
+                }
+                let publish_names = next_snapshot
+                    .publish_configs
+                    .keys()
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                wait_for_reload_servers(&listeners, &publish_names).await;
+                current_entry_config = next_snapshot.entry_config;
+                current_worker_targets = next_snapshot.worker_targets;
+                current_owner_map = next_snapshot.owner_map;
+                _publisher =
+                    spawn_publisher(listeners.clone(), next_snapshot.publish_configs).await;
+                tracing::info!("reload applied to root-local state and forwarded to workers");
             }
             signal::RootSignal::SigUsr1 => {
+                reopen_root_log();
+                {
+                    let mut st = state.lock().await;
+                    st.forward_unix_signal(Signal::SIGUSR1);
+                }
                 tracing::info!("root log reopened, forwarded reopen signal to workers");
             }
         }
     }
 
+    _publisher = None;
+    accept_handle.abort();
+    let _ = accept_handle.await;
     monitor_handle.abort();
+    let _ = monitor_handle.await;
     for runtime in local_runtimes.drain(..) {
         runtime.stop();
     }
-    {
-        let mut st = state.lock().await;
-        for pid in st.worker_pids() {
-            st.cleanup_worker_with_reason(pid, "root_shutdown");
+    match tokio::time::timeout(Duration::from_secs(1), state.lock()).await {
+        Ok(mut st) => {
+            for pid in st.worker_pids() {
+                st.cleanup_worker_with_reason(pid, "root_shutdown");
+            }
+        }
+        Err(_) => {
+            tracing::warn!("state lock timeout during final cleanup; skipping worker cleanup");
         }
     }
-    _ = fs::remove_file(pid_file).await;
+    _ = fs::remove_file(&pid_file).await;
     Ok(())
 }
 
@@ -321,6 +432,103 @@ async fn register_local_runtimes(
     )
     .await
     .whatever_context("failed to register root-local servers")
+}
+
+async fn replace_local_runtimes(
+    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
+    local_runtimes: &mut Vec<pishoo::local_service::LocalServerRuntime>,
+    entry_config: &pishoo::config::EntryConfig,
+) -> Result<(), Whatever> {
+    let retired = {
+        let mut st = state.lock().await;
+        st.retire_local_servers()
+    };
+    if !retired.is_empty() {
+        tracing::info!(
+            servers = retired.len(),
+            "retired root-local servers before reload"
+        );
+    }
+
+    for runtime in local_runtimes.drain(..) {
+        runtime.stop();
+    }
+
+    *local_runtimes = register_local_runtimes(state, entry_config).await?;
+    Ok(())
+}
+
+async fn spawn_publisher(
+    listeners: Arc<QuicListeners>,
+    publish_configs: HashMap<String, gateway::dns::PublishConfig>,
+) -> Option<gateway::dns::Publisher> {
+    if publish_configs.is_empty() {
+        return None;
+    }
+
+    tracing::info!(
+        servers = publish_configs.len(),
+        "starting dns publisher for pishoo"
+    );
+    gateway::dns::publish_now(&listeners, &publish_configs).await;
+    Some(gateway::dns::Publisher::spawn(listeners, publish_configs))
+}
+
+async fn load_root_reload_snapshot(config_file: &Path) -> Result<RootReloadSnapshot, Whatever> {
+    let config = fs::read(config_file).await.whatever_context(format!(
+        "failed to read configuration file at `{}`",
+        config_file.display()
+    ))?;
+    let config = gateway::parse::parse(&config, config_file.parent()).whatever_context(format!(
+        "failed to parse configuration file at `{}`",
+        config_file.display()
+    ))?;
+    let entry_config = pishoo::config::parse_entry_config(&config)
+        .whatever_context("failed to parse pishoo entry configuration")?;
+    let _ = pishoo::config::validate_entry_tree(&entry_config)
+        .await
+        .whatever_context("configuration validation failed during reload")?;
+    let worker_targets = pishoo::config::resolve_entry_worker_targets(&entry_config)
+        .whatever_context("failed to resolve configured worker users during reload")?;
+    let owner_map = pishoo::config::discover_entry_server_owners(&entry_config)
+        .await
+        .whatever_context("failed to discover server ownership during reload")?;
+    let publishable_servers = pishoo::config::discover_entry_servers(&entry_config)
+        .await
+        .whatever_context("failed to discover servers for dns publishing during reload")?;
+    let publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
+        .whatever_context("failed to build dns publish configs during reload")?;
+
+    Ok(RootReloadSnapshot {
+        entry_config,
+        worker_targets,
+        owner_map,
+        publish_configs,
+    })
+}
+
+async fn wait_for_reload_servers(listeners: &Arc<QuicListeners>, publish_names: &HashSet<String>) {
+    if publish_names.is_empty() {
+        return;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let active = listeners.servers().into_iter().collect::<HashSet<_>>();
+        let missing = publish_names
+            .iter()
+            .filter(|name| !active.contains(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(missing = ?missing, "timed out waiting for listeners to re-register before dns republish");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn spawn_configured_workers(

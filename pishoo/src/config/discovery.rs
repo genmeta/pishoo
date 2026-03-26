@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use gateway::{
     error::Whatever,
@@ -7,7 +7,7 @@ use gateway::{
 use genmeta_home::GenmetaHome;
 use snafu::{ResultExt, whatever};
 
-use super::{EntryConfig, ResolvedWorkerTarget, resolve_entry_worker_targets};
+use super::{EntryConfig, EntryServerOwner, ResolvedWorkerTarget, resolve_entry_worker_targets};
 use crate::naming::canonicalize_server_nodes;
 
 pub async fn discover_entry_servers(
@@ -23,6 +23,34 @@ pub async fn discover_entry_servers(
     }
 
     Ok(servers)
+}
+
+pub async fn discover_entry_server_owners(
+    entry_config: &EntryConfig,
+) -> Result<HashMap<String, EntryServerOwner>, Whatever> {
+    let mut owners = HashMap::new();
+    let local_servers = canonicalize_server_nodes(&entry_config.local_servers)?;
+    register_server_owners(
+        &local_servers,
+        EntryServerOwner::Local,
+        &mut owners,
+        "entry config",
+    )?;
+
+    let worker_targets = resolve_entry_worker_targets(entry_config)
+        .whatever_context("failed to resolve configured worker users")?;
+    for target in &worker_targets {
+        let worker_owner = EntryServerOwner::Worker(target.username.clone());
+        let worker_servers = discover_worker_servers(target).await?;
+        register_server_owners(
+            &worker_servers,
+            worker_owner,
+            &mut owners,
+            &format!("worker `{}`", target.username),
+        )?;
+    }
+
+    Ok(owners)
 }
 
 pub async fn discover_worker_servers(
@@ -88,4 +116,26 @@ pub async fn load_identity_servers(conf_path: &Path) -> Result<Vec<Arc<Node>>, W
     };
 
     canonicalize_server_nodes(server_nodes)
+}
+
+fn register_server_owners(
+    servers: &[Arc<Node>],
+    owner: EntryServerOwner,
+    owners: &mut HashMap<String, EntryServerOwner>,
+    scope: &str,
+) -> Result<(), Whatever> {
+    for server in servers {
+        let Some(Value::ServerName(server_names)) = server.get("server_name") else {
+            whatever!("server in {scope} is missing `server_name`");
+        };
+        for server_name in server_names {
+            let normalized = server_name.name.clone();
+            if let Some(existing_owner) = owners.insert(normalized.clone(), owner.clone()) {
+                whatever!(
+                    "duplicate server_name `{normalized}` found in {scope}; existing owner: {existing_owner}"
+                );
+            }
+        }
+    }
+    Ok(())
 }

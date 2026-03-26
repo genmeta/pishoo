@@ -57,38 +57,57 @@ pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), 
     Ok(())
 }
 
-pub async fn handle_signal() -> Result<Option<RootSignal>, Whatever> {
-    let mut term_signal =
-        signal(SignalKind::terminate()).whatever_context("failed to create sigterm listener")?;
-    let mut int_signal =
-        signal(SignalKind::interrupt()).whatever_context("failed to create sigint listener")?;
-    let mut quit_signal =
-        signal(SignalKind::quit()).whatever_context("failed to create sigquit listener")?;
-    let mut hup_signal =
-        signal(SignalKind::hangup()).whatever_context("failed to create sighup listener")?;
-    let mut usr1_signal = signal(SignalKind::user_defined1())
-        .whatever_context("failed to create sigusr1 listener")?;
+/// Long-lived signal listener created once and reused across the main loop.
+///
+/// This avoids re-creating signal streams on every iteration which would open a
+/// window where signals arriving between the drop of old streams and the
+/// creation of new ones are silently lost (e.g. Ctrl+C during reload).
+pub struct RootSignalHandler {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+    quit: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+    usr1: tokio::signal::unix::Signal,
+}
 
-    tokio::select! {
-        _ = term_signal.recv() => {
-            tracing::info!("received sigterm signal");
-            Ok(Some(RootSignal::SigTerm))
-        }
-        _ = int_signal.recv() => {
-            tracing::info!("received sigint signal");
-            Ok(Some(RootSignal::SigInt))
-        }
-        _ = quit_signal.recv() => {
-            tracing::info!("received sigquit signal");
-            Ok(Some(RootSignal::SigQuit))
-        }
-        _ = hup_signal.recv() => {
-            tracing::info!("received sighup signal");
-            Ok(Some(RootSignal::SigHup))
-        }
-        _ = usr1_signal.recv() => {
-            tracing::info!("received sigusr1 signal");
-            Ok(Some(RootSignal::SigUsr1))
+impl RootSignalHandler {
+    pub fn new() -> Result<Self, Whatever> {
+        Ok(Self {
+            term: signal(SignalKind::terminate())
+                .whatever_context("failed to create sigterm listener")?,
+            int: signal(SignalKind::interrupt())
+                .whatever_context("failed to create sigint listener")?,
+            quit: signal(SignalKind::quit())
+                .whatever_context("failed to create sigquit listener")?,
+            hup: signal(SignalKind::hangup())
+                .whatever_context("failed to create sighup listener")?,
+            usr1: signal(SignalKind::user_defined1())
+                .whatever_context("failed to create sigusr1 listener")?,
+        })
+    }
+
+    pub async fn wait(&mut self) -> RootSignal {
+        tokio::select! {
+            _ = self.term.recv() => {
+                tracing::info!("received sigterm signal");
+                RootSignal::SigTerm
+            }
+            _ = self.int.recv() => {
+                tracing::info!("received sigint signal");
+                RootSignal::SigInt
+            }
+            _ = self.quit.recv() => {
+                tracing::info!("received sigquit signal");
+                RootSignal::SigQuit
+            }
+            _ = self.hup.recv() => {
+                tracing::info!("received sighup signal");
+                RootSignal::SigHup
+            }
+            _ = self.usr1.recv() => {
+                tracing::info!("received sigusr1 signal");
+                RootSignal::SigUsr1
+            }
         }
     }
 }

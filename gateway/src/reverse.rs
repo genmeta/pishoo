@@ -164,6 +164,7 @@ pub async fn serve(
     info!("dns resolvers initialized");
 
     // 启动 dns 上报（不含 stun.genmeta.net）
+    crate::dns::publish_now(&quic_listeners, &publish_configs).await;
     let _publisher = Publisher::spawn(quic_listeners.clone(), publish_configs);
     let _stun_manager = match (stun_config, stun_publish_config) {
         (Some(config), Some(publish_config)) => Some(StunServerManager::spawn(

@@ -23,7 +23,6 @@ use crate::{
     per_server_listen::PerServerListenAdapter,
     protocol::{
         ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
-        RequestListen,
     },
     remoc_bridge::{
         ConnectorHandle, ConnectorServerShared, ListenerHandle, ListenerServerShared,
@@ -181,6 +180,22 @@ impl RootState {
         Some(())
     }
 
+    pub fn retire_local_servers(&mut self) -> Vec<String> {
+        let local_server_names = self
+            .servers
+            .iter()
+            .filter_map(|(server_name, record)| {
+                (record.owner == ServiceOwner::Local).then_some(server_name.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for server_name in &local_server_names {
+            let _ = self.retire_server(server_name);
+        }
+
+        local_server_names
+    }
+
     pub async fn register_local_server(
         &mut self,
         server_name: String,
@@ -219,65 +234,55 @@ impl RootState {
         Ok(())
     }
 
-    /// Handle a `request_listen` call from a worker.
+    /// Validate a listen request under the lock (fast, no I/O).
     ///
-    /// Performs conflict detection (first-come-first-served), reads TLS cert/key
-    /// files, registers the server with `QuicListeners`, creates a
-    /// [`PerServerListenAdapter`], and wraps it via
-    /// [`LocalQuicListener::into_remote()`] to produce a [`RemoteQuicListener`]
-    /// for the worker.
-    pub async fn request_listen(
-        &mut self,
+    /// Returns a cloned `Arc<QuicListeners>` so the caller can call
+    /// [`QuicListeners::add_server`] **outside** the mutex.
+    pub fn validate_listen_request(
+        &self,
         caller_pid: Pid,
-        request: RequestListen,
-    ) -> Result<ListenerHandle, ListenRequestError> {
-        let server_name = request.name.as_full().to_owned();
-
-        // 1. Conflict check: first-come-first-served.
-        if self.servers.contains_key(&server_name) {
+        server_name: &str,
+    ) -> Result<Arc<gm_quic::prelude::QuicListeners>, ListenRequestError> {
+        if self.servers.contains_key(server_name) {
             tracing::warn!(caller_pid = %caller_pid, %server_name, "request_listen conflict");
             return Err(ListenRequestError::Conflict);
         }
-
-        // 2. Verify caller is a registered worker.
         if !self.processes.contains_key(&caller_pid) {
             return Err(ListenRequestError::Internal {
                 message: format!("unknown caller pid {caller_pid}"),
             });
         }
+        Ok(self.listeners.clone())
+    }
 
-        // TODO: mataining bindings on network changed.
-        // 4. Add server to QuicListeners.
-        //    bind_uris is Vec<String>; BindUri implements From<String>.
-        self.listeners
-            .add_server(
-                &server_name,
-                request.certs.as_slice(),
-                &request.key,
-                request.bind,
-                None::<Vec<u8>>,
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    caller_pid = %caller_pid,
-                    %server_name,
-                    error = %Report::from_error(&error),
-                    "failed to add server to listeners"
-                );
-                ListenRequestError::Internal {
-                    message: Report::from_error(Whatever::with_source(
-                        Box::new(error),
-                        format!("failed to add server `{server_name}`"),
-                    ))
-                    .to_string(),
-                }
-            })?;
+    /// Commit a validated listen request after `add_server` has completed.
+    ///
+    /// Creates the per-server listen adapter, spawns the RTC serve future,
+    /// and records the server in the registry.  Must be called with the lock
+    /// held.  Re-checks for conflicts that could race during `add_server`.
+    pub fn commit_listen_request(
+        &mut self,
+        caller_pid: Pid,
+        server_name: String,
+    ) -> Result<ListenerHandle, ListenRequestError> {
+        // Re-check: another request may have raced while we were in add_server.
+        if self.servers.contains_key(&server_name) {
+            self.listeners.remove_server(&server_name);
+            tracing::warn!(
+                caller_pid = %caller_pid,
+                %server_name,
+                "request_listen conflict (raced during add_server)"
+            );
+            return Err(ListenRequestError::Conflict);
+        }
+        if !self.processes.contains_key(&caller_pid) {
+            self.listeners.remove_server(&server_name);
+            return Err(ListenRequestError::Internal {
+                message: format!("unknown caller pid {caller_pid}"),
+            });
+        }
 
-        // 5. Create mpsc channel for routing connections to this server.
         let (tx, rx) = mpsc::channel(128);
-
-        // 6. Create per-server listen adapter.
         let shutdown_token = CancellationToken::new();
         let adapter = PerServerListenAdapter::new(rx, shutdown_token.clone());
 
@@ -285,11 +290,8 @@ impl RootState {
         let serve_fut = async move {
             let _ = server.serve(true).await;
         };
-
-        // 8. Spawn the serve future to drive the RTC server.
         tokio::spawn(serve_fut.in_current_span());
 
-        // 9. Update registry: server record.
         self.servers.insert(
             server_name.clone(),
             ServerRecord {
@@ -299,14 +301,11 @@ impl RootState {
             },
         );
 
-        // 10. Update process record: add to owned_servers set.
         if let Some(process) = self.processes.get_mut(&caller_pid) {
             process.owned_servers.insert(server_name);
         }
 
         tracing::info!(caller_pid = %caller_pid, "request_listen success");
-
-        // 11. Return the RemoteQuicListener for the worker.
         Ok(ListenerHandle::new(client))
     }
 
@@ -414,6 +413,27 @@ impl RootState {
         exited
     }
 
+    pub fn force_kill_workers(&mut self, reason: &str) -> Vec<Pid> {
+        let mut killed = Vec::new();
+        for (pid, process) in &mut self.processes {
+            match process.worker_handle.start_kill() {
+                Ok(()) => {
+                    tracing::warn!(pid = %pid, %reason, "sent SIGKILL to worker");
+                    killed.push(*pid);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        pid = %pid,
+                        %reason,
+                        error = %Report::from_error(&error),
+                        "failed to force kill worker"
+                    );
+                }
+            }
+        }
+        killed
+    }
+
     /// Look up the routing sender for a given server_name.
     ///
     /// Used by the central accept loop to route connections to the correct
@@ -458,30 +478,46 @@ impl RootState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
     use super::*;
+
+    struct SharedQuicFixture {
+        listeners: Arc<gm_quic::prelude::QuicListeners>,
+        client: Arc<gm_quic::prelude::QuicClient>,
+    }
+
+    fn shared_quic_fixture() -> &'static SharedQuicFixture {
+        static FIXTURE: OnceLock<SharedQuicFixture> = OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let roots = crate::tls::root_cert_store();
+            let listeners = gm_quic::prelude::QuicListeners::builder()
+                .with_parameters(gm_quic::prelude::handy::server_parameters())
+                .with_client_cert_verifier(
+                    rustls::server::WebPkiClientVerifier::builder(roots)
+                        .allow_unauthenticated()
+                        .build()
+                        .expect("build verifier"),
+                )
+                .with_alpns([b"h3".as_slice()])
+                .listen(16)
+                .expect("create listeners");
+            let client = Arc::new(
+                gm_quic::prelude::QuicClient::builder()
+                    .with_root_certificates(Arc::new(rustls::RootCertStore::empty()))
+                    .without_cert()
+                    .with_alpns(vec!["h3"])
+                    .build(),
+            );
+
+            SharedQuicFixture { listeners, client }
+        })
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cleanup_only_removes_uid_mapping_if_pid_matches() {
-        let roots = crate::tls::root_cert_store();
-        let listeners = gm_quic::prelude::QuicListeners::builder()
-            .with_parameters(gm_quic::prelude::handy::server_parameters())
-            .with_client_cert_verifier(
-                rustls::server::WebPkiClientVerifier::builder(roots)
-                    .allow_unauthenticated()
-                    .build()
-                    .expect("build verifier"),
-            )
-            .with_alpns([b"h3".as_slice()])
-            .listen(16)
-            .expect("create listeners");
-        let client = std::sync::Arc::new(
-            gm_quic::prelude::QuicClient::builder()
-                .with_root_certificates(std::sync::Arc::new(rustls::RootCertStore::empty()))
-                .without_cert()
-                .with_alpns(vec!["h3"])
-                .build(),
-        );
-        let mut state = RootState::new(listeners, client);
+        let fixture = shared_quic_fixture();
+        let mut state = RootState::new(fixture.listeners.clone(), fixture.client.clone());
 
         state.users.insert(Uid::from_raw(1000), Pid::from_raw(200));
         state.processes.insert(
@@ -506,5 +542,40 @@ mod tests {
             state.get_pid_for_uid(Uid::from_raw(1000)),
             Some(Pid::from_raw(200))
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn force_kill_workers_terminates_registered_children() {
+        let fixture = shared_quic_fixture();
+        let mut state = RootState::new(fixture.listeners.clone(), fixture.client.clone());
+        let pid = Pid::from_raw(300);
+        let uid = Uid::from_raw(4000);
+
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn child");
+        state.register_worker(pid, uid, super::WorkerHandle::new(child));
+
+        let killed = state.force_kill_workers("test_force_kill");
+        assert_eq!(killed, vec![pid]);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let exited = state.collect_exited_workers();
+            if exited.contains(&pid) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "force-killed worker should exit promptly"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let summary = state
+            .cleanup_worker_with_reason(pid, "test_force_kill_cleanup")
+            .expect("cleanup summary");
+        assert_eq!(summary.pid, pid);
     }
 }
