@@ -20,7 +20,7 @@ fn main_primes_dns_publish_before_background_task() {
 fn main_force_kills_lingering_workers_during_shutdown() {
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("st.force_kill_workers(\"shutdown_timeout\")"),
+        main_source.contains("state.force_kill_workers(\"shutdown_timeout\")"),
         "root shutdown must SIGKILL lingering workers after graceful timeout"
     );
     assert!(

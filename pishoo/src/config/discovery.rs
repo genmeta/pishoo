@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+use futures::StreamExt;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
@@ -57,21 +58,25 @@ pub async fn discover_worker_servers(
     target: &ResolvedWorkerTarget,
 ) -> Result<Vec<Arc<Node>>, Whatever> {
     let genmeta_home = GenmetaHome::new(target.home.join(".genmeta"));
-    let identity_names = genmeta_home
-        .identities()
-        .list()
-        .await
-        .whatever_context(format!(
-            "failed to list identities for worker `{}`",
-            target.username
-        ))?;
+    let mut identity_names = Vec::new();
+    {
+        let mut stream = std::pin::pin!(genmeta_home.identities());
+        while let Some(result) = stream.next().await {
+            let name = result.whatever_context(format!(
+                "failed to list identities for worker `{}`",
+                target.username
+            ))?;
+            identity_names.push(name);
+        }
+    }
 
     let mut servers = Vec::new();
-    for identity_name in identity_names {
-        let conf_path = genmeta_home
-            .identities()
-            .join_name(identity_name.borrow())
-            .join("pishoo.conf");
+    for identity_name in &identity_names {
+        let identity_home = match genmeta_home.load_identity(identity_name.borrow()).await {
+            Ok(home) => home,
+            Err(_) => continue,
+        };
+        let conf_path = identity_home.path().join("pishoo.conf");
         if !conf_path.is_file() {
             continue;
         }

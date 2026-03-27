@@ -8,8 +8,7 @@
 
 use std::fmt;
 
-use futures::future::BoxFuture;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Error type for [`PerServerListenAdapter`].
@@ -41,7 +40,7 @@ impl std::error::Error for PerServerListenError {}
 /// `QuicListeners::accept()` loop to this adapter's mpsc channel. Wraps the
 /// receiver side so it implements [`h3x::quic::Listen`].
 pub struct PerServerListenAdapter {
-    rx: Mutex<mpsc::Receiver<gm_quic::prelude::Connection>>,
+    rx: mpsc::Receiver<gm_quic::prelude::Connection>,
     shutdown_token: CancellationToken,
 }
 
@@ -54,10 +53,7 @@ impl PerServerListenAdapter {
         rx: mpsc::Receiver<gm_quic::prelude::Connection>,
         shutdown_token: CancellationToken,
     ) -> Self {
-        Self {
-            rx: Mutex::new(rx),
-            shutdown_token,
-        }
+        Self { rx, shutdown_token }
     }
 }
 
@@ -65,22 +61,19 @@ impl h3x::quic::Listen for PerServerListenAdapter {
     type Connection = gm_quic::prelude::Connection;
     type Error = PerServerListenError;
 
-    fn accept(&self) -> BoxFuture<'_, Result<Self::Connection, Self::Error>> {
-        Box::pin(async {
-            let mut rx = self.rx.lock().await;
-            tokio::select! {
-                conn = rx.recv() => {
-                    conn.ok_or(PerServerListenError::ChannelClosed)
-                }
-                _ = self.shutdown_token.cancelled() => {
-                    Err(PerServerListenError::Shutdown)
-                }
+    async fn accept(&mut self) -> Result<Self::Connection, Self::Error> {
+        tokio::select! {
+            conn = self.rx.recv() => {
+                conn.ok_or(PerServerListenError::ChannelClosed)
             }
-        })
+            _ = self.shutdown_token.cancelled() => {
+                Err(PerServerListenError::Shutdown)
+            }
+        }
     }
 
-    fn shutdown(&self) -> BoxFuture<'_, Result<(), Self::Error>> {
+    async fn shutdown(&self) -> Result<(), Self::Error> {
         self.shutdown_token.cancel();
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
     }
 }

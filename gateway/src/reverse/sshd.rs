@@ -28,9 +28,7 @@ pub struct H3ReadStreamWrapper {
 impl From<ReadStream> for H3ReadStreamWrapper {
     fn from(read_stream: ReadStream) -> Self {
         use futures::TryStreamExt;
-        let stream = read_stream
-            .into_bytes_stream()
-            .map_err(|e| io::Error::from(e));
+        let stream = read_stream.into_bytes_stream().map_err(io::Error::from);
         Self {
             inner: Box::pin(stream),
         }

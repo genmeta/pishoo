@@ -154,10 +154,10 @@ mod tests {
     }
 
     fn repo_tls_paths() -> (PathBuf, PathBuf) {
-        let base = repo_root().join("keychain/borber.pilot.genmeta.net");
+        let base = repo_root().join("keychain/test.genmeta.net");
         (
-            base.join("borber.pilot.genmeta.net.pem"),
-            base.join("borber.pilot.genmeta.net.key"),
+            base.join("test.genmeta.net.pem"),
+            base.join("test.genmeta.net.key"),
         )
     }
 
@@ -176,8 +176,11 @@ mod tests {
     fn write_worker_layout(home: &Path, server_name: &str) {
         let (cert, key) = repo_tls_paths();
         let genmeta_dir = home.join(".genmeta");
-        let identity_dir = genmeta_dir.join("identity/borber.pilot.genmeta.net");
-        std::fs::create_dir_all(&identity_dir).expect("create identity dir");
+        // New directory structure: .genmeta/{partial_name}/ssl/
+        // identities() scans .genmeta/ for subdirs with valid names and ssl/ subdir.
+        let identity_dir = genmeta_dir.join("test");
+        let ssl_dir = identity_dir.join("ssl");
+        std::fs::create_dir_all(&ssl_dir).expect("create identity ssl dir");
         std::fs::write(
             genmeta_dir.join("pishoo.conf"),
             format!("pishoo {{ access_rules {}; }}", repo_rules_db_uri()),
@@ -198,7 +201,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn validate_worker_tree_counts_identity_servers() {
         let home = temp_home();
-        write_worker_layout(&home, "borber.pilot.genmeta.net");
+        write_worker_layout(&home, "test.genmeta.net");
         let target = ResolvedWorkerTarget {
             uid: Uid::from_raw(1),
             gid: Gid::from_raw(1),
@@ -212,20 +215,20 @@ mod tests {
             .expect("worker validation should succeed");
 
         assert_eq!(count, 1);
-        assert!(seen.contains("borber.pilot.genmeta.net"));
+        assert!(seen.contains("test.genmeta.net"));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn validate_worker_tree_rejects_duplicate_server_name() {
         let home = temp_home();
-        write_worker_layout(&home, "borber.pilot.genmeta.net");
+        write_worker_layout(&home, "test.genmeta.net");
         let target = ResolvedWorkerTarget {
             uid: Uid::from_raw(1),
             gid: Gid::from_raw(1),
             username: "tester".to_string(),
             home,
         };
-        let mut seen = HashSet::from(["borber.pilot.genmeta.net".to_string()]);
+        let mut seen = HashSet::from(["test.genmeta.net".to_string()]);
 
         let err = validate_worker_tree(&target, &mut seen)
             .await

@@ -2,8 +2,9 @@ use std::{future::Future, sync::Mutex};
 
 use h3x::{
     quic,
-    remoc::quic::{ConnectionClient, serve_quic_connection},
+    remoc::quic::{ConnectionClient, ConnectionServerShared},
 };
+use remoc::prelude::ServerShared;
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -86,14 +87,14 @@ pub trait Connector: Send + Sync {
 }
 
 pub struct ServedListener<L> {
-    listener: L,
+    listener: tokio::sync::Mutex<L>,
     tasks: TaskSet,
 }
 
 impl<L> ServedListener<L> {
     pub fn new(listener: L) -> Self {
         Self {
-            listener,
+            listener: tokio::sync::Mutex::new(listener),
             tasks: TaskSet::new(),
         }
     }
@@ -109,18 +110,24 @@ where
     async fn accept(&self) -> Result<ConnectionClient, ListenError> {
         let connection = self
             .listener
+            .lock()
+            .await
             .accept()
             .await
             .map_err(|source| ListenError::Remote {
                 message: RemoteErrorMessage::new(source.to_string()),
             })?;
-        let (client, fut) = serve_quic_connection(connection);
-        self.tasks.spawn(fut);
+        let (server, client) = ConnectionServerShared::new(std::sync::Arc::new(connection), 1);
+        self.tasks.spawn(async move {
+            let _ = server.serve(true).await;
+        });
         Ok(client)
     }
 
     async fn shutdown(&self) -> Result<(), ListenError> {
         self.listener
+            .lock()
+            .await
             .shutdown()
             .await
             .map_err(|source| ListenError::Remote {
@@ -162,8 +169,10 @@ where
                 .map_err(|source| ConnectError::Remote {
                     message: RemoteErrorMessage::new(source.to_string()),
                 })?;
-        let (client, fut) = serve_quic_connection(connection);
-        self.tasks.spawn(fut);
+        let (server, client) = ConnectionServerShared::new(std::sync::Arc::new(connection), 1);
+        self.tasks.spawn(async move {
+            let _ = server.serve(true).await;
+        });
         Ok(client)
     }
 }

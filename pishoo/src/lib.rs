@@ -1,5 +1,12 @@
 #![cfg(unix)]
 
+// --- New architecture (Phase 1+) ---
+pub mod ipc;
+pub mod root;
+pub mod service;
+pub mod worker;
+
+// --- Legacy modules (to be replaced incrementally) ---
 pub mod bind;
 pub mod config;
 pub mod launcher;

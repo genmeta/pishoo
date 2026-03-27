@@ -8,13 +8,20 @@ use std::{
 };
 
 use clap::Parser;
-use gateway::error::Whatever;
-use gm_quic::prelude::{QuicListeners, handy::server_parameters};
+use gateway::{
+    control_plane::{Identity, ListenRequest},
+    error::Whatever,
+    parse::{Node, Value},
+    reverse::{self, MissingRulePolicy},
+};
+use gm_quic::{
+    prelude::{QuicListeners, handy::server_parameters},
+    qinterface::device::Devices,
+};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
-use snafu::{Report, ResultExt};
+use snafu::{Report, ResultExt, whatever};
 use tokio::fs;
-use tracing::Instrument;
 
 mod signal;
 
@@ -135,25 +142,13 @@ async fn main() -> Result<(), Whatever> {
         .listen(1024)
         .expect("failed to create QuicListeners");
 
-    // Create QuicClient for outbound connectors
-    let root_store = pishoo::tls::root_cert_store();
-    let quic_client = gm_quic::prelude::QuicClient::builder()
-        .with_root_certificates(root_store)
-        .without_cert()
-        .with_alpns(vec!["h3"])
-        .build();
-    let quic_client = Arc::new(quic_client);
-
-    // Create RootState
-    let state = Arc::new(tokio::sync::Mutex::new(pishoo::root_state::RootState::new(
-        listeners.clone(),
-        quic_client,
-    )));
+    // Create RootState (interior mutability — no external Mutex needed)
+    let state = Arc::new(pishoo::root::state::RootState::new(listeners.clone()));
 
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut local_runtimes = register_local_runtimes(&state, &current_entry_config).await?;
+    let mut local_service_handle = spawn_local_service(&state, &current_entry_config).await?;
 
     spawn_configured_workers(&state, current_worker_targets.clone()).await?;
 
@@ -166,50 +161,9 @@ async fn main() -> Result<(), Whatever> {
     let mut signals = signal::RootSignalHandler::new()?;
 
     // Central accept loop: route connections by server_name
-    let accept_state = state.clone();
-    let accept_listeners = listeners.clone();
-    let accept_handle = tokio::spawn(
-        async move {
-            loop {
-                let (conn, server_name, _pathway, _link) = match accept_listeners.accept().await {
-                    Ok(incoming) => incoming,
-                    Err(error) => {
-                        tracing::error!(error = %Report::from_error(&error), "accept loop error");
-                        break;
-                    }
-                };
+    let accept_handle = pishoo::root::network::spawn_accept_loop(state.clone());
 
-                let sender = {
-                    let st = accept_state.lock().await;
-                    st.get_conn_sender(&server_name)
-                };
-                let Some(sender) = sender else {
-                    tracing::warn!(%server_name, "no listener registered for connection");
-                    continue;
-                };
-
-                if sender.send(conn).await.is_err() {
-                    tracing::warn!(%server_name, "failed to route connection (channel closed)");
-                }
-            }
-        }
-        .in_current_span(),
-    );
-
-    let monitor_state = state.clone();
-    let monitor_handle = tokio::spawn(
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let mut st = monitor_state.lock().await;
-                let exited = st.collect_exited_workers();
-                for pid in exited {
-                    st.cleanup_worker_with_reason(pid, "child_exit");
-                }
-            }
-        }
-        .in_current_span(),
-    );
+    let monitor_handle = pishoo::root::process::spawn_monitor_loop(state.clone());
 
     loop {
         let sig = signals.wait().await;
@@ -224,75 +178,48 @@ async fn main() -> Result<(), Whatever> {
                     signal::RootSignal::SigQuit => Signal::SIGQUIT,
                     _ => unreachable!("matched shutdown signals only"),
                 };
-                // Try to forward the shutdown signal to workers.  Use try_lock
-                // to avoid blocking when the state mutex is held by a slow
-                // operation (e.g. add_server during request_listen).  Workers
-                // running in the same process group already receive the terminal
-                // signal directly; the explicit forward is a best-effort courtesy.
-                match state.try_lock() {
-                    Ok(mut st) => {
-                        st.forward_unix_signal(forwarded);
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "state mutex held; skipping signal forward (workers will be force-killed)"
-                        );
-                    }
-                }
+                state.forward_unix_signal(forwarded);
                 accept_handle.abort();
                 tracing::info!(?sig, "forwarded shutdown signal to workers");
 
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                 loop {
-                    let mut done = false;
-                    {
-                        let mut st = state.lock().await;
-                        let exited = st.collect_exited_workers();
-                        for pid in exited {
-                            st.cleanup_worker_with_reason(pid, "signal_terminate");
-                        }
-                        if st.worker_pids().is_empty() {
-                            done = true;
-                        }
+                    let exited = state.collect_exited_workers();
+                    for pid in exited {
+                        state.cleanup_worker_with_reason(pid, "signal_terminate");
                     }
-                    if done || tokio::time::Instant::now() >= deadline {
+                    if state.worker_pids().is_empty() {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
-                let force_killed = {
-                    let mut st = state.lock().await;
-                    if st.worker_pids().is_empty() {
-                        Vec::new()
-                    } else {
-                        st.force_kill_workers("shutdown_timeout")
-                    }
-                };
-                if !force_killed.is_empty() {
-                    tracing::warn!(
-                        workers = force_killed.len(),
-                        "force-killed lingering workers after shutdown timeout"
-                    );
+                if !state.worker_pids().is_empty() {
+                    let force_killed = state.force_kill_workers("shutdown_timeout");
+                    if !force_killed.is_empty() {
+                        tracing::warn!(
+                            workers = force_killed.len(),
+                            "force-killed lingering workers after shutdown timeout"
+                        );
 
-                    let force_kill_deadline =
-                        tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-                    loop {
-                        let mut done = false;
-                        {
-                            let mut st = state.lock().await;
-                            let exited = st.collect_exited_workers();
+                        let force_kill_deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                        loop {
+                            let exited = state.collect_exited_workers();
                             for pid in exited {
-                                st.cleanup_worker_with_reason(pid, "forced_shutdown");
+                                state.cleanup_worker_with_reason(pid, "forced_shutdown");
                             }
-                            if st.worker_pids().is_empty() {
-                                done = true;
+                            if state.worker_pids().is_empty() {
+                                break;
                             }
+                            if tokio::time::Instant::now() >= force_kill_deadline {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
-                        if done || tokio::time::Instant::now() >= force_kill_deadline {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
                 break;
@@ -325,9 +252,12 @@ async fn main() -> Result<(), Whatever> {
                     continue;
                 }
 
-                if let Err(error) =
-                    replace_local_runtimes(&state, &mut local_runtimes, &next_snapshot.entry_config)
-                        .await
+                if let Err(error) = replace_local_service(
+                    &state,
+                    &mut local_service_handle,
+                    &next_snapshot.entry_config,
+                )
+                .await
                 {
                     tracing::warn!(
                         error = %Report::from_error(&error),
@@ -336,10 +266,7 @@ async fn main() -> Result<(), Whatever> {
                     continue;
                 }
 
-                {
-                    let mut st = state.lock().await;
-                    st.forward_unix_signal(Signal::SIGHUP);
-                }
+                state.forward_unix_signal(Signal::SIGHUP);
                 let publish_names = next_snapshot
                     .publish_configs
                     .keys()
@@ -355,10 +282,7 @@ async fn main() -> Result<(), Whatever> {
             }
             signal::RootSignal::SigUsr1 => {
                 reopen_root_log();
-                {
-                    let mut st = state.lock().await;
-                    st.forward_unix_signal(Signal::SIGUSR1);
-                }
+                state.forward_unix_signal(Signal::SIGUSR1);
                 tracing::info!("root log reopened, forwarded reopen signal to workers");
             }
         }
@@ -369,18 +293,11 @@ async fn main() -> Result<(), Whatever> {
     let _ = accept_handle.await;
     monitor_handle.abort();
     let _ = monitor_handle.await;
-    for runtime in local_runtimes.drain(..) {
-        runtime.stop();
+    if let Some(handle) = local_service_handle.take() {
+        handle.abort();
     }
-    match tokio::time::timeout(Duration::from_secs(1), state.lock()).await {
-        Ok(mut st) => {
-            for pid in st.worker_pids() {
-                st.cleanup_worker_with_reason(pid, "root_shutdown");
-            }
-        }
-        Err(_) => {
-            tracing::warn!("state lock timeout during final cleanup; skipping worker cleanup");
-        }
+    for pid in state.worker_pids() {
+        state.cleanup_worker_with_reason(pid, "root_shutdown");
     }
     _ = fs::remove_file(&pid_file).await;
     Ok(())
@@ -412,37 +329,122 @@ fn reopen_root_log() {
     }
 }
 
-async fn register_local_runtimes(
-    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
-    entry_config: &pishoo::config::EntryConfig,
-) -> Result<Vec<pishoo::local_service::LocalServerRuntime>, Whatever> {
-    let local_policy =
-        pishoo::policy::load_policy_bundle(entry_config.local_access_rules_uri.as_deref())
-            .await
-            .whatever_context("failed to load root-local access rules")?;
+async fn build_local_service_config(
+    local_servers: &[Arc<Node>],
+    local_access_rules_uri: Option<&str>,
+) -> Result<pishoo::service::ServiceConfig, Whatever> {
+    let canonicalized = pishoo::naming::canonicalize_server_nodes(local_servers)
+        .whatever_context("failed to canonicalize local server nodes")?;
 
-    if entry_config.local_servers.is_empty() {
-        return Ok(Vec::new());
+    let device_names = Devices::global()
+        .interfaces()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut server_configs = Vec::new();
+    for server in &canonicalized {
+        let Some(Value::Listen(listens)) = server.get("listen") else {
+            whatever!("local server missing `listen`");
+        };
+        let listens = listens.clone();
+        let Some(Value::ServerName(server_names)) = server.get("server_name") else {
+            whatever!("local server missing `server_name`");
+        };
+        let server_names = server_names.clone();
+        let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
+            whatever!("local server missing `ssl_certificate`");
+        };
+        let cert_path = cert_path.clone();
+        let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
+            whatever!("local server missing `ssl_certificate_key`");
+        };
+        let key_path = key_path.clone();
+
+        let cert_pem = tokio::fs::read(&cert_path).await.whatever_context(format!(
+            "failed to read local certificate file `{}`",
+            cert_path.display()
+        ))?;
+        let key_pem = tokio::fs::read(&key_path).await.whatever_context(format!(
+            "failed to read local private key file `{}`",
+            key_path.display()
+        ))?;
+        let (certs, key) = pishoo::tls::validate_tls_material(&cert_pem, &key_pem)
+            .whatever_context("invalid local tls material")?;
+
+        let bind = pishoo::bind::resolve_bind_uris(&listens, &device_names);
+        if bind.is_empty() {
+            whatever!("local server has no resolved bind uris");
+        }
+
+        for configured_name in server_names {
+            let name = genmeta_home::identity::Name::try_from_str(configured_name.name.clone())
+                .whatever_context(format!("invalid server name `{}`", configured_name.name))?;
+            server_configs.push(pishoo::service::ServerConfig {
+                listen_request: ListenRequest {
+                    identity: Identity {
+                        name,
+                        certs: certs.clone(),
+                        key: key.clone_key(),
+                    },
+                    bind: bind.clone(),
+                },
+                server_node: server.clone(),
+            });
+        }
     }
 
-    pishoo::local_service::register_local_servers(
-        state,
-        &entry_config.local_servers,
-        local_policy.location_rules,
-    )
-    .await
-    .whatever_context("failed to register root-local servers")
+    let router = reverse::build_router_for_servers(&canonicalized);
+
+    let local_policy = pishoo::policy::load_policy_bundle(local_access_rules_uri)
+        .await
+        .whatever_context("failed to load root-local access rules")?;
+    let access_rules = local_policy.location_rules;
+
+    Ok(pishoo::service::ServiceConfig {
+        servers: server_configs,
+        h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
+        router,
+        access_rules,
+        missing_rule_policy: MissingRulePolicy::Deny,
+    })
 }
 
-async fn replace_local_runtimes(
-    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
-    local_runtimes: &mut Vec<pishoo::local_service::LocalServerRuntime>,
+async fn spawn_local_service(
+    state: &Arc<pishoo::root::state::RootState>,
+    entry_config: &pishoo::config::EntryConfig,
+) -> Result<Option<tokio::task::JoinHandle<()>>, Whatever> {
+    if entry_config.local_servers.is_empty() {
+        return Ok(None);
+    }
+
+    let config = build_local_service_config(
+        &entry_config.local_servers,
+        entry_config.local_access_rules_uri.as_deref(),
+    )
+    .await?;
+
+    let plane = pishoo::root::local_control_plane::LocalControlPlane::new(state.clone());
+
+    let handle = tokio::spawn(async move {
+        if let Err(error) = pishoo::service::run_service(&plane, &config).await {
+            tracing::error!(
+                error = %Report::from_error(error.as_ref()),
+                "local service exited with error"
+            );
+        }
+    });
+
+    Ok(Some(handle))
+}
+
+async fn replace_local_service(
+    state: &Arc<pishoo::root::state::RootState>,
+    handle: &mut Option<tokio::task::JoinHandle<()>>,
     entry_config: &pishoo::config::EntryConfig,
 ) -> Result<(), Whatever> {
-    let retired = {
-        let mut st = state.lock().await;
-        st.retire_local_servers()
-    };
+    // Retire existing local servers.
+    let retired = state.retire_local_servers();
     if !retired.is_empty() {
         tracing::info!(
             servers = retired.len(),
@@ -450,11 +452,12 @@ async fn replace_local_runtimes(
         );
     }
 
-    for runtime in local_runtimes.drain(..) {
-        runtime.stop();
+    // Abort the previous local service task.
+    if let Some(old_handle) = handle.take() {
+        old_handle.abort();
     }
 
-    *local_runtimes = register_local_runtimes(state, entry_config).await?;
+    *handle = spawn_local_service(state, entry_config).await?;
     Ok(())
 }
 
@@ -532,7 +535,7 @@ async fn wait_for_reload_servers(listeners: &Arc<QuicListeners>, publish_names: 
 }
 
 async fn spawn_configured_workers(
-    state: &Arc<tokio::sync::Mutex<pishoo::root_state::RootState>>,
+    state: &Arc<pishoo::root::state::RootState>,
     worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
 ) -> Result<(), Whatever> {
     if worker_targets.is_empty() {
@@ -544,7 +547,7 @@ async fn spawn_configured_workers(
     let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
 
     for target in worker_targets {
-        let spawned = pishoo::worker_spawn::spawn_worker(
+        let spawned = pishoo::root::process::spawn_worker(
             &worker_bin,
             target.uid,
             target.gid,
@@ -561,8 +564,7 @@ async fn spawn_configured_workers(
 
         ensure_worker_identity(&target, pid, &spawned.hello)?;
 
-        let mut st = state.lock().await;
-        st.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
+        state.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
     }
 
     Ok(())
@@ -571,7 +573,7 @@ async fn spawn_configured_workers(
 fn ensure_worker_identity(
     target: &pishoo::config::ResolvedWorkerTarget,
     pid: u32,
-    hello: &pishoo::protocol::WorkerHello,
+    hello: &pishoo::ipc::WorkerHello,
 ) -> Result<(), Whatever> {
     if hello.pid != pid
         || hello.uid != target.uid.as_raw()

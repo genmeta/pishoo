@@ -1,5 +1,6 @@
 mod command;
 mod common;
+pub mod control_plane;
 pub mod dns;
 pub mod error;
 pub mod forward;
