@@ -9,21 +9,6 @@ use tokio::task::JoinSet;
 use tracing::Instrument;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RemoteErrorMessage(String);
-
-impl RemoteErrorMessage {
-    fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
-
-impl std::fmt::Display for RemoteErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ListenerHandle {
     client: ListenerClient,
 }
@@ -61,7 +46,7 @@ impl ConnectorHandle {
 #[snafu(module)]
 pub enum ListenError {
     #[snafu(display("remote listener error: {message}"))]
-    Remote { message: RemoteErrorMessage },
+    Remote { message: String },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -70,7 +55,7 @@ pub enum ListenError {
 #[snafu(module)]
 pub enum ConnectError {
     #[snafu(display("remote connector error: {message}"))]
-    Remote { message: RemoteErrorMessage },
+    Remote { message: String },
     #[snafu(transparent)]
     Call { source: remoc::rtc::CallError },
 }
@@ -115,7 +100,7 @@ where
             .accept()
             .await
             .map_err(|source| ListenError::Remote {
-                message: RemoteErrorMessage::new(source.to_string()),
+                message: source.to_string(),
             })?;
         let (server, client) = ConnectionServerShared::new(std::sync::Arc::new(connection), 1);
         self.tasks.spawn(async move {
@@ -131,7 +116,7 @@ where
             .shutdown()
             .await
             .map_err(|source| ListenError::Remote {
-                message: RemoteErrorMessage::new(source.to_string()),
+                message: source.to_string(),
             })
     }
 }
@@ -160,14 +145,14 @@ where
     async fn connect(&self, server: String) -> Result<ConnectionClient, ConnectError> {
         let authority =
             http::uri::Authority::try_from(server).map_err(|source| ConnectError::Remote {
-                message: RemoteErrorMessage::new(source.to_string()),
+                message: source.to_string(),
             })?;
         let connection =
             self.connector
                 .connect(&authority)
                 .await
                 .map_err(|source| ConnectError::Remote {
-                    message: RemoteErrorMessage::new(source.to_string()),
+                    message: source.to_string(),
                 })?;
         let (server, client) = ConnectionServerShared::new(std::sync::Arc::new(connection), 1);
         self.tasks.spawn(async move {

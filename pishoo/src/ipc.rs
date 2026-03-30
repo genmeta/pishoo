@@ -83,12 +83,12 @@ pub trait ControlPlane: Send + Sync {
     /// Root creates the listener, starts serving connections over remoc,
     /// and returns a [`RemoteListener`] that the worker can use directly
     /// with h3x.
-    async fn listen(&self, request: ListenRequest) -> Result<RemoteListener, ListenError>;
+    async fn listener(&self, request: ListenRequest) -> Result<RemoteListener, ListenError>;
 
     /// Request an outbound QUIC connector.
     ///
     /// Root creates the connector, starts serving connect requests over
     /// remoc, and returns a [`RemoteConnector`] that the worker can use
     /// directly with h3x.
-    async fn connect(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError>;
+    async fn connector(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError>;
 }

@@ -6,7 +6,6 @@ members = ["gateway", "pishoo"]
 [workspace.dependencies]
 # --- Core & Error Handling ---
 snafu = "0.8"
-thiserror = "2"
 
 # --- Async Runtime & Utilities ---
 tokio = { version = "1", features = ["full"] }
@@ -58,7 +57,9 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "feat/resolver", features = ["h3x-resolver"] }
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "feat/resolver", features = [
+    "h3x-resolver",
+] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"

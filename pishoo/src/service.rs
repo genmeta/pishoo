@@ -71,7 +71,7 @@ where
         let server_name = request.identity.name.as_full().to_owned();
 
         let mut listener = plane
-            .listen(request)
+            .listener(request)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 

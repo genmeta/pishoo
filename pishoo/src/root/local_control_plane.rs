@@ -6,12 +6,11 @@
 use std::sync::Arc;
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
-use snafu::{ResultExt, Snafu};
-use tokio_util::sync::CancellationToken;
+use snafu::Snafu;
 
 use crate::{
     per_server_listen::PerServerListener,
-    root::state::{ServerEntry, ServiceOwner},
+    root::state::{RegisterError, ServiceOwner},
 };
 
 /// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
@@ -29,19 +28,6 @@ impl LocalControlPlane {
     }
 }
 
-/// Error from a local listen request.
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum LocalListenError {
-    #[snafu(display("server `{server_name}` conflicts with an existing listener"))]
-    Conflict { server_name: String },
-    #[snafu(display("failed to add server `{server_name}` to listeners"))]
-    AddServer {
-        server_name: String,
-        source: gm_quic::prelude::ServerError,
-    },
-}
-
 /// Error from a local connect request.
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -53,52 +39,16 @@ pub enum LocalConnectError {
 impl gateway::control_plane::ControlPlane for LocalControlPlane {
     type Listener = PerServerListener;
     type Connector = Arc<gm_quic::prelude::QuicClient>;
-    type ListenError = LocalListenError;
+    type ListenError = RegisterError;
     type ConnectError = LocalConnectError;
 
-    async fn listen(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
-        let server_name = request.identity.name.as_full().to_owned();
-
-        // Add to QuicListeners (involves network I/O).
+    async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         self.state
-            .listeners
-            .add_server(
-                &server_name,
-                request.identity.certs.as_slice(),
-                &request.identity.key,
-                request.bind,
-                None::<Vec<u8>>,
-            )
+            .register_listener(ServiceOwner::Local, request)
             .await
-            .context(local_listen_error::AddServerSnafu {
-                server_name: &server_name,
-            })?;
-
-        // Register in state.
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let shutdown_token = CancellationToken::new();
-
-        if self
-            .state
-            .register_server(
-                server_name.clone(),
-                ServerEntry {
-                    owner: ServiceOwner::Local,
-                    conn_tx: tx,
-                    shutdown_token: shutdown_token.clone(),
-                },
-            )
-            .await
-            .is_err()
-        {
-            self.state.listeners.remove_server(&server_name);
-            return Err(LocalListenError::Conflict { server_name });
-        }
-
-        Ok(PerServerListener::new(rx, shutdown_token))
     }
 
-    async fn connect(
+    async fn connector(
         &self,
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {

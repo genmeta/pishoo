@@ -270,6 +270,10 @@ async fn main() -> Result<(), Whatever> {
                     continue;
                 }
 
+                // Scrub conflicted names before forwarding reload to workers,
+                // so workers can re-register previously-conflicted names.
+                state.scrub_conflicts().await;
+
                 state.forward_unix_signal(Signal::SIGHUP).await;
                 let publish_names = next_snapshot
                     .publish_configs

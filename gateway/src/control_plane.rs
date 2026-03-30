@@ -67,22 +67,22 @@ pub struct ConnectorRequest {
 /// - **`LocalControlPlane`**: used by root-local services, directly
 ///   accessing the root state in-process.
 pub trait ControlPlane: Send + Sync {
-    /// The listener type returned by [`listen()`](Self::listen).
+    /// The listener type returned by [`listener()`](Self::listener).
     type Listener: quic::Listen;
 
-    /// The connector type returned by [`connect()`](Self::connect).
+    /// The connector type returned by [`connector()`](Self::connector).
     type Connector: quic::Connect;
 
-    /// Error type for [`listen()`](Self::listen) operations.
+    /// Error type for [`listener()`](Self::listener) operations.
     type ListenError: std::error::Error + Send + Sync;
 
-    /// Error type for [`connect()`](Self::connect) operations.
+    /// Error type for [`connector()`](Self::connector) operations.
     type ConnectError: std::error::Error + Send + Sync;
 
     /// Request the control plane to create a QUIC listener for the given
     /// server configuration. The returned listener can be used with
     /// [`h3x`] to serve HTTP/3 connections.
-    fn listen(
+    fn listener(
         &self,
         request: ListenRequest,
     ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
@@ -90,7 +90,7 @@ pub trait ControlPlane: Send + Sync {
     /// Request the control plane to create an outbound QUIC connector.
     /// The returned connector can be used by the forward proxy to establish
     /// outbound QUIC connections.
-    fn connect(
+    fn connector(
         &self,
         request: ConnectorRequest,
     ) -> impl Future<Output = Result<Self::Connector, Self::ConnectError>> + Send + '_;

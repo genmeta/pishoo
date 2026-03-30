@@ -12,31 +12,39 @@ use std::{
     sync::Arc,
 };
 
+use gateway::control_plane::ListenRequest;
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
 };
-use snafu::Report;
+use snafu::{Report, ResultExt, Snafu};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::worker_spawn::WorkerHandle;
+use crate::{per_server_listen::PerServerListener, worker_spawn::WorkerHandle};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Error returned when server registration fails due to a name conflict.
-#[derive(Debug)]
-pub struct RegisterConflict;
-
-impl std::fmt::Display for RegisterConflict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "server name already registered")
-    }
+/// Error returned when `register_listener` fails.
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RegisterError {
+    /// The name is already owned by the same owner — duplicate listen attempt.
+    #[snafu(display("duplicate listen for the same owner"))]
+    DuplicateListen,
+    /// The name is owned by a different owner, or was already poisoned.
+    /// The entry has been poisoned (set to `Conflicted`).
+    #[snafu(display("server name conflicted (poisoned)"))]
+    ConflictedName,
+    /// Failed to bind the server in [`QuicListeners`].
+    #[snafu(display("failed to add server `{server_name}` to listeners"))]
+    AddServerFailed {
+        server_name: String,
+        source: gm_quic::prelude::ServerError,
+    },
 }
-
-impl std::error::Error for RegisterConflict {}
 
 /// Identifies the owner of a server_name registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,13 +56,16 @@ pub enum ServiceOwner {
 }
 
 /// Per-server ownership record stored in the root registry.
-pub struct ServerEntry {
-    /// Owner of this server_name.
-    pub owner: ServiceOwner,
-    /// Sender for routing connections from the central accept loop.
-    pub conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
-    /// Shutdown token for the associated [`PerServerListener`](crate::per_server_listen::PerServerListener).
-    pub shutdown_token: CancellationToken,
+pub enum ServerEntry {
+    /// Name is actively owned and serving.
+    Active {
+        owner: ServiceOwner,
+        conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
+        shutdown_token: CancellationToken,
+    },
+    /// Name is poisoned due to a cross-owner conflict.
+    /// Only cleared by `scrub_conflicts()` during reload.
+    Conflicted,
 }
 
 /// Per-worker-process tracking record.
@@ -89,22 +100,37 @@ struct Inner {
     processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping (one worker per uid).
     users: HashMap<Uid, Pid>,
+    /// Per-server_name async gates for serializing register_listener calls.
+    name_gates: HashMap<String, Arc<Mutex<()>>>,
 }
 
 impl Inner {
     /// Remove a server entry, cancel its listener, and remove from QuicListeners.
+    /// For `Conflicted` entries, only removes the map entry (no listener to cancel).
     fn retire_server(
         &mut self,
         server_name: &str,
         listeners: &gm_quic::prelude::QuicListeners,
     ) -> Option<()> {
-        let record = self.servers.remove(server_name)?;
-        record.shutdown_token.cancel();
-        listeners.remove_server(server_name);
+        let entry = self.servers.remove(server_name)?;
+        match entry {
+            ServerEntry::Active { shutdown_token, .. } => {
+                shutdown_token.cancel();
+                listeners.remove_server(server_name);
+            }
+            ServerEntry::Conflicted => {
+                // Already poisoned — no listener to cancel, QuicListeners
+                // already had the server removed when the conflict was created.
+            }
+        }
         Some(())
     }
 
     /// Full cleanup of a worker process, removing all its resources.
+    ///
+    /// Only retires `Active` entries that are still owned by this worker.
+    /// `Conflicted` entries are left in place — only `scrub_conflicts()`
+    /// during reload can clear them.
     fn cleanup_worker(
         &mut self,
         pid: Pid,
@@ -120,7 +146,12 @@ impl Inner {
 
         let mut servers_cleaned = 0usize;
         for server_name in &record.owned_servers {
-            if self.retire_server(server_name, listeners).is_some() {
+            // Only retire if the entry is Active and still owned by this worker.
+            let dominated = matches!(
+                self.servers.get(server_name.as_str()),
+                Some(ServerEntry::Active { owner: ServiceOwner::Worker(p), .. }) if *p == pid
+            );
+            if dominated && self.retire_server(server_name, listeners).is_some() {
                 servers_cleaned += 1;
             }
         }
@@ -172,6 +203,7 @@ impl RootState {
                 servers: HashMap::new(),
                 processes: HashMap::new(),
                 users: HashMap::new(),
+                name_gates: HashMap::new(),
             }),
         }
     }
@@ -180,50 +212,156 @@ impl RootState {
     // Server registry
     // -----------------------------------------------------------------------
 
-    /// Check whether a server_name is already registered.
-    pub async fn has_server(&self, server_name: &str) -> bool {
-        self.inner.lock().await.servers.contains_key(server_name)
+    /// Get or create the per-name async gate for serializing operations on a
+    /// single `server_name`. The gate is held across the async `add_server`
+    /// call so that concurrent register_listener for the same name are
+    /// properly serialized.
+    async fn name_gate(&self, server_name: &str) -> Arc<Mutex<()>> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .name_gates
+            .entry(server_name.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
-    /// Register a server_name with the given entry.
+    /// Unified entry point for registering a listener.
     ///
-    /// Fails if the server_name is already taken. On success, records the
-    /// server in the owning worker's `owned_servers` set (if applicable).
-    pub async fn register_server(
+    /// Semantics:
+    /// - **Vacant**: bind via `add_server`, commit as `Active`.
+    /// - **Active, same owner**: return `DuplicateListen` (no state change).
+    /// - **Active, different owner**: poison the name to `Conflicted`,
+    ///   cancel the existing listener, remove from QuicListeners, return
+    ///   `ConflictedName`.
+    /// - **Conflicted**: return `ConflictedName` (no state change).
+    ///
+    /// Returns a [`PerServerListener`] on success.
+    pub async fn register_listener(
         &self,
-        server_name: String,
-        entry: ServerEntry,
-    ) -> Result<(), RegisterConflict> {
-        let mut inner = self.inner.lock().await;
-        if inner.servers.contains_key(&server_name) {
-            return Err(RegisterConflict);
-        }
+        owner: ServiceOwner,
+        request: ListenRequest,
+    ) -> Result<PerServerListener, RegisterError> {
+        let server_name = request.identity.name.as_full().to_owned();
 
-        // Track in the worker's owned_servers set.
-        if let ServiceOwner::Worker(pid) = entry.owner {
-            if let Some(process) = inner.processes.get_mut(&pid) {
-                process.owned_servers.insert(server_name.clone());
+        // Acquire the per-name gate so that concurrent calls for the same
+        // server_name are serialized. This is critical because `add_server`
+        // is async and we must not race.
+        let gate = self.name_gate(&server_name).await;
+        let _guard = gate.lock().await;
+
+        // Phase 1: check current state and handle conflicts (under inner lock).
+        {
+            let mut inner = self.inner.lock().await;
+            match inner.servers.get(&server_name) {
+                Some(ServerEntry::Active {
+                    owner: existing_owner,
+                    ..
+                }) => {
+                    if *existing_owner == owner {
+                        return Err(RegisterError::DuplicateListen);
+                    }
+                    // Cross-owner conflict — poison the name immediately.
+                    let old = inner
+                        .servers
+                        .insert(server_name.clone(), ServerEntry::Conflicted);
+                    if let Some(ServerEntry::Active {
+                        shutdown_token,
+                        owner: old_owner,
+                        ..
+                    }) = old
+                    {
+                        shutdown_token.cancel();
+                        self.listeners.remove_server(&server_name);
+                        // Remove from old owner's owned_servers.
+                        if let ServiceOwner::Worker(pid) = old_owner
+                            && let Some(proc) = inner.processes.get_mut(&pid)
+                        {
+                            proc.owned_servers.remove(&server_name);
+                        }
+                    }
+                    tracing::warn!(
+                        %server_name,
+                        new_owner = ?owner,
+                        "Cross-owner conflict: name poisoned"
+                    );
+                    return Err(RegisterError::ConflictedName);
+                }
+                Some(ServerEntry::Conflicted) => {
+                    return Err(RegisterError::ConflictedName);
+                }
+                None => {
+                    // Vacant — fall through to bind + commit.
+                }
             }
         }
 
-        inner.servers.insert(server_name, entry);
-        Ok(())
+        // Phase 2: name is vacant — bind the server (slow, async I/O).
+        self.listeners
+            .add_server(
+                &server_name,
+                request.identity.certs.as_slice(),
+                &request.identity.key,
+                request.bind,
+                None::<Vec<u8>>,
+            )
+            .await
+            .context(register_error::AddServerFailedSnafu {
+                server_name: &server_name,
+            })?;
+
+        // Phase 3: commit registration (reacquire inner lock).
+        let mut inner = self.inner.lock().await;
+
+        // Defensive re-check: someone may have raced despite the per-name
+        // gate (shouldn't happen, but belt-and-suspenders).
+        if inner.servers.contains_key(&server_name) {
+            self.listeners.remove_server(&server_name);
+            tracing::error!(
+                %server_name,
+                "BUG: server appeared in registry after add_server despite name gate"
+            );
+            inner
+                .servers
+                .insert(server_name.clone(), ServerEntry::Conflicted);
+            return Err(RegisterError::ConflictedName);
+        }
+
+        let (tx, rx) = mpsc::channel(128);
+        let shutdown_token = CancellationToken::new();
+
+        // Track in the worker's owned_servers set.
+        if let ServiceOwner::Worker(pid) = owner
+            && let Some(process) = inner.processes.get_mut(&pid)
+        {
+            process.owned_servers.insert(server_name.clone());
+        }
+
+        inner.servers.insert(
+            server_name.clone(),
+            ServerEntry::Active {
+                owner,
+                conn_tx: tx,
+                shutdown_token: shutdown_token.clone(),
+            },
+        );
+
+        tracing::info!(%server_name, ?owner, "server registered");
+        Ok(PerServerListener::new(rx, shutdown_token))
     }
 
     /// Look up the routing sender for a given server_name.
     ///
     /// Used by the central accept loop to route connections to the correct
-    /// per-server adapter.
+    /// per-server adapter. Returns `None` for `Conflicted` entries.
     pub async fn get_conn_sender(
         &self,
         server_name: &str,
     ) -> Option<mpsc::Sender<gm_quic::prelude::Connection>> {
-        self.inner
-            .lock()
-            .await
-            .servers
-            .get(server_name)
-            .map(|r| r.conn_tx.clone())
+        let inner = self.inner.lock().await;
+        match inner.servers.get(server_name) {
+            Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
+            _ => None,
+        }
     }
 
     /// Retire all servers owned by the root-local service.
@@ -234,8 +372,12 @@ impl RootState {
         let local_names: Vec<String> = inner
             .servers
             .iter()
-            .filter_map(|(name, entry)| {
-                (entry.owner == ServiceOwner::Local).then_some(name.clone())
+            .filter_map(|(name, entry)| match entry {
+                ServerEntry::Active {
+                    owner: ServiceOwner::Local,
+                    ..
+                } => Some(name.clone()),
+                _ => None,
             })
             .collect();
 
@@ -244,6 +386,36 @@ impl RootState {
         }
 
         local_names
+    }
+
+    /// Remove all `Conflicted` entries from the registry.
+    ///
+    /// Called during reload (SIGHUP) **before** forwarding the signal to
+    /// workers, so that workers can re-register previously-conflicted names.
+    pub async fn scrub_conflicts(&self) -> Vec<String> {
+        let mut inner = self.inner.lock().await;
+        let conflicted: Vec<String> = inner
+            .servers
+            .iter()
+            .filter_map(|(name, entry)| {
+                matches!(entry, ServerEntry::Conflicted).then_some(name.clone())
+            })
+            .collect();
+
+        for name in &conflicted {
+            inner.servers.remove(name);
+            inner.name_gates.remove(name);
+        }
+
+        if !conflicted.is_empty() {
+            tracing::info!(
+                count = conflicted.len(),
+                names = ?conflicted,
+                "scrubbed conflicted server entries during reload"
+            );
+        }
+
+        conflicted
     }
 
     // -----------------------------------------------------------------------
@@ -258,10 +430,10 @@ impl RootState {
         let mut inner = self.inner.lock().await;
 
         // If the same uid is already held by a different pid, clean up the old one.
-        if let Some(&old_pid) = inner.users.get(&uid) {
-            if old_pid != pid {
-                inner.cleanup_worker(old_pid, "uid_replaced", &self.listeners);
-            }
+        if let Some(&old_pid) = inner.users.get(&uid)
+            && old_pid != pid
+        {
+            inner.cleanup_worker(old_pid, "uid_replaced", &self.listeners);
         }
 
         inner.processes.insert(

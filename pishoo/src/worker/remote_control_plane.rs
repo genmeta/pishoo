@@ -46,14 +46,14 @@ impl gateway::control_plane::ControlPlane for RemoteControlPlane {
     type ListenError = RemoteListenError;
     type ConnectError = RemoteConnectError;
 
-    async fn listen(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
-        Ok(self.client.listen(request).await?)
+    async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
+        Ok(self.client.listener(request).await?)
     }
 
-    async fn connect(
+    async fn connector(
         &self,
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
-        Ok(self.client.connect(request).await?)
+        Ok(self.client.connector(request).await?)
     }
 }

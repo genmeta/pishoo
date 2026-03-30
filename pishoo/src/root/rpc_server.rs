@@ -15,8 +15,7 @@ use tracing::Instrument;
 
 use crate::{
     ipc::{ConnectError, ListenError},
-    per_server_listen::PerServerListener,
-    root::state::{ServerEntry, ServiceOwner},
+    root::state::{RegisterError, ServiceOwner},
 };
 
 /// Per-worker [`ControlPlane`](crate::ipc::ControlPlane) implementation.
@@ -36,69 +35,32 @@ impl WorkerControlPlane {
 }
 
 impl crate::ipc::ControlPlane for WorkerControlPlane {
-    async fn listen(&self, request: ListenRequest) -> Result<RemoteListener, ListenError> {
+    async fn listener(&self, request: ListenRequest) -> Result<RemoteListener, ListenError> {
         let server_name = request.identity.name.as_full().to_owned();
+        let owner = ServiceOwner::Worker(self.caller_pid);
 
-        // Phase 1: validate (fast, no I/O).
-        if self.state.has_server(&server_name).await {
-            tracing::warn!(
-                caller_pid = %self.caller_pid,
-                %server_name,
-                "listen request conflicts with existing listener"
-            );
-            return Err(ListenError::Conflict);
-        }
-
-        // Phase 2: bind the server to QuicListeners (slow, involves network I/O).
-        self.state
-            .listeners
-            .add_server(
-                &server_name,
-                request.identity.certs.as_slice(),
-                &request.identity.key,
-                request.bind,
-                None::<Vec<u8>>,
-            )
+        let adapter = self
+            .state
+            .register_listener(owner, request)
             .await
             .map_err(|error| {
                 tracing::warn!(
+                    caller_pid = %self.caller_pid,
                     %server_name,
                     error = %snafu::Report::from_error(&error),
-                    "failed to add server to listeners"
+                    "Listen request failed"
                 );
-                ListenError::Internal {
-                    message: format!("failed to add server `{server_name}`"),
+                match error {
+                    RegisterError::DuplicateListen | RegisterError::ConflictedName => {
+                        ListenError::Conflict
+                    }
+                    RegisterError::AddServerFailed { .. } => ListenError::Internal {
+                        message: format!("failed to add server `{server_name}`"),
+                    },
                 }
             })?;
 
-        // Phase 3: commit registration and create the adapter.
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let shutdown_token = CancellationToken::new();
-
-        // Re-check: another request may have raced during add_server.
-        if let Err(error) = self
-            .state
-            .register_server(
-                server_name.clone(),
-                ServerEntry {
-                    owner: ServiceOwner::Worker(self.caller_pid),
-                    conn_tx: tx,
-                    shutdown_token: shutdown_token.clone(),
-                },
-            )
-            .await
-        {
-            self.state.listeners.remove_server(&server_name);
-            tracing::warn!(
-                caller_pid = %self.caller_pid,
-                error = %snafu::Report::from_error(&error),
-                "failed to register server in state"
-            );
-            return Err(ListenError::Conflict);
-        }
-
-        // Phase 4: serve the adapter via h3x remoc Listen RTC.
-        let adapter = PerServerListener::new(rx, shutdown_token);
+        // Serve the adapter via h3x remoc Listen RTC.
         let (server, client) = ListenServer::new(adapter, 1);
         tokio::spawn(
             async move {
@@ -115,7 +77,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         Ok(RemoteListener::new(client))
     }
 
-    async fn connect(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError> {
+    async fn connector(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError> {
         // Verify caller is a registered worker.
         if !self.state.has_worker(self.caller_pid).await {
             return Err(ConnectError::Internal {

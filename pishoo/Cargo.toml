@@ -146,7 +146,6 @@ serde = { workspace = true }
 
 # --- Error Handling ---
 snafu = { workspace = true }
-thiserror = { workspace = true }
 
 # --- Async Runtime ---
 futures = { workspace = true }

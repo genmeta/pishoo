@@ -11,7 +11,6 @@ path = "examples/forward.rs"
 [dependencies]
 # --- Core & Error Handling ---
 snafu = { workspace = true }
-thiserror = { workspace = true }
 
 # --- Async Runtime & Utilities ---
 tokio = { workspace = true }
