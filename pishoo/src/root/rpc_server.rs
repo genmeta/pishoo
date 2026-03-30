@@ -36,7 +36,7 @@ impl WorkerControlPlane {
 
 impl crate::ipc::ControlPlane for WorkerControlPlane {
     async fn listener(&self, request: ListenRequest) -> Result<RemoteListener, ListenError> {
-        let server_name = request.identity.name.as_full().to_owned();
+        let server_name = request.identity.name().as_full().to_owned();
         let owner = ServiceOwner::Worker(self.caller_pid);
 
         let adapter = self
@@ -90,7 +90,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let builder = gm_quic::prelude::QuicClient::builder().with_root_certificates(root_store);
         let quic_client = match request.identity {
             Some(identity) => builder
-                .with_cert(identity.certs, identity.key)
+                .with_cert(identity.certs().to_vec(), identity.key().clone_key())
                 .with_alpns(vec!["h3"])
                 .build(),
             None => builder.without_cert().with_alpns(vec!["h3"]).build(),

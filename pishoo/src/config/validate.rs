@@ -8,7 +8,7 @@ use snafu::{ResultExt, whatever};
 
 use super::{EntryConfig, ResolvedWorkerTarget, RuntimeShape, resolve_entry_worker_targets};
 use crate::{
-    config::discover_worker_servers, local_service, naming::canonicalize_server_nodes, policy,
+    config::discover_worker_servers, naming::canonicalize_server_nodes, policy, root::local_service,
 };
 
 #[derive(Debug, Clone)]

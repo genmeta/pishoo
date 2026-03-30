@@ -13,7 +13,7 @@ use genmeta_home::GenmetaHome;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     service::run_service,
-    worker::{config::build_service_config, remote_control_plane::RemoteControlPlane},
+    worker::{config::build_service_config, remote_plane::RemoteControlPlane},
 };
 use snafu::{OptionExt, Report, ResultExt};
 use tracing::Instrument;

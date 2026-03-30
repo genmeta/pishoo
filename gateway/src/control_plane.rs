@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use genmeta_home::identity::Name;
+pub use genmeta_home::identity::ssl::Identity;
 use h3x::quic;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
@@ -21,17 +22,6 @@ impl std::fmt::Display for StringError {
 }
 
 impl std::error::Error for StringError {}
-
-/// TLS identity for a genmeta service (name + certificates + private key).
-#[derive(Debug)]
-pub struct Identity {
-    /// The genmeta identity name.
-    pub name: Name<'static>,
-    /// TLS certificate chain in DER format.
-    pub certs: Vec<CertificateDer<'static>>,
-    /// TLS private key in DER format.
-    pub key: PrivateKeyDer<'static>,
-}
 
 /// A request to create a QUIC listener for a specific server.
 #[derive(Debug)]
@@ -97,8 +87,8 @@ pub trait ControlPlane: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Custom serde for Identity / ListenRequest / ConnectorRequest
-// (CertificateDer / PrivateKeyDer are not natively serializable)
+// Custom serde for ListenRequest / ConnectorRequest
+// (Identity / CertificateDer / PrivateKeyDer are not natively serializable)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
@@ -108,25 +98,19 @@ struct IdentityHelper {
     key: Vec<u8>,
 }
 
-impl Serialize for Identity {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        IdentityHelper {
-            name: self.name.clone(),
-            certs: self.certs.iter().map(|c| c.to_vec()).collect(),
-            key: self.key.secret_der().to_vec(),
+impl IdentityHelper {
+    fn from_identity(id: &Identity) -> Self {
+        Self {
+            name: id.name().clone(),
+            certs: id.certs().iter().map(|c| c.to_vec()).collect(),
+            key: id.key().secret_der().to_vec(),
         }
-        .serialize(serializer)
     }
-}
 
-impl<'de> Deserialize<'de> for Identity {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let helper = IdentityHelper::deserialize(deserializer)?;
-        Ok(Self {
-            name: helper.name,
-            certs: helper.certs.into_iter().map(CertificateDer::from).collect(),
-            key: PrivateKeyDer::try_from(helper.key).map_err(serde::de::Error::custom)?,
-        })
+    fn into_identity<E: serde::de::Error>(self) -> Result<Identity, E> {
+        let certs = self.certs.into_iter().map(CertificateDer::from).collect();
+        let key = PrivateKeyDer::try_from(self.key).map_err(E::custom)?;
+        Ok(Identity::new(self.name, certs, key))
     }
 }
 
@@ -139,11 +123,7 @@ struct ListenRequestHelper {
 impl Serialize for ListenRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         ListenRequestHelper {
-            identity: IdentityHelper {
-                name: self.identity.name.clone(),
-                certs: self.identity.certs.iter().map(|c| c.to_vec()).collect(),
-                key: self.identity.key.secret_der().to_vec(),
-            },
+            identity: IdentityHelper::from_identity(&self.identity),
             bind: self.bind.clone(),
         }
         .serialize(serializer)
@@ -154,17 +134,7 @@ impl<'de> Deserialize<'de> for ListenRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let helper = ListenRequestHelper::deserialize(deserializer)?;
         Ok(Self {
-            identity: Identity {
-                name: helper.identity.name,
-                certs: helper
-                    .identity
-                    .certs
-                    .into_iter()
-                    .map(CertificateDer::from)
-                    .collect(),
-                key: PrivateKeyDer::try_from(helper.identity.key)
-                    .map_err(serde::de::Error::custom)?,
-            },
+            identity: helper.identity.into_identity()?,
             bind: helper.bind,
         })
     }
@@ -178,11 +148,7 @@ struct ConnectorRequestHelper {
 impl Serialize for ConnectorRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         ConnectorRequestHelper {
-            identity: self.identity.as_ref().map(|id| IdentityHelper {
-                name: id.name.clone(),
-                certs: id.certs.iter().map(|c| c.to_vec()).collect(),
-                key: id.key.secret_der().to_vec(),
-            }),
+            identity: self.identity.as_ref().map(IdentityHelper::from_identity),
         }
         .serialize(serializer)
     }
@@ -194,13 +160,7 @@ impl<'de> Deserialize<'de> for ConnectorRequest {
         Ok(Self {
             identity: helper
                 .identity
-                .map(|h| {
-                    Ok::<_, D::Error>(Identity {
-                        name: h.name,
-                        certs: h.certs.into_iter().map(CertificateDer::from).collect(),
-                        key: PrivateKeyDer::try_from(h.key).map_err(serde::de::Error::custom)?,
-                    })
-                })
+                .map(IdentityHelper::into_identity)
                 .transpose()?,
         })
     }

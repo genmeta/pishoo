@@ -1658,7 +1658,6 @@ dependencies = [
 [[package]]
 name = "genmeta-home"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/dhttp-home.git?branch=main#323bbe9167f904b272d5a70c2af212772edb032c"
 dependencies = [
  "dirs",
  "futures",

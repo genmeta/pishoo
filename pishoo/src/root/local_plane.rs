@@ -9,7 +9,7 @@ use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
 use snafu::Snafu;
 
 use crate::{
-    per_server_listen::PerServerListener,
+    listen::PerServerListener,
     root::state::{RegisterError, ServiceOwner},
 };
 
@@ -56,7 +56,7 @@ impl gateway::control_plane::ControlPlane for LocalControlPlane {
         let builder = gm_quic::prelude::QuicClient::builder().with_root_certificates(root_store);
         let quic_client = match request.identity {
             Some(identity) => builder
-                .with_cert(identity.certs, identity.key)
+                .with_cert(identity.certs().to_vec(), identity.key().clone_key())
                 .with_alpns(vec!["h3"])
                 .build(),
             None => builder.without_cert().with_alpns(vec!["h3"]).build(),

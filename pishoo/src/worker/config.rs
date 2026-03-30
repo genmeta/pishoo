@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use futures::StreamExt;
 use gateway::{
-    control_plane::{Identity, ListenRequest},
+    control_plane::ListenRequest,
     error::Whatever,
     parse::{Node, Value},
     reverse::MissingRulePolicy,
@@ -92,7 +92,7 @@ pub async fn build_service_config(
         };
 
         // Load TLS material.
-        let ssl = match identity_home.ssl().await {
+        let ssl = match identity_home.identity().await {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(
@@ -150,11 +150,7 @@ pub async fn build_service_config(
         }
 
         let listen_request = ListenRequest {
-            identity: Identity {
-                name: ssl.name().clone(),
-                certs: ssl.certs().to_vec(),
-                key: ssl.key().clone_key(),
-            },
+            identity: ssl,
             bind,
         };
 

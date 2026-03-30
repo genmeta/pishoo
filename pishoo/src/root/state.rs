@@ -21,7 +21,7 @@ use snafu::{Report, ResultExt, Snafu};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::{per_server_listen::PerServerListener, worker_spawn::WorkerHandle};
+use crate::{listen::PerServerListener, root::worker_handle::WorkerHandle};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -241,7 +241,7 @@ impl RootState {
         owner: ServiceOwner,
         request: ListenRequest,
     ) -> Result<PerServerListener, RegisterError> {
-        let server_name = request.identity.name.as_full().to_owned();
+        let server_name = request.identity.name().as_full().to_owned();
 
         // Acquire the per-name gate so that concurrent calls for the same
         // server_name are serialized. This is critical because `add_server`
@@ -299,8 +299,8 @@ impl RootState {
         self.listeners
             .add_server(
                 &server_name,
-                request.identity.certs.as_slice(),
-                &request.identity.key,
+                request.identity.certs(),
+                request.identity.key(),
                 request.bind,
                 None::<Vec<u8>>,
             )
@@ -533,10 +533,7 @@ impl RootState {
     pub async fn forward_unix_signal(&self, signal: Signal) {
         let inner = self.inner.lock().await;
         for (pid, record) in &inner.processes {
-            let Some(raw_pid) = record.worker_handle.pid() else {
-                continue;
-            };
-            let child_pid = Pid::from_raw(raw_pid as i32);
+            let child_pid = record.worker_handle.pid();
             if let Err(error) = nix::sys::signal::kill(child_pid, signal) {
                 tracing::warn!(
                     pid = %pid,

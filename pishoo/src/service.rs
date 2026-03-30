@@ -61,14 +61,14 @@ where
 
     for server_config in &config.servers {
         let request = ListenRequest {
-            identity: gateway::control_plane::Identity {
-                name: server_config.listen_request.identity.name.clone(),
-                certs: server_config.listen_request.identity.certs.clone(),
-                key: server_config.listen_request.identity.key.clone_key(),
-            },
+            identity: gateway::control_plane::Identity::new(
+                server_config.listen_request.identity.name().clone(),
+                server_config.listen_request.identity.certs().to_vec(),
+                server_config.listen_request.identity.key().clone_key(),
+            ),
             bind: server_config.listen_request.bind.clone(),
         };
-        let server_name = request.identity.name.as_full().to_owned();
+        let server_name = request.identity.name().as_full().to_owned();
 
         let mut listener = plane
             .listener(request)

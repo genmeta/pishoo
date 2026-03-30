@@ -6,15 +6,14 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use nix::unistd::{Gid, Pid, Uid};
+use nix::unistd::{Gid, Uid};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, ResultExt, Snafu};
 use tracing::Instrument;
 
 use crate::{
     ipc::{WorkerBootstrap, WorkerHello},
-    root::{rpc_server::WorkerControlPlane, state::RootState},
-    worker_spawn::WorkerHandle,
+    root::{rpc_server::WorkerControlPlane, state::RootState, worker_handle::WorkerHandle},
 };
 
 /// Result of successfully spawning a worker.
@@ -28,7 +27,7 @@ pub struct SpawnedWorker {
 pub enum SpawnWorkerError {
     #[snafu(display("failed to launch worker process"))]
     LaunchWorker {
-        source: crate::launcher::LaunchWorkerError,
+        source: crate::root::launcher::LaunchWorkerError,
     },
     #[snafu(display("failed to establish remoc transport"))]
     ConnectTransport {
@@ -58,9 +57,9 @@ pub async fn spawn_worker(
     home: PathBuf,
     state: Arc<RootState>,
 ) -> Result<SpawnedWorker, SpawnWorkerError> {
-    let launched = crate::launcher::launch_worker(worker_bin, uid, gid, &username, &home)
+    let launched = crate::root::launcher::launch_worker(worker_bin, uid, gid, &username, &home)
         .context(spawn_worker_error::LaunchWorkerSnafu)?;
-    let pid = launched.handle.pid().expect("child has pid");
+    let pid = launched.handle.pid();
     let transport = launched.transport;
 
     // Establish remoc connection over stdin/stdout pipes.
@@ -74,7 +73,7 @@ pub async fn spawn_worker(
     tokio::spawn(conn.in_current_span());
 
     // Create per-worker ControlPlane RPC server.
-    let rpc_impl = WorkerControlPlane::new(Pid::from_raw(pid as i32), state.clone());
+    let rpc_impl = WorkerControlPlane::new(pid, state.clone());
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);

@@ -390,11 +390,7 @@ async fn build_local_service_config(
                 .whatever_context(format!("invalid server name `{}`", configured_name.name))?;
             server_configs.push(pishoo::service::ServerConfig {
                 listen_request: ListenRequest {
-                    identity: Identity {
-                        name,
-                        certs: certs.clone(),
-                        key: key.clone_key(),
-                    },
+                    identity: Identity::new(name, certs.clone(), key.clone_key()),
                     bind: bind.clone(),
                 },
                 server_node: server.clone(),
@@ -432,7 +428,7 @@ async fn spawn_local_service(
     )
     .await?;
 
-    let plane = pishoo::root::local_control_plane::LocalControlPlane::new(state.clone());
+    let plane = pishoo::root::local_plane::LocalControlPlane::new(state.clone());
 
     let handle = tokio::spawn(async move {
         if let Err(error) = pishoo::service::run_service(&plane, &config).await {
@@ -568,13 +564,11 @@ async fn spawn_configured_workers(
             "failed to spawn worker for user `{}`",
             target.username
         ))?;
-        let pid = spawned.handle.pid().expect("worker must have pid");
+        let pid = spawned.handle.pid();
 
         ensure_worker_identity(&target, pid, &spawned.hello)?;
 
-        state
-            .register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle)
-            .await;
+        state.register_worker(pid, target.uid, spawned.handle).await;
     }
 
     Ok(())
@@ -582,10 +576,11 @@ async fn spawn_configured_workers(
 
 fn ensure_worker_identity(
     target: &pishoo::config::ResolvedWorkerTarget,
-    pid: u32,
+    pid: Pid,
     hello: &pishoo::ipc::WorkerHello,
 ) -> Result<(), Whatever> {
-    if hello.pid != pid
+    let raw_pid = pid.as_raw() as u32;
+    if hello.pid != raw_pid
         || hello.uid != target.uid.as_raw()
         || hello.euid != target.uid.as_raw()
         || hello.gid != target.gid.as_raw()
@@ -606,7 +601,7 @@ fn ensure_worker_identity(
     }
 
     tracing::info!(
-        pid,
+        %pid,
         uid = target.uid.as_raw(),
         gid = target.gid.as_raw(),
         user = %target.username,
