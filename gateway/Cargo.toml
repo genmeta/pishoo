@@ -59,11 +59,11 @@ derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
 x509-parser = { workspace = true }
 
-genmeta-ssh3-server = { git = "ssh://git@github.com/genmeta/genmeta-ssh3.git", optional = true }
+genmeta-ssh = { workspace = true, optional = true }
+remoc = { workspace = true }
 genmeta-home = { workspace = true }
 async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }
 chrono = "0.4.42"
-# genmeta-ssh3-server = { path = "../../genmeta-ssh3/genmeta-ssh3-server", optional = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
@@ -78,7 +78,6 @@ clap = { workspace = true }
 
 
 [features]
-sshd = ["dep:genmeta-ssh3-server"]
-sshd-pam = ["genmeta-ssh3-server/pam"]
+sshd = ["dep:genmeta-ssh", "genmeta-ssh/pam", "remoc/rfn"]
 stun_traversal = []
 qlog = []

@@ -124,6 +124,7 @@ async fn serve_static_file(
                 error = %Report::from_error(&index_error),
                 "static file was not found"
             );
+
             super::send_status_and_close(sender, StatusCode::NOT_FOUND).await?;
             req_info.log_access(404, 0).await;
             return Ok(());

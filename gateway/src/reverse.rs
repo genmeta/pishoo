@@ -11,7 +11,7 @@ use gm_quic::{
     qinterface::device::{Devices, Interface, InterfaceEvent, InterfacesMonitor},
 };
 use h3x::{
-    connection::Connection as H3Connection,
+    connection::{Connection as H3Connection, ConnectionBuilder},
     dhttp::settings::Settings,
     message::stream::{ReadStream, WriteStream},
 };
@@ -460,8 +460,12 @@ async fn handle_single_connection(
     info!("accepted connection");
 
     // 建立H3连接
+    let builder = ConnectionBuilder::new(h3_settings);
+    #[cfg(feature = "sshd")]
+    let builder = builder.protocol(genmeta_ssh::protocol::Ssh3ProtocolFactory);
     let h3_conn = Arc::new(
-        H3Connection::new(h3_settings, conn)
+        builder
+            .build(conn)
             .await
             .whatever_context::<_, Whatever>("failed to establish h3 connection")?,
     );
@@ -636,10 +640,8 @@ async fn handle_request(
         }
         #[cfg(feature = "sshd")]
         location_value if location_value.contains_key("ssh_login") => {
-            let cn = client_name.to_string();
-            let rule_set = firewall_matched_location;
-            reverse::sshd::serve(location, final_pattern, rule_set, req, cn, recver, sender)
-                .await?;
+            let protocols = conn.protocols().clone();
+            reverse::sshd::serve(location, &final_pattern, req, protocols, recver, sender).await?;
         }
         _ => {
             send_status_and_close(sender, StatusCode::NOT_FOUND).await?;

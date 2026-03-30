@@ -538,6 +538,31 @@ async fn wait_for_reload_servers(listeners: &Arc<QuicListeners>, publish_names: 
     }
 }
 
+/// Resolve the path of the `pishoo-worker` binary.
+///
+/// - If `PISHOO_WORKER_BIN` env var was set **at compile time**, use it.
+/// - Otherwise in debug builds, fall back to `<current_exe_dir>/pishoo-worker`.
+/// - In release builds without the env var, this is a compile error.
+fn worker_binary_path() -> std::path::PathBuf {
+    #[allow(clippy::option_env_unwrap)]
+    {
+        #[cfg(debug_assertions)]
+        {
+            match option_env!("PISHOO_WORKER_BIN") {
+                Some(path) => std::path::PathBuf::from(path),
+                None => std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("pishoo-worker")))
+                    .unwrap_or_else(|| std::path::PathBuf::from("pishoo-worker")),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            std::path::PathBuf::from(env!("PISHOO_WORKER_BIN"))
+        }
+    }
+}
+
 async fn spawn_configured_workers(
     state: &Arc<pishoo::root::state::RootState>,
     worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
@@ -546,9 +571,7 @@ async fn spawn_configured_workers(
         return Ok(());
     }
 
-    let worker_bin =
-        std::env::current_exe().whatever_context("failed to determine current executable path")?;
-    let worker_bin = worker_bin.parent().unwrap().join("pishoo-worker");
+    let worker_bin = worker_binary_path();
 
     for target in worker_targets {
         let spawned = pishoo::root::process::spawn_worker(

@@ -129,6 +129,11 @@ path = "src/main.rs"
 name = "pishoo-worker"
 path = "src/bin/pishoo_worker.rs"
 
+[[bin]]
+name = "pishoo-ssh-session"
+path = "src/bin/pishoo_ssh_session.rs"
+required-features = ["sshd"]
+
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
@@ -161,6 +166,9 @@ clap = { workspace = true }
 # --- Firewall ---
 firewall-db = { workspace = true }
 
+# --- SSH3 ---
+genmeta-ssh = { workspace = true, optional = true }
+
 # --- Database & ORM ---
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
@@ -177,7 +185,7 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 
 [features]
 default = ["sqlx-sqlite"]
-sshd = ["gateway/sshd"]
+sshd = ["gateway/sshd", "dep:genmeta-ssh", "genmeta-ssh/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]

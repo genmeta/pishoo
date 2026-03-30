@@ -51,10 +51,14 @@ h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "feat/v0.5" }
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
     "remoc_macro",
+    "rfn",
     "rtc",
     "serde",
     "default-codec-json",
 ] }
+
+# --- SSH3 ---
+genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", branch = "main" }
 
 # --- DNS (mDNS/HTTP resolver) ---
 gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "feat/resolver", features = [
