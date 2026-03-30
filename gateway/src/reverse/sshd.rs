@@ -1,6 +1,13 @@
-use std::{self, sync::Arc};
+use std::{
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
+use bytes::Bytes;
 use firewall_base::pattern::{LocationPattern, LocationPatternKind};
+use futures::{Stream, StreamExt};
 use h3x::message::stream::{
     BoxMessageStreamReader, BoxMessageStreamWriter, ReadStream, WriteStream,
 };
@@ -12,6 +19,25 @@ use crate::{
     parse::Node,
     reverse::log::RequestInfo,
 };
+
+struct IoMessageStreamReader(Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>);
+
+impl From<ReadStream> for IoMessageStreamReader {
+    fn from(value: ReadStream) -> Self {
+        let reader: BoxMessageStreamReader<'static> = value.into_box_reader();
+        Self(Box::pin(
+            reader.map(|result| result.map_err(io::Error::from)),
+        ))
+    }
+}
+
+impl Stream for IoMessageStreamReader {
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().0.as_mut().poll_next(cx)
+    }
+}
 
 /// ``` conf
 /// location /ssh {
@@ -59,7 +85,7 @@ pub async fn serve(
         _,
         _,
         BoxMessageStreamWriter<'static>,
-        BoxMessageStreamReader<'static>,
+        IoMessageStreamReader,
     >(
         Arc::new(config),
         request,

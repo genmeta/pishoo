@@ -4,9 +4,7 @@ use std::{
 };
 
 use firewall_base::{
-    action::RequestAction,
-    expr::atomics::HttpRequest,
-    matcher::{DomainRulesMatcher, LocationRulesMatcher},
+    action::RequestAction, expr::atomics::HttpRequest, matcher::LocationRulesMatcher,
 };
 use gm_quic::{
     prelude::{QuicListeners, handy::server_parameters},
@@ -31,7 +29,6 @@ use crate::{
     stun::{STUN_DOMAIN, StunNodeConfig, StunServerManager},
 };
 
-mod auth;
 mod file;
 pub(crate) mod gzip;
 pub(crate) mod log;
@@ -142,10 +139,7 @@ pub async fn handle_single_connection_for_worker(
 ///
 /// # Returns
 /// * `Result<()>` - An empty result if successful, or an error if failed
-pub async fn serve(
-    access_rules: (Arc<DomainRulesMatcher>, Arc<LocationRulesMatcher>),
-    servers: Vec<Arc<Node>>,
-) -> Result<()> {
+pub async fn serve(access_rules: Arc<LocationRulesMatcher>, servers: Vec<Arc<Node>>) -> Result<()> {
     // 从第一个声明了 STUN 的 server 中提取运行时 STUN 配置
     let stun_config = servers.iter().find_map(StunNodeConfig::from_server_node);
 
@@ -159,7 +153,7 @@ pub async fn serve(
     let stun_publish_config = publish_configs.remove(STUN_DOMAIN);
 
     let (quic_listeners, server_listens) =
-        create_quic_listeners(access_rules.0, current_interfaces, &servers).await?;
+        create_quic_listeners(current_interfaces, &servers).await?;
 
     info!("dns resolvers initialized");
 
@@ -186,7 +180,7 @@ pub async fn serve(
     );
 
     // 主接受循环
-    handle_connections(quic_listeners, access_rules.1, router).await
+    handle_connections(quic_listeners, access_rules, router).await
 }
 
 /// 根据服务器配置创建路由表
@@ -210,7 +204,6 @@ fn build_router(servers: &[Arc<Node>]) -> RouterMap {
 
 /// 创建QUIC服务器实例
 async fn create_quic_listeners(
-    domain_access_rules: Arc<DomainRulesMatcher>,
     current_interfaces: &HashMap<String, Interface>,
     servers: &[Arc<Node>],
 ) -> Result<(Arc<QuicListeners>, HashMap<String, Vec<Listens>>)> {
@@ -276,7 +269,6 @@ async fn create_quic_listeners(
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_alpns([b"h3".as_slice()])
-        .with_client_auther(auth::ClientAuther::from(domain_access_rules))
         .listen(1024)
         .whatever_context::<_, Whatever>("failed to listen quic")?;
 
@@ -590,9 +582,9 @@ async fn handle_request(
     let http_request = HttpRequest::new(client_name.as_deref(), &req);
 
     #[allow(unused_variables)]
-    let (firewall_matched_domain, firewall_matched_location, firewall_action) =
-        match access_rules.match_rule(&server_name, req.uri().path(), &http_request) {
-            Ok((domain, location, action)) => (Some(domain), Some(location), action),
+    let (firewall_matched_location, firewall_action) =
+        match access_rules.match_rule(req.uri().path(), &http_request) {
+            Ok((location, action)) => (Some(location), action),
             Err(error) => {
                 let action = action_on_missing_rule(missing_rule_policy);
                 warn!(
@@ -602,7 +594,7 @@ async fn handle_request(
                     error = %Report::from_error(&error),
                     "firewall rule matching failed"
                 );
-                (None, None, action)
+                (None, action)
             }
         };
 
