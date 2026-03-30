@@ -47,7 +47,7 @@ firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "f005d7
 gm-quic = { git = "ssh://git@github.com/genmeta/dquic.git", rev = "c26faf3f4e9e48c981dc789cceba67a132c28ac6" }
 qevent = { git = "ssh://git@github.com/genmeta/dquic.git", rev = "c26faf3f4e9e48c981dc789cceba67a132c28ac6" }
 
-h3x = { git = "ssh://git@github.com/genmeta/h3x.git", rev = "4f78d576d8be0fabd80cbff525848874f1dc8e7d" }
+h3x = { git = "ssh://git@github.com/genmeta/h3x.git", rev = "94175a3d24f353714b4e15b13c2075e79b26d6d2" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -58,7 +58,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", rev = "ac1b0e3b1e95403f27e55387d3bbaaa94308fa53", features = ["h3x-resolver"] }
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", rev = "eba56f016d575e258ccb75597425786a4983c4da", features = ["h3x-resolver"] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -82,7 +82,7 @@ dashmap = "6"
 pin-project-lite = "0.2"
 form_urlencoded = "1"
 x509-parser = "0.18"
-genmeta-home = { git = "ssh://git@github.com/genmeta/gmutils.git", rev = "808d7c93aa0cc001afd8aa27ac8d07e690a3b990" }
+genmeta-home = { git = "ssh://git@github.com/genmeta/gmutils.git", rev = "d1966f6f5187bb74e79dfaa2e10d323051132ea8" }
 
 # --- System Interaction ---
 libc = "0.2"
