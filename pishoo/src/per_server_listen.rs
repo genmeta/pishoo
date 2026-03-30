@@ -2,7 +2,7 @@
 //! `QuicListeners::accept()` loop to individual per-server consumers.
 //!
 //! The root process runs a single `QuicListeners` that multiplexes all servers.
-//! Each server gets a `PerServerListenAdapter` backed by an mpsc channel — the
+//! Each server gets a `PerServerListener` backed by an mpsc channel — the
 //! central accept loop routes connections by `server_name` to the appropriate
 //! channel sender, and this adapter reads from the receiver.
 
@@ -11,19 +11,19 @@ use std::fmt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Error type for [`PerServerListenAdapter`].
+/// Error type for [`PerServerListener`].
 ///
 /// Implements `std::error::Error + std::any::Any` as required by
 /// [`h3x::quic::Listen::Error`].
 #[derive(Debug)]
-pub enum PerServerListenError {
+pub enum PerServerListenerError {
     /// The mpsc channel was closed (server removed or root shutting down).
     ChannelClosed,
-    /// The adapter was explicitly shut down via [`PerServerListenAdapter::shutdown`].
+    /// The adapter was explicitly shut down via [`PerServerListener::shutdown`].
     Shutdown,
 }
 
-impl fmt::Display for PerServerListenError {
+impl fmt::Display for PerServerListenerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ChannelClosed => write!(f, "per-server listen channel closed"),
@@ -32,19 +32,19 @@ impl fmt::Display for PerServerListenError {
     }
 }
 
-impl std::error::Error for PerServerListenError {}
+impl std::error::Error for PerServerListenerError {}
 
 /// Per-server listener adapter.
 ///
 /// Root creates one per `server_name`, routes connections from the central
 /// `QuicListeners::accept()` loop to this adapter's mpsc channel. Wraps the
 /// receiver side so it implements [`h3x::quic::Listen`].
-pub struct PerServerListenAdapter {
+pub struct PerServerListener {
     rx: mpsc::Receiver<gm_quic::prelude::Connection>,
     shutdown_token: CancellationToken,
 }
 
-impl PerServerListenAdapter {
+impl PerServerListener {
     /// Create a new per-server listen adapter.
     ///
     /// * `rx` — receives connections routed by server_name from the central accept loop
@@ -57,17 +57,17 @@ impl PerServerListenAdapter {
     }
 }
 
-impl h3x::quic::Listen for PerServerListenAdapter {
+impl h3x::quic::Listen for PerServerListener {
     type Connection = gm_quic::prelude::Connection;
-    type Error = PerServerListenError;
+    type Error = PerServerListenerError;
 
     async fn accept(&mut self) -> Result<Self::Connection, Self::Error> {
         tokio::select! {
             conn = self.rx.recv() => {
-                conn.ok_or(PerServerListenError::ChannelClosed)
+                conn.ok_or(PerServerListenerError::ChannelClosed)
             }
             _ = self.shutdown_token.cancelled() => {
-                Err(PerServerListenError::Shutdown)
+                Err(PerServerListenerError::Shutdown)
             }
         }
     }

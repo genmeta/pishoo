@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gateway::control_plane::{ConnectRequest, ListenRequest};
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::remoc::quic::{ConnectServer, ListenServer, RemoteConnector, RemoteListener};
 use nix::unistd::Pid;
 use remoc::prelude::Server;
@@ -15,7 +15,7 @@ use tracing::Instrument;
 
 use crate::{
     ipc::{ConnectError, ListenError},
-    per_server_listen::PerServerListenAdapter,
+    per_server_listen::PerServerListener,
     root::state::{ServerEntry, ServiceOwner},
 };
 
@@ -40,7 +40,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let server_name = request.identity.name.as_full().to_owned();
 
         // Phase 1: validate (fast, no I/O).
-        if self.state.has_server(&server_name) {
+        if self.state.has_server(&server_name).await {
             tracing::warn!(
                 caller_pid = %self.caller_pid,
                 %server_name,
@@ -76,14 +76,18 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let shutdown_token = CancellationToken::new();
 
         // Re-check: another request may have raced during add_server.
-        if let Err(error) = self.state.register_server(
-            server_name.clone(),
-            ServerEntry {
-                owner: ServiceOwner::Worker(self.caller_pid),
-                conn_tx: tx,
-                shutdown_token: shutdown_token.clone(),
-            },
-        ) {
+        if let Err(error) = self
+            .state
+            .register_server(
+                server_name.clone(),
+                ServerEntry {
+                    owner: ServiceOwner::Worker(self.caller_pid),
+                    conn_tx: tx,
+                    shutdown_token: shutdown_token.clone(),
+                },
+            )
+            .await
+        {
             self.state.listeners.remove_server(&server_name);
             tracing::warn!(
                 caller_pid = %self.caller_pid,
@@ -94,7 +98,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         }
 
         // Phase 4: serve the adapter via h3x remoc Listen RTC.
-        let adapter = PerServerListenAdapter::new(rx, shutdown_token);
+        let adapter = PerServerListener::new(rx, shutdown_token);
         let (server, client) = ListenServer::new(adapter, 1);
         tokio::spawn(
             async move {
@@ -111,9 +115,9 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         Ok(RemoteListener::new(client))
     }
 
-    async fn connect(&self, request: ConnectRequest) -> Result<RemoteConnector, ConnectError> {
+    async fn connect(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError> {
         // Verify caller is a registered worker.
-        if !self.state.has_worker(self.caller_pid) {
+        if !self.state.has_worker(self.caller_pid).await {
             return Err(ConnectError::Internal {
                 message: format!("unknown caller pid {}", self.caller_pid),
             });
@@ -147,7 +151,9 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             .in_current_span(),
         );
 
-        self.state.add_connector_token(self.caller_pid, cancel);
+        self.state
+            .add_connector_token(self.caller_pid, cancel)
+            .await;
 
         tracing::info!(
             caller_pid = %self.caller_pid,

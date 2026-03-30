@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
-use gateway::control_plane::{ConnectRequest, ListenRequest, StringError};
+use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
 use snafu::{ResultExt, Snafu};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    per_server_listen::PerServerListenAdapter,
+    per_server_listen::PerServerListener,
     root::state::{ServerEntry, ServiceOwner},
 };
 
@@ -18,7 +18,7 @@ use crate::{
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
-/// [`PerServerListenAdapter`] that implements [`h3x::quic::Listen`].
+/// [`PerServerListener`] that implements [`h3x::quic::Listen`].
 pub struct LocalControlPlane {
     state: Arc<super::state::RootState>,
 }
@@ -51,7 +51,7 @@ pub enum LocalConnectError {
 }
 
 impl gateway::control_plane::ControlPlane for LocalControlPlane {
-    type Listener = PerServerListenAdapter;
+    type Listener = PerServerListener;
     type Connector = Arc<gm_quic::prelude::QuicClient>;
     type ListenError = LocalListenError;
     type ConnectError = LocalConnectError;
@@ -88,18 +88,19 @@ impl gateway::control_plane::ControlPlane for LocalControlPlane {
                     shutdown_token: shutdown_token.clone(),
                 },
             )
+            .await
             .is_err()
         {
             self.state.listeners.remove_server(&server_name);
             return Err(LocalListenError::Conflict { server_name });
         }
 
-        Ok(PerServerListenAdapter::new(rx, shutdown_token))
+        Ok(PerServerListener::new(rx, shutdown_token))
     }
 
     async fn connect(
         &self,
-        request: ConnectRequest,
+        request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
         let root_store = crate::tls::root_cert_store();
         let builder = gm_quic::prelude::QuicClient::builder().with_root_certificates(root_store);

@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
-    per_server_listen::PerServerListenAdapter,
+    per_server_listen::PerServerListener,
     protocol::{
         ListenRequestError, OpenConnector, OpenConnectorError, ReleaseListen, ReleaseListenError,
     },
@@ -43,9 +43,9 @@ pub struct ServerRecord {
     /// Owner kind of this server_name.
     pub owner: ServiceOwner,
     /// Sender for routing connections from the central accept loop to this
-    /// server's [`PerServerListenAdapter`].
+    /// server's [`PerServerListener`].
     pub conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
-    /// Shutdown token for the [`PerServerListenAdapter`].
+    /// Shutdown token for the [`PerServerListener`].
     pub shutdown_token: CancellationToken,
 }
 
@@ -284,7 +284,7 @@ impl RootState {
 
         let (tx, rx) = mpsc::channel(128);
         let shutdown_token = CancellationToken::new();
-        let adapter = PerServerListenAdapter::new(rx, shutdown_token.clone());
+        let adapter = PerServerListener::new(rx, shutdown_token.clone());
 
         let (server, client) = ListenerServerShared::new(Arc::new(ServedListener::new(adapter)), 1);
         let serve_fut = async move {

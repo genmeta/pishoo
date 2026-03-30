@@ -48,7 +48,7 @@ pub struct ListenRequest {
 /// with their own mTLS certificate when connecting to other servers,
 /// independent of the root process's identity.
 #[derive(Debug)]
-pub struct ConnectRequest {
+pub struct ConnectorRequest {
     /// Optional TLS identity for outbound mTLS authentication.
     /// When `None`, the connector will not present a client certificate.
     pub identity: Option<Identity>,
@@ -92,12 +92,12 @@ pub trait ControlPlane: Send + Sync {
     /// outbound QUIC connections.
     fn connect(
         &self,
-        request: ConnectRequest,
+        request: ConnectorRequest,
     ) -> impl Future<Output = Result<Self::Connector, Self::ConnectError>> + Send + '_;
 }
 
 // ---------------------------------------------------------------------------
-// Custom serde for Identity / ListenRequest / ConnectRequest
+// Custom serde for Identity / ListenRequest / ConnectorRequest
 // (CertificateDer / PrivateKeyDer are not natively serializable)
 // ---------------------------------------------------------------------------
 
@@ -171,13 +171,13 @@ impl<'de> Deserialize<'de> for ListenRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ConnectRequestHelper {
+struct ConnectorRequestHelper {
     identity: Option<IdentityHelper>,
 }
 
-impl Serialize for ConnectRequest {
+impl Serialize for ConnectorRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        ConnectRequestHelper {
+        ConnectorRequestHelper {
             identity: self.identity.as_ref().map(|id| IdentityHelper {
                 name: id.name.clone(),
                 certs: id.certs.iter().map(|c| c.to_vec()).collect(),
@@ -188,9 +188,9 @@ impl Serialize for ConnectRequest {
     }
 }
 
-impl<'de> Deserialize<'de> for ConnectRequest {
+impl<'de> Deserialize<'de> for ConnectorRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let helper = ConnectRequestHelper::deserialize(deserializer)?;
+        let helper = ConnectorRequestHelper::deserialize(deserializer)?;
         Ok(Self {
             identity: helper
                 .identity

@@ -178,17 +178,19 @@ async fn main() -> Result<(), Whatever> {
                     signal::RootSignal::SigQuit => Signal::SIGQUIT,
                     _ => unreachable!("matched shutdown signals only"),
                 };
-                state.forward_unix_signal(forwarded);
+                state.forward_unix_signal(forwarded).await;
                 accept_handle.abort();
                 tracing::info!(?sig, "forwarded shutdown signal to workers");
 
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                 loop {
-                    let exited = state.collect_exited_workers();
+                    let exited = state.collect_exited_workers().await;
                     for pid in exited {
-                        state.cleanup_worker_with_reason(pid, "signal_terminate");
+                        state
+                            .cleanup_worker_with_reason(pid, "signal_terminate")
+                            .await;
                     }
-                    if state.worker_pids().is_empty() {
+                    if state.worker_pids().await.is_empty() {
                         break;
                     }
                     if tokio::time::Instant::now() >= deadline {
@@ -197,8 +199,8 @@ async fn main() -> Result<(), Whatever> {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
-                if !state.worker_pids().is_empty() {
-                    let force_killed = state.force_kill_workers("shutdown_timeout");
+                if !state.worker_pids().await.is_empty() {
+                    let force_killed = state.force_kill_workers("shutdown_timeout").await;
                     if !force_killed.is_empty() {
                         tracing::warn!(
                             workers = force_killed.len(),
@@ -208,11 +210,13 @@ async fn main() -> Result<(), Whatever> {
                         let force_kill_deadline =
                             tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                         loop {
-                            let exited = state.collect_exited_workers();
+                            let exited = state.collect_exited_workers().await;
                             for pid in exited {
-                                state.cleanup_worker_with_reason(pid, "forced_shutdown");
+                                state
+                                    .cleanup_worker_with_reason(pid, "forced_shutdown")
+                                    .await;
                             }
-                            if state.worker_pids().is_empty() {
+                            if state.worker_pids().await.is_empty() {
                                 break;
                             }
                             if tokio::time::Instant::now() >= force_kill_deadline {
@@ -266,7 +270,7 @@ async fn main() -> Result<(), Whatever> {
                     continue;
                 }
 
-                state.forward_unix_signal(Signal::SIGHUP);
+                state.forward_unix_signal(Signal::SIGHUP).await;
                 let publish_names = next_snapshot
                     .publish_configs
                     .keys()
@@ -282,7 +286,7 @@ async fn main() -> Result<(), Whatever> {
             }
             signal::RootSignal::SigUsr1 => {
                 reopen_root_log();
-                state.forward_unix_signal(Signal::SIGUSR1);
+                state.forward_unix_signal(Signal::SIGUSR1).await;
                 tracing::info!("root log reopened, forwarded reopen signal to workers");
             }
         }
@@ -296,8 +300,8 @@ async fn main() -> Result<(), Whatever> {
     if let Some(handle) = local_service_handle.take() {
         handle.abort();
     }
-    for pid in state.worker_pids() {
-        state.cleanup_worker_with_reason(pid, "root_shutdown");
+    for pid in state.worker_pids().await {
+        state.cleanup_worker_with_reason(pid, "root_shutdown").await;
     }
     _ = fs::remove_file(&pid_file).await;
     Ok(())
@@ -444,7 +448,7 @@ async fn replace_local_service(
     entry_config: &pishoo::config::EntryConfig,
 ) -> Result<(), Whatever> {
     // Retire existing local servers.
-    let retired = state.retire_local_servers();
+    let retired = state.retire_local_servers().await;
     if !retired.is_empty() {
         tracing::info!(
             servers = retired.len(),
@@ -564,7 +568,9 @@ async fn spawn_configured_workers(
 
         ensure_worker_identity(&target, pid, &spawned.hello)?;
 
-        state.register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle);
+        state
+            .register_worker(Pid::from_raw(pid as i32), target.uid, spawned.handle)
+            .await;
     }
 
     Ok(())

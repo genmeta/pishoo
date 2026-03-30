@@ -5,7 +5,7 @@
 //! [`RemoteListener`] / [`RemoteConnector`] come directly from the RPC
 //! call — no additional wrapping needed.
 
-use gateway::control_plane::{ConnectRequest, ListenRequest};
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::remoc::quic::{RemoteConnector, RemoteListener};
 use snafu::Snafu;
 
@@ -52,7 +52,7 @@ impl gateway::control_plane::ControlPlane for RemoteControlPlane {
 
     async fn connect(
         &self,
-        request: ConnectRequest,
+        request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
         Ok(self.client.connect(request).await?)
     }

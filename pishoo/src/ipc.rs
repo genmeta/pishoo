@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use gateway::control_plane::{ConnectRequest, ListenRequest};
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::remoc::quic::{RemoteConnector, RemoteListener};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
@@ -90,5 +90,5 @@ pub trait ControlPlane: Send + Sync {
     /// Root creates the connector, starts serving connect requests over
     /// remoc, and returns a [`RemoteConnector`] that the worker can use
     /// directly with h3x.
-    async fn connect(&self, request: ConnectRequest) -> Result<RemoteConnector, ConnectError>;
+    async fn connect(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError>;
 }

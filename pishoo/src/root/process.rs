@@ -117,9 +117,9 @@ pub async fn spawn_worker(
 pub async fn run_monitor_loop(state: Arc<RootState>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let exited = state.collect_exited_workers();
+        let exited = state.collect_exited_workers().await;
         for pid in exited {
-            state.cleanup_worker_with_reason(pid, "child_exit");
+            state.cleanup_worker_with_reason(pid, "child_exit").await;
         }
     }
 }
