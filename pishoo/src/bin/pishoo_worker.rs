@@ -2,17 +2,14 @@
 //!
 //! Spawned by the root pishoo process with stdin/stdout piped for remoc IPC.
 //! Receives [`WorkerBootstrap`] from the root (containing a
-//! [`ControlPlaneClient`]), scans `~/.genmeta` identities, builds a
-//! [`ServiceConfig`], and calls [`run_service()`] — the same generic
+//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.genmeta` identities, builds a
+//! [`pishoo::service::ServiceConfig`], and calls [`run_service()`] — the same generic
 //! code path used by root-local services.
 //!
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
-use std::sync::Arc;
-
 use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
-use h3x::dhttp::settings::Settings;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     service::run_service,
@@ -74,10 +71,9 @@ async fn main() -> Result<(), Whatever> {
 
     // Scan identities and build service config.
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
-    let worker_policy_path = bootstrap.home.join(".genmeta/pishoo.conf");
-    let h3_settings = Arc::new(Settings::default());
+    let worker_access_rules_config_path = bootstrap.home.join(".genmeta/pishoo.conf");
 
-    let config = build_service_config(&genmeta_home, &worker_policy_path, h3_settings)
+    let config = build_service_config(&genmeta_home, &worker_access_rules_config_path)
         .await
         .whatever_context("failed to build service config")?;
 

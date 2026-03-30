@@ -14,7 +14,6 @@ use gateway::{
     reverse::MissingRulePolicy,
 };
 use genmeta_home::GenmetaHome;
-use h3x::dhttp::settings::Settings;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -51,8 +50,7 @@ impl snafu::FromString for BuildConfigError {
 /// definitions.
 pub async fn build_service_config(
     genmeta_home: &GenmetaHome,
-    worker_policy_path: &Path,
-    h3_settings: Arc<Settings>,
+    worker_access_rules_config_path: &Path,
 ) -> Result<ServiceConfig, BuildConfigError> {
     let device_names = gm_quic::qinterface::device::Devices::global()
         .interfaces()
@@ -175,9 +173,12 @@ pub async fn build_service_config(
     }
 
     // Load worker access rules policy.
-    let access_rules = load_worker_access_rules(worker_policy_path)
+    let access_rules = load_worker_access_rules(worker_access_rules_config_path)
         .await
         .context(build_config_error::PolicySnafu)?;
+
+    // TODO: parse HTTP/3 settings from config once schema is finalized.
+    let h3_settings = Arc::new(h3x::dhttp::settings::Settings::default());
 
     Ok(ServiceConfig {
         servers,

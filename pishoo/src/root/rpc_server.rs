@@ -1,6 +1,6 @@
 //! ControlPlane implementation for the root process (remoc RPC server side).
 //!
-//! Each worker process gets its own [`ControlPlaneImpl`] instance, bound to
+//! Each worker process gets its own [`WorkerControlPlaneRpc`] instance, bound to
 //! the worker's PID. When a worker calls `listen()` or `connect()`, this
 //! module creates the actual QUIC resources and returns h3x remoc handles.
 
@@ -24,18 +24,18 @@ use crate::{
 /// Created for each worker process with a fixed `caller_pid`. Delegates
 /// resource creation to the shared QUIC infrastructure and tracks ownership
 /// in the root state.
-pub struct ControlPlaneImpl {
+pub struct WorkerControlPlane {
     caller_pid: Pid,
     state: Arc<super::state::RootState>,
 }
 
-impl ControlPlaneImpl {
+impl WorkerControlPlane {
     pub fn new(caller_pid: Pid, state: Arc<super::state::RootState>) -> Self {
         Self { caller_pid, state }
     }
 }
 
-impl crate::ipc::ControlPlane for ControlPlaneImpl {
+impl crate::ipc::ControlPlane for WorkerControlPlane {
     async fn listen(&self, request: ListenRequest) -> Result<RemoteListener, ListenError> {
         let server_name = request.identity.name.as_full().to_owned();
 

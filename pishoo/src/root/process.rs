@@ -13,7 +13,7 @@ use tracing::Instrument;
 
 use crate::{
     ipc::{WorkerBootstrap, WorkerHello},
-    root::{rpc_server::ControlPlaneImpl, state::RootState},
+    root::{rpc_server::WorkerControlPlane, state::RootState},
     worker_spawn::WorkerHandle,
 };
 
@@ -74,7 +74,7 @@ pub async fn spawn_worker(
     tokio::spawn(conn.in_current_span());
 
     // Create per-worker ControlPlane RPC server.
-    let rpc_impl = ControlPlaneImpl::new(Pid::from_raw(pid as i32), state.clone());
+    let rpc_impl = WorkerControlPlane::new(Pid::from_raw(pid as i32), state.clone());
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);
