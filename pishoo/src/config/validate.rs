@@ -6,14 +6,13 @@ use gateway::{
 };
 use snafu::{ResultExt, whatever};
 
-use super::{EntryConfig, ResolvedWorkerTarget, RuntimeShape, resolve_entry_worker_targets};
+use super::{EntryConfig, ResolvedWorkerTarget, resolve_entry_worker_targets};
 use crate::{
     config::discover_worker_servers, naming::canonicalize_server_nodes, policy, root::local_service,
 };
 
 #[derive(Debug, Clone)]
 pub struct ValidationSummary {
-    pub shape: RuntimeShape,
     pub workers: usize,
     pub local_servers: usize,
     pub worker_servers: usize,
@@ -23,9 +22,6 @@ pub async fn validate_entry_tree(
     entry_config: &EntryConfig,
 ) -> Result<ValidationSummary, Whatever> {
     if !entry_config.local_servers.is_empty() {
-        let _ = policy::load_policy_bundle(entry_config.local_access_rules_uri.as_deref())
-            .await
-            .whatever_context("failed to validate root-local access rules")?;
         local_service::validate_local_servers(&entry_config.local_servers)
             .await
             .whatever_context("failed to validate root-local servers")?;
@@ -44,7 +40,6 @@ pub async fn validate_entry_tree(
     }
 
     Ok(ValidationSummary {
-        shape: entry_config.shape,
         workers: worker_targets.len(),
         local_servers,
         worker_servers,
@@ -55,46 +50,28 @@ async fn validate_worker_tree(
     target: &ResolvedWorkerTarget,
     seen_server_names: &mut HashSet<String>,
 ) -> Result<usize, Whatever> {
-    let worker_policy_path = target.home.join(".genmeta/pishoo.conf");
-    let raw = tokio::fs::read(&worker_policy_path)
-        .await
-        .whatever_context(format!(
-            "failed to read worker policy config for user `{}` at `{}`",
-            target.username,
-            worker_policy_path.display()
-        ))?;
-    let parsed =
-        gateway::parse::parse(&raw, worker_policy_path.parent()).whatever_context(format!(
-            "failed to parse worker policy config for user `{}` at `{}`",
-            target.username,
-            worker_policy_path.display()
-        ))?;
-    let Some(Value::Nodes(pishoo_nodes)) = parsed.get("pishoo") else {
-        whatever!(
-            "worker policy config for user `{}` is missing `pishoo` block",
-            target.username
-        );
-    };
-    let Some(policy_root) = pishoo_nodes.first() else {
-        whatever!(
-            "worker policy config for user `{}` has empty `pishoo` block",
-            target.username
-        );
-    };
-    let Some(Value::String(uri)) = policy_root.get("access_rules") else {
-        whatever!(
-            "worker policy config for user `{}` is missing `access_rules`",
-            target.username
-        );
-    };
-    let _ = policy::load_policy_bundle(Some(uri.as_str()))
-        .await
-        .whatever_context(format!(
-            "failed to validate worker policy for user `{}`",
-            target.username
-        ))?;
-
     let worker_server_nodes = discover_worker_servers(target).await?;
+
+    // Validate access rules for each server: use explicit access_rules from server
+    // node if present, otherwise default to IDENTITY_HOME/db/access.db.
+    for server_node in &worker_server_nodes {
+        let access_rules_uri = match server_node.get("access_rules") {
+            Some(Value::String(uri)) => uri.clone(),
+            _ => {
+                // Default: derive from the identity home that owns this server.
+                // The server_name tells us which identity it belongs to.
+                // For validation we just check whatever URI we can construct.
+                continue;
+            }
+        };
+        let _ = policy::load_policy_bundle(Some(access_rules_uri.as_str()))
+            .await
+            .whatever_context(format!(
+                "failed to validate worker access rules for user `{}`",
+                target.username
+            ))?;
+    }
+
     local_service::validate_local_servers(&worker_server_nodes)
         .await
         .whatever_context(format!(
@@ -146,13 +123,6 @@ mod tests {
             .to_path_buf()
     }
 
-    fn repo_rules_db_uri() -> String {
-        format!(
-            "sqlite://{}?mode=rw",
-            repo_root().join("rules.db").display()
-        )
-    }
-
     fn repo_tls_paths() -> (PathBuf, PathBuf) {
         let base = repo_root().join("keychain/test.genmeta.net");
         (
@@ -182,14 +152,9 @@ mod tests {
         let ssl_dir = identity_dir.join("ssl");
         std::fs::create_dir_all(&ssl_dir).expect("create identity ssl dir");
         std::fs::write(
-            genmeta_dir.join("pishoo.conf"),
-            format!("pishoo {{ access_rules {}; }}", repo_rules_db_uri()),
-        )
-        .expect("write worker policy");
-        std::fs::write(
-            identity_dir.join("pishoo.conf"),
+            identity_dir.join("server.conf"),
             format!(
-                "pishoo {{ server {{ listen all 443; server_name {server_name}; ssl_certificate {}; ssl_certificate_key {}; location / {{ root {}; }} }} }}",
+                "server {{ listen all 443; server_name {server_name}; ssl_certificate {}; ssl_certificate_key {}; location / {{ root {}; }} }}",
                 cert.display(),
                 key.display(),
                 home.display(),

@@ -76,7 +76,7 @@ pub async fn discover_worker_servers(
             Ok(home) => home,
             Err(_) => continue,
         };
-        let conf_path = identity_home.path().join("pishoo.conf");
+        let conf_path = identity_home.path().join("server.conf");
         if !conf_path.is_file() {
             continue;
         }
@@ -100,23 +100,12 @@ pub async fn load_identity_servers(conf_path: &Path) -> Result<Vec<Arc<Node>>, W
         "failed to read identity config `{}`",
         conf_path.display()
     ))?;
-    let parsed = gateway::parse::parse(&raw, conf_path.parent()).whatever_context(format!(
-        "failed to parse identity config `{}`",
-        conf_path.display()
-    ))?;
-    let Some(Value::Nodes(pishoo_nodes)) = parsed.get("pishoo") else {
-        whatever!(
-            "identity config `{}` is missing `pishoo` block",
+    let parsed =
+        gateway::parse::parse_server_config(&raw, conf_path.parent()).whatever_context(format!(
+            "failed to parse identity server config `{}`",
             conf_path.display()
-        );
-    };
-    let Some(pishoo_node) = pishoo_nodes.first() else {
-        whatever!(
-            "identity config `{}` has empty `pishoo` block",
-            conf_path.display()
-        );
-    };
-    let Some(Value::Nodes(server_nodes)) = pishoo_node.get("server") else {
+        ))?;
+    let Some(Value::Nodes(server_nodes)) = parsed.get("server") else {
         return Ok(Vec::new());
     };
 

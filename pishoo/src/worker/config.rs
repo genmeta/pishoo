@@ -1,10 +1,10 @@
 //! Worker identity configuration: scan identities and build [`ServiceConfig`].
 //!
 //! Workers scan the user's `~/.genmeta/` directory for identities, load
-//! per-identity pishoo config files, and produce a [`ServiceConfig`] to
+//! per-identity server.conf files, and produce a [`ServiceConfig`] to
 //! feed into [`run_service()`](crate::service::run_service).
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use futures::StreamExt;
 use gateway::{
@@ -46,11 +46,9 @@ impl snafu::FromString for BuildConfigError {
 }
 
 /// Build a [`ServiceConfig`] by scanning all identities under the given
-/// [`GenmetaHome`], loading their TLS material and pishoo.conf server
-/// definitions.
+/// [`GenmetaHome`], loading their TLS material and server.conf definitions.
 pub async fn build_service_config(
     genmeta_home: &GenmetaHome,
-    worker_access_rules_config_path: &Path,
 ) -> Result<ServiceConfig, BuildConfigError> {
     let device_names = gm_quic::qinterface::device::Devices::global()
         .interfaces()
@@ -77,6 +75,8 @@ pub async fn build_service_config(
     let mut servers = Vec::new();
     let mut all_server_nodes = Vec::new();
     let mut fallback_entries: HashMap<String, Arc<Node>> = HashMap::new();
+    // Collect the first explicit access_rules URI found, or use default.
+    let mut access_rules_uri: Option<String> = None;
 
     for name in &identity_names {
         let identity_home = match genmeta_home.load_identity(name.borrow()).await {
@@ -110,8 +110,8 @@ pub async fn build_service_config(
             .entry(server_name)
             .or_insert_with(|| Arc::new(Node::new(Value::ValueMap(HashMap::new()))));
 
-        // Load per-identity pishoo.conf if present.
-        let conf_path = identity_home.path().join("pishoo.conf");
+        // Load per-identity server.conf if present.
+        let conf_path = identity_home.path().join("server.conf");
         let identity_server_nodes = if conf_path.is_file() {
             match load_identity_servers(&conf_path).await {
                 Ok(nodes) => nodes,
@@ -127,6 +127,24 @@ pub async fn build_service_config(
         } else {
             Vec::new()
         };
+
+        // Pick up access_rules from server nodes if not yet found.
+        if access_rules_uri.is_none() {
+            for server_node in &identity_server_nodes {
+                if let Some(Value::String(uri)) = server_node.get("access_rules") {
+                    access_rules_uri = Some(uri.clone());
+                    break;
+                }
+            }
+        }
+
+        // Default access_rules: IDENTITY_HOME/db/access.db
+        if access_rules_uri.is_none() {
+            let default_db = identity_home.path().join("db/access.db");
+            if default_db.is_file() {
+                access_rules_uri = Some(format!("sqlite://{}?mode=ro", default_db.display()));
+            }
+        }
 
         // Extract bind addresses from server nodes.
         let mut binds: HashMap<String, Vec<String>> = HashMap::new();
@@ -169,7 +187,7 @@ pub async fn build_service_config(
     }
 
     // Load worker access rules policy.
-    let access_rules = load_worker_access_rules(worker_access_rules_config_path)
+    let access_rules_bundle = policy::load_policy_bundle(access_rules_uri.as_deref())
         .await
         .context(build_config_error::PolicySnafu)?;
 
@@ -180,50 +198,7 @@ pub async fn build_service_config(
         servers,
         h3_settings,
         router: Arc::new(router),
-        access_rules,
+        access_rules: access_rules_bundle.location_rules,
         missing_rule_policy: MissingRulePolicy::Deny,
     })
-}
-
-/// Load access rules from the worker's `pishoo.conf`.
-async fn load_worker_access_rules(
-    conf_path: &Path,
-) -> Result<Arc<firewall_db::base::matcher::LocationRulesMatcher>, policy::PolicyError> {
-    if !conf_path.exists() {
-        return Ok(Arc::new(
-            firewall_db::base::matcher::LocationRulesMatcher::default(),
-        ));
-    }
-
-    let raw = match tokio::fs::read(conf_path).await {
-        Ok(raw) => raw,
-        Err(_) => {
-            return Ok(Arc::new(
-                firewall_db::base::matcher::LocationRulesMatcher::default(),
-            ));
-        }
-    };
-
-    let parsed = match gateway::parse::parse(&raw, conf_path.parent()) {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            return Ok(Arc::new(
-                firewall_db::base::matcher::LocationRulesMatcher::default(),
-            ));
-        }
-    };
-
-    let uri = parsed
-        .get("pishoo")
-        .and_then(|v| match v {
-            Value::Nodes(nodes) => nodes.first(),
-            _ => None,
-        })
-        .and_then(|node| match node.get("access_rules") {
-            Some(Value::String(uri)) => Some(uri.clone()),
-            _ => None,
-        });
-
-    let bundle = policy::load_policy_bundle(uri.as_deref()).await?;
-    Ok(bundle.location_rules)
 }

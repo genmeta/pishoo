@@ -96,7 +96,6 @@ async fn main() -> Result<(), Whatever> {
             .whatever_context("configuration validation failed")?;
         tracing::info!(
             path = %config_file.display(),
-            shape = ?summary.shape,
             workers = summary.workers,
             local_servers = summary.local_servers,
             worker_servers = summary.worker_servers,
@@ -339,7 +338,6 @@ fn reopen_root_log() {
 
 async fn build_local_service_config(
     local_servers: &[Arc<Node>],
-    local_access_rules_uri: Option<&str>,
 ) -> Result<pishoo::service::ServiceConfig, Whatever> {
     let canonicalized = pishoo::naming::canonicalize_server_nodes(local_servers)
         .whatever_context("failed to canonicalize local server nodes")?;
@@ -349,6 +347,9 @@ async fn build_local_service_config(
         .keys()
         .cloned()
         .collect::<Vec<_>>();
+
+    // Collect the first explicit access_rules URI found across local servers.
+    let mut access_rules_uri: Option<String> = None;
 
     let mut server_configs = Vec::new();
     for server in &canonicalized {
@@ -368,6 +369,12 @@ async fn build_local_service_config(
             whatever!("local server missing `ssl_certificate_key`");
         };
         let key_path = key_path.clone();
+
+        if access_rules_uri.is_none()
+            && let Some(Value::String(uri)) = server.get("access_rules")
+        {
+            access_rules_uri = Some(uri.clone());
+        }
 
         let cert_pem = tokio::fs::read(&cert_path).await.whatever_context(format!(
             "failed to read local certificate file `{}`",
@@ -400,7 +407,7 @@ async fn build_local_service_config(
 
     let router = reverse::build_router_for_servers(&canonicalized);
 
-    let local_policy = pishoo::policy::load_policy_bundle(local_access_rules_uri)
+    let local_policy = pishoo::policy::load_policy_bundle(access_rules_uri.as_deref())
         .await
         .whatever_context("failed to load root-local access rules")?;
     let access_rules = local_policy.location_rules;
@@ -422,11 +429,7 @@ async fn spawn_local_service(
         return Ok(None);
     }
 
-    let config = build_local_service_config(
-        &entry_config.local_servers,
-        entry_config.local_access_rules_uri.as_deref(),
-    )
-    .await?;
+    let config = build_local_service_config(&entry_config.local_servers).await?;
 
     let plane = pishoo::root::local_plane::LocalControlPlane::new(state.clone());
 

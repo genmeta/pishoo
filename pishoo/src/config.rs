@@ -21,23 +21,15 @@ pub struct WorkerTarget {
 #[derive(Debug, Clone)]
 pub struct RootConfig {
     pub pid_file: String,
+    pub groups: Vec<String>,
     pub workers: Vec<WorkerTarget>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeShape {
-    Direct,
-    Supervisor,
-    Mixed,
 }
 
 #[derive(Debug, Clone)]
 pub struct EntryConfig {
     pub pid_file: String,
     pub workers: Vec<WorkerTarget>,
-    pub local_access_rules_uri: Option<String>,
     pub local_servers: Vec<Arc<Node>>,
-    pub shape: RuntimeShape,
 }
 
 #[derive(Debug, Snafu)]
@@ -51,22 +43,20 @@ pub enum ConfigError {
     #[snafu(display("invalid pid directive: expected string"))]
     InvalidPid,
 
-    #[snafu(display("invalid access_rules directive: expected string"))]
-    InvalidAccessRules,
-
-    #[snafu(display("configuration must define either `workers` or at least one `server`"))]
-    MissingServersOrWorkers,
+    #[snafu(display("invalid groups directive: expected string list"))]
+    InvalidGroups,
 
     #[snafu(display("worker username cannot be empty"))]
     EmptyWorkerName,
 
-    #[snafu(display("failde to reolsver users in user group `{WORKER_GROUP}`"))]
-    GroupResolve { source: nix::Error },
+    #[snafu(display("failed to resolve users in group `{group_name}`"))]
+    GroupResolve {
+        group_name: String,
+        source: nix::Error,
+    },
 
-    #[snafu(display(
-        "failde to reolsver users in user group `{WORKER_GROUP}` as user group not found"
-    ))]
-    GroupNotFound,
+    #[snafu(display("group `{group_name}` not found"))]
+    GroupNotFound { group_name: String },
 
     #[snafu(display("failed to resolve user `{username}` via system passwd database"))]
     UserNotFound { username: String },
@@ -81,7 +71,7 @@ pub enum ConfigError {
     MissingHome { username: String },
 }
 
-const WORKER_GROUP: &str = "pishoo";
+pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
 
 #[derive(Debug, Clone)]
 pub struct ResolvedWorkerTarget {
@@ -105,8 +95,6 @@ impl fmt::Display for EntryServerOwner {
         }
     }
 }
-
-pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
 
 fn first_pishoo_node(root: &Arc<Node>) -> Result<Arc<Node>, ConfigError> {
     if let Some(Value::Nodes(nodes)) = root.get("pishoo") {
@@ -147,12 +135,61 @@ fn parse_configured_workers(pishoo: &Arc<Node>) -> Result<Vec<WorkerTarget>, Con
     }
 }
 
-fn parse_access_rules_uri(pishoo: &Arc<Node>) -> Result<Option<String>, ConfigError> {
-    match pishoo.get("access_rules") {
-        Some(Value::String(uri)) => Ok(Some(uri.clone())),
-        Some(_) => InvalidAccessRulesSnafu.fail(),
-        None => Ok(None),
+fn parse_groups(pishoo: &Arc<Node>) -> Result<Vec<String>, ConfigError> {
+    match pishoo.get("groups") {
+        Some(Value::StringVec(names)) => Ok(names.clone()),
+        Some(_) => InvalidGroupsSnafu.fail(),
+        None => Ok(Vec::new()),
     }
+}
+
+fn resolve_group_members(group_names: &[String]) -> Result<Vec<WorkerTarget>, ConfigError> {
+    let mut targets = Vec::new();
+    for group_name in group_names {
+        let group = nix::unistd::Group::from_name(group_name)
+            .context(GroupResolveSnafu {
+                group_name: group_name.clone(),
+            })?
+            .context(GroupNotFoundSnafu {
+                group_name: group_name.clone(),
+            })?;
+        targets.extend(parse_worker_names(&group.mem)?);
+    }
+    Ok(targets)
+}
+
+const DEFAULT_GROUPS: &[&str] = &["pishoo"];
+
+fn resolve_all_workers(
+    pishoo: &Arc<Node>,
+    has_local_servers: bool,
+) -> Result<Vec<WorkerTarget>, ConfigError> {
+    let explicit_workers = parse_configured_workers(pishoo)?;
+    let groups = parse_groups(pishoo)?;
+
+    let group_members = if groups.is_empty() && explicit_workers.is_empty() && !has_local_servers {
+        // No groups, no workers, and no local servers — use default groups
+        resolve_group_members(
+            &DEFAULT_GROUPS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>(),
+        )?
+    } else if !groups.is_empty() {
+        resolve_group_members(&groups)?
+    } else {
+        Vec::new()
+    };
+
+    // Deduplicate by username, preserving order (explicit workers first)
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for worker in explicit_workers.into_iter().chain(group_members) {
+        if seen.insert(worker.username.clone()) {
+            result.push(worker);
+        }
+    }
+    Ok(result)
 }
 
 fn parse_local_servers(pishoo: &Arc<Node>) -> Vec<Arc<Node>> {
@@ -165,23 +202,13 @@ fn parse_local_servers(pishoo: &Arc<Node>) -> Vec<Arc<Node>> {
 pub fn parse_entry_config(root: &Arc<Node>) -> Result<EntryConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
-    let workers = parse_configured_workers(&pishoo)?;
-    let local_access_rules_uri = parse_access_rules_uri(&pishoo)?;
     let local_servers = parse_local_servers(&pishoo);
-
-    let shape = match (workers.is_empty(), local_servers.is_empty()) {
-        (false, false) => RuntimeShape::Mixed,
-        (false, true) => RuntimeShape::Supervisor,
-        (true, false) => RuntimeShape::Direct,
-        (true, true) => return MissingServersOrWorkersSnafu.fail(),
-    };
+    let workers = resolve_all_workers(&pishoo, !local_servers.is_empty())?;
 
     Ok(EntryConfig {
         pid_file,
         workers,
-        local_access_rules_uri,
         local_servers,
-        shape,
     })
 }
 
@@ -190,39 +217,27 @@ pub fn parse_root_config(
 ) -> Result<RootConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
+    let groups = parse_groups(&pishoo)?;
+    let workers = resolve_all_workers(&pishoo, false)?;
 
-    let workers = match pishoo.get("workers") {
-        Some(Value::StringVec(names)) => parse_worker_names(names)?,
-        Some(_) => return InvalidWorkersSnafu.fail(),
-        None => parse_worker_names(
-            &nix::unistd::Group::from_name(WORKER_GROUP)
-                .context(GroupResolveSnafu)?
-                .context(GroupNotFoundSnafu)?
-                .mem,
-        )?,
-    };
-
-    Ok(RootConfig { pid_file, workers })
+    Ok(RootConfig {
+        pid_file,
+        groups,
+        workers,
+    })
 }
 
 pub fn resolve_entry_worker_targets(
     entry_config: &EntryConfig,
 ) -> Result<Vec<ResolvedWorkerTarget>, ConfigError> {
-    if entry_config.workers.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    resolve_worker_targets(&RootConfig {
-        pid_file: entry_config.pid_file.clone(),
-        workers: entry_config.workers.clone(),
-    })
+    resolve_worker_targets(&entry_config.workers)
 }
 
 pub fn resolve_worker_targets(
-    config: &RootConfig,
+    workers: &[WorkerTarget],
 ) -> Result<Vec<ResolvedWorkerTarget>, ConfigError> {
-    let mut resolved = Vec::with_capacity(config.workers.len());
-    for worker in &config.workers {
+    let mut resolved = Vec::with_capacity(workers.len());
+    for worker in workers {
         let user = nix::unistd::User::from_name(&worker.username)
             .context(UserResolveSnafu {
                 username: worker.username.clone(),
@@ -386,17 +401,14 @@ mod tests {
         let me = nix::unistd::User::from_uid(nix::unistd::getuid())
             .expect("resolve current uid")
             .expect("current user exists");
-        let cfg = RootConfig {
-            pid_file: PID_FILE_DEFAULT.to_string(),
-            workers: vec![WorkerTarget { username: me.name }],
-        };
-        let resolved = resolve_worker_targets(&cfg).expect("resolve user target");
+        let workers = vec![WorkerTarget { username: me.name }];
+        let resolved = resolve_worker_targets(&workers).expect("resolve user target");
         assert_eq!(resolved.len(), 1);
         assert!(!resolved[0].home.as_os_str().is_empty());
     }
 
     #[test]
-    fn parse_entry_config_direct_mode() {
+    fn parse_entry_config_servers_only() {
         let (cert, key) = create_temp_tls_files();
         let conf = format!(
             "pishoo {{ server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root .; }} }} }}",
@@ -406,13 +418,12 @@ mod tests {
         let parsed = gateway::parse::parse(conf.as_bytes(), Some(std::path::Path::new(".")))
             .expect("parse config");
         let entry = parse_entry_config(&parsed).expect("parse entry config");
-        assert_eq!(entry.shape, RuntimeShape::Direct);
         assert!(entry.workers.is_empty());
         assert_eq!(entry.local_servers.len(), 1);
     }
 
     #[test]
-    fn parse_entry_config_mixed_mode() {
+    fn parse_entry_config_workers_and_servers() {
         let (cert, key) = create_temp_tls_files();
         let conf = format!(
             "pishoo {{ workers alice; server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root .; }} }} }}",
@@ -422,7 +433,6 @@ mod tests {
         let parsed = gateway::parse::parse(conf.as_bytes(), Some(std::path::Path::new(".")))
             .expect("parse config");
         let entry = parse_entry_config(&parsed).expect("parse entry config");
-        assert_eq!(entry.shape, RuntimeShape::Mixed);
         assert_eq!(entry.workers.len(), 1);
         assert_eq!(entry.local_servers.len(), 1);
     }
@@ -468,16 +478,12 @@ mod tests {
         let current = EntryConfig {
             pid_file: "/tmp/a.pid".to_string(),
             workers: Vec::new(),
-            local_access_rules_uri: None,
             local_servers: Vec::new(),
-            shape: RuntimeShape::Direct,
         };
         let next = EntryConfig {
             pid_file: "/tmp/b.pid".to_string(),
             workers: Vec::new(),
-            local_access_rules_uri: None,
             local_servers: Vec::new(),
-            shape: RuntimeShape::Direct,
         };
 
         let err =
@@ -492,9 +498,7 @@ mod tests {
         let current_entry = EntryConfig {
             pid_file: "/tmp/a.pid".to_string(),
             workers: Vec::new(),
-            local_access_rules_uri: None,
             local_servers: Vec::new(),
-            shape: RuntimeShape::Supervisor,
         };
         let next_entry = current_entry.clone();
         let current_workers = vec![ResolvedWorkerTarget {
@@ -528,9 +532,7 @@ mod tests {
         let entry = EntryConfig {
             pid_file: "/tmp/a.pid".to_string(),
             workers: Vec::new(),
-            local_access_rules_uri: None,
             local_servers: Vec::new(),
-            shape: RuntimeShape::Mixed,
         };
         let current_owners =
             HashMap::from([("demo.genmeta.net".to_string(), EntryServerOwner::Local)]);

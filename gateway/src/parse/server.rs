@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whatever> {
+pub(crate) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whatever> {
     let mut commands = Commands::new();
 
     commands.insert("listen", parse_listen);
@@ -27,6 +27,7 @@ pub(super) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whateve
     commands.insert("location", parse_location);
     commands.insert("types", parse_types);
     commands.insert("default_type", parse_header_value);
+    commands.insert("access_rules", parse_string);
     commands.insert("relay", parse_boolean);
     commands.insert("stun", parse_boolean);
     commands.insert("stun_server", parse_stun_server);

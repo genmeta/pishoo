@@ -71,9 +71,8 @@ async fn main() -> Result<(), Whatever> {
 
     // Scan identities and build service config.
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
-    let worker_access_rules_config_path = bootstrap.home.join(".genmeta/pishoo.conf");
 
-    let config = build_service_config(&genmeta_home, &worker_access_rules_config_path)
+    let config = build_service_config(&genmeta_home)
         .await
         .whatever_context("failed to build service config")?;
 

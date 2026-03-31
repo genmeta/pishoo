@@ -28,7 +28,7 @@ mod location;
 pub mod pattern;
 mod pishoo;
 mod proxy;
-mod server;
+pub(crate) mod server;
 
 type Result<T, E = Whatever> = std::result::Result<T, E>;
 
@@ -346,6 +346,23 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
 
     // 解析配置
     parse_conf(directives)
+}
+
+pub fn parse_server_config(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
+    CONFIG_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
+
+    let mut directives =
+        Directive::<Nginx>::parse(configure).whatever_context("cannot parse configuration")?;
+
+    if let Some(root) = root {
+        directives = directives
+            .into_iter()
+            .map(|mut directive| directive.resolve_include(root).map(|_| directive))
+            .collect::<Result<Vec<_>, _>>()
+            .whatever_context("cannot resolve include in configuration")?;
+    }
+
+    conf::parse_server_conf(directives)
 }
 
 #[derive(Default, Debug, Clone)]
