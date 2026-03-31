@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_compression::{Level, tokio::bufread::GzipEncoder};
 use http::response::Parts;
+use tokio_util::io::ReaderStream;
 
 use crate::parse::Node;
 
@@ -79,17 +80,74 @@ impl GzipConfig {
             l => Level::Precise(l),
         }
     }
+}
 
-    /// 根据是否压缩，包装 reader
-    pub fn wrap_reader<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
-        &self,
-        should_compress: bool,
-        reader: R,
-    ) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
-        if should_compress {
-            Box::new(GzipEncoder::with_quality(reader, self.level()))
-        } else {
-            Box::new(reader)
-        }
+/// Compress a hyper `Incoming` response body if the location config requires it.
+///
+/// Returns a new response with the body wrapped in gzip, or the original response unchanged.
+pub fn compress_response(
+    location: &Arc<Node>,
+    accept_encoding: Option<&str>,
+    response: http::Response<hyper::body::Incoming>,
+) -> http::Response<axum::body::Body> {
+    use futures::TryStreamExt;
+
+    let gzip = GzipConfig::from_location(location, accept_encoding);
+
+    let (mut parts, body) = response.into_parts();
+
+    let content_length = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let should_compress = gzip.should_compress(&parts, content_length);
+
+    if should_compress {
+        gzip.apply_headers(&mut parts);
+
+        let body_stream = tokio_util::io::StreamReader::new(
+            http_body_util::BodyExt::into_data_stream(body)
+                .map_err(std::io::Error::other),
+        );
+        let compressed = GzipEncoder::with_quality(body_stream, gzip.level());
+        let stream = ReaderStream::new(compressed);
+        let body = axum::body::Body::from_stream(stream);
+        http::Response::from_parts(parts, body)
+    } else {
+        http::Response::from_parts(parts, axum::body::Body::new(body))
+    }
+}
+
+/// Compress a file body with the same gzip config logic.
+///
+/// Returns the response with appropriate headers and optionally compressed body.
+pub fn compress_file_response(
+    location: &Arc<Node>,
+    accept_encoding: Option<&str>,
+    mut parts: http::response::Parts,
+    file: tokio::fs::File,
+    file_size: u64,
+) -> http::Response<axum::body::Body> {
+    let gzip = GzipConfig::from_location(location, accept_encoding);
+    let should_compress = gzip.should_compress(&parts, Some(file_size));
+
+    if should_compress {
+        gzip.apply_headers(&mut parts);
+
+        let reader = tokio::io::BufReader::new(file);
+        let compressed = GzipEncoder::with_quality(reader, gzip.level());
+        let stream = ReaderStream::new(compressed);
+        let body = axum::body::Body::from_stream(stream);
+        http::Response::from_parts(parts, body)
+    } else {
+        parts
+            .headers
+            .insert(http::header::CONTENT_LENGTH, file_size.into());
+
+        let stream = ReaderStream::new(file);
+        let body = axum::body::Body::from_stream(stream);
+        http::Response::from_parts(parts, body)
     }
 }

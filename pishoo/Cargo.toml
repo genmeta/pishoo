@@ -160,6 +160,9 @@ tokio-util = { workspace = true }
 # --- HTTP ---
 http = { workspace = true }
 
+# --- Tower ---
+tower = { workspace = true }
+
 # --- CLI Parsing ---
 clap = { workspace = true }
 
@@ -176,10 +179,10 @@ sea-orm-migration = { workspace = true }
 # --- Logging & Tracing ---
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
 
 # --- System / OS ---
-atty = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 

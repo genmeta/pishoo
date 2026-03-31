@@ -26,9 +26,13 @@ tracing-subscriber = { workspace = true }
 # --- Networking & HTTP ---
 bytes = { workspace = true }
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-service = { workspace = true }
 firewall-base = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---

@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Local;
 use genmeta_home::GenmetaHome;
@@ -17,10 +17,6 @@ fn get_log_dir() -> Option<PathBuf> {
 
 fn get_access_log_path() -> Option<PathBuf> {
     get_log_dir().map(|dir| dir.join("access.log"))
-}
-
-fn get_error_log_path() -> Option<PathBuf> {
-    get_log_dir().map(|dir| dir.join("error.log"))
 }
 
 async fn ensure_log_dir() -> Result<()> {
@@ -87,10 +83,6 @@ impl RequestInfo {
         );
         write_access_log(log_line).await;
     }
-
-    pub async fn log_error(&self, message: impl Display) {
-        write_error_log(message).await;
-    }
 }
 
 pub async fn write_access_log(line: String) {
@@ -125,43 +117,6 @@ pub async fn write_access_log(line: String) {
         tracing::error!(
             error = %Report::from_error(e),
             "failed to write access log"
-        );
-    }
-}
-
-// TODO: avoid open log file on every error log write, keep it open and rotate by size or time
-pub async fn write_error_log(line: impl Display) {
-    let Some(path) = get_error_log_path() else {
-        return;
-    };
-
-    let result: Result<()> = async {
-        ensure_log_dir().await?;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .whatever_context::<_, crate::error::CustomError>(format!(
-                "failed to open error log file: {:?}",
-                path
-            ))?;
-
-        let timestamp = Local::now().format("%Y/%m/%d %H:%M:%S");
-        let formatted_line = format!("{} [error] {}\n", timestamp, line);
-
-        file.write_all(formatted_line.as_bytes())
-            .await
-            .whatever_context::<_, crate::error::CustomError>("failed to write to error log")?;
-        Ok(())
-    }
-    .await;
-
-    if let Err(e) = result {
-        tracing::error!(
-            error = %Report::from_error(e),
-            "failed to write error log"
         );
     }
 }

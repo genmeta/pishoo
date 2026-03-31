@@ -191,6 +191,7 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExec
         [b"USER=".as_slice(), username.as_bytes()].concat(),
         [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
         [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
+        [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
     ]
     .into_iter()
     .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))

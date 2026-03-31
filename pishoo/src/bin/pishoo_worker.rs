@@ -21,6 +21,16 @@ use tracing::Instrument;
 #[tokio::main(flavor = "current_thread")]
 #[snafu::report]
 async fn main() -> Result<(), Whatever> {
+    let user = std::env::var("PISHOO_USER").unwrap_or_else(|_| {
+        eprintln!("PISHOO_USER not set; this binary must be spawned by pishoo root");
+        std::process::exit(1);
+    });
+    let _tracing_guard = pishoo::tracing_init::init_tracing(&format!(
+        "pishoo-worker:{}/{}",
+        user,
+        std::process::id()
+    ));
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
@@ -41,10 +51,6 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to receive worker bootstrap")?
         .whatever_context("root closed channel without sending bootstrap")?;
 
-    // Logging must go to stderr (stdout is the remoc transport).
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
     tracing::info!(
         uid = bootstrap.uid,
         username = %bootstrap.username,

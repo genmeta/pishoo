@@ -12,7 +12,7 @@ use gateway::{
     control_plane::{Identity, ListenRequest},
     error::Whatever,
     parse::{Node, Value},
-    reverse::{self, MissingRulePolicy},
+    reverse::MissingRulePolicy,
 };
 use gm_quic::{
     prelude::{QuicListeners, handy::server_parameters},
@@ -60,18 +60,10 @@ async fn main() -> Result<(), Whatever> {
     let args = Args::parse();
 
     #[cfg(not(feature = "console_subscriber"))]
-    {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(tracing::Level::DEBUG.into())
-                    .from_env_lossy(),
-            )
-            .with_ansi(atty::is(atty::Stream::Stdout));
-        #[cfg(debug_assertions)]
-        let subscriber = subscriber.with_file(true).with_line_number(true);
-        subscriber.init();
-    }
+    let _tracing_guard = pishoo::tracing_init::init_tracing(&format!(
+        "pishoo/{}",
+        std::process::id()
+    ));
 
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
@@ -405,8 +397,6 @@ async fn build_local_service_config(
         }
     }
 
-    let router = reverse::build_router_for_servers(&canonicalized);
-
     let local_policy = pishoo::policy::load_policy_bundle(access_rules_uri.as_deref())
         .await
         .whatever_context("failed to load root-local access rules")?;
@@ -415,7 +405,6 @@ async fn build_local_service_config(
     Ok(pishoo::service::ServiceConfig {
         servers: server_configs,
         h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
-        router,
         access_rules,
         missing_rule_policy: MissingRulePolicy::Deny,
     })

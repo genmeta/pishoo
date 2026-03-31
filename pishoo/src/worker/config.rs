@@ -73,8 +73,6 @@ pub async fn build_service_config(
 
     // For each identity, load TLS material + config → build ServerConfigs.
     let mut servers = Vec::new();
-    let mut all_server_nodes = Vec::new();
-    let mut fallback_entries: HashMap<String, Arc<Node>> = HashMap::new();
     // Collect the first explicit access_rules URI found, or use default.
     let mut access_rules_uri: Option<String> = None;
 
@@ -104,11 +102,7 @@ pub async fn build_service_config(
             }
         };
 
-        // Always register a fallback router entry for the identity name.
-        let server_name = name.as_full().to_string();
-        fallback_entries
-            .entry(server_name)
-            .or_insert_with(|| Arc::new(Node::new(Value::ValueMap(HashMap::new()))));
+        // Always register a fallback server node for the identity name.
 
         // Load per-identity server.conf if present.
         let conf_path = identity_home.join("server.conf");
@@ -157,7 +151,6 @@ pub async fn build_service_config(
                 }
             }
         }
-        all_server_nodes.extend(identity_server_nodes);
 
         // Build the listen request using the identity's server name as primary bind key,
         // falling back to default bind if not explicitly configured.
@@ -178,14 +171,6 @@ pub async fn build_service_config(
         });
     }
 
-    // Build the router from all collected server nodes.
-    let mut router = gateway::reverse::build_router_for_servers(&all_server_nodes)
-        .as_ref()
-        .clone();
-    for (entry_name, node) in fallback_entries {
-        router.entry(entry_name).or_insert(node);
-    }
-
     // Load worker access rules policy.
     let access_rules_bundle = policy::load_policy_bundle(access_rules_uri.as_deref())
         .await
@@ -197,7 +182,6 @@ pub async fn build_service_config(
     Ok(ServiceConfig {
         servers,
         h3_settings,
-        router: Arc::new(router),
         access_rules: access_rules_bundle.location_rules,
         missing_rule_policy: MissingRulePolicy::Deny,
     })

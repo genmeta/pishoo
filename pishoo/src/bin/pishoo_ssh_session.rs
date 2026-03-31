@@ -26,9 +26,15 @@ use tracing::Instrument;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
+    let user = std::env::var("PISHOO_USER").unwrap_or_else(|_| {
+        eprintln!("PISHOO_USER not set; this binary must be spawned by pishoo");
+        std::process::exit(1);
+    });
+    let _tracing_guard = pishoo::tracing_init::init_tracing(&format!(
+        "sshd-session:{}/{}",
+        user,
+        std::process::id()
+    ));
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();

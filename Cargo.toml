@@ -31,14 +31,19 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "time",
     "local-time",
 ] }
+tracing-appender = "0.2"
 console-subscriber = "0.4"
 
 # --- Networking & HTTP ---
 bytes = "1"
 http = "1"
+http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+axum = { version = "0.8", default-features = false }
+tower = { version = "0.5", features = ["util"] }
+tower-service = "0.3"
 firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
@@ -72,7 +77,6 @@ rustls-native-certs = "0.8"
 tokio-rustls = "0.26"
 
 # --- Utilities ---
-atty = "0.2"
 regex = "1"
 parking_lot = "0.12"
 misc-conf = "0.1"

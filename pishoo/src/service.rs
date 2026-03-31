@@ -5,15 +5,20 @@
 //! `RemoteControlPlane`) or directly inside the root process (using
 //! `LocalControlPlane`).
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use gateway::{
     control_plane::{ControlPlane, ListenRequest},
-    parse::Node,
-    reverse::{self, MissingRulePolicy},
+    parse::{Node, Value},
+    reverse::{
+        middleware::{AccessControlLayer, AccessLogLayer},
+        router::NginxRouter,
+        MissingRulePolicy,
+    },
 };
-use h3x::{dhttp::settings::Settings, quic};
+use h3x::{connection::ConnectionBuilder, dhttp::settings::Settings, hyper::server::TowerService, quic, server::Servers};
 use snafu::Report;
+use tower::ServiceBuilder;
 use tracing::Instrument;
 
 /// Configuration for a single server within a service.
@@ -32,8 +37,6 @@ pub struct ServiceConfig {
     pub servers: Vec<ServerConfig>,
     /// HTTP/3 settings for all servers.
     pub h3_settings: Arc<Settings>,
-    /// Router mapping server_name → config node.
-    pub router: Arc<HashMap<String, Arc<Node>>>,
     /// Access control rules.
     pub access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
     /// Policy for requests that don't match any access rule.
@@ -70,59 +73,48 @@ where
         };
         let server_name = request.identity.name().as_full().to_owned();
 
-        let mut listener = plane
+        let listener = plane
             .listener(request)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         tracing::info!(%server_name, "Listener registered");
 
-        let h3_settings = config.h3_settings.clone();
-        let router = config.router.clone();
-        let access_rules = config.access_rules.clone();
-        let missing_rule_policy = config.missing_rule_policy;
+        // Extract location blocks from this server's config node
+        let locations = match server_config.server_node.get("location") {
+            Some(Value::Nodes(locations)) => locations.clone(),
+            _ => Vec::new(),
+        };
+
+        // Build the service stack: AccessLog → AccessControl → NginxRouter
+        let nginx_router = NginxRouter::new(locations);
+        let service_stack = ServiceBuilder::new()
+            .layer(AccessLogLayer)
+            .layer(AccessControlLayer::new(
+                config.access_rules.clone(),
+                config.missing_rule_policy,
+            ))
+            .service(nginx_router);
+
+        // Build H3 connection builder with configured settings
+        let builder = ConnectionBuilder::new(config.h3_settings.clone());
+        #[cfg(feature = "sshd")]
+        let builder = builder.protocol(genmeta_ssh::protocol::Ssh3ProtocolFactory);
+
+        let mut servers = Servers::from_quic_listener()
+            .listener(listener)
+            .service(TowerService(service_stack))
+            .builder(Arc::new(builder))
+            .build();
 
         tasks.spawn(
             async move {
-                loop {
-                    let conn = match quic::Listen::accept(&mut listener).await {
-                        Ok(conn) => conn,
-                        Err(error) => {
-                            tracing::warn!(
-                                %server_name,
-                                error = %Report::from_error(&error),
-                                "Listener accept error, stopping"
-                            );
-                            break;
-                        }
-                    };
-
-                    let sn = server_name.clone();
-                    let settings = h3_settings.clone();
-                    let r = router.clone();
-                    let ar = access_rules.clone();
-                    tokio::spawn(
-                        async move {
-                            if let Err(error) = reverse::handle_single_connection_for_server(
-                                conn,
-                                sn.clone(),
-                                settings,
-                                r,
-                                ar,
-                                missing_rule_policy,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    server_name = %sn,
-                                    error = %Report::from_error(&error),
-                                    "Connection handling failed"
-                                );
-                            }
-                        }
-                        .in_current_span(),
-                    );
-                }
+                let error = servers.run().await;
+                tracing::warn!(
+                    %server_name,
+                    error = %Report::from_error(&error),
+                    "Server stopped"
+                );
             }
             .in_current_span(),
         );
