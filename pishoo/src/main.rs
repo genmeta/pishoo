@@ -524,27 +524,37 @@ async fn wait_for_reload_servers(listeners: &Arc<QuicListeners>, publish_names: 
 
 /// Resolve the path of the `pishoo-worker` binary.
 ///
-/// - If `PISHOO_WORKER_BIN` env var was set **at compile time**, use it.
-/// - Otherwise in debug builds, fall back to `<current_exe_dir>/pishoo-worker`.
-/// - In release builds without the env var, this is a compile error.
+/// Search order:
+/// 1. Runtime env var `PISHOO_WORKER_BIN`
+/// 2. Compile-time env var `PISHOO_WORKER_BIN` (set by deb builds)
+/// 3. `<exe_dir>/../libexec/pishoo-worker` (Homebrew layout)
+/// 4. `<exe_dir>/pishoo-worker` (debug / same-dir fallback)
 fn worker_binary_path() -> std::path::PathBuf {
-    #[allow(clippy::option_env_unwrap)]
-    {
-        #[cfg(debug_assertions)]
-        {
-            match option_env!("PISHOO_WORKER_BIN") {
-                Some(path) => std::path::PathBuf::from(path),
-                None => std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("pishoo-worker")))
-                    .unwrap_or_else(|| std::path::PathBuf::from("pishoo-worker")),
-            }
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            std::path::PathBuf::from(env!("PISHOO_WORKER_BIN"))
-        }
+    // 1. Runtime environment variable
+    if let Ok(path) = std::env::var("PISHOO_WORKER_BIN") {
+        return std::path::PathBuf::from(path);
     }
+
+    // 2. Compile-time environment variable (set during release deb builds)
+    if let Some(path) = option_env!("PISHOO_WORKER_BIN") {
+        return std::path::PathBuf::from(path);
+    }
+
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        // 3. Homebrew libexec layout: <prefix>/bin/pishoo → <prefix>/libexec/pishoo-worker
+        let libexec = exe_dir.join("../libexec/pishoo-worker");
+        if libexec.exists() {
+            return libexec;
+        }
+
+        // 4. Same directory (debug builds, Windows, cargo build output)
+        return exe_dir.join("pishoo-worker");
+    }
+
+    std::path::PathBuf::from("pishoo-worker")
 }
 
 async fn spawn_configured_workers(

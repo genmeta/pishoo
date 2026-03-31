@@ -431,28 +431,38 @@ pub fn recv_fds(sock_fd: std::os::fd::RawFd) -> Result<Vec<OwnedFd>, Errno> {
 
 /// Resolve the path of the `pishoo-ssh-session` binary.
 ///
-/// - If `PISHOO_SSH_SESSION_BIN` env var was set at **compile time**, use it.
-/// - Otherwise in debug builds, fall back to `<current_exe_dir>/pishoo-ssh-session`.
-/// - In release builds without the env var, this is a compile error.
+/// Search order:
+/// 1. Runtime env var `PISHOO_SSH_SESSION_BIN`
+/// 2. Compile-time env var `PISHOO_SSH_SESSION_BIN` (set by deb builds)
+/// 3. `<exe_dir>/../libexec/pishoo-ssh-session` (Homebrew layout)
+/// 4. `<exe_dir>/pishoo-ssh-session` (debug / same-dir fallback)
 #[cfg(feature = "sshd")]
 pub fn session_binary_path() -> std::path::PathBuf {
-    #[allow(clippy::option_env_unwrap)]
-    {
-        #[cfg(debug_assertions)]
-        {
-            match option_env!("PISHOO_SSH_SESSION_BIN") {
-                Some(path) => std::path::PathBuf::from(path),
-                None => std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("pishoo-ssh-session")))
-                    .unwrap_or_else(|| std::path::PathBuf::from("pishoo-ssh-session")),
-            }
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            std::path::PathBuf::from(env!("PISHOO_SSH_SESSION_BIN"))
-        }
+    // 1. Runtime environment variable
+    if let Ok(path) = std::env::var("PISHOO_SSH_SESSION_BIN") {
+        return std::path::PathBuf::from(path);
     }
+
+    // 2. Compile-time environment variable (set during release deb builds)
+    if let Some(path) = option_env!("PISHOO_SSH_SESSION_BIN") {
+        return std::path::PathBuf::from(path);
+    }
+
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        // 3. Homebrew libexec layout
+        let libexec = exe_dir.join("../libexec/pishoo-ssh-session");
+        if libexec.exists() {
+            return libexec;
+        }
+
+        // 4. Same directory fallback
+        return exe_dir.join("pishoo-ssh-session");
+    }
+
+    std::path::PathBuf::from("pishoo-ssh-session")
 }
 
 fn max_fd() -> i32 {

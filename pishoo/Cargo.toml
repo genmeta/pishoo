@@ -119,7 +119,11 @@ depends = "pishoo-common (>= 0.2.0), $auto"
 section = "httpd"
 priority = "optional"
 maintainer-scripts = "pkg/debian"
-assets = [["target/release/pishoo", "usr/bin/", "755"]]
+assets = [
+  ["target/release/pishoo", "usr/bin/", "755"],
+  ["target/release/pishoo-worker", "usr/lib/pishoo/", "755"],
+  ["target/release/pishoo-ssh-session", "usr/lib/pishoo/", "755"],
+]
 
 [[bin]]
 name = "pishoo"
