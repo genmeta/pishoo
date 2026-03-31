@@ -3,6 +3,8 @@
 //! This allows root-local servers to use the same `run_service()` code
 //! as workers, but without any IPC — operations go directly to RootState.
 
+#[cfg(feature = "sshd")]
+use std::process::Stdio;
 use std::sync::Arc;
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
@@ -36,17 +38,71 @@ pub enum LocalConnectError {
     BuildClient { source: StringError },
 }
 
-impl gateway::control_plane::ControlPlane for LocalControlPlane {
+/// Error from a local session spawn.
+#[cfg(feature = "sshd")]
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum LocalSpawnSessionError {
+    #[snafu(display("failed to spawn session process"))]
+    Spawn { source: std::io::Error },
+    #[snafu(display("failed to take child stdin"))]
+    TakeStdin,
+    #[snafu(display("failed to take child stdout"))]
+    TakeStdout,
+    #[snafu(display("failed to convert child stdin to owned fd"))]
+    ConvertStdinFd { source: std::io::Error },
+    #[snafu(display("failed to convert child stdout to owned fd"))]
+    ConvertStdoutFd { source: std::io::Error },
+}
+
+#[cfg(feature = "sshd")]
+impl gateway::control_plane::SpawnSession for LocalControlPlane {
+    type Error = LocalSpawnSessionError;
+
+    async fn spawn_session(
+        &self,
+        username: &str,
+    ) -> Result<gateway::control_plane::SessionTransport, Self::Error> {
+        use local_spawn_session_error::*;
+        use snafu::{OptionExt, ResultExt};
+
+        let session_binary = crate::root::launcher::session_binary_path();
+
+        let mut child = tokio::process::Command::new(&session_binary)
+            .env("PISHOO_USER", username)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context(SpawnSnafu)?;
+
+        let child_stdin = child.stdin.take().context(TakeStdinSnafu)?;
+        let child_stdout = child.stdout.take().context(TakeStdoutSnafu)?;
+
+        let stdin_fd = child_stdin.into_owned_fd().context(ConvertStdinFdSnafu)?;
+        let stdout_fd = child_stdout.into_owned_fd().context(ConvertStdoutFdSnafu)?;
+
+        Ok(gateway::control_plane::SessionTransport {
+            stdin: stdin_fd,
+            stdout: stdout_fd,
+        })
+    }
+}
+
+impl gateway::control_plane::ProvideListener for LocalControlPlane {
     type Listener = PerServerListener;
-    type Connector = Arc<gm_quic::prelude::QuicClient>;
     type ListenError = RegisterError;
-    type ConnectError = LocalConnectError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         self.state
             .register_listener(ServiceOwner::Local, request)
             .await
     }
+}
+
+impl gateway::control_plane::ProvideConnector for LocalControlPlane {
+    type Connector = Arc<gm_quic::prelude::QuicClient>;
+    type ConnectError = LocalConnectError;
 
     async fn connector(
         &self,

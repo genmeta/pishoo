@@ -52,8 +52,11 @@ pub struct ServiceConfig {
 /// This is the unified entry point for both worker processes and root-local
 /// services. The `P` type parameter determines whether requests go over
 /// remoc RPC (worker) or directly in-process (root-local).
-pub async fn run_service<P: ControlPlane>(
-    plane: &P,
+///
+/// Takes an `Arc<P>` so the control plane can be shared with SSH session
+/// handlers (when the `sshd` feature is enabled).
+pub async fn run_service<P: ControlPlane + 'static>(
+    plane: Arc<P>,
     config: &ServiceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -90,7 +93,13 @@ where
         };
 
         // Build the service stack: AccessLog → AccessControl → NginxRouter
-        let nginx_router = NginxRouter::new(locations);
+        let nginx_router = NginxRouter::new(
+            locations,
+            gateway::reverse::router::RouterState {
+                #[cfg(feature = "sshd")]
+                session_spawner: plane.clone(),
+            },
+        );
         let service_stack = ServiceBuilder::new()
             .layer(AccessLogLayer)
             .layer(AccessControlLayer::new(

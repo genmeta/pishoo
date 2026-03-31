@@ -56,10 +56,10 @@ pub fn match_location(locations: &[Arc<Node>], path: &str) -> Option<LocationMat
         let priority = pattern.priority();
 
         // Skip if this pattern's priority is lower than what we already have
-        if let Some((_, _, best_priority)) = &best {
-            if priority < *best_priority {
-                continue;
-            }
+        if let Some((_, _, best_priority)) = &best
+            && priority < *best_priority
+        {
+            continue;
         }
 
         if let Ok(Some(matched)) = pattern.try_match(path) {

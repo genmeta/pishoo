@@ -6,7 +6,7 @@ pub mod middleware;
 mod proxy;
 pub mod router;
 #[cfg(feature = "sshd")]
-mod sshd;
+pub mod sshd;
 mod upstream_tls;
 
 /*

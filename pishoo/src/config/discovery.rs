@@ -85,8 +85,7 @@ pub async fn discover_worker_servers(
                 .await
                 .whatever_context(format!(
                     "failed to load identity servers for `{}` of worker `{}`",
-                    identity_name,
-                    target.username
+                    identity_name, target.username
                 ))?,
         );
     }

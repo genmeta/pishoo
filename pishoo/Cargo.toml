@@ -188,7 +188,7 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 
 [features]
 default = ["sqlx-sqlite"]
-sshd = ["gateway/sshd", "dep:genmeta-ssh"]
+sshd = ["gateway/sshd", "dep:genmeta-ssh", "nix/socket", "nix/uio"]
 pam = ["sshd", "genmeta-ssh/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]

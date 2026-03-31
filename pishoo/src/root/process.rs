@@ -73,7 +73,12 @@ pub async fn spawn_worker(
     tokio::spawn(conn.in_current_span());
 
     // Create per-worker ControlPlane RPC server.
-    let rpc_impl = WorkerControlPlane::new(pid, state.clone());
+    let rpc_impl = WorkerControlPlane::new(
+        pid,
+        state.clone(),
+        #[cfg(feature = "sshd")]
+        launched.seqpacket,
+    );
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);

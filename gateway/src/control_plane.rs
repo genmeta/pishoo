@@ -1,5 +1,9 @@
 use std::future::Future;
+#[cfg(feature = "sshd")]
+use std::os::fd::OwnedFd;
 
+#[cfg(feature = "sshd")]
+use futures::future::BoxFuture;
 use genmeta_home::identity::Name;
 pub use genmeta_home::identity::ssl::Identity;
 use h3x::quic;
@@ -23,6 +27,10 @@ impl std::fmt::Display for StringError {
 
 impl std::error::Error for StringError {}
 
+// ---------------------------------------------------------------------------
+// Capability trait: ProvideListener
+// ---------------------------------------------------------------------------
+
 /// A request to create a QUIC listener for a specific server.
 #[derive(Debug)]
 pub struct ListenRequest {
@@ -31,6 +39,25 @@ pub struct ListenRequest {
     /// Bind addresses (e.g., `["0.0.0.0:443", "[::]:443"]`).
     pub bind: Vec<String>,
 }
+
+/// Capability to create QUIC listeners.
+pub trait ProvideListener: Send + Sync {
+    /// The listener type returned by [`listener()`](Self::listener).
+    type Listener: quic::Listen;
+    /// Error type for [`listener()`](Self::listener) operations.
+    type ListenError: std::error::Error + Send + Sync;
+
+    /// Request the control plane to create a QUIC listener for the given
+    /// server configuration.
+    fn listener(
+        &self,
+        request: ListenRequest,
+    ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
+}
+
+// ---------------------------------------------------------------------------
+// Capability trait: ProvideConnector
+// ---------------------------------------------------------------------------
 
 /// A request to create an outbound QUIC connector.
 ///
@@ -44,47 +71,101 @@ pub struct ConnectorRequest {
     pub identity: Option<Identity>,
 }
 
-/// Abstraction over the control plane that provides QUIC listener and
-/// connector creation capabilities.
-///
-/// This trait is the boundary between the service layer (HTTP/3 request
-/// handling) and the infrastructure layer (QUIC networking). Two
-/// implementations exist:
-///
-/// - **`RemoteControlPlane`**: used by worker processes, communicates with
-///   root via remoc RPC. Returns [`h3x::remoc::quic::RemoteListener`] /
-///   [`h3x::remoc::quic::RemoteConnector`].
-/// - **`LocalControlPlane`**: used by root-local services, directly
-///   accessing the root state in-process.
-pub trait ControlPlane: Send + Sync {
-    /// The listener type returned by [`listener()`](Self::listener).
-    type Listener: quic::Listen;
-
+/// Capability to create outbound QUIC connectors.
+pub trait ProvideConnector: Send + Sync {
     /// The connector type returned by [`connector()`](Self::connector).
     type Connector: quic::Connect;
-
-    /// Error type for [`listener()`](Self::listener) operations.
-    type ListenError: std::error::Error + Send + Sync;
-
     /// Error type for [`connector()`](Self::connector) operations.
     type ConnectError: std::error::Error + Send + Sync;
 
-    /// Request the control plane to create a QUIC listener for the given
-    /// server configuration. The returned listener can be used with
-    /// [`h3x`] to serve HTTP/3 connections.
-    fn listener(
-        &self,
-        request: ListenRequest,
-    ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
-
     /// Request the control plane to create an outbound QUIC connector.
-    /// The returned connector can be used by the forward proxy to establish
-    /// outbound QUIC connections.
     fn connector(
         &self,
         request: ConnectorRequest,
     ) -> impl Future<Output = Result<Self::Connector, Self::ConnectError>> + Send + '_;
 }
+
+// ---------------------------------------------------------------------------
+// Capability trait: SpawnSession (sshd feature)
+// ---------------------------------------------------------------------------
+
+/// Transport handles for communicating with a spawned SSH session process.
+///
+/// Contains the raw pipe file descriptors of the child process. The
+/// consumer is responsible for converting these into the async IO type
+/// it needs (e.g. `tokio::fs::File`).
+#[cfg(feature = "sshd")]
+pub struct SessionTransport {
+    /// Write end of the child's stdin pipe.
+    pub stdin: OwnedFd,
+    /// Read end of the child's stdout pipe.
+    pub stdout: OwnedFd,
+}
+
+/// Concrete (AFIT) trait for spawning SSH session child processes.
+///
+/// Implement this for each control plane variant. A blanket impl
+/// provides [`DynSpawnSession`] automatically.
+#[cfg(feature = "sshd")]
+pub trait SpawnSession: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn spawn_session(
+        &self,
+        username: &str,
+    ) -> impl Future<Output = Result<SessionTransport, Self::Error>> + Send;
+}
+
+/// Object-safe version of [`SpawnSession`] with type-erased error.
+#[cfg(feature = "sshd")]
+pub trait DynSpawnSession: Send + Sync {
+    fn spawn_session<'a>(
+        &'a self,
+        username: &'a str,
+    ) -> BoxFuture<'a, Result<SessionTransport, Box<dyn std::error::Error + Send + Sync>>>;
+}
+
+#[cfg(feature = "sshd")]
+impl<T: SpawnSession> DynSpawnSession for T {
+    fn spawn_session<'a>(
+        &'a self,
+        username: &'a str,
+    ) -> BoxFuture<'a, Result<SessionTransport, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async move {
+            SpawnSession::spawn_session(self, username)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ControlPlane: aggregation of capabilities
+// ---------------------------------------------------------------------------
+
+/// Aggregated marker trait combining all control plane capabilities.
+///
+/// Two implementations exist:
+///
+/// - **`RemoteControlPlane`**: used by worker processes, communicates with
+///   root via remoc RPC.
+/// - **`LocalControlPlane`**: used by root-local services, directly
+///   accessing the root state in-process.
+///
+/// When the `sshd` feature is enabled, implementors must also provide
+/// [`SpawnSession`] so that SSH3 handlers can spawn session child
+/// processes through the control plane.
+#[cfg(feature = "sshd")]
+pub trait ControlPlane: ProvideListener + ProvideConnector + SpawnSession {}
+
+#[cfg(feature = "sshd")]
+impl<T: ProvideListener + ProvideConnector + SpawnSession> ControlPlane for T {}
+
+#[cfg(not(feature = "sshd"))]
+pub trait ControlPlane: ProvideListener + ProvideConnector {}
+
+#[cfg(not(feature = "sshd"))]
+impl<T: ProvideListener + ProvideConnector> ControlPlane for T {}
 
 // ---------------------------------------------------------------------------
 // Custom serde for ListenRequest / ConnectorRequest

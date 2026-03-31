@@ -4,6 +4,8 @@
 //! the worker's PID. When a worker calls `listen()` or `connect()`, this
 //! module creates the actual QUIC resources and returns h3x remoc handles.
 
+#[cfg(feature = "sshd")]
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
@@ -26,11 +28,23 @@ use crate::{
 pub struct WorkerControlPlane {
     caller_pid: Pid,
     state: Arc<super::state::RootState>,
+    /// Root-side end of the seqpacket pair for sending FDs to the worker.
+    #[cfg(feature = "sshd")]
+    seqpacket: OwnedFd,
 }
 
 impl WorkerControlPlane {
-    pub fn new(caller_pid: Pid, state: Arc<super::state::RootState>) -> Self {
-        Self { caller_pid, state }
+    pub fn new(
+        caller_pid: Pid,
+        state: Arc<super::state::RootState>,
+        #[cfg(feature = "sshd")] seqpacket: OwnedFd,
+    ) -> Self {
+        Self {
+            caller_pid,
+            state,
+            #[cfg(feature = "sshd")]
+            seqpacket,
+        }
     }
 }
 
@@ -122,5 +136,59 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             "Connect request fulfilled"
         );
         Ok(RemoteConnector::new(client))
+    }
+
+    async fn spawn_session(&self, username: String) -> Result<(), crate::ipc::SpawnSessionError> {
+        #[cfg(feature = "sshd")]
+        {
+            use std::os::fd::AsRawFd;
+
+            tracing::info!(
+                caller_pid = %self.caller_pid,
+                %username,
+                "spawn session request received"
+            );
+
+            // Fork the session process as root (no privilege drop).
+            let transport = crate::root::launcher::launch_session(&username).map_err(|e| {
+                crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: snafu::Report::from_error(e).to_string(),
+                }
+            })?;
+
+            // Send the child's pipe FDs to the worker via SCM_RIGHTS on the
+            // seqpacket socket. This must complete BEFORE we return Ok(()) —
+            // the worker reads FDs immediately after the RPC returns.
+            let sock_fd = self.seqpacket.as_raw_fd();
+            let stdin_fd = transport.stdin.as_raw_fd();
+            let stdout_fd = transport.stdout.as_raw_fd();
+            tokio::task::spawn_blocking(move || {
+                let fds = [stdin_fd, stdout_fd];
+                crate::root::launcher::send_fds(sock_fd, &fds)
+            })
+            .await
+            .map_err(|_| crate::ipc::SpawnSessionError::SpawnFailed {
+                reason: "blocking task cancelled".to_owned(),
+            })?
+            .map_err(|e| crate::ipc::SpawnSessionError::SpawnFailed {
+                reason: format!("failed to send FDs: {e}"),
+            })?;
+
+            // transport.stdin/stdout OwnedFds drop here, closing root's copies.
+            // The worker now owns the only copies (via SCM_RIGHTS).
+            drop(transport);
+
+            tracing::info!(
+                caller_pid = %self.caller_pid,
+                %username,
+                "session spawned, FDs sent to worker"
+            );
+            Ok(())
+        }
+        #[cfg(not(feature = "sshd"))]
+        {
+            let _ = username;
+            Err(crate::ipc::SpawnSessionError::NotSupported)
+        }
     }
 }

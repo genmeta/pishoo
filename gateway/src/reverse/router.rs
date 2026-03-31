@@ -11,11 +11,21 @@ use h3x::message::stream::MessageStreamError;
 use http::StatusCode;
 use http_body_util::combinators::UnsyncBoxBody;
 
+use super::location::match_location;
 use crate::parse::Node;
 
-use super::location::match_location;
-
 type ReqBody = UnsyncBoxBody<Bytes, MessageStreamError>;
+
+/// Shared state for all reverse-proxy handlers.
+///
+/// Injected as axum `State` into every handler. Currently holds SSH
+/// session spawning support; designed for future extensions (e.g.
+/// forward proxy connector, WebSocket upgrade).
+#[derive(Clone)]
+pub struct RouterState {
+    #[cfg(feature = "sshd")]
+    pub session_spawner: std::sync::Arc<dyn crate::control_plane::DynSpawnSession>,
+}
 
 /// Nginx-style location router implementing `tower::Service`.
 ///
@@ -26,11 +36,12 @@ type ReqBody = UnsyncBoxBody<Bytes, MessageStreamError>;
 #[derive(Clone)]
 pub struct NginxRouter {
     locations: Vec<Arc<Node>>,
+    state: RouterState,
 }
 
 impl NginxRouter {
-    pub fn new(locations: Vec<Arc<Node>>) -> Self {
-        Self { locations }
+    pub fn new(locations: Vec<Arc<Node>>, state: RouterState) -> Self {
+        Self { locations, state }
     }
 }
 
@@ -45,6 +56,7 @@ impl tower_service::Service<http::Request<ReqBody>> for NginxRouter {
 
     fn call(&mut self, mut request: http::Request<ReqBody>) -> Self::Future {
         let locations = self.locations.clone();
+        let state = self.state.clone();
 
         Box::pin(async move {
             let path = request.uri().path().to_string();
@@ -64,18 +76,13 @@ impl tower_service::Service<http::Request<ReqBody>> for NginxRouter {
             let location = &loc_match.location;
 
             let response = if location.get("proxy_pass").is_some() {
-                Handler::call(super::proxy::proxy_handle, request, ()).await
+                Handler::call(super::proxy::proxy_handle, request, state).await
             } else if location.get("root").is_some() || location.get("alias").is_some() {
-                Handler::call(super::file::file_handle, request, ()).await
+                Handler::call(super::file::file_handle, request, state).await
             } else {
                 #[cfg(feature = "sshd")]
                 if location.get("ssh_login").is_some() {
-                    return Ok(Handler::call(
-                        super::sshd::sshd_handle,
-                        request,
-                        (),
-                    )
-                    .await);
+                    return Ok(Handler::call(super::sshd::sshd_handle, request, state).await);
                 }
                 StatusCode::NOT_FOUND.into_response()
             };

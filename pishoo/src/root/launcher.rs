@@ -24,6 +24,16 @@ pub struct WorkerTransport {
 pub struct LaunchedWorker {
     pub handle: WorkerHandle,
     pub transport: WorkerTransport,
+    /// Root-side end of the seqpacket pair for FD passing.
+    #[cfg(feature = "sshd")]
+    pub seqpacket: OwnedFd,
+}
+
+/// Transport for a launched session child process (stdin/stdout pipes).
+#[cfg(feature = "sshd")]
+pub struct SessionTransport {
+    pub stdin: OwnedFd,
+    pub stdout: OwnedFd,
 }
 
 struct ChildExecSpec<'a> {
@@ -35,6 +45,8 @@ struct ChildExecSpec<'a> {
     supplementary_groups: &'a [Gid],
     stdin_fd: &'a OwnedFd,
     stdout_fd: &'a OwnedFd,
+    /// Optional extra FD to dup2 to FD 3 (e.g. seqpacket for FD passing).
+    extra_fd: Option<&'a OwnedFd>,
     max_fd: i32,
 }
 
@@ -56,8 +68,30 @@ pub enum LaunchWorkerError {
     CreateStdinPipe { source: Errno },
     #[snafu(display("failed to create worker stdout pipe"))]
     CreateStdoutPipe { source: Errno },
+    #[cfg(feature = "sshd")]
+    #[snafu(display("failed to create seqpacket pair"))]
+    CreateSeqpacketPair { source: Errno },
     #[snafu(display("failed to fork worker process"))]
     ForkWorker { source: Errno },
+}
+
+/// Errors from [`launch_session`].
+#[cfg(feature = "sshd")]
+#[derive(Debug, Snafu)]
+pub enum LaunchSessionError {
+    #[snafu(display("session binary path contains nul byte"))]
+    InvalidSessionPath { source: std::ffi::NulError },
+    #[snafu(display("failed to build exec environment for user `{username}`"))]
+    BuildSessionExecEnv {
+        username: String,
+        source: BuildExecEnvError,
+    },
+    #[snafu(display("failed to create session stdin pipe"))]
+    CreateSessionStdinPipe { source: Errno },
+    #[snafu(display("failed to create session stdout pipe"))]
+    CreateSessionStdoutPipe { source: Errno },
+    #[snafu(display("failed to fork session process"))]
+    ForkSession { source: Errno },
 }
 
 #[derive(Debug, Snafu)]
@@ -91,7 +125,25 @@ pub fn launch_worker(
         .context(ResolveSupplementaryGroupsSnafu { username })?;
     let worker_bin =
         CString::new(worker_bin.as_os_str().as_encoded_bytes()).context(InvalidWorkerPathSnafu)?;
-    let env = build_exec_env(username, home).context(BuildExecEnvSnafu { username })?;
+
+    #[cfg(feature = "sshd")]
+    let (parent_seqpacket, child_seqpacket) = seqpacket_pair().context(CreateSeqpacketPairSnafu)?;
+
+    // Build env — include PISHOO_SEQPACKET_FD if sshd is enabled.
+    #[cfg(feature = "sshd")]
+    let seqpacket_fd_num = {
+        use std::os::fd::AsRawFd;
+        child_seqpacket.as_raw_fd()
+    };
+    let env = build_exec_env(
+        username,
+        home,
+        #[cfg(feature = "sshd")]
+        Some(seqpacket_fd_num),
+        #[cfg(not(feature = "sshd"))]
+        None,
+    )
+    .context(BuildExecEnvSnafu { username })?;
     let argv = vec![worker_bin.clone()];
     let max_fd = max_fd();
 
@@ -110,18 +162,26 @@ pub fn launch_worker(
                 supplementary_groups: &supplementary_groups,
                 stdin_fd: &child_stdin_read,
                 stdout_fd: &child_stdout_write,
+                #[cfg(feature = "sshd")]
+                extra_fd: Some(&child_seqpacket),
+                #[cfg(not(feature = "sshd"))]
+                extra_fd: None,
                 max_fd,
             });
         }
         ForkResult::Parent { child } => {
             drop(child_stdin_read);
             drop(child_stdout_write);
+            #[cfg(feature = "sshd")]
+            drop(child_seqpacket);
             let stdin = File::from_std(std::fs::File::from(parent_stdin_write));
             let stdout = File::from_std(std::fs::File::from(parent_stdout_read));
 
             Ok(LaunchedWorker {
                 handle: WorkerHandle::from_pid(child),
                 transport: WorkerTransport { stdin, stdout },
+                #[cfg(feature = "sshd")]
+                seqpacket: parent_seqpacket,
             })
         }
     }
@@ -137,6 +197,7 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         supplementary_groups,
         stdin_fd,
         stdout_fd,
+        extra_fd,
         max_fd,
     } = spec;
 
@@ -147,9 +208,18 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         child_fail(126);
     }
 
-    let mut fd = 3;
+    // Determine the FD to skip when closing (the extra FD we want to pass).
+    let skip_fd = extra_fd.map(|fd| {
+        use std::os::fd::AsRawFd;
+        fd.as_raw_fd()
+    });
+
+    let start_fd = 3;
+    let mut fd = start_fd;
     while fd < max_fd {
-        let _ = nix::unistd::close(fd);
+        if Some(fd) != skip_fd {
+            let _ = nix::unistd::close(fd);
+        }
         fd += 1;
     }
 
@@ -184,22 +254,205 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
     pipe()
 }
 
-fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExecEnvError> {
+#[cfg(feature = "sshd")]
+fn seqpacket_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+    let (a, b) = socketpair(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        None,
+        SockFlag::SOCK_CLOEXEC,
+    )?;
+    Ok((a, b))
+}
+
+/// Spawn a session child process **without dropping privileges**.
+///
+/// The child process is exec'd as root so it can perform PAM authentication
+/// and `open_session`. It is responsible for calling `drop_privileges()`
+/// after PAM completes.
+///
+/// Returns the pipe file descriptors for communicating with the child
+/// via remoc (stdin write + stdout read).
+#[cfg(feature = "sshd")]
+pub fn launch_session(username: &str) -> Result<SessionTransport, LaunchSessionError> {
+    let session_bin = session_binary_path();
+    let session_bin = CString::new(session_bin.as_os_str().as_encoded_bytes())
+        .context(InvalidSessionPathSnafu)?;
+
+    let env = build_session_exec_env(username).context(BuildSessionExecEnvSnafu { username })?;
+    let argv = vec![session_bin.clone()];
+    let max_fd = max_fd();
+
+    let (child_stdin_read, parent_stdin_write) =
+        pipe_pair().context(CreateSessionStdinPipeSnafu)?;
+    let (parent_stdout_read, child_stdout_write) =
+        pipe_pair().context(CreateSessionStdoutPipeSnafu)?;
+
+    // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
+    match unsafe { fork() }.context(ForkSessionSnafu)? {
+        ForkResult::Child => {
+            // Session child: dup2 stdin/stdout, close other FDs, exec.
+            // No privilege drop — stays root for PAM.
+            session_child_exec(
+                &session_bin,
+                &argv,
+                &env,
+                &child_stdin_read,
+                &child_stdout_write,
+                max_fd,
+            );
+        }
+        ForkResult::Parent { child: _ } => {
+            drop(child_stdin_read);
+            drop(child_stdout_write);
+            Ok(SessionTransport {
+                stdin: parent_stdin_write,
+                stdout: parent_stdout_read,
+            })
+        }
+    }
+}
+
+/// Minimal child exec for session processes: dup2 stdin/stdout, close FDs, exec.
+/// No privilege drop (child runs as root for PAM).
+#[cfg(feature = "sshd")]
+fn session_child_exec(
+    bin: &CString,
+    argv: &[CString],
+    envp: &[CString],
+    stdin_fd: &OwnedFd,
+    stdout_fd: &OwnedFd,
+    max_fd: i32,
+) -> ! {
+    if nix::unistd::dup2_stdin(stdin_fd).is_err() {
+        child_fail(126);
+    }
+    if nix::unistd::dup2_stdout(stdout_fd).is_err() {
+        child_fail(126);
+    }
+
+    let mut fd = 3;
+    while fd < max_fd {
+        let _ = nix::unistd::close(fd);
+        fd += 1;
+    }
+
+    let _ = execve(bin, argv, envp);
+    child_fail(127);
+}
+
+#[cfg(feature = "sshd")]
+fn build_session_exec_env(username: &str) -> Result<Vec<CString>, BuildExecEnvError> {
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
     [
-        [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
-        [b"USER=".as_slice(), username.as_bytes()].concat(),
-        [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
-        [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
         [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
+        [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
     ]
     .into_iter()
     .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))
     .collect()
 }
 
+fn build_exec_env(
+    username: &str,
+    home: &Path,
+    seqpacket_fd: Option<i32>,
+) -> Result<Vec<CString>, BuildExecEnvError> {
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let mut entries: Vec<Vec<u8>> = vec![
+        [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
+        [b"USER=".as_slice(), username.as_bytes()].concat(),
+        [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
+        [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
+        [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
+    ];
+    if let Some(fd) = seqpacket_fd {
+        entries.push(format!("PISHOO_SEQPACKET_FD={fd}").into_bytes());
+    }
+    entries
+        .into_iter()
+        .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))
+        .collect()
+}
+
 fn child_fail(code: i32) -> ! {
     std::process::exit(code);
+}
+
+// ---------------------------------------------------------------------------
+// SCM_RIGHTS helpers for FD passing over seqpacket
+// ---------------------------------------------------------------------------
+
+/// Send file descriptors over a seqpacket socket using `SCM_RIGHTS`.
+///
+/// Blocking — should be called inside `spawn_blocking`.
+#[cfg(feature = "sshd")]
+pub fn send_fds(sock_fd: std::os::fd::RawFd, fds: &[std::os::fd::RawFd]) -> Result<(), Errno> {
+    use std::io::IoSlice;
+
+    use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
+
+    let cmsg = [ControlMessage::ScmRights(fds)];
+    sendmsg::<()>(
+        sock_fd,
+        &[IoSlice::new(&[0u8])],
+        &cmsg,
+        MsgFlags::empty(),
+        None,
+    )?;
+    Ok(())
+}
+
+/// Receive file descriptors from a seqpacket socket using `SCM_RIGHTS`.
+///
+/// Blocking — should be called inside `spawn_blocking`.
+#[cfg(feature = "sshd")]
+pub fn recv_fds(sock_fd: std::os::fd::RawFd) -> Result<Vec<OwnedFd>, Errno> {
+    use std::{io::IoSliceMut, os::fd::FromRawFd};
+
+    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
+
+    let mut buf = [0u8; 1];
+    let mut cmsg_buf = nix::cmsg_space!([std::os::fd::RawFd; 4]);
+    let mut iov = [IoSliceMut::new(&mut buf)];
+    let msg = recvmsg::<()>(sock_fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())?;
+    for cmsg in msg.cmsgs()? {
+        if let ControlMessageOwned::ScmRights(fds) = cmsg {
+            // SAFETY: recvmsg guarantees these are valid open FDs passed via SCM_RIGHTS.
+            return Ok(fds
+                .into_iter()
+                .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+                .collect());
+        }
+    }
+    Err(Errno::ENODATA)
+}
+
+/// Resolve the path of the `pishoo-ssh-session` binary.
+///
+/// - If `PISHOO_SSH_SESSION_BIN` env var was set at **compile time**, use it.
+/// - Otherwise in debug builds, fall back to `<current_exe_dir>/pishoo-ssh-session`.
+/// - In release builds without the env var, this is a compile error.
+#[cfg(feature = "sshd")]
+pub fn session_binary_path() -> std::path::PathBuf {
+    #[allow(clippy::option_env_unwrap)]
+    {
+        #[cfg(debug_assertions)]
+        {
+            match option_env!("PISHOO_SSH_SESSION_BIN") {
+                Some(path) => std::path::PathBuf::from(path),
+                None => std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("pishoo-ssh-session")))
+                    .unwrap_or_else(|| std::path::PathBuf::from("pishoo-ssh-session")),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            std::path::PathBuf::from(env!("PISHOO_SSH_SESSION_BIN"))
+        }
+    }
 }
 
 fn max_fd() -> i32 {

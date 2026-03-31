@@ -67,6 +67,18 @@ pub enum ConnectError {
     Call { source: remoc::rtc::CallError },
 }
 
+/// Error returned by [`ControlPlane::spawn_session`].
+#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
+#[snafu(module)]
+pub enum SpawnSessionError {
+    #[snafu(display("failed to spawn session process: {reason}"))]
+    SpawnFailed { reason: String },
+    #[snafu(display("session spawning is not supported"))]
+    NotSupported,
+    #[snafu(transparent)]
+    Call { source: remoc::rtc::CallError },
+}
+
 // ---------------------------------------------------------------------------
 // ControlPlane — remoc RTC trait
 // ---------------------------------------------------------------------------
@@ -91,4 +103,13 @@ pub trait ControlPlane: Send + Sync {
     /// remoc, and returns a [`RemoteConnector`] that the worker can use
     /// directly with h3x.
     async fn connector(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError>;
+
+    /// Request root to spawn an SSH session child process for the given user.
+    ///
+    /// Root forks `pishoo-ssh-session` as root (for PAM), then sends the
+    /// child's pipe FDs to the worker via the seqpacket side-channel
+    /// (SCM_RIGHTS). This RPC returns `Ok(())` only after the FDs have
+    /// been sent — the worker must read them from the seqpacket socket
+    /// immediately after this call returns.
+    async fn spawn_session(&self, username: String) -> Result<(), SpawnSessionError>;
 }

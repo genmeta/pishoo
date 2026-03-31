@@ -1,6 +1,6 @@
-use std::{path::PathBuf, process::Stdio, sync::Arc};
+use std::sync::Arc;
 
-use axum::{Extension, response::IntoResponse};
+use axum::{Extension, extract::State, response::IntoResponse};
 use genmeta_ssh::{
     auth::AuthCredential,
     constants::SSH_VERSION,
@@ -16,30 +16,45 @@ use h3x::{
 };
 use http::{Request, StatusCode};
 use remoc::prelude::{Server, ServerShared};
-use snafu::Report;
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tracing::Instrument;
 
-use crate::{parse::Value, reverse::location::LocationMatch};
+use crate::{
+    control_plane::DynSpawnSession,
+    parse::Value,
+    reverse::{location::LocationMatch, router::RouterState},
+};
 
-/// Resolve the path of the `pishoo-ssh-session` binary.
-fn session_binary_path() -> PathBuf {
-    #[allow(clippy::option_env_unwrap)]
-    {
-        #[cfg(debug_assertions)]
-        {
-            match option_env!("PISHOO_SSH_SESSION_BIN") {
-                Some(path) => PathBuf::from(path),
-                None => std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("pishoo-ssh-session")))
-                    .unwrap_or_else(|| PathBuf::from("pishoo-ssh-session")),
-            }
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            PathBuf::from(env!("PISHOO_SSH_SESSION_BIN"))
-        }
-    }
+/// Errors from [`run_ssh_session`].
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RunSshSessionError {
+    #[snafu(display("Ssh3Protocol not registered"))]
+    ProtocolNotRegistered,
+    #[snafu(display("failed to register SSH3 conversation"))]
+    RegisterConversation {
+        source: crate::control_plane::StringError,
+    },
+    #[snafu(display("failed to spawn session child process"))]
+    SpawnSession {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(display("failed to establish remoc channel with child"))]
+    RemocConnect {
+        source: remoc::ConnectError<std::io::Error, std::io::Error>,
+    },
+    #[snafu(display("failed to receive AuthenticateFn from child"))]
+    RecvAuthFn { source: remoc::rch::base::RecvError },
+    #[snafu(display("child did not send AuthenticateFn"))]
+    NoAuthFn,
+    #[snafu(display("authentication rejected by child"))]
+    AuthRejected {
+        source: genmeta_ssh::session::AuthError,
+    },
+    #[snafu(display("child session failed"))]
+    SessionFailed {
+        source: genmeta_ssh::session::SessionRunError,
+    },
 }
 
 /// Axum-style handler for SSH3 CONNECT sessions.
@@ -51,6 +66,7 @@ pub async fn sshd_handle(
     Extension(loc): Extension<LocationMatch>,
     Extension(protocols): Extension<Arc<Protocols>>,
     Extension(stream_id): Extension<StreamId>,
+    State(state): State<RouterState>,
     mut req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
     let username = loc.remaining.trim_matches('/');
@@ -93,36 +109,40 @@ pub async fn sshd_handle(
 
     // Spawn the SSH session in a background task. The CONNECT upgrade streams
     // become available after this handler returns the 200 response.
-    tokio::spawn(async move {
-        // Extract raw read/write streams via CONNECT upgrade.
-        let read_stream = match upgrade::take::<ReadStream>(&mut req).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to take over read stream");
-                return;
-            }
-        };
-        let write_stream = match upgrade::take::<WriteStream>(&mut req).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to take over write stream");
-                return;
-            }
-        };
+    tokio::spawn(
+        async move {
+            // Extract raw read/write streams via CONNECT upgrade.
+            let read_stream = match upgrade::take::<ReadStream>(&mut req).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to take over read stream");
+                    return;
+                }
+            };
+            let write_stream = match upgrade::take::<WriteStream>(&mut req).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to take over write stream");
+                    return;
+                }
+            };
 
-        if let Err(e) = run_ssh_session(
-            &username,
-            conversation_id,
-            peer_version,
-            protocols,
-            read_stream,
-            write_stream,
-        )
-        .await
-        {
-            tracing::error!(error = %e, "SSH session failed");
+            if let Err(e) = run_ssh_session(
+                &username,
+                conversation_id,
+                peer_version,
+                protocols,
+                state.session_spawner.as_ref(),
+                read_stream,
+                write_stream,
+            )
+            .await
+            {
+                tracing::error!(error = %Report::from_error(&e), "ssh session failed");
+            }
         }
-    }.instrument(span));
+        .instrument(span),
+    );
 
     // Return 200 OK with ssh-version header to accept the CONNECT.
     http::Response::builder()
@@ -138,59 +158,55 @@ async fn run_ssh_session(
     conversation_id: StreamId,
     peer_version: String,
     protocols: Arc<Protocols>,
+    spawner: &dyn DynSpawnSession,
     recver: ReadStream,
     sender: WriteStream,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RunSshSessionError> {
+    use run_ssh_session_error::*;
+
     let ssh3_proto = protocols
         .get::<genmeta_ssh::protocol::Ssh3Protocol>()
-        .ok_or("Ssh3Protocol not registered")?;
+        .context(ProtocolNotRegisteredSnafu)?;
     let handle = ssh3_proto
         .register(conversation_id)
-        .map_err(|e| format!("failed to register SSH3 conversation: {e}"))?;
+        .map_err(|e| crate::control_plane::StringError(e.to_string()))
+        .context(RegisterConversationSnafu)?;
 
-    let session_binary = session_binary_path();
+    // Spawn the session child process via the control plane.
+    let transport = spawner
+        .spawn_session(username)
+        .await
+        .context(SpawnSessionSnafu)?;
 
-    let mut child = tokio::process::Command::new(&session_binary)
-        .env("PISHOO_USER", username)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                path = %session_binary.display(),
-                "failed to spawn session binary"
-            );
-            e
-        })?;
-
-    let child_stdin = child.stdin.take().unwrap();
-    let child_stdout = child.stdout.take().unwrap();
+    // Convert OwnedFd → tokio::fs::File for remoc IO.
+    let stdin = tokio::fs::File::from_std(std::fs::File::from(transport.stdin));
+    let stdout = tokio::fs::File::from_std(std::fs::File::from(transport.stdout));
 
     let (conn, _tx, mut rx) =
         remoc::Connect::io::<_, _, (), AuthenticateFn, remoc::codec::Default>(
             remoc::Cfg::default(),
-            child_stdout,
-            child_stdin,
+            stdout,
+            stdin,
         )
-        .await?;
+        .await
+        .context(RemocConnectSnafu)?;
     let conn_handle = tokio::spawn(conn.in_current_span());
 
     let auth_fn: AuthenticateFn = rx
         .recv()
-        .await?
-        .ok_or("child did not send AuthenticateFn")?;
+        .await
+        .context(RecvAuthFnSnafu)?
+        .context(NoAuthFnSnafu)?;
 
     let auth_request = AuthRequest {
         username: username.to_owned(),
         credential: AuthCredential::Certificate,
     };
 
-    let start_session_fn = auth_fn.call(auth_request).await.map_err(|e| {
-        tracing::warn!(error = %Report::from_error(&e), "authentication failed");
-        e
-    })?;
+    let start_session_fn = auth_fn
+        .call(auth_request)
+        .await
+        .context(AuthRejectedSnafu)?;
 
     // Set up remoc bridges for the control streams.
     let (rs, rc) = ReadMessageStreamServer::new(Box::pin(recver.into_bytes_stream()), 1);
@@ -228,15 +244,11 @@ async fn run_ssh_session(
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
 
-    match start_session_fn.call(bootstrap).await {
-        Ok(()) => tracing::info!(%conversation_id, "child session completed"),
-        Err(e) => tracing::error!(
-            error = %Report::from_error(&e),
-            "child session failed"
-        ),
-    }
+    start_session_fn
+        .call(bootstrap)
+        .await
+        .context(SessionFailedSnafu)?;
 
-    let _ = child.wait().await;
     let _ = conn_handle.await;
     tracing::info!(%conversation_id, "session ended");
     Ok(())

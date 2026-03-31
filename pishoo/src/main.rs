@@ -60,10 +60,8 @@ async fn main() -> Result<(), Whatever> {
     let args = Args::parse();
 
     #[cfg(not(feature = "console_subscriber"))]
-    let _tracing_guard = pishoo::tracing_init::init_tracing(&format!(
-        "pishoo/{}",
-        std::process::id()
-    ));
+    let _tracing_guard =
+        pishoo::tracing_init::init_tracing(&format!("pishoo/{}", std::process::id()));
 
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
@@ -420,10 +418,12 @@ async fn spawn_local_service(
 
     let config = build_local_service_config(&entry_config.local_servers).await?;
 
-    let plane = pishoo::root::local_plane::LocalControlPlane::new(state.clone());
+    let plane = Arc::new(pishoo::root::local_plane::LocalControlPlane::new(
+        state.clone(),
+    ));
 
     let handle = tokio::spawn(async move {
-        if let Err(error) = pishoo::service::run_service(&plane, &config).await {
+        if let Err(error) = pishoo::service::run_service(plane, &config).await {
             tracing::error!(
                 error = %Report::from_error(error.as_ref()),
                 "local service exited with error"

@@ -8,6 +8,8 @@
 //!
 //! **stdout is reserved for remoc transport** — all logging goes to stderr.
 
+use std::sync::Arc;
+
 use gateway::error::Whatever;
 use genmeta_home::GenmetaHome;
 use pishoo::{
@@ -73,7 +75,25 @@ async fn main() -> Result<(), Whatever> {
     tracing::info!("Startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
-    let plane = RemoteControlPlane::new(bootstrap.control_plane);
+    // Recover the seqpacket FD passed by root via PISHOO_SEQPACKET_FD env var.
+    #[cfg(feature = "sshd")]
+    let seqpacket = {
+        use std::os::fd::FromRawFd;
+        let fd_str = std::env::var("PISHOO_SEQPACKET_FD").whatever_context(
+            "PISHOO_SEQPACKET_FD not set; this binary must be spawned by pishoo root",
+        )?;
+        let fd_num: i32 = fd_str
+            .parse()
+            .whatever_context("PISHOO_SEQPACKET_FD is not a valid fd number")?;
+        // SAFETY: the FD was set up by the root process in launch_worker and
+        // intentionally kept open (skipped in the FD close loop).
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd_num) }
+    };
+    let plane = Arc::new(RemoteControlPlane::new(
+        bootstrap.control_plane,
+        #[cfg(feature = "sshd")]
+        seqpacket,
+    ));
 
     // Scan identities and build service config.
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
@@ -98,7 +118,7 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to create SIGHUP listener")?;
 
     tokio::select! {
-        result = run_service(&plane, &config) => {
+        result = run_service(plane.clone(), &config) => {
             if let Err(error) = result {
                 tracing::error!(
                     error = %Report::from_error(error.as_ref()),
