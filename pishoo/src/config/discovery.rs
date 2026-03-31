@@ -1,11 +1,11 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use futures::StreamExt;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
 };
-use genmeta_home::GenmetaHome;
+use genmeta_home::{GenmetaHome, identity::IdentityHome};
 use snafu::{ResultExt, whatever};
 
 use super::{EntryConfig, EntryServerOwner, ResolvedWorkerTarget, resolve_entry_worker_targets};
@@ -76,17 +76,16 @@ pub async fn discover_worker_servers(
             Ok(home) => home,
             Err(_) => continue,
         };
-        let conf_path = identity_home.path().join("server.conf");
-        if !conf_path.is_file() {
+        if !identity_home.join("server.conf").is_file() {
             continue;
         }
 
         servers.extend(
-            load_identity_servers(&conf_path)
+            load_identity_servers(&identity_home)
                 .await
                 .whatever_context(format!(
-                    "failed to load identity servers from `{}` for worker `{}`",
-                    conf_path.display(),
+                    "failed to load identity servers for `{}` of worker `{}`",
+                    identity_name,
                     target.username
                 ))?,
         );
@@ -95,13 +94,16 @@ pub async fn discover_worker_servers(
     Ok(servers)
 }
 
-pub async fn load_identity_servers(conf_path: &Path) -> Result<Vec<Arc<Node>>, Whatever> {
-    let raw = tokio::fs::read(conf_path).await.whatever_context(format!(
+pub async fn load_identity_servers(
+    identity_home: &IdentityHome,
+) -> Result<Vec<Arc<Node>>, Whatever> {
+    let conf_path = identity_home.join("server.conf");
+    let raw = tokio::fs::read(&conf_path).await.whatever_context(format!(
         "failed to read identity config `{}`",
         conf_path.display()
     ))?;
     let parsed =
-        gateway::parse::parse_server_config(&raw, conf_path.parent()).whatever_context(format!(
+        gateway::parse::parse_server_config(&raw, identity_home).whatever_context(format!(
             "failed to parse identity server config `{}`",
             conf_path.display()
         ))?;

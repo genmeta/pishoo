@@ -7,6 +7,7 @@ use std::{
 };
 
 use conf::parse_conf;
+use genmeta_home::identity::IdentityHome;
 use gm_quic::prelude::BindUri;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
@@ -20,7 +21,7 @@ use tokio::sync::OnceCell;
 use crate::error::Whatever;
 
 thread_local! {
-    pub(crate) static CONFIG_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static IDENTITY_HOME: std::cell::RefCell<Option<IdentityHome>> = const { std::cell::RefCell::new(None) };
 }
 
 pub mod conf;
@@ -328,7 +329,7 @@ impl Node {
 }
 
 pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
-    CONFIG_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
+    IDENTITY_HOME.with(|r| *r.borrow_mut() = None);
 
     let mut directives =
         Directive::<Nginx>::parse(configure).whatever_context("cannot parse configuration")?;
@@ -348,19 +349,18 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
     parse_conf(directives)
 }
 
-pub fn parse_server_config(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
-    CONFIG_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
+pub fn parse_server_config(configure: &[u8], identity_home: &IdentityHome) -> Result<Arc<Node>> {
+    IDENTITY_HOME.with(|r| *r.borrow_mut() = Some(identity_home.clone()));
 
     let mut directives =
         Directive::<Nginx>::parse(configure).whatever_context("cannot parse configuration")?;
 
-    if let Some(root) = root {
-        directives = directives
-            .into_iter()
-            .map(|mut directive| directive.resolve_include(root).map(|_| directive))
-            .collect::<Result<Vec<_>, _>>()
-            .whatever_context("cannot resolve include in configuration")?;
-    }
+    let root = identity_home.path();
+    directives = directives
+        .into_iter()
+        .map(|mut directive| directive.resolve_include(root).map(|_| directive))
+        .collect::<Result<Vec<_>, _>>()
+        .whatever_context("cannot resolve include in configuration")?;
 
     conf::parse_server_conf(directives)
 }

@@ -111,9 +111,9 @@ pub async fn build_service_config(
             .or_insert_with(|| Arc::new(Node::new(Value::ValueMap(HashMap::new()))));
 
         // Load per-identity server.conf if present.
-        let conf_path = identity_home.path().join("server.conf");
+        let conf_path = identity_home.join("server.conf");
         let identity_server_nodes = if conf_path.is_file() {
-            match load_identity_servers(&conf_path).await {
+            match load_identity_servers(&identity_home).await {
                 Ok(nodes) => nodes,
                 Err(error) => {
                     tracing::warn!(
