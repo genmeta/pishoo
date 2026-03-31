@@ -117,11 +117,12 @@ async fn main() -> Result<(), Whatever> {
         .build()
         .expect("failed to build tls client cert verifier");
 
+    let stun_server = std::env::var("STUN_SERVER").unwrap_or_else(|_| "stun.genmeta.net".into());
     let listeners = QuicListeners::builder()
         .with_resolver(Arc::new(gateway::dns::build_query_resolver_chain(
             &publishable_servers,
         )))
-        .with_stun("stun.genmeta.net")
+        .with_stun(stun_server)
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
         .with_alpns([b"h3".as_slice()])
