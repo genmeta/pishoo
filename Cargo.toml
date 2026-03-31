@@ -112,8 +112,9 @@ gateway = { path = "gateway", default-features = false }
 # [patch."ssh://git@github.com/genmeta/h3x.git"]
 # h3x = { path = "../h3x" }
 
-[patch."ssh://git@github.com/genmeta/dhttp-home.git"]
-genmeta-home = { path = "../dhttp-home" }
+# [patch."ssh://git@github.com/genmeta/dquic.git"]
+# gm-quic = { path = "../dquic/gm-quic" }
+# qevent = { path = "../dquic/qevent" }
 
 [profile.dev]
 panic = "abort"

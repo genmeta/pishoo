@@ -409,23 +409,37 @@ impl RootState {
         };
 
         for (server_name, listens) in entries {
-            let desired: std::collections::HashSet<String> =
-                crate::bind::resolve_bind_uris(&listens, &device_names)
-                    .into_iter()
-                    .collect();
+            let desired_uris: Vec<String> = crate::bind::resolve_bind_uris(&listens, &device_names);
+
+            // Build identity_key → original URI maps for stable comparison.
+            // alloc_port() generates a unique query param each call, so we
+            // must compare by identity_key (URI without query string).
+            let desired_keys: std::collections::HashMap<String, &str> = desired_uris
+                .iter()
+                .map(|uri| {
+                    let bind_uri = gm_quic::prelude::BindUri::from(uri.as_str());
+                    (bind_uri.identity_key(), uri.as_str())
+                })
+                .collect();
 
             let Some(server) = self.listeners.get_server(&server_name) else {
                 continue;
             };
 
-            let current: std::collections::HashSet<String> = server
+            let current_map: std::collections::HashMap<String, String> = server
                 .bind_interfaces()
                 .keys()
-                .map(|uri| uri.to_string())
+                .map(|uri| (uri.identity_key(), uri.to_string()))
                 .collect();
 
-            // Bind new URIs.
-            let to_add: Vec<String> = desired.difference(&current).cloned().collect();
+            let desired_key_set: std::collections::HashSet<&String> = desired_keys.keys().collect();
+            let current_key_set: std::collections::HashSet<&String> = current_map.keys().collect();
+
+            // Bind new URIs (present in desired but not in current).
+            let to_add: Vec<String> = desired_key_set
+                .difference(&current_key_set)
+                .filter_map(|key| desired_keys.get(key.as_str()).map(|s| s.to_string()))
+                .collect();
             if !to_add.is_empty() {
                 tracing::info!(
                     %server_name,
@@ -435,8 +449,11 @@ impl RootState {
                 server.bind(to_add).await;
             }
 
-            // Unbind removed URIs.
-            let to_remove: Vec<String> = current.difference(&desired).cloned().collect();
+            // Unbind removed URIs (present in current but not in desired).
+            let to_remove: Vec<String> = current_key_set
+                .difference(&desired_key_set)
+                .filter_map(|key| current_map.get(key.as_str()).cloned())
+                .collect();
             for uri_str in &to_remove {
                 let uri = gm_quic::prelude::BindUri::from(uri_str.as_str());
                 server.remove_iface(&uri);
