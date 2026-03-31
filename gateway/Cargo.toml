@@ -78,6 +78,7 @@ clap = { workspace = true }
 
 
 [features]
-sshd = ["dep:genmeta-ssh", "genmeta-ssh/pam", "remoc/rfn"]
+sshd = ["dep:genmeta-ssh", "remoc/rfn"]
+pam = ["sshd", "genmeta-ssh/pam"]
 stun_traversal = []
 qlog = []

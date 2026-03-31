@@ -50,6 +50,7 @@ async fn main() {
         tracing::info!(username = %auth_request.username, credential = %auth_request.credential, "authentication starting");
 
         let (uid, gid, shell) = match &auth_request.credential {
+            #[cfg(feature = "pam")]
             AuthCredential::Basic { password, .. } => {
                 // Password-based: full PAM authenticate + acct_mgmt.
                 let user_info = genmeta_ssh::session::pam::authenticate(
@@ -63,6 +64,13 @@ async fn main() {
                 })?;
                 (user_info.uid, user_info.gid, user_info.shell)
             }
+            #[cfg(not(feature = "pam"))]
+            AuthCredential::Basic { .. } => {
+                return Err(AuthError::PamFailed {
+                    reason: "password authentication requires the `pam` feature".to_owned(),
+                });
+            }
+            #[cfg(feature = "pam")]
             AuthCredential::Certificate => {
                 // mTLS: skip password authentication, but still perform
                 // PAM acct_mgmt + open_session for system session creation.
@@ -72,6 +80,16 @@ async fn main() {
                         .map_err(|e| AuthError::PamFailed {
                             reason: Report::from_error(e).to_string(),
                         })?;
+                (user_info.uid, user_info.gid, user_info.shell)
+            }
+            #[cfg(not(feature = "pam"))]
+            AuthCredential::Certificate => {
+                // mTLS without PAM: look up user directly from /etc/passwd.
+                let user_info = genmeta_ssh::session::lookup_user(&auth_request.username)
+                    .await
+                    .map_err(|e| AuthError::PamFailed {
+                        reason: Report::from_error(e).to_string(),
+                    })?;
                 (user_info.uid, user_info.gid, user_info.shell)
             }
         };

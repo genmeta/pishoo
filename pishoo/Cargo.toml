@@ -185,7 +185,8 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 
 [features]
 default = ["sqlx-sqlite"]
-sshd = ["gateway/sshd", "dep:genmeta-ssh", "genmeta-ssh/pam"]
+sshd = ["gateway/sshd", "dep:genmeta-ssh"]
+pam = ["sshd", "genmeta-ssh/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]
