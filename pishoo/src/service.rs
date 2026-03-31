@@ -123,6 +123,8 @@ where
         );
     }
 
+    tracing::info!(server_count = config.servers.len(), "worker ready");
+
     // Wait for all server tasks (they run until shutdown).
     while tasks.join_next().await.is_some() {}
 
