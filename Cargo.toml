@@ -59,7 +59,7 @@ remoc = { version = "0.18", default-features = false, features = [
     "rfn",
     "rtc",
     "serde",
-    "default-codec-json",
+    "default-codec-bincode",
 ] }
 
 # --- SSH3 ---
