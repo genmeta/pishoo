@@ -133,21 +133,24 @@ pub async fn build_service_config(
             }
         }
 
-        // Extract bind specifications from server nodes.
+        // Extract bind specifications and find the matching server node.
         let mut binds: HashMap<String, Vec<Listens>> = HashMap::new();
+        let mut server_nodes_by_name: HashMap<String, Arc<Node>> = HashMap::new();
         for server_node in &identity_server_nodes {
             if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
                 (server_node.get("server_name"), server_node.get("listen"))
             {
                 for sn in server_names {
                     binds.insert(sn.name.clone(), listens.clone());
+                    server_nodes_by_name.insert(sn.name.clone(), server_node.clone());
                 }
             }
         }
 
         // Build the listen request using the identity's server name as primary bind key,
         // falling back to default bind if not explicitly configured.
-        let bind = binds.remove(name.as_full()).unwrap_or_default();
+        let primary_name = name.as_full().to_owned();
+        let bind = binds.remove(&primary_name).unwrap_or_default();
         if bind.is_empty() {
             tracing::warn!(%name, "no listen specifications, skipping listener request");
             continue;
@@ -158,9 +161,16 @@ pub async fn build_service_config(
             bind,
         };
 
+        // Use the parsed server node (with location blocks etc.) instead of
+        // an empty node — this is what carries proxy/file/location config
+        // through to the service layer.
+        let server_node = server_nodes_by_name
+            .remove(&primary_name)
+            .unwrap_or_else(|| Arc::new(Node::new(Value::ValueMap(HashMap::new()))));
+
         servers.push(ServerConfig {
             listen_request,
-            server_node: Arc::new(Node::new(Value::ValueMap(HashMap::new()))),
+            server_node,
         });
     }
 
