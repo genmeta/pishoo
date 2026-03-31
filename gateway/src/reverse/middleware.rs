@@ -12,9 +12,8 @@ use http_body_util::combinators::UnsyncBoxBody;
 use snafu::Report;
 use tracing::{info, warn};
 
-use crate::reverse::MissingRulePolicy;
-
 use super::log::RequestInfo;
+use crate::reverse::MissingRulePolicy;
 
 type ReqBody = UnsyncBoxBody<Bytes, MessageStreamError>;
 
@@ -66,8 +65,11 @@ pub struct AccessControlService<S> {
 
 impl<S> tower_service::Service<http::Request<ReqBody>> for AccessControlService<S>
 where
-    S: tower_service::Service<http::Request<ReqBody>, Response = axum::response::Response, Error = Infallible>
-        + Clone
+    S: tower_service::Service<
+            http::Request<ReqBody>,
+            Response = axum::response::Response,
+            Error = Infallible,
+        > + Clone
         + Send
         + 'static,
     S::Future: Send,
@@ -90,10 +92,8 @@ where
                 .extensions()
                 .get::<Arc<dyn agent::RemoteAgent>>()
                 .map(|a| a.name().to_owned());
-            let http_request = firewall_base::expr::atomics::HttpRequest::new(
-                client_name.as_deref(),
-                &request,
-            );
+            let http_request =
+                firewall_base::expr::atomics::HttpRequest::new(client_name.as_deref(), &request);
 
             let action = match access_rules.match_rule(request.uri().path(), &http_request) {
                 Ok((_location, action)) => action,
@@ -154,8 +154,11 @@ pub struct AccessLogService<S> {
 
 impl<S> tower_service::Service<http::Request<ReqBody>> for AccessLogService<S>
 where
-    S: tower_service::Service<http::Request<ReqBody>, Response = axum::response::Response, Error = Infallible>
-        + Clone
+    S: tower_service::Service<
+            http::Request<ReqBody>,
+            Response = axum::response::Response,
+            Error = Infallible,
+        > + Clone
         + Send
         + 'static,
     S::Future: Send,

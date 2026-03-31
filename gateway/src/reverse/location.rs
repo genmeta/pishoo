@@ -63,11 +63,9 @@ pub fn match_location(locations: &[Arc<Node>], path: &str) -> Option<LocationMat
         }
 
         if let Ok(Some(matched)) = pattern.try_match(path) {
-            let dominated = best
-                .as_ref()
-                .is_none_or(|(_, best_matched, best_p)| {
-                    priority > *best_p || (priority == *best_p && matched.len() >= best_matched.len())
-                });
+            let dominated = best.as_ref().is_none_or(|(_, best_matched, best_p)| {
+                priority > *best_p || (priority == *best_p && matched.len() >= best_matched.len())
+            });
 
             if dominated {
                 best = Some((location, matched, priority));
@@ -96,9 +94,7 @@ fn compute_remaining(location: &Node, path: &str, matched: &str) -> String {
     match pattern {
         // For prefix-style patterns, the matched string IS the prefix — strip it.
         Pattern::Exact(_) | Pattern::Prefix(_) | Pattern::NormalPrefix(_) | Pattern::Common => {
-            path.strip_prefix(matched)
-                .unwrap_or("")
-                .to_string()
+            path.strip_prefix(matched).unwrap_or("").to_string()
         }
         // For regex patterns, the match position is arbitrary (not necessarily a prefix),
         // so we return the full path as remaining.
@@ -148,8 +144,9 @@ mod tests {
 
     #[test]
     fn test_regex_match_remaining_is_full_path() {
-        let locations =
-            vec![make_location(Pattern::Regex(Regex::new(r"\.(jpg|gif)$").unwrap()))];
+        let locations = vec![make_location(Pattern::Regex(
+            Regex::new(r"\.(jpg|gif)$").unwrap(),
+        ))];
 
         let m = match_location(&locations, "/images/cat.jpg").unwrap();
         assert_eq!(m.matched, ".jpg");

@@ -115,9 +115,9 @@ fn pass(
             "proxying request to upstream path and query"
         );
 
-        let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(format!(
-            "failed to generate target uri from `{path_and_query}`"
-        ))?;
+        let target_uri = Uri::from_str(&path_and_query).whatever_context::<_, Whatever>(
+            format!("failed to generate target uri from `{path_and_query}`"),
+        )?;
 
         let mut new_parts = parts;
         new_parts.uri = target_uri.clone();

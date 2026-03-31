@@ -108,8 +108,7 @@ pub fn compress_response(
         gzip.apply_headers(&mut parts);
 
         let body_stream = tokio_util::io::StreamReader::new(
-            http_body_util::BodyExt::into_data_stream(body)
-                .map_err(std::io::Error::other),
+            http_body_util::BodyExt::into_data_stream(body).map_err(std::io::Error::other),
         );
         let compressed = GzipEncoder::with_quality(body_stream, gzip.level());
         let stream = ReaderStream::new(compressed);

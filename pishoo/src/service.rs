@@ -11,12 +11,15 @@ use gateway::{
     control_plane::{ControlPlane, ListenRequest},
     parse::{Node, Value},
     reverse::{
+        MissingRulePolicy,
         middleware::{AccessControlLayer, AccessLogLayer},
         router::NginxRouter,
-        MissingRulePolicy,
     },
 };
-use h3x::{connection::ConnectionBuilder, dhttp::settings::Settings, hyper::server::TowerService, quic, server::Servers};
+use h3x::{
+    connection::ConnectionBuilder, dhttp::settings::Settings, hyper::server::TowerService, quic,
+    server::Servers,
+};
 use snafu::Report;
 use tower::ServiceBuilder;
 use tracing::Instrument;
