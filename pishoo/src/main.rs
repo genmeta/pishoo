@@ -14,10 +14,7 @@ use gateway::{
     parse::{Node, Value},
     reverse::MissingRulePolicy,
 };
-use gm_quic::{
-    prelude::{QuicListeners, handy::server_parameters},
-    qinterface::device::Devices,
-};
+use gm_quic::prelude::{QuicListeners, handy::server_parameters};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{Report, ResultExt, whatever};
@@ -153,6 +150,9 @@ async fn main() -> Result<(), Whatever> {
     let accept_handle = pishoo::root::network::spawn_accept_loop(state.clone());
 
     let monitor_handle = pishoo::root::process::spawn_monitor_loop(state.clone());
+
+    // Watch for network interface changes and reconcile bind URIs
+    let network_watch_handle = pishoo::root::network::spawn_network_watch_loop(state.clone());
 
     loop {
         let sig = signals.wait().await;
@@ -290,6 +290,8 @@ async fn main() -> Result<(), Whatever> {
     let _ = accept_handle.await;
     monitor_handle.abort();
     let _ = monitor_handle.await;
+    network_watch_handle.abort();
+    let _ = network_watch_handle.await;
     if let Some(handle) = local_service_handle.take() {
         handle.abort();
     }
@@ -332,12 +334,6 @@ async fn build_local_service_config(
     let canonicalized = pishoo::naming::canonicalize_server_nodes(local_servers)
         .whatever_context("failed to canonicalize local server nodes")?;
 
-    let device_names = Devices::global()
-        .interfaces()
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-
     // Collect the first explicit access_rules URI found across local servers.
     let mut access_rules_uri: Option<String> = None;
 
@@ -377,18 +373,13 @@ async fn build_local_service_config(
         let (certs, key) = pishoo::tls::validate_tls_material(&cert_pem, &key_pem)
             .whatever_context("invalid local tls material")?;
 
-        let bind = pishoo::bind::resolve_bind_uris(&listens, &device_names);
-        if bind.is_empty() {
-            whatever!("local server has no resolved bind uris");
-        }
-
         for configured_name in server_names {
             let name = genmeta_home::identity::Name::try_from_str(configured_name.name.clone())
                 .whatever_context(format!("invalid server name `{}`", configured_name.name))?;
             server_configs.push(pishoo::service::ServerConfig {
                 listen_request: ListenRequest {
                     identity: Identity::new(name, certs.clone(), key.clone_key()),
-                    bind: bind.clone(),
+                    bind: listens.clone(),
                 },
                 server_node: server.clone(),
             });

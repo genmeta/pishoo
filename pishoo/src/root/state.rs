@@ -62,6 +62,8 @@ pub enum ServerEntry {
         owner: ServiceOwner,
         conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
         shutdown_token: CancellationToken,
+        /// Original listen specifications for network-change reconciliation.
+        listens: Vec<gateway::parse::Listens>,
     },
     /// Name is poisoned due to a cross-owner conflict.
     /// Only cleared by `scrub_conflicts()` during reload.
@@ -295,13 +297,20 @@ impl RootState {
             }
         }
 
-        // Phase 2: name is vacant — bind the server (slow, async I/O).
+        // Phase 2: name is vacant — resolve bind URIs and bind the server.
+        let device_names = gm_quic::qinterface::device::Devices::global()
+            .interfaces()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let bind_uris = crate::bind::resolve_bind_uris(&request.bind, &device_names);
+
         self.listeners
             .add_server(
                 &server_name,
                 request.identity.certs(),
                 request.identity.key(),
-                request.bind,
+                bind_uris,
                 None::<Vec<u8>>,
             )
             .await
@@ -342,6 +351,7 @@ impl RootState {
                 owner,
                 conn_tx: tx,
                 shutdown_token: shutdown_token.clone(),
+                listens: request.bind,
             },
         );
 
@@ -361,6 +371,83 @@ impl RootState {
         match inner.servers.get(server_name) {
             Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
             _ => None,
+        }
+    }
+
+    /// Reconcile bind URIs for active servers affected by a network
+    /// interface event.
+    ///
+    /// Only servers whose [`Listens`] reference the changed device (via
+    /// [`IfaceRange::All`] or [`IfaceRange::Exact`]) are re-resolved.
+    /// Listens with `specific_addrs` are always skipped (they don't depend
+    /// on network interfaces).
+    pub async fn reconcile_binds(&self, event: &gm_quic::qinterface::device::InterfaceEvent) {
+        let device = event.device();
+
+        let device_names: Vec<String> = gm_quic::qinterface::device::Devices::global()
+            .interfaces()
+            .keys()
+            .cloned()
+            .collect();
+
+        // Collect only servers whose listens are affected by this device.
+        let entries: Vec<(String, Vec<gateway::parse::Listens>)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .servers
+                .iter()
+                .filter_map(|(name, entry)| match entry {
+                    ServerEntry::Active { listens, .. } => {
+                        let affected = listens
+                            .iter()
+                            .any(|l| l.specific_addrs.is_none() && l.range.contains(device));
+                        affected.then(|| (name.clone(), listens.clone()))
+                    }
+                    ServerEntry::Conflicted => None,
+                })
+                .collect()
+        };
+
+        for (server_name, listens) in entries {
+            let desired: std::collections::HashSet<String> =
+                crate::bind::resolve_bind_uris(&listens, &device_names)
+                    .into_iter()
+                    .collect();
+
+            let Some(server) = self.listeners.get_server(&server_name) else {
+                continue;
+            };
+
+            let current: std::collections::HashSet<String> = server
+                .bind_interfaces()
+                .keys()
+                .map(|uri| uri.to_string())
+                .collect();
+
+            // Bind new URIs.
+            let to_add: Vec<String> = desired.difference(&current).cloned().collect();
+            if !to_add.is_empty() {
+                tracing::info!(
+                    %server_name,
+                    added = ?to_add,
+                    "reconcile: binding new interfaces"
+                );
+                server.bind(to_add).await;
+            }
+
+            // Unbind removed URIs.
+            let to_remove: Vec<String> = current.difference(&desired).cloned().collect();
+            for uri_str in &to_remove {
+                let uri = gm_quic::prelude::BindUri::from(uri_str.as_str());
+                server.remove_iface(&uri);
+            }
+            if !to_remove.is_empty() {
+                tracing::info!(
+                    %server_name,
+                    removed = ?to_remove,
+                    "reconcile: unbound removed interfaces"
+                );
+            }
         }
     }
 

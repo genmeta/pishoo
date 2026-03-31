@@ -10,6 +10,8 @@ use h3x::quic;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 
+use crate::parse as gateway_parse;
+
 /// A simple error type wrapping a string message.
 ///
 /// Implements [`Display`](std::fmt::Display) to show its content and
@@ -36,8 +38,8 @@ impl std::error::Error for StringError {}
 pub struct ListenRequest {
     /// The identity to use for the server's TLS configuration.
     pub identity: Identity,
-    /// Bind addresses (e.g., `["0.0.0.0:443", "[::]:443"]`).
-    pub bind: Vec<String>,
+    /// Listen specifications; resolved to bind URIs by the root process.
+    pub bind: Vec<gateway_parse::Listens>,
 }
 
 /// Capability to create QUIC listeners.
@@ -198,7 +200,7 @@ impl IdentityHelper {
 #[derive(Serialize, Deserialize)]
 struct ListenRequestHelper {
     identity: IdentityHelper,
-    bind: Vec<String>,
+    bind: Vec<gateway_parse::Listens>,
 }
 
 impl Serialize for ListenRequest {

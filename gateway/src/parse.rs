@@ -112,7 +112,7 @@ pub fn optional_server_identity(node: &Node, server_name_key: &str) -> Option<Se
     server_identity(node, server_name.clone())
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IpFamilies {
     V4,
     V6,
@@ -133,7 +133,7 @@ impl FromStr for IpFamilies {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IfaceRange {
     All,
     External,
@@ -167,7 +167,7 @@ impl From<&str> for IfaceRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Listens {
     pub range: IfaceRange,
     pub families: IpFamilies,

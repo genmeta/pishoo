@@ -10,14 +10,13 @@ use futures::StreamExt;
 use gateway::{
     control_plane::ListenRequest,
     error::Whatever,
-    parse::{Node, Value},
+    parse::{Listens, Node, Value},
     reverse::MissingRulePolicy,
 };
 use genmeta_home::GenmetaHome;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
-    bind::resolve_bind_uris,
     config::load_identity_servers,
     policy,
     service::{ServerConfig, ServiceConfig},
@@ -50,12 +49,6 @@ impl snafu::FromString for BuildConfigError {
 pub async fn build_service_config(
     genmeta_home: &GenmetaHome,
 ) -> Result<ServiceConfig, BuildConfigError> {
-    let device_names = gm_quic::qinterface::device::Devices::global()
-        .interfaces()
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-
     // Collect identity names from the stream.
     let mut identity_names = Vec::new();
     let mut stream = std::pin::pin!(genmeta_home.identities());
@@ -140,14 +133,14 @@ pub async fn build_service_config(
             }
         }
 
-        // Extract bind addresses from server nodes.
-        let mut binds: HashMap<String, Vec<String>> = HashMap::new();
+        // Extract bind specifications from server nodes.
+        let mut binds: HashMap<String, Vec<Listens>> = HashMap::new();
         for server_node in &identity_server_nodes {
             if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
                 (server_node.get("server_name"), server_node.get("listen"))
             {
                 for sn in server_names {
-                    binds.insert(sn.name.clone(), resolve_bind_uris(listens, &device_names));
+                    binds.insert(sn.name.clone(), listens.clone());
                 }
             }
         }
@@ -156,7 +149,7 @@ pub async fn build_service_config(
         // falling back to default bind if not explicitly configured.
         let bind = binds.remove(name.as_full()).unwrap_or_default();
         if bind.is_empty() {
-            tracing::warn!(%name, "no resolved bind URIs, skipping listener request");
+            tracing::warn!(%name, "no listen specifications, skipping listener request");
             continue;
         }
 
