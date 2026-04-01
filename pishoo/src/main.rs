@@ -19,6 +19,7 @@ use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{Report, ResultExt, whatever};
 use tokio::fs;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 mod signal;
 
@@ -27,6 +28,18 @@ struct RootReloadSnapshot {
     worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
     owner_map: HashMap<String, pishoo::config::EntryServerOwner>,
     publish_configs: HashMap<String, gateway::dns::PublishConfig>,
+}
+
+struct LocalServiceHandle {
+    shutdown: CancellationToken,
+    task: AbortOnDropHandle<()>,
+}
+
+impl LocalServiceHandle {
+    async fn shutdown(self) {
+        self.shutdown.cancel();
+        let _ = self.task.await;
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -294,7 +307,7 @@ async fn main() -> Result<(), Whatever> {
     network_watch_handle.abort();
     let _ = network_watch_handle.await;
     if let Some(handle) = local_service_handle.take() {
-        handle.abort();
+        handle.shutdown().await;
     }
     for pid in state.worker_pids().await {
         state.cleanup_worker_with_reason(pid, "root_shutdown").await;
@@ -403,7 +416,7 @@ async fn build_local_service_config(
 async fn spawn_local_service(
     state: &Arc<pishoo::root::state::RootState>,
     entry_config: &pishoo::config::EntryConfig,
-) -> Result<Option<tokio::task::JoinHandle<()>>, Whatever> {
+) -> Result<Option<LocalServiceHandle>, Whatever> {
     if entry_config.local_servers.is_empty() {
         return Ok(None);
     }
@@ -413,36 +426,31 @@ async fn spawn_local_service(
     let plane = Arc::new(pishoo::root::local_plane::LocalControlPlane::new(
         state.clone(),
     ));
+    let shutdown = CancellationToken::new();
+    let service_shutdown = shutdown.clone();
 
-    let handle = tokio::spawn(async move {
-        if let Err(error) = pishoo::service::run_service(plane, &config).await {
+    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+        if let Err(error) = pishoo::service::run_service(plane, &config, service_shutdown).await {
             tracing::error!(
                 error = %Report::from_error(error.as_ref()),
                 "local service exited with error"
             );
         }
-    });
+    }));
 
-    Ok(Some(handle))
+    Ok(Some(LocalServiceHandle {
+        shutdown,
+        task: handle,
+    }))
 }
 
 async fn replace_local_service(
     state: &Arc<pishoo::root::state::RootState>,
-    handle: &mut Option<tokio::task::JoinHandle<()>>,
+    handle: &mut Option<LocalServiceHandle>,
     entry_config: &pishoo::config::EntryConfig,
 ) -> Result<(), Whatever> {
-    // Retire existing local servers.
-    let retired = state.retire_local_servers().await;
-    if !retired.is_empty() {
-        tracing::info!(
-            servers = retired.len(),
-            "retired root-local servers before reload"
-        );
-    }
-
-    // Abort the previous local service task.
     if let Some(old_handle) = handle.take() {
-        old_handle.abort();
+        old_handle.shutdown().await;
     }
 
     *handle = spawn_local_service(state, entry_config).await?;
@@ -583,7 +591,10 @@ async fn spawn_configured_workers(
         ))?;
         let pid = spawned.handle.pid();
 
-        ensure_worker_identity(&target, pid, &spawned.hello)?;
+        if let Err(error) = ensure_worker_identity(&target, pid, &spawned.hello) {
+            state.cleanup_worker_tasks(pid).await;
+            return Err(error);
+        }
 
         state.register_worker(pid, target.uid, spawned.handle).await;
     }

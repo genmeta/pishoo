@@ -12,7 +12,6 @@ use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::remoc::quic::{ConnectServer, ListenServer, RemoteConnector, RemoteListener};
 use nix::unistd::Pid;
 use remoc::prelude::Server;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
@@ -76,12 +75,15 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
         // Serve the adapter via h3x remoc Listen RTC.
         let (server, client) = ListenServer::new(adapter, 1);
-        tokio::spawn(
-            async move {
-                let _ = server.serve().await;
-            }
-            .in_current_span(),
-        );
+        self.state
+            .spawn_worker_task(
+                self.caller_pid,
+                async move {
+                    let _ = server.serve().await;
+                }
+                .in_current_span(),
+            )
+            .await;
 
         tracing::info!(
             caller_pid = %self.caller_pid,
@@ -114,21 +116,14 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         // Create a ConnectServer wrapping the per-identity QuicClient.
         let (server, client) = ConnectServer::new(quic_client, 1);
 
-        // Track with a cancellation token for cleanup on worker exit.
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        tokio::spawn(
-            async move {
-                tokio::select! {
-                    _ = async { let _ = server.serve().await; } => {}
-                    () = cancel_clone.cancelled() => {}
-                }
-            }
-            .in_current_span(),
-        );
-
         self.state
-            .add_connector_token(self.caller_pid, cancel)
+            .spawn_worker_task(
+                self.caller_pid,
+                async move {
+                    let _ = server.serve().await;
+                }
+                .in_current_span(),
+            )
             .await;
 
         tracing::info!(

@@ -22,6 +22,7 @@ use genmeta_ssh::{
     },
 };
 use snafu::Report;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 #[tokio::main(flavor = "current_thread")]
@@ -49,7 +50,9 @@ async fn main() {
     >(remoc::Cfg::default(), stdin, stdout)
     .await
     .expect("failed to establish remoc channel");
-    let conn_handle = tokio::spawn(conn.instrument(tracing::info_span!("remoc_conn")));
+    let conn_handle = AbortOnDropHandle::new(tokio::spawn(
+        conn.instrument(tracing::info_span!("remoc_conn")),
+    ));
 
     // Create the outer RFnOnce: authentication.
     let auth_fn = remoc::rfn::RFnOnce::new_1(|auth_request: AuthRequest| async move {

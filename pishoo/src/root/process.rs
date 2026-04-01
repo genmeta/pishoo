@@ -8,7 +8,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use nix::unistd::{Gid, Uid};
 use remoc::prelude::ServerShared;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 use crate::{
@@ -70,7 +71,11 @@ pub async fn spawn_worker(
     ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
         .await
         .context(spawn_worker_error::ConnectTransportSnafu)?;
-    tokio::spawn(conn.in_current_span());
+    state
+        .spawn_worker_task(pid, async move {
+            let _ = conn.in_current_span().await;
+        })
+        .await;
 
     // Create per-worker ControlPlane RPC server.
     let rpc_impl = WorkerControlPlane::new(
@@ -82,12 +87,15 @@ pub async fn spawn_worker(
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);
-    tokio::spawn(
-        async move {
-            let _ = server.serve(true).await;
-        }
-        .in_current_span(),
-    );
+    state
+        .spawn_worker_task(
+            pid,
+            async move {
+                let _ = server.serve(true).await;
+            }
+            .in_current_span(),
+        )
+        .await;
 
     // Send bootstrap with new ControlPlane client.
     let bootstrap = WorkerBootstrap {
@@ -97,16 +105,22 @@ pub async fn spawn_worker(
         control_plane: client,
     };
 
-    base_tx
-        .send(bootstrap)
-        .await
-        .context(spawn_worker_error::SendBootstrapSnafu)?;
+    if let Err(source) = base_tx.send(bootstrap).await {
+        state.cleanup_worker_tasks(pid).await;
+        return Err(SpawnWorkerError::SendBootstrap { source });
+    }
 
-    let hello = base_rx
-        .recv()
-        .await
-        .context(spawn_worker_error::ReceiveHelloSnafu)?
-        .context(spawn_worker_error::MissingHelloSnafu)?;
+    let hello = match base_rx.recv().await {
+        Ok(Some(hello)) => hello,
+        Ok(None) => {
+            state.cleanup_worker_tasks(pid).await;
+            return Err(SpawnWorkerError::MissingHello);
+        }
+        Err(source) => {
+            state.cleanup_worker_tasks(pid).await;
+            return Err(SpawnWorkerError::ReceiveHello { source });
+        }
+    };
 
     Ok(SpawnedWorker {
         handle: launched.handle,
@@ -129,6 +143,6 @@ pub async fn run_monitor_loop(state: Arc<RootState>) {
 }
 
 /// Spawn the monitor loop as a background task. Returns the join handle.
-pub fn spawn_monitor_loop(state: Arc<RootState>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_monitor_loop(state).in_current_span())
+pub fn spawn_monitor_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(run_monitor_loop(state).in_current_span()))
 }

@@ -3,7 +3,8 @@ fn worker_requests_root_owned_connector() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
 
     assert!(
-        worker_source.contains("RemoteControlPlane::new(bootstrap.control_plane)"),
+        worker_source.contains("RemoteControlPlane::new(")
+            && worker_source.contains("bootstrap.control_plane"),
         "worker must use RemoteControlPlane backed by the root-provided client"
     );
     assert!(
@@ -34,7 +35,7 @@ fn worker_reload_uses_single_helper_path() {
         "worker should build config through the shared builder"
     );
     assert!(
-        worker_source.contains("run_service(&plane, &config)"),
+        worker_source.contains("run_service(plane.clone(), &config, shutdown.clone())"),
         "worker should run through the unified run_service entry point"
     );
 }
@@ -61,7 +62,8 @@ fn worker_stops_server_runtimes_before_exit() {
 fn worker_reload_rebuilds_all_listener_handles() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
     assert!(
-        worker_source.contains("SIGHUP") && worker_source.contains("reload not yet implemented"),
-        "worker reload path should be stubbed with a clear TODO"
+        worker_source.contains("received SIGHUP, rebuilding service config")
+            && worker_source.contains("worker reload completed"),
+        "worker reload path should rebuild config and restart the service"
     );
 }

@@ -18,7 +18,10 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use snafu::{Report, ResultExt, Snafu};
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{listen::PerServerListener, root::worker_handle::WorkerHandle};
@@ -78,8 +81,11 @@ struct WorkerProcessRecord {
     owned_servers: HashSet<String>,
     /// Handle to the spawned worker process.
     worker_handle: WorkerHandle,
-    /// Cancellation tokens for connector serve futures owned by this worker.
-    connector_shutdown_tokens: Vec<CancellationToken>,
+}
+
+struct WorkerCleanupArtifacts {
+    summary: CleanupSummary,
+    background_tasks: JoinSet<()>,
 }
 
 /// Summary produced by worker cleanup.
@@ -88,7 +94,7 @@ pub struct CleanupSummary {
     pub pid: Pid,
     pub uid: Uid,
     pub servers_cleaned: usize,
-    pub connectors_cleaned: usize,
+    pub background_tasks_cleaned: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +108,8 @@ struct Inner {
     processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping (one worker per uid).
     users: HashMap<Uid, Pid>,
+    /// Root-side background tasks grouped by worker pid.
+    worker_tasks: HashMap<Pid, JoinSet<()>>,
     /// Per-server_name async gates for serializing register_listener calls.
     name_gates: HashMap<String, Arc<Mutex<()>>>,
 }
@@ -138,7 +146,7 @@ impl Inner {
         pid: Pid,
         reason: &str,
         listeners: &gm_quic::prelude::QuicListeners,
-    ) -> Option<CleanupSummary> {
+    ) -> Option<WorkerCleanupArtifacts> {
         let record = self.processes.remove(&pid)?;
 
         // Only remove uid→pid mapping if it still points to this pid.
@@ -158,26 +166,27 @@ impl Inner {
             }
         }
 
-        let connectors_cleaned = record.connector_shutdown_tokens.len();
-        for token in &record.connector_shutdown_tokens {
-            token.cancel();
-        }
+        let background_tasks = self.worker_tasks.remove(&pid).unwrap_or_default();
+        let background_tasks_cleaned = background_tasks.len();
 
         let summary = CleanupSummary {
             pid,
             uid: record.uid,
             servers_cleaned,
-            connectors_cleaned,
+            background_tasks_cleaned,
         };
         tracing::info!(
             pid = %summary.pid,
             uid = summary.uid.as_raw(),
             servers_cleaned = summary.servers_cleaned,
-            connectors_cleaned = summary.connectors_cleaned,
+            background_tasks_cleaned = summary.background_tasks_cleaned,
             %reason,
             "Worker cleanup complete"
         );
-        Some(summary)
+        Some(WorkerCleanupArtifacts {
+            summary,
+            background_tasks,
+        })
     }
 }
 
@@ -205,6 +214,7 @@ impl RootState {
                 servers: HashMap::new(),
                 processes: HashMap::new(),
                 users: HashMap::new(),
+                worker_tasks: HashMap::new(),
                 name_gates: HashMap::new(),
             }),
         }
@@ -239,7 +249,7 @@ impl RootState {
     ///
     /// Returns a [`PerServerListener`] on success.
     pub async fn register_listener(
-        &self,
+        self: &Arc<Self>,
         owner: ServiceOwner,
         request: ListenRequest,
     ) -> Result<PerServerListener, RegisterError> {
@@ -356,7 +366,35 @@ impl RootState {
         );
 
         tracing::info!(%server_name, ?owner, "server registered");
-        Ok(PerServerListener::new(rx, shutdown_token))
+        Ok(PerServerListener::new_registered(
+            rx,
+            shutdown_token,
+            self,
+            server_name,
+            owner,
+        ))
+    }
+
+    /// Release a single active server entry owned by the specified owner.
+    pub async fn release_server(&self, server_name: &str, owner: ServiceOwner) {
+        let gate = self.name_gate(server_name).await;
+        let _guard = gate.lock().await;
+
+        let mut inner = self.inner.lock().await;
+        let owned = matches!(
+            inner.servers.get(server_name),
+            Some(ServerEntry::Active { owner: existing_owner, .. }) if *existing_owner == owner
+        );
+        if !owned {
+            return;
+        }
+
+        inner.retire_server(server_name, &self.listeners);
+        if let ServiceOwner::Worker(pid) = owner
+            && let Some(process) = inner.processes.get_mut(&pid)
+        {
+            process.owned_servers.remove(server_name);
+        }
     }
 
     /// Look up the routing sender for a given server_name.
@@ -531,22 +569,28 @@ impl RootState {
     /// If another worker already holds the same UID, the old one is cleaned
     /// up first (uid-replaced).
     pub async fn register_worker(&self, pid: Pid, uid: Uid, worker_handle: WorkerHandle) {
-        let mut inner = self.inner.lock().await;
+        let replaced_pid = {
+            let inner = self.inner.lock().await;
+            inner
+                .users
+                .get(&uid)
+                .copied()
+                .filter(|old_pid| *old_pid != pid)
+        };
 
-        // If the same uid is already held by a different pid, clean up the old one.
-        if let Some(&old_pid) = inner.users.get(&uid)
-            && old_pid != pid
-        {
-            inner.cleanup_worker(old_pid, "uid_replaced", &self.listeners);
+        if let Some(old_pid) = replaced_pid {
+            let _ = self
+                .cleanup_worker_with_reason(old_pid, "uid_replaced")
+                .await;
         }
 
+        let mut inner = self.inner.lock().await;
         inner.processes.insert(
             pid,
             WorkerProcessRecord {
                 uid,
                 owned_servers: HashSet::new(),
                 worker_handle,
-                connector_shutdown_tokens: Vec::new(),
             },
         );
         inner.users.insert(uid, pid);
@@ -558,12 +602,27 @@ impl RootState {
         self.inner.lock().await.processes.contains_key(&pid)
     }
 
-    /// Track a connector cancellation token for a worker.
-    pub async fn add_connector_token(&self, pid: Pid, token: CancellationToken) {
+    /// Spawn and track a root-side background task for a worker.
+    pub async fn spawn_worker_task<F>(&self, pid: Pid, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let mut inner = self.inner.lock().await;
-        if let Some(process) = inner.processes.get_mut(&pid) {
-            process.connector_shutdown_tokens.push(token);
-        }
+        inner
+            .worker_tasks
+            .entry(pid)
+            .or_insert_with(JoinSet::new)
+            .spawn(task);
+    }
+
+    /// Abort and drain any root-side background tasks associated with the pid.
+    pub async fn cleanup_worker_tasks(&self, pid: Pid) {
+        let mut tasks = {
+            let mut inner = self.inner.lock().await;
+            inner.worker_tasks.remove(&pid).unwrap_or_default()
+        };
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
     }
 
     /// Remove all resources for a dead/exited worker process.
@@ -572,10 +631,17 @@ impl RootState {
         pid: Pid,
         reason: &str,
     ) -> Option<CleanupSummary> {
-        self.inner
+        let artifacts = self
+            .inner
             .lock()
             .await
-            .cleanup_worker(pid, reason, &self.listeners)
+            .cleanup_worker(pid, reason, &self.listeners)?;
+
+        let mut tasks = artifacts.background_tasks;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+
+        Some(artifacts.summary)
     }
 
     /// Collect PIDs of workers whose processes have exited.

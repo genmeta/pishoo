@@ -18,6 +18,7 @@ use pishoo::{
     worker::{config::build_service_config, remote_plane::RemoteControlPlane},
 };
 use snafu::{OptionExt, Report, ResultExt};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 #[tokio::main(flavor = "current_thread")]
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Whatever> {
     ) = remoc::Connect::io(remoc::Cfg::default(), stdin, stdout)
         .await
         .whatever_context("failed to establish remoc transport")?;
-    tokio::spawn(conn.in_current_span());
+    let _conn_handle = AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
 
     // Receive bootstrap payload from root.
     let bootstrap = base_rx
@@ -95,19 +96,12 @@ async fn main() -> Result<(), Whatever> {
         seqpacket,
     ));
 
-    // Scan identities and build service config.
     let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
 
-    let config = build_service_config(&genmeta_home)
+    let mut config = build_service_config(&genmeta_home)
         .await
         .whatever_context("failed to build service config")?;
 
-    tracing::info!(
-        servers = config.servers.len(),
-        "Service config built, starting service"
-    );
-
-    // Run the service with signal-based shutdown.
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create SIGTERM listener")?;
     let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -117,29 +111,75 @@ async fn main() -> Result<(), Whatever> {
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .whatever_context("failed to create SIGHUP listener")?;
 
-    tokio::select! {
-        result = run_service(plane.clone(), &config) => {
-            if let Err(error) = result {
-                tracing::error!(
-                    error = %Report::from_error(error.as_ref()),
-                    "Service exited with error"
-                );
+    loop {
+        tracing::info!(
+            servers = config.servers.len(),
+            "service config built, starting service"
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut next_config = None;
+        let mut should_exit = false;
+
+        {
+            let service = run_service(plane.clone(), &config, shutdown.clone());
+            tokio::pin!(service);
+
+            tokio::select! {
+                result = &mut service => {
+                    if let Err(error) = result {
+                        tracing::error!(
+                            error = %Report::from_error(error.as_ref()),
+                            "service exited with error"
+                        );
+                    }
+                    should_exit = true;
+                }
+                _ = term_signal.recv() => {
+                    tracing::info!("received SIGTERM, shutting down");
+                    shutdown.cancel();
+                    let _ = service.await;
+                    should_exit = true;
+                }
+                _ = int_signal.recv() => {
+                    tracing::info!("received SIGINT, shutting down");
+                    shutdown.cancel();
+                    let _ = service.await;
+                    should_exit = true;
+                }
+                _ = quit_signal.recv() => {
+                    tracing::info!("received SIGQUIT, shutting down");
+                    shutdown.cancel();
+                    let _ = service.await;
+                    should_exit = true;
+                }
+                _ = hup_signal.recv() => {
+                    tracing::info!("received SIGHUP, rebuilding service config");
+                    let rebuilt_config = match build_service_config(&genmeta_home).await {
+                        Ok(config) => config,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %Report::from_error(&error),
+                                "failed to rebuild service config, keeping current service"
+                            );
+                            continue;
+                        }
+                    };
+
+                    shutdown.cancel();
+                    let _ = service.await;
+                    next_config = Some(rebuilt_config);
+                }
             }
         }
-        _ = term_signal.recv() => {
-            tracing::info!("Received SIGTERM, shutting down");
+
+        if should_exit {
+            break;
         }
-        _ = int_signal.recv() => {
-            tracing::info!("Received SIGINT, shutting down");
-        }
-        _ = quit_signal.recv() => {
-            tracing::info!("Received SIGQUIT, shutting down");
-        }
-        _ = hup_signal.recv() => {
-            // TODO: implement config reload — requires adding release_listen()
-            // to the ControlPlane trait to properly unregister listeners before
-            // re-scanning identities.
-            tracing::warn!("Received SIGHUP, reload not yet implemented");
+
+        if let Some(rebuilt_config) = next_config {
+            config = rebuilt_config;
+            tracing::info!(servers = config.servers.len(), "worker reload completed");
         }
     }
 

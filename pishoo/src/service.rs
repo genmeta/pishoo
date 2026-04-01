@@ -21,6 +21,7 @@ use h3x::{
     server::Servers,
 };
 use snafu::Report;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument;
 
@@ -58,9 +59,11 @@ pub struct ServiceConfig {
 pub async fn run_service<P: ControlPlane + 'static>(
     plane: Arc<P>,
     config: &ServiceConfig,
+    shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     P::Listener: 'static,
+    <P::Listener as quic::Listen>::Error: Send,
     <P::Listener as quic::Listen>::Connection: 'static,
     <<P::Listener as quic::Listen>::Connection as quic::WithLocalAgent>::LocalAgent: Send + Sync,
     <<P::Listener as quic::Listen>::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
@@ -118,15 +121,28 @@ where
             .service(TowerService(service_stack))
             .builder(Arc::new(builder))
             .build();
+        let server_shutdown = shutdown.clone();
 
         tasks.spawn(
             async move {
-                let error = servers.run().await;
-                tracing::warn!(
-                    %server_name,
-                    error = %Report::from_error(&error),
-                    "Server stopped"
-                );
+                tokio::select! {
+                    error = servers.run() => {
+                        tracing::warn!(
+                            %server_name,
+                            error = %Report::from_error(&error),
+                            "server stopped"
+                        );
+                    }
+                    () = server_shutdown.cancelled() => {
+                        if let Err(error) = servers.shutdown().await {
+                            tracing::warn!(
+                                %server_name,
+                                error = %Report::from_error(&error),
+                                "server shutdown failed"
+                            );
+                        }
+                    }
+                }
             }
             .in_current_span(),
         );

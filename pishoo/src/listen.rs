@@ -6,10 +6,15 @@
 //! central accept loop routes connections by `server_name` to the appropriate
 //! channel sender, and this adapter reads from the receiver.
 
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, Weak},
+};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+use crate::root::state::{RootState, ServiceOwner};
 
 /// Error type for [`PerServerListener`].
 ///
@@ -42,6 +47,9 @@ impl std::error::Error for PerServerListenerError {}
 pub struct PerServerListener {
     rx: mpsc::Receiver<gm_quic::prelude::Connection>,
     shutdown_token: CancellationToken,
+    root_state: Weak<RootState>,
+    server_name: String,
+    owner: ServiceOwner,
 }
 
 impl PerServerListener {
@@ -49,11 +57,20 @@ impl PerServerListener {
     ///
     /// * `rx` — receives connections routed by server_name from the central accept loop
     /// * `shutdown_token` — signals shutdown of this adapter
-    pub fn new(
+    pub fn new_registered(
         rx: mpsc::Receiver<gm_quic::prelude::Connection>,
         shutdown_token: CancellationToken,
+        root_state: &Arc<RootState>,
+        server_name: String,
+        owner: ServiceOwner,
     ) -> Self {
-        Self { rx, shutdown_token }
+        Self {
+            rx,
+            shutdown_token,
+            root_state: Arc::downgrade(root_state),
+            server_name,
+            owner,
+        }
     }
 }
 
@@ -74,6 +91,11 @@ impl h3x::quic::Listen for PerServerListener {
 
     async fn shutdown(&self) -> Result<(), Self::Error> {
         self.shutdown_token.cancel();
+        if let Some(root_state) = self.root_state.upgrade() {
+            root_state
+                .release_server(&self.server_name, self.owner)
+                .await;
+        }
         Ok(())
     }
 }

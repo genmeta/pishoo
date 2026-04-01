@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use gm_quic::qinterface::device::Devices;
 use snafu::Report;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 use super::state::RootState;
@@ -46,8 +47,8 @@ pub async fn run_accept_loop(state: Arc<RootState>) {
 }
 
 /// Spawn the accept loop as a background task. Returns the join handle.
-pub fn spawn_accept_loop(state: Arc<RootState>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_accept_loop(state).in_current_span())
+pub fn spawn_accept_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(run_accept_loop(state).in_current_span()))
 }
 
 /// Watch for network interface changes and reconcile bind URIs.
@@ -64,6 +65,8 @@ async fn run_network_watch_loop(state: Arc<RootState>) {
 }
 
 /// Spawn the network watch loop as a background task. Returns the join handle.
-pub fn spawn_network_watch_loop(state: Arc<RootState>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_network_watch_loop(state).in_current_span())
+pub fn spawn_network_watch_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(
+        run_network_watch_loop(state).in_current_span(),
+    ))
 }
