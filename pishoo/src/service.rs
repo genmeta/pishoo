@@ -150,8 +150,17 @@ where
 
     tracing::info!(server_count = config.servers.len(), "worker ready");
 
-    // Wait for all server tasks (they run until shutdown).
-    while tasks.join_next().await.is_some() {}
+    if config.servers.is_empty() {
+        // No servers to run — wait for shutdown rather than returning immediately.
+        // Returning here would cause the worker process to exit, tearing down the
+        // remoc connection before buffered IPC messages (e.g. the startup hello)
+        // are flushed to the root.  Staying alive lets the worker respond to
+        // SIGHUP and reload identities that may appear later.
+        shutdown.cancelled().await;
+    } else {
+        // Wait for all server tasks (they run until shutdown).
+        while tasks.join_next().await.is_some() {}
+    }
 
     Ok(())
 }

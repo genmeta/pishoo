@@ -576,7 +576,7 @@ async fn spawn_configured_workers(
     let worker_bin = worker_binary_path();
 
     for target in worker_targets {
-        let spawned = pishoo::root::process::spawn_worker(
+        let spawned = match pishoo::root::process::spawn_worker(
             &worker_bin,
             target.uid,
             target.gid,
@@ -585,13 +585,25 @@ async fn spawn_configured_workers(
             state.clone(),
         )
         .await
-        .whatever_context(format!(
-            "failed to spawn worker for user `{}`",
-            target.username
-        ))?;
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                // Worker spawn failures (fork/exec, IPC negotiation, hello
+                // timeout) are per-user problems that must not bring down the
+                // entire root process.  Log and continue to the next worker.
+                tracing::error!(
+                    user = %target.username,
+                    error = %Report::from_error(&error),
+                    "failed to spawn worker, skipping user"
+                );
+                continue;
+            }
+        };
         let pid = spawned.handle.pid();
 
         if let Err(error) = ensure_worker_identity(&target, pid, &spawned.hello) {
+            // Identity mismatch is a privilege-separation security violation —
+            // this IS fatal and must stop the root process immediately.
             state.cleanup_worker_tasks(pid).await;
             return Err(error);
         }
