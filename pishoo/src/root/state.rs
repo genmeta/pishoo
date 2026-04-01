@@ -123,6 +123,7 @@ impl Inner {
         listeners: &gm_quic::prelude::QuicListeners,
     ) -> Option<()> {
         let entry = self.servers.remove(server_name)?;
+        self.name_gates.remove(server_name);
         match entry {
             ServerEntry::Active { shutdown_token, .. } => {
                 shutdown_token.cancel();
