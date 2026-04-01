@@ -33,6 +33,10 @@ impl Drop for WorkerHandle {
     fn drop(&mut self) {
         // Best-effort kill — child may have already exited.
         let _ = self.start_kill();
+        // Reap the child to avoid zombie processes. Non-blocking: if the
+        // child hasn't exited yet (e.g. SIGKILL still pending), the kernel
+        // will reparent it to init which reaps automatically.
+        let _ = self.try_wait();
     }
 }
 
