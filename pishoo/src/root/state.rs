@@ -495,7 +495,9 @@ impl RootState {
                 .collect();
             for uri_str in &to_remove {
                 let uri = gm_quic::prelude::BindUri::from(uri_str.as_str());
-                server.remove_iface(&uri);
+                if let Some(iface) = server.remove_iface(&uri) {
+                    let _ = iface.close().await;
+                }
             }
             if !to_remove.is_empty() {
                 tracing::info!(

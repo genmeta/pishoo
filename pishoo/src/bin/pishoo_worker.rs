@@ -76,19 +76,13 @@ async fn main() -> Result<(), Whatever> {
     tracing::info!("Startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
-    // Recover the seqpacket FD passed by root via PISHOO_SEQPACKET_FD env var.
+    // Recover the seqpacket FD passed by root at fixed FD 3 (dup2'd in child_exec).
     #[cfg(feature = "sshd")]
     let seqpacket = {
         use std::os::fd::FromRawFd;
-        let fd_str = std::env::var("PISHOO_SEQPACKET_FD").whatever_context(
-            "PISHOO_SEQPACKET_FD not set; this binary must be spawned by pishoo root",
-        )?;
-        let fd_num: i32 = fd_str
-            .parse()
-            .whatever_context("PISHOO_SEQPACKET_FD is not a valid fd number")?;
-        // SAFETY: the FD was set up by the root process in launch_worker and
-        // intentionally kept open (skipped in the FD close loop).
-        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd_num) }
+        // SAFETY: the root process dup2'd the seqpacket FD to FD 3 in child_exec
+        // before execve. FD 3 is guaranteed to be open and valid.
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(3) }
     };
     let plane = Arc::new(RemoteControlPlane::new(
         bootstrap.control_plane,

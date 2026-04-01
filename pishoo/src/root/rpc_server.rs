@@ -171,7 +171,13 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
             // transport.stdin/stdout OwnedFds drop here, closing root's copies.
             // The worker now owns the only copies (via SCM_RIGHTS).
+            let child_pid = transport.child_pid;
             drop(transport);
+
+            // Reap the session child process to avoid zombies.
+            tokio::task::spawn_blocking(move || {
+                let _ = nix::sys::wait::waitpid(child_pid, None);
+            });
 
             tracing::info!(
                 caller_pid = %self.caller_pid,

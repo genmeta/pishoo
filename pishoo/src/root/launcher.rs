@@ -34,6 +34,7 @@ pub struct LaunchedWorker {
 pub struct SessionTransport {
     pub stdin: OwnedFd,
     pub stdout: OwnedFd,
+    pub child_pid: nix::unistd::Pid,
 }
 
 struct ChildExecSpec<'a> {
@@ -129,21 +130,7 @@ pub fn launch_worker(
     #[cfg(feature = "sshd")]
     let (parent_seqpacket, child_seqpacket) = seqpacket_pair().context(CreateSeqpacketPairSnafu)?;
 
-    // Build env — include PISHOO_SEQPACKET_FD if sshd is enabled.
-    #[cfg(feature = "sshd")]
-    let seqpacket_fd_num = {
-        use std::os::fd::AsRawFd;
-        child_seqpacket.as_raw_fd()
-    };
-    let env = build_exec_env(
-        username,
-        home,
-        #[cfg(feature = "sshd")]
-        Some(seqpacket_fd_num),
-        #[cfg(not(feature = "sshd"))]
-        None,
-    )
-    .context(BuildExecEnvSnafu { username })?;
+    let env = build_exec_env(username, home).context(BuildExecEnvSnafu { username })?;
     let argv = vec![worker_bin.clone()];
     let max_fd = max_fd();
 
@@ -208,18 +195,24 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         child_fail(126);
     }
 
-    // Determine the FD to skip when closing (the extra FD we want to pass).
-    let skip_fd = extra_fd.map(|fd| {
+    // If an extra FD is provided (e.g. seqpacket for SSH FD passing), dup2 it
+    // to FD 3. dup2 automatically clears the CLOEXEC flag on the new FD,
+    // ensuring it survives execve. Close all other FDs from FD 4 onward
+    // (or FD 3 onward when no extra FD is present).
+    let start_fd = if let Some(fd) = extra_fd {
         use std::os::fd::AsRawFd;
-        fd.as_raw_fd()
-    });
+        // SAFETY: post-fork child, single-threaded. dup2 is async-signal-safe.
+        if unsafe { libc::dup2(fd.as_raw_fd(), 3) } < 0 {
+            child_fail(126);
+        }
+        4
+    } else {
+        3
+    };
 
-    let start_fd = 3;
     let mut fd = start_fd;
     while fd < max_fd {
-        if Some(fd) != skip_fd {
-            let _ = nix::unistd::close(fd);
-        }
+        let _ = nix::unistd::close(fd);
         fd += 1;
     }
 
@@ -303,12 +296,13 @@ pub fn launch_session(username: &str) -> Result<SessionTransport, LaunchSessionE
                 max_fd,
             );
         }
-        ForkResult::Parent { child: _ } => {
+        ForkResult::Parent { child } => {
             drop(child_stdin_read);
             drop(child_stdout_write);
             Ok(SessionTransport {
                 stdin: parent_stdin_write,
                 stdout: parent_stdout_read,
+                child_pid: child,
             })
         }
     }
@@ -354,22 +348,15 @@ fn build_session_exec_env(username: &str) -> Result<Vec<CString>, BuildExecEnvEr
     .collect()
 }
 
-fn build_exec_env(
-    username: &str,
-    home: &Path,
-    seqpacket_fd: Option<i32>,
-) -> Result<Vec<CString>, BuildExecEnvError> {
+fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExecEnvError> {
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
-    let mut entries: Vec<Vec<u8>> = vec![
+    let entries: Vec<Vec<u8>> = vec![
         [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
         [b"USER=".as_slice(), username.as_bytes()].concat(),
         [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
         [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
         [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
     ];
-    if let Some(fd) = seqpacket_fd {
-        entries.push(format!("PISHOO_SEQPACKET_FD={fd}").into_bytes());
-    }
     entries
         .into_iter()
         .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))

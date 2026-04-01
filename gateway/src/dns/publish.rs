@@ -4,8 +4,8 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
-    qresolve::Publish as DnsPublisher,
     qinterface::{BindInterface, component::location::Locations},
+    qresolve::Publish as DnsPublisher,
     qtraversal::nat::client::{NatType, StunClientsComponent},
 };
 use gmdns::{
@@ -292,12 +292,17 @@ async fn publish_resolvers(
     let packet = MdnsPacket::answer(0, &hosts).to_bytes();
 
     for resolver in &config.resolvers {
-        if let Err(error) = resolver.publish(server_name, &packet).await {
-            tracing::error!(
-                resolver = %resolver,
-                error = %Report::from_error(error),
-                "dns publish failed"
-            );
+        match resolver.publish(server_name, &packet).await {
+            Err(error) => {
+                tracing::error!(
+                    resolver = %resolver,
+                    error = %Report::from_error(error),
+                    "dns publish failed"
+                );
+            }
+            Ok(_) => {
+                tracing::info!(server_name, resolver = %resolver, "published resolver endpoints");
+            }
         }
     }
 }
