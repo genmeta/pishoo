@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gm_quic::{
     prelude::QuicClient,
-    qdns::{Resolve as GmdnsResolver, SystemResolver},
+    qresolve::{Resolve as GmdnsResolver, SystemResolver},
 };
 use gmdns::resolvers::{H3Resolver, Resolvers};
 use h3x::client::Client;

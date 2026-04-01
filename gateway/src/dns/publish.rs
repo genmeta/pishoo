@@ -4,7 +4,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use gm_quic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
-    qdns::Publish as DnsPublisher,
+    qresolve::Publish as DnsPublisher,
     qinterface::{BindInterface, component::location::Locations},
     qtraversal::nat::client::{NatType, StunClientsComponent},
 };

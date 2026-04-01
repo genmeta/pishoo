@@ -106,6 +106,9 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 gateway = { path = "gateway", default-features = false }
 
 
+# [patch."ssh://git@github.com/genmeta/genmeta-ssh.git"]
+# genmeta-ssh = { path = "../genmeta-ssh" }
+
 # [patch."ssh://git@github.com/genmeta/gmdns.git"]
 # gmdns = { path = "../gmdns" }
 
