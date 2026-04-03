@@ -358,9 +358,7 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExec
         [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
     ];
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        entries.push(
-            [b"RUST_LOG=".as_slice(), rust_log.as_bytes()].concat(),
-        );
+        entries.push([b"RUST_LOG=".as_slice(), rust_log.as_bytes()].concat());
     }
     entries
         .into_iter()
