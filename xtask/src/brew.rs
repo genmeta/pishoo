@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use flate2::{Compression, write::GzEncoder};
 use snafu::{ResultExt, Whatever};
+use tracing::info;
 use xshell::{Shell, cmd};
 
 use crate::{package_meta, sha256_file, target_dir};
@@ -96,82 +97,34 @@ fn generate_formula(
 }
 
 pub fn run(targets: &[String]) -> Result<(), Whatever> {
-    let sh = Shell::new().whatever_context("failed to create shell")?;
-    check_cargo(&sh)?;
-
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
     let workspace = std::env::current_dir().whatever_context("failed to get cwd")?;
 
-    let mut archives = Vec::new();
+    let archives: Vec<ArchiveInfo> = std::thread::scope(|s| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|triple| {
+                let meta_version = &meta.version;
+                let target_dir = &target_dir;
+                let workspace = &workspace;
+                s.spawn(move || {
+                    build_one(triple, meta_version, target_dir, workspace)
+                        .map_err(|e| e.to_string())
+                })
+            })
+            .collect();
 
-    for triple in targets {
-        eprintln!("--- building brew archive for {triple} ---");
-
-        // Build with sshd feature
-        cmd!(
-            sh,
-            "cargo build --release --target {triple} -p {CARGO_NAME} --features sshd"
-        )
-        .run()
-        .whatever_context(format!("cargo build failed for {triple}"))?;
-
-        // Stage
-        let brew_dir = target_dir.join(triple).join("release").join("brew");
-        let staging = brew_dir.join("staging");
-        let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging)
-            .whatever_context(format!("failed to create {}", staging.display()))?;
-
-        // Copy binaries
-        let release_dir = target_dir.join(triple).join("release");
-        fs::copy(release_dir.join("pishoo"), staging.join("pishoo"))
-            .whatever_context("failed to copy pishoo")?;
-        fs::copy(
-            release_dir.join("pishoo-worker"),
-            staging.join("pishoo-worker"),
-        )
-        .whatever_context("failed to copy pishoo-worker")?;
-        fs::copy(
-            release_dir.join("pishoo-ssh-session"),
-            staging.join("pishoo-ssh-session"),
-        )
-        .whatever_context("failed to copy pishoo-ssh-session")?;
-
-        // Copy config files
-        let conf_src = workspace.join("pishoo/pkg/common/etc/pishoo");
-        fs::copy(conf_src.join("pishoo.conf"), staging.join("pishoo.conf"))
-            .whatever_context("failed to copy pishoo.conf")?;
-        fs::copy(conf_src.join("mime.types"), staging.join("mime.types"))
-            .whatever_context("failed to copy mime.types")?;
-
-        // Rewrite /etc paths to relative etc for Homebrew
-        let conf_content = fs::read_to_string(staging.join("pishoo.conf"))
-            .whatever_context("failed to read staged pishoo.conf")?;
-        fs::write(
-            staging.join("pishoo.conf"),
-            conf_content.replace("/etc", "etc"),
-        )
-        .whatever_context("failed to rewrite pishoo.conf")?;
-
-        // Create tar.gz
-        let archive_name = format!("{CARGO_NAME}_{}-{triple}.tar.gz", meta.version);
-        let archive_path = brew_dir.join(&archive_name);
-        create_tar_gz(&staging, &archive_path)?;
-
-        // Cleanup staging
-        let _ = fs::remove_dir_all(&staging);
-
-        // Hash
-        let sha = sha256_file(&archive_path)?;
-
-        eprintln!("produced {}", archive_path.display());
-        archives.push(ArchiveInfo {
-            triple: triple.clone(),
-            archive_name,
-            sha256: sha,
-        });
-    }
+        let mut results = Vec::new();
+        for h in handles {
+            let inner = h.join().unwrap();
+            match inner {
+                Ok(info) => results.push(info),
+                Err(msg) => snafu::whatever!("{msg}"),
+            }
+        }
+        Ok(results)
+    })?;
 
     // Generate aggregated formula
     let content_path = workspace.join("pishoo/homebrew_content.rb");
@@ -194,7 +147,83 @@ pub fn run(targets: &[String]) -> Result<(), Whatever> {
     let formula_path = formula_dir.join(format!("{CARGO_NAME}.rb"));
     fs::write(&formula_path, &formula)
         .whatever_context(format!("failed to write {}", formula_path.display()))?;
-    eprintln!("produced {}", formula_path.display());
+    info!(path = %formula_path.display(), "produced formula");
 
     Ok(())
+}
+
+fn build_one(
+    triple: &str,
+    version: &str,
+    target_dir: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<ArchiveInfo, Whatever> {
+    let _span = tracing::info_span!("brew", triple).entered();
+
+    let sh = Shell::new().whatever_context("failed to create shell")?;
+    check_cargo(&sh)?;
+
+    // Build with sshd feature
+    cmd!(
+        sh,
+        "cargo build --release --target {triple} -p {CARGO_NAME} --features sshd"
+    )
+    .run()
+    .whatever_context(format!("cargo build failed for {triple}"))?;
+
+    // Stage
+    let brew_dir = target_dir.join(triple).join("release").join("brew");
+    let staging = brew_dir.join("staging");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)
+        .whatever_context(format!("failed to create {}", staging.display()))?;
+
+    // Copy binaries
+    let release_dir = target_dir.join(triple).join("release");
+    fs::copy(release_dir.join("pishoo"), staging.join("pishoo"))
+        .whatever_context("failed to copy pishoo")?;
+    fs::copy(
+        release_dir.join("pishoo-worker"),
+        staging.join("pishoo-worker"),
+    )
+    .whatever_context("failed to copy pishoo-worker")?;
+    fs::copy(
+        release_dir.join("pishoo-ssh-session"),
+        staging.join("pishoo-ssh-session"),
+    )
+    .whatever_context("failed to copy pishoo-ssh-session")?;
+
+    // Copy config files
+    let conf_src = workspace.join("pishoo/pkg/common/etc/pishoo");
+    fs::copy(conf_src.join("pishoo.conf"), staging.join("pishoo.conf"))
+        .whatever_context("failed to copy pishoo.conf")?;
+    fs::copy(conf_src.join("mime.types"), staging.join("mime.types"))
+        .whatever_context("failed to copy mime.types")?;
+
+    // Rewrite /etc paths to relative etc for Homebrew
+    let conf_content = fs::read_to_string(staging.join("pishoo.conf"))
+        .whatever_context("failed to read staged pishoo.conf")?;
+    fs::write(
+        staging.join("pishoo.conf"),
+        conf_content.replace("/etc", "etc"),
+    )
+    .whatever_context("failed to rewrite pishoo.conf")?;
+
+    // Create tar.gz
+    let archive_name = format!("{CARGO_NAME}_{version}-{triple}.tar.gz");
+    let archive_path = brew_dir.join(&archive_name);
+    create_tar_gz(&staging, &archive_path)?;
+
+    // Cleanup staging
+    let _ = fs::remove_dir_all(&staging);
+
+    // Hash
+    let sha = sha256_file(&archive_path)?;
+
+    info!(path = %archive_path.display(), "produced archive");
+    Ok(ArchiveInfo {
+        triple: triple.to_string(),
+        archive_name,
+        sha256: sha,
+    })
 }

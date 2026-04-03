@@ -350,13 +350,18 @@ fn build_session_exec_env(username: &str) -> Result<Vec<CString>, BuildExecEnvEr
 
 fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExecEnvError> {
     let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
-    let entries: Vec<Vec<u8>> = vec![
+    let mut entries: Vec<Vec<u8>> = vec![
         [b"HOME=".as_slice(), home.as_os_str().as_encoded_bytes()].concat(),
         [b"USER=".as_slice(), username.as_bytes()].concat(),
         [b"LOGNAME=".as_slice(), username.as_bytes()].concat(),
         [b"PATH=".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
         [b"PISHOO_USER=".as_slice(), username.as_bytes()].concat(),
     ];
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        entries.push(
+            [b"RUST_LOG=".as_slice(), rust_log.as_bytes()].concat(),
+        );
+    }
     entries
         .into_iter()
         .map(|entry| CString::new(entry).context(EntryContainsNulSnafu))

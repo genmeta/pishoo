@@ -1,10 +1,11 @@
 mod brew;
 mod deb;
 
-use std::path::PathBuf;
+use std::{io::IsTerminal, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use snafu::{OptionExt, ResultExt, Whatever};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Build & packaging tasks for pishoo")]
@@ -97,9 +98,29 @@ fn sha256_file(path: &std::path::Path) -> Result<String, Whatever> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
+    let (stderr, guard) = tracing_appender::non_blocking(std::io::stderr());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(std::io::stderr().is_terminal())
+                .with_writer(stderr),
+        )
+        .with(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+    guard
+}
+
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), Whatever> {
+    let _guard = init_tracing();
+
     let cli = Cli::parse();
     match cli.command {
         Command::Dist { format } => match format {
