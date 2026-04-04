@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
-use crate::{package_version, target_dir};
+use crate::{DebTarget, package_version, target_dir};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -369,7 +369,7 @@ dpkg-deb -b /staging /output/{deb_name}
     Ok(())
 }
 
-pub async fn run(targets: &[String]) -> Result<(), Whatever> {
+pub async fn run(targets: &[DebTarget], sshd: bool) -> Result<(), Whatever> {
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
@@ -379,8 +379,8 @@ pub async fn run(targets: &[String]) -> Result<(), Whatever> {
 
     let mut tasks = tokio::task::JoinSet::new();
 
-    for triple in targets {
-        if triple == "common" {
+    for &target in targets {
+        if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
             tasks.spawn(
                 async move { run_common(&docker).await.map_err(|e| e.to_string()) }
@@ -390,13 +390,13 @@ pub async fn run(targets: &[String]) -> Result<(), Whatever> {
         }
 
         let docker = docker.clone();
-        let span = info_span!("deb", %triple);
-        let triple = triple.clone();
+        let triple = target.triple();
+        let span = info_span!("deb", triple);
         let version = version.clone();
         let target_dir = target_dir.clone();
         tasks.spawn(
             async move {
-                build_one(&docker, &triple, &version, &target_dir)
+                build_one(&docker, triple, &version, &target_dir, sshd)
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -419,6 +419,7 @@ async fn build_one(
     triple: &str,
     version: &str,
     target_dir: &std::path::Path,
+    sshd: bool,
 ) -> Result<(), Whatever> {
     let arch = deb_arch(triple)?;
     let gnu = gnu_arch(triple)?;
@@ -467,13 +468,19 @@ async fn build_one(
         .await
         .whatever_context("failed to start build container")?;
 
-    // Build with sshd feature + env vars for binary discovery
+    // Build
+    let features = if sshd { " --features sshd" } else { "" };
+    let sshd_env = if sshd {
+        "export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && \
+         export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && "
+    } else {
+        ""
+    };
     let build_cmd = format!(
         "source /root/.cargo/env && \
          export RUSTFLAGS=\"${{RUSTFLAGS:-}} -L /usr/lib/{gnu}\" && \
-         export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && \
-         export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && \
-         cargo zigbuild --release --target {triple} -p {CARGO_NAME} --features sshd"
+         {sshd_env}\
+         cargo zigbuild --release --target {triple} -p {CARGO_NAME}{features}"
     );
     exec_in_container(docker, &container.id, &["bash", "-c", &build_cmd]).await?;
 
@@ -491,22 +498,40 @@ async fn build_one(
         ("Priority", "optional"),
     ]);
 
+    let (sshd_copy, sshd_shlibdeps) = if sshd {
+        (
+            format!(
+                r#"cp /workspace/target/{triple}/release/pishoo-worker /staging/usr/lib/pishoo/
+cp /workspace/target/{triple}/release/pishoo-ssh-session /staging/usr/lib/pishoo/
+chmod 755 /staging/usr/lib/pishoo/*"#
+            ),
+            r#"DEPS=$(dpkg-shlibdeps -O \
+    /staging/usr/bin/pishoo \
+    /staging/usr/lib/pishoo/pishoo-worker \
+    /staging/usr/lib/pishoo/pishoo-ssh-session \
+    2>/dev/null | sed 's/^shlibs:Depends=//' || true)"#
+                .to_string(),
+        )
+    } else {
+        (
+            String::new(),
+            r#"DEPS=$(dpkg-shlibdeps -O /staging/usr/bin/pishoo \
+    2>/dev/null | sed 's/^shlibs:Depends=//' || true)"#
+                .to_string(),
+        )
+    };
+
     let package_script = format!(
         r#"set -e
 # staging layout
 mkdir -p /staging/usr/bin /staging/usr/lib/pishoo /staging/DEBIAN
 
 cp /workspace/target/{triple}/release/pishoo /staging/usr/bin/
-cp /workspace/target/{triple}/release/pishoo-worker /staging/usr/lib/pishoo/
-cp /workspace/target/{triple}/release/pishoo-ssh-session /staging/usr/lib/pishoo/
-chmod 755 /staging/usr/bin/* /staging/usr/lib/pishoo/*
+chmod 755 /staging/usr/bin/*
+{sshd_copy}
 
-# detect shared library dependencies for all binaries
-DEPS=$(dpkg-shlibdeps -O \
-    /staging/usr/bin/pishoo \
-    /staging/usr/lib/pishoo/pishoo-worker \
-    /staging/usr/lib/pishoo/pishoo-ssh-session \
-    2>/dev/null | sed 's/^shlibs:Depends=//' || true)
+# detect shared library dependencies
+{sshd_shlibdeps}
 
 # write control file
 cat > /staging/DEBIAN/control <<'CTRL'

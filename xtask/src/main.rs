@@ -3,7 +3,7 @@ mod deb;
 
 use std::{io::IsTerminal, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use snafu::{OptionExt, ResultExt, Whatever};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -23,19 +23,77 @@ enum Command {
     },
 }
 
+/// Supported target triples for .deb builds.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DebTarget {
+    /// x86_64-unknown-linux-gnu
+    #[value(name = "x86_64-unknown-linux-gnu")]
+    X86_64,
+    /// aarch64-unknown-linux-gnu
+    #[value(name = "aarch64-unknown-linux-gnu")]
+    Aarch64,
+    /// armv7-unknown-linux-gnueabihf
+    #[value(name = "armv7-unknown-linux-gnueabihf")]
+    Armv7,
+    /// Arch-independent pishoo-common config package
+    #[value(name = "common")]
+    Common,
+}
+
+impl DebTarget {
+    pub fn triple(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64-unknown-linux-gnu",
+            Self::Aarch64 => "aarch64-unknown-linux-gnu",
+            Self::Armv7 => "armv7-unknown-linux-gnueabihf",
+            Self::Common => "common",
+        }
+    }
+}
+
+/// Supported target triples for Homebrew builds.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum BrewTarget {
+    /// aarch64-apple-darwin
+    #[value(name = "aarch64-apple-darwin")]
+    Aarch64,
+    /// x86_64-apple-darwin
+    #[value(name = "x86_64-apple-darwin")]
+    X86_64,
+}
+
+impl BrewTarget {
+    pub fn triple(self) -> &'static str {
+        match self {
+            Self::Aarch64 => "aarch64-apple-darwin",
+            Self::X86_64 => "x86_64-apple-darwin",
+        }
+    }
+}
+
+/// Cargo features to enable.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Feature {
+    /// Enable SSH daemon support (pishoo-worker, pishoo-ssh-session)
+    Sshd,
+}
+
 #[derive(Subcommand)]
 enum DistFormat {
     /// Build .deb packages (via Docker container + cargo-zigbuild)
     Deb {
         /// Target triples (or "common" for arch-independent config package)
         #[arg(long = "target", required = true)]
-        targets: Vec<String>,
+        targets: Vec<DebTarget>,
+        /// Cargo features to enable
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
     },
     /// Build Homebrew archives + formula
     Brew {
-        /// Target triples to build for (e.g. aarch64-apple-darwin)
+        /// Target triples to build for
         #[arg(long = "target", required = true)]
-        targets: Vec<String>,
+        targets: Vec<BrewTarget>,
     },
 }
 
@@ -124,7 +182,10 @@ async fn main() -> Result<(), Whatever> {
     let cli = Cli::parse();
     match cli.command {
         Command::Dist { format } => match format {
-            DistFormat::Deb { targets } => deb::run(&targets).await?,
+            DistFormat::Deb { targets, features } => {
+                let sshd = features.iter().any(|f| matches!(f, Feature::Sshd));
+                deb::run(&targets, sshd).await?;
+            }
             DistFormat::Brew { targets } => brew::run(&targets)?,
         },
     }

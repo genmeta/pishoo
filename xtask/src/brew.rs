@@ -5,7 +5,7 @@ use snafu::{ResultExt, Whatever};
 use tracing::info;
 use xshell::{Shell, cmd};
 
-use crate::{package_meta, sha256_file, target_dir};
+use crate::{BrewTarget, package_meta, sha256_file, target_dir};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -96,7 +96,7 @@ fn generate_formula(
     Ok(lines.join("\n"))
 }
 
-pub fn run(targets: &[String]) -> Result<(), Whatever> {
+pub fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
     let workspace = std::env::current_dir().whatever_context("failed to get cwd")?;
@@ -104,10 +104,11 @@ pub fn run(targets: &[String]) -> Result<(), Whatever> {
     let archives: Vec<ArchiveInfo> = std::thread::scope(|s| {
         let handles: Vec<_> = targets
             .iter()
-            .map(|triple| {
+            .map(|&target| {
                 let meta_version = &meta.version;
                 let target_dir = &target_dir;
                 let workspace = &workspace;
+                let triple = target.triple();
                 s.spawn(move || {
                     build_one(triple, meta_version, target_dir, workspace)
                         .map_err(|e| e.to_string())
