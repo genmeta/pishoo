@@ -496,7 +496,14 @@ impl RootState {
             for uri_str in &to_remove {
                 let uri = gm_quic::prelude::BindUri::from(uri_str.as_str());
                 if let Some(iface) = server.remove_iface(&uri) {
-                    let _ = iface.close().await;
+                    // Close the interface in the background to avoid blocking
+                    // the reconcile loop. BindInterface::close() waits for all
+                    // components (e.g. STUN keep-alive tasks) to shut down,
+                    // which may take a long time if the network interface has
+                    // already been removed at the OS level.
+                    tokio::spawn(async move {
+                        let _ = iface.close().await;
+                    });
                 }
             }
             if !to_remove.is_empty() {
