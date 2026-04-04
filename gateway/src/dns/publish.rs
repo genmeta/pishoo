@@ -68,8 +68,7 @@ pub async fn publish_host_endpoints(
     }
 
     if endpoints.is_empty() {
-        tracing::warn!(host, "no endpoints to publish");
-        return;
+        tracing::warn!(host, "no endpoints to publish for this server");
     }
 
     endpoints.iter_mut().for_each(|ep| config.sign_endpoint(ep));
