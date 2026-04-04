@@ -276,15 +276,14 @@ async fn publish_resolvers(
 
     if endpoints.is_empty() {
         tracing::warn!(server_name, "no endpoints to publish for this server");
-        return;
+    } else {
+        tracing::debug!(
+            server_name,
+            server_id = config.server_id,
+            count = endpoints.len(),
+            "publishing endpoints"
+        );
     }
-
-    tracing::debug!(
-        server_name,
-        server_id = config.server_id,
-        count = endpoints.len(),
-        "publishing endpoints"
-    );
 
     let mut hosts = std::collections::HashMap::new();
     hosts.insert(server_name.to_string(), endpoints);
