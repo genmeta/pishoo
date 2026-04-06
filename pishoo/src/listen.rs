@@ -45,7 +45,7 @@ impl std::error::Error for PerServerListenerError {}
 /// `QuicListeners::accept()` loop to this adapter's mpsc channel. Wraps the
 /// receiver side so it implements [`h3x::quic::Listen`].
 pub struct PerServerListener {
-    rx: mpsc::Receiver<gm_quic::prelude::Connection>,
+    rx: mpsc::Receiver<dquic::prelude::Connection>,
     shutdown_token: CancellationToken,
     root_state: Weak<RootState>,
     server_name: String,
@@ -58,7 +58,7 @@ impl PerServerListener {
     /// * `rx` — receives connections routed by server_name from the central accept loop
     /// * `shutdown_token` — signals shutdown of this adapter
     pub fn new_registered(
-        rx: mpsc::Receiver<gm_quic::prelude::Connection>,
+        rx: mpsc::Receiver<dquic::prelude::Connection>,
         shutdown_token: CancellationToken,
         root_state: &Arc<RootState>,
         server_name: String,
@@ -75,7 +75,7 @@ impl PerServerListener {
 }
 
 impl h3x::quic::Listen for PerServerListener {
-    type Connection = gm_quic::prelude::Connection;
+    type Connection = dquic::prelude::Connection;
     type Error = PerServerListenerError;
 
     async fn accept(&mut self) -> Result<Self::Connection, Self::Error> {

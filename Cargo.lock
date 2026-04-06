@@ -94,7 +94,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -105,7 +105,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1318,7 +1318,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1369,6 +1369,24 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "dquic"
+version = "0.4.0"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "derive_more",
+ "futures",
+ "qconnection",
+ "qresolve",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "dunce"
@@ -1425,7 +1443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1729,6 +1747,7 @@ dependencies = [
  "crossterm",
  "dashmap",
  "derive_more",
+ "dquic",
  "firewall-base",
  "form_urlencoded",
  "futures",
@@ -1736,7 +1755,6 @@ dependencies = [
  "genmeta-ssh",
  "getifs",
  "getrandom 0.3.4",
- "gm-quic",
  "gmdns",
  "h3x",
  "http",
@@ -1932,27 +1950,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "gm-quic"
-version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
-dependencies = [
- "bytes",
- "dashmap",
- "derive_more",
- "futures",
- "qconnection",
- "qresolve",
- "rustls",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "gmdns"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=feat%2Fresolver#19de110e3e43134e303277965357db86729395a2"
+source = "git+ssh://git@github.com/genmeta/gmdns.git?branch=feat%2Fresolver#bb6b21eddf68fb41d68e4a849b66ff801057e469"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -2005,13 +2005,13 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/h3x.git?branch=feat%2Fv0.5#653bcfee632b50c24f6d642d05924ba736bf1a83"
+source = "git+ssh://git@github.com/genmeta/h3x.git?branch=feat%2Fv0.5#6378995baa5d83cd562dd8728c82772aed1cd73d"
 dependencies = [
  "bon",
  "bytes",
  "dashmap",
+ "dquic",
  "futures",
- "gm-quic",
  "httlib-huffman",
  "http",
  "http-body",
@@ -2536,7 +2536,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3023,7 +3023,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3416,12 +3416,12 @@ version = "0.4.2"
 dependencies = [
  "clap",
  "console-subscriber",
+ "dquic",
  "firewall-db",
  "futures",
  "gateway",
  "genmeta-home",
  "genmeta-ssh",
- "gm-quic",
  "h3x",
  "http",
  "libc",
@@ -3760,7 +3760,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3784,7 +3784,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "qbase",
  "qevent",
@@ -3797,7 +3797,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3825,7 +3825,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3843,7 +3843,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3868,7 +3868,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3879,7 +3879,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3897,7 +3897,7 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "futures",
  "qbase",
@@ -3908,7 +3908,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -3937,7 +3937,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -4010,13 +4010,13 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
 name = "qunreliable"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#9f4a2e609562f31cf00481d3c7faec317369b1da"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#1b9cfa1300def3400d65dfa93013b890f495c5af"
 dependencies = [
  "bytes",
  "futures",
@@ -4521,7 +4521,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5120,7 +5120,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5132,7 +5132,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54254b8531cafa275c5e096f62d48c81435d1015405a91198ddb11e967301d40"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5155,7 +5155,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6259,7 +6259,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

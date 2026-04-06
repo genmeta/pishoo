@@ -1,6 +1,6 @@
 use std::sync::{Arc, Once, OnceLock};
 
-use gm_quic::prelude::handy::ToCertificate;
+use dquic::prelude::handy::ToCertificate;
 use rustls::RootCertStore;
 
 pub fn ensure_crypto_provider() {

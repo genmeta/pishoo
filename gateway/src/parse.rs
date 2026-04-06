@@ -8,7 +8,7 @@ use std::{
 
 use conf::parse_conf;
 use genmeta_home::identity::IdentityHome;
-use gm_quic::prelude::BindUri;
+use dquic::prelude::BindUri;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
@@ -186,7 +186,7 @@ impl Listens {
     }
 
     pub fn contains(&self, bind_uri: &BindUri) -> bool {
-        use gm_quic::qbase::net::*;
+        use dquic::qbase::net::*;
         // TODO: check specific_addrs
         let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
             return false;

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Once, OnceLock};
 
-use gm_quic::prelude::handy::ToCertificate;
+use dquic::prelude::handy::ToCertificate;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use snafu::Snafu;
 

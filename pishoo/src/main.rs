@@ -14,7 +14,7 @@ use gateway::{
     parse::{Node, Value},
     reverse::MissingRulePolicy,
 };
-use gm_quic::prelude::{QuicListeners, handy::server_parameters};
+use dquic::prelude::{QuicListeners, handy::server_parameters};
 use nix::{sys::signal::Signal, unistd::Pid};
 use rustls::server::WebPkiClientVerifier;
 use snafu::{Report, ResultExt, whatever};

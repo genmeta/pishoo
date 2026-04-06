@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use futures::{StreamExt, stream::FuturesUnordered};
-use gm_quic::{
+use dquic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
     qinterface::{BindInterface, component::location::Locations},
@@ -387,7 +387,7 @@ impl Publisher {
 }
 
 fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {
-    use gm_quic::prelude::handy::ToPrivateKey;
+    use dquic::prelude::handy::ToPrivateKey;
 
     let key_bytes = std::fs::read(path)
         .whatever_context::<_, Whatever>(format!("failed to read key file {}", path.display()))?;

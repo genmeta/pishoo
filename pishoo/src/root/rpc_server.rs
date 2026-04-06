@@ -103,7 +103,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
         // Build a QuicClient with the requested client identity (if any).
         let root_store = crate::tls::root_cert_store();
-        let builder = gm_quic::prelude::QuicClient::builder().with_root_certificates(root_store);
+        let builder = dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
         let quic_client = match request.identity {
             Some(identity) => builder
                 .with_cert(identity.certs().to_vec(), identity.key().clone_key())

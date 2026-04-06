@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use h3x::gm_quic::H3Client;
+use h3x::dquic::H3Client;
 use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
@@ -84,7 +84,7 @@ pub async fn connect_tunnel(
 
 /// 将请求通过 quic 转发到目标服务器
 async fn send(
-    h3_conn: Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>,
+    h3_conn: Arc<h3x::connection::Connection<dquic::prelude::Connection>>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, Whatever> {
     // 使用 h3x 的 execute_hyper_request 一步完成：打开流、发送请求、接收响应
@@ -104,7 +104,7 @@ async fn send(
 async fn connect(
     client: &H3Client,
     host: &str,
-) -> Result<Arc<h3x::connection::Connection<gm_quic::prelude::Connection>>, Whatever> {
+) -> Result<Arc<h3x::connection::Connection<dquic::prelude::Connection>>, Whatever> {
     let authority: Authority = host
         .parse()
         .whatever_context(format!("invalid host: {host}"))?;

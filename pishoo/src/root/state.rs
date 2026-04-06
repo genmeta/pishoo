@@ -45,7 +45,7 @@ pub enum RegisterError {
     #[snafu(display("failed to add server `{server_name}` to listeners"))]
     AddServerFailed {
         server_name: String,
-        source: gm_quic::prelude::ServerError,
+        source: dquic::prelude::ServerError,
     },
 }
 
@@ -63,7 +63,7 @@ pub enum ServerEntry {
     /// Name is actively owned and serving.
     Active {
         owner: ServiceOwner,
-        conn_tx: mpsc::Sender<gm_quic::prelude::Connection>,
+        conn_tx: mpsc::Sender<dquic::prelude::Connection>,
         shutdown_token: CancellationToken,
         /// Original listen specifications for network-change reconciliation.
         listens: Vec<gateway::parse::Listens>,
@@ -120,7 +120,7 @@ impl Inner {
     fn retire_server(
         &mut self,
         server_name: &str,
-        listeners: &gm_quic::prelude::QuicListeners,
+        listeners: &dquic::prelude::QuicListeners,
     ) -> Option<()> {
         let entry = self.servers.remove(server_name)?;
         self.name_gates.remove(server_name);
@@ -146,7 +146,7 @@ impl Inner {
         &mut self,
         pid: Pid,
         reason: &str,
-        listeners: &gm_quic::prelude::QuicListeners,
+        listeners: &dquic::prelude::QuicListeners,
     ) -> Option<WorkerCleanupArtifacts> {
         let record = self.processes.remove(&pid)?;
 
@@ -202,13 +202,13 @@ impl Inner {
 /// server registration / cleanup.
 pub struct RootState {
     /// The shared QUIC listeners object.
-    pub listeners: Arc<gm_quic::prelude::QuicListeners>,
+    pub listeners: Arc<dquic::prelude::QuicListeners>,
     inner: Mutex<Inner>,
 }
 
 impl RootState {
     /// Create a new root state with the given shared QUIC listeners.
-    pub fn new(listeners: Arc<gm_quic::prelude::QuicListeners>) -> Self {
+    pub fn new(listeners: Arc<dquic::prelude::QuicListeners>) -> Self {
         Self {
             listeners,
             inner: Mutex::new(Inner {
@@ -309,7 +309,7 @@ impl RootState {
         }
 
         // Phase 2: name is vacant — resolve bind URIs and bind the server.
-        let device_names = gm_quic::qinterface::device::Devices::global()
+        let device_names = dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
             .cloned()
@@ -405,7 +405,7 @@ impl RootState {
     pub async fn get_conn_sender(
         &self,
         server_name: &str,
-    ) -> Option<mpsc::Sender<gm_quic::prelude::Connection>> {
+    ) -> Option<mpsc::Sender<dquic::prelude::Connection>> {
         let inner = self.inner.lock().await;
         match inner.servers.get(server_name) {
             Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
@@ -420,10 +420,10 @@ impl RootState {
     /// [`IfaceRange::All`] or [`IfaceRange::Exact`]) are re-resolved.
     /// Listens with `specific_addrs` are always skipped (they don't depend
     /// on network interfaces).
-    pub async fn reconcile_binds(&self, event: &gm_quic::qinterface::device::InterfaceEvent) {
+    pub async fn reconcile_binds(&self, event: &dquic::qinterface::device::InterfaceEvent) {
         let device = event.device();
 
-        let device_names: Vec<String> = gm_quic::qinterface::device::Devices::global()
+        let device_names: Vec<String> = dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
             .cloned()
@@ -456,7 +456,7 @@ impl RootState {
             let desired_keys: std::collections::HashMap<String, &str> = desired_uris
                 .iter()
                 .map(|uri| {
-                    let bind_uri = gm_quic::prelude::BindUri::from(uri.as_str());
+                    let bind_uri = dquic::prelude::BindUri::from(uri.as_str());
                     (bind_uri.identity_key(), uri.as_str())
                 })
                 .collect();
@@ -494,7 +494,7 @@ impl RootState {
                 .filter_map(|key| current_map.get(key.as_str()).cloned())
                 .collect();
             for uri_str in &to_remove {
-                let uri = gm_quic::prelude::BindUri::from(uri_str.as_str());
+                let uri = dquic::prelude::BindUri::from(uri_str.as_str());
                 if let Some(iface) = server.remove_iface(&uri) {
                     // Close the interface in the background to avoid blocking
                     // the reconcile loop. BindInterface::close() waits for all

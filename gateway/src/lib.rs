@@ -8,4 +8,4 @@ pub mod parse;
 pub mod reverse;
 pub mod stun;
 
-pub use gm_quic::prelude::EndpointAddr;
+pub use dquic::prelude::EndpointAddr;

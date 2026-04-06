@@ -48,7 +48,7 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-gm-quic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
+dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
 qevent = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
 
 h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "feat/v0.5" }
@@ -104,20 +104,6 @@ sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 
 # --- workspace ---
 gateway = { path = "gateway", default-features = false }
-
-
-# [patch."ssh://git@github.com/genmeta/genmeta-ssh.git"]
-# genmeta-ssh = { path = "../genmeta-ssh" }
-
-# [patch."ssh://git@github.com/genmeta/gmdns.git"]
-# gmdns = { path = "../gmdns" }
-
-# [patch."ssh://git@github.com/genmeta/h3x.git"]
-# h3x = { path = "../h3x" }
-
-# [patch."ssh://git@github.com/genmeta/dquic.git"]
-# gm-quic = { path = "../dquic/gm-quic" }
-# qevent = { path = "../dquic/qevent" }
 
 [profile.dev]
 panic = "abort"

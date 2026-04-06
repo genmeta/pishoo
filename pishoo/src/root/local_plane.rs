@@ -101,7 +101,7 @@ impl gateway::control_plane::ProvideListener for LocalControlPlane {
 }
 
 impl gateway::control_plane::ProvideConnector for LocalControlPlane {
-    type Connector = Arc<gm_quic::prelude::QuicClient>;
+    type Connector = Arc<dquic::prelude::QuicClient>;
     type ConnectError = LocalConnectError;
 
     async fn connector(
@@ -109,7 +109,7 @@ impl gateway::control_plane::ProvideConnector for LocalControlPlane {
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
         let root_store = crate::tls::root_cert_store();
-        let builder = gm_quic::prelude::QuicClient::builder().with_root_certificates(root_store);
+        let builder = dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
         let quic_client = match request.identity {
             Some(identity) => builder
                 .with_cert(identity.certs().to_vec(), identity.key().clone_key())

@@ -1,11 +1,11 @@
 use std::sync::{Arc, RwLock};
 
-use gm_quic::{
+use dquic::{
     prelude::handy::{ToCertificate, client_parameters},
     qinterface::{device::Devices, io::ProductIO, manager::InterfaceManager},
 };
 use gmdns::resolvers::Resolvers;
-use h3x::gm_quic::H3Client;
+use h3x::dquic::H3Client;
 use snafu::Snafu;
 use tracing::debug;
 
@@ -98,7 +98,7 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
             .expect("failed to create client builder")
     };
 
-    let iface_factory: Arc<dyn ProductIO> = Arc::new(gm_quic::prelude::handy::DEFAULT_IO_FACTORY);
+    let iface_factory: Arc<dyn ProductIO> = Arc::new(dquic::prelude::handy::DEFAULT_IO_FACTORY);
     let iface_manager = InterfaceManager::global().clone();
     let monitor = Devices::global().monitor();
 
@@ -122,7 +122,7 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
         let mut parameters = client_parameters();
         parameters
             .set(
-                gm_quic::prelude::ParameterId::ClientName,
+                dquic::prelude::ParameterId::ClientName,
                 client_name.clone(),
             )
             .unwrap();

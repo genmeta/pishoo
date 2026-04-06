@@ -43,7 +43,7 @@ rustls-pemfile = "2"
 getrandom = { workspace = true }
 
 # --- QUIC Implementation ---
-gm-quic = { workspace = true }
+dquic = { workspace = true }
 qevent = { workspace = true }
 
 # --- DNS resolver ---
