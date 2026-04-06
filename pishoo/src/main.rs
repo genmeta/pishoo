@@ -12,7 +12,6 @@ use gateway::{
     control_plane::{Identity, ListenRequest},
     error::Whatever,
     parse::{Node, Value},
-    reverse::MissingRulePolicy,
 };
 use dquic::prelude::{QuicListeners, handy::server_parameters};
 use nix::{sys::signal::Signal, unistd::Pid};
@@ -408,7 +407,6 @@ async fn build_local_service_config(
         servers: server_configs,
         h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
         access_rules,
-        missing_rule_policy: MissingRulePolicy::Deny,
     })
 }
 

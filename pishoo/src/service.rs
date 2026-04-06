@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
+use axum::middleware::{from_fn, from_fn_with_state};
 use gateway::{
     control_plane::{ControlPlane, ListenRequest},
     parse::{Node, Value},
     reverse::{
-        MissingRulePolicy,
-        middleware::{AccessControlLayer, AccessLogLayer},
+        middleware::{AccessControlState, BodyAdapterLayer, access_control, access_log},
         router::NginxRouter,
     },
 };
@@ -43,8 +43,6 @@ pub struct ServiceConfig {
     pub h3_settings: Arc<Settings>,
     /// Access control rules.
     pub access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
-    /// Policy for requests that don't match any access rule.
-    pub missing_rule_policy: MissingRulePolicy,
 }
 
 /// Run the service loop: register listeners and connectors via the control
@@ -95,7 +93,7 @@ where
             _ => Vec::new(),
         };
 
-        // Build the service stack: AccessLog → AccessControl → NginxRouter
+        // Build the service stack: BodyAdapter → AccessLog → AccessControl → NginxRouter
         let nginx_router = NginxRouter::new(
             locations,
             gateway::reverse::router::RouterState {
@@ -103,12 +101,14 @@ where
                 session_spawner: plane.clone(),
             },
         );
+        let access_state = AccessControlState {
+            access_rules: config.access_rules.clone(),
+            server_name: Arc::from(server_name.as_str()),
+        };
         let service_stack = ServiceBuilder::new()
-            .layer(AccessLogLayer)
-            .layer(AccessControlLayer::new(
-                config.access_rules.clone(),
-                config.missing_rule_policy,
-            ))
+            .layer(BodyAdapterLayer)
+            .layer(from_fn(access_log))
+            .layer(from_fn_with_state(access_state, access_control))
             .service(nginx_router);
 
         // Build H3 connection builder with configured settings

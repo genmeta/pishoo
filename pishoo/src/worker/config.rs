@@ -11,7 +11,6 @@ use gateway::{
     control_plane::ListenRequest,
     error::Whatever,
     parse::{Listens, Node, Value},
-    reverse::MissingRulePolicy,
 };
 use genmeta_home::GenmetaHome;
 use snafu::{ResultExt, Snafu};
@@ -186,6 +185,5 @@ pub async fn build_service_config(
         servers,
         h3_settings,
         access_rules: access_rules_bundle.location_rules,
-        missing_rule_policy: MissingRulePolicy::Deny,
     })
 }

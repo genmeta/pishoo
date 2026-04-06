@@ -3414,6 +3414,7 @@ dependencies = [
 name = "pishoo"
 version = "0.4.2"
 dependencies = [
+ "axum 0.8.8",
  "clap",
  "console-subscriber",
  "dquic",

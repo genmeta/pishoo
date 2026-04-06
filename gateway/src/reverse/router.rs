@@ -4,17 +4,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{handler::Handler, response::IntoResponse};
-use bytes::Bytes;
+use axum::{body::Body, handler::Handler, response::IntoResponse};
 use futures::future::BoxFuture;
-use h3x::message::stream::MessageStreamError;
 use http::StatusCode;
-use http_body_util::combinators::UnsyncBoxBody;
 
 use super::location::match_location;
 use crate::parse::Node;
-
-type ReqBody = UnsyncBoxBody<Bytes, MessageStreamError>;
 
 /// Shared state for all reverse-proxy handlers.
 ///
@@ -45,7 +40,7 @@ impl NginxRouter {
     }
 }
 
-impl tower_service::Service<http::Request<ReqBody>> for NginxRouter {
+impl tower_service::Service<http::Request<Body>> for NginxRouter {
     type Response = axum::response::Response;
     type Error = Infallible;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -54,7 +49,7 @@ impl tower_service::Service<http::Request<ReqBody>> for NginxRouter {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut request: http::Request<ReqBody>) -> Self::Future {
+    fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
         let locations = self.locations.clone();
         let state = self.state.clone();
 
@@ -68,10 +63,6 @@ impl tower_service::Service<http::Request<ReqBody>> for NginxRouter {
 
             // Inject LocationMatch into request extensions for extractors
             request.extensions_mut().insert(loc_match.clone());
-
-            // Convert body for axum handlers
-            let (parts, body) = request.into_parts();
-            let request = http::Request::from_parts(parts, axum::body::Body::new(body));
 
             let location = &loc_match.location;
 

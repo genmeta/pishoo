@@ -120,9 +120,21 @@ section = "httpd"
 priority = "optional"
 maintainer-scripts = "pkg/debian"
 assets = [
-  ["target/release/pishoo", "usr/bin/", "755"],
-  ["target/release/pishoo-worker", "usr/lib/pishoo/", "755"],
-  ["target/release/pishoo-ssh-session", "usr/lib/pishoo/", "755"],
+  [
+    "target/release/pishoo",
+    "usr/bin/",
+    "755",
+  ],
+  [
+    "target/release/pishoo-worker",
+    "usr/lib/pishoo/",
+    "755",
+  ],
+  [
+    "target/release/pishoo-ssh-session",
+    "usr/lib/pishoo/",
+    "755",
+  ],
 ]
 
 [[bin]]
@@ -163,6 +175,7 @@ tokio-util = { workspace = true }
 
 # --- HTTP ---
 http = { workspace = true }
+axum = { workspace = true }
 
 # --- Tower ---
 tower = { workspace = true }
