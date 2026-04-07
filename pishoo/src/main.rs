@@ -429,7 +429,7 @@ async fn spawn_local_service(
     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
         if let Err(error) = pishoo::service::run_service(plane, &config, service_shutdown).await {
             tracing::error!(
-                error = %Report::from_error(error.as_ref()),
+                error = %Report::from_error(&error),
                 "local service exited with error"
             );
         }

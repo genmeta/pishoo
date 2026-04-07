@@ -123,7 +123,7 @@ async fn main() -> Result<(), Whatever> {
                 result = &mut service => {
                     if let Err(error) = result {
                         tracing::error!(
-                            error = %Report::from_error(error.as_ref()),
+                            error = %Report::from_error(&error),
                             "service exited with error"
                         );
                     }

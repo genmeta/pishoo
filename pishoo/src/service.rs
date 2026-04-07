@@ -58,7 +58,7 @@ pub async fn run_service<P: ControlPlane + 'static>(
     plane: Arc<P>,
     config: &ServiceConfig,
     shutdown: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<(), P::ListenError>
 where
     P::Listener: 'static,
     <P::Listener as quic::Listen>::Error: Send,
@@ -80,10 +80,7 @@ where
         };
         let server_name = request.identity.name().as_full().to_owned();
 
-        let listener = plane
-            .listener(request)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let listener = plane.listener(request).await?;
 
         tracing::info!(%server_name, "Listener registered");
 
