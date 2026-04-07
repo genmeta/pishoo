@@ -23,6 +23,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::{listen::PerServerListener, root::worker_handle::WorkerHandle};
 
@@ -501,9 +502,12 @@ impl RootState {
                     // components (e.g. STUN keep-alive tasks) to shut down,
                     // which may take a long time if the network interface has
                     // already been removed at the OS level.
-                    tokio::spawn(async move {
-                        let _ = iface.close().await;
-                    });
+                    tokio::spawn(
+                        async move {
+                            let _ = iface.close().await;
+                        }
+                        .in_current_span(),
+                    );
                 }
             }
             if !to_remove.is_empty() {

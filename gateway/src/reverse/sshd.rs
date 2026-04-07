@@ -127,14 +127,14 @@ pub async fn sshd_handle(
             let read_stream = match upgrade::take::<ReadStream>(&mut req).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to take over read stream");
+                    tracing::error!(error = %Report::from_error(&e), "failed to take over read stream");
                     return;
                 }
             };
             let write_stream = match upgrade::take::<WriteStream>(&mut req).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to take over write stream");
+                    tracing::error!(error = %Report::from_error(&e), "failed to take over write stream");
                     return;
                 }
             };

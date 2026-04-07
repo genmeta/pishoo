@@ -1,6 +1,5 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use futures::{StreamExt, stream::FuturesUnordered};
 use dquic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
@@ -8,6 +7,7 @@ use dquic::{
     qresolve::Publish as DnsPublisher,
     qtraversal::nat::client::{NatType, StunClientsComponent},
 };
+use futures::{StreamExt, stream::FuturesUnordered};
 use gmdns::{
     MdnsPacket,
     mdns::Mdns,

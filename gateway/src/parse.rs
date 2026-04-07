@@ -7,8 +7,8 @@ use std::{
 };
 
 use conf::parse_conf;
-use genmeta_home::identity::IdentityHome;
 use dquic::prelude::BindUri;
+use genmeta_home::identity::IdentityHome;
 use http::{HeaderName, HeaderValue, Uri};
 use misc_conf::{
     ast::{Directive, DirectiveTrait},

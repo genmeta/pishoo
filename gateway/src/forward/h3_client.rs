@@ -121,10 +121,7 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
     if let Some((_, _, ref client_name)) = config {
         let mut parameters = client_parameters();
         parameters
-            .set(
-                dquic::prelude::ParameterId::ClientName,
-                client_name.clone(),
-            )
+            .set(dquic::prelude::ParameterId::ClientName, client_name.clone())
             .unwrap();
         builder = builder.with_quic_parameters(parameters);
     }

@@ -73,7 +73,7 @@ async fn main() -> Result<(), Whatever> {
         .send(hello)
         .await
         .whatever_context("failed to send startup hello")?;
-    tracing::info!("Startup hello sent");
+    tracing::info!("startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
     // Recover the seqpacket FD passed by root at fixed FD 3 (dup2'd in child_exec).
