@@ -1,18 +1,18 @@
 //! Worker identity configuration: scan identities and build [`ServiceConfig`].
 //!
-//! Workers scan the user's `~/.genmeta/` directory for identities, load
+//! Workers scan the user's `~/.dhttp/` directory for identities, load
 //! per-identity server.conf files, and produce a [`ServiceConfig`] to
 //! feed into [`run_service()`](crate::service::run_service).
 
 use std::{collections::HashMap, sync::Arc};
 
+use dhttp_home::DhttpHome;
 use futures::StreamExt;
 use gateway::{
     control_plane::ListenRequest,
     error::Whatever,
     parse::{Listens, Node, Value},
 };
-use genmeta_home::GenmetaHome;
 use snafu::{ResultExt, Snafu};
 
 use crate::{
@@ -44,13 +44,13 @@ impl snafu::FromString for BuildConfigError {
 }
 
 /// Build a [`ServiceConfig`] by scanning all identities under the given
-/// [`GenmetaHome`], loading their TLS material and server.conf definitions.
+/// [`DhttpHome`], loading their TLS material and server.conf definitions.
 pub async fn build_service_config(
-    genmeta_home: &GenmetaHome,
+    dhttp_home: &DhttpHome,
 ) -> Result<ServiceConfig, BuildConfigError> {
     // Collect identity names from the stream.
     let mut identity_names = Vec::new();
-    let mut stream = std::pin::pin!(genmeta_home.identities());
+    let mut stream = std::pin::pin!(dhttp_home.identities());
     while let Some(result) = stream.next().await {
         match result {
             Ok(name) => identity_names.push(name),
@@ -69,7 +69,7 @@ pub async fn build_service_config(
     let mut access_rules_uri: Option<String> = None;
 
     for name in &identity_names {
-        let identity_home = match genmeta_home.load_identity(name.borrow()).await {
+        let identity_home = match dhttp_home.load_identity(name.borrow()).await {
             Ok(home) => home,
             Err(error) => {
                 tracing::warn!(

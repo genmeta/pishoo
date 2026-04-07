@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
+use dhttp_home::{DhttpHome, identity::IdentityHome};
 use futures::StreamExt;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
 };
-use genmeta_home::{GenmetaHome, identity::IdentityHome};
 use snafu::{ResultExt, whatever};
 
 use super::{EntryConfig, EntryServerOwner, ResolvedWorkerTarget, resolve_entry_worker_targets};
@@ -57,10 +57,10 @@ pub async fn discover_entry_server_owners(
 pub async fn discover_worker_servers(
     target: &ResolvedWorkerTarget,
 ) -> Result<Vec<Arc<Node>>, Whatever> {
-    let genmeta_home = GenmetaHome::new(target.home.join(".genmeta"));
+    let dhttp_home = DhttpHome::new(target.home.join(".dhttp"));
     let mut identity_names = Vec::new();
     {
-        let mut stream = std::pin::pin!(genmeta_home.identities());
+        let mut stream = std::pin::pin!(dhttp_home.identities());
         while let Some(result) = stream.next().await {
             let name = result.whatever_context(format!(
                 "failed to list identities for worker `{}`",
@@ -72,7 +72,7 @@ pub async fn discover_worker_servers(
 
     let mut servers = Vec::new();
     for identity_name in &identity_names {
-        let identity_home = match genmeta_home.load_identity(identity_name.borrow()).await {
+        let identity_home = match dhttp_home.load_identity(identity_name.borrow()).await {
             Ok(home) => home,
             Err(_) => continue,
         };

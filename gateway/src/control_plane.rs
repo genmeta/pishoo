@@ -2,10 +2,10 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
+use dhttp_home::identity::Name;
+pub use dhttp_home::identity::ssl::Identity;
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
-use genmeta_home::identity::Name;
-pub use genmeta_home::identity::ssl::Identity;
 use h3x::quic;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};

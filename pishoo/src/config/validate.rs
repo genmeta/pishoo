@@ -145,10 +145,10 @@ mod tests {
 
     fn write_worker_layout(home: &Path, server_name: &str) {
         let (cert, key) = repo_tls_paths();
-        let genmeta_dir = home.join(".genmeta");
-        // New directory structure: .genmeta/{partial_name}/ssl/
-        // identities() scans .genmeta/ for subdirs with valid names and ssl/ subdir.
-        let identity_dir = genmeta_dir.join("test");
+        let dhttp_dir = home.join(".dhttp");
+        // New directory structure: .dhttp/{partial_name}/ssl/
+        // identities() scans .dhttp/ for subdirs with valid names and ssl/ subdir.
+        let identity_dir = dhttp_dir.join("test");
         let ssl_dir = identity_dir.join("ssl");
         std::fs::create_dir_all(&ssl_dir).expect("create identity ssl dir");
         std::fs::write(

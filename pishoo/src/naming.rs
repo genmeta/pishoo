@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use dhttp_home::identity::Name;
 use gateway::{
     error::Whatever,
     parse::{Node, ServerName, Value},
 };
-use genmeta_home::identity::Name;
 use snafu::{FromString, whatever};
 
 pub fn canonicalize_genmeta_name(name: &str) -> Result<String, Whatever> {

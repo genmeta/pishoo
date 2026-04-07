@@ -153,7 +153,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
-genmeta-home = { workspace = true }
+dhttp-home = { workspace = true }
 
 # --- QUIC & HTTP/3 ---
 dquic = { workspace = true }

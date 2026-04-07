@@ -386,7 +386,7 @@ async fn build_local_service_config(
             .whatever_context("invalid local tls material")?;
 
         for configured_name in server_names {
-            let name = genmeta_home::identity::Name::try_from_str(configured_name.name.clone())
+            let name = dhttp_home::identity::Name::try_from_str(configured_name.name.clone())
                 .whatever_context(format!("invalid server name `{}`", configured_name.name))?;
             server_configs.push(pishoo::service::ServerConfig {
                 listen_request: ListenRequest {

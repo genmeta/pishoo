@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Local;
-use genmeta_home::GenmetaHome;
+use dhttp_home::DhttpHome;
 use http::{Method, Request, Version};
 use snafu::{Report, ResultExt};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
@@ -10,7 +10,7 @@ use crate::error::Result;
 
 // Returns None on Android (no logging)
 fn get_log_dir() -> Option<PathBuf> {
-    GenmetaHome::load_from_environment()
+    DhttpHome::load_from_environment()
         .map(|home| home.join("logs"))
         .ok()
 }

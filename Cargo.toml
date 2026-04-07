@@ -91,7 +91,7 @@ dashmap = "6"
 pin-project-lite = "0.2"
 form_urlencoded = "1"
 x509-parser = "0.18"
-genmeta-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "main" }
+dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "main" }
 
 # --- System Interaction ---
 libc = "0.2"

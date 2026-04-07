@@ -2,7 +2,7 @@
 //!
 //! Spawned by the root pishoo process with stdin/stdout piped for remoc IPC.
 //! Receives [`WorkerBootstrap`] from the root (containing a
-//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.genmeta` identities, builds a
+//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, builds a
 //! [`pishoo::service::ServiceConfig`], and calls [`run_service()`] — the same generic
 //! code path used by root-local services.
 //!
@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
+use dhttp_home::DhttpHome;
 use gateway::error::Whatever;
-use genmeta_home::GenmetaHome;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     service::run_service,
@@ -90,9 +90,9 @@ async fn main() -> Result<(), Whatever> {
         seqpacket,
     ));
 
-    let genmeta_home = GenmetaHome::new(bootstrap.home.join(".genmeta"));
+    let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));
 
-    let mut config = build_service_config(&genmeta_home)
+    let mut config = build_service_config(&dhttp_home)
         .await
         .whatever_context("failed to build service config")?;
 
@@ -149,7 +149,7 @@ async fn main() -> Result<(), Whatever> {
                 }
                 _ = hup_signal.recv() => {
                     tracing::info!("received SIGHUP, rebuilding service config");
-                    let rebuilt_config = match build_service_config(&genmeta_home).await {
+                    let rebuilt_config = match build_service_config(&dhttp_home).await {
                         Ok(config) => config,
                         Err(error) => {
                             tracing::warn!(

@@ -1,4 +1,4 @@
-use genmeta_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
+use dhttp_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use misc_conf::{ast::Directive, nginx::Nginx};
 use snafu::ensure_whatever;
 
