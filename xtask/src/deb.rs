@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
-use crate::{DebTarget, package_version, target_dir};
+use crate::{DebTarget, Feature, package_version, target_dir};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -369,7 +369,7 @@ dpkg-deb -b /staging /output/{deb_name}
     Ok(())
 }
 
-pub async fn run(targets: &[DebTarget], sshd: bool) -> Result<(), Whatever> {
+pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), Whatever> {
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
@@ -394,9 +394,10 @@ pub async fn run(targets: &[DebTarget], sshd: bool) -> Result<(), Whatever> {
         let span = info_span!("deb", triple);
         let version = version.clone();
         let target_dir = target_dir.clone();
+        let features = features.to_vec();
         tasks.spawn(
             async move {
-                build_one(&docker, triple, &version, &target_dir, sshd)
+                build_one(&docker, triple, &version, &target_dir, &features)
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -419,8 +420,11 @@ async fn build_one(
     triple: &str,
     version: &str,
     target_dir: &std::path::Path,
-    sshd: bool,
+    features: &[Feature],
 ) -> Result<(), Whatever> {
+    let has_sshd = features
+        .iter()
+        .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
     let arch = deb_arch(triple)?;
     let gnu = gnu_arch(triple)?;
     let image = ensure_image(docker, triple).await?;
@@ -469,8 +473,21 @@ async fn build_one(
         .whatever_context("failed to start build container")?;
 
     // Build
-    let features = if sshd { " --features sshd" } else { "" };
-    let sshd_env = if sshd {
+    let cargo_features = {
+        let names: Vec<&str> = features
+            .iter()
+            .map(|f| match f {
+                Feature::Sshd => "sshd",
+                Feature::Pam => "pam",
+            })
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" --features {}", names.join(","))
+        }
+    };
+    let sshd_env = if has_sshd {
         "export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && \
          export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && "
     } else {
@@ -480,7 +497,7 @@ async fn build_one(
         "source /root/.cargo/env && \
          export RUSTFLAGS=\"${{RUSTFLAGS:-}} -L /usr/lib/{gnu}\" && \
          {sshd_env}\
-         cargo zigbuild --release --target {triple} -p {CARGO_NAME}{features}"
+         cargo zigbuild --release --target {triple} -p {CARGO_NAME}{cargo_features}"
     );
     exec_in_container(docker, &container.id, &["bash", "-c", &build_cmd]).await?;
 
@@ -498,7 +515,7 @@ async fn build_one(
         ("Priority", "optional"),
     ]);
 
-    let (sshd_copy, sshd_shlibdeps) = if sshd {
+    let (sshd_copy, sshd_shlibdeps) = if has_sshd {
         (
             format!(
                 r#"cp /workspace/target/{triple}/release/pishoo-worker /staging/usr/lib/pishoo/

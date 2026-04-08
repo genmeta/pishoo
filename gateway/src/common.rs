@@ -13,7 +13,7 @@ pub fn ensure_crypto_provider() {
 
 pub fn root_cert() -> Arc<RootCertStore> {
     static ROOT_CERT_STORE: OnceLock<Arc<RootCertStore>> = OnceLock::new();
-    let root_cert = include_bytes!("../../keychain/root.crt");
+    let root_cert = include_bytes!(concat!(env!("OUT_DIR"), "/root.crt"));
 
     ensure_crypto_provider();
 
