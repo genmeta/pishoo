@@ -1,11 +1,7 @@
 mod brew;
 mod deb;
 
-use std::{
-    io::IsTerminal,
-    path::PathBuf,
-    process::Stdio,
-};
+use std::{io::IsTerminal, path::PathBuf, process::Stdio};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::{OptionExt, ResultExt, Whatever};

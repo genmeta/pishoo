@@ -212,7 +212,10 @@ async fn copy_from_container(
     container_path: &str,
     local_dir: &Path,
 ) -> Result<(), Whatever> {
-    info!(path = container_path, "starting container artifact download");
+    info!(
+        path = container_path,
+        "starting container artifact download"
+    );
     let mut tar_stream = docker.download_from_container(
         container_id,
         Some(

@@ -95,7 +95,7 @@ dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "ma
 
 # --- System Interaction ---
 libc = "0.2"
-nix = "0.30"
+nix = "0.31"
 pam = "0.7"
 
 # --- Database ORM ---
