@@ -38,7 +38,7 @@ pub fn root_cert_store() -> Arc<rustls::RootCertStore> {
     ROOT_CERT_STORE
         .get_or_init(|| {
             let mut store = rustls::RootCertStore::empty();
-            let root_cert = include_bytes!("../../keychain/root.crt");
+            let root_cert = include_bytes!(concat!(env!("OUT_DIR"), "/root.crt"));
             store.add_parsable_certificates(root_cert.to_certificate());
             Arc::new(store)
         })

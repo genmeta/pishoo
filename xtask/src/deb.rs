@@ -445,6 +445,23 @@ async fn build_one(
     }];
     mounts.extend(cargo_cache_mounts());
 
+    // Forward ROOT_CA into the container if set on the host.
+    let root_ca_env = if let Ok(host_path) = std::env::var("ROOT_CA") {
+        let host_path = std::path::Path::new(&host_path)
+            .canonicalize()
+            .whatever_context(format!("ROOT_CA path not found: {host_path}"))?;
+        mounts.push(Mount {
+            target: Some("/root-ca/root.crt".into()),
+            source: Some(host_path.to_string_lossy().into_owned()),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        "export ROOT_CA=/root-ca/root.crt && "
+    } else {
+        ""
+    };
+
     let container_name = format!("xtask-deb-{triple}");
     let container = docker
         .create_container(
@@ -496,6 +513,7 @@ async fn build_one(
     let build_cmd = format!(
         "source /root/.cargo/env && \
          export RUSTFLAGS=\"${{RUSTFLAGS:-}} -L /usr/lib/{gnu}\" && \
+         {root_ca_env}\
          {sshd_env}\
          cargo zigbuild --release --target {triple} -p {CARGO_NAME}{cargo_features}"
     );
