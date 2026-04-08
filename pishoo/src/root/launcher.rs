@@ -250,12 +250,25 @@ fn pipe_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
 #[cfg(feature = "sshd")]
 fn seqpacket_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
     use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+
     let (a, b) = socketpair(
         AddressFamily::Unix,
         SockType::SeqPacket,
         None,
+        // SOCK_CLOEXEC is not available on macOS; set it manually below.
+        #[cfg(not(target_vendor = "apple"))]
         SockFlag::SOCK_CLOEXEC,
+        #[cfg(target_vendor = "apple")]
+        SockFlag::empty(),
     )?;
+
+    #[cfg(target_vendor = "apple")]
+    {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        fcntl(&a, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+        fcntl(&b, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+    }
+
     Ok((a, b))
 }
 
