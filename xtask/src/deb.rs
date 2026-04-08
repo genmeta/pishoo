@@ -383,7 +383,7 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
             tasks.spawn(
-                async move { run_common(&docker).await.map_err(|e| e.to_string()) }
+                async move { run_common(&docker).await }
                     .instrument(info_span!("deb", triple = "common")),
             );
             continue;
@@ -396,20 +396,13 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
         let target_dir = target_dir.clone();
         let features = features.to_vec();
         tasks.spawn(
-            async move {
-                build_one(&docker, triple, &version, &target_dir, &features)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            .instrument(span),
+            async move { build_one(&docker, triple, &version, &target_dir, &features).await }
+                .instrument(span),
         );
     }
 
     while let Some(result) = tasks.join_next().await {
-        let inner = result.whatever_context("deb build task panicked")?;
-        if let Err(msg) = inner {
-            snafu::whatever!("{msg}");
-        }
+        result.whatever_context("deb build task panicked")??;
     }
 
     Ok(())
