@@ -1,7 +1,11 @@
 mod brew;
 mod deb;
 
-use std::{io::IsTerminal, path::PathBuf};
+use std::{
+    io::IsTerminal,
+    path::PathBuf,
+    process::Stdio,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use snafu::{OptionExt, ResultExt, Whatever};
@@ -166,6 +170,18 @@ async fn sha256_file(path: &std::path::Path) -> Result<String, Whatever> {
 /// Run an external command, checking its exit status.
 pub async fn run_cmd(cmd: &mut tokio::process::Command) -> Result<(), Whatever> {
     let status = cmd
+        .status()
+        .await
+        .whatever_context("failed to spawn process")?;
+    snafu::ensure_whatever!(status.success(), "command exited with {status}");
+    Ok(())
+}
+
+/// Run an external command quietly, suppressing stdout/stderr.
+pub async fn run_cmd_quiet(cmd: &mut tokio::process::Command) -> Result<(), Whatever> {
+    let status = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await
         .whatever_context("failed to spawn process")?;

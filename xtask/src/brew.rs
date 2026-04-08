@@ -4,7 +4,7 @@ use flate2::{Compression, write::GzEncoder};
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
-use crate::{BrewTarget, package_meta, run_cmd, sha256_file, target_dir};
+use crate::{BrewTarget, package_meta, run_cmd, run_cmd_quiet, sha256_file, target_dir};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -20,7 +20,7 @@ fn brew_on_block(triple: &str) -> Result<&'static str, Whatever> {
 }
 
 async fn check_cargo() -> Result<(), Whatever> {
-    run_cmd(tokio::process::Command::new("which").arg("cargo")).await
+    run_cmd_quiet(tokio::process::Command::new("which").arg("cargo")).await
 }
 
 /// Create a tar.gz archive from a staging directory.
@@ -92,6 +92,7 @@ fn generate_formula(
 }
 
 pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
+    info!(target_count = targets.len(), "starting brew dist build");
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
     let workspace = std::env::current_dir().whatever_context("failed to get cwd")?;
@@ -102,6 +103,7 @@ pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
         let target_dir = target_dir.clone();
         let workspace = workspace.clone();
         let triple = target.triple();
+        info!(triple, "queued brew target build");
         let span = info_span!("brew", triple);
         tasks.spawn(
             async move { build_one(triple, &version, &target_dir, &workspace).await }
@@ -110,6 +112,7 @@ pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
     }
 
     let mut archives = Vec::new();
+    info!("waiting for brew target builds to finish");
     while let Some(result) = tasks.join_next().await {
         archives.push(result.whatever_context("brew build task panicked")??);
     }
@@ -139,6 +142,7 @@ pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
         .await
         .whatever_context(format!("failed to write {}", formula_path.display()))?;
     info!(path = %formula_path.display(), "produced formula");
+    info!("finished brew dist build");
 
     Ok(())
 }
@@ -149,9 +153,11 @@ async fn build_one(
     target_dir: &Path,
     workspace: &Path,
 ) -> Result<ArchiveInfo, Whatever> {
+    info!(triple, "checking cargo availability");
     check_cargo().await?;
 
     // Build with sshd feature
+    info!(triple, "starting cargo build for brew target");
     run_cmd(tokio::process::Command::new("cargo").args([
         "build",
         "--release",
@@ -164,6 +170,7 @@ async fn build_one(
     ]))
     .await
     .whatever_context(format!("cargo build failed for {triple}"))?;
+    info!(triple, "cargo build finished for brew target");
 
     // Stage
     let brew_dir = target_dir.join(triple).join("release").join("brew");

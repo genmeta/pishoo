@@ -212,6 +212,7 @@ async fn copy_from_container(
     container_path: &str,
     local_dir: &Path,
 ) -> Result<(), Whatever> {
+    info!(path = container_path, "starting container artifact download");
     let mut tar_stream = docker.download_from_container(
         container_id,
         Some(
@@ -227,26 +228,35 @@ async fn copy_from_container(
         tar_data.extend_from_slice(&chunk);
     }
 
-    let mut archive = tar::Archive::new(&tar_data[..]);
-    std::fs::create_dir_all(local_dir)
-        .whatever_context(format!("failed to create {}", local_dir.display()))?;
+    let local_dir = local_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut archive = tar::Archive::new(&tar_data[..]);
+        std::fs::create_dir_all(&local_dir)
+            .whatever_context(format!("failed to create {}", local_dir.display()))?;
 
-    for entry in archive
-        .entries()
-        .whatever_context("failed to read tar entries")?
-    {
-        let mut entry = entry.whatever_context("failed to read tar entry")?;
-        let path = entry
-            .path()
-            .whatever_context("failed to read entry path")?
-            .into_owned();
-        let filename = path.file_name().unwrap_or(path.as_os_str());
-        let dest = local_dir.join(filename);
-        let mut file = std::fs::File::create(&dest)
-            .whatever_context(format!("failed to create {}", dest.display()))?;
-        std::io::copy(&mut entry, &mut file)
-            .whatever_context(format!("failed to write {}", dest.display()))?;
-    }
+        for entry in archive
+            .entries()
+            .whatever_context("failed to read tar entries")?
+        {
+            let mut entry = entry.whatever_context("failed to read tar entry")?;
+            let path = entry
+                .path()
+                .whatever_context("failed to read entry path")?
+                .into_owned();
+            let filename = path.file_name().unwrap_or(path.as_os_str());
+            let dest = local_dir.join(filename);
+            let mut file = std::fs::File::create(&dest)
+                .whatever_context(format!("failed to create {}", dest.display()))?;
+            std::io::copy(&mut entry, &mut file)
+                .whatever_context(format!("failed to write {}", dest.display()))?;
+        }
+
+        Ok::<(), Whatever>(())
+    })
+    .await
+    .whatever_context("artifact extraction task panicked")??;
+
+    info!("finished container artifact extraction");
 
     Ok(())
 }
@@ -282,10 +292,12 @@ fn cargo_cache_mounts() -> Vec<Mount> {
 
 /// Build the arch-independent pishoo-common config package.
 async fn run_common(docker: &Docker) -> Result<(), Whatever> {
+    info!("starting common deb package build");
     let target_dir = target_dir()?;
     let deb_name = format!("pishoo-common_{COMMON_VERSION}-1_all.deb");
     let out_dir = target_dir.join("common").join("deb");
-    std::fs::create_dir_all(&out_dir)
+    tokio::fs::create_dir_all(&out_dir)
+        .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
 
     let workspace_dir =
@@ -366,10 +378,12 @@ dpkg-deb -b /staging /output/{deb_name}
         .whatever_context("failed to remove common container")?;
 
     info!(deb_name, "produced");
+    info!("finished common deb package build");
     Ok(())
 }
 
 pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), Whatever> {
+    info!(target_count = targets.len(), "starting deb dist build");
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
@@ -382,6 +396,7 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
     for &target in targets {
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
+            info!("queued common deb package build");
             tasks.spawn(
                 async move { run_common(&docker).await }
                     .instrument(info_span!("deb", triple = "common")),
@@ -391,6 +406,7 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
 
         let docker = docker.clone();
         let triple = target.triple();
+        info!(triple, "queued deb target build");
         let span = info_span!("deb", triple);
         let version = version.clone();
         let target_dir = target_dir.clone();
@@ -404,6 +420,8 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
     while let Some(result) = tasks.join_next().await {
         result.whatever_context("deb build task panicked")??;
     }
+
+    info!("finished deb dist build");
 
     Ok(())
 }
@@ -420,11 +438,13 @@ async fn build_one(
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
     let arch = deb_arch(triple)?;
     let gnu = gnu_arch(triple)?;
+    info!(triple, "ensuring build image");
     let image = ensure_image(docker, triple).await?;
 
     let deb_name = format!("{CARGO_NAME}_{version}-1_{arch}.deb");
     let out_dir = target_dir.join(triple).join("release").join("deb");
-    std::fs::create_dir_all(&out_dir)
+    tokio::fs::create_dir_all(&out_dir)
+        .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
 
     let workspace_dir =
@@ -456,6 +476,7 @@ async fn build_one(
     };
 
     let container_name = format!("xtask-deb-{triple}");
+    info!(triple, container = %container_name, "creating build container");
     let container = docker
         .create_container(
             Some(
@@ -481,6 +502,7 @@ async fn build_one(
         .start_container(&container.id, None::<StartContainerOptions>)
         .await
         .whatever_context("failed to start build container")?;
+    info!(triple, "build container started");
 
     // Build
     let cargo_features = {
@@ -510,7 +532,9 @@ async fn build_one(
          {sshd_env}\
          cargo zigbuild --release --target {triple} -p {CARGO_NAME}{cargo_features}"
     );
+    info!(triple, "starting cargo zigbuild inside container");
     exec_in_container(docker, &container.id, &["bash", "-c", &build_cmd]).await?;
+    info!(triple, "cargo zigbuild finished inside container");
 
     // Stage + detect dependencies + build .deb
     let control = format_control(&[
