@@ -22,8 +22,8 @@ const BASE_IMAGE: &str = "debian:bookworm";
 /// Image tag prefix for pishoo deb builds.
 const IMAGE_TAG_PREFIX: &str = "pishoo-deb";
 
-/// pishoo-common version (arch-independent config package).
-const COMMON_VERSION: &str = "0.2.1";
+/// Relative path from workspace root to the debian packaging directory.
+const DEBIAN_PKG_DIR: &str = "pishoo/pkg/debian";
 
 fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
@@ -128,7 +128,7 @@ cargo install cargo-zigbuild
 # cross-compilation libraries
 dpkg --add-architecture {deb}
 apt-get update -qq
-apt-get install --assume-yes -qq libc-dev:{deb} libpam0g-dev:{deb} dpkg-dev
+apt-get install --assume-yes -qq libc-dev:{deb} libpam0g-dev:{deb} dpkg-dev debhelper fakeroot
 "#
     );
     exec_in_container(docker, &container.id, &["bash", "-c", &setup_script]).await?;
@@ -264,13 +264,29 @@ async fn copy_from_container(
     Ok(())
 }
 
-fn format_control(fields: &[(&str, &str)]) -> String {
-    fields
-        .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+/// Path to the debian packaging directory within the workspace.
+fn debian_dir() -> Result<std::path::PathBuf, Whatever> {
+    let workspace_dir =
+        std::env::current_dir().whatever_context("failed to get current directory")?;
+    Ok(workspace_dir.join(DEBIAN_PKG_DIR))
+}
+
+/// Generate a debian/changelog from the Cargo.toml version.
+fn generate_changelog(version: &str) -> Result<(), Whatever> {
+    let changelog_path = debian_dir()?.join("changelog");
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%a, %d %b %Y %H:%M:%S +0000");
+    let content = format!(
+        "{CARGO_NAME} ({version}-1) unstable; urgency=low\n\
+         \n\
+         \x20 * release {version}\n\
+         \n\
+         \x20-- Genmeta Tech Limited <support@genmeta.net>  {timestamp}\n"
+    );
+    std::fs::write(&changelog_path, content)
+        .whatever_context(format!("failed to write {}", changelog_path.display()))?;
+    info!(version, "generated debian/changelog");
+    Ok(())
 }
 
 /// Bind mounts for the host cargo git/registry cache (read-only).
@@ -294,10 +310,9 @@ fn cargo_cache_mounts() -> Vec<Mount> {
 }
 
 /// Build the arch-independent pishoo-common config package.
-async fn run_common(docker: &Docker) -> Result<(), Whatever> {
+async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
     info!("starting common deb package build");
     let target_dir = target_dir()?;
-    let deb_name = format!("pishoo-common_{COMMON_VERSION}-1_all.deb");
     let out_dir = target_dir.join("common").join("deb");
     tokio::fs::create_dir_all(&out_dir)
         .await
@@ -306,7 +321,7 @@ async fn run_common(docker: &Docker) -> Result<(), Whatever> {
     let workspace_dir =
         std::env::current_dir().whatever_context("failed to get current directory")?;
 
-    // Use any base image — pishoo-common just needs dpkg-deb
+    // Ensure base image exists (pishoo-common only needs debhelper + dpkg-deb)
     let mut pull_stream = docker.create_image(
         Some(
             CreateImageOptionsBuilder::default()
@@ -331,7 +346,7 @@ async fn run_common(docker: &Docker) -> Result<(), Whatever> {
             ContainerCreateBody {
                 image: Some(BASE_IMAGE.to_string()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
-                working_dir: Some("/workspace".into()),
+                working_dir: Some("/workspace/pishoo".into()),
                 host_config: Some(HostConfig {
                     mounts: Some(vec![Mount {
                         target: Some("/workspace".into()),
@@ -352,25 +367,38 @@ async fn run_common(docker: &Docker) -> Result<(), Whatever> {
         .await
         .whatever_context("failed to start common container")?;
 
-    let script = format!(
-        r#"set -e
-mkdir -p /staging/DEBIAN
-cp -r /workspace/pishoo/pkg/common/* /staging/
-cp -r /workspace/pishoo/pkg/debian/* /staging/DEBIAN/
-sed -i 's/Version:.*/Version: {COMMON_VERSION}-1/' /staging/DEBIAN/control
-mkdir -p /output
-dpkg-deb -b /staging /output/{deb_name}
-"#
-    );
-    exec_in_container(docker, &container.id, &["bash", "-c", &script]).await?;
+    // Install debhelper inside the base container (no cross-compilation image needed)
+    let setup_script = r#"set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install --assume-yes -qq debhelper fakeroot
+"#;
+    exec_in_container(docker, &container.id, &["bash", "-c", setup_script]).await?;
 
+    // Link debian/ into the pishoo source tree (dpkg-buildpackage expects it there)
+    let build_script = r#"set -e
+ln -sfn /workspace/pishoo/pkg/debian /workspace/pishoo/debian
+dpkg-buildpackage -A -uc -us -d
+"#;
+    exec_in_container(docker, &container.id, &["bash", "-c", build_script]).await?;
+
+    // dpkg-buildpackage writes .deb one level above the source directory
+    let deb_glob = format!("pishoo-common_{version}-1_all.deb");
     copy_from_container(
         docker,
         &container.id,
-        &format!("/output/{deb_name}"),
+        &format!("/workspace/{deb_glob}"),
         &out_dir,
     )
     .await?;
+
+    // Clean up the debian symlink
+    let _ = exec_in_container(
+        docker,
+        &container.id,
+        &["rm", "-f", "/workspace/pishoo/debian"],
+    )
+    .await;
 
     docker
         .remove_container(
@@ -380,7 +408,7 @@ dpkg-deb -b /staging /output/{deb_name}
         .await
         .whatever_context("failed to remove common container")?;
 
-    info!(deb_name, "produced");
+    info!(deb_glob, "produced");
     info!("finished common deb package build");
     Ok(())
 }
@@ -394,14 +422,18 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
     let version = package_version(CARGO_NAME)?;
     let target_dir = target_dir()?;
 
+    // Generate debian/changelog from Cargo.toml version before any build
+    generate_changelog(&version)?;
+
     let mut tasks = tokio::task::JoinSet::new();
 
     for &target in targets {
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
+            let version = version.clone();
             info!("queued common deb package build");
             tasks.spawn(
-                async move { run_common(&docker).await }
+                async move { run_common(&docker, &version).await }
                     .instrument(info_span!("deb", triple = "common")),
             );
             continue;
@@ -490,7 +522,7 @@ async fn build_one(
             ContainerCreateBody {
                 image: Some(image.clone()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
-                working_dir: Some("/workspace".into()),
+                working_dir: Some("/workspace/pishoo".into()),
                 host_config: Some(HostConfig {
                     mounts: Some(mounts),
                     ..Default::default()
@@ -507,7 +539,7 @@ async fn build_one(
         .whatever_context("failed to start build container")?;
     info!(triple, "build container started");
 
-    // Build
+    // Build cargo features string
     let cargo_features = {
         let names: Vec<&str> = features
             .iter()
@@ -519,101 +551,57 @@ async fn build_one(
         if names.is_empty() {
             String::new()
         } else {
-            format!(" --features {}", names.join(","))
+            names.join(",")
         }
     };
+
+    // Environment variables for debian/rules override_dh_auto_build
     let sshd_env = if has_sshd {
         "export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && \
          export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && "
     } else {
         ""
     };
-    let build_cmd = format!(
-        "source /root/.cargo/env && \
-         export RUSTFLAGS=\"${{RUSTFLAGS:-}} -L /usr/lib/{gnu}\" && \
-         {root_ca_env}\
-         {sshd_env}\
-         cargo zigbuild --release --target {triple} -p {CARGO_NAME}{cargo_features}"
-    );
-    info!(triple, "starting cargo zigbuild inside container");
-    exec_in_container(docker, &container.id, &["bash", "-c", &build_cmd]).await?;
-    info!(triple, "cargo zigbuild finished inside container");
 
-    // Stage + detect dependencies + build .deb
-    let control = format_control(&[
-        ("Package", CARGO_NAME),
-        ("Version", &format!("{version}-1")),
-        ("Architecture", arch),
-        ("Maintainer", "Genmeta Tech Limited <support@genmeta.net>"),
-        (
-            "Description",
-            "modern, secure, QUIC-powered web/proxy engine",
-        ),
-        ("Section", "httpd"),
-        ("Priority", "optional"),
-    ]);
-
-    let (sshd_copy, sshd_shlibdeps) = if has_sshd {
-        (
-            format!(
-                r#"cp /workspace/target/{triple}/release/pishoo-worker /staging/usr/lib/pishoo/
-cp /workspace/target/{triple}/release/pishoo-ssh-session /staging/usr/lib/pishoo/
-chmod 755 /staging/usr/lib/pishoo/*"#
-            ),
-            r#"DEPS=$(dpkg-shlibdeps -O \
-    /staging/usr/bin/pishoo \
-    /staging/usr/lib/pishoo/pishoo-worker \
-    /staging/usr/lib/pishoo/pishoo-ssh-session \
-    2>/dev/null | sed 's/^shlibs:Depends=//' || true)"#
-                .to_string(),
-        )
+    let cargo_features_env = if cargo_features.is_empty() {
+        String::new()
     } else {
-        (
-            String::new(),
-            r#"DEPS=$(dpkg-shlibdeps -O /staging/usr/bin/pishoo \
-    2>/dev/null | sed 's/^shlibs:Depends=//' || true)"#
-                .to_string(),
-        )
+        format!("export CARGO_FEATURES={cargo_features} && ")
     };
 
-    let package_script = format!(
-        r#"set -e
-# staging layout
-mkdir -p /staging/usr/bin /staging/usr/lib/pishoo /staging/DEBIAN
-
-cp /workspace/target/{triple}/release/pishoo /staging/usr/bin/
-chmod 755 /staging/usr/bin/*
-{sshd_copy}
-
-# detect shared library dependencies
-{sshd_shlibdeps}
-
-# write control file
-cat > /staging/DEBIAN/control <<'CTRL'
-{control}CTRL
-
-# append depends: pishoo-common + auto-detected
-FULL_DEPS="pishoo-common (>= {COMMON_VERSION})"
-if [ -n "$DEPS" ]; then
-    FULL_DEPS="$FULL_DEPS, $DEPS"
-fi
-sed -i "/^Architecture:/a Depends: $FULL_DEPS" /staging/DEBIAN/control
-
-# build .deb
-dpkg-deb -b /staging /output/{deb_name}
-"#
+    // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary)
+    // debian/rules reads TRIPLE, CARGO_FEATURES, ROOT_CA, PISHOO_WORKER_BIN etc.
+    let build_script = format!(
+        "source /root/.cargo/env && \
+         export TRIPLE={triple} && \
+         export DEB_HOST_MULTIARCH={gnu} && \
+         {root_ca_env}\
+         {sshd_env}\
+         {cargo_features_env}\
+         ln -sfn /workspace/pishoo/pkg/debian /workspace/pishoo/debian && \
+         dpkg-buildpackage -B -uc -us -d"
     );
 
-    exec_in_container(docker, &container.id, &["mkdir", "-p", "/output"]).await?;
-    exec_in_container(docker, &container.id, &["bash", "-c", &package_script]).await?;
+    info!(triple, "starting dpkg-buildpackage inside container");
+    exec_in_container(docker, &container.id, &["bash", "-c", &build_script]).await?;
+    info!(triple, "dpkg-buildpackage finished inside container");
 
+    // dpkg-buildpackage writes .deb one level above the source directory
     copy_from_container(
         docker,
         &container.id,
-        &format!("/output/{deb_name}"),
+        &format!("/workspace/{deb_name}"),
         &out_dir,
     )
     .await?;
+
+    // Clean up the debian symlink
+    let _ = exec_in_container(
+        docker,
+        &container.id,
+        &["rm", "-f", "/workspace/pishoo/debian"],
+    )
+    .await;
 
     docker
         .remove_container(

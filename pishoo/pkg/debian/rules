@@ -1,0 +1,52 @@
+#!/usr/bin/make -f
+
+# dpkg-buildpackage calls this via debian/rules.
+# TRIPLE and CARGO_FEATURES are passed as environment variables by xtask.
+# For arch-all builds (-A), the build/install targets for pishoo are skipped.
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+# --- pishoo binary build (arch-any only) ---
+
+override_dh_auto_build:
+ifdef TRIPLE
+	. /root/.cargo/env && \
+	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
+	$(if $(ROOT_CA),export ROOT_CA=$(ROOT_CA) &&) \
+	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
+	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
+	cargo zigbuild --release --target $(TRIPLE) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
+endif
+
+override_dh_auto_install:
+ifdef TRIPLE
+	mkdir -p debian/pishoo/usr/bin
+	cp ../target/$(TRIPLE)/release/pishoo debian/pishoo/usr/bin/
+	chmod 755 debian/pishoo/usr/bin/pishoo
+ifdef PISHOO_WORKER_BIN
+	mkdir -p debian/pishoo/usr/lib/pishoo
+	cp ../target/$(TRIPLE)/release/pishoo-worker debian/pishoo/usr/lib/pishoo/
+	cp ../target/$(TRIPLE)/release/pishoo-ssh-session debian/pishoo/usr/lib/pishoo/
+	chmod 755 debian/pishoo/usr/lib/pishoo/*
+endif
+endif
+	# pishoo-common: install config files
+	mkdir -p debian/pishoo-common
+	if [ -d pkg/common ]; then cp -r pkg/common/* debian/pishoo-common/; fi
+
+override_dh_auto_test:
+	# skip tests in cross-compilation environment
+
+override_dh_installsystemd:
+	dh_installsystemd --name=pishoo
+
+override_dh_shlibdeps:
+ifdef TRIPLE
+	dh_shlibdeps -ppishoo -l/usr/lib/$(DEB_HOST_MULTIARCH)
+endif
+
+override_dh_auto_clean:
+	# do not run cargo clean; workspace is bind-mounted

@@ -1,16 +1,28 @@
-Package: pishoo-common
 Source: pishoo
-Version: 0.2.0
-Architecture: all
-Maintainer: Genmeta Tech Limited <support@genmeta.net>
 Section: httpd
 Priority: optional
-Multi-Arch: foreign
+Maintainer: Genmeta Tech Limited <support@genmeta.net>
+Build-Depends: debhelper-compat (= 13)
 Homepage: https://pishoo.genmeta.net
+
+Package: pishoo-common
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends}
 Description: modern, secure, QUIC-powered web/proxy engine - common files
-  Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for
-  HTTP/3 and end-to-end encrypted communication. Built for privacy and security
-  scenarios, it seamlessly functions as both a forward proxy for client privacy
-  and a reverse proxy to streamline traffic between edge networks and backend
-  services. Its architecture is designed to safeguard your data from infringement
-  and ensures that it can be accessed and utilized securely.
+ Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for
+ HTTP/3 and end-to-end encrypted communication. Built for privacy and security
+ scenarios, it seamlessly functions as both a forward proxy for client privacy
+ and a reverse proxy to streamline traffic between edge networks and backend
+ services. Its architecture is designed to safeguard your data from infringement
+ and ensures that it can be accessed and utilized securely.
+
+Package: pishoo
+Architecture: any
+Depends: pishoo-common (>= ${source:Version}), ${shlibs:Depends}, ${misc:Depends}
+Description: modern, secure, QUIC-powered web/proxy engine
+ Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for
+ HTTP/3 and end-to-end encrypted communication. Built for privacy and security
+ scenarios, it seamlessly functions as both a forward proxy for client privacy
+ and a reverse proxy to streamline traffic between edge networks and backend
+ services.
