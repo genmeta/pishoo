@@ -799,7 +799,7 @@ fn parse_ssh_login(directive: Directive<Nginx>) -> Result<Value> {
         .iter()
         .map(|auth| {
             ensure_whatever!(
-                auth == "basic" || auth == "ssl",
+                auth == "ssl",
                 "invalid value for directive: {}",
                 directive.name
             );
