@@ -190,7 +190,6 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .with_target(false)
                 .with_ansi(std::io::stderr().is_terminal())
                 .with_writer(stderr),
         )
