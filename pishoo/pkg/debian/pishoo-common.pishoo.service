@@ -8,9 +8,6 @@
 # After another 5s (TimeoutStopSec=5), and if pishoo is alive, systemd sends
 # SIGKILL to all the remaining processes in the process group (KillMode=mixed).
 #
-# pishoo signals reference doc:
-# http://pishoo.genmeta.net/en/docs/control.html
-#
 [Unit]
 Description=A modern, secure, QUIC-powered, peer-to-peer web/proxy engine
 After=network-online.target remote-fs.target nss-lookup.target
