@@ -6822,7 +6822,6 @@ version = "0.0.0"
 dependencies = [
  "bollard",
  "cargo_metadata",
- "chrono",
  "clap",
  "flate2",
  "futures-util",

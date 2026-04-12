@@ -18,12 +18,6 @@ tarpaulin-report.html
 .vscode/*
 .idea/
 *.log
-
-# dpkg-buildpackage outputs (.deb, .buildinfo, .changes written to parent dir)
-*.deb
-*.buildinfo
-*.changes
-*.dsc
 Cargo.lock
 
 .DS_Store

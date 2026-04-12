@@ -1,11 +1,9 @@
-use std::path::Path;
-
 use bollard::{
     Docker,
     models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountTypeEnum},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-        DownloadFromContainerOptionsBuilder, RemoveContainerOptionsBuilder, StartContainerOptions,
+        RemoveContainerOptionsBuilder, StartContainerOptions,
     },
 };
 use futures_util::StreamExt;
@@ -22,8 +20,8 @@ const BASE_IMAGE: &str = "debian:bookworm";
 /// Image tag prefix for pishoo deb builds.
 const IMAGE_TAG_PREFIX: &str = "pishoo-deb";
 
-/// Relative path from workspace root to the debian packaging directory.
-const DEBIAN_PKG_DIR: &str = "pishoo/pkg/debian";
+/// Relative path from workspace root to the debian packaging source files.
+const DEBIAN_PKG_DIR: &str = "xtask/deb";
 
 fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
@@ -205,90 +203,6 @@ async fn exec_in_container(
     Ok(())
 }
 
-/// Copy a file from a container to the local filesystem.
-async fn copy_from_container(
-    docker: &Docker,
-    container_id: &str,
-    container_path: &str,
-    local_dir: &Path,
-) -> Result<(), Whatever> {
-    info!(
-        path = container_path,
-        "starting container artifact download"
-    );
-    let mut tar_stream = docker.download_from_container(
-        container_id,
-        Some(
-            DownloadFromContainerOptionsBuilder::default()
-                .path(container_path)
-                .build(),
-        ),
-    );
-
-    let mut tar_data = Vec::new();
-    while let Some(chunk) = tar_stream.next().await {
-        let chunk = chunk.whatever_context("failed to download from container")?;
-        tar_data.extend_from_slice(&chunk);
-    }
-
-    let local_dir = local_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut archive = tar::Archive::new(&tar_data[..]);
-        std::fs::create_dir_all(&local_dir)
-            .whatever_context(format!("failed to create {}", local_dir.display()))?;
-
-        for entry in archive
-            .entries()
-            .whatever_context("failed to read tar entries")?
-        {
-            let mut entry = entry.whatever_context("failed to read tar entry")?;
-            let path = entry
-                .path()
-                .whatever_context("failed to read entry path")?
-                .into_owned();
-            let filename = path.file_name().unwrap_or(path.as_os_str());
-            let dest = local_dir.join(filename);
-            let mut file = std::fs::File::create(&dest)
-                .whatever_context(format!("failed to create {}", dest.display()))?;
-            std::io::copy(&mut entry, &mut file)
-                .whatever_context(format!("failed to write {}", dest.display()))?;
-        }
-
-        Ok::<(), Whatever>(())
-    })
-    .await
-    .whatever_context("artifact extraction task panicked")??;
-
-    info!("finished container artifact extraction");
-
-    Ok(())
-}
-
-/// Path to the debian packaging directory within the workspace.
-fn debian_dir() -> Result<std::path::PathBuf, Whatever> {
-    let workspace_dir =
-        std::env::current_dir().whatever_context("failed to get current directory")?;
-    Ok(workspace_dir.join(DEBIAN_PKG_DIR))
-}
-
-/// Generate a debian/changelog from the Cargo.toml version.
-fn generate_changelog(version: &str) -> Result<(), Whatever> {
-    let changelog_path = debian_dir()?.join("changelog");
-    let now = chrono::Utc::now();
-    let timestamp = now.format("%a, %d %b %Y %H:%M:%S +0000");
-    let content = format!(
-        "{CARGO_NAME} ({version}-1) unstable; urgency=low\n\
-         \n\
-         \x20 * release {version}\n\
-         \n\
-         \x20-- Genmeta Tech Limited <support@genmeta.net>  {timestamp}\n"
-    );
-    std::fs::write(&changelog_path, content)
-        .whatever_context(format!("failed to write {}", changelog_path.display()))?;
-    info!(version, "generated debian/changelog");
-    Ok(())
-}
-
 /// Bind mounts for the host cargo git/registry cache (read-only).
 fn cargo_cache_mounts() -> Vec<Mount> {
     let cargo_home = std::env::var("CARGO_HOME")
@@ -346,7 +260,6 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
             ContainerCreateBody {
                 image: Some(BASE_IMAGE.to_string()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
-                working_dir: Some("/workspace/pishoo".into()),
                 host_config: Some(HostConfig {
                     mounts: Some(vec![Mount {
                         target: Some("/workspace".into()),
@@ -375,30 +288,20 @@ apt-get install --assume-yes -qq debhelper fakeroot
 "#;
     exec_in_container(docker, &container.id, &["bash", "-c", setup_script]).await?;
 
-    // Link debian/ into the pishoo source tree (dpkg-buildpackage expects it there)
-    let build_script = r#"set -e
-ln -sfn /workspace/pishoo/pkg/debian /workspace/pishoo/debian
+    // Prepare debian source tree under target/common/deb/src/ and run dpkg-buildpackage.
+    // Products (.deb etc.) land in target/common/deb/ (one level above src/).
+    let build_script = format!(
+        r#"set -e
+SRC=/workspace/target/common/deb/src
+mkdir -p "$SRC/debian"
+cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <support@genmeta.net>  %s\n' \
+    "$(date -R)" > "$SRC/debian/changelog"
+cd "$SRC"
 dpkg-buildpackage -A -uc -us -d
-"#;
-    exec_in_container(docker, &container.id, &["bash", "-c", build_script]).await?;
-
-    // dpkg-buildpackage writes .deb one level above the source directory
-    let deb_glob = format!("pishoo-common_{version}-1_all.deb");
-    copy_from_container(
-        docker,
-        &container.id,
-        &format!("/workspace/{deb_glob}"),
-        &out_dir,
-    )
-    .await?;
-
-    // Clean up the debian symlink
-    let _ = exec_in_container(
-        docker,
-        &container.id,
-        &["rm", "-f", "/workspace/pishoo/debian"],
-    )
-    .await;
+"#
+    );
+    exec_in_container(docker, &container.id, &["bash", "-c", &build_script]).await?;
 
     docker
         .remove_container(
@@ -408,7 +311,8 @@ dpkg-buildpackage -A -uc -us -d
         .await
         .whatever_context("failed to remove common container")?;
 
-    info!(deb_glob, "produced");
+    let deb_name = format!("pishoo-common_{version}-1_all.deb");
+    info!(deb_name, "produced");
     info!("finished common deb package build");
     Ok(())
 }
@@ -421,9 +325,6 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
 
     let version = package_version(CARGO_NAME)?;
     let target_dir = target_dir()?;
-
-    // Generate debian/changelog from Cargo.toml version before any build
-    generate_changelog(&version)?;
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -522,7 +423,6 @@ async fn build_one(
             ContainerCreateBody {
                 image: Some(image.clone()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
-                working_dir: Some("/workspace/pishoo".into()),
                 host_config: Some(HostConfig {
                     mounts: Some(mounts),
                     ..Default::default()
@@ -569,39 +469,28 @@ async fn build_one(
         format!("export CARGO_FEATURES={cargo_features} && ")
     };
 
-    // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary)
-    // debian/rules reads TRIPLE, CARGO_FEATURES, ROOT_CA, PISHOO_WORKER_BIN etc.
+    // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary).
+    // Prepare debian source tree under target/{triple}/release/deb/src/ so that
+    // all temp files and products stay inside target/ (bind-mounted, gitignored).
     let build_script = format!(
-        "source /root/.cargo/env && \
-         export TRIPLE={triple} && \
-         export DEB_HOST_MULTIARCH={gnu} && \
-         {root_ca_env}\
-         {sshd_env}\
-         {cargo_features_env}\
-         ln -sfn /workspace/pishoo/pkg/debian /workspace/pishoo/debian && \
-         dpkg-buildpackage -B -uc -us -d"
+        r#"set -e
+source /root/.cargo/env
+export TRIPLE={triple}
+export DEB_HOST_MULTIARCH={gnu}
+{root_ca_env}{sshd_env}{cargo_features_env}
+SRC=/workspace/target/{triple}/release/deb/src
+mkdir -p "$SRC/debian"
+cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <support@genmeta.net>  %s\n' \
+    "$(date -R)" > "$SRC/debian/changelog"
+cd "$SRC"
+dpkg-buildpackage -B -uc -us -d
+"#
     );
 
     info!(triple, "starting dpkg-buildpackage inside container");
     exec_in_container(docker, &container.id, &["bash", "-c", &build_script]).await?;
     info!(triple, "dpkg-buildpackage finished inside container");
-
-    // dpkg-buildpackage writes .deb one level above the source directory
-    copy_from_container(
-        docker,
-        &container.id,
-        &format!("/workspace/{deb_name}"),
-        &out_dir,
-    )
-    .await?;
-
-    // Clean up the debian symlink
-    let _ = exec_in_container(
-        docker,
-        &container.id,
-        &["rm", "-f", "/workspace/pishoo/debian"],
-    )
-    .await;
 
     docker
         .remove_container(
