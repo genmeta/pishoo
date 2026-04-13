@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use nix::unistd::{Gid, Uid};
 use remoc::prelude::ServerShared;
-use snafu::{ResultExt, Snafu};
+use snafu::{Report, ResultExt, Snafu};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
@@ -128,16 +128,26 @@ pub async fn spawn_worker(
     })
 }
 
-/// Run the worker monitor loop: poll workers for exit and clean up.
+/// Run the worker monitor loop: wait for SIGCHLD notification or 5s fallback,
+/// then reap all exited workers.
 ///
-/// This task runs forever. It checks every 500ms whether any worker
-/// processes have exited and cleans up their resources.
+/// SIGCHLD signals may be coalesced by the kernel, so we loop `collect_exited_workers`
+/// until no more exits are found after each wake-up.
 pub async fn run_monitor_loop(state: Arc<RootState>) {
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let exited = state.collect_exited_workers().await;
-        for pid in exited {
-            state.cleanup_worker_with_reason(pid, "child_exit").await;
+        tokio::select! {
+            _ = state.worker_notify.notified() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+        }
+        // SIGCHLD coalescing: loop waitpid until no more exited children.
+        loop {
+            let exited = state.collect_exited_workers().await;
+            if exited.is_empty() {
+                break;
+            }
+            for pid in exited {
+                state.cleanup_worker_with_reason(pid, "child_exit").await;
+            }
         }
     }
 }
@@ -145,4 +155,87 @@ pub async fn run_monitor_loop(state: Arc<RootState>) {
 /// Spawn the monitor loop as a background task. Returns the join handle.
 pub fn spawn_monitor_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
     AbortOnDropHandle::new(tokio::spawn(run_monitor_loop(state).in_current_span()))
+}
+
+// ---------------------------------------------------------------------------
+// Worker binary resolution and batch spawning
+// ---------------------------------------------------------------------------
+
+/// Resolve the path of the `pishoo-worker` binary.
+///
+/// Search order:
+/// 1. Runtime env var `PISHOO_WORKER_BIN`
+/// 2. Compile-time env var `PISHOO_WORKER_BIN` (set by deb builds)
+/// 3. `<exe_dir>/../libexec/pishoo-worker` (Homebrew layout)
+/// 4. `<exe_dir>/pishoo-worker` (debug / same-dir fallback)
+pub(crate) fn worker_binary_path() -> PathBuf {
+    // 1. Runtime environment variable
+    if let Ok(path) = std::env::var("PISHOO_WORKER_BIN") {
+        return PathBuf::from(path);
+    }
+
+    // 2. Compile-time environment variable (set during release deb builds)
+    if let Some(path) = option_env!("PISHOO_WORKER_BIN") {
+        return PathBuf::from(path);
+    }
+
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        // 3. Homebrew libexec layout: <prefix>/bin/pishoo → <prefix>/libexec/pishoo-worker
+        let libexec = exe_dir.join("../libexec/pishoo-worker");
+        if libexec.exists() {
+            return libexec;
+        }
+
+        // 4. Same directory (debug builds, Windows, cargo build output)
+        return exe_dir.join("pishoo-worker");
+    }
+
+    PathBuf::from("pishoo-worker")
+}
+
+/// Spawn worker processes for all resolved targets.
+///
+/// Failures are per-user and logged; they do not prevent other workers
+/// from being spawned.
+pub async fn spawn_configured_workers(
+    state: &Arc<RootState>,
+    worker_targets: Vec<crate::config::ResolvedWorkerTarget>,
+) {
+    if worker_targets.is_empty() {
+        return;
+    }
+
+    let worker_bin = worker_binary_path();
+
+    for target in worker_targets {
+        let spawned = match spawn_worker(
+            &worker_bin,
+            target.uid,
+            target.gid,
+            target.name.clone(),
+            target.dir.clone(),
+            state.clone(),
+        )
+        .await
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                // Worker spawn failures (fork/exec, IPC negotiation, hello
+                // timeout) are per-user problems that must not bring down the
+                // entire root process.  Log and continue to the next worker.
+                tracing::error!(
+                    user = %target.name,
+                    error = %Report::from_error(&error),
+                    "failed to spawn worker, skipping user"
+                );
+                continue;
+            }
+        };
+        let pid = spawned.handle.pid();
+
+        state.register_worker(pid, target.uid, spawned.handle).await;
+    }
 }

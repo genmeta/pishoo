@@ -27,6 +27,8 @@ pub enum RootSignal {
     SigHup,
     /// SIGUSR1 — reopen logs (root reopens its own, then forwards to workers).
     SigUsr1,
+    /// SIGCHLD — a child process has exited.
+    SigChld,
 }
 
 pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
@@ -68,6 +70,7 @@ pub struct RootSignalHandler {
     quit: tokio::signal::unix::Signal,
     hup: tokio::signal::unix::Signal,
     usr1: tokio::signal::unix::Signal,
+    child: tokio::signal::unix::Signal,
 }
 
 impl RootSignalHandler {
@@ -83,6 +86,8 @@ impl RootSignalHandler {
                 .whatever_context("failed to create sighup listener")?,
             usr1: signal(SignalKind::user_defined1())
                 .whatever_context("failed to create sigusr1 listener")?,
+            child: signal(SignalKind::child())
+                .whatever_context("failed to create sigchld listener")?,
         })
     }
 
@@ -107,6 +112,10 @@ impl RootSignalHandler {
             _ = self.usr1.recv() => {
                 tracing::info!("received sigusr1 signal");
                 RootSignal::SigUsr1
+            }
+            _ = self.child.recv() => {
+                tracing::debug!("received sigchld signal");
+                RootSignal::SigChld
             }
         }
     }

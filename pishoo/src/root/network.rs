@@ -34,7 +34,7 @@ pub async fn run_accept_loop(state: Arc<RootState>) {
             }
         };
 
-        let sender = state.get_conn_sender(&server_name).await;
+        let sender = state.get_conn_sender(&server_name);
         let Some(sender) = sender else {
             tracing::warn!(%server_name, "No listener registered for connection");
             continue;
