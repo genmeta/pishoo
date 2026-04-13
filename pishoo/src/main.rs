@@ -106,6 +106,7 @@ async fn main() -> Result<(), Whatever> {
 
     let mut local_service_handle =
         pishoo::root::local_service::spawn_local_service(&state, &current_entry_config).await?;
+    drop(current_entry_config);
 
     pishoo::root::process::spawn_configured_workers(&state, current_worker_targets.clone()).await;
 
@@ -254,7 +255,7 @@ async fn main() -> Result<(), Whatever> {
                 }
 
                 // Scrub conflicted names before forwarding reload to workers.
-                state.scrub_conflicts();
+                state.scrub_conflicts().await;
 
                 // Phase 2: Forward SIGHUP to unchanged workers.
                 for target in &diff.unchanged {
@@ -268,8 +269,7 @@ async fn main() -> Result<(), Whatever> {
                     .chain(diff.changed.into_iter().map(|(_old, new)| new))
                     .collect();
                 if !workers_to_spawn.is_empty() {
-                    pishoo::root::process::spawn_configured_workers(&state, workers_to_spawn)
-                        .await;
+                    pishoo::root::process::spawn_configured_workers(&state, workers_to_spawn).await;
                 }
 
                 current_worker_targets = next_snapshot.worker_targets;

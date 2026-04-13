@@ -175,9 +175,16 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             drop(transport);
 
             // Reap the session child process to avoid zombies.
-            tokio::task::spawn_blocking(move || {
-                let _ = nix::sys::wait::waitpid(child_pid, None);
-            });
+            let state = self.state.clone();
+            let caller_pid = self.caller_pid;
+            state
+                .spawn_worker_task(caller_pid, async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = nix::sys::wait::waitpid(child_pid, None);
+                    })
+                    .await;
+                })
+                .await;
 
             tracing::info!(
                 caller_pid = %self.caller_pid,

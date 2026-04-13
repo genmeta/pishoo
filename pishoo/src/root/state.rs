@@ -12,7 +12,6 @@ use std::{
     sync::Arc,
 };
 
-use dashmap::DashMap;
 use gateway::control_plane::ListenRequest;
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
@@ -20,7 +19,7 @@ use nix::{
 };
 use snafu::{Report, ResultExt, Snafu};
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, RwLock, mpsc},
     task::JoinSet,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -121,14 +120,58 @@ struct Inner {
 pub struct RootState {
     /// The shared QUIC listeners object.
     pub listeners: Arc<dquic::prelude::QuicListeners>,
-    /// server_name → ownership + routing sender (lock-free reads).
-    servers: DashMap<String, ServerEntry>,
-    /// Per-server_name async gates for serializing register_listener calls.
-    name_gates: DashMap<String, Arc<Mutex<()>>>,
+    /// Server entries + per-name gates (behind RwLock for concurrent reads).
+    servers: RwLock<ServerRegistry>,
     /// Process/user bookkeeping (behind Mutex).
     inner: Mutex<Inner>,
     /// Notified when SIGCHLD arrives so the monitor loop wakes immediately.
     pub worker_notify: tokio::sync::Notify,
+}
+
+/// Combined server-name registry: entries + per-name serialization gates.
+struct ServerRegistry {
+    /// server_name → ownership + routing sender.
+    entries: HashMap<String, ServerEntry>,
+    /// Per-server_name async gates for serializing register_listener calls.
+    name_gates: HashMap<String, Arc<Mutex<()>>>,
+}
+
+impl ServerRegistry {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            name_gates: HashMap::new(),
+        }
+    }
+
+    /// Remove a server entry, cancel its listener, and remove from QuicListeners.
+    /// For `Conflicted` entries, only removes the map entry (no listener to cancel).
+    ///
+    /// Caller must already hold a write lock on this `ServerRegistry`.
+    fn retire_entry(
+        &mut self,
+        server_name: &str,
+        listeners: &dquic::prelude::QuicListeners,
+    ) -> Option<()> {
+        let entry = self.entries.remove(server_name)?;
+        self.name_gates.remove(server_name);
+        match entry {
+            ServerEntry::Active { shutdown_token, .. } => {
+                shutdown_token.cancel();
+                listeners.remove_server(server_name);
+            }
+            ServerEntry::Conflicted => {}
+        }
+        Some(())
+    }
+
+    /// Get or create the per-name async gate.
+    fn name_gate(&mut self, server_name: &str) -> Arc<Mutex<()>> {
+        self.name_gates
+            .entry(server_name.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
 }
 
 impl RootState {
@@ -136,8 +179,7 @@ impl RootState {
     pub fn new(listeners: Arc<dquic::prelude::QuicListeners>) -> Self {
         Self {
             listeners,
-            servers: DashMap::new(),
-            name_gates: DashMap::new(),
+            servers: RwLock::new(ServerRegistry::new()),
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
                 users: HashMap::new(),
@@ -151,30 +193,12 @@ impl RootState {
     // Server registry
     // -----------------------------------------------------------------------
 
-    /// Remove a server entry, cancel its listener, and remove from QuicListeners.
-    /// For `Conflicted` entries, only removes the map entry (no listener to cancel).
-    fn retire_server(&self, server_name: &str) -> Option<()> {
-        let (_, entry) = self.servers.remove(server_name)?;
-        self.name_gates.remove(server_name);
-        match entry {
-            ServerEntry::Active { shutdown_token, .. } => {
-                shutdown_token.cancel();
-                self.listeners.remove_server(server_name);
-            }
-            ServerEntry::Conflicted => {}
-        }
-        Some(())
-    }
-
     /// Get or create the per-name async gate for serializing operations on a
     /// single `server_name`. The gate is held across the async `add_server`
     /// call so that concurrent register_listener for the same name are
     /// properly serialized.
-    fn name_gate(&self, server_name: &str) -> Arc<Mutex<()>> {
-        self.name_gates
-            .entry(server_name.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+    async fn name_gate(&self, server_name: &str) -> Arc<Mutex<()>> {
+        self.servers.write().await.name_gate(server_name)
     }
 
     /// Unified entry point for registering a listener.
@@ -198,33 +222,35 @@ impl RootState {
         // Acquire the per-name gate so that concurrent calls for the same
         // server_name are serialized. This is critical because `add_server`
         // is async and we must not race.
-        let gate = self.name_gate(&server_name);
+        let gate = self.name_gate(&server_name).await;
         let _guard = gate.lock().await;
 
         // Phase 1: check current state and handle conflicts.
         {
-            let state = self.servers.get(&server_name);
-            let verdict = match state.as_deref() {
+            let registry = self.servers.read().await;
+            let verdict = match registry.entries.get(&server_name) {
                 Some(ServerEntry::Active {
                     owner: existing_owner,
                     ..
-                }) if *existing_owner == owner => Some(true),  // duplicate
+                }) if *existing_owner == owner => Some(true), // duplicate
                 Some(ServerEntry::Active { .. }) => Some(false), // conflict
                 Some(ServerEntry::Conflicted) => {
                     return Err(RegisterError::ConflictedName);
                 }
                 None => None, // vacant
             };
-            // Drop the DashMap ref before mutating.
-            drop(state);
+            drop(registry);
 
             match verdict {
                 Some(true) => return Err(RegisterError::DuplicateListen),
                 Some(false) => {
                     // Cross-owner conflict — poison the name immediately.
-                    let old = self
-                        .servers
-                        .insert(server_name.clone(), ServerEntry::Conflicted);
+                    let old = {
+                        let mut registry = self.servers.write().await;
+                        registry
+                            .entries
+                            .insert(server_name.clone(), ServerEntry::Conflicted)
+                    };
                     if let Some(ServerEntry::Active {
                         shutdown_token,
                         owner: old_owner,
@@ -276,80 +302,105 @@ impl RootState {
             })?;
 
         // Phase 3: commit registration.
-        // Defensive re-check: someone may have raced despite the per-name
-        // gate (shouldn't happen, but belt-and-suspenders).
-        if self.servers.contains_key(&server_name) {
-            self.listeners.remove_server(&server_name);
-            tracing::error!(
-                %server_name,
-                "BUG: server appeared in registry after add_server despite name gate"
-            );
-            self.servers
-                .insert(server_name.clone(), ServerEntry::Conflicted);
-            return Err(RegisterError::ConflictedName);
-        }
+        {
+            let mut registry = self.servers.write().await;
 
-        let (tx, rx) = mpsc::channel(128);
-        let shutdown_token = CancellationToken::new();
-
-        // Spawn per-server DNS publish task.
-        let publish_config = gateway::dns::build_publish_config_from_identity(
-            &request.identity,
-            request.dns_resolver_url.as_deref(),
-        );
-        let publish_task = if publish_config.resolvers.is_empty() {
-            None
-        } else {
-            Some(gateway::dns::spawn_server_publish_task(
-                server_name.clone(),
-                publish_config,
-                self.listeners.clone(),
-            ))
-        };
-
-        // Track in the worker's owned_servers set.
-        if let ServiceOwner::Worker(pid) = owner {
-            let mut inner = self.inner.lock().await;
-            if let Some(process) = inner.processes.get_mut(&pid) {
-                process.owned_servers.insert(server_name.clone());
+            // Defensive re-check: someone may have raced despite the per-name
+            // gate (shouldn't happen, but belt-and-suspenders).
+            if registry.entries.contains_key(&server_name) {
+                self.listeners.remove_server(&server_name);
+                tracing::error!(
+                    %server_name,
+                    "BUG: server appeared in registry after add_server despite name gate"
+                );
+                registry
+                    .entries
+                    .insert(server_name.clone(), ServerEntry::Conflicted);
+                return Err(RegisterError::ConflictedName);
             }
-        }
 
-        self.servers.insert(
-            server_name.clone(),
-            ServerEntry::Active {
+            let (tx, rx) = mpsc::channel(128);
+            let shutdown_token = CancellationToken::new();
+
+            // Spawn per-server DNS publish task.
+            let publish_config = gateway::dns::build_publish_config_from_identity(
+                &request.identity,
+                request.dns_resolver_url.as_deref(),
+            );
+            let publish_task = if publish_config.resolvers.is_empty() {
+                None
+            } else {
+                Some(gateway::dns::spawn_server_publish_task(
+                    server_name.clone(),
+                    publish_config,
+                    self.listeners.clone(),
+                ))
+            };
+
+            registry.entries.insert(
+                server_name.clone(),
+                ServerEntry::Active {
+                    owner,
+                    conn_tx: tx,
+                    shutdown_token: shutdown_token.clone(),
+                    listens: request.bind,
+                    publish_task,
+                },
+            );
+            // Release servers write lock before acquiring inner lock.
+            drop(registry);
+
+            // Track in the worker's owned_servers set.
+            if let ServiceOwner::Worker(pid) = owner {
+                let mut inner = self.inner.lock().await;
+                if let Some(process) = inner.processes.get_mut(&pid) {
+                    process.owned_servers.insert(server_name.clone());
+                } else {
+                    // Worker died during async gap — rollback the server entry.
+                    drop(inner);
+                    let mut registry = self.servers.write().await;
+                    registry.retire_entry(&server_name, &self.listeners);
+                    tracing::warn!(
+                        %server_name,
+                        pid = %pid,
+                        "worker vanished during register_listener; rolled back"
+                    );
+                    return Err(RegisterError::ConflictedName);
+                }
+            }
+
+            tracing::info!(%server_name, ?owner, "server registered");
+            Ok(PerServerListener::new_registered(
+                rx,
+                shutdown_token,
+                self,
+                server_name,
                 owner,
-                conn_tx: tx,
-                shutdown_token: shutdown_token.clone(),
-                listens: request.bind,
-                publish_task,
-            },
-        );
-
-        tracing::info!(%server_name, ?owner, "server registered");
-        Ok(PerServerListener::new_registered(
-            rx,
-            shutdown_token,
-            self,
-            server_name,
-            owner,
-        ))
+            ))
+        }
     }
 
     /// Release a single active server entry owned by the specified owner.
     pub async fn release_server(&self, server_name: &str, owner: ServiceOwner) {
-        let gate = self.name_gate(server_name);
+        let gate = self.name_gate(server_name).await;
         let _guard = gate.lock().await;
 
-        let owned = matches!(
-            self.servers.get(server_name),
-            Some(ref entry) if matches!(entry.value(), ServerEntry::Active { owner: existing_owner, .. } if *existing_owner == owner)
-        );
+        let owned = {
+            let registry = self.servers.read().await;
+            matches!(
+                registry.entries.get(server_name),
+                Some(ServerEntry::Active { owner: existing_owner, .. }) if *existing_owner == owner
+            )
+        };
         if !owned {
             return;
         }
 
-        self.retire_server(server_name);
+        self.servers
+            .write()
+            .await
+            .retire_entry(server_name, &self.listeners);
+
         if let ServiceOwner::Worker(pid) = owner {
             let mut inner = self.inner.lock().await;
             if let Some(process) = inner.processes.get_mut(&pid) {
@@ -362,19 +413,14 @@ impl RootState {
     ///
     /// Used by the central accept loop to route connections to the correct
     /// per-server adapter. Returns `None` for `Conflicted` entries.
-    ///
-    /// This operation is lock-free: it only touches the DashMap (per-shard
-    /// lock), never the inner Mutex.
-    pub fn get_conn_sender(
+    pub async fn get_conn_sender(
         &self,
         server_name: &str,
     ) -> Option<mpsc::Sender<dquic::prelude::Connection>> {
-        match self.servers.get(server_name) {
-            Some(ref entry) => match entry.value() {
-                ServerEntry::Active { conn_tx, .. } => Some(conn_tx.clone()),
-                _ => None,
-            },
-            None => None,
+        let registry = self.servers.read().await;
+        match registry.entries.get(server_name) {
+            Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
+            _ => None,
         }
     }
 
@@ -395,19 +441,22 @@ impl RootState {
             .collect();
 
         // Collect only servers whose listens are affected by this device.
-        let entries: Vec<(String, Vec<gateway::parse::Listens>)> = self
-            .servers
-            .iter()
-            .filter_map(|entry| match entry.value() {
-                ServerEntry::Active { listens, .. } => {
-                    let affected = listens
-                        .iter()
-                        .any(|l| l.specific_addrs.is_none() && l.range.contains(device));
-                    affected.then(|| (entry.key().clone(), listens.clone()))
-                }
-                ServerEntry::Conflicted => None,
-            })
-            .collect();
+        let entries: Vec<(String, Vec<gateway::parse::Listens>)> = {
+            let registry = self.servers.read().await;
+            registry
+                .entries
+                .iter()
+                .filter_map(|(name, entry)| match entry {
+                    ServerEntry::Active { listens, .. } => {
+                        let affected = listens
+                            .iter()
+                            .any(|l| l.specific_addrs.is_none() && l.range.contains(device));
+                        affected.then(|| (name.clone(), listens.clone()))
+                    }
+                    ServerEntry::Conflicted => None,
+                })
+                .collect()
+        };
 
         for (server_name, listens) in entries {
             let desired_uris: Vec<String> = crate::bind::resolve_bind_uris(&listens, &device_names);
@@ -481,45 +530,23 @@ impl RootState {
         }
     }
 
-    /// Retire all servers owned by the root-local service.
-    ///
-    /// Returns the list of retired server_names.
-    pub fn retire_local_servers(&self) -> Vec<String> {
-        let local_names: Vec<String> = self
-            .servers
-            .iter()
-            .filter_map(|entry| match entry.value() {
-                ServerEntry::Active {
-                    owner: ServiceOwner::Local,
-                    ..
-                } => Some(entry.key().clone()),
-                _ => None,
-            })
-            .collect();
-
-        for name in &local_names {
-            self.retire_server(name);
-        }
-
-        local_names
-    }
-
     /// Remove all `Conflicted` entries from the registry.
     ///
     /// Called during reload (SIGHUP) **before** forwarding the signal to
     /// workers, so that workers can re-register previously-conflicted names.
-    pub fn scrub_conflicts(&self) -> Vec<String> {
-        let conflicted: Vec<String> = self
-            .servers
+    pub async fn scrub_conflicts(&self) -> Vec<String> {
+        let mut registry = self.servers.write().await;
+        let conflicted: Vec<String> = registry
+            .entries
             .iter()
-            .filter_map(|entry| {
-                matches!(entry.value(), ServerEntry::Conflicted).then_some(entry.key().clone())
+            .filter_map(|(name, entry)| {
+                matches!(entry, ServerEntry::Conflicted).then_some(name.clone())
             })
             .collect();
 
         for name in &conflicted {
-            self.servers.remove(name);
-            self.name_gates.remove(name);
+            registry.entries.remove(name);
+            registry.name_gates.remove(name);
         }
 
         if !conflicted.is_empty() {
@@ -576,11 +603,16 @@ impl RootState {
     }
 
     /// Spawn and track a root-side background task for a worker.
+    ///
+    /// If the worker is no longer registered, the task is not spawned.
     pub async fn spawn_worker_task<F>(&self, pid: Pid, task: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let mut inner = self.inner.lock().await;
+        if !inner.processes.contains_key(&pid) {
+            return;
+        }
         inner
             .worker_tasks
             .entry(pid)
@@ -600,14 +632,16 @@ impl RootState {
 
     /// Remove all resources for a dead/exited worker process.
     ///
-    /// Holds the inner lock while operating on DashMap to ensure zero
-    /// state inconsistency between process records and server entries.
+    /// Acquires `inner` lock first (to collect owned servers), releases it,
+    /// then acquires `servers` write lock for cleanup. The two locks are
+    /// never held simultaneously.
     pub async fn cleanup_worker_with_reason(
         &self,
         pid: Pid,
         reason: &str,
     ) -> Option<CleanupSummary> {
-        let (summary, background_tasks) = {
+        // Step 1: remove process record and collect owned server names.
+        let (record_uid, owned_servers, background_tasks) = {
             let mut inner = self.inner.lock().await;
             let record = inner.processes.remove(&pid)?;
 
@@ -616,39 +650,46 @@ impl RootState {
                 inner.users.remove(&record.uid);
             }
 
-            let mut servers_cleaned = 0usize;
-            for server_name in &record.owned_servers {
-                // Only retire if the entry is Active and still owned by this worker.
+            let background_tasks = inner.worker_tasks.remove(&pid).unwrap_or_default();
+            (record.uid, record.owned_servers, background_tasks)
+        };
+        // inner lock released here.
+
+        // Step 2: retire owned servers under the servers write lock.
+        let servers_cleaned = {
+            let mut registry = self.servers.write().await;
+            let mut cleaned = 0usize;
+            for server_name in &owned_servers {
                 let dominated = matches!(
-                    self.servers.get(server_name.as_str()),
-                    Some(ref entry) if matches!(entry.value(), ServerEntry::Active { owner: ServiceOwner::Worker(p), .. } if *p == pid)
+                    registry.entries.get(server_name.as_str()),
+                    Some(ServerEntry::Active { owner: ServiceOwner::Worker(p), .. }) if *p == pid
                 );
                 if dominated {
-                    self.retire_server(server_name);
-                    servers_cleaned += 1;
+                    registry.retire_entry(server_name, &self.listeners);
+                    cleaned += 1;
                 }
             }
-
-            let background_tasks = inner.worker_tasks.remove(&pid).unwrap_or_default();
-            let background_tasks_cleaned = background_tasks.len();
-
-            let summary = CleanupSummary {
-                pid,
-                uid: record.uid,
-                servers_cleaned,
-                background_tasks_cleaned,
-            };
-            tracing::info!(
-                pid = %summary.pid,
-                uid = summary.uid.as_raw(),
-                servers_cleaned = summary.servers_cleaned,
-                background_tasks_cleaned = summary.background_tasks_cleaned,
-                %reason,
-                "Worker cleanup complete"
-            );
-            (summary, background_tasks)
+            cleaned
         };
+        // servers lock released here.
 
+        let background_tasks_cleaned = background_tasks.len();
+        let summary = CleanupSummary {
+            pid,
+            uid: record_uid,
+            servers_cleaned,
+            background_tasks_cleaned,
+        };
+        tracing::info!(
+            pid = %summary.pid,
+            uid = summary.uid.as_raw(),
+            servers_cleaned = summary.servers_cleaned,
+            background_tasks_cleaned = summary.background_tasks_cleaned,
+            %reason,
+            "Worker cleanup complete"
+        );
+
+        // Step 3: drain background tasks (no lock held).
         let mut tasks = background_tasks;
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}

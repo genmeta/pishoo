@@ -38,9 +38,6 @@ serde = { workspace = true }
 # --- Error Handling ---
 snafu = { workspace = true }
 
-# --- Concurrent ---
-dashmap = { workspace = true }
-
 # --- Async Runtime ---
 futures = { workspace = true }
 tokio = { workspace = true }

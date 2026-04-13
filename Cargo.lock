@@ -3410,7 +3410,6 @@ dependencies = [
  "axum 0.8.8",
  "clap",
  "console-subscriber",
- "dashmap",
  "dhttp-home",
  "dquic",
  "firewall-db",

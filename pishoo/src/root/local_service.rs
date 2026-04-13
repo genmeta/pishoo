@@ -138,19 +138,31 @@ pub async fn build_local_service_config(
     let mut server_configs = Vec::new();
     for server in &canonicalized {
         let Some(Value::Listen(listens)) = server.get("listen") else {
-            return build_local_service_error::MissingDirectiveSnafu { directive: "listen" }.fail();
+            return build_local_service_error::MissingDirectiveSnafu {
+                directive: "listen",
+            }
+            .fail();
         };
         let listens = listens.clone();
         let Some(Value::ServerName(server_names)) = server.get("server_name") else {
-            return build_local_service_error::MissingDirectiveSnafu { directive: "server_name" }.fail();
+            return build_local_service_error::MissingDirectiveSnafu {
+                directive: "server_name",
+            }
+            .fail();
         };
         let server_names = server_names.clone();
         let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
-            return build_local_service_error::MissingDirectiveSnafu { directive: "ssl_certificate" }.fail();
+            return build_local_service_error::MissingDirectiveSnafu {
+                directive: "ssl_certificate",
+            }
+            .fail();
         };
         let cert_path = cert_path.clone();
         let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
-            return build_local_service_error::MissingDirectiveSnafu { directive: "ssl_certificate_key" }.fail();
+            return build_local_service_error::MissingDirectiveSnafu {
+                directive: "ssl_certificate_key",
+            }
+            .fail();
         };
         let key_path = key_path.clone();
 
