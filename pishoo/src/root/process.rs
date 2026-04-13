@@ -14,12 +14,11 @@ use tracing::Instrument;
 
 use crate::{
     ipc::{WorkerBootstrap, WorkerHello},
-    root::{rpc_server::WorkerControlPlane, state::RootState, worker_handle::WorkerHandle},
+    root::{rpc_server::WorkerControlPlane, state::RootState},
 };
 
 /// Result of successfully spawning a worker.
 pub struct SpawnedWorker {
-    pub handle: WorkerHandle,
     pub hello: WorkerHello,
 }
 
@@ -48,8 +47,9 @@ pub enum SpawnWorkerError {
 ///
 /// 1. Fork + exec the pishoo-worker binary with privilege drop
 /// 2. Establish remoc connection over stdin/stdout pipes
-/// 3. Create a per-worker ControlPlane RPC server
-/// 4. Send bootstrap (with ControlPlane client) → receive hello
+/// 3. Register the worker early so background tasks can be tracked
+/// 4. Create a per-worker ControlPlane RPC server
+/// 5. Send bootstrap (with ControlPlane client) → receive hello
 pub async fn spawn_worker(
     worker_bin: &std::path::Path,
     uid: Uid,
@@ -71,6 +71,11 @@ pub async fn spawn_worker(
     ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
         .await
         .context(spawn_worker_error::ConnectTransportSnafu)?;
+
+    // Register the worker now so that spawn_worker_task can track tasks.
+    // On any subsequent failure, cleanup_worker_with_reason undoes this.
+    state.register_worker(pid, uid, launched.handle).await;
+
     state
         .spawn_worker_task(pid, async move {
             let _ = conn.in_current_span().await;
@@ -106,26 +111,27 @@ pub async fn spawn_worker(
     };
 
     if let Err(source) = base_tx.send(bootstrap).await {
-        state.cleanup_worker_tasks(pid).await;
+        state
+            .cleanup_worker_with_reason(pid, "send_bootstrap_failed")
+            .await;
         return Err(SpawnWorkerError::SendBootstrap { source });
     }
 
     let hello = match base_rx.recv().await {
         Ok(Some(hello)) => hello,
         Ok(None) => {
-            state.cleanup_worker_tasks(pid).await;
+            state.cleanup_worker_with_reason(pid, "missing_hello").await;
             return Err(SpawnWorkerError::MissingHello);
         }
         Err(source) => {
-            state.cleanup_worker_tasks(pid).await;
+            state
+                .cleanup_worker_with_reason(pid, "receive_hello_failed")
+                .await;
             return Err(SpawnWorkerError::ReceiveHello { source });
         }
     };
 
-    Ok(SpawnedWorker {
-        handle: launched.handle,
-        hello,
-    })
+    Ok(SpawnedWorker { hello })
 }
 
 /// Run the worker monitor loop: wait for SIGCHLD notification or 5s fallback,
@@ -234,8 +240,6 @@ pub async fn spawn_configured_workers(
                 continue;
             }
         };
-        let pid = spawned.handle.pid();
-
-        state.register_worker(pid, target.uid, spawned.handle).await;
+        let _ = spawned;
     }
 }

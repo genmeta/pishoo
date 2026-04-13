@@ -17,7 +17,7 @@ use nix::{
     sys::{signal::Signal, wait::WaitStatus},
     unistd::{Pid, Uid},
 };
-use snafu::{Report, ResultExt, Snafu};
+use snafu::{Report, Snafu};
 use tokio::{
     sync::{Mutex, RwLock, mpsc},
     task::JoinSet,
@@ -61,6 +61,10 @@ pub enum ServiceOwner {
 
 /// Per-server ownership record stored in the root registry.
 pub enum ServerEntry {
+    /// A registration is in progress — the async `add_server` call is
+    /// running. Acts as a sentinel so that concurrent callers see the name
+    /// as occupied. Transitions to `Active` on success, removed on failure.
+    Registering { owner: ServiceOwner },
     /// Name is actively owned and serving.
     Active {
         owner: ServiceOwner,
@@ -74,6 +78,16 @@ pub enum ServerEntry {
     /// Name is poisoned due to a cross-owner conflict.
     /// Only cleared by `scrub_conflicts()` during reload.
     Conflicted,
+}
+
+impl ServerEntry {
+    /// Return the owner if this entry is `Registering` or `Active`.
+    fn owner(&self) -> Option<ServiceOwner> {
+        match self {
+            Self::Registering { owner } | Self::Active { owner, .. } => Some(*owner),
+            Self::Conflicted => None,
+        }
+    }
 }
 
 /// Per-worker-process tracking record.
@@ -120,7 +134,7 @@ struct Inner {
 pub struct RootState {
     /// The shared QUIC listeners object.
     pub listeners: Arc<dquic::prelude::QuicListeners>,
-    /// Server entries + per-name gates (behind RwLock for concurrent reads).
+    /// Server entries (behind RwLock for concurrent reads).
     servers: RwLock<ServerRegistry>,
     /// Process/user bookkeeping (behind Mutex).
     inner: Mutex<Inner>,
@@ -128,24 +142,25 @@ pub struct RootState {
     pub worker_notify: tokio::sync::Notify,
 }
 
-/// Combined server-name registry: entries + per-name serialization gates.
+/// Server-name registry: `server_name → ServerEntry` state machine.
+///
+/// Entry lifecycle: `(vacant) → Registering → Active → (removed)`.
+/// Conflict: any state → `Conflicted`, cleared by `scrub_conflicts`.
 struct ServerRegistry {
-    /// server_name → ownership + routing sender.
     entries: HashMap<String, ServerEntry>,
-    /// Per-server_name async gates for serializing register_listener calls.
-    name_gates: HashMap<String, Arc<Mutex<()>>>,
 }
 
 impl ServerRegistry {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            name_gates: HashMap::new(),
         }
     }
 
     /// Remove a server entry, cancel its listener, and remove from QuicListeners.
-    /// For `Conflicted` entries, only removes the map entry (no listener to cancel).
+    ///
+    /// For `Registering` entries, calls `remove_server` defensively (the async
+    /// `add_server` may have already completed). `remove_server` is idempotent.
     ///
     /// Caller must already hold a write lock on this `ServerRegistry`.
     fn retire_entry(
@@ -154,23 +169,18 @@ impl ServerRegistry {
         listeners: &dquic::prelude::QuicListeners,
     ) -> Option<()> {
         let entry = self.entries.remove(server_name)?;
-        self.name_gates.remove(server_name);
         match entry {
             ServerEntry::Active { shutdown_token, .. } => {
                 shutdown_token.cancel();
                 listeners.remove_server(server_name);
             }
+            ServerEntry::Registering { .. } => {
+                // add_server may or may not have completed — idempotent cleanup.
+                listeners.remove_server(server_name);
+            }
             ServerEntry::Conflicted => {}
         }
         Some(())
-    }
-
-    /// Get or create the per-name async gate.
-    fn name_gate(&mut self, server_name: &str) -> Arc<Mutex<()>> {
-        self.name_gates
-            .entry(server_name.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
     }
 }
 
@@ -193,23 +203,14 @@ impl RootState {
     // Server registry
     // -----------------------------------------------------------------------
 
-    /// Get or create the per-name async gate for serializing operations on a
-    /// single `server_name`. The gate is held across the async `add_server`
-    /// call so that concurrent register_listener for the same name are
-    /// properly serialized.
-    async fn name_gate(&self, server_name: &str) -> Arc<Mutex<()>> {
-        self.servers.write().await.name_gate(server_name)
-    }
-
     /// Unified entry point for registering a listener.
     ///
-    /// Semantics:
-    /// - **Vacant**: bind via `add_server`, commit as `Active`.
-    /// - **Active, same owner**: return `DuplicateListen` (no state change).
-    /// - **Active, different owner**: poison the name to `Conflicted`,
-    ///   cancel the existing listener, remove from QuicListeners, return
-    ///   `ConflictedName`.
-    /// - **Conflicted**: return `ConflictedName` (no state change).
+    /// State machine:
+    /// - **Vacant** → insert `Registering` sentinel → async `add_server` →
+    ///   promote to `Active`.
+    /// - **Registering/Active, same owner** → `DuplicateListen`.
+    /// - **Registering/Active, different owner** → poison to `Conflicted`.
+    /// - **Conflicted** → `ConflictedName`.
     ///
     /// Returns a [`PerServerListener`] on success.
     pub async fn register_listener(
@@ -219,38 +220,24 @@ impl RootState {
     ) -> Result<PerServerListener, RegisterError> {
         let server_name = request.identity.name().as_full().to_owned();
 
-        // Acquire the per-name gate so that concurrent calls for the same
-        // server_name are serialized. This is critical because `add_server`
-        // is async and we must not race.
-        let gate = self.name_gate(&server_name).await;
-        let _guard = gate.lock().await;
-
-        // Phase 1: check current state and handle conflicts.
+        // Phase 1: claim the name by inserting a `Registering` sentinel.
         {
-            let registry = self.servers.read().await;
-            let verdict = match registry.entries.get(&server_name) {
-                Some(ServerEntry::Active {
-                    owner: existing_owner,
-                    ..
-                }) if *existing_owner == owner => Some(true), // duplicate
-                Some(ServerEntry::Active { .. }) => Some(false), // conflict
+            let mut registry = self.servers.write().await;
+            match registry.entries.get(&server_name) {
+                Some(entry) if entry.owner() == Some(owner) => {
+                    return Err(RegisterError::DuplicateListen);
+                }
                 Some(ServerEntry::Conflicted) => {
                     return Err(RegisterError::ConflictedName);
                 }
-                None => None, // vacant
-            };
-            drop(registry);
+                Some(_) => {
+                    // Different owner occupies the name — conflict + poison.
+                    let old = registry
+                        .entries
+                        .insert(server_name.clone(), ServerEntry::Conflicted);
+                    // Release write lock before acquiring inner lock.
+                    drop(registry);
 
-            match verdict {
-                Some(true) => return Err(RegisterError::DuplicateListen),
-                Some(false) => {
-                    // Cross-owner conflict — poison the name immediately.
-                    let old = {
-                        let mut registry = self.servers.write().await;
-                        registry
-                            .entries
-                            .insert(server_name.clone(), ServerEntry::Conflicted)
-                    };
                     if let Some(ServerEntry::Active {
                         shutdown_token,
                         owner: old_owner,
@@ -259,7 +246,6 @@ impl RootState {
                     {
                         shutdown_token.cancel();
                         self.listeners.remove_server(&server_name);
-                        // Remove from old owner's owned_servers.
                         if let ServiceOwner::Worker(pid) = old_owner {
                             let mut inner = self.inner.lock().await;
                             if let Some(proc) = inner.processes.get_mut(&pid) {
@@ -275,12 +261,16 @@ impl RootState {
                     return Err(RegisterError::ConflictedName);
                 }
                 None => {
-                    // Vacant — fall through to bind + commit.
+                    // Vacant — claim with sentinel.
+                    registry
+                        .entries
+                        .insert(server_name.clone(), ServerEntry::Registering { owner });
                 }
             }
         }
 
-        // Phase 2: name is vacant — resolve bind URIs and bind the server.
+        // Phase 2: name is claimed — resolve bind URIs and bind the server.
+        // No lock held — other server_names can be read/written concurrently.
         let device_names = dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
@@ -288,7 +278,8 @@ impl RootState {
             .collect::<Vec<_>>();
         let bind_uris = crate::bind::resolve_bind_uris(&request.bind, &device_names);
 
-        self.listeners
+        let add_result = self
+            .listeners
             .add_server(
                 &server_name,
                 request.identity.certs(),
@@ -296,27 +287,38 @@ impl RootState {
                 bind_uris,
                 None::<Vec<u8>>,
             )
-            .await
-            .context(register_error::AddServerFailedSnafu {
-                server_name: &server_name,
-            })?;
+            .await;
 
-        // Phase 3: commit registration.
+        if let Err(source) = add_result {
+            // Rollback the sentinel.
+            self.servers.write().await.entries.remove(&server_name);
+            return Err(RegisterError::AddServerFailed {
+                server_name,
+                source,
+            });
+        }
+
+        // Phase 3: promote sentinel to `Active`.
         {
             let mut registry = self.servers.write().await;
 
-            // Defensive re-check: someone may have raced despite the per-name
-            // gate (shouldn't happen, but belt-and-suspenders).
-            if registry.entries.contains_key(&server_name) {
-                self.listeners.remove_server(&server_name);
-                tracing::error!(
-                    %server_name,
-                    "BUG: server appeared in registry after add_server despite name gate"
-                );
-                registry
-                    .entries
-                    .insert(server_name.clone(), ServerEntry::Conflicted);
-                return Err(RegisterError::ConflictedName);
+            // Verify our sentinel is still there. Another operation (conflict
+            // or cleanup) may have replaced/removed it.
+            match registry.entries.get(&server_name) {
+                Some(ServerEntry::Registering { owner: o }) if *o == owner => {
+                    // Good — our sentinel is intact.
+                }
+                _ => {
+                    // Sentinel was replaced (e.g., by cross-owner conflict or
+                    // cleanup). Roll back the listeners binding.
+                    self.listeners.remove_server(&server_name);
+                    tracing::warn!(
+                        %server_name,
+                        ?owner,
+                        "sentinel lost during register_listener; rolled back"
+                    );
+                    return Err(RegisterError::ConflictedName);
+                }
             }
 
             let (tx, rx) = mpsc::channel(128);
@@ -347,7 +349,6 @@ impl RootState {
                     publish_task,
                 },
             );
-            // Release servers write lock before acquiring inner lock.
             drop(registry);
 
             // Track in the worker's owned_servers set.
@@ -356,10 +357,12 @@ impl RootState {
                 if let Some(process) = inner.processes.get_mut(&pid) {
                     process.owned_servers.insert(server_name.clone());
                 } else {
-                    // Worker died during async gap — rollback the server entry.
+                    // Worker died during async gap — rollback.
                     drop(inner);
-                    let mut registry = self.servers.write().await;
-                    registry.retire_entry(&server_name, &self.listeners);
+                    self.servers
+                        .write()
+                        .await
+                        .retire_entry(&server_name, &self.listeners);
                     tracing::warn!(
                         %server_name,
                         pid = %pid,
@@ -382,24 +385,17 @@ impl RootState {
 
     /// Release a single active server entry owned by the specified owner.
     pub async fn release_server(&self, server_name: &str, owner: ServiceOwner) {
-        let gate = self.name_gate(server_name).await;
-        let _guard = gate.lock().await;
-
-        let owned = {
-            let registry = self.servers.read().await;
-            matches!(
+        {
+            let mut registry = self.servers.write().await;
+            let owned = matches!(
                 registry.entries.get(server_name),
                 Some(ServerEntry::Active { owner: existing_owner, .. }) if *existing_owner == owner
-            )
-        };
-        if !owned {
-            return;
+            );
+            if !owned {
+                return;
+            }
+            registry.retire_entry(server_name, &self.listeners);
         }
-
-        self.servers
-            .write()
-            .await
-            .retire_entry(server_name, &self.listeners);
 
         if let ServiceOwner::Worker(pid) = owner {
             let mut inner = self.inner.lock().await;
@@ -453,7 +449,7 @@ impl RootState {
                             .any(|l| l.specific_addrs.is_none() && l.range.contains(device));
                         affected.then(|| (name.clone(), listens.clone()))
                     }
-                    ServerEntry::Conflicted => None,
+                    ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
                 })
                 .collect()
         };
@@ -546,7 +542,6 @@ impl RootState {
 
         for name in &conflicted {
             registry.entries.remove(name);
-            registry.name_gates.remove(name);
         }
 
         if !conflicted.is_empty() {
@@ -620,16 +615,6 @@ impl RootState {
             .spawn(task);
     }
 
-    /// Abort and drain any root-side background tasks associated with the pid.
-    pub async fn cleanup_worker_tasks(&self, pid: Pid) {
-        let mut tasks = {
-            let mut inner = self.inner.lock().await;
-            inner.worker_tasks.remove(&pid).unwrap_or_default()
-        };
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-    }
-
     /// Remove all resources for a dead/exited worker process.
     ///
     /// Acquires `inner` lock first (to collect owned servers), releases it,
@@ -656,6 +641,9 @@ impl RootState {
         // inner lock released here.
 
         // Step 2: retire owned servers under the servers write lock.
+        // Also scan for `Registering` entries owned by this worker — they are
+        // not yet recorded in `owned_servers` because `register_listener`
+        // Phase 3 has not completed.
         let servers_cleaned = {
             let mut registry = self.servers.write().await;
             let mut cleaned = 0usize;
@@ -668,6 +656,22 @@ impl RootState {
                     registry.retire_entry(server_name, &self.listeners);
                     cleaned += 1;
                 }
+            }
+            // Full-scan for Registering sentinels owned by the dead worker.
+            let orphaned: Vec<String> = registry
+                .entries
+                .iter()
+                .filter(|&(_, entry)| {
+                    matches!(
+                        entry,
+                        ServerEntry::Registering { owner: ServiceOwner::Worker(p) } if *p == pid
+                    )
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in &orphaned {
+                registry.retire_entry(name, &self.listeners);
+                cleaned += 1;
             }
             cleaned
         };
