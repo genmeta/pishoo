@@ -21,7 +21,7 @@ use snafu::{OptionExt, Report, ResultExt};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 #[snafu::report]
 async fn main() -> Result<(), Whatever> {
     let user = std::env::var("PISHOO_USER").unwrap_or_else(|_| {

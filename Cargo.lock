@@ -1388,7 +1388,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "dquic"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1813,7 +1813,7 @@ dependencies = [
 [[package]]
 name = "genmeta-ssh"
 version = "0.1.0"
-source = "git+ssh://git@github.com/genmeta/genmeta-ssh.git?branch=main#b330e6aab2328da12c72da8f7e3da81301608954"
+source = "git+ssh://git@github.com/genmeta/genmeta-ssh.git?branch=main#fbd4601ac56f493dac77793887f8569110093193"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3410,6 +3410,7 @@ dependencies = [
  "axum 0.8.8",
  "clap",
  "console-subscriber",
+ "dashmap",
  "dhttp-home",
  "dquic",
  "firewall-db",
@@ -3754,7 +3755,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3778,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "qbase",
  "qevent",
@@ -3791,7 +3792,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3819,7 +3820,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3837,7 +3838,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3862,7 +3863,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3873,7 +3874,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3891,7 +3892,7 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "futures",
  "qbase",
@@ -3902,7 +3903,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -3931,7 +3932,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -4010,7 +4011,7 @@ dependencies = [
 [[package]]
 name = "qunreliable"
 version = "0.4.0"
-source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#d06041647dcb54c0ebb2868f38a5d11bcc08e791"
+source = "git+ssh://git@github.com/genmeta/dquic.git?branch=feat%2Fv0.5#5f7617ca0bac3a89a57f562920e7541ff2598643"
 dependencies = [
  "bytes",
  "futures",
@@ -4520,9 +4521,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.37"
+version = "0.23.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
+checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
 dependencies = [
  "aws-lc-rs",
  "log",
