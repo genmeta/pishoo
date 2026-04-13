@@ -80,6 +80,11 @@ async fn main() -> Result<(), Whatever> {
         pishoo::config::resolve_entry_worker_targets(&current_entry_config)
             .whatever_context("failed to resolve configured worker users")?;
 
+    tracing::info!(
+        pid_file = %current_entry_config.pid_file,
+        "pishoo starting"
+    );
+
     // --- Multi-process supervisor setup ---
 
     // Create QuicListeners (empty — workers add servers via request_listen)
@@ -99,28 +104,32 @@ async fn main() -> Result<(), Whatever> {
         .expect("failed to create QuicListeners");
 
     // Create RootState (interior mutability — no external Mutex needed)
-    let state = Arc::new(pishoo::root::state::RootState::new(listeners.clone()));
+    let state = Arc::new(pishoo::hypervisor::state::RootState::new(listeners.clone()));
 
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
     let mut local_service_handle =
-        pishoo::root::local_service::spawn_local_service(&state, &current_entry_config).await?;
+        pishoo::hypervisor::local_service::spawn_local_service(&state, &current_entry_config)
+            .await?;
     drop(current_entry_config);
 
-    pishoo::root::process::spawn_configured_workers(&state, current_worker_targets.clone()).await;
+    pishoo::hypervisor::process::spawn_configured_workers(&state, current_worker_targets.clone())
+        .await;
 
     // Create signal handler once — reused across the main loop so that signals
     // arriving during reload are never lost.
     let mut signals = signal::RootSignalHandler::new()?;
 
     // Central accept loop: route connections by server_name
-    let accept_handle = pishoo::root::network::spawn_accept_loop(state.clone());
+    let accept_handle = pishoo::hypervisor::network::spawn_accept_loop(state.clone());
 
-    let monitor_handle = pishoo::root::process::spawn_monitor_loop(state.clone());
+    let monitor_handle = pishoo::hypervisor::process::spawn_monitor_loop(state.clone());
 
     // Watch for network interface changes and reconcile bind URIs
-    let network_watch_handle = pishoo::root::network::spawn_network_watch_loop(state.clone());
+    let network_watch_handle = pishoo::hypervisor::network::spawn_network_watch_loop(state.clone());
+
+    tracing::info!("pishoo ready");
 
     loop {
         let sig = signals.wait().await;
@@ -129,6 +138,7 @@ async fn main() -> Result<(), Whatever> {
             signal::RootSignal::SigTerm
             | signal::RootSignal::SigInt
             | signal::RootSignal::SigQuit => {
+                tracing::info!(?sig, "received shutdown signal");
                 let forwarded = match sig {
                     signal::RootSignal::SigTerm => Signal::SIGTERM,
                     signal::RootSignal::SigInt => Signal::SIGINT,
@@ -137,7 +147,6 @@ async fn main() -> Result<(), Whatever> {
                 };
                 state.forward_unix_signal(forwarded).await;
                 accept_handle.abort();
-                tracing::info!(?sig, "forwarded shutdown signal to workers");
 
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                 loop {
@@ -182,12 +191,17 @@ async fn main() -> Result<(), Whatever> {
                             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
                     }
+                } else {
+                    tracing::info!("all workers exited gracefully");
                 }
+                tracing::info!("shutdown complete");
                 break;
             }
             signal::RootSignal::SigHup => {
+                tracing::info!("received reload signal");
                 let next_snapshot =
-                    match pishoo::root::reload::load_root_reload_snapshot(&config_file).await {
+                    match pishoo::hypervisor::reload::load_root_reload_snapshot(&config_file).await
+                    {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
                             tracing::warn!(
@@ -199,7 +213,7 @@ async fn main() -> Result<(), Whatever> {
                         }
                     };
 
-                if let Err(error) = pishoo::root::local_service::replace_local_service(
+                if let Err(error) = pishoo::hypervisor::local_service::replace_local_service(
                     &state,
                     &mut local_service_handle,
                     &next_snapshot.entry_config,
@@ -219,37 +233,57 @@ async fn main() -> Result<(), Whatever> {
                     &next_snapshot.worker_targets,
                 );
 
+                fn target_names(targets: &[pishoo::config::ResolvedWorkerTarget]) -> Vec<&str> {
+                    targets.iter().map(|t| t.name.as_str()).collect()
+                }
+                tracing::info!(
+                    unchanged = ?target_names(&diff.unchanged),
+                    added = ?target_names(&diff.added),
+                    removed = ?target_names(&diff.removed),
+                    changed = ?diff.changed.iter().map(|(_, new)| new.name.as_str()).collect::<Vec<_>>(),
+                    "reload diff"
+                );
+
                 // Phase 1: Kill removed + changed workers (parallel).
                 let workers_to_kill: Vec<_> = diff
                     .removed
                     .iter()
-                    .map(|t| (t.name.clone(), t.uid, "reload_removed"))
+                    .map(|t| (t.uid, "reload_removed"))
                     .chain(
                         diff.changed
                             .iter()
-                            .map(|(old, _)| (old.name.clone(), old.uid, "reload_changed")),
+                            .map(|(old, _)| (old.uid, "reload_changed")),
                     )
                     .collect();
 
                 if !workers_to_kill.is_empty() {
                     let mut kill_tasks = tokio::task::JoinSet::new();
-                    for (username, uid, reason) in &workers_to_kill {
+                    for (uid, reason) in &workers_to_kill {
                         let state = state.clone();
-                        let username = username.clone();
                         let uid = *uid;
                         let reason = *reason;
-                        kill_tasks.spawn(async move {
-                            if let Some(pid) = state.pid_for_uid(uid).await {
-                                // SIGTERM + 2s grace
-                                state.send_signal_to_user(uid, Signal::SIGTERM).await;
-                                if !state.wait_worker_exit(pid, std::time::Duration::from_secs(2)).await {
-                                    state.force_kill_worker(pid).await;
-                                    state.wait_worker_exit(pid, std::time::Duration::from_secs(2)).await;
+                        kill_tasks.spawn(
+                            async move {
+                                if let Some(pid) = state.pid_for_uid(uid).await {
+                                    // SIGTERM + 2s grace
+                                    state.send_signal_to_user(uid, Signal::SIGTERM).await;
+                                    if !state
+                                        .wait_worker_exit(pid, std::time::Duration::from_secs(2))
+                                        .await
+                                    {
+                                        state.force_kill_worker(pid).await;
+                                        state
+                                            .wait_worker_exit(
+                                                pid,
+                                                std::time::Duration::from_secs(2),
+                                            )
+                                            .await;
+                                    }
+                                    state.cleanup_worker_with_reason(pid, reason).await;
                                 }
-                                state.cleanup_worker_with_reason(pid, reason).await;
-                                tracing::info!(user = %username, pid = %pid, "worker killed during reload");
                             }
-                        }.in_current_span());
+                            .in_current_span(),
+                        );
                     }
                     while kill_tasks.join_next().await.is_some() {}
                 }
@@ -269,14 +303,15 @@ async fn main() -> Result<(), Whatever> {
                     .chain(diff.changed.into_iter().map(|(_old, new)| new))
                     .collect();
                 if !workers_to_spawn.is_empty() {
-                    pishoo::root::process::spawn_configured_workers(&state, workers_to_spawn).await;
+                    pishoo::hypervisor::process::spawn_configured_workers(&state, workers_to_spawn)
+                        .await;
                 }
 
                 current_worker_targets = next_snapshot.worker_targets;
-                tracing::info!("reload applied to root-local state and forwarded to workers");
+                tracing::info!("reload complete");
             }
             signal::RootSignal::SigUsr1 => {
-                pishoo::root::log::reopen_root_log();
+                pishoo::hypervisor::log::reopen_root_log();
                 state.forward_unix_signal(Signal::SIGUSR1).await;
                 tracing::info!("root log reopened, forwarded reopen signal to workers");
             }

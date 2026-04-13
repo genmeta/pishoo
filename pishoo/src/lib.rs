@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
+pub mod hypervisor;
 pub mod ipc;
-pub mod root;
 pub mod service;
 pub mod tracing_init;
 pub mod worker;

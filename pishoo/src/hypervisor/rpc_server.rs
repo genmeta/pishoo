@@ -15,8 +15,8 @@ use remoc::prelude::Server;
 use tracing::Instrument;
 
 use crate::{
+    hypervisor::state::{RegisterError, ServiceOwner},
     ipc::{ConnectError, ListenError},
-    root::state::{RegisterError, ServiceOwner},
 };
 
 /// Per-worker [`ControlPlane`](crate::ipc::ControlPlane) implementation.
@@ -61,7 +61,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     caller_pid = %self.caller_pid,
                     %server_name,
                     error = %snafu::Report::from_error(&error),
-                    "Listen request failed"
+                    "listen request failed"
                 );
                 match error {
                     RegisterError::DuplicateListen | RegisterError::ConflictedName => {
@@ -85,10 +85,10 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             )
             .await;
 
-        tracing::info!(
+        tracing::debug!(
             caller_pid = %self.caller_pid,
             %server_name,
-            "Listen request fulfilled"
+            "listen request fulfilled"
         );
         Ok(RemoteListener::new(client))
     }
@@ -126,9 +126,9 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             )
             .await;
 
-        tracing::info!(
+        tracing::debug!(
             caller_pid = %self.caller_pid,
-            "Connect request fulfilled"
+            "connect request fulfilled"
         );
         Ok(RemoteConnector::new(client))
     }
@@ -145,11 +145,12 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             );
 
             // Fork the session process as root (no privilege drop).
-            let transport = crate::root::launcher::launch_session(&username).map_err(|e| {
-                crate::ipc::SpawnSessionError::SpawnFailed {
-                    reason: snafu::Report::from_error(e).to_string(),
-                }
-            })?;
+            let transport =
+                crate::hypervisor::launcher::launch_session(&username).map_err(|e| {
+                    crate::ipc::SpawnSessionError::SpawnFailed {
+                        reason: snafu::Report::from_error(e).to_string(),
+                    }
+                })?;
 
             // Send the child's pipe FDs to the worker via SCM_RIGHTS on the
             // seqpacket socket. This must complete BEFORE we return Ok(()) —
@@ -159,7 +160,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             let stdout_fd = transport.stdout.as_raw_fd();
             tokio::task::spawn_blocking(move || {
                 let fds = [stdin_fd, stdout_fd];
-                crate::root::launcher::send_fds(sock_fd, &fds)
+                crate::hypervisor::launcher::send_fds(sock_fd, &fds)
             })
             .await
             .map_err(|_| crate::ipc::SpawnSessionError::SpawnFailed {

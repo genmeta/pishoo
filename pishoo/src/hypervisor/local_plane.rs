@@ -11,8 +11,8 @@ use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
 use snafu::Snafu;
 
 use crate::{
+    hypervisor::state::{RegisterError, ServiceOwner},
     listen::PerServerListener,
-    root::state::{RegisterError, ServiceOwner},
 };
 
 /// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
@@ -66,7 +66,7 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         use local_spawn_session_error::*;
         use snafu::{OptionExt, ResultExt};
 
-        let session_binary = crate::root::launcher::session_binary_path();
+        let session_binary = crate::hypervisor::launcher::session_binary_path();
 
         let mut child = tokio::process::Command::new(&session_binary)
             .env("PISHOO_USER", username)

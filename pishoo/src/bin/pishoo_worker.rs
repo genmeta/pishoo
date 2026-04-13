@@ -54,11 +54,11 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to receive worker bootstrap")?
         .whatever_context("root closed channel without sending bootstrap")?;
 
-    tracing::info!(
+    tracing::debug!(
         uid = bootstrap.uid,
         username = %bootstrap.username,
         home = %bootstrap.home.display(),
-        "Worker bootstrap received"
+        "bootstrap received"
     );
 
     // Send startup hello back to root.
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Whatever> {
         .send(hello)
         .await
         .whatever_context("failed to send startup hello")?;
-    tracing::info!("startup hello sent");
+    tracing::debug!("startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
     // Recover the seqpacket FD passed by root at fixed FD 3 (dup2'd in child_exec).
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to create SIGHUP listener")?;
 
     loop {
-        tracing::info!(
+        tracing::debug!(
             servers = config.servers.len(),
             "service config built, starting service"
         );
@@ -132,28 +132,29 @@ async fn main() -> Result<(), Whatever> {
 
             tokio::select! {
                 () = &mut service => {
+                    tracing::info!("service exited");
                     should_exit = true;
                 }
                 _ = term_signal.recv() => {
-                    tracing::info!("received SIGTERM, shutting down");
+                    tracing::info!(signal = "SIGTERM", "received shutdown signal");
                     shutdown.cancel();
                     service.await;
                     should_exit = true;
                 }
                 _ = int_signal.recv() => {
-                    tracing::info!("received SIGINT, shutting down");
+                    tracing::info!(signal = "SIGINT", "received shutdown signal");
                     shutdown.cancel();
                     service.await;
                     should_exit = true;
                 }
                 _ = quit_signal.recv() => {
-                    tracing::info!("received SIGQUIT, shutting down");
+                    tracing::info!(signal = "SIGQUIT", "received shutdown signal");
                     shutdown.cancel();
                     service.await;
                     should_exit = true;
                 }
                 _ = hup_signal.recv() => {
-                    tracing::info!("received SIGHUP, rebuilding service config");
+                    tracing::info!("received reload signal");
                     let rebuilt_config = match build_service_config(&dhttp_home).await {
                         Ok(config) => config,
                         Err(error) => {
@@ -178,10 +179,10 @@ async fn main() -> Result<(), Whatever> {
 
         if let Some(rebuilt_config) = next_config {
             config = rebuilt_config;
-            tracing::info!(servers = config.servers.len(), "worker reload completed");
+            tracing::info!(servers = config.servers.len(), "reload complete");
         }
     }
 
-    tracing::info!("pishoo-worker exiting");
+    tracing::info!("exiting");
     Ok(())
 }

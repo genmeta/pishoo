@@ -25,7 +25,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
-use crate::{listen::PerServerListener, root::worker_handle::WorkerHandle};
+use crate::{hypervisor::worker_handle::WorkerHandle, listen::PerServerListener};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,6 +94,8 @@ impl ServerEntry {
 struct WorkerProcessRecord {
     /// The UID this worker runs as.
     uid: Uid,
+    /// The username this worker runs as.
+    username: String,
     /// Set of server_names owned by this worker.
     owned_servers: HashSet<String>,
     /// Handle to the spawned worker process.
@@ -256,7 +258,7 @@ impl RootState {
                     tracing::warn!(
                         %server_name,
                         new_owner = ?owner,
-                        "Cross-owner conflict: name poisoned"
+                        "cross-owner conflict: name poisoned"
                     );
                     return Err(RegisterError::ConflictedName);
                 }
@@ -372,7 +374,7 @@ impl RootState {
                 }
             }
 
-            tracing::info!(%server_name, ?owner, "server registered");
+            tracing::debug!(%server_name, ?owner, "server registered");
             Ok(PerServerListener::new_registered(
                 rx,
                 shutdown_token,
@@ -563,7 +565,13 @@ impl RootState {
     ///
     /// If another worker already holds the same UID, the old one is cleaned
     /// up first (uid-replaced).
-    pub async fn register_worker(&self, pid: Pid, uid: Uid, worker_handle: WorkerHandle) {
+    pub async fn register_worker(
+        &self,
+        pid: Pid,
+        uid: Uid,
+        username: String,
+        worker_handle: WorkerHandle,
+    ) {
         let replaced_pid = {
             let inner = self.inner.lock().await;
             inner
@@ -584,12 +592,13 @@ impl RootState {
             pid,
             WorkerProcessRecord {
                 uid,
+                username: username.clone(),
                 owned_servers: HashSet::new(),
                 worker_handle,
             },
         );
         inner.users.insert(uid, pid);
-        tracing::info!(pid = %pid, uid = uid.as_raw(), "Registered worker");
+        tracing::debug!(pid = %pid, uid = uid.as_raw(), %username, "registered worker");
     }
 
     /// Check whether a worker with the given PID is registered.
@@ -626,7 +635,7 @@ impl RootState {
         reason: &str,
     ) -> Option<CleanupSummary> {
         // Step 1: remove process record and collect owned server names.
-        let (record_uid, owned_servers, background_tasks) = {
+        let (record_uid, record_username, owned_servers, background_tasks) = {
             let mut inner = self.inner.lock().await;
             let record = inner.processes.remove(&pid)?;
 
@@ -636,7 +645,12 @@ impl RootState {
             }
 
             let background_tasks = inner.worker_tasks.remove(&pid).unwrap_or_default();
-            (record.uid, record.owned_servers, background_tasks)
+            (
+                record.uid,
+                record.username,
+                record.owned_servers,
+                background_tasks,
+            )
         };
         // inner lock released here.
 
@@ -686,11 +700,10 @@ impl RootState {
         };
         tracing::info!(
             pid = %summary.pid,
-            uid = summary.uid.as_raw(),
+            username = %record_username,
             servers_cleaned = summary.servers_cleaned,
-            background_tasks_cleaned = summary.background_tasks_cleaned,
             %reason,
-            "Worker cleanup complete"
+            "worker stopped"
         );
 
         // Step 3: drain background tasks (no lock held).
@@ -710,7 +723,7 @@ impl RootState {
                 Ok(Some(status)) => match status {
                     WaitStatus::StillAlive => {}
                     _ => {
-                        tracing::warn!(pid = %pid, ?status, "Worker exited");
+                        tracing::warn!(pid = %pid, ?status, "worker exited");
                         exited.push(*pid);
                     }
                 },
@@ -719,7 +732,7 @@ impl RootState {
                     tracing::error!(
                         pid = %pid,
                         error = %Report::from_error(&error),
-                        "Failed to poll worker status"
+                        "failed to poll worker status"
                     );
                     exited.push(*pid);
                 }
@@ -740,7 +753,7 @@ impl RootState {
         for (pid, process) in &mut inner.processes {
             match process.worker_handle.start_kill() {
                 Ok(()) => {
-                    tracing::warn!(pid = %pid, %reason, "Sent SIGKILL to worker");
+                    tracing::warn!(pid = %pid, %reason, "sent SIGKILL to worker");
                     killed.push(*pid);
                 }
                 Err(error) => {
@@ -748,7 +761,7 @@ impl RootState {
                         pid = %pid,
                         %reason,
                         error = %Report::from_error(&error),
-                        "Failed to force kill worker"
+                        "failed to force kill worker"
                     );
                 }
             }

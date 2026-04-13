@@ -6,15 +6,15 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use nix::unistd::{Gid, Uid};
 use remoc::prelude::ServerShared;
 use snafu::{Report, ResultExt, Snafu};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 use crate::{
+    config::ResolvedWorkerTarget,
+    hypervisor::{rpc_server::WorkerControlPlane, state::RootState},
     ipc::{WorkerBootstrap, WorkerHello},
-    root::{rpc_server::WorkerControlPlane, state::RootState},
 };
 
 /// Result of successfully spawning a worker.
@@ -27,7 +27,7 @@ pub struct SpawnedWorker {
 pub enum SpawnWorkerError {
     #[snafu(display("failed to launch worker process"))]
     LaunchWorker {
-        source: crate::root::launcher::LaunchWorkerError,
+        source: crate::hypervisor::launcher::LaunchWorkerError,
     },
     #[snafu(display("failed to establish remoc transport"))]
     ConnectTransport {
@@ -52,14 +52,17 @@ pub enum SpawnWorkerError {
 /// 5. Send bootstrap (with ControlPlane client) → receive hello
 pub async fn spawn_worker(
     worker_bin: &std::path::Path,
-    uid: Uid,
-    gid: Gid,
-    username: String,
-    home: PathBuf,
+    target: &ResolvedWorkerTarget,
     state: Arc<RootState>,
 ) -> Result<SpawnedWorker, SpawnWorkerError> {
-    let launched = crate::root::launcher::launch_worker(worker_bin, uid, gid, &username, &home)
-        .context(spawn_worker_error::LaunchWorkerSnafu)?;
+    let launched = crate::hypervisor::launcher::launch_worker(
+        worker_bin,
+        target.uid,
+        target.gid,
+        &target.name,
+        &target.dir,
+    )
+    .context(spawn_worker_error::LaunchWorkerSnafu)?;
     let pid = launched.handle.pid();
     let transport = launched.transport;
 
@@ -74,7 +77,9 @@ pub async fn spawn_worker(
 
     // Register the worker now so that spawn_worker_task can track tasks.
     // On any subsequent failure, cleanup_worker_with_reason undoes this.
-    state.register_worker(pid, uid, launched.handle).await;
+    state
+        .register_worker(pid, target.uid, target.name.clone(), launched.handle)
+        .await;
 
     state
         .spawn_worker_task(pid, async move {
@@ -104,9 +109,9 @@ pub async fn spawn_worker(
 
     // Send bootstrap with new ControlPlane client.
     let bootstrap = WorkerBootstrap {
-        uid: uid.as_raw(),
-        username,
-        home,
+        uid: target.uid.as_raw(),
+        username: target.name.clone(),
+        home: target.dir.clone(),
         control_plane: client,
     };
 
@@ -130,6 +135,8 @@ pub async fn spawn_worker(
             return Err(SpawnWorkerError::ReceiveHello { source });
         }
     };
+
+    tracing::info!(pid = %pid, username = %target.name, "worker spawned");
 
     Ok(SpawnedWorker { hello })
 }
@@ -211,23 +218,17 @@ pub async fn spawn_configured_workers(
     worker_targets: Vec<crate::config::ResolvedWorkerTarget>,
 ) {
     if worker_targets.is_empty() {
+        tracing::info!("no worker targets resolved");
         return;
     }
 
+    let total = worker_targets.len();
+    let mut spawned = 0usize;
     let worker_bin = worker_binary_path();
 
-    for target in worker_targets {
-        let spawned = match spawn_worker(
-            &worker_bin,
-            target.uid,
-            target.gid,
-            target.name.clone(),
-            target.dir.clone(),
-            state.clone(),
-        )
-        .await
-        {
-            Ok(spawned) => spawned,
+    for target in &worker_targets {
+        match spawn_worker(&worker_bin, target, state.clone()).await {
+            Ok(_) => spawned += 1,
             Err(error) => {
                 // Worker spawn failures (fork/exec, IPC negotiation, hello
                 // timeout) are per-user problems that must not bring down the
@@ -237,9 +238,19 @@ pub async fn spawn_configured_workers(
                     error = %Report::from_error(&error),
                     "failed to spawn worker, skipping user"
                 );
-                continue;
             }
         };
-        let _ = spawned;
+    }
+
+    let failed = total - spawned;
+    if failed > 0 {
+        tracing::warn!(
+            total,
+            spawned,
+            failed,
+            "worker spawn complete with failures"
+        );
+    } else {
+        tracing::info!(count = total, "all workers spawned");
     }
 }

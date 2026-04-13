@@ -99,7 +99,7 @@ where
 
         let listener = plane.listener(request).await?;
 
-        tracing::info!(%server_name, "listener registered");
+        tracing::debug!(%server_name, "listener registered");
 
         // Extract location blocks from this server's config node
         let locations = match server_config.server_node.get("location") {

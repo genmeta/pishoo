@@ -14,7 +14,7 @@ use nix::{
 use snafu::{ResultExt, Snafu};
 use tokio::fs::File;
 
-use crate::root::worker_handle::WorkerHandle;
+use crate::hypervisor::worker_handle::WorkerHandle;
 
 pub struct WorkerTransport {
     pub stdin: File,

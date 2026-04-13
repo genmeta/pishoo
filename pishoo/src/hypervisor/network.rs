@@ -27,7 +27,7 @@ pub async fn run_accept_loop(state: Arc<RootState>) {
                 Err(error) => {
                     tracing::error!(
                         error = %Report::from_error(&error),
-                        "Accept loop error"
+                        "accept loop error"
                     );
                     break;
                 }
@@ -36,12 +36,12 @@ pub async fn run_accept_loop(state: Arc<RootState>) {
 
         let sender = state.get_conn_sender(&server_name).await;
         let Some(sender) = sender else {
-            tracing::warn!(%server_name, "No listener registered for connection");
+            tracing::warn!(%server_name, "no listener registered for connection");
             continue;
         };
 
         if sender.send(conn).await.is_err() {
-            tracing::warn!(%server_name, "Failed to route connection (channel closed)");
+            tracing::warn!(%server_name, "failed to route connection (channel closed)");
         }
     }
 }

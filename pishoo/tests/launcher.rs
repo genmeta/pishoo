@@ -4,7 +4,7 @@ use std::{
 };
 
 use nix::{sys::wait::WaitStatus, unistd::User};
-use pishoo::root::launcher::launch_worker;
+use pishoo::hypervisor::launcher::launch_worker;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn current_user() -> User {

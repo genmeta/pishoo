@@ -9,7 +9,7 @@ fn main_uses_shared_root_cert_store() {
 
 #[test]
 fn main_uses_reactive_per_server_dns_publish() {
-    let state_source = include_str!("../src/root/state.rs");
+    let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
         state_source.contains("publish_task"),
         "register_listener must spawn per-server DNS publish tasks via ServerEntry"

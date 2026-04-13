@@ -8,7 +8,7 @@ use gateway::{
 use snafu::{ResultExt, Snafu, whatever};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use crate::{root::state::RootState, tls};
+use crate::{hypervisor::state::RootState, tls};
 
 #[allow(dead_code)]
 struct LocalServerDef {
@@ -222,6 +222,7 @@ pub async fn spawn_local_service(
     entry_config: &crate::config::EntryConfig,
 ) -> Result<Option<LocalServiceHandle>, Whatever> {
     if entry_config.local_servers.is_empty() {
+        tracing::debug!("no local servers configured");
         return Ok(None);
     }
 
@@ -229,7 +230,7 @@ pub async fn spawn_local_service(
         .await
         .whatever_context("failed to build local service config")?;
 
-    let plane = Arc::new(crate::root::local_plane::LocalControlPlane::new(
+    let plane = Arc::new(crate::hypervisor::local_plane::LocalControlPlane::new(
         state.clone(),
     ));
     let shutdown = CancellationToken::new();
@@ -239,9 +240,13 @@ pub async fn spawn_local_service(
         .await
         .whatever_context("failed to set up local service")?;
 
+    let server_count = config.servers.len();
+
     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
         crate::service::run_service(service_handle, service_shutdown).await;
     }));
+
+    tracing::info!(servers = server_count, "local service started");
 
     Ok(Some(LocalServiceHandle {
         shutdown,

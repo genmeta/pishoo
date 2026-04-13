@@ -89,10 +89,11 @@ impl gateway::control_plane::SpawnSession for RemoteControlPlane {
 
         // Root has sent FDs before returning Ok(()) — read them now.
         let sock_fd = self.seqpacket.as_raw_fd();
-        let fds = tokio::task::spawn_blocking(move || crate::root::launcher::recv_fds(sock_fd))
-            .await
-            .context(JoinRecvFdsSnafu)?
-            .context(ReceiveFdsSnafu)?;
+        let fds =
+            tokio::task::spawn_blocking(move || crate::hypervisor::launcher::recv_fds(sock_fd))
+                .await
+                .context(JoinRecvFdsSnafu)?
+                .context(ReceiveFdsSnafu)?;
 
         snafu::ensure!(fds.len() >= 2, UnexpectedFdCountSnafu { actual: fds.len() });
 

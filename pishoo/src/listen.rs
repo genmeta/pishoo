@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::root::state::{RootState, ServiceOwner};
+use crate::hypervisor::state::{RootState, ServiceOwner};
 
 /// Error type for [`PerServerListener`].
 ///
