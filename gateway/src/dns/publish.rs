@@ -14,13 +14,14 @@ use gmdns::{
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolvers::{H3Publisher, MdnsResolver},
 };
-use rustls::{SignatureScheme, sign::SigningKey};
+use rustls::{SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info};
 
 use crate::{
+    control_plane::Identity,
     dns::{MDNS_SERVICE, resolve::DnsResolver},
     error::{Result, Whatever},
     parse::{Node, ServerIdentity, Value, server_identity},
@@ -384,6 +385,160 @@ impl Publisher {
         ));
         Self { _task }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-server DNS publish: reactive, per-listener publish task
+// ---------------------------------------------------------------------------
+
+/// Build a [`PublishConfig`] from in-memory identity materials.
+///
+/// Used by `register_listener` to set up per-server DNS publishing without
+/// reading any files from disk.
+pub fn build_publish_config_from_identity(
+    identity: &Identity,
+    dns_resolver_url: Option<&str>,
+) -> PublishConfig {
+    let server_name = identity.name().as_full().to_owned();
+
+    let dns_url = dns_resolver_url.unwrap_or(super::H3_DNS_SERVER);
+    let dns_uri: http::Uri = dns_url
+        .parse()
+        .expect("dns resolver url should be a valid uri");
+    let resolver = DnsResolver { base_url: dns_uri };
+
+    let resolvers: Vec<Arc<dyn DnsPublisher + Send + Sync>> =
+        if server_name.ends_with("user.genmeta.net") {
+            tracing::warn!(server_name = %server_name, "domain excluded from publishing");
+            vec![]
+        } else {
+            let client = create_h3_client_from_identity(&resolver, identity);
+            let publisher: Arc<dyn DnsPublisher + Send + Sync> = Arc::new(
+                H3Publisher::new(resolver.base_url.to_string(), client)
+                    .expect("dns resolver base_url already validated"),
+            );
+            info!(server_name = %server_name, "configuring dns publisher from identity");
+            vec![publisher]
+        };
+
+    let server_id = compute_server_id(&server_name);
+    let signing_key = signing_key_from_der(identity.key());
+
+    PublishConfig {
+        resolvers,
+        server_id,
+        signing_key,
+    }
+}
+
+/// Spawn an autonomous DNS publish task for a single server.
+///
+/// The task periodically re-publishes the server's endpoints to DNS
+/// and reacts to endpoint changes (network interface events, STUN
+/// binding updates). Dropping the returned handle aborts the task.
+pub fn spawn_server_publish_task(
+    server_name: String,
+    config: PublishConfig,
+    listeners: Arc<QuicListeners>,
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(
+        async move {
+            let new_publish = || {
+                let server_name = server_name.clone();
+                let config = config.clone();
+                let listeners = listeners.clone();
+                AbortOnDropHandle::new(tokio::spawn(
+                    async move {
+                        time::sleep(Duration::from_millis(50)).await;
+                        publish_server(&server_name, &config, &listeners).await;
+                    }
+                    .in_current_span(),
+                ))
+            };
+
+            let mut current = new_publish();
+            let mut interval = interval(DNS_PUBLISH_INTERVAL);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut observer = Locations::global().subscribe();
+
+            loop {
+                tokio::select! {
+                    _ = observer.recv() => {
+                        current.abort();
+                    }
+                    _ = interval.tick() => {
+                        current.abort();
+                    }
+                }
+                current = new_publish();
+            }
+        }
+        .in_current_span(),
+    ))
+}
+
+/// Publish endpoints for a single server (mDNS + DNS resolvers).
+async fn publish_server(server_name: &str, config: &PublishConfig, listeners: &QuicListeners) {
+    let Some(server) = listeners.get_server(server_name) else {
+        return;
+    };
+    let ifaces = server.bind_interfaces();
+
+    // mDNS publish
+    for (uri, iface) in &ifaces {
+        publish_single_mdns(uri, iface, server_name, config).await;
+    }
+
+    // DNS resolver publish
+    publish_resolvers(server_name, config, ifaces.iter()).await;
+}
+
+fn create_h3_client_from_identity(
+    _resolver: &DnsResolver,
+    identity: &Identity,
+) -> h3x::client::Client<Arc<dquic::prelude::QuicClient>> {
+    let root_store = crate::common::root_cert();
+    let builder = h3x::client::Client::<Arc<dquic::prelude::QuicClient>>::builder()
+        .with_root_certificates(root_store);
+
+    builder
+        .with_identity(
+            identity.name().as_full().to_owned(),
+            identity.certs().to_vec(),
+            identity.key().clone_key(),
+        )
+        .expect("failed to configure client identity for dns publisher")
+        .build()
+}
+
+fn compute_server_id(name: &str) -> u8 {
+    if let Some(base) = name.strip_suffix(".genmeta.net") {
+        let parts: Vec<&str> = base.split('.').collect();
+        if parts.len() == 2 {
+            return parts[1].parse::<u8>().unwrap_or(0);
+        }
+    }
+    0
+}
+
+fn signing_key_from_der(key: &PrivateKeyDer<'_>) -> Option<(Arc<dyn SigningKey>, SignatureScheme)> {
+    let key = rustls::crypto::ring::sign::any_supported_type(key).ok()?;
+    let supported_schemes = [
+        SignatureScheme::ECDSA_NISTP256_SHA256,
+        SignatureScheme::ECDSA_NISTP384_SHA384,
+        SignatureScheme::ED25519,
+        SignatureScheme::RSA_PSS_SHA256,
+        SignatureScheme::RSA_PSS_SHA384,
+        SignatureScheme::RSA_PSS_SHA512,
+        SignatureScheme::RSA_PKCS1_SHA256,
+        SignatureScheme::RSA_PKCS1_SHA384,
+        SignatureScheme::RSA_PKCS1_SHA512,
+    ];
+    let scheme = supported_schemes
+        .iter()
+        .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
+        .copied()?;
+    Some((key, scheme))
 }
 
 fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {

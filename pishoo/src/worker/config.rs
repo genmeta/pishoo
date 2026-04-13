@@ -155,9 +155,18 @@ pub async fn build_service_config(
             continue;
         }
 
+        // Extract DNS resolver URL from the server node's `dns` directive.
+        let dns_resolver_url = server_nodes_by_name
+            .get(&primary_name)
+            .and_then(|node| match node.get("dns") {
+                Some(Value::Resolver(url)) => Some(url.to_string()),
+                _ => None,
+            });
+
         let listen_request = ListenRequest {
             identity: ssl,
             bind,
+            dns_resolver_url,
         };
 
         // Use the parsed server node (with location blocks etc.) instead of

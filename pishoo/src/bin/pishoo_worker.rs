@@ -14,7 +14,7 @@ use dhttp_home::DhttpHome;
 use gateway::error::Whatever;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
-    service::run_service,
+    service::{run_service, setup_service},
     worker::{config::build_service_config, remote_plane::RemoteControlPlane},
 };
 use snafu::{OptionExt, Report, ResultExt};
@@ -116,35 +116,40 @@ async fn main() -> Result<(), Whatever> {
         let mut should_exit = false;
 
         {
-            let service = run_service(plane.clone(), &config, shutdown.clone());
+            let handle = match setup_service(plane.clone(), &config).await {
+                Ok(h) => h,
+                Err(error) => {
+                    tracing::error!(
+                        error = %Report::from_error(&error),
+                        "failed to set up service"
+                    );
+                    break;
+                }
+            };
+
+            let service = run_service(handle, shutdown.clone());
             tokio::pin!(service);
 
             tokio::select! {
-                result = &mut service => {
-                    if let Err(error) = result {
-                        tracing::error!(
-                            error = %Report::from_error(&error),
-                            "service exited with error"
-                        );
-                    }
+                () = &mut service => {
                     should_exit = true;
                 }
                 _ = term_signal.recv() => {
                     tracing::info!("received SIGTERM, shutting down");
                     shutdown.cancel();
-                    let _ = service.await;
+                    service.await;
                     should_exit = true;
                 }
                 _ = int_signal.recv() => {
                     tracing::info!("received SIGINT, shutting down");
                     shutdown.cancel();
-                    let _ = service.await;
+                    service.await;
                     should_exit = true;
                 }
                 _ = quit_signal.recv() => {
                     tracing::info!("received SIGQUIT, shutting down");
                     shutdown.cancel();
-                    let _ = service.await;
+                    service.await;
                     should_exit = true;
                 }
                 _ = hup_signal.recv() => {
@@ -161,7 +166,7 @@ async fn main() -> Result<(), Whatever> {
                     };
 
                     shutdown.cancel();
-                    let _ = service.await;
+                    service.await;
                     next_config = Some(rebuilt_config);
                 }
             }

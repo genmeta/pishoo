@@ -35,7 +35,11 @@ fn worker_reload_uses_single_helper_path() {
         "worker should build config through the shared builder"
     );
     assert!(
-        worker_source.contains("run_service(plane.clone(), &config, shutdown.clone())"),
+        worker_source.contains("setup_service(plane.clone(), &config)"),
+        "worker should set up through the unified setup_service entry point"
+    );
+    assert!(
+        worker_source.contains("run_service(handle, shutdown.clone())"),
         "worker should run through the unified run_service entry point"
     );
 }

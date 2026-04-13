@@ -40,6 +40,9 @@ pub struct ListenRequest {
     pub identity: Identity,
     /// Listen specifications; resolved to bind URIs by the root process.
     pub bind: Vec<gateway_parse::Listens>,
+    /// Optional DNS resolver URL for publishing this server's endpoints.
+    /// When `None`, the default H3 DNS server is used.
+    pub dns_resolver_url: Option<String>,
 }
 
 /// Capability to create QUIC listeners.
@@ -201,6 +204,8 @@ impl IdentityHelper {
 struct ListenRequestHelper {
     identity: IdentityHelper,
     bind: Vec<gateway_parse::Listens>,
+    #[serde(default)]
+    dns_resolver_url: Option<String>,
 }
 
 impl Serialize for ListenRequest {
@@ -208,6 +213,7 @@ impl Serialize for ListenRequest {
         ListenRequestHelper {
             identity: IdentityHelper::from_identity(&self.identity),
             bind: self.bind.clone(),
+            dns_resolver_url: self.dns_resolver_url.clone(),
         }
         .serialize(serializer)
     }
@@ -219,6 +225,7 @@ impl<'de> Deserialize<'de> for ListenRequest {
         Ok(Self {
             identity: helper.identity.into_identity()?,
             bind: helper.bind,
+            dns_resolver_url: helper.dns_resolver_url,
         })
     }
 }

@@ -8,11 +8,11 @@ fn main_uses_shared_root_cert_store() {
 }
 
 #[test]
-fn main_primes_dns_publish_before_background_task() {
-    let main_source = include_str!("../src/main.rs");
+fn main_uses_reactive_per_server_dns_publish() {
+    let state_source = include_str!("../src/root/state.rs");
     assert!(
-        main_source.contains("gateway::dns::publish_now(&listeners, &publish_configs).await;"),
-        "root reload/startup must publish dns records before swapping publisher handles"
+        state_source.contains("publish_task"),
+        "register_listener must spawn per-server DNS publish tasks via ServerEntry"
     );
 }
 
@@ -31,10 +31,10 @@ fn main_force_kills_lingering_workers_during_shutdown() {
 }
 
 #[test]
-fn main_waits_for_listener_reregistration_before_reload_republish() {
+fn main_reload_uses_worker_diff() {
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("wait_for_reload_servers(&listeners, &publish_names).await;"),
-        "reload should wait for listener re-registration before DNS republish"
+        main_source.contains("compute_worker_diff"),
+        "reload should use diff-based worker management instead of whole-set replacement"
     );
 }

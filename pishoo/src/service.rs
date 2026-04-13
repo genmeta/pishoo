@@ -52,13 +52,29 @@ pub struct ServiceConfig {
 /// services. The `P` type parameter determines whether requests go over
 /// remoc RPC (worker) or directly in-process (root-local).
 ///
-/// Takes an `Arc<P>` so the control plane can be shared with SSH session
-/// handlers (when the `sshd` feature is enabled).
-pub async fn run_service<P: ControlPlane + 'static>(
+/// A closure that spawns one server's accept loop onto a [`JoinSet`].
+type ServerSpawner = Box<dyn FnOnce(&mut tokio::task::JoinSet<()>, CancellationToken) + Send>;
+
+/// Handle returned by [`setup_service`], containing server task spawners
+/// ready to run.
+///
+/// Each server is represented as a named closure that, when called, spawns
+/// the accept loop onto a [`JoinSet`].
+pub struct ServiceHandle {
+    spawners: Vec<ServerSpawner>,
+    server_count: usize,
+}
+
+/// Set up a service: register all listeners via the control plane and build
+/// the HTTP/3 service stack for each server. Does **not** start the accept
+/// loop — call [`run_service`] with the returned handle to begin serving.
+///
+/// In dry-run / test mode, callers can drop the handle after setup succeeds
+/// to validate configuration without serving traffic.
+pub async fn setup_service<P: ControlPlane + 'static>(
     plane: Arc<P>,
     config: &ServiceConfig,
-    shutdown: CancellationToken,
-) -> Result<(), P::ListenError>
+) -> Result<ServiceHandle, P::ListenError>
 where
     P::Listener: 'static,
     <P::Listener as quic::Listen>::Error: Send,
@@ -67,7 +83,7 @@ where
     <<P::Listener as quic::Listen>::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
     P::ListenError: 'static,
 {
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut spawners: Vec<ServerSpawner> = Vec::new();
 
     for server_config in &config.servers {
         let request = ListenRequest {
@@ -77,12 +93,13 @@ where
                 server_config.listen_request.identity.key().clone_key(),
             ),
             bind: server_config.listen_request.bind.clone(),
+            dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
         };
         let server_name = request.identity.name().as_full().to_owned();
 
         let listener = plane.listener(request).await?;
 
-        tracing::info!(%server_name, "Listener registered");
+        tracing::info!(%server_name, "listener registered");
 
         // Extract location blocks from this server's config node
         let locations = match server_config.server_node.get("location") {
@@ -118,46 +135,62 @@ where
             .service(TowerService(service_stack))
             .builder(Arc::new(builder))
             .build();
-        let server_shutdown = shutdown.clone();
 
-        tasks.spawn(
-            async move {
-                tokio::select! {
-                    error = servers.run() => {
-                        tracing::warn!(
-                            %server_name,
-                            error = %Report::from_error(&error),
-                            "server stopped"
-                        );
-                    }
-                    () = server_shutdown.cancelled() => {
-                        if let Err(error) = servers.shutdown().await {
-                            tracing::warn!(
-                                %server_name,
-                                error = %Report::from_error(&error),
-                                "server shutdown failed"
-                            );
+        spawners.push(Box::new(
+            move |tasks: &mut tokio::task::JoinSet<()>, shutdown: CancellationToken| {
+                let server_shutdown = shutdown;
+                tasks.spawn(
+                    async move {
+                        tokio::select! {
+                            error = servers.run() => {
+                                tracing::warn!(
+                                    %server_name,
+                                    error = %Report::from_error(&error),
+                                    "server stopped"
+                                );
+                            }
+                            () = server_shutdown.cancelled() => {
+                                if let Err(error) = servers.shutdown().await {
+                                    tracing::warn!(
+                                        %server_name,
+                                        error = %Report::from_error(&error),
+                                        "server shutdown failed"
+                                    );
+                                }
+                            }
                         }
                     }
-                }
-            }
-            .in_current_span(),
-        );
+                    .in_current_span(),
+                );
+            },
+        ));
     }
 
-    tracing::info!(server_count = config.servers.len(), "worker ready");
+    let server_count = config.servers.len();
+    Ok(ServiceHandle {
+        spawners,
+        server_count,
+    })
+}
 
-    if config.servers.is_empty() {
+/// Run the service accept loop for a previously set up service handle.
+///
+/// This consumes the handle and runs until `shutdown` is triggered or all
+/// server tasks complete.
+pub async fn run_service(handle: ServiceHandle, shutdown: CancellationToken) {
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for spawner in handle.spawners {
+        spawner(&mut tasks, shutdown.clone());
+    }
+
+    tracing::info!(server_count = handle.server_count, "worker ready");
+
+    if handle.server_count == 0 {
         // No servers to run — wait for shutdown rather than returning immediately.
-        // Returning here would cause the worker process to exit, tearing down the
-        // remoc connection before buffered IPC messages (e.g. the startup hello)
-        // are flushed to the root.  Staying alive lets the worker respond to
-        // SIGHUP and reload identities that may appear later.
         shutdown.cancelled().await;
     } else {
         // Wait for all server tasks (they run until shutdown).
         while tasks.join_next().await.is_some() {}
     }
-
-    Ok(())
 }

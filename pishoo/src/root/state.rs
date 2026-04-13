@@ -22,7 +22,7 @@ use tokio::{
     sync::{Mutex, mpsc},
     task::JoinSet,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 use crate::{listen::PerServerListener, root::worker_handle::WorkerHandle};
@@ -68,6 +68,8 @@ pub enum ServerEntry {
         shutdown_token: CancellationToken,
         /// Original listen specifications for network-change reconciliation.
         listens: Vec<gateway::parse::Listens>,
+        /// Per-server DNS publish task, aborted when the entry is retired.
+        publish_task: Option<AbortOnDropHandle<()>>,
     },
     /// Name is poisoned due to a cross-owner conflict.
     /// Only cleared by `scrub_conflicts()` during reload.
@@ -350,6 +352,21 @@ impl RootState {
         let (tx, rx) = mpsc::channel(128);
         let shutdown_token = CancellationToken::new();
 
+        // Spawn per-server DNS publish task.
+        let publish_config = gateway::dns::build_publish_config_from_identity(
+            &request.identity,
+            request.dns_resolver_url.as_deref(),
+        );
+        let publish_task = if publish_config.resolvers.is_empty() {
+            None
+        } else {
+            Some(gateway::dns::spawn_server_publish_task(
+                server_name.clone(),
+                publish_config,
+                self.listeners.clone(),
+            ))
+        };
+
         // Track in the worker's owned_servers set.
         if let ServiceOwner::Worker(pid) = owner
             && let Some(process) = inner.processes.get_mut(&pid)
@@ -364,6 +381,7 @@ impl RootState {
                 conn_tx: tx,
                 shutdown_token: shutdown_token.clone(),
                 listens: request.bind,
+                publish_task,
             },
         );
 
@@ -723,8 +741,74 @@ impl RootState {
                     pid = %pid,
                     error = %Report::from_error(&error),
                     ?signal,
-                    "Failed to forward unix signal to worker"
+                    "failed to forward unix signal to worker"
                 );
+            }
+        }
+    }
+
+    /// Send a Unix signal to a specific worker by UID.
+    pub async fn send_signal_to_user(&self, uid: Uid, signal: Signal) {
+        let inner = self.inner.lock().await;
+        if let Some(&pid) = inner.users.get(&uid)
+            && let Some(record) = inner.processes.get(&pid)
+        {
+            let child_pid = record.worker_handle.pid();
+            if let Err(error) = nix::sys::signal::kill(child_pid, signal) {
+                tracing::warn!(
+                    pid = %pid,
+                    uid = uid.as_raw(),
+                    error = %Report::from_error(&error),
+                    ?signal,
+                    "failed to send signal to worker"
+                );
+            }
+        }
+    }
+
+    /// Wait for a worker to exit with a timeout.
+    ///
+    /// Returns `true` if the worker exited before the deadline.
+    pub async fn wait_worker_exit(&self, pid: Pid, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            {
+                let mut inner = self.inner.lock().await;
+                if !inner.processes.contains_key(&pid) {
+                    return true;
+                }
+                if let Some(record) = inner.processes.get_mut(&pid) {
+                    match record.worker_handle.try_wait() {
+                        Ok(Some(WaitStatus::StillAlive)) | Ok(None) => {}
+                        Ok(Some(_)) => return true,
+                        Err(_) => return true,
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Get the PID for a worker running under the given UID, if any.
+    pub async fn pid_for_uid(&self, uid: Uid) -> Option<Pid> {
+        self.inner.lock().await.users.get(&uid).copied()
+    }
+
+    /// Send SIGKILL to a specific worker by PID.
+    pub async fn force_kill_worker(&self, pid: Pid) {
+        let mut inner = self.inner.lock().await;
+        if let Some(record) = inner.processes.get_mut(&pid) {
+            if let Err(error) = record.worker_handle.start_kill() {
+                tracing::warn!(
+                    pid = %pid,
+                    error = %Report::from_error(&error),
+                    "failed to force kill worker"
+                );
+            } else {
+                tracing::warn!(pid = %pid, "sent SIGKILL to worker");
             }
         }
     }

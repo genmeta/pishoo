@@ -1,10 +1,8 @@
 #![cfg(unix)]
 
 use std::{
-    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use clap::Parser;
@@ -14,19 +12,18 @@ use gateway::{
     error::Whatever,
     parse::{Node, Value},
 };
-use nix::{sys::signal::Signal, unistd::Pid};
+use nix::sys::signal::Signal;
 use rustls::server::WebPkiClientVerifier;
 use snafu::{Report, ResultExt, whatever};
 use tokio::fs;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tracing::Instrument;
 
 mod signal;
 
 struct RootReloadSnapshot {
     entry_config: pishoo::config::EntryConfig,
     worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
-    owner_map: HashMap<String, pishoo::config::EntryServerOwner>,
-    publish_configs: HashMap<String, gateway::dns::PublishConfig>,
 }
 
 struct LocalServiceHandle {
@@ -90,35 +87,23 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {
-        let summary = pishoo::config::validate_entry_tree(&entry_config)
-            .await
-            .whatever_context("configuration validation failed")?;
         tracing::info!(
             path = %config_file.display(),
-            workers = summary.workers,
-            local_servers = summary.local_servers,
-            worker_servers = summary.worker_servers,
-            "configuration is valid"
+            "configuration parsed successfully"
         );
         return Ok(());
     }
 
     let pid_file = entry_config.pid_file.clone();
-    let publishable_servers = pishoo::config::discover_entry_servers(&entry_config)
-        .await
-        .whatever_context("failed to discover servers for dns publishing")?;
 
     if let Some(signal) = args.signal {
         return signal::send_signal(&pid_file, signal).await;
     }
 
-    let mut current_entry_config = entry_config;
+    let current_entry_config = entry_config;
     let mut current_worker_targets =
         pishoo::config::resolve_entry_worker_targets(&current_entry_config)
             .whatever_context("failed to resolve configured worker users")?;
-    let mut current_owner_map = pishoo::config::discover_entry_server_owners(&current_entry_config)
-        .await
-        .whatever_context("failed to discover current server ownership")?;
 
     // --- Multi-process supervisor setup ---
 
@@ -130,9 +115,7 @@ async fn main() -> Result<(), Whatever> {
         .expect("failed to build tls client cert verifier");
 
     let listeners = QuicListeners::builder()
-        .with_resolver(Arc::new(gateway::dns::build_query_resolver_chain(
-            &publishable_servers,
-        )))
+        .with_resolver(Arc::new(gateway::dns::build_query_resolver_chain(&[])))
         .with_stun(gateway::dns::DEFAULT_STUN_SERVER)
         .with_parameters(server_parameters())
         .with_client_cert_verifier(tls_client_cert_verifier)
@@ -148,11 +131,7 @@ async fn main() -> Result<(), Whatever> {
 
     let mut local_service_handle = spawn_local_service(&state, &current_entry_config).await?;
 
-    spawn_configured_workers(&state, current_worker_targets.clone()).await?;
-
-    let initial_publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
-        .whatever_context("failed to build dns publish configs")?;
-    let mut _publisher = spawn_publisher(listeners.clone(), initial_publish_configs).await;
+    spawn_configured_workers(&state, current_worker_targets.clone()).await;
 
     // Create signal handler once — reused across the main loop so that signals
     // arriving during reload are never lost.
@@ -242,21 +221,6 @@ async fn main() -> Result<(), Whatever> {
                     }
                 };
 
-                if let Err(error) = pishoo::config::ensure_reload_supported(
-                    &current_entry_config,
-                    &current_worker_targets,
-                    &current_owner_map,
-                    &next_snapshot.entry_config,
-                    &next_snapshot.worker_targets,
-                    &next_snapshot.owner_map,
-                ) {
-                    tracing::warn!(
-                        error = %Report::from_error(&error),
-                        "reload rejected because it requires a full restart"
-                    );
-                    continue;
-                }
-
                 if let Err(error) = replace_local_service(
                     &state,
                     &mut local_service_handle,
@@ -271,22 +235,66 @@ async fn main() -> Result<(), Whatever> {
                     continue;
                 }
 
-                // Scrub conflicted names before forwarding reload to workers,
-                // so workers can re-register previously-conflicted names.
+                // Compute worker diff.
+                let diff = pishoo::config::compute_worker_diff(
+                    &current_worker_targets,
+                    &next_snapshot.worker_targets,
+                );
+
+                // Phase 1: Kill removed + changed workers (parallel).
+                let workers_to_kill: Vec<_> = diff
+                    .removed
+                    .iter()
+                    .map(|t| (t.name.clone(), t.uid, "reload_removed"))
+                    .chain(
+                        diff.changed
+                            .iter()
+                            .map(|(old, _)| (old.name.clone(), old.uid, "reload_changed")),
+                    )
+                    .collect();
+
+                if !workers_to_kill.is_empty() {
+                    let mut kill_tasks = tokio::task::JoinSet::new();
+                    for (username, uid, reason) in &workers_to_kill {
+                        let state = state.clone();
+                        let username = username.clone();
+                        let uid = *uid;
+                        let reason = *reason;
+                        kill_tasks.spawn(async move {
+                            if let Some(pid) = state.pid_for_uid(uid).await {
+                                // SIGTERM + 2s grace
+                                state.send_signal_to_user(uid, Signal::SIGTERM).await;
+                                if !state.wait_worker_exit(pid, std::time::Duration::from_secs(2)).await {
+                                    state.force_kill_worker(pid).await;
+                                    state.wait_worker_exit(pid, std::time::Duration::from_secs(2)).await;
+                                }
+                                state.cleanup_worker_with_reason(pid, reason).await;
+                                tracing::info!(user = %username, pid = %pid, "worker killed during reload");
+                            }
+                        }.in_current_span());
+                    }
+                    while kill_tasks.join_next().await.is_some() {}
+                }
+
+                // Scrub conflicted names before forwarding reload to workers.
                 state.scrub_conflicts().await;
 
-                state.forward_unix_signal(Signal::SIGHUP).await;
-                let publish_names = next_snapshot
-                    .publish_configs
-                    .keys()
-                    .cloned()
-                    .collect::<HashSet<_>>();
-                wait_for_reload_servers(&listeners, &publish_names).await;
-                current_entry_config = next_snapshot.entry_config;
+                // Phase 2: Forward SIGHUP to unchanged workers.
+                for target in &diff.unchanged {
+                    state.send_signal_to_user(target.uid, Signal::SIGHUP).await;
+                }
+
+                // Phase 3: Spawn added + changed workers.
+                let workers_to_spawn: Vec<_> = diff
+                    .added
+                    .into_iter()
+                    .chain(diff.changed.into_iter().map(|(_old, new)| new))
+                    .collect();
+                if !workers_to_spawn.is_empty() {
+                    spawn_configured_workers(&state, workers_to_spawn).await;
+                }
+
                 current_worker_targets = next_snapshot.worker_targets;
-                current_owner_map = next_snapshot.owner_map;
-                _publisher =
-                    spawn_publisher(listeners.clone(), next_snapshot.publish_configs).await;
                 tracing::info!("reload applied to root-local state and forwarded to workers");
             }
             signal::RootSignal::SigUsr1 => {
@@ -297,7 +305,6 @@ async fn main() -> Result<(), Whatever> {
         }
     }
 
-    _publisher = None;
     accept_handle.abort();
     let _ = accept_handle.await;
     monitor_handle.abort();
@@ -385,6 +392,12 @@ async fn build_local_service_config(
         let (certs, key) = pishoo::tls::validate_tls_material(&cert_pem, &key_pem)
             .whatever_context("invalid local tls material")?;
 
+        // Extract DNS resolver URL from the server node's `dns` directive.
+        let dns_resolver_url = match server.get("dns") {
+            Some(Value::Resolver(url)) => Some(url.to_string()),
+            _ => None,
+        };
+
         for configured_name in server_names {
             let name = dhttp_home::identity::Name::try_from_str(configured_name.name.clone())
                 .whatever_context(format!("invalid server name `{}`", configured_name.name))?;
@@ -392,6 +405,7 @@ async fn build_local_service_config(
                 listen_request: ListenRequest {
                     identity: Identity::new(name, certs.clone(), key.clone_key()),
                     bind: listens.clone(),
+                    dns_resolver_url: dns_resolver_url.clone(),
                 },
                 server_node: server.clone(),
             });
@@ -426,13 +440,12 @@ async fn spawn_local_service(
     let shutdown = CancellationToken::new();
     let service_shutdown = shutdown.clone();
 
+    let service_handle = pishoo::service::setup_service(plane, &config)
+        .await
+        .whatever_context("failed to set up local service")?;
+
     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-        if let Err(error) = pishoo::service::run_service(plane, &config, service_shutdown).await {
-            tracing::error!(
-                error = %Report::from_error(&error),
-                "local service exited with error"
-            );
-        }
+        pishoo::service::run_service(service_handle, service_shutdown).await;
     }));
 
     Ok(Some(LocalServiceHandle {
@@ -454,22 +467,6 @@ async fn replace_local_service(
     Ok(())
 }
 
-async fn spawn_publisher(
-    listeners: Arc<QuicListeners>,
-    publish_configs: HashMap<String, gateway::dns::PublishConfig>,
-) -> Option<gateway::dns::Publisher> {
-    if publish_configs.is_empty() {
-        return None;
-    }
-
-    tracing::info!(
-        servers = publish_configs.len(),
-        "starting dns publisher for pishoo"
-    );
-    gateway::dns::publish_now(&listeners, &publish_configs).await;
-    Some(gateway::dns::Publisher::spawn(listeners, publish_configs))
-}
-
 async fn load_root_reload_snapshot(config_file: &Path) -> Result<RootReloadSnapshot, Whatever> {
     let config = fs::read(config_file).await.whatever_context(format!(
         "failed to read configuration file at `{}`",
@@ -481,50 +478,13 @@ async fn load_root_reload_snapshot(config_file: &Path) -> Result<RootReloadSnaps
     ))?;
     let entry_config = pishoo::config::parse_entry_config(&config)
         .whatever_context("failed to parse pishoo entry configuration")?;
-    let _ = pishoo::config::validate_entry_tree(&entry_config)
-        .await
-        .whatever_context("configuration validation failed during reload")?;
     let worker_targets = pishoo::config::resolve_entry_worker_targets(&entry_config)
         .whatever_context("failed to resolve configured worker users during reload")?;
-    let owner_map = pishoo::config::discover_entry_server_owners(&entry_config)
-        .await
-        .whatever_context("failed to discover server ownership during reload")?;
-    let publishable_servers = pishoo::config::discover_entry_servers(&entry_config)
-        .await
-        .whatever_context("failed to discover servers for dns publishing during reload")?;
-    let publish_configs = gateway::dns::build_publish_configs(&publishable_servers)
-        .whatever_context("failed to build dns publish configs during reload")?;
 
     Ok(RootReloadSnapshot {
         entry_config,
         worker_targets,
-        owner_map,
-        publish_configs,
     })
-}
-
-async fn wait_for_reload_servers(listeners: &Arc<QuicListeners>, publish_names: &HashSet<String>) {
-    if publish_names.is_empty() {
-        return;
-    }
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let active = listeners.servers().into_iter().collect::<HashSet<_>>();
-        let missing = publish_names
-            .iter()
-            .filter(|name| !active.contains(name.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        if missing.is_empty() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!(missing = ?missing, "timed out waiting for listeners to re-register before dns republish");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 /// Resolve the path of the `pishoo-worker` binary.
@@ -565,9 +525,9 @@ fn worker_binary_path() -> std::path::PathBuf {
 async fn spawn_configured_workers(
     state: &Arc<pishoo::root::state::RootState>,
     worker_targets: Vec<pishoo::config::ResolvedWorkerTarget>,
-) -> Result<(), Whatever> {
+) {
     if worker_targets.is_empty() {
-        return Ok(());
+        return;
     }
 
     let worker_bin = worker_binary_path();
@@ -577,8 +537,8 @@ async fn spawn_configured_workers(
             &worker_bin,
             target.uid,
             target.gid,
-            target.username.clone(),
-            target.home.clone(),
+            target.name.clone(),
+            target.dir.clone(),
             state.clone(),
         )
         .await
@@ -589,7 +549,7 @@ async fn spawn_configured_workers(
                 // timeout) are per-user problems that must not bring down the
                 // entire root process.  Log and continue to the next worker.
                 tracing::error!(
-                    user = %target.username,
+                    user = %target.name,
                     error = %Report::from_error(&error),
                     "failed to spawn worker, skipping user"
                 );
@@ -598,52 +558,6 @@ async fn spawn_configured_workers(
         };
         let pid = spawned.handle.pid();
 
-        if let Err(error) = ensure_worker_identity(&target, pid, &spawned.hello) {
-            // Identity mismatch is a privilege-separation security violation —
-            // this IS fatal and must stop the root process immediately.
-            state.cleanup_worker_tasks(pid).await;
-            return Err(error);
-        }
-
         state.register_worker(pid, target.uid, spawned.handle).await;
     }
-
-    Ok(())
-}
-
-fn ensure_worker_identity(
-    target: &pishoo::config::ResolvedWorkerTarget,
-    pid: Pid,
-    hello: &pishoo::ipc::WorkerHello,
-) -> Result<(), Whatever> {
-    let raw_pid = pid.as_raw() as u32;
-    if hello.pid != raw_pid
-        || hello.uid != target.uid.as_raw()
-        || hello.euid != target.uid.as_raw()
-        || hello.gid != target.gid.as_raw()
-        || hello.egid != target.gid.as_raw()
-    {
-        snafu::whatever!(
-            "worker identity mismatch for user `{}`: pid={} hello_pid={} uid/euid={}/{} expected_uid={} gid/egid={}/{} expected_gid={}",
-            target.username,
-            pid,
-            hello.pid,
-            hello.uid,
-            hello.euid,
-            target.uid,
-            hello.gid,
-            hello.egid,
-            target.gid
-        );
-    }
-
-    tracing::info!(
-        %pid,
-        uid = target.uid.as_raw(),
-        gid = target.gid.as_raw(),
-        user = %target.username,
-        "worker privilege separation verified"
-    );
-
-    Ok(())
 }
