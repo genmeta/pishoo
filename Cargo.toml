@@ -51,7 +51,7 @@ firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "mai
 dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
 qevent = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
 
-h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "feat/v0.5" }
+h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "main" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -66,7 +66,7 @@ remoc = { version = "0.18", default-features = false, features = [
 genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", branch = "main" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "feat/resolver", features = [
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "main", features = [
     "h3x-resolver",
 ] }
 
