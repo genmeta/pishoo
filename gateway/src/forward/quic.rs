@@ -40,6 +40,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     match send(h3_conn, req).await {
         Ok(mut response) => {
             let response_upgrade = hyper::upgrade::on(&mut response);
+            // Terminates when either end of the tunnel closes the connection.
             tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
             info!(?response, "request proxied successfully");
             Ok(response)

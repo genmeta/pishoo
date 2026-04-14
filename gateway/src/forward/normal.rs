@@ -44,6 +44,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         .handshake(TokioIo::new(stream))
         .await?;
 
+    // Terminates when the HTTP/1.1 connection closes or encounters an error.
     tokio::spawn(
         async move {
             // 启用连接升级支持,用于处理 WebSocket
@@ -76,6 +77,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let mut resp = sender.send_request(req).await?;
     let response_upgrade = hyper::upgrade::on(&mut resp);
 
+    // Terminates when either end of the tunnel closes the connection.
     tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
 
     Ok(resp.map(|b| UnsyncBoxBody::new(b.map_err(BoxError::from))))

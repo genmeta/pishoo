@@ -16,7 +16,7 @@ use genmeta_ssh::{
     auth::AuthCredential,
     conversation::Conversation,
     session::{
-        AuthError, AuthRequest, SessionBootstrap, SessionRunError, StartSessionFn,
+        AuthError, AuthRequest, SessionBootstrap, SessionRunError, StartSessionFn, UserInfo,
         dispatcher::{SessionConfig, run_session},
         privilege::drop_privileges,
     },
@@ -58,7 +58,7 @@ async fn main() {
     let auth_fn = remoc::rfn::RFnOnce::new_1(|auth_request: AuthRequest| async move {
         tracing::info!(username = %auth_request.username, credential = %auth_request.credential, "authentication starting");
 
-        let (uid, gid, shell) = match &auth_request.credential {
+        let user_info: UserInfo = match &auth_request.credential {
             AuthCredential::Basic { .. } => {
                 return Err(AuthError::PamFailed {
                     reason: "password authentication is no longer supported".to_owned(),
@@ -68,13 +68,11 @@ async fn main() {
             AuthCredential::Certificate => {
                 // mTLS: skip password authentication, but still perform
                 // PAM acct_mgmt + open_session for system session creation.
-                let user_info =
-                    genmeta_ssh::session::pam::open_session("sshd", &auth_request.username)
-                        .await
-                        .map_err(|e| AuthError::PamFailed {
-                            reason: Report::from_error(e).to_string(),
-                        })?;
-                (user_info.uid, user_info.gid, user_info.shell)
+                genmeta_ssh::session::pam::open_session("sshd", &auth_request.username)
+                    .await
+                    .map_err(|e| AuthError::PamFailed {
+                        reason: Report::from_error(e).to_string(),
+                    })?
             }
             #[cfg(not(feature = "pam"))]
             AuthCredential::Certificate => {
@@ -84,11 +82,15 @@ async fn main() {
                     .map_err(|e| AuthError::PamFailed {
                         reason: Report::from_error(e).to_string(),
                     })?;
-                (user_info.uid, user_info.gid, user_info.shell)
+                // Without PAM, explicitly check /etc/nologin.
+                if let Err(msg) = genmeta_ssh::session::check_nologin(user_info.uid) {
+                    return Err(AuthError::PamFailed { reason: msg });
+                }
+                user_info
             }
         };
 
-        tracing::info!(uid, gid, "authentication succeeded");
+        tracing::info!(uid = user_info.uid, gid = user_info.gid, "authentication succeeded");
 
         let username = auth_request.username;
 
@@ -98,12 +100,12 @@ async fn main() {
                 tracing::info!(%username, "starting session");
 
                 if nix::unistd::getuid().is_root() {
-                    drop_privileges(uid, gid, &username).map_err(|e| {
+                    drop_privileges(user_info.uid, user_info.gid, &username).map_err(|e| {
                         SessionRunError::DropPrivileges {
                             reason: Report::from_error(e).to_string(),
                         }
                     })?;
-                    tracing::info!(uid, gid, "privileges dropped");
+                    tracing::info!(uid = user_info.uid, gid = user_info.gid, "privileges dropped");
                 }
 
                 let control_reader = bootstrap.control_reader.into_box_reader();
@@ -118,7 +120,7 @@ async fn main() {
                 ));
 
                 let config = SessionConfig {
-                    shell,
+                    user: user_info,
                     ..Default::default()
                 };
 
