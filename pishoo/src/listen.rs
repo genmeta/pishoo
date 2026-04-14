@@ -7,10 +7,12 @@
 //! channel sender, and this adapter reads from the receiver.
 
 use std::{
+    collections::HashSet,
     fmt,
     sync::{Arc, Weak},
 };
 
+use gateway::parse::Listens;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -98,4 +100,19 @@ impl h3x::quic::Listen for PerServerListener {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bind URI resolution
+// ---------------------------------------------------------------------------
+
+pub fn resolve_bind_uris(listens: &[Listens], device_names: &[String]) -> Vec<String> {
+    listens
+        .iter()
+        .flat_map(|listen| listen.resolve(device_names.iter().map(String::as_str)))
+        .filter(|uri| uri.resolve().is_ok())
+        .map(|uri| uri.to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
 }

@@ -6,7 +6,6 @@ pub mod service;
 pub mod tracing_init;
 pub mod worker;
 
-pub mod bind;
 pub mod config;
 pub mod listen;
 pub mod naming;

@@ -1,0 +1,80 @@
+use std::sync::Arc;
+
+use axum::{
+    extract::{Request, State},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use firewall_base::matcher::{LocationRulesMatcher, MatchRuleFailed};
+use h3x::quic::agent;
+use http::StatusCode;
+use tracing::{info, warn};
+
+/// Shared state for the access control middleware.
+#[derive(Clone)]
+pub struct AccessControlState {
+    pub access_rules: Arc<LocationRulesMatcher>,
+    pub server_name: Arc<str>,
+}
+
+/// Axum middleware that enforces firewall access control rules.
+///
+/// When no ruleset matches the request path (`MatchSet`), the request is
+/// allowed only if the client is the server itself; all others are denied.
+/// When a ruleset matches but no individual rule matches (`MatchRuleInSet`),
+/// the request is denied for everyone.
+pub async fn access_control(
+    State(state): State<AccessControlState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let client_name = request
+        .extensions()
+        .get::<Arc<dyn agent::RemoteAgent>>()
+        .map(|a| a.name().to_owned());
+    let http_request =
+        firewall_base::expr::atomics::HttpRequest::new(client_name.as_deref(), &request);
+
+    let action = match state
+        .access_rules
+        .match_rule(request.uri().path(), &http_request)
+    {
+        Ok((_location, action)) => action,
+        Err(MatchRuleFailed::MatchSet { .. }) => {
+            // No ruleset matched the path — allow the server itself, deny others.
+            if client_name.as_deref() == Some(&*state.server_name) {
+                warn!(
+                    path = %request.uri().path(),
+                    "no ruleset matched, allowing self only"
+                );
+                firewall_base::action::RequestAction::Allow
+            } else {
+                warn!(
+                    path = %request.uri().path(),
+                    client = client_name.as_deref(),
+                    "no ruleset matched, denying non-self client"
+                );
+                firewall_base::action::RequestAction::Deny
+            }
+        }
+        Err(MatchRuleFailed::MatchRuleInSet) => {
+            // Ruleset matched but no rule matched — deny everyone.
+            warn!(
+                path = %request.uri().path(),
+                "ruleset matched but no rule matched, denying all"
+            );
+            firewall_base::action::RequestAction::Deny
+        }
+    };
+
+    if action == firewall_base::action::RequestAction::Deny {
+        info!(
+            client_name = client_name.as_deref(),
+            uri = %request.uri(),
+            "firewall rules denied request"
+        );
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    next.run(request).await
+}

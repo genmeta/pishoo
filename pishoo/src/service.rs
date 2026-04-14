@@ -12,7 +12,9 @@ use gateway::{
     control_plane::{ControlPlane, ListenRequest},
     parse::{Node, Value},
     reverse::{
-        middleware::{AccessControlState, BodyAdapterLayer, access_control, access_log},
+        access_control::{AccessControlState, access_control},
+        access_log::access_log,
+        body_adapter::BodyAdapterLayer,
         router::NginxRouter,
     },
 };

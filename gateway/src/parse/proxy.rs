@@ -1,9 +1,12 @@
 use misc_conf::{ast::Directive, nginx::Nginx};
 use snafu::ensure_whatever;
 
-use crate::parse::{
-    Commands, Result, Value, parse_address, parse_header_value, parse_path, parse_resolver,
-    parse_string, parse_string_vec, parse_types,
+use super::{
+    Commands, Result, Value,
+    directives::{
+        parse_address, parse_header_value, parse_path, parse_resolver, parse_string,
+        parse_string_vec, parse_types,
+    },
 };
 
 pub(super) fn parse_proxy(directive: Directive<Nginx>) -> Result<Value> {

@@ -2,14 +2,15 @@ use dhttp_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use misc_conf::{ast::Directive, nginx::Nginx};
 use snafu::ensure_whatever;
 
-use crate::{
-    error::{Result, Whatever},
-    parse::{
-        Commands, IDENTITY_HOME, ServerName, Value, location::parse_location, parse_address,
-        parse_boolean, parse_header_value, parse_listen, parse_path, parse_resolver,
+use super::{
+    Commands, IDENTITY_HOME, ServerName, Value,
+    directives::{
+        parse_address, parse_boolean, parse_header_value, parse_listen, parse_path, parse_resolver,
         parse_server_id, parse_server_name, parse_string, parse_string_vec, parse_types,
     },
+    location::parse_location,
 };
+use crate::error::{Result, Whatever};
 
 pub(crate) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whatever> {
     let mut commands = Commands::new();

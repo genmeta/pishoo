@@ -6,12 +6,10 @@ use clap::Parser;
 use dquic::prelude::{QuicListeners, handy::server_parameters};
 use gateway::error::Whatever;
 use nix::sys::signal::Signal;
+use pishoo::hypervisor::signal;
 use rustls::server::WebPkiClientVerifier;
-use snafu::{Report, ResultExt};
+use snafu::ResultExt;
 use tokio::fs;
-use tracing::Instrument;
-
-mod signal;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -21,18 +19,10 @@ struct Args {
     config_file: PathBuf,
     /// Send signal to a master process (only on Linux/MacOS)
     #[arg(short, default_value = None)]
-    signal: Option<SignalType>,
+    signal: Option<signal::SignalType>,
     /// Test configuration and exit
     #[arg(short, default_value_t = false)]
     test_config: bool,
-}
-
-#[derive(clap::ValueEnum, Debug, Clone, Copy)]
-pub enum SignalType {
-    Stop,
-    Quit,
-    Reopen,
-    Reload,
 }
 
 #[tokio::main]
@@ -145,170 +135,18 @@ async fn main() -> Result<(), Whatever> {
                     signal::RootSignal::SigQuit => Signal::SIGQUIT,
                     _ => unreachable!("matched shutdown signals only"),
                 };
-                state.forward_unix_signal(forwarded).await;
                 accept_handle.abort();
-
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-                loop {
-                    let exited = state.collect_exited_workers().await;
-                    for pid in exited {
-                        state
-                            .cleanup_worker_with_reason(pid, "signal_terminate")
-                            .await;
-                    }
-                    if state.worker_pids().await.is_empty() {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-
-                if !state.worker_pids().await.is_empty() {
-                    let force_killed = state.force_kill_workers("shutdown_timeout").await;
-                    if !force_killed.is_empty() {
-                        tracing::warn!(
-                            workers = force_killed.len(),
-                            "force-killed lingering workers after shutdown timeout"
-                        );
-
-                        let force_kill_deadline =
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-                        loop {
-                            let exited = state.collect_exited_workers().await;
-                            for pid in exited {
-                                state
-                                    .cleanup_worker_with_reason(pid, "forced_shutdown")
-                                    .await;
-                            }
-                            if state.worker_pids().await.is_empty() {
-                                break;
-                            }
-                            if tokio::time::Instant::now() >= force_kill_deadline {
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
-                    }
-                } else {
-                    tracing::info!("all workers exited gracefully");
-                }
-                tracing::info!("shutdown complete");
+                pishoo::hypervisor::shutdown::run_shutdown(&state, forwarded).await;
                 break;
             }
             signal::RootSignal::SigHup => {
-                tracing::info!("received reload signal");
-                let next_snapshot =
-                    match pishoo::hypervisor::reload::load_root_reload_snapshot(&config_file).await
-                    {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %Report::from_error(&error),
-                                path = %config_file.display(),
-                                "reload preflight failed; keeping current root state"
-                            );
-                            continue;
-                        }
-                    };
-
-                if let Err(error) = pishoo::hypervisor::local_service::replace_local_service(
+                pishoo::hypervisor::reload::run_reload(
                     &state,
+                    &config_file,
+                    &mut current_worker_targets,
                     &mut local_service_handle,
-                    &next_snapshot.entry_config,
                 )
-                .await
-                {
-                    tracing::warn!(
-                        error = %Report::from_error(&error),
-                        "failed to reload root-local servers; keeping previous worker state"
-                    );
-                    continue;
-                }
-
-                // Compute worker diff.
-                let diff = pishoo::config::compute_worker_diff(
-                    &current_worker_targets,
-                    &next_snapshot.worker_targets,
-                );
-
-                fn target_names(targets: &[pishoo::config::ResolvedWorkerTarget]) -> Vec<&str> {
-                    targets.iter().map(|t| t.name.as_str()).collect()
-                }
-                tracing::info!(
-                    unchanged = ?target_names(&diff.unchanged),
-                    added = ?target_names(&diff.added),
-                    removed = ?target_names(&diff.removed),
-                    changed = ?diff.changed.iter().map(|(_, new)| new.name.as_str()).collect::<Vec<_>>(),
-                    "reload diff"
-                );
-
-                // Phase 1: Kill removed + changed workers (parallel).
-                let workers_to_kill: Vec<_> = diff
-                    .removed
-                    .iter()
-                    .map(|t| (t.uid, "reload_removed"))
-                    .chain(
-                        diff.changed
-                            .iter()
-                            .map(|(old, _)| (old.uid, "reload_changed")),
-                    )
-                    .collect();
-
-                if !workers_to_kill.is_empty() {
-                    let mut kill_tasks = tokio::task::JoinSet::new();
-                    for (uid, reason) in &workers_to_kill {
-                        let state = state.clone();
-                        let uid = *uid;
-                        let reason = *reason;
-                        kill_tasks.spawn(
-                            async move {
-                                if let Some(pid) = state.pid_for_uid(uid).await {
-                                    // SIGTERM + 2s grace
-                                    state.send_signal_to_user(uid, Signal::SIGTERM).await;
-                                    if !state
-                                        .wait_worker_exit(pid, std::time::Duration::from_secs(2))
-                                        .await
-                                    {
-                                        state.force_kill_worker(pid).await;
-                                        state
-                                            .wait_worker_exit(
-                                                pid,
-                                                std::time::Duration::from_secs(2),
-                                            )
-                                            .await;
-                                    }
-                                    state.cleanup_worker_with_reason(pid, reason).await;
-                                }
-                            }
-                            .in_current_span(),
-                        );
-                    }
-                    while kill_tasks.join_next().await.is_some() {}
-                }
-
-                // Scrub conflicted names before forwarding reload to workers.
-                state.scrub_conflicts().await;
-
-                // Phase 2: Forward SIGHUP to unchanged workers.
-                for target in &diff.unchanged {
-                    state.send_signal_to_user(target.uid, Signal::SIGHUP).await;
-                }
-
-                // Phase 3: Spawn added + changed workers.
-                let workers_to_spawn: Vec<_> = diff
-                    .added
-                    .into_iter()
-                    .chain(diff.changed.into_iter().map(|(_old, new)| new))
-                    .collect();
-                if !workers_to_spawn.is_empty() {
-                    pishoo::hypervisor::process::spawn_configured_workers(&state, workers_to_spawn)
-                        .await;
-                }
-
-                current_worker_targets = next_snapshot.worker_targets;
-                tracing::info!("reload complete");
+                .await;
             }
             signal::RootSignal::SigUsr1 => {
                 pishoo::hypervisor::log::reopen_root_log();

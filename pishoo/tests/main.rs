@@ -18,11 +18,12 @@ fn main_uses_reactive_per_server_dns_publish() {
 
 #[test]
 fn main_force_kills_lingering_workers_during_shutdown() {
-    let main_source = include_str!("../src/main.rs");
+    let shutdown_source = include_str!("../src/hypervisor/shutdown.rs");
     assert!(
-        main_source.contains("state.force_kill_workers(\"shutdown_timeout\")"),
+        shutdown_source.contains("state.force_kill_workers(\"shutdown_timeout\")"),
         "root shutdown must SIGKILL lingering workers after graceful timeout"
     );
+    let main_source = include_str!("../src/main.rs");
     assert!(
         main_source.contains("let _ = accept_handle.await;")
             && main_source.contains("let _ = monitor_handle.await;"),
@@ -32,9 +33,9 @@ fn main_force_kills_lingering_workers_during_shutdown() {
 
 #[test]
 fn main_reload_uses_worker_diff() {
-    let main_source = include_str!("../src/main.rs");
+    let orchestrate_source = include_str!("../src/hypervisor/reload/orchestrate.rs");
     assert!(
-        main_source.contains("compute_worker_diff"),
+        orchestrate_source.contains("compute_worker_diff"),
         "reload should use diff-based worker management instead of whole-set replacement"
     );
 }

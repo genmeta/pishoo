@@ -8,7 +8,14 @@ use tokio::{
     signal::unix::{SignalKind, signal},
 };
 
-use crate::SignalType;
+/// Signal type for CLI `-s` flag (stop, quit, reopen, reload).
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum SignalType {
+    Stop,
+    Quit,
+    Reopen,
+    Reload,
+}
 
 /// Signal received by the root supervisor process.
 ///
