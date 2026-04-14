@@ -4,7 +4,7 @@ use flate2::{Compression, write::GzEncoder};
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
-use crate::{BrewTarget, package_meta, run_cmd, run_cmd_quiet, sha256_file, target_dir};
+use crate::{BrewTarget, Feature, package_meta, run_cmd, run_cmd_quiet, sha256_file, target_dir};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -91,7 +91,7 @@ fn generate_formula(
     Ok(lines.join("\n"))
 }
 
-pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
+pub async fn run(targets: &[BrewTarget], features: &[Feature]) -> Result<(), Whatever> {
     info!(target_count = targets.len(), "starting brew dist build");
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
@@ -103,10 +103,11 @@ pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
         let target_dir = target_dir.clone();
         let workspace = workspace.clone();
         let triple = target.triple();
+        let features = features.to_vec();
         info!(triple, "queued brew target build");
         let span = info_span!("brew", triple);
         tasks.spawn(
-            async move { build_one(triple, &version, &target_dir, &workspace).await }
+            async move { build_one(triple, &version, &target_dir, &workspace, &features).await }
                 .instrument(span),
         );
     }
@@ -117,11 +118,22 @@ pub async fn run(targets: &[BrewTarget]) -> Result<(), Whatever> {
         archives.push(result.whatever_context("brew build task panicked")??);
     }
 
-    // Generate aggregated formula
+    // Generate aggregated formula.
+    // Strip pishoo-ssh-session from the template when sshd is not enabled.
+    let has_sshd = features
+        .iter()
+        .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
     let content_path = workspace.join("pishoo/homebrew_content.rb");
-    let content = tokio::fs::read_to_string(&content_path)
+    let mut content = tokio::fs::read_to_string(&content_path)
         .await
         .whatever_context(format!("failed to read {}", content_path.display()))?;
+    if !has_sshd {
+        content = content
+            .lines()
+            .filter(|line| !line.contains("pishoo-ssh-session"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
 
     let formula = generate_formula(
         CARGO_NAME,
@@ -152,24 +164,40 @@ async fn build_one(
     version: &str,
     target_dir: &Path,
     workspace: &Path,
+    features: &[Feature],
 ) -> Result<ArchiveInfo, Whatever> {
+    let has_sshd = features
+        .iter()
+        .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
+
     info!(triple, "checking cargo availability");
     check_cargo().await?;
 
-    // Build with sshd feature
+    // Build cargo features string
+    let cargo_features = {
+        let names: Vec<&str> = features
+            .iter()
+            .map(|f| match f {
+                Feature::Sshd => "sshd",
+                Feature::Pam => "pam",
+            })
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            names.join(",")
+        }
+    };
+
     info!(triple, "starting cargo build for brew target");
-    run_cmd(tokio::process::Command::new("cargo").args([
-        "build",
-        "--release",
-        "--target",
-        triple,
-        "-p",
-        CARGO_NAME,
-        "--features",
-        "sshd",
-    ]))
-    .await
-    .whatever_context(format!("cargo build failed for {triple}"))?;
+    let mut args = vec!["build", "--release", "--target", triple, "-p", CARGO_NAME];
+    if !cargo_features.is_empty() {
+        args.push("--features");
+        args.push(&cargo_features);
+    }
+    run_cmd(tokio::process::Command::new("cargo").args(&args))
+        .await
+        .whatever_context(format!("cargo build failed for {triple}"))?;
     info!(triple, "cargo build finished for brew target");
 
     // Stage
@@ -180,7 +208,7 @@ async fn build_one(
         .await
         .whatever_context(format!("failed to create {}", staging.display()))?;
 
-    // Copy binaries
+    // Copy binaries: pishoo and pishoo-worker are always required
     let release_dir = target_dir.join(triple).join("release");
     tokio::fs::copy(release_dir.join("pishoo"), staging.join("pishoo"))
         .await
@@ -191,12 +219,21 @@ async fn build_one(
     )
     .await
     .whatever_context("failed to copy pishoo-worker")?;
-    tokio::fs::copy(
-        release_dir.join("pishoo-ssh-session"),
-        staging.join("pishoo-ssh-session"),
-    )
-    .await
-    .whatever_context("failed to copy pishoo-ssh-session")?;
+
+    // pishoo-ssh-session is only built when sshd feature is enabled
+    if has_sshd {
+        tokio::fs::copy(
+            release_dir.join("pishoo-ssh-session"),
+            staging.join("pishoo-ssh-session"),
+        )
+        .await
+        .whatever_context("failed to copy pishoo-ssh-session")?;
+    } else {
+        info!(
+            triple,
+            "skipping pishoo-ssh-session (sshd feature not enabled)"
+        );
+    }
 
     // Copy config files
     let conf_src = workspace.join("pishoo/pkg/common/etc/pishoo");

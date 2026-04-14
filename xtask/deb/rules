@@ -29,11 +29,12 @@ ifdef TRIPLE
 	mkdir -p debian/pishoo/usr/bin
 	cp /workspace/target/$(TRIPLE)/release/pishoo debian/pishoo/usr/bin/
 	chmod 755 debian/pishoo/usr/bin/pishoo
-ifdef PISHOO_WORKER_BIN
 	mkdir -p debian/pishoo/usr/lib/pishoo
 	cp /workspace/target/$(TRIPLE)/release/pishoo-worker debian/pishoo/usr/lib/pishoo/
+	chmod 755 debian/pishoo/usr/lib/pishoo/pishoo-worker
+ifdef PISHOO_SSH_SESSION_BIN
 	cp /workspace/target/$(TRIPLE)/release/pishoo-ssh-session debian/pishoo/usr/lib/pishoo/
-	chmod 755 debian/pishoo/usr/lib/pishoo/*
+	chmod 755 debian/pishoo/usr/lib/pishoo/pishoo-ssh-session
 endif
 endif
 	# pishoo-common: install config files

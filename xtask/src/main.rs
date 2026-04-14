@@ -74,7 +74,7 @@ impl BrewTarget {
 /// Cargo features to enable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Feature {
-    /// Enable SSH daemon support (pishoo-worker, pishoo-ssh-session)
+    /// Enable SSH daemon support (pishoo-ssh-session)
     Sshd,
     /// Enable PAM authentication (implies sshd)
     Pam,
@@ -96,6 +96,9 @@ enum DistFormat {
         /// Target triples to build for
         #[arg(long = "target", required = true)]
         targets: Vec<BrewTarget>,
+        /// Cargo features to enable
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
     },
 }
 
@@ -213,7 +216,7 @@ async fn main() -> Result<(), Whatever> {
             DistFormat::Deb { targets, features } => {
                 deb::run(&targets, &features).await?;
             }
-            DistFormat::Brew { targets } => brew::run(&targets).await?,
+            DistFormat::Brew { targets, features } => brew::run(&targets, &features).await?,
         },
     }
     Ok(())

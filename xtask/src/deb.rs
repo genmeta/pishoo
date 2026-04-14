@@ -455,10 +455,11 @@ async fn build_one(
         }
     };
 
-    // Environment variables for debian/rules override_dh_auto_build
-    let sshd_env = if has_sshd {
-        "export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && \
-         export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && "
+    // Environment variables for debian/rules override_dh_auto_build.
+    // pishoo-worker is always required; pishoo-ssh-session only when sshd feature is enabled.
+    let worker_env = "export PISHOO_WORKER_BIN=/usr/lib/pishoo/pishoo-worker && ";
+    let ssh_session_env = if has_sshd {
+        "export PISHOO_SSH_SESSION_BIN=/usr/lib/pishoo/pishoo-ssh-session && "
     } else {
         ""
     };
@@ -478,7 +479,7 @@ async fn build_one(
 source /root/.cargo/env
 export TRIPLE={triple}
 export DEB_HOST_MULTIARCH={gnu}
-{root_ca_env}{sshd_env}{cargo_features_env}
+{root_ca_env}{worker_env}{ssh_session_env}{cargo_features_env}
 apt-get install -y -qq binutils-{gnu} 2>/dev/null || true
 SRC=/workspace/target/{triple}/release/deb/src
 mkdir -p "$SRC/debian"
