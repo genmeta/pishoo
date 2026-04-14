@@ -78,7 +78,7 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
     }
 
     // Create temp container from base
-    let container_name = format!("xtask-setup-{triple}");
+    let container_name = format!("{CARGO_NAME}-xtask-setup-{triple}");
     let container = docker
         .create_container(
             Some(
@@ -249,12 +249,12 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
         result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
     }
 
-    let container_name = "xtask-deb-common";
+    let container_name = format!("{CARGO_NAME}-xtask-deb-common");
     let container = docker
         .create_container(
             Some(
                 CreateContainerOptionsBuilder::default()
-                    .name(container_name)
+                    .name(&container_name)
                     .build(),
             ),
             ContainerCreateBody {
@@ -411,7 +411,7 @@ async fn build_one(
         ""
     };
 
-    let container_name = format!("xtask-deb-{triple}");
+    let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
     let container = docker
         .create_container(
