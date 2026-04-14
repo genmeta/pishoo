@@ -12,7 +12,7 @@ use crate::naming::canonicalize_server_nodes;
 pub async fn load_identity_servers(
     identity_home: &IdentityHome,
 ) -> Result<Vec<Arc<Node>>, Whatever> {
-    let conf_path = identity_home.join("server.conf");
+    let conf_path = identity_home.server_conf_path();
     let raw = tokio::fs::read(&conf_path).await.whatever_context(format!(
         "failed to read identity config `{}`",
         conf_path.display()

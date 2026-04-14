@@ -1,122 +1,69 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io::Write, path::PathBuf, sync::Arc};
 
-use chrono::Local;
-use dhttp_home::DhttpHome;
-use http::{Method, Request, Version};
-use snafu::{Report, ResultExt};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+use dhttp_home::identity::IdentityHome;
+use tracing_appender::{
+    non_blocking::{NonBlocking, WorkerGuard},
+    rolling::{RollingFileAppender, Rotation},
+};
 
-use crate::error::Result;
-
-// Returns None on Android (no logging)
-fn get_log_dir() -> Option<PathBuf> {
-    DhttpHome::load_from_environment()
-        .map(|home| home.join("logs"))
-        .ok()
+/// A non-blocking, clone-able access log writer backed by
+/// `tracing_appender::non_blocking`.
+///
+/// Created once at service startup per identity; shared across all requests
+/// for that identity via axum middleware state. The internal [`WorkerGuard`]
+/// is held via `Arc` so that clones keep the background I/O thread alive
+/// until the last reference is dropped.
+#[derive(Clone, Debug)]
+pub struct AccessLogWriter {
+    inner: NonBlocking,
+    /// Prevent the background thread from shutting down while any clone exists.
+    _guard: Arc<WorkerGuard>,
 }
 
-fn get_access_log_path() -> Option<PathBuf> {
-    get_log_dir().map(|dir| dir.join("access.log"))
-}
+impl AccessLogWriter {
+    /// Create a new writer that appends to `{log_dir}/access.log`.
+    ///
+    /// The directory is created if it does not exist.
+    pub fn new(log_dir: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&log_dir)?;
 
-async fn ensure_log_dir() -> Result<()> {
-    if let Some(dir) = get_log_dir() {
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .whatever_context::<_, crate::error::CustomError>(format!(
-                "failed to create log directory: {:?}",
-                dir
-            ))?;
+        let appender =
+            RollingFileAppender::new(Rotation::NEVER, log_dir, IdentityHome::ACCESS_LOG_FILE);
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+
+        Ok(Self {
+            inner: non_blocking,
+            _guard: Arc::new(guard),
+        })
     }
-    Ok(())
-}
 
-#[derive(Clone)]
-pub struct RequestInfo {
-    pub method: Method,
-    pub uri: String,
-    pub version: Version,
-    pub user_agent: String,
-    pub referer: String,
-    pub client_addr: String,
-}
-
-impl RequestInfo {
-    pub fn from_request<T>(req: &Request<T>) -> Self {
+    /// Create a writer that discards all output.
+    ///
+    /// Used as a fallback when the log directory cannot be created.
+    pub fn disabled() -> Self {
+        let (non_blocking, guard) = tracing_appender::non_blocking(std::io::sink());
         Self {
-            method: req.method().clone(),
-            uri: req.uri().to_string(),
-            version: req.version(),
-            user_agent: req
-                .headers()
-                .get("user-agent")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("-")
-                .to_string(),
-            referer: req
-                .headers()
-                .get("referer")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("-")
-                .to_string(),
-            client_addr: req
-                .extensions()
-                .get::<SocketAddr>()
-                .map(|a| a.ip().to_string())
-                .unwrap_or_else(|| "-".to_string()),
+            inner: non_blocking,
+            _guard: Arc::new(guard),
         }
     }
-
-    pub async fn log_access(&self, status: u16, body_size: u64) {
-        let time_local = Local::now().format("%d/%b/%Y:%H:%M:%S %z");
-        let log_line = format!(
-            "{} - - [{}] \"{} {} {:?}\" {} {} \"{}\" \"{}\"",
-            self.client_addr,
-            time_local,
-            self.method,
-            self.uri,
-            self.version,
-            status,
-            body_size,
-            self.referer,
-            self.user_agent
-        );
-        write_access_log(log_line).await;
-    }
 }
 
-pub async fn write_access_log(line: String) {
-    let Some(path) = get_access_log_path() else {
-        return;
-    };
-
-    let result: Result<()> = async {
-        ensure_log_dir().await?;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .whatever_context::<_, crate::error::CustomError>(format!(
-                "failed to open access log file: {:?}",
-                path
-            ))?;
-
-        file.write_all(line.as_bytes())
-            .await
-            .whatever_context::<_, crate::error::CustomError>("failed to write to access log")?;
-        file.write_all(b"\n")
-            .await
-            .whatever_context::<_, crate::error::CustomError>("failed to write to access log")?;
-        Ok(())
+impl Write for AccessLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
     }
-    .await;
 
-    if let Err(e) = result {
-        tracing::error!(
-            error = %Report::from_error(e),
-            "failed to write access log"
-        );
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+
+    /// Write the entire buffer in a single call.
+    ///
+    /// A single `write_all` is required because [`NonBlocking`] sends each
+    /// call as an independent message; splitting across two calls may
+    /// interleave with other writers.
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.inner.write_all(buf)
     }
 }

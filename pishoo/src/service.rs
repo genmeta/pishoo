@@ -5,16 +5,17 @@
 //! `RemoteControlPlane`) or directly inside the root process (using
 //! `LocalControlPlane`).
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use axum::middleware::{from_fn, from_fn_with_state};
+use axum::middleware::from_fn_with_state;
 use gateway::{
     control_plane::{ControlPlane, ListenRequest},
     parse::{Node, Value},
     reverse::{
         access_control::{AccessControlState, access_control},
-        access_log::access_log,
+        access_log::{AccessLogState, access_log},
         body_adapter::BodyAdapterLayer,
+        log::AccessLogWriter,
         router::NginxRouter,
     },
 };
@@ -33,6 +34,9 @@ pub struct ServerConfig {
     pub listen_request: ListenRequest,
     /// Parsed nginx-style server configuration node.
     pub server_node: Arc<Node>,
+    /// Directory for per-identity access logs (e.g. `~/.dhttp/{name}/logs/`).
+    /// `None` disables access logging for this server.
+    pub access_log_dir: Option<PathBuf>,
 }
 
 /// Configuration for a service instance (shared between worker and root-local).
@@ -121,9 +125,36 @@ where
             access_rules: config.access_rules.clone(),
             server_name: Arc::from(server_name.as_str()),
         };
+
+        // Create per-identity access log writer.
+        let access_log_writer = match &server_config.access_log_dir {
+            Some(dir) => match AccessLogWriter::new(dir.clone()) {
+                Ok(writer) => {
+                    tracing::debug!(
+                        %server_name,
+                        dir = %dir.display(),
+                        "access log writer created"
+                    );
+                    writer
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %server_name,
+                        %error,
+                        "failed to create access log writer, access logging disabled"
+                    );
+                    AccessLogWriter::disabled()
+                }
+            },
+            None => AccessLogWriter::disabled(),
+        };
+        let access_log_state = AccessLogState {
+            writer: access_log_writer,
+        };
+
         let service_stack = ServiceBuilder::new()
             .layer(BodyAdapterLayer)
-            .layer(from_fn(access_log))
+            .layer(from_fn_with_state(access_log_state, access_log))
             .layer(from_fn_with_state(access_state, access_control))
             .service(nginx_router);
 

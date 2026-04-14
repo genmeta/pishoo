@@ -4,7 +4,7 @@ pub mod body_adapter;
 mod file;
 pub(crate) mod gzip;
 pub mod location;
-pub(crate) mod log;
+pub mod log;
 mod proxy;
 pub mod router;
 #[cfg(feature = "sshd")]

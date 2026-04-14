@@ -97,7 +97,7 @@ pub async fn build_service_config(
         // Always register a fallback server node for the identity name.
 
         // Load per-identity server.conf if present.
-        let conf_path = identity_home.join("server.conf");
+        let conf_path = identity_home.server_conf_path();
         let identity_server_nodes = if conf_path.is_file() {
             match load_identity_servers(&identity_home).await {
                 Ok(nodes) => nodes,
@@ -126,7 +126,7 @@ pub async fn build_service_config(
 
         // Default access_rules: IDENTITY_HOME/db/access.db
         if access_rules_uri.is_none() {
-            let default_db = identity_home.path().join("db/access.db");
+            let default_db = identity_home.access_db_path();
             if default_db.is_file() {
                 access_rules_uri = Some(format!("sqlite://{}?mode=ro", default_db.display()));
             }
@@ -179,6 +179,7 @@ pub async fn build_service_config(
         servers.push(ServerConfig {
             listen_request,
             server_node,
+            access_log_dir: Some(identity_home.logs_dir()),
         });
     }
 

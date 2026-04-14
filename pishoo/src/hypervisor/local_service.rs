@@ -199,6 +199,7 @@ pub async fn build_local_service_config(
                     dns_resolver_url: dns_resolver_url.clone(),
                 },
                 server_node: server.clone(),
+                access_log_dir: None,
             });
         }
     }

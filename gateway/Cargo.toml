@@ -68,6 +68,7 @@ remoc = { workspace = true }
 dhttp-home = { workspace = true }
 async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }
 chrono = "0.4.42"
+tracing-appender = { workspace = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
