@@ -213,7 +213,7 @@ async fn run_ssh_session(
         .context(AuthRejectedSnafu)?;
 
     // Set up remoc bridges for the control streams.
-    let (rs, rc) = ReadMessageStreamServer::new(Box::pin(recver.into_bytes_stream()), 1);
+    let (rs, rc) = ReadMessageStreamServer::new(Box::pin(recver.into_bytes_stream()), 8);
     tokio::spawn(
         async move {
             let _ = rs.serve().await;
@@ -221,7 +221,7 @@ async fn run_ssh_session(
         .in_current_span(),
     );
 
-    let (ws, wc) = WriteMessageStreamServer::new(Box::pin(sender.into_bytes_sink()), 1);
+    let (ws, wc) = WriteMessageStreamServer::new(Box::pin(sender.into_bytes_sink()), 8);
     tokio::spawn(
         async move {
             let _ = ws.serve().await;
@@ -230,7 +230,7 @@ async fn run_ssh_session(
     );
 
     let bridge = ManageStreamBridge::new(handle);
-    let (ms, mc) = RemoteManageStreamServerShared::new(Arc::new(bridge), 1);
+    let (ms, mc) = RemoteManageStreamServerShared::new(Arc::new(bridge), 8);
     tokio::spawn(
         async move {
             let _ = ms.serve(true).await;

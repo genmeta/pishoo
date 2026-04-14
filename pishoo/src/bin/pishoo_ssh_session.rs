@@ -25,7 +25,7 @@ use snafu::Report;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     let user = std::env::var("PISHOO_USER").unwrap_or_else(|_| {
         eprintln!("PISHOO_USER not set; this binary must be spawned by pishoo");
@@ -90,7 +90,11 @@ async fn main() {
             }
         };
 
-        tracing::info!(uid = user_info.uid, gid = user_info.gid, "authentication succeeded");
+        tracing::info!(
+            uid = user_info.uid,
+            gid = user_info.gid,
+            "authentication succeeded"
+        );
 
         let username = auth_request.username;
 
@@ -105,7 +109,11 @@ async fn main() {
                             reason: Report::from_error(e).to_string(),
                         }
                     })?;
-                    tracing::info!(uid = user_info.uid, gid = user_info.gid, "privileges dropped");
+                    tracing::info!(
+                        uid = user_info.uid,
+                        gid = user_info.gid,
+                        "privileges dropped"
+                    );
                 }
 
                 let control_reader = bootstrap.control_reader.into_box_reader();
