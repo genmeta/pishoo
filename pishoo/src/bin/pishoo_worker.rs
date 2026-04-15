@@ -1,17 +1,18 @@
 //! pishoo-worker: per-user worker process.
 //!
-//! Spawned by the root pishoo process with stdin/stdout piped for remoc IPC.
+//! Spawned by the root pishoo process with a MuxChannel socketpair on FD 3.
 //! Receives [`WorkerBootstrap`] from the root (containing a
 //! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, builds a
 //! [`pishoo::service::ServiceConfig`], and calls [`run_service()`] — the same generic
 //! code path used by root-local services.
 //!
-//! **stdout is reserved for remoc transport** — all logging goes to stderr.
+//! **FD 3 is reserved for MuxChannel transport** — all logging goes to stderr.
 
 use std::sync::Arc;
 
 use dhttp_home::DhttpHome;
 use gateway::error::Whatever;
+use h3x::ipc::transport::MuxChannel;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     service::{run_service, setup_service},
@@ -34,15 +35,27 @@ async fn main() -> Result<(), Whatever> {
         std::process::id()
     ));
 
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
+    // Recover the MuxChannel FD from FD 3 (dup2'd by root in child_exec).
+    let mux_fd = {
+        use std::os::fd::FromRawFd;
+        // SAFETY: the root process dup2'd the socketpair FD to FD 3 in child_exec
+        // before execve. FD 3 is guaranteed to be open and valid.
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(3) }
+    };
 
-    // Establish remoc connection over stdin (read) / stdout (write).
+    let mux =
+        MuxChannel::from_fd(mux_fd).whatever_context("failed to create MuxChannel from fd 3")?;
+    let (sink, stream) = mux.split().whatever_context("failed to split MuxChannel")?;
+
+    // Keep FdRegistry for receiving FDs from root (e.g. session child FDs).
+    let fd_registry = stream.fd_registry();
+
+    // Establish remoc connection over MuxSink/MuxStream.
     let (conn, mut base_tx, mut base_rx): (
         _,
         remoc::rch::base::Sender<WorkerHello>,
         remoc::rch::base::Receiver<WorkerBootstrap>,
-    ) = remoc::Connect::io(remoc::Cfg::default(), stdin, stdout)
+    ) = remoc::Connect::framed(remoc::Cfg::default(), sink, stream)
         .await
         .whatever_context("failed to establish remoc transport")?;
     let _conn_handle = AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
@@ -76,18 +89,10 @@ async fn main() -> Result<(), Whatever> {
     tracing::debug!("startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
-    // Recover the seqpacket FD passed by root at fixed FD 3 (dup2'd in child_exec).
-    #[cfg(feature = "sshd")]
-    let seqpacket = {
-        use std::os::fd::FromRawFd;
-        // SAFETY: the root process dup2'd the seqpacket FD to FD 3 in child_exec
-        // before execve. FD 3 is guaranteed to be open and valid.
-        unsafe { std::os::fd::OwnedFd::from_raw_fd(3) }
-    };
+    // Pass FdRegistry so spawn_session can receive FDs from root via MuxChannel.
     let plane = Arc::new(RemoteControlPlane::new(
         bootstrap.control_plane,
-        #[cfg(feature = "sshd")]
-        seqpacket,
+        fd_registry,
     ));
 
     let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));

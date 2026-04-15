@@ -7,33 +7,26 @@ use std::{
 use nix::{
     errno::Errno,
     unistd::{
-        ForkResult, Gid, SysconfVar, Uid, execve, fork, getegid, geteuid, getgid, getuid, pipe,
-        setgid, setuid, sysconf,
+        ForkResult, Gid, SysconfVar, Uid, execve, fork, getegid, geteuid, getgid, getuid, setgid,
+        setuid, sysconf,
     },
 };
 use snafu::{ResultExt, Snafu};
-use tokio::fs::File;
 
 use crate::hypervisor::worker_handle::WorkerHandle;
 
-pub struct WorkerTransport {
-    pub stdin: File,
-    pub stdout: File,
-}
-
 pub struct LaunchedWorker {
     pub handle: WorkerHandle,
-    pub transport: WorkerTransport,
-    /// Root-side end of the seqpacket pair for FD passing.
-    #[cfg(feature = "sshd")]
-    pub seqpacket: OwnedFd,
+    /// Root-side end of the MuxChannel socketpair for IPC with the worker.
+    pub mux_fd: OwnedFd,
 }
 
-/// Transport for a launched session child process (stdin/stdout pipes).
+/// Transport for a launched session child process (socketpair for MuxChannel).
 #[cfg(feature = "sshd")]
 pub struct SessionTransport {
-    pub stdin: OwnedFd,
-    pub stdout: OwnedFd,
+    /// Root-side end of the socketpair. The worker will receive this FD via
+    /// MuxChannel FD passing, then establish a MuxChannel to the child.
+    pub mux_fd: OwnedFd,
     pub child_pid: nix::unistd::Pid,
 }
 
@@ -44,10 +37,8 @@ struct ChildExecSpec<'a> {
     uid: Uid,
     gid: Gid,
     supplementary_groups: &'a [Gid],
-    stdin_fd: &'a OwnedFd,
-    stdout_fd: &'a OwnedFd,
-    /// Optional extra FD to dup2 to FD 3 (e.g. seqpacket for FD passing).
-    extra_fd: Option<&'a OwnedFd>,
+    /// Socketpair FD to dup2 to FD 3 (MuxChannel IPC).
+    mux_fd: &'a OwnedFd,
     max_fd: i32,
 }
 
@@ -65,13 +56,8 @@ pub enum LaunchWorkerError {
         username: String,
         source: BuildExecEnvError,
     },
-    #[snafu(display("failed to create worker stdin pipe"))]
-    CreateStdinPipe { source: Errno },
-    #[snafu(display("failed to create worker stdout pipe"))]
-    CreateStdoutPipe { source: Errno },
-    #[cfg(feature = "sshd")]
-    #[snafu(display("failed to create seqpacket pair"))]
-    CreateSeqpacketPair { source: Errno },
+    #[snafu(display("failed to create worker socketpair"))]
+    CreateSocketpair { source: std::io::Error },
     #[snafu(display("failed to fork worker process"))]
     ForkWorker { source: Errno },
 }
@@ -87,10 +73,8 @@ pub enum LaunchSessionError {
         username: String,
         source: BuildExecEnvError,
     },
-    #[snafu(display("failed to create session stdin pipe"))]
-    CreateSessionStdinPipe { source: Errno },
-    #[snafu(display("failed to create session stdout pipe"))]
-    CreateSessionStdoutPipe { source: Errno },
+    #[snafu(display("failed to create session socketpair"))]
+    CreateSessionSocketpair { source: std::io::Error },
     #[snafu(display("failed to fork session process"))]
     ForkSession { source: Errno },
 }
@@ -127,15 +111,12 @@ pub fn launch_worker(
     let worker_bin =
         CString::new(worker_bin.as_os_str().as_encoded_bytes()).context(InvalidWorkerPathSnafu)?;
 
-    #[cfg(feature = "sshd")]
-    let (parent_seqpacket, child_seqpacket) = seqpacket_pair().context(CreateSeqpacketPairSnafu)?;
-
     let env = build_exec_env(username, home).context(BuildExecEnvSnafu { username })?;
     let argv = vec![worker_bin.clone()];
     let max_fd = max_fd();
 
-    let (child_stdin_read, parent_stdin_write) = pipe_pair().context(CreateStdinPipeSnafu)?;
-    let (parent_stdout_read, child_stdout_write) = pipe_pair().context(CreateStdoutPipeSnafu)?;
+    // Single SOCK_STREAM socketpair for MuxChannel (replaces stdin/stdout pipes + seqpacket).
+    let (parent_fd, child_fd) = std_unix_socketpair().context(CreateSocketpairSnafu)?;
 
     // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
     match unsafe { fork() }.context(ForkWorkerSnafu)? {
@@ -147,28 +128,16 @@ pub fn launch_worker(
                 uid,
                 gid,
                 supplementary_groups: &supplementary_groups,
-                stdin_fd: &child_stdin_read,
-                stdout_fd: &child_stdout_write,
-                #[cfg(feature = "sshd")]
-                extra_fd: Some(&child_seqpacket),
-                #[cfg(not(feature = "sshd"))]
-                extra_fd: None,
+                mux_fd: &child_fd,
                 max_fd,
             });
         }
         ForkResult::Parent { child } => {
-            drop(child_stdin_read);
-            drop(child_stdout_write);
-            #[cfg(feature = "sshd")]
-            drop(child_seqpacket);
-            let stdin = File::from_std(std::fs::File::from(parent_stdin_write));
-            let stdout = File::from_std(std::fs::File::from(parent_stdout_read));
+            drop(child_fd);
 
             Ok(LaunchedWorker {
                 handle: WorkerHandle::from_pid(child),
-                transport: WorkerTransport { stdin, stdout },
-                #[cfg(feature = "sshd")]
-                seqpacket: parent_seqpacket,
+                mux_fd: parent_fd,
             })
         }
     }
@@ -182,35 +151,23 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         uid,
         gid,
         supplementary_groups,
-        stdin_fd,
-        stdout_fd,
-        extra_fd,
+        mux_fd,
         max_fd,
     } = spec;
 
-    if nix::unistd::dup2_stdin(stdin_fd).is_err() {
+    // dup2 the MuxChannel socketpair FD to FD 3 (clears CLOEXEC).
+    // SAFETY: post-fork child, single-threaded. We wrap raw fd 3 in OwnedFd
+    // to satisfy nix's typed API, then forget it to prevent Drop from closing fd 3.
+    use std::os::fd::FromRawFd;
+    let mut fd3 = unsafe { OwnedFd::from_raw_fd(3) };
+    if nix::unistd::dup2(mux_fd, &mut fd3).is_err() {
         child_fail(126);
     }
-    if nix::unistd::dup2_stdout(stdout_fd).is_err() {
-        child_fail(126);
-    }
+    std::mem::forget(fd3);
 
-    // If an extra FD is provided (e.g. seqpacket for SSH FD passing), dup2 it
-    // to FD 3. dup2 automatically clears the CLOEXEC flag on the new FD,
-    // ensuring it survives execve. Close all other FDs from FD 4 onward
-    // (or FD 3 onward when no extra FD is present).
-    let start_fd = if let Some(fd) = extra_fd {
-        use std::os::fd::AsRawFd;
-        // SAFETY: post-fork child, single-threaded. dup2 is async-signal-safe.
-        if unsafe { libc::dup2(fd.as_raw_fd(), 3) } < 0 {
-            child_fail(126);
-        }
-        4
-    } else {
-        3
-    };
-
-    let mut fd = start_fd;
+    // Close all FDs from 4 onward (FD 0/1/2 = inherited stdio for logging,
+    // FD 3 = MuxChannel).
+    let mut fd = 4;
     while fd < max_fd {
         let _ = nix::unistd::close(fd);
         fd += 1;
@@ -243,43 +200,20 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
     child_fail(127);
 }
 
-fn pipe_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
-    pipe()
-}
-
-#[cfg(feature = "sshd")]
-fn seqpacket_pair() -> Result<(OwnedFd, OwnedFd), Errno> {
-    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
-
-    let (a, b) = socketpair(
-        AddressFamily::Unix,
-        SockType::SeqPacket,
-        None,
-        // SOCK_CLOEXEC is not available on macOS; set it manually below.
-        #[cfg(not(target_vendor = "apple"))]
-        SockFlag::SOCK_CLOEXEC,
-        #[cfg(target_vendor = "apple")]
-        SockFlag::empty(),
-    )?;
-
-    #[cfg(target_vendor = "apple")]
-    {
-        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-        fcntl(&a, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-        fcntl(&b, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-    }
-
-    Ok((a, b))
+/// Create a `SOCK_STREAM` socketpair for MuxChannel IPC.
+///
+/// Uses `std::os::unix::net::UnixStream::pair()` which sets CLOEXEC
+/// automatically. The child side will be dup2'd to a fixed FD, clearing
+/// CLOEXEC for that copy.
+fn std_unix_socketpair() -> Result<(OwnedFd, OwnedFd), std::io::Error> {
+    let (a, b) = std::os::unix::net::UnixStream::pair()?;
+    Ok((a.into(), b.into()))
 }
 
 /// Spawn a session child process **without dropping privileges**.
 ///
 /// The child process is exec'd as root so it can perform PAM authentication
-/// and `open_session`. It is responsible for calling `drop_privileges()`
-/// after PAM completes.
-///
-/// Returns the pipe file descriptors for communicating with the child
-/// via remoc (stdin write + stdout read).
+/// and `open_session`. Returns the socketpair FD for MuxChannel communication.
 #[cfg(feature = "sshd")]
 pub fn launch_session(username: &str) -> Result<SessionTransport, LaunchSessionError> {
     let session_bin = session_binary_path();
@@ -290,56 +224,46 @@ pub fn launch_session(username: &str) -> Result<SessionTransport, LaunchSessionE
     let argv = vec![session_bin.clone()];
     let max_fd = max_fd();
 
-    let (child_stdin_read, parent_stdin_write) =
-        pipe_pair().context(CreateSessionStdinPipeSnafu)?;
-    let (parent_stdout_read, child_stdout_write) =
-        pipe_pair().context(CreateSessionStdoutPipeSnafu)?;
+    // Single SOCK_STREAM socketpair for MuxChannel to session child.
+    let (parent_fd, child_fd) = std_unix_socketpair().context(CreateSessionSocketpairSnafu)?;
 
     // SAFETY: fork semantics require unsafe; child path immediately performs exec/exit only.
     match unsafe { fork() }.context(ForkSessionSnafu)? {
         ForkResult::Child => {
-            // Session child: dup2 stdin/stdout, close other FDs, exec.
+            // Session child: dup2 socketpair to FD 3, close other FDs, exec.
             // No privilege drop — stays root for PAM.
-            session_child_exec(
-                &session_bin,
-                &argv,
-                &env,
-                &child_stdin_read,
-                &child_stdout_write,
-                max_fd,
-            );
+            session_child_exec(&session_bin, &argv, &env, &child_fd, max_fd);
         }
         ForkResult::Parent { child } => {
-            drop(child_stdin_read);
-            drop(child_stdout_write);
+            drop(child_fd);
             Ok(SessionTransport {
-                stdin: parent_stdin_write,
-                stdout: parent_stdout_read,
+                mux_fd: parent_fd,
                 child_pid: child,
             })
         }
     }
 }
 
-/// Minimal child exec for session processes: dup2 stdin/stdout, close FDs, exec.
+/// Minimal child exec for session processes: dup2 MuxChannel to FD 3, close FDs, exec.
 /// No privilege drop (child runs as root for PAM).
 #[cfg(feature = "sshd")]
 fn session_child_exec(
     bin: &CString,
     argv: &[CString],
     envp: &[CString],
-    stdin_fd: &OwnedFd,
-    stdout_fd: &OwnedFd,
+    mux_fd: &OwnedFd,
     max_fd: i32,
 ) -> ! {
-    if nix::unistd::dup2_stdin(stdin_fd).is_err() {
+    // SAFETY: post-fork child, single-threaded. We wrap raw fd 3 in OwnedFd
+    // to satisfy nix's typed API, then forget it to prevent Drop from closing fd 3.
+    use std::os::fd::FromRawFd;
+    let mut fd3 = unsafe { OwnedFd::from_raw_fd(3) };
+    if nix::unistd::dup2(mux_fd, &mut fd3).is_err() {
         child_fail(126);
     }
-    if nix::unistd::dup2_stdout(stdout_fd).is_err() {
-        child_fail(126);
-    }
+    std::mem::forget(fd3);
 
-    let mut fd = 3;
+    let mut fd = 4;
     while fd < max_fd {
         let _ = nix::unistd::close(fd);
         fd += 1;
@@ -381,55 +305,6 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExec
 
 fn child_fail(code: i32) -> ! {
     std::process::exit(code);
-}
-
-// ---------------------------------------------------------------------------
-// SCM_RIGHTS helpers for FD passing over seqpacket
-// ---------------------------------------------------------------------------
-
-/// Send file descriptors over a seqpacket socket using `SCM_RIGHTS`.
-///
-/// Blocking — should be called inside `spawn_blocking`.
-#[cfg(feature = "sshd")]
-pub fn send_fds(sock_fd: std::os::fd::RawFd, fds: &[std::os::fd::RawFd]) -> Result<(), Errno> {
-    use std::io::IoSlice;
-
-    use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
-
-    let cmsg = [ControlMessage::ScmRights(fds)];
-    sendmsg::<()>(
-        sock_fd,
-        &[IoSlice::new(&[0u8])],
-        &cmsg,
-        MsgFlags::empty(),
-        None,
-    )?;
-    Ok(())
-}
-
-/// Receive file descriptors from a seqpacket socket using `SCM_RIGHTS`.
-///
-/// Blocking — should be called inside `spawn_blocking`.
-#[cfg(feature = "sshd")]
-pub fn recv_fds(sock_fd: std::os::fd::RawFd) -> Result<Vec<OwnedFd>, Errno> {
-    use std::{io::IoSliceMut, os::fd::FromRawFd};
-
-    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
-
-    let mut buf = [0u8; 1];
-    let mut cmsg_buf = nix::cmsg_space!([std::os::fd::RawFd; 4]);
-    let mut iov = [IoSliceMut::new(&mut buf)];
-    let msg = recvmsg::<()>(sock_fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())?;
-    for cmsg in msg.cmsgs()? {
-        if let ControlMessageOwned::ScmRights(fds) = cmsg {
-            // SAFETY: recvmsg guarantees these are valid open FDs passed via SCM_RIGHTS.
-            return Ok(fds
-                .into_iter()
-                .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
-                .collect());
-        }
-    }
-    Err(Errno::ENODATA)
 }
 
 /// Resolve the path of the `pishoo-ssh-session` binary.

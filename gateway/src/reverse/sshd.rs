@@ -4,7 +4,7 @@ use axum::{Extension, extract::State, response::IntoResponse};
 use genmeta_ssh::{
     auth::AuthCredential,
     constants::SSH_VERSION,
-    conversation::remoc::{ManageStreamBridge, RemoteManageStreamServerShared},
+    conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
     protocol::ConversationHandle,
     session::{AuthRequest, AuthenticateFn, SessionBootstrap},
 };
@@ -12,11 +12,10 @@ use h3x::{
     hyper::upgrade,
     message::stream::{ReadStream, WriteStream},
     protocol::Protocols,
-    remoc::message::{ReadMessageStreamServer, WriteMessageStreamServer},
     stream_id::StreamId,
 };
 use http::{Request, StatusCode};
-use remoc::prelude::{Server, ServerShared};
+use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tracing::Instrument;
 
@@ -34,9 +33,18 @@ pub enum RunSshSessionError {
     SpawnSession {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[snafu(display("failed to create MuxChannel from session FD"))]
+    MuxChannel { source: std::io::Error },
+    #[snafu(display("failed to split MuxChannel"))]
+    SplitChannel {
+        source: h3x::ipc::transport::SplitError,
+    },
     #[snafu(display("failed to establish remoc channel with child"))]
     RemocConnect {
-        source: remoc::ConnectError<std::io::Error, std::io::Error>,
+        source: remoc::ConnectError<
+            h3x::ipc::transport::MuxSinkError,
+            h3x::ipc::transport::MuxStreamError,
+        >,
     },
     #[snafu(display("failed to receive AuthenticateFn from child"))]
     RecvAuthFn { source: remoc::rch::base::RecvError },
@@ -50,6 +58,14 @@ pub enum RunSshSessionError {
     SessionFailed {
         source: genmeta_ssh::session::SessionRunError,
     },
+    #[snafu(display("failed to create control stream socketpair"))]
+    ControlSocketpair { source: std::io::Error },
+    #[snafu(display("failed to queue control stream FD"))]
+    QueueControlFd {
+        source: h3x::ipc::transport::QueueFdsError,
+    },
+    #[snafu(display("failed to convert control stream socket to tokio"))]
+    ControlFromStd { source: std::io::Error },
 }
 
 /// Axum-style handler for SSH3 CONNECT sessions.
@@ -182,15 +198,19 @@ async fn run_ssh_session(
         .await
         .context(SpawnSessionSnafu)?;
 
-    // Convert OwnedFd → tokio::fs::File for remoc IO.
-    let stdin = tokio::fs::File::from_std(std::fs::File::from(transport.stdin));
-    let stdout = tokio::fs::File::from_std(std::fs::File::from(transport.stdout));
+    // Establish remoc channel over MuxChannel with the session child.
+    let mux =
+        h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd).context(MuxChannelSnafu)?;
+    let (sink, stream) = mux.split().context(SplitChannelSnafu)?;
+
+    // Capture FD sender before remoc consumes the sink.
+    let fd_sender = sink.fd_sender();
 
     let (conn, _tx, mut rx) =
-        remoc::Connect::io::<_, _, (), AuthenticateFn, remoc::codec::Default>(
+        remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
             remoc::Cfg::default(),
-            stdout,
-            stdin,
+            sink,
+            stream,
         )
         .await
         .context(RemocConnectSnafu)?;
@@ -212,25 +232,34 @@ async fn run_ssh_session(
         .await
         .context(AuthRejectedSnafu)?;
 
-    // Set up remoc bridges for the control streams.
-    let (rs, rc) = ReadMessageStreamServer::new(Box::pin(recver.into_bytes_stream()), 8);
+    // Set up control stream via Unix socketpair + FD passing.
+    let (ctrl_srv, ctrl_cli) =
+        std::os::unix::net::UnixStream::pair().context(ControlSocketpairSnafu)?;
+    let ctrl_fd_id = fd_sender
+        .queue_fds(vec![ctrl_cli.into()])
+        .context(QueueControlFdSnafu)?;
+    let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
+    let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
+
+    // Bridge QUIC CONNECT streams ↔ control stream socketpair.
     tokio::spawn(
-        async move {
-            let _ = rs.serve().await;
-        }
+        genmeta_ssh::conversation::ipc::bridge_message_reader_to_unix(
+            Box::pin(recver.into_bytes_stream()),
+            ctrl_write,
+        )
+        .in_current_span(),
+    );
+    tokio::spawn(
+        genmeta_ssh::conversation::ipc::bridge_unix_to_message_writer(
+            ctrl_read,
+            Box::pin(sender.into_bytes_sink()),
+        )
         .in_current_span(),
     );
 
-    let (ws, wc) = WriteMessageStreamServer::new(Box::pin(sender.into_bytes_sink()), 8);
-    tokio::spawn(
-        async move {
-            let _ = ws.serve().await;
-        }
-        .in_current_span(),
-    );
-
-    let bridge = ManageStreamBridge::new(handle);
-    let (ms, mc) = RemoteManageStreamServerShared::new(Arc::new(bridge), 8);
+    // Set up manage-stream RPC via IPC FD passing.
+    let adapter = IpcManageStreamAdapter::new(handle, fd_sender);
+    let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
     tokio::spawn(
         async move {
             let _ = ms.serve(true).await;
@@ -240,8 +269,7 @@ async fn run_ssh_session(
 
     let bootstrap = SessionBootstrap {
         manage_stream: mc,
-        control_reader: rc,
-        control_writer: wc,
+        control_fd_id: ctrl_fd_id,
         conversation_id,
         peer_version,
     };

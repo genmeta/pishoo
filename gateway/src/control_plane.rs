@@ -94,17 +94,15 @@ pub trait ProvideConnector: Send + Sync {
 // Capability trait: SpawnSession (sshd feature)
 // ---------------------------------------------------------------------------
 
-/// Transport handles for communicating with a spawned SSH session process.
+/// Transport handle for communicating with a spawned SSH session process.
 ///
-/// Contains the raw pipe file descriptors of the child process. The
-/// consumer is responsible for converting these into the async IO type
-/// it needs (e.g. `tokio::fs::File`).
+/// Contains the MuxChannel socketpair FD of the child process. The
+/// consumer converts it into a [`h3x::ipc::transport::MuxChannel`] and
+/// establishes a remoc connection over the resulting sink/stream pair.
 #[cfg(feature = "sshd")]
 pub struct SessionTransport {
-    /// Write end of the child's stdin pipe.
-    pub stdin: OwnedFd,
-    /// Read end of the child's stdout pipe.
-    pub stdout: OwnedFd,
+    /// The MuxChannel socketpair FD connected to the session child process.
+    pub mux_fd: OwnedFd,
 }
 
 /// Concrete (AFIT) trait for spawning SSH session child processes.

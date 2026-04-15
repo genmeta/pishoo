@@ -2,14 +2,14 @@
 //!
 //! This module defines:
 //! - [`ControlPlane`]: the remoc RTC trait exposing root's QUIC control
-//!   plane to workers (returns [`RemoteListener`] / [`RemoteConnector`]).
+//!   plane to workers (returns [`IpcListenClient`] / [`IpcConnectClient`]).
 //! - [`WorkerBootstrap`] / [`WorkerHello`]: one-shot bootstrap handshake.
 //! - Error types for control plane operations.
 
 use std::path::PathBuf;
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
-use h3x::remoc::quic::{RemoteConnector, RemoteListener};
+use h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -86,30 +86,32 @@ pub enum SpawnSessionError {
 /// Remote trait exposing the root process's QUIC control plane to workers.
 ///
 /// Workers call these methods to request listeners and connectors from root.
-/// The returned [`RemoteListener`] / [`RemoteConnector`] directly implement
-/// [`h3x::quic::Listen`] / [`h3x::quic::Connect`].
+/// The returned [`IpcListenClient`] / [`IpcConnectClient`] are used by the
+/// worker to construct [`IpcListener`] / [`IpcConnector`] with the local
+/// [`FdRegistry`](h3x::ipc::transport::FdRegistry).
 #[remoc::rtc::remote]
 pub trait ControlPlane: Send + Sync {
     /// Request a QUIC listener for the given server configuration.
     ///
-    /// Root creates the listener, starts serving connections over remoc,
-    /// and returns a [`RemoteListener`] that the worker can use directly
-    /// with h3x.
-    async fn listener(&self, request: ListenRequest) -> Result<RemoteListener, ListenError>;
+    /// Root creates the listener, wraps it in an IPC `ListenAdapter`, and
+    /// returns an [`IpcListenClient`] that the worker constructs an
+    /// [`IpcListener`](h3x::ipc::capability::listener::IpcListener) from.
+    async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
 
     /// Request an outbound QUIC connector.
     ///
-    /// Root creates the connector, starts serving connect requests over
-    /// remoc, and returns a [`RemoteConnector`] that the worker can use
-    /// directly with h3x.
-    async fn connector(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError>;
+    /// Root creates the connector, wraps it in an IPC `ConnectAdapter`, and
+    /// returns an [`IpcConnectClient`] that the worker constructs an
+    /// [`IpcConnector`](h3x::ipc::capability::connector::IpcConnector) from.
+    async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError>;
 
     /// Request root to spawn an SSH session child process for the given user.
     ///
-    /// Root forks `pishoo-ssh-session` as root (for PAM), then sends the
-    /// child's pipe FDs to the worker via the seqpacket side-channel
-    /// (SCM_RIGHTS). This RPC returns `Ok(())` only after the FDs have
-    /// been sent — the worker must read them from the seqpacket socket
-    /// immediately after this call returns.
-    async fn spawn_session(&self, username: String) -> Result<(), SpawnSessionError>;
+    /// Root forks `pishoo-ssh-session` as root (for PAM), then queues the
+    /// child's MuxChannel FD to the worker via the root-side MuxChannel's
+    /// [`FdSender`](h3x::ipc::transport::FdSender). The returned `u64` is
+    /// the FD batch ID — the worker passes it to
+    /// [`FdRegistry::wait_fds`](h3x::ipc::transport::FdRegistry::wait_fds)
+    /// to receive the FD.
+    async fn spawn_session(&self, username: String) -> Result<u64, SpawnSessionError>;
 }

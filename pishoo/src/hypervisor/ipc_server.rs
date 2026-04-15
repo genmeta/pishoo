@@ -1,17 +1,21 @@
 //! ControlPlane implementation for the root process (remoc RPC server side).
 //!
-//! Each worker process gets its own [`WorkerControlPlaneRpc`] instance, bound to
+//! Each worker process gets its own [`WorkerControlPlane`] instance, bound to
 //! the worker's PID. When a worker calls `listen()` or `connect()`, this
-//! module creates the actual QUIC resources and returns h3x remoc handles.
+//! module creates the actual QUIC resources and returns IPC capability handles.
 
-#[cfg(feature = "sshd")]
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
-use h3x::remoc::quic::{ConnectServer, ListenServer, RemoteConnector, RemoteListener};
+use h3x::ipc::{
+    quic::{
+        ConnectAdapter, IpcConnectClient, IpcConnectServerShared, IpcListenServerSharedMut,
+        ListenAdapter,
+    },
+    transport::FdSender,
+};
 use nix::unistd::Pid;
-use remoc::prelude::Server;
+use remoc::prelude::{ServerShared, ServerSharedMut};
 use tracing::Instrument;
 
 use crate::{
@@ -27,28 +31,31 @@ use crate::{
 pub struct WorkerControlPlane {
     caller_pid: Pid,
     state: Arc<super::state::RootState>,
-    /// Root-side end of the seqpacket pair for sending FDs to the worker.
-    #[cfg(feature = "sshd")]
-    seqpacket: OwnedFd,
+    /// FdSender from the root-side MuxChannel, used to pass FDs to worker.
+    fd_sender: FdSender,
 }
 
 impl WorkerControlPlane {
-    pub fn new(
-        caller_pid: Pid,
-        state: Arc<super::state::RootState>,
-        #[cfg(feature = "sshd")] seqpacket: OwnedFd,
-    ) -> Self {
+    pub fn new(caller_pid: Pid, state: Arc<super::state::RootState>, fd_sender: FdSender) -> Self {
         Self {
             caller_pid,
             state,
-            #[cfg(feature = "sshd")]
-            seqpacket,
+            fd_sender,
         }
     }
 }
 
+/// The remoc codec used for per-connection MuxChannel remoc links.
+///
+/// Must match the codec used by the worker-side [`IpcListener`] /
+/// [`IpcConnector`].
+type IpcCodec = remoc::codec::Default;
+
 impl crate::ipc::ControlPlane for WorkerControlPlane {
-    async fn listener(&self, request: ListenRequest) -> Result<RemoteListener, ListenError> {
+    async fn listener(
+        &self,
+        request: ListenRequest,
+    ) -> Result<h3x::ipc::quic::IpcListenClient, ListenError> {
         let server_name = request.identity.name().as_full().to_owned();
         let owner = ServiceOwner::Worker(self.caller_pid);
 
@@ -73,13 +80,15 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 }
             })?;
 
-        // Serve the adapter via h3x remoc Listen RTC.
-        let (server, client) = ListenServer::new(adapter, 1);
+        // Wrap adapter in ListenAdapter for IPC capability forwarding.
+        let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
+        let (server, client) =
+            IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
         self.state
             .spawn_worker_task(
                 self.caller_pid,
                 async move {
-                    let _ = server.serve().await;
+                    let _ = server.serve(true).await;
                 }
                 .in_current_span(),
             )
@@ -88,12 +97,12 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         tracing::debug!(
             caller_pid = %self.caller_pid,
             %server_name,
-            "listen request fulfilled"
+            "listen request fulfilled (IPC)"
         );
-        Ok(RemoteListener::new(client))
+        Ok(client)
     }
 
-    async fn connector(&self, request: ConnectorRequest) -> Result<RemoteConnector, ConnectError> {
+    async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError> {
         // Verify caller is a registered worker.
         if !self.state.has_worker(self.caller_pid).await {
             return Err(ConnectError::Internal {
@@ -111,16 +120,16 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 .build(),
             None => builder.without_cert().with_alpns(vec!["h3"]).build(),
         };
-        let quic_client = Arc::new(quic_client);
 
-        // Create a ConnectServer wrapping the per-identity QuicClient.
-        let (server, client) = ConnectServer::new(quic_client, 1);
-
+        // Wrap QuicClient in ConnectAdapter for IPC capability forwarding.
+        let connect_adapter =
+            ConnectAdapter::<_, IpcCodec>::new(Arc::new(quic_client), self.fd_sender.clone());
+        let (server, client) = IpcConnectServerShared::new(Arc::new(connect_adapter), 64);
         self.state
             .spawn_worker_task(
                 self.caller_pid,
                 async move {
-                    let _ = server.serve().await;
+                    let _ = server.serve(true).await;
                 }
                 .in_current_span(),
             )
@@ -128,16 +137,14 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
         tracing::debug!(
             caller_pid = %self.caller_pid,
-            "connect request fulfilled"
+            "connect request fulfilled (IPC)"
         );
-        Ok(RemoteConnector::new(client))
+        Ok(client)
     }
 
-    async fn spawn_session(&self, username: String) -> Result<(), crate::ipc::SpawnSessionError> {
+    async fn spawn_session(&self, username: String) -> Result<u64, crate::ipc::SpawnSessionError> {
         #[cfg(feature = "sshd")]
         {
-            use std::os::fd::AsRawFd;
-
             tracing::info!(
                 caller_pid = %self.caller_pid,
                 %username,
@@ -152,30 +159,18 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     }
                 })?;
 
-            // Send the child's pipe FDs to the worker via SCM_RIGHTS on the
-            // seqpacket socket. This must complete BEFORE we return Ok(()) —
-            // the worker reads FDs immediately after the RPC returns.
-            let sock_fd = self.seqpacket.as_raw_fd();
-            let stdin_fd = transport.stdin.as_raw_fd();
-            let stdout_fd = transport.stdout.as_raw_fd();
-            tokio::task::spawn_blocking(move || {
-                let fds = [stdin_fd, stdout_fd];
-                crate::hypervisor::launcher::send_fds(sock_fd, &fds)
-            })
-            .await
-            .map_err(|_| crate::ipc::SpawnSessionError::SpawnFailed {
-                reason: "blocking task cancelled".to_owned(),
-            })?
-            .map_err(|e| crate::ipc::SpawnSessionError::SpawnFailed {
-                reason: format!("failed to send FDs: {e}"),
-            })?;
-
-            // transport.stdin/stdout OwnedFds drop here, closing root's copies.
-            // The worker now owns the only copies (via SCM_RIGHTS).
-            let child_pid = transport.child_pid;
-            drop(transport);
+            // Send the session child's MuxChannel FD to the worker via the
+            // root-side MuxChannel's FD sender. The worker will pick it up
+            // from FdRegistry using the returned VarInt id.
+            let fd_id = self
+                .fd_sender
+                .queue_fds(vec![transport.mux_fd])
+                .map_err(|e| crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: snafu::Report::from_error(e).to_string(),
+                })?;
 
             // Reap the session child process to avoid zombies.
+            let child_pid = transport.child_pid;
             let state = self.state.clone();
             let caller_pid = self.caller_pid;
             state
@@ -190,9 +185,10 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             tracing::info!(
                 caller_pid = %self.caller_pid,
                 %username,
-                "session spawned, FDs sent to worker"
+                fd_id = %fd_id,
+                "session spawned, FD queued for worker"
             );
-            Ok(())
+            Ok(u64::from(fd_id))
         }
         #[cfg(not(feature = "sshd"))]
         {

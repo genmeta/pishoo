@@ -48,7 +48,7 @@ qevent = { workspace = true }
 
 # --- DNS resolver ---
 gmdns = { workspace = true }
-h3x = { workspace = true, features = ["remoc"] }
+h3x = { workspace = true, features = ["rpc"] }
 
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }
@@ -83,7 +83,7 @@ clap = { workspace = true }
 
 
 [features]
-sshd = ["dep:genmeta-ssh", "remoc/rfn"]
+sshd = ["dep:genmeta-ssh", "genmeta-ssh/server", "remoc/rfn", "h3x/ipc"]
 pam = ["sshd", "genmeta-ssh/pam"]
 stun_traversal = []
 qlog = []

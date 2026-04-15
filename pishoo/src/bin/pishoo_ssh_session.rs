@@ -1,7 +1,8 @@
 //! pishoo-ssh-session: privilege-separated SSH3 session child process.
 //!
 //! Spawned by the gateway (pishoo) for each SSH3 connection.
-//! Communicates with the parent via a remoc channel over stdin/stdout.
+//! Communicates with the parent via a remoc channel over a MuxChannel
+//! socketpair on FD 3.
 //!
 //! Flow:
 //! 1. Send `AuthenticateFn` to parent over remoc
@@ -21,6 +22,7 @@ use genmeta_ssh::{
         privilege::drop_privileges,
     },
 };
+use h3x::ipc::transport::MuxChannel;
 use snafu::Report;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
@@ -37,17 +39,28 @@ async fn main() {
         std::process::id()
     ));
 
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
+    // Recover the MuxChannel FD from FD 3 (dup2'd by root in session_child_exec).
+    let mux_fd = {
+        use std::os::fd::FromRawFd;
+        // SAFETY: the root process dup2'd the socketpair FD to FD 3 in
+        // session_child_exec before execve. FD 3 is guaranteed to be open.
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(3) }
+    };
 
-    // Establish remoc channel over stdin/stdout.
-    let (conn, mut tx, _rx) = remoc::Connect::io::<
+    let mux = MuxChannel::from_fd(mux_fd).expect("failed to create MuxChannel from fd 3");
+    let (sink, stream) = mux.split().expect("failed to split MuxChannel");
+
+    // Capture FD registry before remoc consumes the stream.
+    let fd_registry = stream.fd_registry();
+
+    // Establish remoc channel over MuxSink/MuxStream.
+    let (conn, mut tx, _rx) = remoc::Connect::framed::<
         _,
         _,
         genmeta_ssh::session::AuthenticateFn,
         (),
         remoc::codec::Default,
-    >(remoc::Cfg::default(), stdin, stdout)
+    >(remoc::Cfg::default(), sink, stream)
     .await
     .expect("failed to establish remoc channel");
     let conn_handle = AbortOnDropHandle::new(tokio::spawn(
@@ -116,15 +129,38 @@ async fn main() {
                     );
                 }
 
-                let control_reader = bootstrap.control_reader.into_box_reader();
-                let control_writer = bootstrap.control_writer.into_box_writer();
+                // Resolve control stream from FD registry.
+                let fds = fd_registry
+                    .wait_fds(bootstrap.control_fd_id)
+                    .await
+                    .map_err(|e| SessionRunError::ConversationBuild {
+                        reason: Report::from_error(e).to_string(),
+                    })?;
+                let ctrl_fd =
+                    fds.into_iter()
+                        .next()
+                        .ok_or_else(|| SessionRunError::ConversationBuild {
+                            reason: "expected 1 FD for control stream, got 0".into(),
+                        })?;
+                let ctrl_unix =
+                    tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(ctrl_fd))
+                        .map_err(|e| SessionRunError::ConversationBuild {
+                            reason: format!("failed to convert control FD to tokio stream: {e}"),
+                        })?;
+                let (control_reader, control_writer) = ctrl_unix.into_split();
+
+                // Create IPC manage stream handle.
+                let manage_stream = genmeta_ssh::conversation::ipc::IpcManageStreamHandle::new(
+                    bootstrap.manage_stream,
+                    fd_registry,
+                );
 
                 let conversation = Arc::new(Conversation::new(
                     bootstrap.conversation_id,
                     bootstrap.peer_version,
                     control_reader,
                     control_writer,
-                    bootstrap.manage_stream,
+                    manage_stream,
                 ));
 
                 let config = SessionConfig {

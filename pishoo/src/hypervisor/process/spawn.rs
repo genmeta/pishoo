@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
+use h3x::ipc::transport::MuxChannel;
 use remoc::prelude::ServerShared;
 use snafu::{ResultExt, Snafu};
 use tracing::Instrument;
 
 use crate::{
     config::ResolvedWorkerTarget,
-    hypervisor::{rpc_server::WorkerControlPlane, state::RootState},
+    hypervisor::{ipc_server::WorkerControlPlane, state::RootState},
     ipc::{WorkerBootstrap, WorkerHello},
 };
 
@@ -24,9 +25,18 @@ pub enum SpawnWorkerError {
     LaunchWorker {
         source: crate::hypervisor::launcher::LaunchWorkerError,
     },
+    #[snafu(display("failed to create MuxChannel from fd"))]
+    MuxChannelFromFd { source: std::io::Error },
+    #[snafu(display("failed to split MuxChannel"))]
+    MuxChannelSplit {
+        source: h3x::ipc::transport::SplitError,
+    },
     #[snafu(display("failed to establish remoc transport"))]
     ConnectTransport {
-        source: remoc::ConnectError<std::io::Error, std::io::Error>,
+        source: remoc::ConnectError<
+            h3x::ipc::transport::MuxSinkError,
+            h3x::ipc::transport::MuxStreamError,
+        >,
     },
     #[snafu(display("failed to send worker bootstrap"))]
     SendBootstrap {
@@ -38,13 +48,14 @@ pub enum SpawnWorkerError {
     MissingHello,
 }
 
-/// Spawn a worker process with the new ControlPlane protocol.
+/// Spawn a worker process with the new MuxChannel protocol.
 ///
 /// 1. Fork + exec the pishoo-worker binary with privilege drop
-/// 2. Establish remoc connection over stdin/stdout pipes
-/// 3. Register the worker early so background tasks can be tracked
-/// 4. Create a per-worker ControlPlane RPC server
-/// 5. Send bootstrap (with ControlPlane client) → receive hello
+/// 2. Establish MuxChannel over SOCK_STREAM socketpair
+/// 3. Split into MuxSink/MuxStream, establish remoc connection
+/// 4. Register the worker early so background tasks can be tracked
+/// 5. Create a per-worker ControlPlane RPC server (with FdSender for FD passing)
+/// 6. Send bootstrap (with ControlPlane client) → receive hello
 pub async fn spawn_worker(
     worker_bin: &std::path::Path,
     target: &ResolvedWorkerTarget,
@@ -59,14 +70,23 @@ pub async fn spawn_worker(
     )
     .context(spawn_worker_error::LaunchWorkerSnafu)?;
     let pid = launched.handle.pid();
-    let transport = launched.transport;
 
-    // Establish remoc connection over stdin/stdout pipes.
+    // Establish MuxChannel over the socketpair FD.
+    let mux =
+        MuxChannel::from_fd(launched.mux_fd).context(spawn_worker_error::MuxChannelFromFdSnafu)?;
+    let (sink, stream) = mux
+        .split()
+        .context(spawn_worker_error::MuxChannelSplitSnafu)?;
+
+    // Keep FdSender for later use in ControlPlane (listener/connector/session FD passing).
+    let fd_sender = sink.fd_sender();
+
+    // Establish remoc connection over MuxSink/MuxStream.
     let (conn, mut base_tx, mut base_rx): (
         _,
         remoc::rch::base::Sender<WorkerBootstrap>,
         remoc::rch::base::Receiver<WorkerHello>,
-    ) = remoc::Connect::io(remoc::Cfg::default(), transport.stdout, transport.stdin)
+    ) = remoc::Connect::framed(remoc::Cfg::default(), sink, stream)
         .await
         .context(spawn_worker_error::ConnectTransportSnafu)?;
 
@@ -82,13 +102,8 @@ pub async fn spawn_worker(
         })
         .await;
 
-    // Create per-worker ControlPlane RPC server.
-    let rpc_impl = WorkerControlPlane::new(
-        pid,
-        state.clone(),
-        #[cfg(feature = "sshd")]
-        launched.seqpacket,
-    );
+    // Create per-worker ControlPlane RPC server with FdSender for FD passing.
+    let rpc_impl = WorkerControlPlane::new(pid, state.clone(), fd_sender);
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);

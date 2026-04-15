@@ -27,7 +27,7 @@ dhttp-home = { workspace = true }
 
 # --- QUIC & HTTP/3 ---
 dquic = { workspace = true }
-h3x = { workspace = true, features = ["remoc"] }
+h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 
@@ -75,7 +75,13 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 
 [features]
 default = ["sqlx-sqlite"]
-sshd = ["gateway/sshd", "dep:genmeta-ssh", "nix/socket", "nix/uio"]
+sshd = [
+    "gateway/sshd",
+    "dep:genmeta-ssh",
+    "genmeta-ssh/server",
+    "nix/socket",
+    "nix/uio",
+]
 pam = ["sshd", "genmeta-ssh/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]

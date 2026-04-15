@@ -4,6 +4,8 @@
 //! as workers, but without any IPC — operations go directly to RootState.
 
 #[cfg(feature = "sshd")]
+use std::os::fd::AsRawFd;
+#[cfg(feature = "sshd")]
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -43,16 +45,10 @@ pub enum LocalConnectError {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum LocalSpawnSessionError {
+    #[snafu(display("failed to create socketpair"))]
+    CreateSocketpair { source: std::io::Error },
     #[snafu(display("failed to spawn session process"))]
     Spawn { source: std::io::Error },
-    #[snafu(display("failed to take child stdin"))]
-    TakeStdin,
-    #[snafu(display("failed to take child stdout"))]
-    TakeStdout,
-    #[snafu(display("failed to convert child stdin to owned fd"))]
-    ConvertStdinFd { source: std::io::Error },
-    #[snafu(display("failed to convert child stdout to owned fd"))]
-    ConvertStdoutFd { source: std::io::Error },
 }
 
 #[cfg(feature = "sshd")]
@@ -64,28 +60,54 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         username: &str,
     ) -> Result<gateway::control_plane::SessionTransport, Self::Error> {
         use local_spawn_session_error::*;
-        use snafu::{OptionExt, ResultExt};
+        use snafu::ResultExt;
 
         let session_binary = crate::hypervisor::launcher::session_binary_path();
 
-        let mut child = tokio::process::Command::new(&session_binary)
-            .env("PISHOO_USER", username)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context(SpawnSnafu)?;
+        // Create a Unix socketpair for MuxChannel transport.
+        let (parent_sock, child_sock) =
+            std::os::unix::net::UnixStream::pair().context(CreateSocketpairSnafu)?;
 
-        let child_stdin = child.stdin.take().context(TakeStdinSnafu)?;
-        let child_stdout = child.stdout.take().context(TakeStdoutSnafu)?;
+        let child_raw_fd = child_sock.as_raw_fd();
 
-        let stdin_fd = child_stdin.into_owned_fd().context(ConvertStdinFdSnafu)?;
-        let stdout_fd = child_stdout.into_owned_fd().context(ConvertStdoutFdSnafu)?;
+        let mut cmd = tokio::process::Command::new(&session_binary);
+        cmd.env("PISHOO_USER", username)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
 
-        Ok(gateway::control_plane::SessionTransport {
-            stdin: stdin_fd,
-            stdout: stdout_fd,
-        })
+        // In pre_exec: dup2 the child socketpair end to FD 3, then close
+        // all FDs >= 4 (same as launcher.rs session_child_exec).
+        unsafe {
+            cmd.pre_exec(move || {
+                use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+
+                if child_raw_fd != 3 {
+                    let old_fd = BorrowedFd::borrow_raw(child_raw_fd);
+                    let mut fd3 = OwnedFd::from_raw_fd(3);
+                    nix::unistd::dup2(old_fd, &mut fd3)?;
+                    std::mem::forget(fd3);
+                }
+                // Close FDs from 4 upwards.
+                let max_fd = nix::unistd::sysconf(nix::unistd::SysconfVar::OPEN_MAX)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(1024) as i32;
+                for fd in 4..max_fd {
+                    let _ = nix::unistd::close(fd);
+                }
+                Ok(())
+            });
+        }
+
+        let _child = cmd.spawn().context(SpawnSnafu)?;
+
+        // Drop the child end in the parent; the child has it via FD 3.
+        drop(child_sock);
+
+        let parent_fd = std::os::fd::OwnedFd::from(parent_sock);
+
+        Ok(gateway::control_plane::SessionTransport { mux_fd: parent_fd })
     }
 }
 
