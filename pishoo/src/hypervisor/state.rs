@@ -89,6 +89,8 @@ pub enum ServerEntry {
         _accept_task: AbortOnDropHandle<()>,
         /// Per-server DNS publish task, aborted when the entry is retired.
         publish_task: Option<AbortOnDropHandle<()>>,
+        /// Per-server stapled OCSP refresh task, aborted when the entry is retired.
+        stapling_task: Option<AbortOnDropHandle<()>>,
     },
     /// Name is poisoned due to a cross-owner conflict.
     /// Only cleared by `scrub_conflicts()` during reload.

@@ -9,6 +9,7 @@ use h3x::{
     },
 };
 use http::Uri;
+use rustls::client::WebPkiServerVerifier;
 
 use super::H3_DNS_SERVER;
 use crate::parse::{Node, ServerIdentity, Value, optional_server_identity, server_identity};
@@ -53,7 +54,7 @@ impl DnsResolver {
     pub(crate) fn create_h3_client_no_auth(&self) -> Client<Arc<QuicClient>> {
         let root_store = crate::common::root_cert();
         Client::<Arc<QuicClient>>::builder()
-            .with_root_certificates(root_store)
+            .with_dangerous_server_cert_verifier(crate::ocsp::ocsp_server_cert_verifier(root_store))
             .without_identity()
             .expect("failed to create client builder")
             .build()
@@ -62,8 +63,11 @@ impl DnsResolver {
     pub(crate) fn create_h3_client(&self, config: &ServerIdentity) -> Client<Arc<QuicClient>> {
         let root_store = crate::common::root_cert();
 
-        let client_builder =
-            Client::<Arc<QuicClient>>::builder().with_root_certificates(root_store.clone());
+        let client_builder = Client::<Arc<QuicClient>>::builder().with_webpki_verifier(
+            WebPkiServerVerifier::builder(root_store.clone())
+                .build()
+                .expect("webpki verifier must build from gateway root store"),
+        );
 
         let (cert_path, key_path, name) =
             (&config.cert_path, &config.key_path, &config.server_name);

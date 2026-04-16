@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    time::Duration,
     sync::{Arc, Weak},
 };
 
@@ -10,10 +11,11 @@ use h3x::{
     dquic::{prelude::BindUri, qinterface::BindInterface},
     endpoint::identity::NamedIdentity,
 };
+use rustls::pki_types::{CertificateDer, UnixTime};
 use snafu::IntoError;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
-use tracing::Instrument;
+use tracing::{Instrument, info, warn};
 
 use super::{RegisterError, RootState, ServerEntry, ServiceOwner, register_error};
 use crate::listen::PerServerListener;
@@ -170,6 +172,12 @@ impl RootState {
                     provider,
                 ))
             };
+            let stapling_task = spawn_server_stapling_refresh_task(
+                server_name.clone(),
+                request.identity.certs().to_vec(),
+                self.listeners.clone(),
+                shutdown_token.clone(),
+            );
 
             registry.entries.insert(
                 server_name.clone(),
@@ -181,6 +189,7 @@ impl RootState {
                     bound_ifaces,
                     _accept_task: accept_task,
                     publish_task,
+                    stapling_task,
                 },
             );
             drop(registry);
@@ -470,4 +479,71 @@ fn bind_uri_provider(state: Weak<RootState>, server_name: String) -> gateway::dn
             _ => Vec::new(),
         }
     })
+}
+
+fn spawn_server_stapling_refresh_task(
+    server_name: String,
+    cert_chain: Vec<CertificateDer<'static>>,
+    listeners: Arc<h3x::dquic::prelude::QuicListeners>,
+    shutdown_token: CancellationToken,
+) -> Option<AbortOnDropHandle<()>> {
+    if cert_chain.len() < 2 {
+        warn!(
+            %server_name,
+            "skipping stapled OCSP refresh because server certificate chain has no issuer"
+        );
+        return None;
+    }
+
+    Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut delay = Duration::ZERO;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                _ = tokio::time::sleep(delay) => {}
+            }
+
+            match gateway::ocsp::fetch_stapled_ocsp(&cert_chain).await {
+                Ok(stapled) => {
+                    if let Err(error) =
+                        listeners.update_server_ocsp(&server_name, Some(stapled.response_der))
+                    {
+                        warn!(
+                            %server_name,
+                            error = %error,
+                            "failed to update stapled OCSP response"
+                        );
+                        break;
+                    }
+
+                    delay = gateway::ocsp::next_stapling_refresh_delay(
+                        stapled.valid_until,
+                        unix_time_now(),
+                    );
+                    info!(
+                        %server_name,
+                        valid_until = stapled.valid_until.as_secs(),
+                        next_refresh_in_secs = delay.as_secs(),
+                        "refreshed stapled OCSP response for server"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        %server_name,
+                        error = %error,
+                        "failed to refresh stapled OCSP response"
+                    );
+                    delay = gateway::ocsp::OCSP_REFRESH_RETRY_DELAY;
+                }
+            }
+        }
+    })))
+}
+
+fn unix_time_now() -> UnixTime {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    UnixTime::since_unix_epoch(now)
 }

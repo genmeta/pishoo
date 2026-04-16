@@ -44,11 +44,22 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "system-proxy",
+    "gzip",
+    "json",
+    "zstd",
+    "rustls-no-provider",
+] }
 firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
+dquic = { path = "../gm-quic/dquic" }
+qevent = { path = "../gm-quic/qevent" }
+h3x = { path = "../h3x" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -63,9 +74,7 @@ remoc = { version = "0.18", default-features = false, features = [
 genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", rev = "a32d6bec27dd3012f5914a9efb83d66cf11c172a" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", rev = "3722e28b6c8bb5370517736ec760035ecf980a4f", features = [
-    "h3x-resolver",
-] }
+gmdns = { path = "../gmdns", features = ["h3x-resolver"] }
 
 # --- Security & TLS ---
 getrandom = "0.3.1"
@@ -113,8 +122,22 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# Pin all h3x references (gateway + transitive via gmdns/genmeta-ssh) to a
-# single revision. Using the ssh URL as the patch target differentiates it
-# from the https URL in direct deps, which is required by cargo.
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { git = "ssh://git@github.com/genmeta/h3x.git", rev = "6133d31651b31d4b03956946c370b776c203f4c3" }
+[patch."ssh://git@github.com/genmeta/dquic.git"]
+qmacro = { path = "../gm-quic/qmacro" }
+qbase = { path = "../gm-quic/qbase" }
+qevent = { path = "../gm-quic/qevent" }
+qrecovery = { path = "../gm-quic/qrecovery" }
+qcongestion = { path = "../gm-quic/qcongestion" }
+qudp = { path = "../gm-quic/qudp" }
+qinterface = { path = "../gm-quic/qinterface" }
+qdatagram = { path = "../gm-quic/qdatagram" }
+qconnection = { path = "../gm-quic/qconnection" }
+dquic = { path = "../gm-quic/dquic" }
+qtraversal = { path = "../gm-quic/qtraversal" }
+qresolve = { path = "../gm-quic/qresolve" }
+
+[patch."ssh://git@github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x" }
+
+[patch."ssh://git@github.com/genmeta/gmdns.git"]
+gmdns = { path = "../gmdns" }

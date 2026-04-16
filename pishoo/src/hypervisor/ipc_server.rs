@@ -16,6 +16,7 @@ use h3x::ipc::{
 };
 use nix::unistd::Pid;
 use remoc::prelude::{ServerShared, ServerSharedMut};
+use rustls::client::WebPkiServerVerifier;
 use tracing::Instrument;
 
 use super::state::RootState;
@@ -113,7 +114,11 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
         // Build a QuicClient with the requested client identity (if any).
         let root_store = crate::tls::root_cert_store();
-        let builder = h3x::dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
+        let builder = dquic::prelude::QuicClient::builder().with_webpki_verifier(
+            WebPkiServerVerifier::builder(root_store)
+                .build()
+                .expect("webpki verifier must build from pishoo root store"),
+        );
         let quic_client = match request.identity {
             Some(identity) => builder
                 .with_cert(identity.certs().to_vec(), identity.key().clone_key())

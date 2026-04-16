@@ -16,7 +16,9 @@ use h3x::{
     },
     endpoint::Network,
 };
-use rustls::{SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
+use rustls::{
+    SignatureScheme, client::WebPkiServerVerifier, pki_types::PrivateKeyDer, sign::SigningKey,
+};
 use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
@@ -439,7 +441,11 @@ fn create_h3_client_from_identity(
 ) -> h3x::client::Client<Arc<h3x::dquic::prelude::QuicClient>> {
     let root_store = crate::common::root_cert();
     let builder = h3x::client::Client::<Arc<h3x::dquic::prelude::QuicClient>>::builder()
-        .with_root_certificates(root_store);
+        .with_webpki_verifier(
+            WebPkiServerVerifier::builder(root_store)
+                .build()
+                .expect("webpki verifier must build from gateway root store"),
+        );
 
     builder
         .with_identity(
