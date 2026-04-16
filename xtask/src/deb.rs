@@ -12,13 +12,17 @@ use tracing::{Instrument, info, info_span};
 
 use crate::{DebTarget, Feature, package_version, target_dir};
 
+/// Toolchain install paths inside the Docker image (globally readable).
+const CARGO_HOME: &str = "/opt/cargo";
+const RUSTUP_HOME: &str = "/opt/rustup";
+
 const CARGO_NAME: &str = "pishoo";
 
 /// Base Docker image for cross-compilation.
 const BASE_IMAGE: &str = "debian:bookworm";
 
 /// Image tag prefix for pishoo deb builds.
-const IMAGE_TAG_PREFIX: &str = "pishoo-deb";
+const IMAGE_TAG_PREFIX: &str = "pishoo-deb-v2";
 
 /// Relative path from workspace root to the debian packaging source files.
 const DEBIAN_PKG_DIR: &str = "xtask/deb";
@@ -100,7 +104,8 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
         .await
         .whatever_context("failed to start setup container")?;
 
-    // Install Rust toolchain, Zig, cargo-zigbuild, and cross-compilation libs
+    // Install Rust toolchain, Zig, cargo-zigbuild, and cross-compilation libs.
+    // Toolchain is installed to /opt/cargo + /opt/rustup so any uid can use it.
     let setup_script = format!(
         r#"set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -108,10 +113,12 @@ apt-get update -qq
 apt-get install --assume-yes -qq \
     ca-certificates curl build-essential pkg-config libclang-dev wget
 
-# install rust
+# install rust into globally readable paths
+export CARGO_HOME={CARGO_HOME}
+export RUSTUP_HOME={RUSTUP_HOME}
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- --default-toolchain nightly --profile minimal -y
-source /root/.cargo/env
+export PATH="{CARGO_HOME}/bin:$PATH"
 rustup target add {triple}
 
 # install zig
@@ -127,9 +134,12 @@ cargo install cargo-zigbuild
 dpkg --add-architecture {deb}
 apt-get update -qq
 apt-get install --assume-yes -qq libc-dev:{deb} libpam0g-dev:{deb} dpkg-dev debhelper fakeroot
+
+# make toolchain readable by any user
+chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME}
 "#
     );
-    exec_in_container(docker, &container.id, &["bash", "-c", &setup_script]).await?;
+    exec_in_container(docker, &container.id, &["bash", "-c", &setup_script], None).await?;
 
     // Commit
     let repo = tag.split(':').next().unwrap_or(&tag);
@@ -159,11 +169,22 @@ apt-get install --assume-yes -qq libc-dev:{deb} libpam0g-dev:{deb} dpkg-dev debh
     Ok(tag)
 }
 
+/// Get the uid:gid of the workspace directory on the host.
+fn host_uid_gid() -> Result<String, Whatever> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::env::current_dir()
+        .and_then(|d| d.metadata())
+        .whatever_context("failed to stat workspace directory")?;
+    Ok(format!("{}:{}", meta.uid(), meta.gid()))
+}
+
 /// Execute a command inside a container and stream output to stderr.
+/// When `user` is `Some("uid:gid")`, the command runs as that user.
 async fn exec_in_container(
     docker: &Docker,
     container_id: &str,
     cmd: &[&str],
+    user: Option<&str>,
 ) -> Result<(), Whatever> {
     let exec = docker
         .create_exec(
@@ -172,6 +193,7 @@ async fn exec_in_container(
                 cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
+                user: user.map(|u| u.to_string()),
                 ..Default::default()
             },
         )
@@ -203,7 +225,7 @@ async fn exec_in_container(
     Ok(())
 }
 
-/// Bind mounts for the host cargo git/registry cache (read-only).
+/// Bind mounts for the host cargo git/registry cache.
 fn cargo_cache_mounts() -> Vec<Mount> {
     let cargo_home = std::env::var("CARGO_HOME")
         .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
@@ -212,10 +234,9 @@ fn cargo_cache_mounts() -> Vec<Mount> {
         let host_path = format!("{cargo_home}/{subdir}");
         if std::path::Path::new(&host_path).is_dir() {
             mounts.push(Mount {
-                target: Some(format!("/root/.cargo/{subdir}")),
+                target: Some(format!("{CARGO_HOME}/{subdir}")),
                 source: Some(host_path),
                 typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
                 ..Default::default()
             });
         }
@@ -286,10 +307,12 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install --assume-yes -qq debhelper fakeroot
 "#;
-    exec_in_container(docker, &container.id, &["bash", "-c", setup_script]).await?;
+    exec_in_container(docker, &container.id, &["bash", "-c", setup_script], None).await?;
 
     // Prepare debian source tree under target/common/deb/src/ and run dpkg-buildpackage.
     // Products (.deb etc.) land in target/common/deb/ (one level above src/).
+    // Runs as host uid:gid so files in target/ are owned by the host user.
+    let user = host_uid_gid()?;
     let build_script = format!(
         r#"set -e
 SRC=/workspace/target/common/deb/src
@@ -301,7 +324,7 @@ cd "$SRC"
 dpkg-buildpackage -A -uc -us -d
 "#
     );
-    exec_in_container(docker, &container.id, &["bash", "-c", &build_script]).await?;
+    exec_in_container(docker, &container.id, &["bash", "-c", &build_script], Some(&user)).await?;
 
     docker
         .remove_container(
@@ -471,17 +494,27 @@ async fn build_one(
         format!("export CARGO_FEATURES={cargo_features} && ")
     };
 
+    // Install cross-compilation binutils (needs root).
+    let install_binutils = format!(
+        "apt-get install -y -qq binutils-{gnu} 2>/dev/null || true"
+    );
+    exec_in_container(docker, &container.id, &["bash", "-c", &install_binutils], None).await?;
+
     // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary).
     // -a{arch} sets the host architecture for cross-compilation.
     // Prepare debian source tree under target/{triple}/release/deb/src/ so that
     // all temp files and products stay inside target/ (bind-mounted, gitignored).
+    // Runs as host uid:gid so files in target/ are owned by the host user.
+    let user = host_uid_gid()?;
     let build_script = format!(
         r#"set -e
-source /root/.cargo/env
+export HOME=/tmp
+export PATH="{CARGO_HOME}/bin:/usr/local/zig:$PATH"
+export RUSTUP_HOME={RUSTUP_HOME}
+export CARGO_HOME={CARGO_HOME}
 export TRIPLE={triple}
 export DEB_HOST_MULTIARCH={gnu}
 {root_ca_env}{worker_env}{ssh_session_env}{cargo_features_env}
-apt-get install -y -qq binutils-{gnu} 2>/dev/null || true
 SRC=/workspace/target/{triple}/release/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
@@ -493,7 +526,7 @@ dpkg-buildpackage -B -uc -us -d -a{arch}
     );
 
     info!(triple, "starting dpkg-buildpackage inside container");
-    exec_in_container(docker, &container.id, &["bash", "-c", &build_script]).await?;
+    exec_in_container(docker, &container.id, &["bash", "-c", &build_script], Some(&user)).await?;
     info!(triple, "dpkg-buildpackage finished inside container");
 
     docker
