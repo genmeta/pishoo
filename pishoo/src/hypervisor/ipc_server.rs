@@ -164,7 +164,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             // from FdRegistry using the returned VarInt id.
             let fd_id = self
                 .fd_sender
-                .queue_fds(vec![transport.mux_fd])
+                .queue_fds(vec![transport.mux_fd].into())
                 .map_err(|e| crate::ipc::SpawnSessionError::SpawnFailed {
                     reason: snafu::Report::from_error(e).to_string(),
                 })?;

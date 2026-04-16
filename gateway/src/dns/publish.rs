@@ -443,34 +443,35 @@ pub fn spawn_server_publish_task(
 ) -> AbortOnDropHandle<()> {
     AbortOnDropHandle::new(tokio::spawn(
         async move {
-            let new_publish = || {
-                let server_name = server_name.clone();
-                let config = config.clone();
-                let listeners = listeners.clone();
-                AbortOnDropHandle::new(tokio::spawn(
-                    async move {
-                        time::sleep(Duration::from_millis(50)).await;
-                        publish_server(&server_name, &config, &listeners).await;
-                    }
-                    .in_current_span(),
-                ))
-            };
-
-            let mut current = new_publish();
             let mut interval = interval(DNS_PUBLISH_INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut observer = Locations::global().subscribe();
 
+            // Initial publish after a short debounce.
+            time::sleep(Duration::from_millis(50)).await;
+            publish_server(&server_name, &config, &listeners).await;
+
             loop {
+                // Wait for either a location change or the next interval tick.
                 tokio::select! {
+                    biased;
+                    _ = interval.tick() => {}
                     _ = observer.recv() => {
-                        current.abort();
-                    }
-                    _ = interval.tick() => {
-                        current.abort();
+                        // Drain any additional pending location events to avoid
+                        // rapid restarts when many events arrive in a burst.
+                        while observer.try_recv().is_ok() {}
+                        // Reset the interval so we wait at least one full period
+                        // after the last change before publishing again.
+                        interval.reset();
                     }
                 }
-                current = new_publish();
+
+                // Small debounce to coalesce rapid-fire events.
+                time::sleep(Duration::from_millis(50)).await;
+                // Drain any events that arrived during the sleep.
+                while observer.try_recv().is_ok() {}
+
+                publish_server(&server_name, &config, &listeners).await;
             }
         }
         .in_current_span(),
@@ -480,6 +481,7 @@ pub fn spawn_server_publish_task(
 /// Publish endpoints for a single server (mDNS + DNS resolvers).
 async fn publish_server(server_name: &str, config: &PublishConfig, listeners: &QuicListeners) {
     let Some(server) = listeners.get_server(server_name) else {
+        tracing::warn!(server_name, "publish_server: server not found in listeners");
         return;
     };
     let ifaces = server.bind_interfaces();

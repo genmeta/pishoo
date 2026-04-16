@@ -114,3 +114,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[patch."ssh://git@github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x" }

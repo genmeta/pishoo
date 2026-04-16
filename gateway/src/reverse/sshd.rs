@@ -236,7 +236,7 @@ async fn run_ssh_session(
     let (ctrl_srv, ctrl_cli) =
         std::os::unix::net::UnixStream::pair().context(ControlSocketpairSnafu)?;
     let ctrl_fd_id = fd_sender
-        .queue_fds(vec![ctrl_cli.into()])
+        .queue_fds(vec![ctrl_cli.into()].into())
         .context(QueueControlFdSnafu)?;
     let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
     let (ctrl_read, ctrl_write) = ctrl_srv.into_split();

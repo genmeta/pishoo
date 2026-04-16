@@ -392,6 +392,21 @@ async fn build_one(
         typ: Some(MountTypeEnum::BIND),
         ..Default::default()
     }];
+
+    // Mount sibling h3x directory if it exists (for [patch] overrides).
+    if let Some(parent) = workspace_dir.parent() {
+        let h3x_dir = parent.join("h3x");
+        if h3x_dir.is_dir() {
+            mounts.push(Mount {
+                target: Some("/h3x".into()),
+                source: Some(h3x_dir.to_string_lossy().into_owned()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+    }
+
     mounts.extend(cargo_cache_mounts());
 
     // Forward ROOT_CA into the container if set on the host.
