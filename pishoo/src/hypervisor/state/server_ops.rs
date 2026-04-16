@@ -221,7 +221,7 @@ impl RootState {
     ///
     /// Used by the central accept loop to route connections to the correct
     /// per-server adapter. Returns `None` for `Conflicted` entries.
-    pub async fn get_conn_sender(
+    pub async fn route_connection(
         &self,
         server_name: &str,
     ) -> Option<mpsc::Sender<dquic::prelude::Connection>> {

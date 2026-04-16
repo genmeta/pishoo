@@ -1,11 +1,12 @@
 //! Shared service logic for both worker processes and root-local services.
 //!
-//! The [`run_service`] function is generic over [`ControlPlane`], allowing
-//! the exact same code to run in a worker process (using
-//! `RemoteControlPlane`) or directly inside the root process (using
-//! `LocalControlPlane`).
+//! [`setup_service`] registers QUIC listeners via the control plane (reusing
+//! existing ones when possible). [`run_service`] builds the HTTP/3 service
+//! stack and runs accept loops. When cancelled, listeners are recovered into
+//! the [`PreparedServer`]s so they can be reused on the next reload without
+//! tearing down underlying QUIC bindings.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::middleware::from_fn_with_state;
 use gateway::{
@@ -16,14 +17,18 @@ use gateway::{
         access_log::{AccessLogState, access_log},
         body_adapter::BodyAdapterLayer,
         log::AccessLogWriter,
-        router::NginxRouter,
+        router::{NginxRouter, RouterState},
     },
 };
 use h3x::{
-    connection::ConnectionBuilder, dhttp::settings::Settings, hyper::server::TowerService, quic,
+    connection::ConnectionBuilder,
+    dhttp::settings::Settings,
+    hyper::server::TowerService,
+    quic::{self, Listen as _},
     server::Servers,
 };
 use snafu::Report;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument;
@@ -51,83 +56,148 @@ pub struct ServiceConfig {
     pub access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
 }
 
-/// Run the service loop: register listeners and connectors via the control
-/// plane, then serve HTTP/3 reverse proxy and (optionally) forward proxy.
+/// A server whose QUIC listener has been registered and is ready to run.
 ///
-/// This is the unified entry point for both worker processes and root-local
-/// services. The `P` type parameter determines whether requests go over
-/// remoc RPC (worker) or directly in-process (root-local).
-///
-/// A closure that spawns one server's accept loop onto a [`JoinSet`].
-type ServerSpawner = Box<dyn FnOnce(&mut tokio::task::JoinSet<()>, CancellationToken) + Send>;
-
-/// Handle returned by [`setup_service`], containing server task spawners
-/// ready to run.
-///
-/// Each server is represented as a named closure that, when called, spawns
-/// the accept loop onto a [`JoinSet`].
-pub struct ServiceHandle {
-    spawners: Vec<ServerSpawner>,
-    server_count: usize,
+/// Holds the listener and associated metadata. The listener is temporarily
+/// taken during [`run_service`] and recovered on cancellation so it can be
+/// reused across reloads.
+pub struct PreparedServer<L: quic::Listen> {
+    /// Server name (SNI).
+    pub server_name: String,
+    /// Original listen request, retained for diffing on reload.
+    pub listen_request: ListenRequest,
+    /// The QUIC listener. `Some` when idle, `None` while `run_service` is active.
+    pub listener: Option<L>,
+    /// Parsed nginx-style server configuration node.
+    pub server_node: Arc<Node>,
+    /// Access log directory (or `None` to disable).
+    pub access_log_dir: Option<PathBuf>,
 }
 
-/// Set up a service: register all listeners via the control plane and build
-/// the HTTP/3 service stack for each server. Does **not** start the accept
-/// loop — call [`run_service`] with the returned handle to begin serving.
+/// Register QUIC listeners for all servers in the config.
 ///
-/// In dry-run / test mode, callers can drop the handle after setup succeeds
-/// to validate configuration without serving traffic.
+/// Reuses listeners from `existing_listeners` (keyed by server_name) when
+/// available. For servers not in the map, a new listener is requested via
+/// the control plane.
+///
+/// Any listeners remaining in `existing_listeners` after processing all
+/// servers are shut down (they belong to servers removed from the config).
 pub async fn setup_service<P: ControlPlane + 'static>(
-    plane: Arc<P>,
+    plane: &P,
     config: &ServiceConfig,
-) -> Result<ServiceHandle, P::ListenError>
+    mut existing_listeners: HashMap<String, P::Listener>,
+) -> Result<Vec<PreparedServer<P::Listener>>, P::ListenError>
 where
     P::Listener: 'static,
-    <P::Listener as quic::Listen>::Error: Send,
-    <P::Listener as quic::Listen>::Connection: 'static,
-    <<P::Listener as quic::Listen>::Connection as quic::WithLocalAgent>::LocalAgent: Send + Sync,
-    <<P::Listener as quic::Listen>::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
-    P::ListenError: 'static,
 {
-    let mut spawners: Vec<ServerSpawner> = Vec::new();
+    let mut result = Vec::new();
 
     for server_config in &config.servers {
-        let request = ListenRequest {
-            identity: gateway::control_plane::Identity::new(
-                server_config.listen_request.identity.name().clone(),
-                server_config.listen_request.identity.certs().to_vec(),
-                server_config.listen_request.identity.key().clone_key(),
-            ),
-            bind: server_config.listen_request.bind.clone(),
-            dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
+        let server_name = server_config
+            .listen_request
+            .identity
+            .name()
+            .as_full()
+            .to_owned();
+
+        let listener = if let Some(listener) = existing_listeners.remove(&server_name) {
+            tracing::debug!(%server_name, "reusing existing listener");
+            listener
+        } else {
+            let request = ListenRequest {
+                identity: gateway::control_plane::Identity::new(
+                    server_config.listen_request.identity.name().clone(),
+                    server_config.listen_request.identity.certs().to_vec(),
+                    server_config.listen_request.identity.key().clone_key(),
+                ),
+                bind: server_config.listen_request.bind.clone(),
+                dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
+            };
+            let listener = plane.listener(request).await?;
+            tracing::debug!(%server_name, "listener registered");
+            listener
         };
-        let server_name = request.identity.name().as_full().to_owned();
 
-        let listener = plane.listener(request).await?;
+        result.push(PreparedServer {
+            server_name,
+            listen_request: ListenRequest {
+                identity: gateway::control_plane::Identity::new(
+                    server_config.listen_request.identity.name().clone(),
+                    server_config.listen_request.identity.certs().to_vec(),
+                    server_config.listen_request.identity.key().clone_key(),
+                ),
+                bind: server_config.listen_request.bind.clone(),
+                dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
+            },
+            listener: Some(listener),
+            server_node: server_config.server_node.clone(),
+            access_log_dir: server_config.access_log_dir.clone(),
+        });
+    }
 
-        tracing::debug!(%server_name, "listener registered");
+    // Shut down listeners for servers removed from the config.
+    for (name, listener) in existing_listeners {
+        tracing::info!(%name, "shutting down removed server listener");
+        if let Err(error) = listener.shutdown().await {
+            tracing::warn!(
+                %name,
+                error = %Report::from_error(&error),
+                "failed to shut down removed listener"
+            );
+        }
+    }
 
-        // Extract location blocks from this server's config node
-        let locations = match server_config.server_node.get("location") {
+    Ok(result)
+}
+
+/// Run the service accept loop for prepared servers.
+///
+/// Builds the HTTP/3 service stack for each server, then runs accept loops
+/// until `shutdown` is triggered or all servers stop. On return, recovered
+/// listeners are placed back into each [`PreparedServer`]'s `listener` field.
+pub async fn run_service<L>(
+    prepared: &mut [PreparedServer<L>],
+    h3_settings: &Arc<Settings>,
+    access_rules: &Arc<firewall_db::base::matcher::LocationRulesMatcher>,
+    router_state: RouterState,
+    shutdown: CancellationToken,
+) where
+    L: quic::Listen + 'static,
+    L::Error: Send,
+    L::Connection: 'static,
+    <L::Connection as quic::WithLocalAgent>::LocalAgent: Send + Sync,
+    <L::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
+{
+    let server_count = prepared.len();
+
+    if server_count == 0 {
+        tracing::info!(server_count = 0, "worker ready");
+        shutdown.cancelled().await;
+        return;
+    }
+
+    let mut tasks: JoinSet<(String, L)> = JoinSet::new();
+
+    for server in prepared.iter_mut() {
+        let listener = server
+            .listener
+            .take()
+            .expect("listener must be present before run_service");
+        let server_name = server.server_name.clone();
+
+        // Build the service stack: BodyAdapter → AccessLog → AccessControl → NginxRouter
+        let locations = match server.server_node.get("location") {
             Some(Value::Nodes(locations)) => locations.clone(),
             _ => Vec::new(),
         };
 
-        // Build the service stack: BodyAdapter → AccessLog → AccessControl → NginxRouter
-        let nginx_router = NginxRouter::new(
-            locations,
-            gateway::reverse::router::RouterState {
-                #[cfg(feature = "sshd")]
-                session_spawner: plane.clone(),
-            },
-        );
+        let nginx_router = NginxRouter::new(locations, router_state.clone());
         let access_state = AccessControlState {
-            access_rules: config.access_rules.clone(),
+            access_rules: access_rules.clone(),
             server_name: Arc::from(server_name.as_str()),
         };
 
-        // Create per-identity access log writer.
-        let access_log_writer = match &server_config.access_log_dir {
+        let access_log_writer = match &server.access_log_dir {
             Some(dir) => match AccessLogWriter::new(dir.clone()) {
                 Ok(writer) => {
                     tracing::debug!(
@@ -159,7 +229,7 @@ where
             .service(nginx_router);
 
         // Build H3 connection builder with configured settings
-        let builder = ConnectionBuilder::new(config.h3_settings.clone());
+        let builder = ConnectionBuilder::new(h3_settings.clone());
         #[cfg(feature = "sshd")]
         let builder = builder.protocol(genmeta_ssh::protocol::Ssh3ProtocolFactory);
 
@@ -169,61 +239,98 @@ where
             .builder(Arc::new(builder))
             .build();
 
-        spawners.push(Box::new(
-            move |tasks: &mut tokio::task::JoinSet<()>, shutdown: CancellationToken| {
-                let server_shutdown = shutdown;
-                tasks.spawn(
-                    async move {
-                        tokio::select! {
-                            error = servers.run() => {
-                                tracing::warn!(
-                                    %server_name,
-                                    error = %Report::from_error(&error),
-                                    "server stopped"
-                                );
-                            }
-                            () = server_shutdown.cancelled() => {
-                                if let Err(error) = servers.shutdown().await {
-                                    tracing::warn!(
-                                        %server_name,
-                                        error = %Report::from_error(&error),
-                                        "server shutdown failed"
-                                    );
-                                }
-                            }
-                        }
+        let cancel = shutdown.clone();
+        tasks.spawn(
+            async move {
+                tokio::select! {
+                    error = servers.run() => {
+                        tracing::warn!(
+                            %server_name,
+                            error = %Report::from_error(&error),
+                            "server stopped"
+                        );
                     }
-                    .in_current_span(),
-                );
-            },
-        ));
+                    () = cancel.cancelled() => {
+                        // Intentionally not calling servers.shutdown() —
+                        // preserve the underlying QUIC listener bindings.
+                    }
+                }
+                let (_, listener, _, _) = servers.into_parts();
+                (server_name, listener)
+            }
+            .in_current_span(),
+        );
     }
 
-    let server_count = config.servers.len();
-    Ok(ServiceHandle {
-        spawners,
-        server_count,
-    })
+    tracing::info!(server_count, "worker ready");
+
+    // Wait for all server tasks to complete.
+    let mut recovered: HashMap<String, L> = HashMap::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((name, listener)) => {
+                recovered.insert(name, listener);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "server task panicked");
+            }
+        }
+    }
+
+    // Put recovered listeners back into their PreparedServer slots.
+    for server in prepared.iter_mut() {
+        if let Some(listener) = recovered.remove(&server.server_name) {
+            server.listener = Some(listener);
+        }
+    }
 }
 
-/// Run the service accept loop for a previously set up service handle.
-///
-/// This consumes the handle and runs until `shutdown` is triggered or all
-/// server tasks complete.
-pub async fn run_service(handle: ServiceHandle, shutdown: CancellationToken) {
-    let mut tasks = tokio::task::JoinSet::new();
+/// Collect reusable listeners from prepared servers, shutting down those
+/// whose network config (listen request) has changed.
+pub async fn collect_reusable_listeners<L: quic::Listen>(
+    old_prepared: Vec<PreparedServer<L>>,
+    new_config: &ServiceConfig,
+) -> HashMap<String, L> {
+    let new_requests: HashMap<&str, &ListenRequest> = new_config
+        .servers
+        .iter()
+        .map(|sc| {
+            let name = sc.listen_request.identity.name().as_full();
+            (name, &sc.listen_request)
+        })
+        .collect();
 
-    for spawner in handle.spawners {
-        spawner(&mut tasks, shutdown.clone());
+    let mut reusable = HashMap::new();
+
+    for mut server in old_prepared {
+        let Some(listener) = server.listener.take() else {
+            continue;
+        };
+
+        let should_reuse = new_requests
+            .get(server.server_name.as_str())
+            .is_some_and(|new_req| **new_req == server.listen_request);
+
+        if should_reuse {
+            tracing::debug!(
+                server_name = %server.server_name,
+                "listener eligible for reuse"
+            );
+            reusable.insert(server.server_name, listener);
+        } else {
+            tracing::info!(
+                server_name = %server.server_name,
+                "shutting down changed/removed server listener"
+            );
+            if let Err(error) = listener.shutdown().await {
+                tracing::warn!(
+                    server_name = %server.server_name,
+                    error = %Report::from_error(&error),
+                    "failed to shut down listener"
+                );
+            }
+        }
     }
 
-    tracing::info!(server_count = handle.server_count, "worker ready");
-
-    if handle.server_count == 0 {
-        // No servers to run — wait for shutdown rather than returning immediately.
-        shutdown.cancelled().await;
-    } else {
-        // Wait for all server tasks (they run until shutdown).
-        while tasks.join_next().await.is_some() {}
-    }
+    reusable
 }

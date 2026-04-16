@@ -34,15 +34,22 @@ pub async fn run_accept_loop(state: Arc<RootState>) {
             }
         };
 
-        let sender = state.get_conn_sender(&server_name).await;
-        let Some(sender) = sender else {
-            tracing::warn!(%server_name, "no listener registered for connection");
-            continue;
-        };
+        let span = tracing::info_span!("route_connection", %server_name);
+        let state = state.clone();
+        tokio::spawn(
+            async move {
+                let sender = state.route_connection(&server_name).await;
+                let Some(sender) = sender else {
+                    tracing::warn!("no listener registered for connection");
+                    return;
+                };
 
-        if sender.send(conn).await.is_err() {
-            tracing::warn!(%server_name, "failed to route connection (channel closed)");
-        }
+                if sender.send(conn).await.is_err() {
+                    tracing::warn!("failed to route connection (channel closed)");
+                }
+            }
+            .instrument(span),
+        );
     }
 }
 

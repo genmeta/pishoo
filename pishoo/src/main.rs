@@ -99,9 +99,12 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut local_service_handle =
-        pishoo::hypervisor::local_service::spawn_local_service(&state, &current_entry_config)
-            .await?;
+    let mut local_service_handle = pishoo::hypervisor::local_service::spawn_local_service(
+        &state,
+        &current_entry_config,
+        std::collections::HashMap::new(),
+    )
+    .await?;
     drop(current_entry_config);
 
     pishoo::hypervisor::process::spawn_configured_workers(&state, current_worker_targets.clone())

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use gateway::{
     control_plane::{Identity, ListenRequest},
@@ -8,7 +12,9 @@ use gateway::{
 use snafu::{ResultExt, Snafu, whatever};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use crate::{hypervisor::state::RootState, tls};
+use crate::{
+    hypervisor::state::RootState, listen::PerServerListener, service::PreparedServer, tls,
+};
 
 #[allow(dead_code)]
 struct LocalServerDef {
@@ -80,13 +86,14 @@ async fn collect_local_server_defs(servers: &[Arc<Node>]) -> Result<Vec<LocalSer
 /// Handle to a running root-local service, used for shutdown and replacement.
 pub struct LocalServiceHandle {
     shutdown: CancellationToken,
-    task: AbortOnDropHandle<()>,
+    task: AbortOnDropHandle<Vec<PreparedServer<PerServerListener>>>,
 }
 
 impl LocalServiceHandle {
-    pub async fn shutdown(self) {
+    /// Cancel the running service and recover prepared servers with listeners.
+    pub async fn shutdown(self) -> Vec<PreparedServer<PerServerListener>> {
         self.shutdown.cancel();
-        let _ = self.task.await;
+        self.task.await.unwrap_or_default()
     }
 }
 
@@ -221,9 +228,15 @@ pub async fn build_local_service_config(
 pub async fn spawn_local_service(
     state: &Arc<RootState>,
     entry_config: &crate::config::EntryConfig,
+    existing_listeners: HashMap<String, PerServerListener>,
 ) -> Result<Option<LocalServiceHandle>, Whatever> {
     if entry_config.local_servers.is_empty() {
         tracing::debug!("no local servers configured");
+        // Shut down any leftover listeners from a previous cycle.
+        for (name, listener) in existing_listeners {
+            tracing::info!(%name, "shutting down listener (no local servers configured)");
+            let _ = h3x::quic::Listen::shutdown(&listener).await;
+        }
         return Ok(None);
     }
 
@@ -237,14 +250,28 @@ pub async fn spawn_local_service(
     let shutdown = CancellationToken::new();
     let service_shutdown = shutdown.clone();
 
-    let service_handle = crate::service::setup_service(plane, &config)
+    let mut prepared = crate::service::setup_service(&*plane, &config, existing_listeners)
         .await
         .whatever_context("failed to set up local service")?;
 
-    let server_count = config.servers.len();
+    let server_count = prepared.len();
+    let h3_settings = config.h3_settings.clone();
+    let access_rules = config.access_rules.clone();
+    let router_state = gateway::reverse::router::RouterState {
+        #[cfg(feature = "sshd")]
+        session_spawner: plane.clone(),
+    };
 
     let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-        crate::service::run_service(service_handle, service_shutdown).await;
+        crate::service::run_service(
+            &mut prepared,
+            &h3_settings,
+            &access_rules,
+            router_state,
+            service_shutdown,
+        )
+        .await;
+        prepared
     }));
 
     tracing::info!(servers = server_count, "local service started");
@@ -257,17 +284,23 @@ pub async fn spawn_local_service(
 
 /// Replace the running root-local service with a freshly built one.
 ///
-/// Shuts down the old service (if any), then spawns a new one from the
-/// updated entry configuration.
+/// Shuts down the old service (if any), recovers reusable listeners, then
+/// spawns a new one from the updated entry configuration.
 pub async fn replace_local_service(
     state: &Arc<RootState>,
     handle: &mut Option<LocalServiceHandle>,
     entry_config: &crate::config::EntryConfig,
 ) -> Result<(), Whatever> {
-    if let Some(old_handle) = handle.take() {
-        old_handle.shutdown().await;
-    }
+    let existing_listeners = if let Some(old_handle) = handle.take() {
+        let config = build_local_service_config(&entry_config.local_servers)
+            .await
+            .whatever_context("failed to build local service config for diff")?;
+        let old_prepared = old_handle.shutdown().await;
+        crate::service::collect_reusable_listeners(old_prepared, &config).await
+    } else {
+        HashMap::new()
+    };
 
-    *handle = spawn_local_service(state, entry_config).await?;
+    *handle = spawn_local_service(state, entry_config, existing_listeners).await?;
     Ok(())
 }

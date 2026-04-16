@@ -1,10 +1,12 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use bytes::Bytes;
 use dhttp_home::identity::Name;
+use h3x::client::Client;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -13,18 +15,18 @@ use snafu::{Report, ResultExt, Snafu};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
 };
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::{
     command,
-    dns::{MDNS_SERVICE, build_query_resolvers},
     error::{BoxError, Result, Whatever},
     forward,
     parse::{Node, Value},
 };
 
-pub(crate) mod h3_client;
+pub(crate) mod h3_client; // TODO: remove once all callers are migrated
 mod normal;
 mod quic;
 
@@ -46,83 +48,39 @@ pub enum ForwardRequestError {
     MissingConnectAuthority,
 }
 
-/// 从配置节点中读取并设置客户端认证配置
+/// Configure TCP keepalive on a stream to detect dead peers.
 ///
-/// 仅当 ssl_certificate、ssl_certificate_key 和 client_name 三者都存在且类型正确时才会设置。
-/// 如果配置不完整或类型错误，会记录相应的日志。
-fn setup_client_config(node: &Node) -> Result<()> {
-    // 从配置中读取客户端配置(可选)
-    let cert_path = node.get("ssl_certificate").and_then(|v| {
-        if let Value::Path(path) = v {
-            Some(path)
-        } else {
-            warn!("ssl_certificate must be a path, ignoring");
-            None
-        }
-    });
-
-    let key_path = node.get("ssl_certificate_key").and_then(|v| {
-        if let Value::Path(path) = v {
-            Some(path)
-        } else {
-            warn!("ssl_certificate_key must be a path, ignoring");
-            None
-        }
-    });
-
-    let client_name = node.get("client_name").and_then(|v| {
-        if let Value::String(name) = v {
-            Some(name.clone())
-        } else {
-            warn!("client_name must be a string, ignoring");
-            None
-        }
-    });
-
-    // 仅当所有配置项都存在时才设置客户端配置
-    if let (Some(cert_path), Some(key_path), Some(client_name)) = (cert_path, key_path, client_name)
-    {
-        // 读取证书和密钥
-        let cert_chain = std::fs::read(cert_path).whatever_context::<_, Whatever>(format!(
-            "failed to read client certificate from {}",
-            cert_path.display()
-        ))?;
-        let private_key = std::fs::read(key_path).whatever_context::<_, Whatever>(format!(
-            "failed to read client private key from {}",
-            key_path.display()
-        ))?;
-
-        // 设置客户端配置
-        if let Err(error) =
-            h3_client::set_client_config(cert_chain, private_key, client_name.clone())
-        {
-            info!(
-                error = %Report::from_error(&error),
-                "client config already set, reinitializing connection pool"
-            );
-        } else {
-            info!(%client_name, "client config set");
-        }
-    } else {
-        info!("client authentication not configured, using connection pool without client auth");
+/// After 60 seconds of idle, sends probes every 10 seconds; 3 consecutive
+/// failures trigger a RST (~90 seconds total).
+fn configure_tcp_keepalive(stream: &TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10))
+        .with_retries(3);
+    if let Err(e) = sock.set_tcp_keepalive(&keepalive) {
+        warn!(error = %e, "failed to set TCP keepalive");
     }
-
-    Ok(())
 }
 
 /// Start the QUIC proxy server
 ///
 /// # Arguments
 /// * `node` - The configuration node
+/// * `client` - Pre-built H3 client for QUIC proxying
 ///
 /// # Returns
-/// * `Result<String>` - The address the server is listening on
-pub async fn serve(
+/// * `Result<(SocketAddr, impl Future)>` - The address and server task
+pub async fn serve<C: h3x::quic::Connect + 'static>(
     node: Arc<Node>,
+    client: Arc<Client<C>>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
-)> {
+)>
+where
+    C::Connection: 'static,
+{
     tracing::info!("starting forward proxy server");
     let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
         unreachable!()
@@ -138,132 +96,112 @@ pub async fn serve(
 
     info!(%local_addr, "listening on http endpoint");
 
-    let resolvers =
-        build_query_resolvers(&node, "client_name").with_mdns_resolvers(MDNS_SERVICE, |_, _| true);
-
-    // 设置客户端认证配置
-    setup_client_config(&node)?;
-    h3_client::reinitialize(Some(Arc::new(resolvers.clone()))).await;
-
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
-
-    let accept_tcp_stream = async move |stream: TcpStream| {
-        let io = TokioIo::new(stream);
-        let acl = acl.clone();
-
-        // 为每个连接创建服务处理器
-        let service = service_fn(move |mut req| {
-            let acl = acl.clone();
-            let span = info_span!("forward_proxy", uri=%req.uri(), method=%req.method());
-            async move {
-                debug!(request=?req);
-                let host = match validate_host(&mut req) {
-                    Ok(host) => host,
-                    Err(error) => {
-                        error!(error = %Report::from_error(&error), "invalid host");
-                        return Ok(build_error_response(Report::from_error(&error).to_string()));
-                    }
-                };
-
-                let is_connect = req.method() == Method::CONNECT;
-
-                match acl.check(&host) {
-                    true if is_connect => {
-                        debug!(%host, "quic proxying connect request");
-                        forward::quic::connect_tunnel(req).await
-                    }
-                    true => {
-                        debug!(%host, "quic proxying request");
-                        forward::quic::proxy(req).await
-                    }
-                    false if is_connect => {
-                        debug!(%host, "normal proxying connect request");
-                        forward::normal::connect(req).await
-                    }
-                    false => {
-                        debug!(%host, "normal proxying request");
-                        forward::normal::proxy(req).await
-                    }
-                }
-            }
-            .instrument(span)
-        });
-
-        tokio::task::spawn(
-            async move {
-                // 启动 HTTP/1.1 服务
-                let result = http1::Builder::new()
-                    .preserve_header_case(true)
-                    .title_case_headers(true)
-                    .serve_connection(io, service)
-                    .with_upgrades()
-                    .await;
-                match &result {
-                    Ok(()) => info!("http/1.1 serve_connection completed"),
-                    Err(error) => {
-                        error!(
-                            error = %Report::from_error(error),
-                            canceled = error.is_canceled(),
-                            closed = error.is_closed(),
-                            parse = error.is_parse(),
-                            user = error.is_user(),
-                            incomplete_message = error.is_incomplete_message(),
-                            "http/1.1 serve_connection failed"
-                        );
-                    }
-                }
-            }
-            .in_current_span(),
-        );
-    };
+    let semaphore = Arc::new(Semaphore::new(1024));
 
     let task = async move {
         loop {
             match listener.accept().await {
                 Ok((stream, from)) => {
-                    accept_tcp_stream(stream)
-                        .instrument(info_span!("accept", %from))
-                        .await
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                        break; // semaphore closed
+                    };
+                    let acl = acl.clone();
+                    let client = client.clone();
+                    async {
+                        let _permit = permit;
+                        configure_tcp_keepalive(&stream);
+                        let io = TokioIo::new(stream);
+
+                        // 为每个连接创建服务处理器
+                        let service = service_fn(move |mut req| {
+                            let acl = acl.clone();
+                            let client = client.clone();
+                            let span =
+                                info_span!("forward_proxy", uri=%req.uri(), method=%req.method());
+                            async move {
+                                debug!(request=?req);
+                                let host = match validate_host(&mut req) {
+                                    Ok(host) => host,
+                                    Err(error) => {
+                                        error!(
+                                            error = %Report::from_error(&error),
+                                            "invalid host"
+                                        );
+                                        return Ok(build_error_response(
+                                            Report::from_error(&error).to_string(),
+                                        ));
+                                    }
+                                };
+
+                                let is_connect = req.method() == Method::CONNECT;
+
+                                match acl.check(&host) {
+                                    true if is_connect => {
+                                        debug!(%host, "quic proxying connect request");
+                                        forward::quic::connect_tunnel(req, client).await
+                                    }
+                                    true => {
+                                        debug!(%host, "quic proxying request");
+                                        forward::quic::proxy(req, client).await
+                                    }
+                                    false if is_connect => {
+                                        debug!(%host, "normal proxying connect request");
+                                        forward::normal::connect(req).await
+                                    }
+                                    false => {
+                                        debug!(%host, "normal proxying request");
+                                        forward::normal::proxy(req).await
+                                    }
+                                }
+                            }
+                            .instrument(span)
+                        });
+
+                        // Inherent termination: TCP keepalive detects dead peers (~90s),
+                        // header_read_timeout closes idle keep-alive connections (120s).
+                        tokio::task::spawn(
+                            async move {
+                                let result = http1::Builder::new()
+                                    .timer(hyper_util::rt::tokio::TokioTimer::new())
+                                    .header_read_timeout(Some(Duration::from_secs(120)))
+                                    .preserve_header_case(true)
+                                    .title_case_headers(true)
+                                    .serve_connection(io, service)
+                                    .with_upgrades()
+                                    .await;
+                                match &result {
+                                    Ok(()) => info!("http/1.1 serve_connection completed"),
+                                    Err(error) => {
+                                        error!(
+                                            error = %Report::from_error(error),
+                                            canceled = error.is_canceled(),
+                                            closed = error.is_closed(),
+                                            parse = error.is_parse(),
+                                            user = error.is_user(),
+                                            incomplete_message = error.is_incomplete_message(),
+                                            "http/1.1 serve_connection failed"
+                                        );
+                                    }
+                                }
+                            }
+                            .in_current_span(),
+                        );
+                    }
+                    .instrument(info_span!("accept", %from))
+                    .await
                 }
                 Err(error) => {
                     error!(error = %Report::from_error(&error), "listener accept failed");
+                    tokio::time::sleep(Duration::from_millis(33)).await;
                 }
             }
         }
+        Ok(())
     };
 
     Ok((local_addr, task))
-}
-
-/// Resume the network
-///
-/// # Returns
-/// * `Result<()>` - The result of resuming the network
-pub async fn resume(node: Arc<Node>) -> Result<()> {
-    match serve(node).await {
-        Ok((_local_addr, forward_proxy)) => {
-            tokio::spawn(
-                async move {
-                    // QuicInterfaces::global().clear();
-                    if let Err(error) = forward_proxy.await {
-                        error!(error = %Report::from_error(&error), "forward proxy failed");
-                    }
-                }
-                .in_current_span(),
-            );
-            Ok(())
-        }
-        Err(launch_error) => {
-            // 重新初始化 H3Client，清除旧连接状态
-            h3_client::reinitialize(None).await;
-            error!(
-                error = %Report::from_error(&launch_error),
-                "failed to launch forward proxy, restarting all interfaces"
-            );
-            Err(launch_error)
-        }
-    }
 }
 
 /// 验证请求中的 Host 头合法性

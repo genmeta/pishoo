@@ -90,6 +90,7 @@ derive_more = "2"
 dashmap = "6"
 pin-project-lite = "0.2"
 form_urlencoded = "1"
+socket2 = "0.5"
 x509-parser = "0.18"
 dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "main" }
 

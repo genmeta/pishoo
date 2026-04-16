@@ -35,11 +35,11 @@ fn worker_reload_uses_single_helper_path() {
         "worker should build config through the shared builder"
     );
     assert!(
-        worker_source.contains("setup_service(plane.clone(), &config)"),
+        worker_source.contains("setup_service("),
         "worker should set up through the unified setup_service entry point"
     );
     assert!(
-        worker_source.contains("run_service(handle, shutdown.clone())"),
+        worker_source.contains("service::run_service("),
         "worker should run through the unified run_service entry point"
     );
 }
@@ -66,8 +66,8 @@ fn worker_stops_server_runtimes_before_exit() {
 fn worker_reload_rebuilds_all_listener_handles() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
     assert!(
-        worker_source.contains("received SIGHUP, rebuilding service config")
-            && worker_source.contains("worker reload completed"),
+        worker_source.contains("received reload signal")
+            && worker_source.contains("reload complete"),
         "worker reload path should rebuild config and restart the service"
     );
 }

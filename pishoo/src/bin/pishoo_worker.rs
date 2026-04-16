@@ -15,7 +15,7 @@ use gateway::error::Whatever;
 use h3x::ipc::transport::MuxChannel;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
-    service::{run_service, setup_service},
+    service::{self, PreparedServer, setup_service},
     worker::{config::build_service_config, remote_plane::RemoteControlPlane},
 };
 use snafu::{OptionExt, Report, ResultExt};
@@ -110,29 +110,45 @@ async fn main() -> Result<(), Whatever> {
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .whatever_context("failed to create SIGHUP listener")?;
 
+    let mut prepared: Vec<PreparedServer<_>> = Vec::new();
+
     loop {
+        // Collect reusable listeners from the previous cycle.
+        let existing_listeners =
+            service::collect_reusable_listeners(std::mem::take(&mut prepared), &config).await;
+
         tracing::debug!(
             servers = config.servers.len(),
             "service config built, starting service"
         );
+
+        prepared = match setup_service(&*plane, &config, existing_listeners).await {
+            Ok(p) => p,
+            Err(error) => {
+                tracing::error!(
+                    error = %Report::from_error(&error),
+                    "failed to set up service"
+                );
+                break;
+            }
+        };
 
         let shutdown = CancellationToken::new();
         let mut next_config = None;
         let mut should_exit = false;
 
         {
-            let handle = match setup_service(plane.clone(), &config).await {
-                Ok(h) => h,
-                Err(error) => {
-                    tracing::error!(
-                        error = %Report::from_error(&error),
-                        "failed to set up service"
-                    );
-                    break;
-                }
+            let router_state = gateway::reverse::router::RouterState {
+                #[cfg(feature = "sshd")]
+                session_spawner: plane.clone(),
             };
-
-            let service = run_service(handle, shutdown.clone());
+            let service = service::run_service(
+                &mut prepared,
+                &config.h3_settings,
+                &config.access_rules,
+                router_state,
+                shutdown.clone(),
+            );
             tokio::pin!(service);
 
             tokio::select! {
@@ -167,6 +183,10 @@ async fn main() -> Result<(), Whatever> {
                                 error = %Report::from_error(&error),
                                 "failed to rebuild service config, keeping current service"
                             );
+                            // Cancel and recover listeners before continuing
+                            // so they are not leaked.
+                            shutdown.cancel();
+                            service.await;
                             continue;
                         }
                     };

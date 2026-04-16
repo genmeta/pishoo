@@ -34,7 +34,7 @@ impl std::error::Error for StringError {}
 // ---------------------------------------------------------------------------
 
 /// A request to create a QUIC listener for a specific server.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ListenRequest {
     /// The identity to use for the server's TLS configuration.
     pub identity: Identity,

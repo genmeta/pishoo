@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use h3x::dquic::H3Client;
+use h3x::{client::Client, connection::Connection, quic};
 use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
@@ -15,7 +15,13 @@ use crate::{
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
-pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
+pub async fn proxy<C: quic::Connect>(
+    mut req: Request<hyper::body::Incoming>,
+    client: Arc<Client<C>>,
+) -> Result<BoxResponse, hyper::Error>
+where
+    C::Connection: 'static,
+{
     // 验证主机合法性
     let host = match validate_host(&mut req) {
         Ok(host) => host,
@@ -24,7 +30,6 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
             return Ok(build_error_response(Report::from_error(&error).to_string()));
         }
     };
-    let client = super::h3_client::global().await;
     // 创建 QUIC 连接
     let h3_conn = match connect(&client, &host).await {
         Ok(conn) => conn,
@@ -53,16 +58,23 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect_tunnel(
+pub async fn connect_tunnel<C: quic::Connect + 'static>(
     req: Request<hyper::body::Incoming>,
-) -> Result<BoxResponse, hyper::Error> {
+    client: Arc<Client<C>>,
+) -> Result<BoxResponse, hyper::Error>
+where
+    C::Connection: 'static,
+{
     tokio::spawn(
         async move {
             // 升级连接并处理后续请求
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     info!("establishing tunnel to request uri");
-                    let service = service_fn(proxy);
+                    let service = service_fn(move |req| {
+                        let client = client.clone();
+                        async move { proxy(req, client).await }
+                    });
                     if let Err(error) = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
@@ -84,8 +96,8 @@ pub async fn connect_tunnel(
 }
 
 /// 将请求通过 quic 转发到目标服务器
-async fn send(
-    h3_conn: Arc<h3x::connection::Connection<dquic::prelude::Connection>>,
+async fn send<Conn: quic::Connection>(
+    h3_conn: Arc<Connection<Conn>>,
     req: Request<hyper::body::Incoming>,
 ) -> Result<BoxResponse, Whatever> {
     // 使用 h3x 的 execute_hyper_request 一步完成：打开流、发送请求、接收响应
@@ -102,10 +114,10 @@ async fn send(
 }
 
 /// 通过 h3x 连接池获取连接
-async fn connect(
-    client: &H3Client,
+async fn connect<C: quic::Connect>(
+    client: &Client<C>,
     host: &str,
-) -> Result<Arc<h3x::connection::Connection<dquic::prelude::Connection>>, Whatever> {
+) -> Result<Arc<Connection<C::Connection>>, Whatever> {
     let authority: Authority = host
         .parse()
         .whatever_context(format!("invalid host: {host}"))?;

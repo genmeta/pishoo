@@ -18,6 +18,7 @@ use nix::unistd::Pid;
 use remoc::prelude::{ServerShared, ServerSharedMut};
 use tracing::Instrument;
 
+use super::state::RootState;
 use crate::{
     hypervisor::state::{RegisterError, ServiceOwner},
     ipc::{ConnectError, ListenError},
@@ -30,13 +31,13 @@ use crate::{
 /// in the root state.
 pub struct WorkerControlPlane {
     caller_pid: Pid,
-    state: Arc<super::state::RootState>,
+    state: Arc<RootState>,
     /// FdSender from the root-side MuxChannel, used to pass FDs to worker.
     fd_sender: FdSender,
 }
 
 impl WorkerControlPlane {
-    pub fn new(caller_pid: Pid, state: Arc<super::state::RootState>, fd_sender: FdSender) -> Self {
+    pub fn new(caller_pid: Pid, state: Arc<RootState>, fd_sender: FdSender) -> Self {
         Self {
             caller_pid,
             state,

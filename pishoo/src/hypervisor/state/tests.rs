@@ -193,10 +193,10 @@ async fn test_register_then_release() {
         .await
         .expect("register_listener should succeed");
 
-    assert!(state.get_conn_sender(server_name).await.is_some());
+    assert!(state.route_connection(server_name).await.is_some());
 
     state.release_server(server_name, owner).await;
-    assert!(state.get_conn_sender(server_name).await.is_none());
+    assert!(state.route_connection(server_name).await.is_none());
 }
 
 #[tokio::test]
@@ -247,7 +247,7 @@ async fn test_register_cross_owner_conflict() {
     // Original server's conn_sender should be None (poisoned).
     assert!(
         state
-            .get_conn_sender("cross-conflict.user.genmeta.net")
+            .route_connection("cross-conflict.user.genmeta.net")
             .await
             .is_none()
     );
@@ -317,7 +317,7 @@ async fn test_scrub_then_reregister() {
         .expect("re-register after scrub should succeed");
     assert!(
         state
-            .get_conn_sender("scrub-re.user.genmeta.net")
+            .route_connection("scrub-re.user.genmeta.net")
             .await
             .is_some()
     );
@@ -349,7 +349,7 @@ async fn test_release_wrong_owner() {
     // Server should still be active.
     assert!(
         state
-            .get_conn_sender("wrong-owner.user.genmeta.net")
+            .route_connection("wrong-owner.user.genmeta.net")
             .await
             .is_some()
     );
@@ -381,7 +381,7 @@ async fn test_cleanup_worker_releases_servers() {
         .expect("register should succeed");
     assert!(
         state
-            .get_conn_sender("cleanup-srv.user.genmeta.net")
+            .route_connection("cleanup-srv.user.genmeta.net")
             .await
             .is_some()
     );
@@ -395,7 +395,7 @@ async fn test_cleanup_worker_releases_servers() {
 
     assert!(
         state
-            .get_conn_sender("cleanup-srv.user.genmeta.net")
+            .route_connection("cleanup-srv.user.genmeta.net")
             .await
             .is_none()
     );
