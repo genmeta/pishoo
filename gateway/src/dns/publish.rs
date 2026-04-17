@@ -1,18 +1,18 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use h3x::dquic::{
-    prelude::{BindUri, BoundAddr, IO, QuicListeners},
-    qbase::net::addr::SocketEndpointAddr,
-    qinterface::{BindInterface, component::location::Locations},
-    qresolve::Publish as DnsPublisher,
-    qtraversal::nat::client::{NatType, StunClientsComponent},
-};
 use futures::{StreamExt, stream::FuturesUnordered};
 use gmdns::{
     MdnsPacket,
     mdns::Mdns,
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolvers::{H3Publisher, MdnsResolver},
+};
+use h3x::dquic::{
+    prelude::{BindUri, BoundAddr, IO, QuicListeners},
+    qbase::net::addr::SocketEndpointAddr,
+    qinterface::{BindInterface, component::location::Locations},
+    qresolve::Publish as DnsPublisher,
+    qtraversal::nat::client::{NatType, StunClientsComponent},
 };
 use rustls::{SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt, whatever};

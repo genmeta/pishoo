@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use h3x::dquic::{
-    prelude::QuicClient,
-    qresolve::{Resolve as GmdnsResolver, SystemResolver},
-};
 use gmdns::resolvers::{H3Resolver, Resolvers};
-use h3x::client::Client;
+use h3x::{
+    client::Client,
+    dquic::{
+        prelude::QuicClient,
+        qresolve::{Resolve as GmdnsResolver, SystemResolver},
+    },
+};
 use http::Uri;
 
 use super::H3_DNS_SERVER;
