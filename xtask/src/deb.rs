@@ -32,6 +32,7 @@ fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
         "x86_64-unknown-linux-gnu" => Ok("amd64"),
         "aarch64-unknown-linux-gnu" => Ok("arm64"),
         "armv7-unknown-linux-gnueabihf" => Ok("armhf"),
+        "i686-unknown-linux-gnu" => Ok("i386"),
         _ => snafu::whatever!("unsupported deb target triple: {triple}"),
     }
 }
@@ -42,6 +43,7 @@ fn gnu_arch(triple: &str) -> Result<&'static str, Whatever> {
         "x86_64-unknown-linux-gnu" => Ok("x86_64-linux-gnu"),
         "aarch64-unknown-linux-gnu" => Ok("aarch64-linux-gnu"),
         "armv7-unknown-linux-gnueabihf" => Ok("arm-linux-gnueabihf"),
+        "i686-unknown-linux-gnu" => Ok("i386-linux-gnu"),
         _ => snafu::whatever!("unsupported gnu arch for triple: {triple}"),
     }
 }
