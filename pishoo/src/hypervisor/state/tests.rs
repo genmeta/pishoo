@@ -16,8 +16,8 @@ fn test_state() -> Arc<RootState> {
     // Ensure the rustls CryptoProvider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let router = Arc::new(dquic::qinterface::component::route::QuicRouter::new());
-    let listeners = dquic::prelude::QuicListeners::builder()
+    let router = Arc::new(h3x::dquic::qinterface::component::route::QuicRouter::new());
+    let listeners = h3x::dquic::prelude::QuicListeners::builder()
         .with_router(router)
         .without_client_cert_verifier()
         .with_alpns([b"h3".as_slice()])

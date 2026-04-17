@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use dquic::{
+use h3x::dquic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::addr::SocketEndpointAddr,
     qinterface::{BindInterface, component::location::Locations},
@@ -498,9 +498,9 @@ async fn publish_server(server_name: &str, config: &PublishConfig, listeners: &Q
 fn create_h3_client_from_identity(
     _resolver: &DnsResolver,
     identity: &Identity,
-) -> h3x::client::Client<Arc<dquic::prelude::QuicClient>> {
+) -> h3x::client::Client<Arc<h3x::dquic::prelude::QuicClient>> {
     let root_store = crate::common::root_cert();
-    let builder = h3x::client::Client::<Arc<dquic::prelude::QuicClient>>::builder()
+    let builder = h3x::client::Client::<Arc<h3x::dquic::prelude::QuicClient>>::builder()
         .with_root_certificates(root_store);
 
     builder
@@ -544,7 +544,7 @@ fn signing_key_from_der(key: &PrivateKeyDer<'_>) -> Option<(Arc<dyn SigningKey>,
 }
 
 fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {
-    use dquic::prelude::handy::ToPrivateKey;
+    use h3x::dquic::prelude::handy::ToPrivateKey;
 
     let key_bytes = std::fs::read(path)
         .whatever_context::<_, Whatever>(format!("failed to read key file {}", path.display()))?;

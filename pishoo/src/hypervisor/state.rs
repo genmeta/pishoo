@@ -44,7 +44,7 @@ pub enum RegisterError {
     #[snafu(display("failed to add server `{server_name}` to listeners"))]
     AddServerFailed {
         server_name: String,
-        source: dquic::prelude::ServerError,
+        source: h3x::dquic::prelude::ServerError,
     },
 }
 
@@ -66,7 +66,7 @@ pub enum ServerEntry {
     /// Name is actively owned and serving.
     Active {
         owner: ServiceOwner,
-        conn_tx: mpsc::Sender<dquic::prelude::Connection>,
+        conn_tx: mpsc::Sender<h3x::dquic::prelude::Connection>,
         shutdown_token: CancellationToken,
         /// Original listen specifications for network-change reconciliation.
         listens: Vec<gateway::parse::Listens>,
@@ -133,7 +133,7 @@ pub(super) struct Inner {
 /// server registration / cleanup.
 pub struct RootState {
     /// The shared QUIC listeners object.
-    pub listeners: Arc<dquic::prelude::QuicListeners>,
+    pub listeners: Arc<h3x::dquic::prelude::QuicListeners>,
     /// Server entries (behind RwLock for concurrent reads).
     pub(super) servers: RwLock<ServerRegistry>,
     /// Process/user bookkeeping (behind Mutex).
@@ -166,7 +166,7 @@ impl ServerRegistry {
     pub(super) fn retire_entry(
         &mut self,
         server_name: &str,
-        listeners: &dquic::prelude::QuicListeners,
+        listeners: &h3x::dquic::prelude::QuicListeners,
     ) -> Option<()> {
         let entry = self.entries.remove(server_name)?;
         match entry {
@@ -186,7 +186,7 @@ impl ServerRegistry {
 
 impl RootState {
     /// Create a new root state with the given shared QUIC listeners.
-    pub fn new(listeners: Arc<dquic::prelude::QuicListeners>) -> Self {
+    pub fn new(listeners: Arc<h3x::dquic::prelude::QuicListeners>) -> Self {
         Self {
             listeners,
             servers: RwLock::new(ServerRegistry::new()),

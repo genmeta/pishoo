@@ -48,10 +48,7 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-dquic = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
-qevent = { git = "ssh://git@github.com/genmeta/dquic.git", branch = "feat/v0.5" }
-
-h3x = { git = "ssh://git@github.com/genmeta/h3x.git", branch = "main" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [

@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use dquic::prelude::{QuicListeners, handy::server_parameters};
+use h3x::dquic::prelude::{QuicListeners, handy::server_parameters};
 use gateway::error::Whatever;
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;

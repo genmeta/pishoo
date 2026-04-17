@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use dquic::{
+use h3x::dquic::{
     prelude::{BindUri, BoundAddr, IO, QuicListeners},
     qbase::net::Family,
     qinterface::{
@@ -459,7 +459,7 @@ fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<Bi
 /// 注意：这只是"选下一跳"的策略，不保证 `CHANGE_IP|CHANGE_PORT` 一定同时改变 IP 和端口；
 /// 真正返回哪个地址取决于被选中节点自身的 `change_address` / `change_port` 配置。
 fn compute_change_address(
-    iface: &dquic::qinterface::Interface,
+    iface: &h3x::dquic::qinterface::Interface,
     is_ipv4: bool,
 ) -> Option<SocketAddr> {
     let own_outer_ips: HashSet<IpAddr> = iface

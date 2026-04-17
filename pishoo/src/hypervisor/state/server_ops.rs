@@ -83,7 +83,7 @@ impl RootState {
 
         // Phase 2: name is claimed — resolve bind URIs and bind the server.
         // No lock held — other server_names can be read/written concurrently.
-        let device_names = dquic::qinterface::device::Devices::global()
+        let device_names = h3x::dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
             .cloned()
@@ -224,7 +224,7 @@ impl RootState {
     pub async fn route_connection(
         &self,
         server_name: &str,
-    ) -> Option<mpsc::Sender<dquic::prelude::Connection>> {
+    ) -> Option<mpsc::Sender<h3x::dquic::prelude::Connection>> {
         let registry = self.servers.read().await;
         match registry.entries.get(server_name) {
             Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
@@ -239,10 +239,10 @@ impl RootState {
     /// [`IfaceRange::All`] or [`IfaceRange::Exact`]) are re-resolved.
     /// Listens with `specific_addrs` are always skipped (they don't depend
     /// on network interfaces).
-    pub async fn reconcile_binds(&self, event: &dquic::qinterface::device::InterfaceEvent) {
+    pub async fn reconcile_binds(&self, event: &h3x::dquic::qinterface::device::InterfaceEvent) {
         let device = event.device();
 
-        let device_names: Vec<String> = dquic::qinterface::device::Devices::global()
+        let device_names: Vec<String> = h3x::dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
             .cloned()
@@ -276,7 +276,7 @@ impl RootState {
             let desired_keys: std::collections::HashMap<String, &str> = desired_uris
                 .iter()
                 .map(|uri| {
-                    let bind_uri = dquic::prelude::BindUri::from(uri.as_str());
+                    let bind_uri = h3x::dquic::prelude::BindUri::from(uri.as_str());
                     (bind_uri.identity_key(), uri.as_str())
                 })
                 .collect();
@@ -314,7 +314,7 @@ impl RootState {
                 .filter_map(|key| current_map.get(key.as_str()).cloned())
                 .collect();
             for uri_str in &to_remove {
-                let uri = dquic::prelude::BindUri::from(uri_str.as_str());
+                let uri = h3x::dquic::prelude::BindUri::from(uri_str.as_str());
                 if let Some(iface) = server.remove_iface(&uri) {
                     // Close the interface in the background to avoid blocking
                     // the reconcile loop. BindInterface::close() waits for all

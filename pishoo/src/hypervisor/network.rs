@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use dquic::qinterface::device::Devices;
+use h3x::dquic::qinterface::device::Devices;
 use snafu::Report;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;

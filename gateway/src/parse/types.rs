@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
-use dquic::prelude::BindUri;
+use h3x::dquic::prelude::BindUri;
 use snafu::whatever;
 
 use super::{Result, Value};
@@ -126,7 +126,7 @@ impl Listens {
     }
 
     pub fn contains(&self, bind_uri: &BindUri) -> bool {
-        use dquic::qbase::net::*;
+        use h3x::dquic::qbase::net::*;
         // TODO: check specific_addrs
         let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
             return false;

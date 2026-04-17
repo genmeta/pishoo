@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dquic::{
+use h3x::dquic::{
     prelude::QuicClient,
     qresolve::{Resolve as GmdnsResolver, SystemResolver},
 };

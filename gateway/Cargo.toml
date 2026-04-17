@@ -42,10 +42,6 @@ tokio-rustls = { workspace = true }
 rustls-pemfile = "2"
 getrandom = { workspace = true }
 
-# --- QUIC Implementation ---
-dquic = { workspace = true }
-qevent = { workspace = true }
-
 # --- DNS resolver ---
 gmdns = { workspace = true }
 h3x = { workspace = true, features = ["rpc"] }
