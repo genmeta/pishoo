@@ -56,6 +56,40 @@ async fn check_docker(docker: &Docker) -> Result<(), Whatever> {
     Ok(())
 }
 
+/// Remove a container by name if it exists; ignore "no such container" errors.
+///
+/// Used to recover from leaked containers left by a previous failed run
+/// (e.g. a transient network error during toolchain install) that would
+/// otherwise cause a 409 name conflict on the next attempt.
+async fn remove_container_if_exists(docker: &Docker, name: &str) {
+    let opts = RemoveContainerOptionsBuilder::default().force(true).build();
+    match docker.remove_container(name, Some(opts)).await {
+        Ok(()) => {
+            tracing::info!(
+                container = name,
+                "removed stale container from previous run"
+            );
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if !(msg.contains("No such container") || msg.contains("404")) {
+                tracing::debug!(container = name, error = %msg, "ignored non-404 remove error");
+            }
+        }
+    }
+}
+
+/// Best-effort container removal used for cleanup-on-exit.
+///
+/// Logs but does not propagate errors so that it is safe to call on both
+/// the success and failure paths without masking the original error.
+async fn force_remove_container(docker: &Docker, id: &str) {
+    let opts = RemoveContainerOptionsBuilder::default().force(true).build();
+    if let Err(e) = docker.remove_container(id, Some(opts)).await {
+        tracing::warn!(container = id, error = %e, "failed to remove container on cleanup");
+    }
+}
+
 /// Ensure the build image exists for the given target triple.
 /// Installs cross-compilation toolchain, libc-dev, and libpam0g-dev.
 async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever> {
@@ -85,6 +119,8 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
 
     // Create temp container from base
     let container_name = format!("{CARGO_NAME}-xtask-setup-{triple}");
+    // Remove a leaked container left by a previous failed run so we can retry.
+    remove_container_if_exists(docker, &container_name).await;
     let container = docker
         .create_container(
             Some(
@@ -100,9 +136,50 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
         )
         .await
         .whatever_context("failed to create setup container")?;
+    let container_id = container.id.clone();
 
+    // Any failure past this point must still remove the container, otherwise
+    // the name collides on retry.
+    let setup_result = ensure_image_inner(docker, &container_id, triple, deb).await;
+
+    if setup_result.is_err() {
+        force_remove_container(docker, &container_id).await;
+        setup_result?;
+        unreachable!();
+    }
+
+    // Commit
+    let repo = tag.split(':').next().unwrap_or(&tag);
+    let img_tag = tag.split(':').nth(1).unwrap_or(IMAGE_TAG_PREFIX);
+    let commit_result = docker
+        .commit_container(
+            CommitContainerOptionsBuilder::default()
+                .container(&container_id)
+                .repo(repo)
+                .tag(img_tag)
+                .build(),
+            ContainerConfig::default(),
+        )
+        .await
+        .whatever_context("failed to commit image");
+
+    // Always remove the setup container before returning.
+    force_remove_container(docker, &container_id).await;
+    commit_result?;
+
+    info!(tag, "image ready");
+    Ok(tag)
+}
+
+/// Run the toolchain-installation steps inside an already-created container.
+async fn ensure_image_inner(
+    docker: &Docker,
+    container_id: &str,
+    triple: &str,
+    deb: &str,
+) -> Result<(), Whatever> {
     docker
-        .start_container(&container.id, None::<StartContainerOptions>)
+        .start_container(container_id, None::<StartContainerOptions>)
         .await
         .whatever_context("failed to start setup container")?;
 
@@ -141,34 +218,8 @@ apt-get install --assume-yes -qq libc-dev:{deb} libpam0g-dev:{deb} dpkg-dev debh
 chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME}
 "#
     );
-    exec_in_container(docker, &container.id, &["bash", "-c", &setup_script], None).await?;
-
-    // Commit
-    let repo = tag.split(':').next().unwrap_or(&tag);
-    let img_tag = tag.split(':').nth(1).unwrap_or(IMAGE_TAG_PREFIX);
-    docker
-        .commit_container(
-            CommitContainerOptionsBuilder::default()
-                .container(&container.id)
-                .repo(repo)
-                .tag(img_tag)
-                .build(),
-            ContainerConfig::default(),
-        )
-        .await
-        .whatever_context("failed to commit image")?;
-
-    // Cleanup
-    docker
-        .remove_container(
-            &container.id,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-        )
-        .await
-        .whatever_context("failed to remove setup container")?;
-
-    info!(tag, "image ready");
-    Ok(tag)
+    exec_in_container(docker, container_id, &["bash", "-c", &setup_script], None).await?;
+    Ok(())
 }
 
 /// Get the uid:gid of the workspace directory on the host.
@@ -273,6 +324,7 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
     }
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-common");
+    remove_container_if_exists(docker, &container_name).await;
     let container = docker
         .create_container(
             Some(
@@ -297,9 +349,26 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
         )
         .await
         .whatever_context("failed to create common container")?;
+    let container_id = container.id.clone();
 
+    // Always remove the common container before returning, success or not.
+    let result = run_common_inner(docker, &container_id, version).await;
+    force_remove_container(docker, &container_id).await;
+    result?;
+
+    let deb_name = format!("pishoo-common_{version}-1_all.deb");
+    info!(deb_name, "produced");
+    info!("finished common deb package build");
+    Ok(())
+}
+
+async fn run_common_inner(
+    docker: &Docker,
+    container_id: &str,
+    version: &str,
+) -> Result<(), Whatever> {
     docker
-        .start_container(&container.id, None::<StartContainerOptions>)
+        .start_container(container_id, None::<StartContainerOptions>)
         .await
         .whatever_context("failed to start common container")?;
 
@@ -309,7 +378,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install --assume-yes -qq debhelper fakeroot
 "#;
-    exec_in_container(docker, &container.id, &["bash", "-c", setup_script], None).await?;
+    exec_in_container(docker, container_id, &["bash", "-c", setup_script], None).await?;
 
     // Prepare debian source tree under target/common/deb/src/ and run dpkg-buildpackage.
     // Products (.deb etc.) land in target/common/deb/ (one level above src/).
@@ -326,19 +395,14 @@ cd "$SRC"
 dpkg-buildpackage -A -uc -us -d
 "#
     );
-    exec_in_container(docker, &container.id, &["bash", "-c", &build_script], Some(&user)).await?;
+    exec_in_container(
+        docker,
+        container_id,
+        &["bash", "-c", &build_script],
+        Some(&user),
+    )
+    .await?;
 
-    docker
-        .remove_container(
-            &container.id,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-        )
-        .await
-        .whatever_context("failed to remove common container")?;
-
-    let deb_name = format!("pishoo-common_{version}-1_all.deb");
-    info!(deb_name, "produced");
-    info!("finished common deb package build");
     Ok(())
 }
 
@@ -439,6 +503,7 @@ async fn build_one(
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
+    remove_container_if_exists(docker, &container_name).await;
     let container = docker
         .create_container(
             Some(
@@ -458,12 +523,7 @@ async fn build_one(
         )
         .await
         .whatever_context("failed to create build container")?;
-
-    docker
-        .start_container(&container.id, None::<StartContainerOptions>)
-        .await
-        .whatever_context("failed to start build container")?;
-    info!(triple, "build container started");
+    let container_id = container.id.clone();
 
     // Build cargo features string
     let cargo_features = {
@@ -496,11 +556,55 @@ async fn build_one(
         format!("export CARGO_FEATURES={cargo_features} && ")
     };
 
+    // Run the actual build; always clean up the container regardless of outcome.
+    let result = build_one_inner(
+        docker,
+        &container_id,
+        triple,
+        version,
+        arch,
+        gnu,
+        root_ca_env,
+        worker_env,
+        ssh_session_env,
+        &cargo_features_env,
+    )
+    .await;
+    force_remove_container(docker, &container_id).await;
+    result?;
+
+    info!(deb_name, "produced");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_one_inner(
+    docker: &Docker,
+    container_id: &str,
+    triple: &str,
+    version: &str,
+    arch: &str,
+    gnu: &str,
+    root_ca_env: &str,
+    worker_env: &str,
+    ssh_session_env: &str,
+    cargo_features_env: &str,
+) -> Result<(), Whatever> {
+    docker
+        .start_container(container_id, None::<StartContainerOptions>)
+        .await
+        .whatever_context("failed to start build container")?;
+    info!(triple, "build container started");
+
     // Install cross-compilation binutils (needs root).
-    let install_binutils = format!(
-        "apt-get install -y -qq binutils-{gnu} 2>/dev/null || true"
-    );
-    exec_in_container(docker, &container.id, &["bash", "-c", &install_binutils], None).await?;
+    let install_binutils = format!("apt-get install -y -qq binutils-{gnu} 2>/dev/null || true");
+    exec_in_container(
+        docker,
+        container_id,
+        &["bash", "-c", &install_binutils],
+        None,
+    )
+    .await?;
 
     // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary).
     // -a{arch} sets the host architecture for cross-compilation.
@@ -528,17 +632,14 @@ dpkg-buildpackage -B -uc -us -d -a{arch}
     );
 
     info!(triple, "starting dpkg-buildpackage inside container");
-    exec_in_container(docker, &container.id, &["bash", "-c", &build_script], Some(&user)).await?;
+    exec_in_container(
+        docker,
+        container_id,
+        &["bash", "-c", &build_script],
+        Some(&user),
+    )
+    .await?;
     info!(triple, "dpkg-buildpackage finished inside container");
 
-    docker
-        .remove_container(
-            &container.id,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-        )
-        .await
-        .whatever_context("failed to remove build container")?;
-
-    info!(deb_name, "produced");
     Ok(())
 }
