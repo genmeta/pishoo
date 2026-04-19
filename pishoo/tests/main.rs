@@ -25,8 +25,8 @@ fn main_force_kills_lingering_workers_during_shutdown() {
     );
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("let _ = accept_handle.await;")
-            && main_source.contains("let _ = monitor_handle.await;"),
+        main_source.contains("let _ = monitor_handle.await;")
+            && main_source.contains("let _ = network_watch_handle.await;"),
         "root shutdown must await aborted background tasks"
     );
 }

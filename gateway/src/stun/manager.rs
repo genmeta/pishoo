@@ -5,25 +5,28 @@ use std::{
     time::Duration,
 };
 
-use h3x::dquic::{
-    prelude::{BindUri, BoundAddr, IO, QuicListeners},
-    qbase::net::Family,
-    qinterface::{
-        BindInterface, WeakInterface,
-        bind_uri::BindUriScheme,
-        component::location::Locations,
-        io::{ProductIO, handy::DEFAULT_IO_FACTORY},
-    },
-    qtraversal::{
-        nat::{
-            client::{NatType, StunClientsComponent},
-            router::{StunRouter, StunRouterComponent},
-            server::{StunServer, StunServerConfig},
-        },
-        route::ReceiveAndDeliverPacket,
-    },
-};
 use gmdns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
+use h3x::{
+    dquic::{
+        prelude::{BindUri, BoundAddr, IO},
+        qbase::net::Family,
+        qinterface::{
+            BindInterface, WeakInterface,
+            bind_uri::BindUriScheme,
+            component::location::Locations,
+            io::{ProductIO, handy::DEFAULT_IO_FACTORY},
+        },
+        qtraversal::{
+            nat::{
+                client::{NatType, StunClientsComponent},
+                router::{StunRouter, StunRouterComponent},
+                server::{StunServer, StunServerConfig},
+            },
+            route::ReceiveAndDeliverPacket,
+        },
+    },
+    endpoint::Network,
+};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, warn};
@@ -83,7 +86,7 @@ impl DynamicStunHandle {
 
 impl StunServerManager {
     pub fn spawn(
-        listeners: Arc<QuicListeners>,
+        network: Arc<Network>,
         publish_config: PublishConfig,
         config: StunNodeConfig,
     ) -> Self {
@@ -97,14 +100,14 @@ impl StunServerManager {
                     if use_configured {
                         reconcile_configured(&config, &mut configured_handles);
                     } else {
-                        reconcile_dynamic(&listeners, &mut dynamic_handles).await;
+                        reconcile_dynamic(&network, &mut dynamic_handles).await;
                     }
                 };
             }
 
             reconcile!();
             publish_stun_endpoints(
-                &listeners,
+                &network,
                 &configured_handles,
                 &dynamic_handles,
                 &publish_config,
@@ -123,14 +126,14 @@ impl StunServerManager {
                     _ = observer.recv() => {
                         time::sleep(Duration::from_millis(50)).await;
                         reconcile!();
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                     _ = timer.tick() => {
                         reconcile!();
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&listeners, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
                     }
                 }
             }
@@ -245,17 +248,17 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
 /// 除了存活性，这里还会检查 `change_address` 是否变化；
 /// 一旦环上后继变化，就重建 pair，让新配置立即生效。
 async fn reconcile_dynamic(
-    listeners: &Arc<QuicListeners>,
+    network: &Arc<Network>,
     handles: &mut HashMap<BindUri, DynamicStunHandle>,
 ) {
-    let desired = collect_fullcone_bind_uris(listeners);
+    let desired = collect_fullcone_bind_uris(network);
 
     // 移除不再 FullCone 或已失效的
     handles.retain(|uri, h| desired.contains(uri) && h.is_alive());
 
     for bind_uri in &desired {
         if handles.contains_key(bind_uri) {
-            let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
+            let Some(bind_iface) = find_bind_iface(network, bind_uri) else {
                 continue;
             };
             let is_ipv4 = is_ipv4_bind_uri(bind_uri);
@@ -283,7 +286,7 @@ async fn reconcile_dynamic(
             continue;
         }
 
-        let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
+        let Some(bind_iface) = find_bind_iface(network, bind_uri) else {
             continue;
         };
         let is_ipv4 = is_ipv4_bind_uri(bind_uri);
@@ -304,40 +307,30 @@ async fn reconcile_dynamic(
     }
 }
 
-fn find_bind_iface(listeners: &Arc<QuicListeners>, bind_uri: &BindUri) -> Option<BindInterface> {
-    for server_name in listeners.servers() {
-        let Some(server) = listeners.get_server(&server_name) else {
-            continue;
-        };
-        if let Some(iface) = server.get_iface(bind_uri) {
-            return Some(iface);
-        }
-    }
-    None
+fn find_bind_iface(network: &Arc<Network>, bind_uri: &BindUri) -> Option<BindInterface> {
+    network.get_iface(bind_uri)
 }
 
 /// 收集所有当前已被任一 STUN client 判定为 `FullCone` 的 listener。
-fn collect_fullcone_bind_uris(listeners: &Arc<QuicListeners>) -> HashSet<BindUri> {
+fn collect_fullcone_bind_uris(network: &Arc<Network>) -> HashSet<BindUri> {
     let mut result = HashSet::new();
-    for server_name in listeners.servers() {
-        let Some(server) = listeners.get_server(&server_name) else {
+    for bind_uri in network.current_bind_uris() {
+        let Some(bind_iface) = network.get_iface(&bind_uri) else {
             continue;
         };
-        for (bind_uri, bind_iface) in server.bind_interfaces() {
-            let is_fullcone = bind_iface
-                .borrow()
-                .with_component(|clients: &StunClientsComponent| {
-                    clients.with_clients(|map| {
-                        map.values()
-                            .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
-                    })
+        let is_fullcone = bind_iface
+            .borrow()
+            .with_component(|clients: &StunClientsComponent| {
+                clients.with_clients(|map| {
+                    map.values()
+                        .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
                 })
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            if is_fullcone {
-                result.insert(bind_uri);
-            }
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if is_fullcone {
+            result.insert(bind_uri);
         }
     }
     result
@@ -529,7 +522,7 @@ fn compute_change_address(
 // ──────────────────────────────────────────────────────────────────────────────
 
 async fn publish_stun_endpoints(
-    listeners: &Arc<QuicListeners>,
+    network: &Arc<Network>,
     configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
     dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
     publish_config: &PublishConfig,
@@ -555,7 +548,7 @@ async fn publish_stun_endpoints(
         if handle.change_address.is_none() {
             continue; // 缺少 ChangedAddress 时仅具备部分 STUN 能力，不发布到公共 agent 列表
         }
-        let Some(bind_iface) = find_bind_iface(listeners, bind_uri) else {
+        let Some(bind_iface) = find_bind_iface(network, bind_uri) else {
             continue;
         };
         let iface = bind_iface.borrow();

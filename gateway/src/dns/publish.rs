@@ -1,18 +1,20 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use futures::{StreamExt, stream::FuturesUnordered};
 use gmdns::{
     MdnsPacket,
     mdns::Mdns,
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolvers::{H3Publisher, MdnsResolver},
 };
-use h3x::dquic::{
-    prelude::{BindUri, BoundAddr, IO, QuicListeners},
-    qbase::net::addr::SocketEndpointAddr,
-    qinterface::{BindInterface, component::location::Locations},
-    qresolve::Publish as DnsPublisher,
-    qtraversal::nat::client::{NatType, StunClientsComponent},
+use h3x::{
+    dquic::{
+        prelude::{BindUri, BoundAddr, IO},
+        qbase::net::addr::SocketEndpointAddr,
+        qinterface::{BindInterface, component::location::Locations},
+        qresolve::Publish as DnsPublisher,
+        qtraversal::nat::client::{NatType, StunClientsComponent},
+    },
+    endpoint::Network,
 };
 use rustls::{SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
 use snafu::{OptionExt, Report, ResultExt, whatever};
@@ -26,10 +28,6 @@ use crate::{
     error::{Result, Whatever},
     parse::{Node, ServerIdentity, Value, server_identity},
 };
-
-pub struct Publisher {
-    _task: AbortOnDropHandle<()>,
-}
 
 pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
 
@@ -306,87 +304,6 @@ async fn publish_resolvers(
     }
 }
 
-async fn publish_once(listeners: &Arc<QuicListeners>, resolvers: &HashMap<String, PublishConfig>) {
-    listeners
-        .servers()
-        .into_iter()
-        .filter_map(|name| {
-            let ifaces = listeners.get_server(&name)?.bind_interfaces();
-            let config = resolvers.get(&name)?;
-            Some((name, ifaces, config))
-        })
-        .map(|(name, ifaces, config)| async move {
-            let mdns_name = name.clone();
-            let mdns_future = async {
-                ifaces
-                    .iter()
-                    .map(|(uri, iface)| publish_single_mdns(uri, iface, &mdns_name, config))
-                    .collect::<FuturesUnordered<_>>()
-                    .collect::<()>()
-                    .await;
-            };
-
-            let resolvers_future = publish_resolvers(&name, config, ifaces.iter());
-
-            tokio::join!(mdns_future, resolvers_future);
-        })
-        .collect::<FuturesUnordered<_>>()
-        .collect::<()>()
-        .await;
-}
-
-pub async fn publish_now(
-    listeners: &Arc<QuicListeners>,
-    resolvers: &HashMap<String, PublishConfig>,
-) {
-    publish_once(listeners, resolvers).await;
-}
-
-impl Publisher {
-    pub fn spawn(listeners: Arc<QuicListeners>, resolvers: HashMap<String, PublishConfig>) -> Self {
-        let resolvers = Arc::new(resolvers);
-
-        let publish_all =
-            async move |listeners: Arc<QuicListeners>,
-                        resolvers: Arc<HashMap<String, PublishConfig>>| {
-                publish_once(&listeners, &resolvers).await
-            };
-
-        let _task = AbortOnDropHandle::new(tokio::spawn(
-            async move {
-                let new_publish_task = || {
-                    let publish_all = publish_all(listeners.clone(), resolvers.clone());
-                    AbortOnDropHandle::new(tokio::spawn(
-                        async move {
-                            time::sleep(Duration::from_millis(50)).await;
-                            publish_all.await
-                        }
-                        .in_current_span(),
-                    ))
-                };
-
-                let mut interval = interval(DNS_PUBLISH_INTERVAL);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                let mut current_publish_task = new_publish_task();
-                let mut observer = Locations::global().subscribe();
-                loop {
-                    tokio::select! {
-                        _ = observer.recv() => {
-                            current_publish_task.abort();
-                        }
-                        _ = interval.tick() => {
-                            current_publish_task.abort();
-                        }
-                    }
-                    current_publish_task = new_publish_task();
-                }
-            }
-            .in_current_span(),
-        ));
-        Self { _task }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Per-server DNS publish: reactive, per-listener publish task
 // ---------------------------------------------------------------------------
@@ -431,15 +348,29 @@ pub fn build_publish_config_from_identity(
     }
 }
 
+/// Provider of the current set of bind URIs for a given server.
+///
+/// Pishoo owns the authoritative mapping from server name to desired bind
+/// URIs. It injects a closure so the publish task can re-query the live
+/// set on each interval tick without taking a hard dependency on pishoo's
+/// internal state.
+pub type BindUriProvider = Arc<dyn Fn() -> Vec<BindUri> + Send + Sync>;
+
 /// Spawn an autonomous DNS publish task for a single server.
 ///
 /// The task periodically re-publishes the server's endpoints to DNS
 /// and reacts to endpoint changes (network interface events, STUN
 /// binding updates). Dropping the returned handle aborts the task.
+///
+/// `bind_uris` is re-invoked on every publish tick, so pishoo can return
+/// an updated URI set after `reconcile_binds` reshapes the server's
+/// listens. The task terminates naturally when the returned handle is
+/// dropped, which happens at server retirement.
 pub fn spawn_server_publish_task(
     server_name: String,
     config: PublishConfig,
-    listeners: Arc<QuicListeners>,
+    network: Arc<Network>,
+    bind_uris: BindUriProvider,
 ) -> AbortOnDropHandle<()> {
     AbortOnDropHandle::new(tokio::spawn(
         async move {
@@ -447,31 +378,29 @@ pub fn spawn_server_publish_task(
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut observer = Locations::global().subscribe();
 
-            // Initial publish after a short debounce.
+            // initial publish after a short debounce.
             time::sleep(Duration::from_millis(50)).await;
-            publish_server(&server_name, &config, &listeners).await;
+            publish_server(&server_name, &config, &network, &bind_uris()).await;
 
             loop {
-                // Wait for either a location change or the next interval tick.
+                // wait for either a location change or the next interval tick.
                 tokio::select! {
                     biased;
                     _ = interval.tick() => {}
                     _ = observer.recv() => {
-                        // Drain any additional pending location events to avoid
-                        // rapid restarts when many events arrive in a burst.
+                        // drain bursty events to avoid rapid restarts.
                         while observer.try_recv().is_ok() {}
-                        // Reset the interval so we wait at least one full period
+                        // reset the interval so we wait at least one full period
                         // after the last change before publishing again.
                         interval.reset();
                     }
                 }
 
-                // Small debounce to coalesce rapid-fire events.
+                // small debounce to coalesce rapid-fire events.
                 time::sleep(Duration::from_millis(50)).await;
-                // Drain any events that arrived during the sleep.
                 while observer.try_recv().is_ok() {}
 
-                publish_server(&server_name, &config, &listeners).await;
+                publish_server(&server_name, &config, &network, &bind_uris()).await;
             }
         }
         .in_current_span(),
@@ -479,12 +408,21 @@ pub fn spawn_server_publish_task(
 }
 
 /// Publish endpoints for a single server (mDNS + DNS resolvers).
-async fn publish_server(server_name: &str, config: &PublishConfig, listeners: &QuicListeners) {
-    let Some(server) = listeners.get_server(server_name) else {
-        tracing::warn!(server_name, "publish_server: server not found in listeners");
-        return;
-    };
-    let ifaces = server.bind_interfaces();
+///
+/// The caller provides the authoritative set of bind URIs for the server;
+/// this function resolves each URI to a live [`BindInterface`] via
+/// [`Network::get_iface`], silently skipping URIs that have already been
+/// released.
+pub async fn publish_server(
+    server_name: &str,
+    config: &PublishConfig,
+    network: &Network,
+    uris: &[BindUri],
+) {
+    let ifaces: Vec<(BindUri, BindInterface)> = uris
+        .iter()
+        .filter_map(|uri| network.get_iface(uri).map(|iface| (uri.clone(), iface)))
+        .collect();
 
     // mDNS publish
     for (uri, iface) in &ifaces {
@@ -492,7 +430,7 @@ async fn publish_server(server_name: &str, config: &PublishConfig, listeners: &Q
     }
 
     // DNS resolver publish
-    publish_resolvers(server_name, config, ifaces.iter()).await;
+    publish_resolvers(server_name, config, ifaces.iter().map(|(u, i)| (u, i))).await;
 }
 
 fn create_h3_client_from_identity(

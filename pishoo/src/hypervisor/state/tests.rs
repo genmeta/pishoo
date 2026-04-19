@@ -7,23 +7,31 @@ use nix::unistd::{Pid, Uid};
 use super::*;
 use crate::hypervisor::worker_handle::WorkerHandle;
 
+/// Test helper: is there an `Active` entry for `server_name`?
+async fn is_active(state: &RootState, server_name: &str) -> bool {
+    let registry = state.servers.read().await;
+    matches!(
+        registry.entries.get(server_name),
+        Some(ServerEntry::Active { .. })
+    )
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 
-/// Create an independent QuicListeners + RootState for one test.
+/// Create an independent [`Network`] + [`RootState`] for one test.
 fn test_state() -> Arc<RootState> {
     // Ensure the rustls CryptoProvider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let router = Arc::new(h3x::dquic::qinterface::component::route::QuicRouter::new());
-    let listeners = h3x::dquic::prelude::QuicListeners::builder()
-        .with_router(router)
-        .without_client_cert_verifier()
-        .with_alpns([b"h3".as_slice()])
-        .listen(8)
-        .expect("failed to create test QuicListeners");
-    Arc::new(RootState::new(listeners))
+    let network = h3x::endpoint::Network::builder()
+        .stun_server(Arc::<str>::from(""))
+        .build();
+    Arc::new(RootState::new(
+        network,
+        h3x::endpoint::config::ServerQuicConfig::default(),
+    ))
 }
 
 /// Generate a self-signed Identity for `{label}.user.genmeta.net`.
@@ -193,10 +201,10 @@ async fn test_register_then_release() {
         .await
         .expect("register_listener should succeed");
 
-    assert!(state.route_connection(server_name).await.is_some());
+    assert!(is_active(&state, server_name).await);
 
     state.release_server(server_name, owner).await;
-    assert!(state.route_connection(server_name).await.is_none());
+    assert!(!is_active(&state, server_name).await);
 }
 
 #[tokio::test]
@@ -245,12 +253,7 @@ async fn test_register_cross_owner_conflict() {
     assert!(matches!(err, RegisterError::ConflictedName));
 
     // Original server's conn_sender should be None (poisoned).
-    assert!(
-        state
-            .route_connection("cross-conflict.user.genmeta.net")
-            .await
-            .is_none()
-    );
+    assert!(!is_active(&state, "cross-conflict.user.genmeta.net").await);
 }
 
 #[tokio::test]
@@ -315,12 +318,7 @@ async fn test_scrub_then_reregister() {
         .register_listener(ServiceOwner::Local, test_request("scrub-re"))
         .await
         .expect("re-register after scrub should succeed");
-    assert!(
-        state
-            .route_connection("scrub-re.user.genmeta.net")
-            .await
-            .is_some()
-    );
+    assert!(is_active(&state, "scrub-re.user.genmeta.net").await);
 }
 
 #[tokio::test]
@@ -347,12 +345,7 @@ async fn test_release_wrong_owner() {
         .await;
 
     // Server should still be active.
-    assert!(
-        state
-            .route_connection("wrong-owner.user.genmeta.net")
-            .await
-            .is_some()
-    );
+    assert!(is_active(&state, "wrong-owner.user.genmeta.net").await);
 }
 
 #[tokio::test]
@@ -379,12 +372,7 @@ async fn test_cleanup_worker_releases_servers() {
         .register_listener(owner, test_request("cleanup-srv"))
         .await
         .expect("register should succeed");
-    assert!(
-        state
-            .route_connection("cleanup-srv.user.genmeta.net")
-            .await
-            .is_some()
-    );
+    assert!(is_active(&state, "cleanup-srv.user.genmeta.net").await);
 
     // Cleanup the worker — its server should also be gone.
     let summary = state
@@ -393,11 +381,6 @@ async fn test_cleanup_worker_releases_servers() {
         .expect("cleanup should find the worker");
     assert_eq!(summary.servers_cleaned, 1);
 
-    assert!(
-        state
-            .route_connection("cleanup-srv.user.genmeta.net")
-            .await
-            .is_none()
-    );
+    assert!(!is_active(&state, "cleanup-srv.user.genmeta.net").await);
     assert!(!state.has_worker(pid).await);
 }

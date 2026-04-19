@@ -114,16 +114,19 @@ impl RootState {
         // Also scan for `Registering` entries owned by this worker — they are
         // not yet recorded in `owned_servers` because `register_listener`
         // Phase 3 has not completed.
-        let servers_cleaned = {
+        let (servers_cleaned, retired_tasks) = {
             let mut registry = self.servers.write().await;
             let mut cleaned = 0usize;
+            let mut retired: Vec<tokio_util::task::AbortOnDropHandle<()>> = Vec::new();
             for server_name in &owned_servers {
                 let dominated = matches!(
                     registry.entries.get(server_name.as_str()),
                     Some(ServerEntry::Active { owner: ServiceOwner::Worker(p), .. }) if *p == pid
                 );
                 if dominated {
-                    registry.retire_entry(server_name, &self.listeners);
+                    if let Some(task) = registry.retire_entry(server_name) {
+                        retired.push(task);
+                    }
                     cleaned += 1;
                 }
             }
@@ -140,12 +143,18 @@ impl RootState {
                 .map(|(name, _)| name.clone())
                 .collect();
             for name in &orphaned {
-                registry.retire_entry(name, &self.listeners);
+                if let Some(task) = registry.retire_entry(name) {
+                    retired.push(task);
+                }
                 cleaned += 1;
             }
-            cleaned
+            (cleaned, retired)
         };
-        // servers lock released here.
+        // servers lock released here — await the retired fanout tasks so
+        // their captured `ServerBinding`s are dropped before we return.
+        for task in retired_tasks {
+            let _ = task.await;
+        }
 
         let background_tasks_cleaned = background_tasks.len();
         let summary = CleanupSummary {

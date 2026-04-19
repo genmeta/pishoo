@@ -3,8 +3,14 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
-use h3x::dquic::prelude::{QuicListeners, handy::server_parameters};
 use gateway::error::Whatever;
+use h3x::{
+    dquic::prelude::handy::server_parameters,
+    endpoint::{
+        Network,
+        config::{ServerOnlyConfig, ServerQuicConfig},
+    },
+};
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
 use rustls::server::WebPkiClientVerifier;
@@ -77,24 +83,37 @@ async fn main() -> Result<(), Whatever> {
 
     // --- Multi-process supervisor setup ---
 
-    // Create QuicListeners (empty — workers add servers via request_listen)
+    // Build the shared Network + default ServerQuicConfig that every
+    // registered SNI will reuse. Workers register by calling back through
+    // IPC (request_listen) — no servers are added up-front.
     let roots = pishoo::tls::root_cert_store();
     let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
         .allow_unauthenticated()
         .build()
         .expect("failed to build tls client cert verifier");
 
-    let listeners = QuicListeners::builder()
-        .with_resolver(Arc::new(gateway::dns::build_query_resolver_chain(&[])))
-        .with_stun(gateway::dns::DEFAULT_STUN_SERVER)
-        .with_parameters(server_parameters())
-        .with_client_cert_verifier(tls_client_cert_verifier)
-        .with_alpns([b"h3".as_slice()])
-        .listen(1024)
-        .expect("failed to create QuicListeners");
+    let server_only = ServerOnlyConfig {
+        parameters: server_parameters(),
+        alpns: vec![b"h3".to_vec()],
+        backlog: 1024,
+        client_cert_verifier: tls_client_cert_verifier,
+        ..Default::default()
+    };
+    let server_qcfg = ServerQuicConfig {
+        own: Arc::new(server_only),
+        ..Default::default()
+    };
+
+    let network = Network::builder()
+        .stun_server(Arc::<str>::from(gateway::dns::DEFAULT_STUN_SERVER))
+        .stun_resolver(Arc::new(gateway::dns::build_query_resolver_chain(&[])))
+        .build();
 
     // Create RootState (interior mutability — no external Mutex needed)
-    let state = Arc::new(pishoo::hypervisor::state::RootState::new(listeners.clone()));
+    let state = Arc::new(pishoo::hypervisor::state::RootState::new(
+        network,
+        server_qcfg,
+    ));
 
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
@@ -114,8 +133,8 @@ async fn main() -> Result<(), Whatever> {
     // arriving during reload are never lost.
     let mut signals = signal::RootSignalHandler::new()?;
 
-    // Central accept loop: route connections by server_name
-    let accept_handle = pishoo::hypervisor::network::spawn_accept_loop(state.clone());
+    // Per-server accept tasks are spawned inside `register_listener`; no
+    // central accept loop is needed here.
 
     let monitor_handle = pishoo::hypervisor::process::spawn_monitor_loop(state.clone());
 
@@ -138,7 +157,6 @@ async fn main() -> Result<(), Whatever> {
                     signal::RootSignal::SigQuit => Signal::SIGQUIT,
                     _ => unreachable!("matched shutdown signals only"),
                 };
-                accept_handle.abort();
                 pishoo::hypervisor::shutdown::run_shutdown(&state, forwarded).await;
                 break;
             }
@@ -162,8 +180,6 @@ async fn main() -> Result<(), Whatever> {
         }
     }
 
-    accept_handle.abort();
-    let _ = accept_handle.await;
     monitor_handle.abort();
     let _ = monitor_handle.await;
     network_watch_handle.abort();

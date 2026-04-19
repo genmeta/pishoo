@@ -75,8 +75,8 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     RegisterError::DuplicateListen | RegisterError::ConflictedName => {
                         ListenError::Conflict
                     }
-                    RegisterError::AddServerFailed { .. } => ListenError::Internal {
-                        message: format!("failed to add server `{server_name}`"),
+                    RegisterError::BindServer { .. } => ListenError::Internal {
+                        message: format!("failed to bind server `{server_name}` on network"),
                     },
                 }
             })?;

@@ -1,13 +1,21 @@
 //! Server registry operations on [`RootState`].
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Weak},
+};
 
 use gateway::control_plane::ListenRequest;
+use h3x::{
+    dquic::{prelude::BindUri, qinterface::BindInterface},
+    endpoint::identity::NamedIdentity,
+};
+use snafu::IntoError;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
-use super::{RegisterError, RootState, ServerEntry, ServiceOwner};
+use super::{RegisterError, RootState, ServerEntry, ServiceOwner, register_error};
 use crate::listen::PerServerListener;
 
 impl RootState {
@@ -18,8 +26,8 @@ impl RootState {
     /// Unified entry point for registering a listener.
     ///
     /// State machine:
-    /// - **Vacant** → insert `Registering` sentinel → async `add_server` →
-    ///   promote to `Active`.
+    /// - **Vacant** → insert `Registering` sentinel → bind server on network
+    ///   → promote to `Active`.
     /// - **Registering/Active, same owner** → `DuplicateListen`.
     /// - **Registering/Active, different owner** → poison to `Conflicted`.
     /// - **Conflicted** → `ConflictedName`.
@@ -53,17 +61,25 @@ impl RootState {
                     if let Some(ServerEntry::Active {
                         shutdown_token,
                         owner: old_owner,
+                        _accept_task,
                         ..
                     }) = old
                     {
                         shutdown_token.cancel();
-                        self.listeners.remove_server(&server_name);
                         if let ServiceOwner::Worker(pid) = old_owner {
                             let mut inner = self.inner.lock().await;
                             if let Some(proc) = inner.processes.get_mut(&pid) {
                                 proc.owned_servers.remove(&server_name);
                             }
                         }
+                        // Abort the accept task, then await it so the old
+                        // owner's `ServerBinding` is dropped before we
+                        // return — otherwise a subsequent re-register of
+                        // the same SNI (e.g. after `scrub_conflicts`)
+                        // would race against the old binding and fail
+                        // with `SniInUse`.
+                        _accept_task.abort();
+                        let _ = _accept_task.await;
                     }
                     tracing::warn!(
                         %server_name,
@@ -81,34 +97,35 @@ impl RootState {
             }
         }
 
-        // Phase 2: name is claimed — resolve bind URIs and bind the server.
+        // Phase 2: name is claimed — resolve bind URIs, acquire BindInterfaces
+        // from the shared Network, then register the SNI via bind_server.
         // No lock held — other server_names can be read/written concurrently.
         let device_names = h3x::dquic::qinterface::device::Devices::global()
             .interfaces()
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let bind_uris = crate::listen::resolve_bind_uris(&request.bind, &device_names);
+        let bind_uri_strings = crate::listen::resolve_bind_uris(&request.bind, &device_names);
+        let bound_ifaces = bind_uris_on_network(&self.network, &bind_uri_strings).await;
 
-        let add_result = self
-            .listeners
-            .add_server(
-                &server_name,
-                request.identity.certs(),
-                request.identity.key(),
-                bind_uris,
-                None::<Vec<u8>>,
-            )
-            .await;
-
-        if let Err(source) = add_result {
-            // Rollback the sentinel.
-            self.servers.write().await.entries.remove(&server_name);
-            return Err(RegisterError::AddServerFailed {
-                server_name,
-                source,
-            });
-        }
+        let named_identity = Arc::new(NamedIdentity {
+            name: Arc::from(server_name.as_str()),
+            certs: request.identity.certs().to_vec(),
+            key: Arc::new(request.identity.key().clone_key()),
+        });
+        let server_binding = match self
+            .network
+            .bind_server(named_identity, self.server_qcfg.clone())
+            .await
+        {
+            Ok(binding) => binding,
+            Err(source) => {
+                // Rollback the sentinel. Dropping `bound_ifaces` releases the
+                // BindInterfaces acquired above (no other server uses them).
+                self.servers.write().await.entries.remove(&server_name);
+                return Err(register_error::BindServerSnafu { server_name }.into_error(source));
+            }
+        };
 
         // Phase 3: promote sentinel to `Active`.
         {
@@ -122,8 +139,8 @@ impl RootState {
                 }
                 _ => {
                     // Sentinel was replaced (e.g., by cross-owner conflict or
-                    // cleanup). Roll back the listeners binding.
-                    self.listeners.remove_server(&server_name);
+                    // cleanup). Drop the server_binding to release the SNI.
+                    drop(server_binding);
                     tracing::warn!(
                         %server_name,
                         ?owner,
@@ -135,6 +152,7 @@ impl RootState {
 
             let (tx, rx) = mpsc::channel(128);
             let shutdown_token = CancellationToken::new();
+            let accept_task = spawn_accept_task(server_binding, tx.clone());
 
             // Spawn per-server DNS publish task.
             let publish_config = gateway::dns::build_publish_config_from_identity(
@@ -144,10 +162,12 @@ impl RootState {
             let publish_task = if publish_config.resolvers.is_empty() {
                 None
             } else {
+                let provider = bind_uri_provider(Arc::downgrade(self), server_name.clone());
                 Some(gateway::dns::spawn_server_publish_task(
                     server_name.clone(),
                     publish_config,
-                    self.listeners.clone(),
+                    self.network.clone(),
+                    provider,
                 ))
             };
 
@@ -158,6 +178,8 @@ impl RootState {
                     conn_tx: tx,
                     shutdown_token: shutdown_token.clone(),
                     listens: request.bind,
+                    bound_ifaces,
+                    _accept_task: accept_task,
                     publish_task,
                 },
             );
@@ -171,10 +193,10 @@ impl RootState {
                 } else {
                     // Worker died during async gap — rollback.
                     drop(inner);
-                    self.servers
-                        .write()
-                        .await
-                        .retire_entry(&server_name, &self.listeners);
+                    let retired = self.servers.write().await.retire_entry(&server_name);
+                    if let Some(task) = retired {
+                        let _ = task.await;
+                    }
                     tracing::warn!(
                         %server_name,
                         pid = %pid,
@@ -197,7 +219,7 @@ impl RootState {
 
     /// Release a single active server entry owned by the specified owner.
     pub async fn release_server(&self, server_name: &str, owner: ServiceOwner) {
-        {
+        let retired = {
             let mut registry = self.servers.write().await;
             let owned = matches!(
                 registry.entries.get(server_name),
@@ -206,7 +228,14 @@ impl RootState {
             if !owned {
                 return;
             }
-            registry.retire_entry(server_name, &self.listeners);
+            registry.retire_entry(server_name)
+        };
+
+        // Wait for the fanout task to finish so its captured
+        // `ServerBinding` is dropped (and the SNI slot freed) before we
+        // return control to the caller.
+        if let Some(task) = retired {
+            let _ = task.await;
         }
 
         if let ServiceOwner::Worker(pid) = owner {
@@ -214,21 +243,6 @@ impl RootState {
             if let Some(process) = inner.processes.get_mut(&pid) {
                 process.owned_servers.remove(server_name);
             }
-        }
-    }
-
-    /// Look up the routing sender for a given server_name.
-    ///
-    /// Used by the central accept loop to route connections to the correct
-    /// per-server adapter. Returns `None` for `Conflicted` entries.
-    pub async fn route_connection(
-        &self,
-        server_name: &str,
-    ) -> Option<mpsc::Sender<h3x::dquic::prelude::Connection>> {
-        let registry = self.servers.read().await;
-        match registry.entries.get(server_name) {
-            Some(ServerEntry::Active { conn_tx, .. }) => Some(conn_tx.clone()),
-            _ => None,
         }
     }
 
@@ -248,8 +262,8 @@ impl RootState {
             .cloned()
             .collect();
 
-        // Collect only servers whose listens are affected by this device.
-        let entries: Vec<(String, Vec<gateway::parse::Listens>)> = {
+        // collect only servers whose listens are affected by this device.
+        let affected: Vec<(String, Vec<gateway::parse::Listens>)> = {
             let registry = self.servers.read().await;
             registry
                 .entries
@@ -266,75 +280,76 @@ impl RootState {
                 .collect()
         };
 
-        for (server_name, listens) in entries {
+        for (server_name, listens) in affected {
             let desired_uris: Vec<String> =
                 crate::listen::resolve_bind_uris(&listens, &device_names);
-
-            // Build identity_key → original URI maps for stable comparison.
-            // alloc_port() generates a unique query param each call, so we
-            // must compare by identity_key (URI without query string).
-            let desired_keys: std::collections::HashMap<String, &str> = desired_uris
+            let desired_by_key: HashMap<String, BindUri> = desired_uris
                 .iter()
-                .map(|uri| {
-                    let bind_uri = h3x::dquic::prelude::BindUri::from(uri.as_str());
-                    (bind_uri.identity_key(), uri.as_str())
+                .map(|s| {
+                    let uri = BindUri::from(s.as_str());
+                    (uri.identity_key(), uri)
                 })
                 .collect();
 
-            let Some(server) = self.listeners.get_server(&server_name) else {
-                continue;
+            // Snapshot the currently-bound URIs under a read lock, then
+            // compute the diff.
+            let current_by_key: HashMap<String, BindUri> = {
+                let registry = self.servers.read().await;
+                match registry.entries.get(&server_name) {
+                    Some(ServerEntry::Active { bound_ifaces, .. }) => bound_ifaces
+                        .keys()
+                        .map(|uri| (uri.identity_key(), uri.clone()))
+                        .collect(),
+                    _ => continue,
+                }
             };
 
-            let current_map: std::collections::HashMap<String, String> = server
-                .bind_interfaces()
-                .keys()
-                .map(|uri| (uri.identity_key(), uri.to_string()))
+            let desired_keys: HashSet<&String> = desired_by_key.keys().collect();
+            let current_keys: HashSet<&String> = current_by_key.keys().collect();
+
+            let to_add: Vec<BindUri> = desired_keys
+                .difference(&current_keys)
+                .filter_map(|k| desired_by_key.get(*k).cloned())
+                .collect();
+            let to_remove: Vec<BindUri> = current_keys
+                .difference(&desired_keys)
+                .filter_map(|k| current_by_key.get(*k).cloned())
                 .collect();
 
-            let desired_key_set: std::collections::HashSet<&String> = desired_keys.keys().collect();
-            let current_key_set: std::collections::HashSet<&String> = current_map.keys().collect();
-
-            // Bind new URIs (present in desired but not in current).
-            let to_add: Vec<String> = desired_key_set
-                .difference(&current_key_set)
-                .filter_map(|key| desired_keys.get(key.as_str()).map(|s| s.to_string()))
-                .collect();
-            if !to_add.is_empty() {
-                tracing::info!(
-                    %server_name,
-                    added = ?to_add,
-                    "reconcile: binding new interfaces"
-                );
-                server.bind(to_add).await;
+            if to_add.is_empty() && to_remove.is_empty() {
+                continue;
             }
 
-            // Unbind removed URIs (present in current but not in desired).
-            let to_remove: Vec<String> = current_key_set
-                .difference(&desired_key_set)
-                .filter_map(|key| current_map.get(key.as_str()).cloned())
-                .collect();
-            for uri_str in &to_remove {
-                let uri = h3x::dquic::prelude::BindUri::from(uri_str.as_str());
-                if let Some(iface) = server.remove_iface(&uri) {
-                    // Close the interface in the background to avoid blocking
-                    // the reconcile loop. BindInterface::close() waits for all
-                    // components (e.g. STUN keep-alive tasks) to shut down,
-                    // which may take a long time if the network interface has
-                    // already been removed at the OS level.
-                    tokio::spawn(
-                        async move {
-                            let _ = iface.close().await;
-                        }
-                        .in_current_span(),
-                    );
+            // Acquire new BindInterfaces outside the registry lock.
+            let mut added_ifaces: HashMap<BindUri, BindInterface> =
+                HashMap::with_capacity(to_add.len());
+            for uri in &to_add {
+                let iface = self.network.bind(uri.clone()).await;
+                added_ifaces.insert(uri.clone(), iface);
+            }
+
+            // Apply the diff to the live entry under the write lock.
+            let mut registry = self.servers.write().await;
+            match registry.entries.get_mut(&server_name) {
+                Some(ServerEntry::Active { bound_ifaces, .. }) => {
+                    for (uri, iface) in added_ifaces {
+                        bound_ifaces.insert(uri, iface);
+                    }
+                    for uri in &to_remove {
+                        bound_ifaces.remove(uri);
+                    }
                 }
+                _ => continue,
+            }
+            drop(registry);
+
+            if !to_add.is_empty() {
+                let added: Vec<String> = to_add.iter().map(ToString::to_string).collect();
+                tracing::info!(%server_name, added = ?added, "reconcile: binding new interfaces");
             }
             if !to_remove.is_empty() {
-                tracing::info!(
-                    %server_name,
-                    removed = ?to_remove,
-                    "reconcile: unbound removed interfaces"
-                );
+                let removed: Vec<String> = to_remove.iter().map(ToString::to_string).collect();
+                tracing::info!(%server_name, removed = ?removed, "reconcile: unbound removed interfaces");
             }
         }
     }
@@ -367,4 +382,92 @@ impl RootState {
 
         conflicted
     }
+}
+
+/// Acquire a [`BindInterface`] for each requested URI from the shared
+/// [`Network`]. Duplicate URIs and any that fail to parse as a valid
+/// [`BindUri`] (h3x panics at parse time, so this is best-effort) are
+/// silently deduplicated on the [`BindUri::identity_key`] level.
+async fn bind_uris_on_network(
+    network: &Arc<h3x::endpoint::network::Network>,
+    uri_strings: &[String],
+) -> HashMap<BindUri, BindInterface> {
+    let mut result = HashMap::with_capacity(uri_strings.len());
+    for s in uri_strings {
+        let uri = BindUri::from(s.as_str());
+        // identity_key folds transient query params; keep one bind per key
+        // to match h3x's own deduplication in `Binds::to_bind_uris`.
+        if result.contains_key(&uri) {
+            continue;
+        }
+        let iface = network.bind(uri.clone()).await;
+        result.insert(uri, iface);
+    }
+    result
+}
+
+/// Spawn the per-server fanout task that drains the shared [`ServerBinding`]
+/// mpmc queue into the worker-visible mpsc channel.
+///
+/// The task terminates inherently when either end of the pipe closes:
+/// dropping every [`ServerBinding`] clone yields `None` from
+/// [`ServerBinding::recv`]; closing the worker's `mpsc::Receiver` (by
+/// dropping [`PerServerListener`]) makes `tx.send` fail. The returned
+/// [`AbortOnDropHandle`] additionally guarantees cleanup on retire.
+fn spawn_accept_task(
+    binding: h3x::endpoint::network::ServerBinding,
+    tx: mpsc::Sender<Arc<h3x::dquic::prelude::Connection>>,
+) -> AbortOnDropHandle<()> {
+    let name = binding.name.clone();
+    AbortOnDropHandle::new(tokio::spawn(
+        async move {
+            // loop exits when `binding.recv()` returns None (SNI dropped)
+            // or when the receiver side of `tx` is closed.
+            loop {
+                match binding.recv().await {
+                    Some(conn) => {
+                        if tx.send(conn).await.is_err() {
+                            tracing::debug!(%name, "accept task: receiver dropped, exiting");
+                            break;
+                        }
+                    }
+                    None => {
+                        tracing::debug!(%name, "accept task: binding closed, exiting");
+                        break;
+                    }
+                }
+            }
+        }
+        .in_current_span(),
+    ))
+}
+
+/// Build a [`gateway::dns::BindUriProvider`] closure that snapshots the
+/// authoritative URI set for `server_name` from [`RootState`] on every
+/// invocation. Returns an empty vector if the state is gone or the entry
+/// is no longer active.
+fn bind_uri_provider(state: Weak<RootState>, server_name: String) -> gateway::dns::BindUriProvider {
+    Arc::new(move || {
+        let Some(state) = state.upgrade() else {
+            return Vec::new();
+        };
+        // Block on the registry read lock: this runs inside the publish
+        // task which is itself spawned on the tokio runtime, so a short
+        // synchronous blocking read is acceptable. Use `try_read` to avoid
+        // deadlocking against the write lock held during reconcile; a
+        // transient miss simply delays the next publish by one tick.
+        let Ok(registry) = state.servers.try_read() else {
+            tracing::trace!(
+                %server_name,
+                "bind_uri_provider: registry locked, publishing with empty set"
+            );
+            return Vec::new();
+        };
+        match registry.entries.get(&server_name) {
+            Some(ServerEntry::Active { bound_ifaces, .. }) => {
+                bound_ifaces.keys().cloned().collect()
+            }
+            _ => Vec::new(),
+        }
+    })
 }

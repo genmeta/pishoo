@@ -1,62 +1,19 @@
-//! QUIC listeners/client management and connection routing.
+//! Network interface watch loop.
 //!
-//! The root process runs a single [`QuicListeners`] that multiplexes all
-//! servers. This module provides the central accept loop that routes
-//! incoming connections by `server_name` to per-server mpsc channels,
-//! and a network watch loop that reconciles bind URIs on interface changes.
+//! Each registered server owns its own per-SNI accept task (spawned inside
+//! [`RootState::register_listener`]) that drains the shared
+//! `ServerBinding` into the worker's mpsc channel, so there is no longer
+//! a single central accept loop. What remains here is the background task
+//! that reconciles per-server bind URIs in response to interface changes
+//! reported by [`Devices`].
 
 use std::sync::Arc;
 
 use h3x::dquic::qinterface::device::Devices;
-use snafu::Report;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 use super::state::RootState;
-
-/// Run the central accept loop: route connections by server_name.
-///
-/// This task runs forever (until the listeners are dropped or an
-/// unrecoverable error occurs). Each incoming connection is dispatched
-/// to the per-server mpsc channel registered in [`RootState`].
-pub async fn run_accept_loop(state: Arc<RootState>) {
-    loop {
-        let (conn, server_name, _pathway, _link) = {
-            match state.listeners.accept().await {
-                Ok(incoming) => incoming,
-                Err(error) => {
-                    tracing::error!(
-                        error = %Report::from_error(&error),
-                        "accept loop error"
-                    );
-                    break;
-                }
-            }
-        };
-
-        let span = tracing::info_span!("route_connection", %server_name);
-        let state = state.clone();
-        tokio::spawn(
-            async move {
-                let sender = state.route_connection(&server_name).await;
-                let Some(sender) = sender else {
-                    tracing::warn!("no listener registered for connection");
-                    return;
-                };
-
-                if sender.send(conn).await.is_err() {
-                    tracing::warn!("failed to route connection (channel closed)");
-                }
-            }
-            .instrument(span),
-        );
-    }
-}
-
-/// Spawn the accept loop as a background task. Returns the join handle.
-pub fn spawn_accept_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(tokio::spawn(run_accept_loop(state).in_current_span()))
-}
 
 /// Watch for network interface changes and reconcile bind URIs.
 ///

@@ -2,7 +2,7 @@
 //!
 //! Tracks which worker process owns which server names, provides conflict
 //! detection, and manages the lifecycle of per-server listen adapters routed
-//! from the central [`QuicListeners`].
+//! from the shared [`Network`](h3x::endpoint::Network)'s SNI dispatcher.
 //!
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
@@ -15,6 +15,10 @@ use std::{
     sync::Arc,
 };
 
+use h3x::{
+    dquic::{prelude::BindUri, qinterface::BindInterface},
+    endpoint::{config::ServerQuicConfig, network::Network},
+};
 use nix::unistd::{Pid, Uid};
 use snafu::Snafu;
 use tokio::{
@@ -40,11 +44,11 @@ pub enum RegisterError {
     /// The entry has been poisoned (set to `Conflicted`).
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
-    /// Failed to bind the server in [`QuicListeners`].
-    #[snafu(display("failed to add server `{server_name}` to listeners"))]
-    AddServerFailed {
+    /// Failed to register the server's identity on the shared [`Network`].
+    #[snafu(display("failed to bind server `{server_name}` on network"))]
+    BindServer {
         server_name: String,
-        source: h3x::dquic::prelude::ServerError,
+        source: h3x::endpoint::network::BindServerError,
     },
 }
 
@@ -59,17 +63,30 @@ pub enum ServiceOwner {
 
 /// Per-server ownership record stored in the root registry.
 pub enum ServerEntry {
-    /// A registration is in progress — the async `add_server` call is
-    /// running. Acts as a sentinel so that concurrent callers see the name
-    /// as occupied. Transitions to `Active` on success, removed on failure.
+    /// A registration is in progress — the async bind is running. Acts as
+    /// a sentinel so concurrent callers see the name as occupied.
+    /// Transitions to `Active` on success, removed on failure.
     Registering { owner: ServiceOwner },
     /// Name is actively owned and serving.
     Active {
         owner: ServiceOwner,
-        conn_tx: mpsc::Sender<h3x::dquic::prelude::Connection>,
+        /// Channel to route accepted connections into the worker/local
+        /// service's [`PerServerListener`]. Retained only for legacy API
+        /// compatibility; the real fanout is driven by `_accept_task`.
+        conn_tx: mpsc::Sender<Arc<h3x::dquic::prelude::Connection>>,
         shutdown_token: CancellationToken,
         /// Original listen specifications for network-change reconciliation.
         listens: Vec<gateway::parse::Listens>,
+        /// Bind URIs currently bound on the shared [`Network`] on behalf of
+        /// this server. Each entry holds a live [`BindInterface`] to keep
+        /// the underlying socket alive; dropping the entry releases one
+        /// reference in [`InterfaceManager`], which closes the socket when
+        /// it is the last outstanding reference.
+        bound_ifaces: HashMap<BindUri, BindInterface>,
+        /// SNI registration handle on the shared [`Network`]. Owns the
+        /// fanout task that drains inbound connections into `conn_tx`;
+        /// dropping releases the SNI entry.
+        _accept_task: AbortOnDropHandle<()>,
         /// Per-server DNS publish task, aborted when the entry is retired.
         publish_task: Option<AbortOnDropHandle<()>>,
     },
@@ -129,11 +146,17 @@ pub(super) struct Inner {
 /// Root-side ownership registry (thread-safe, interior mutability).
 ///
 /// Tracks `server_name → owner`, `pid → owned_servers`, and `uid → pid`
-/// mappings. Owns the shared [`QuicListeners`] and coordinates all
-/// server registration / cleanup.
+/// mappings. Owns the shared [`Network`] + default [`ServerQuicConfig`]
+/// used for every server registration, and coordinates all server
+/// registration / cleanup.
 pub struct RootState {
-    /// The shared QUIC listeners object.
-    pub listeners: Arc<h3x::dquic::prelude::QuicListeners>,
+    /// Shared QUIC network with installed SNI dispatcher.
+    pub network: Arc<Network>,
+    /// Server-side QUIC/TLS configuration shared across every registered
+    /// SNI. `Network::bind_server` rejects registrations whose config
+    /// does not match this one, so a single instance is kept here and
+    /// cloned (cheap — inner `Arc`s) for every `bind_server` call.
+    pub server_qcfg: ServerQuicConfig,
     /// Server entries (behind RwLock for concurrent reads).
     pub(super) servers: RwLock<ServerRegistry>,
     /// Process/user bookkeeping (behind Mutex).
@@ -157,38 +180,51 @@ impl ServerRegistry {
         }
     }
 
-    /// Remove a server entry, cancel its listener, and remove from QuicListeners.
+    /// Remove a server entry and return its accept task, if any.
     ///
-    /// For `Registering` entries, calls `remove_server` defensively (the async
-    /// `add_server` may have already completed). `remove_server` is idempotent.
+    /// Callers **must** await the returned [`AbortOnDropHandle`] after
+    /// releasing any locks — dropping it triggers the abort but the
+    /// runtime drops the task's captured [`ServerBinding`] asynchronously,
+    /// so a subsequent `bind_server` call for the same SNI may otherwise
+    /// race against the old binding's `SniGuard::Drop` and fail with
+    /// `SniInUse`. Awaiting the handle blocks until the task's locals
+    /// (including the `ServerBinding`) have been dropped.
+    ///
+    /// For `Registering` sentinels there is no `ServerBinding` yet, so
+    /// removal of the map entry is sufficient and `None` is returned.
     ///
     /// Caller must already hold a write lock on this `ServerRegistry`.
     pub(super) fn retire_entry(
         &mut self,
         server_name: &str,
-        listeners: &h3x::dquic::prelude::QuicListeners,
-    ) -> Option<()> {
+    ) -> Option<tokio_util::task::AbortOnDropHandle<()>> {
         let entry = self.entries.remove(server_name)?;
         match entry {
-            ServerEntry::Active { shutdown_token, .. } => {
+            ServerEntry::Active {
+                shutdown_token,
+                _accept_task,
+                ..
+            } => {
                 shutdown_token.cancel();
-                listeners.remove_server(server_name);
+                // Abort the accept task eagerly so its captured
+                // `ServerBinding` is released; callers await the handle to
+                // observe the drop synchronously before the next
+                // `bind_server` for the same SNI.
+                _accept_task.abort();
+                Some(_accept_task)
             }
-            ServerEntry::Registering { .. } => {
-                // add_server may or may not have completed — idempotent cleanup.
-                listeners.remove_server(server_name);
-            }
-            ServerEntry::Conflicted => {}
+            ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
         }
-        Some(())
     }
 }
 
 impl RootState {
-    /// Create a new root state with the given shared QUIC listeners.
-    pub fn new(listeners: Arc<h3x::dquic::prelude::QuicListeners>) -> Self {
+    /// Create a new root state with the given shared [`Network`] and
+    /// default [`ServerQuicConfig`].
+    pub fn new(network: Arc<Network>, server_qcfg: ServerQuicConfig) -> Self {
         Self {
-            listeners,
+            network,
+            server_qcfg,
             servers: RwLock::new(ServerRegistry::new()),
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
