@@ -4,7 +4,7 @@ use gateway::{
     forward,
     parse::{self, Value},
 };
-use h3x::dquic::H3Client;
+use h3x::{client::Client, dquic::prelude::QuicClient};
 use snafu::{ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
@@ -48,14 +48,15 @@ async fn main() -> Result<(), Whatever> {
         whatever!("no proxy found in pishoo configuration");
     };
 
-    // Build a minimal H3Client without identity for the example
-    let client = Arc::new(
-        H3Client::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .without_identity()
-            .whatever_context("failed to create H3 client builder")?
+    // Build a minimal H3 client without identity for the example
+    let quic_client = Arc::new(
+        QuicClient::builder()
+            .with_root_certificates(Arc::new(rustls::RootCertStore::empty()))
+            .without_cert()
+            .with_alpns(vec!["h3"])
             .build(),
     );
+    let client = Arc::new(Client::from_quic_client().client(quic_client).build());
 
     let mut handler = JoinSet::new();
 
