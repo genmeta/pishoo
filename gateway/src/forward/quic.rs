@@ -18,10 +18,7 @@ use crate::{
 pub async fn proxy<C: quic::Connect>(
     mut req: Request<hyper::body::Incoming>,
     client: Arc<Client<C>>,
-) -> Result<BoxResponse, hyper::Error>
-where
-    C::Connection: 'static,
-{
+) -> Result<BoxResponse, hyper::Error> {
     // 验证主机合法性
     let host = match validate_host(&mut req) {
         Ok(host) => host,
@@ -61,10 +58,7 @@ where
 pub async fn connect_tunnel<C: quic::Connect + 'static>(
     req: Request<hyper::body::Incoming>,
     client: Arc<Client<C>>,
-) -> Result<BoxResponse, hyper::Error>
-where
-    C::Connection: 'static,
-{
+) -> Result<BoxResponse, hyper::Error> {
     tokio::spawn(
         async move {
             // 升级连接并处理后续请求

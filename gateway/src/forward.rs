@@ -77,10 +77,7 @@ pub async fn serve<C: h3x::quic::Connect + 'static>(
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
-)>
-where
-    C::Connection: 'static,
-{
+)> {
     tracing::info!("starting forward proxy server");
     let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
         unreachable!()
