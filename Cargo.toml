@@ -48,7 +48,7 @@ firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "m
 firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
+h3x = { git = "https://github.com/genmeta/h3x.git", tag = "v0.2.0" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -112,3 +112,25 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[patch."ssh://git@github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x" }
+
+# --- Local h3x override (pool fission fix) ---
+[patch."https://github.com/genmeta/h3x.git"]
+h3x = { path = "../h3x" }
+
+# --- Local dquic override (BG task leak fix in QuicClient::connect) ---
+[patch.crates-io]
+dquic = { path = "../dquic/dquic" }
+qbase = { path = "../dquic/qbase" }
+qcongestion = { path = "../dquic/qcongestion" }
+qconnection = { path = "../dquic/qconnection" }
+qdatagram = { path = "../dquic/qdatagram" }
+qevent = { path = "../dquic/qevent" }
+qinterface = { path = "../dquic/qinterface" }
+qmacro = { path = "../dquic/qmacro" }
+qrecovery = { path = "../dquic/qrecovery" }
+qresolve = { path = "../dquic/qresolve" }
+qtraversal = { path = "../dquic/qtraversal" }
+qudp = { path = "../dquic/qudp" }
