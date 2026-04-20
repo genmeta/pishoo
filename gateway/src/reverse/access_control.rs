@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use firewall_base::matcher::{LocationRulesMatcher, MatchRuleFailed};
-use h3x::quic::agent;
+use h3x::{connection::ConnectionState, quic};
 use http::StatusCode;
 use tracing::{info, warn};
 
@@ -28,10 +28,20 @@ pub async fn access_control(
     request: Request,
     next: Next,
 ) -> Response {
-    let client_name = request
+    let client_name = match request
         .extensions()
-        .get::<Arc<dyn agent::RemoteAgent>>()
-        .map(|a| a.name().to_owned());
+        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
+    {
+        Some(conn) => match conn.remote_agent().await {
+            Ok(Some(agent)) => Some(agent.name().to_owned()),
+            Ok(None) => None,
+            Err(error) => {
+                warn!(error = %error, "failed to fetch remote agent from connection");
+                None
+            }
+        },
+        None => None,
+    };
     let http_request =
         firewall_base::expr::atomics::HttpRequest::new(client_name.as_deref(), &request);
 

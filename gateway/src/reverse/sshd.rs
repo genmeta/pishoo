@@ -9,9 +9,10 @@ use genmeta_ssh::{
     session::{AuthRequest, AuthenticateFn, SessionBootstrap},
 };
 use h3x::{
+    connection::ConnectionState,
     hyper::upgrade,
     message::stream::{ReadStream, WriteStream},
-    protocol::Protocols,
+    quic,
     stream_id::StreamId,
 };
 use http::{Request, StatusCode};
@@ -75,7 +76,7 @@ pub enum RunSshSessionError {
 /// returns 200 OK with `ssh-version` header to complete the CONNECT upgrade.
 pub async fn sshd_handle(
     Extension(loc): Extension<LocationMatch>,
-    Extension(protocols): Extension<Arc<Protocols>>,
+    Extension(connection): Extension<Arc<ConnectionState<dyn quic::DynConnection>>>,
     Extension(stream_id): Extension<StreamId>,
     State(state): State<RouterState>,
     mut req: Request<axum::body::Body>,
@@ -119,7 +120,7 @@ pub async fn sshd_handle(
     // Register the conversation BEFORE returning 200 OK. This ensures the
     // protocol layer can route incoming channel streams as soon as the client
     // receives the response and opens new QUIC bidi streams.
-    let handle = match protocols.get::<genmeta_ssh::protocol::Ssh3Protocol>() {
+    let handle = match connection.protocols().get::<genmeta_ssh::protocol::Ssh3Protocol>() {
         Some(proto) => match proto.register(conversation_id) {
             Ok(h) => h,
             Err(e) => {
