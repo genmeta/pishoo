@@ -1,5 +1,84 @@
 # Changelog
 
+## [0.5.0] - 2026-04-20
+
+### Added
+- **dhttp-home identity model**: pishoo now adopts `dhttp-home` as the
+  foundational identity abstraction. Each OS user owns a *dhttp home*
+  that contains any number of *identity homes*, each holding one
+  identity's TLS certificate/key, server configuration, and related
+  assets. The gateway resolves services per identity home rather than
+  consuming a single monolithic config.
+- **Privilege-separated multi-process supervisor**: motivated directly by
+  dhttp-home, pishoo splits into a privileged root process and per-user
+  worker processes. The root owns listeners, the PID file, and a
+  `server_name -> owner worker` registry; each worker runs as its owning
+  OS user and serves the identity homes that live in that user's dhttp
+  home. This is what makes it correct to host many users' identities on
+  one gateway without running business logic as root.
+- **Standalone STUN server mode**: new `stun_server { bind / outer_addr /
+  change_addr / change_port }` directives for running RFC 5780 STUN
+  endpoints inside a `server` block.
+- **Access control plane**: new `access_rules sqlite://...` directive
+  backed by a SQLite ACL database, plus an HTTP configuration API for
+  rule management.
+- **Per-identity access logs**: non-blocking writer producing structured
+  access logs scoped to each identity.
+- **Response compression**: `gzip`, `gzip_comp_level`, `gzip_min_length`,
+  `gzip_vary`, and `gzip_types` directives.
+- **Header directives**: `proxy_set_header` and `add_header` with variable
+  interpolation (`$host`, `$scheme`, `$http_*`, `$arg_*`, `$remote_addr`).
+- **Upstream TLS**: configurable TLS to proxied upstreams.
+- **SIGHUP-driven selective reload**: listeners are reused where possible
+  when only per-worker configuration changes.
+- **xtask distribution tooling**: `cargo xtask` replaces the shell /
+  Makefile pipeline with parallel builds, shared cargo cache,
+  `dpkg-buildpackage` + debhelper based `.deb` generation, Homebrew
+  formula generation, and cross-compilation for `amd64`, `arm64`,
+  `armhf`, `i686`, and macOS Apple Silicon / Intel.
+- README rewritten to document the new supervisor architecture and boot
+  flow.
+
+### Changed
+- Switched to the h3x / dquic 0.2 line; forward and reverse data paths
+  migrate to h3x `TowerService`, `h3x::quic::Listen`, and
+  `Arc<Connection>` propagation for reduced per-request allocation.
+- TLS certificate/key resolution is delegated to dhttp-home `Identity`
+  instead of ad-hoc file loading.
+- Forward proxy client certificate fields now refer to per-identity
+  keychain paths.
+- DNS publishing now publishes empty records when no endpoints are
+  available, clearing stale entries instead of leaving them.
+- STUN configuration: the `STUN_SERVER` environment variable is removed;
+  the built-in default server is now `nat.genmeta.net:20004` (was
+  `stun.genmeta.net:20002`) and can be overridden via config.
+- Missing files on reverse-proxied paths return HTTP 404 instead of 500.
+- IPC between supervisor and workers uses a multiplexed channel
+  transport.
+- Upgrade `nix` 0.30 → 0.31.
+
+### Removed
+- **SSH3 password / basic authentication**: `ssh_login basic` is no
+  longer accepted; only `ssh_login ssl` (client-certificate
+  authentication) is supported.
+- `STUN_SERVER` environment variable (use config instead).
+- Legacy `Makefile` / `homebrew.sh` / `pishoo/pkg` packaging artifacts
+  (superseded by `xtask`).
+
+### Fixed
+- `sshd`: prevent lingering `pishoo-ssh-session` processes after client
+  disconnect; register the conversation before returning 200 OK.
+- Pishoo: use SOCK_CLOEXEC fallback on macOS; close leaked seqpacket
+  sockets; tolerate worker spawn failures without crashing the root.
+- DNS: spawn interface teardown in the background to prevent the
+  reconcile loop from blocking on slow closes.
+
+### Dependencies
+- Pin all git dependencies to specific revisions (`rev = "..."`) of the
+  respective repositories' default branches to avoid accidental drift.
+- h3x is the only git dependency over `https://`; all others use
+  `ssh://`.
+
 
 ## [0.4.2]
 

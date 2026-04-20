@@ -44,8 +44,8 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
-firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
-firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "main" }
+firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
+firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
 
 # --- QUIC Implementation ---
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
@@ -60,10 +60,10 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- SSH3 ---
-genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", branch = "main" }
+genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", rev = "a32d6bec27dd3012f5914a9efb83d66cf11c172a" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", branch = "main", features = [
+gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", rev = "3722e28b6c8bb5370517736ec760035ecf980a4f", features = [
     "h3x-resolver",
 ] }
 
@@ -89,7 +89,7 @@ pin-project-lite = "0.2"
 form_urlencoded = "1"
 socket2 = "0.5"
 x509-parser = "0.18"
-dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "main" }
+dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", rev = "780ee2de466d64527fed636e7583bf11aef92f1e" }
 
 # --- System Interaction ---
 libc = "0.2"
@@ -112,3 +112,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# Pin all h3x references (gateway + transitive via gmdns/genmeta-ssh) to a
+# single revision. Using the ssh URL as the patch target differentiates it
+# from the https URL in direct deps, which is required by cargo.
+[patch."https://github.com/genmeta/h3x.git"]
+h3x = { git = "ssh://git@github.com/genmeta/h3x.git", rev = "6133d31651b31d4b03956946c370b776c203f4c3" }
