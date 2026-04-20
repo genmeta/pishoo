@@ -406,11 +406,19 @@ dpkg-buildpackage -A -uc -us -d
     Ok(())
 }
 
-pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), Whatever> {
+pub async fn run(
+    targets: &[DebTarget],
+    features: &[Feature],
+    siblings: &[std::path::PathBuf],
+) -> Result<(), Whatever> {
     info!(target_count = targets.len(), "starting deb dist build");
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
+
+    // Resolve sibling paths up front so every target build sees the same set
+    // and path errors surface before we spin up containers.
+    let siblings = resolve_siblings(siblings)?;
 
     let version = package_version(CARGO_NAME)?;
     let target_dir = target_dir()?;
@@ -436,9 +444,12 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
         let version = version.clone();
         let target_dir = target_dir.clone();
         let features = features.to_vec();
+        let siblings = siblings.clone();
         tasks.spawn(
-            async move { build_one(&docker, triple, &version, &target_dir, &features).await }
-                .instrument(span),
+            async move {
+                build_one(&docker, triple, &version, &target_dir, &features, &siblings).await
+            }
+            .instrument(span),
         );
     }
 
@@ -451,12 +462,45 @@ pub async fn run(targets: &[DebTarget], features: &[Feature]) -> Result<(), What
     Ok(())
 }
 
+/// Resolved sibling bind-mount: canonical host path + basename used as the
+/// container target path (`/{basename}`).
+#[derive(Clone)]
+struct Sibling {
+    host: std::path::PathBuf,
+    basename: String,
+}
+
+fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibling>, Whatever> {
+    let mut out = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let host = raw
+            .canonicalize()
+            .whatever_context(format!("sibling path not found: {}", raw.display()))?;
+        if !host.is_dir() {
+            snafu::whatever!("sibling path is not a directory: {}", host.display());
+        }
+        let basename = host
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                snafu::FromString::without_source(format!(
+                    "sibling path has no usable basename: {}",
+                    host.display()
+                ))
+            })?;
+        out.push(Sibling { host, basename });
+    }
+    Ok(out)
+}
+
 async fn build_one(
     docker: &Docker,
     triple: &str,
     version: &str,
     target_dir: &std::path::Path,
     features: &[Feature],
+    siblings: &[Sibling],
 ) -> Result<(), Whatever> {
     let has_sshd = features
         .iter()
@@ -481,6 +525,18 @@ async fn build_one(
         typ: Some(MountTypeEnum::BIND),
         ..Default::default()
     }];
+
+    // User-requested sibling crates, bind-mounted at /{basename} so that
+    // `path = "../{basename}"` references in Cargo.toml resolve inside the
+    // container.
+    for sibling in siblings {
+        mounts.push(Mount {
+            target: Some(format!("/{}", sibling.basename)),
+            source: Some(sibling.host.to_string_lossy().into_owned()),
+            typ: Some(MountTypeEnum::BIND),
+            ..Default::default()
+        });
+    }
 
     mounts.extend(cargo_cache_mounts());
 

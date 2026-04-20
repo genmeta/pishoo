@@ -94,6 +94,11 @@ enum DistFormat {
         /// Cargo features to enable
         #[arg(long = "features", value_delimiter = ',')]
         features: Vec<Feature>,
+        /// Sibling crate directories to bind-mount into the build container
+        /// at `/{basename}`, matching `path = "../{basename}"` in Cargo.toml.
+        /// Repeatable. Each path must exist and be a directory.
+        #[arg(long = "sibling")]
+        siblings: Vec<PathBuf>,
     },
     /// Build Homebrew archives + formula
     Brew {
@@ -217,8 +222,12 @@ async fn main() -> Result<(), Whatever> {
     let cli = Cli::parse();
     match cli.command {
         Command::Dist { format } => match format {
-            DistFormat::Deb { targets, features } => {
-                deb::run(&targets, &features).await?;
+            DistFormat::Deb {
+                targets,
+                features,
+                siblings,
+            } => {
+                deb::run(&targets, &features, &siblings).await?;
             }
             DistFormat::Brew { targets, features } => brew::run(&targets, &features).await?,
         },
