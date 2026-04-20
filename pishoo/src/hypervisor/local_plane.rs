@@ -100,7 +100,18 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
             });
         }
 
-        let _child = cmd.spawn().context(SpawnSnafu)?;
+        let mut child = cmd.spawn().context(SpawnSnafu)?;
+
+        // Reap the child asynchronously so it does not become a zombie when
+        // the session ends. The session lifecycle is controlled by the remoc
+        // connection teardown — once the parent drops the socketpair, the
+        // child sees EOF and exits.
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) => tracing::debug!(?status, "ssh-session child exited"),
+                Err(e) => tracing::warn!(error = %e, "failed to wait on ssh-session child"),
+            }
+        });
 
         // Drop the child end in the parent; the child has it via FD 3.
         drop(child_sock);

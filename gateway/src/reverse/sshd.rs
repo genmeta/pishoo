@@ -120,7 +120,10 @@ pub async fn sshd_handle(
     // Register the conversation BEFORE returning 200 OK. This ensures the
     // protocol layer can route incoming channel streams as soon as the client
     // receives the response and opens new QUIC bidi streams.
-    let handle = match connection.protocols().get::<genmeta_ssh::protocol::Ssh3Protocol>() {
+    let handle = match connection
+        .protocols()
+        .get::<genmeta_ssh::protocol::Ssh3Protocol>()
+    {
         Some(proto) => match proto.register(conversation_id) {
             Ok(h) => h,
             Err(e) => {
@@ -215,7 +218,11 @@ async fn run_ssh_session(
         )
         .await
         .context(RemocConnectSnafu)?;
-    let conn_handle = tokio::spawn(conn.in_current_span());
+    // Wrap in AbortOnDropHandle so an early return / panic tears down the
+    // remoc connection (and its sink/stream, i.e. the socketpair) instead of
+    // leaking a task that keeps the child process alive forever.
+    let conn_handle =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
 
     let auth_fn: AuthenticateFn = rx
         .recv()
@@ -277,12 +284,21 @@ async fn run_ssh_session(
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
 
-    start_session_fn
+    let session_result = start_session_fn
         .call(bootstrap)
         .await
-        .context(SessionFailedSnafu)?;
+        .context(SessionFailedSnafu);
 
+    // Session is done — tear down the remoc connection so the child sees
+    // transport EOF on the socketpair and exits cleanly. Without this the
+    // child's `conn_handle.await` would hang forever and the
+    // `pishoo-ssh-session` process would linger after the SSH session ends.
+    drop(_tx);
+    drop(rx);
+    conn_handle.abort();
     let _ = conn_handle.await;
+
+    session_result?;
     tracing::info!(%conversation_id, "session ended");
     Ok(())
 }
