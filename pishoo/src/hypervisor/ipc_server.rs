@@ -114,7 +114,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 
         // Build a QuicClient with the requested client identity (if any).
         let root_store = crate::tls::root_cert_store();
-        let builder = dquic::prelude::QuicClient::builder().with_webpki_verifier(
+        let builder = h3x::dquic::prelude::QuicClient::builder().with_webpki_verifier(
             WebPkiServerVerifier::builder(root_store)
                 .build()
                 .expect("webpki verifier must build from pishoo root store"),

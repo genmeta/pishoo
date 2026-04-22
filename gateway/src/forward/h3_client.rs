@@ -87,11 +87,7 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
 
     let mut builder = if let Some((ref cert_chain, ref key_der, ref name)) = config {
         tls_builder
-            .with_identity(
-                name.clone(),
-                cert_chain.as_slice(),
-                key_der.as_slice(),
-            )
+            .with_identity(name.clone(), cert_chain.as_slice(), key_der.as_slice())
             .expect("failed to create client builder with identity")
     } else {
         tls_builder
@@ -99,7 +95,8 @@ async fn build_client(config: Option<ClientConfig>, resolver: Option<Arc<Resolve
             .expect("failed to create client builder")
     };
 
-    let iface_factory: Arc<dyn ProductIO> = Arc::new(h3x::dquic::prelude::handy::DEFAULT_IO_FACTORY);
+    let iface_factory: Arc<dyn ProductIO> =
+        Arc::new(h3x::dquic::prelude::handy::DEFAULT_IO_FACTORY);
     let iface_manager = InterfaceManager::global().clone();
     let monitor = Devices::global().monitor();
 
