@@ -1,8 +1,10 @@
 #!/usr/bin/make -f
 
 # dpkg-buildpackage calls this via debian/rules.
-# TRIPLE and CARGO_FEATURES are passed as environment variables by xtask.
-# For arch-all builds (-A), the build/install targets for pishoo are skipped.
+# TRIPLE is passed as an environment variable by xtask (base triple, used for
+# target/ output paths). ZIG_TARGET is the glibc-suffixed target passed to
+# cargo-zigbuild (e.g. x86_64-unknown-linux-gnu.2.28). CARGO_FEATURES is
+# optional.
 #
 # This file lives in xtask/deb/ and is copied into target/.../deb/src/debian/
 # before dpkg-buildpackage runs. All paths use /workspace (the bind mount root).
@@ -21,7 +23,7 @@ ifdef TRIPLE
 	$(if $(ROOT_CA),export ROOT_CA=$(ROOT_CA) &&) \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
 	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
-	cargo zigbuild --release --target $(TRIPLE) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
+	cargo zigbuild --release --target $(ZIG_TARGET) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
 endif
 
 override_dh_auto_install:
@@ -29,12 +31,12 @@ ifdef TRIPLE
 	mkdir -p debian/pishoo/usr/bin
 	cp /workspace/target/$(TRIPLE)/release/pishoo debian/pishoo/usr/bin/
 	chmod 755 debian/pishoo/usr/bin/pishoo
-	mkdir -p debian/pishoo/usr/lib/pishoo
-	cp /workspace/target/$(TRIPLE)/release/pishoo-worker debian/pishoo/usr/lib/pishoo/
-	chmod 755 debian/pishoo/usr/lib/pishoo/pishoo-worker
+	mkdir -p debian/pishoo/usr/libexec/pishoo
+	cp /workspace/target/$(TRIPLE)/release/pishoo-worker debian/pishoo/usr/libexec/pishoo/
+	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-worker
 ifdef PISHOO_SSH_SESSION_BIN
-	cp /workspace/target/$(TRIPLE)/release/pishoo-ssh-session debian/pishoo/usr/lib/pishoo/
-	chmod 755 debian/pishoo/usr/lib/pishoo/pishoo-ssh-session
+	cp /workspace/target/$(TRIPLE)/release/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
+	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-ssh-session
 endif
 endif
 	# pishoo-common: install config files

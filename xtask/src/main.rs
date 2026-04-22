@@ -1,5 +1,7 @@
 mod brew;
+mod container;
 mod deb;
+mod rpm;
 
 use std::{io::IsTerminal, path::PathBuf, process::Stdio};
 
@@ -55,6 +57,34 @@ impl DebTarget {
     }
 }
 
+/// Supported target triples for .rpm builds.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RpmTarget {
+    /// x86_64-unknown-linux-gnu -> x86_64
+    #[value(name = "x86_64-unknown-linux-gnu")]
+    X86_64,
+    /// aarch64-unknown-linux-gnu -> aarch64
+    #[value(name = "aarch64-unknown-linux-gnu")]
+    Aarch64,
+    /// armv7-unknown-linux-gnueabihf -> armv7hl
+    #[value(name = "armv7-unknown-linux-gnueabihf")]
+    Armv7,
+    /// i686-unknown-linux-gnu -> i686
+    #[value(name = "i686-unknown-linux-gnu")]
+    I686,
+}
+
+impl RpmTarget {
+    pub fn triple(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64-unknown-linux-gnu",
+            Self::Aarch64 => "aarch64-unknown-linux-gnu",
+            Self::Armv7 => "armv7-unknown-linux-gnueabihf",
+            Self::I686 => "i686-unknown-linux-gnu",
+        }
+    }
+}
+
 /// Supported target triples for Homebrew builds.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum BrewTarget {
@@ -97,6 +127,18 @@ enum DistFormat {
         /// Sibling crate directories to bind-mount into the build container
         /// at `/{basename}`, matching `path = "../{basename}"` in Cargo.toml.
         /// Repeatable. Each path must exist and be a directory.
+        #[arg(long = "sibling")]
+        siblings: Vec<PathBuf>,
+    },
+    /// Build .rpm packages (via Fedora container + cargo-zigbuild + rpmbuild)
+    Rpm {
+        /// Target triples to build for
+        #[arg(long = "target", required = true)]
+        targets: Vec<RpmTarget>,
+        /// Cargo features to enable
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
+        /// Sibling crate directories to bind-mount into the build container.
         #[arg(long = "sibling")]
         siblings: Vec<PathBuf>,
     },
@@ -228,6 +270,13 @@ async fn main() -> Result<(), Whatever> {
                 siblings,
             } => {
                 deb::run(&targets, &features, &siblings).await?;
+            }
+            DistFormat::Rpm {
+                targets,
+                features,
+                siblings,
+            } => {
+                rpm::run(&targets, &features, &siblings).await?;
             }
             DistFormat::Brew { targets, features } => brew::run(&targets, &features).await?,
         },
