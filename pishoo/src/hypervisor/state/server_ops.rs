@@ -10,6 +10,7 @@ use h3x::{
     dquic::{prelude::BindUri, qinterface::BindInterface},
     endpoint::identity::NamedIdentity,
 };
+use rustls::pki_types::{CertificateDer, UnixTime};
 use snafu::IntoError;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -113,6 +114,12 @@ impl RootState {
             certs: request.identity.certs().to_vec(),
             key: Arc::new(request.identity.key().clone_key()),
         });
+        let certificate_chain: Vec<CertificateDer<'static>> = request
+            .identity
+            .certs()
+            .iter()
+            .map(|cert| CertificateDer::from(cert.as_ref().to_vec()))
+            .collect();
         let server_binding = match self
             .network
             .bind_server(named_identity, self.server_qcfg.clone())
@@ -152,7 +159,7 @@ impl RootState {
 
             let (tx, rx) = mpsc::channel(128);
             let shutdown_token = CancellationToken::new();
-            let accept_task = spawn_accept_task(server_binding, tx.clone());
+            let accept_task = spawn_accept_task(server_binding.clone(), tx.clone());
 
             // Spawn per-server DNS publish task.
             let publish_config = gateway::dns::build_publish_config_from_identity(
@@ -170,7 +177,10 @@ impl RootState {
                     provider,
                 ))
             };
-            let stapling_task = None;
+            let stapling_task = Some(spawn_server_stapling_refresh_task(
+                server_binding,
+                certificate_chain,
+            ));
 
             registry.entries.insert(
                 server_name.clone(),
@@ -444,6 +454,56 @@ fn spawn_accept_task(
     ))
 }
 
+/// Spawn the per-server OCSP stapling refresh task.
+///
+/// The task periodically fetches a fresh stapled OCSP response for the
+/// server certificate chain and updates the in-memory TLS key used by
+/// new handshakes.
+fn spawn_server_stapling_refresh_task(
+    binding: h3x::endpoint::network::ServerBinding,
+    certificate_chain: Vec<CertificateDer<'static>>,
+) -> AbortOnDropHandle<()> {
+    let name = binding.name.clone();
+    AbortOnDropHandle::new(tokio::spawn(
+        async move {
+            loop {
+                match gateway::ocsp::fetch_stapled_ocsp(&certificate_chain).await {
+                    Ok(stapled) => {
+                        binding.update_ocsp(Some(stapled.response_der));
+                        let delay = gateway::ocsp::next_stapling_refresh_delay(
+                            stapled.valid_until,
+                            unix_now(),
+                        );
+                        tracing::info!(
+                            %name,
+                            delay_secs = delay.as_secs(),
+                            "refreshed stapled OCSP response"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %name,
+                            %error,
+                            retry_secs = gateway::ocsp::OCSP_REFRESH_RETRY_DELAY.as_secs(),
+                            "failed to refresh stapled OCSP response"
+                        );
+                        tokio::time::sleep(gateway::ocsp::OCSP_REFRESH_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+        .in_current_span(),
+    ))
+}
+
+fn unix_now() -> UnixTime {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    UnixTime::since_unix_epoch(now)
+}
+
 /// Build a [`gateway::dns::BindUriProvider`] closure that snapshots the
 /// authoritative URI set for `server_name` from [`RootState`] on every
 /// invocation. Returns an empty vector if the state is gone or the entry
@@ -473,4 +533,3 @@ fn bind_uri_provider(state: Weak<RootState>, server_name: String) -> gateway::dn
         }
     })
 }
-
