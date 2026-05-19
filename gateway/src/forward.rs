@@ -26,7 +26,6 @@ use crate::{
     parse::{Node, Value},
 };
 
-pub(crate) mod h3_client; // TODO: remove once all callers are migrated
 mod normal;
 mod quic;
 
