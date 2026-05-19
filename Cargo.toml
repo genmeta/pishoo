@@ -2,7 +2,6 @@
 resolver = "2"
 members = ["gateway", "pishoo", "xtask"]
 
-
 [workspace.dependencies]
 # --- Core & Error Handling ---
 snafu = "0.8"
@@ -44,11 +43,11 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
-firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
-firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
+firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "endpoint" }
+firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", branch = "endpoint" }
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -60,7 +59,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- SSH3 ---
-genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", rev = "a32d6bec27dd3012f5914a9efb83d66cf11c172a" }
+genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", branch = "endpoint" }
 
 # --- DNS (mDNS/HTTP resolver) ---
 gmdns = { package = "ddns", git = "ssh://git@github.com/genmeta/ddns.git", branch = "endpoint", features = [
@@ -89,7 +88,7 @@ pin-project-lite = "0.2"
 form_urlencoded = "1"
 socket2 = "0.5"
 x509-parser = "0.18"
-dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", branch = "main" }
+dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 dhttp-identity = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 dhttp = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
 
@@ -115,26 +114,3 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# Use the local h3x checkout while this monorepo migration spans crates.
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { path = "../h3x" }
-
-[patch."ssh://git@github.com/genmeta/dquic.git"]
-dquic = { path = "../dquic/dquic" }
-
-[patch."ssh://git@github.com/genmeta/ddns.git"]
-ddns = { path = "../ddns/ddns" }
-
-[patch."ssh://git@github.com/genmeta/dhttp-home.git"]
-dhttp-home = { path = "../dhttp/home" }
-dhttp-identity = { path = "../dhttp/identity" }
-
-[patch."ssh://git@github.com/genmeta/dhttp.git"]
-dhttp = { path = "../dhttp/dhttp" }
-dhttp-identity = { path = "../dhttp/identity" }
-dhttp-home = { path = "../dhttp/home" }
-
-[patch."ssh://git@github.com/genmeta/firewall.git"]
-firewall-base = { path = "../firewall/firewall-base" }
-firewall-db = { path = "../firewall/firewall-db" }
-firewall-migration = { path = "../firewall/firewall-migration" }
