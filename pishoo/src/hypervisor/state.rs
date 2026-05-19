@@ -45,6 +45,12 @@ pub enum RegisterError {
     /// The entry has been poisoned (set to `Conflicted`).
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
+    #[snafu(display("failed to build dns resolver for registered endpoint"))]
+    BuildResolver { source: std::io::Error },
+    #[snafu(display("failed to create dns publisher for registered endpoint"))]
+    CreatePublisher {
+        source: dhttp::ddns::CreatePublisherError,
+    },
 }
 
 /// Identifies the owner of a server_name registration.

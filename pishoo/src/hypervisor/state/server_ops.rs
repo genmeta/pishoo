@@ -2,12 +2,20 @@
 
 use std::sync::Arc;
 
-use dhttp::{endpoint::Endpoint, name::DhttpName};
+use dhttp::{
+    ddns::{DHTTP_H3_DNS_SERVER, Resolvers},
+    endpoint::Endpoint,
+    identity::Identity,
+    name::DhttpName,
+};
 use gateway::control_plane::ListenRequest;
-use h3x::quic::Listen as _;
-use tokio_util::sync::CancellationToken;
+use h3x::{dquic::binds::BindPattern, quic::Listen as _};
+use http::Uri;
+use snafu::IntoError;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tracing::Instrument;
 
-use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner};
+use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner, register_error};
 use crate::listen::WorkerEndpoint;
 
 impl RootState {
@@ -96,21 +104,46 @@ impl RootState {
             .iter()
             .flat_map(gateway::parse::Listens::to_bind_patterns)
             .collect::<Vec<_>>();
+        let identity = Arc::new(request.identity.clone());
+        let bind_patterns = Arc::new(bind_patterns);
+        let resolver = match self
+            .build_endpoint_resolver(
+                identity.clone(),
+                bind_patterns.clone(),
+                request.dns_resolver_url.clone(),
+            )
+            .await
+        {
+            Ok(resolver) => resolver,
+            Err(source) => {
+                self.servers.write().await.entries.remove(&server_name);
+                return Err(register_error::BuildResolverSnafu.into_error(source));
+            }
+        };
         let endpoint = Endpoint::builder()
             .network(self.network.clone())
-            .identity(Arc::new(request.identity.clone()))
+            .identity(identity)
             .server(self.server_qcfg.clone())
-            .bind(Arc::new(bind_patterns))
-            .resolver(Arc::new(dhttp::dquic::resolver::handy::SystemResolver))
+            .bind(bind_patterns)
+            .resolver(Arc::new(resolver))
             .build()
             .await;
         let shutdown_token = CancellationToken::new();
 
-        // DNS publishing is moving to dhttp::Endpoint/DnsPublisher in the next
-        // phase. Do not keep the legacy BindUri-based publisher alive here,
-        // because this registry now stores BindPattern intent rather than
-        // concrete BindUri snapshots.
-        let publish_task = None;
+        let publisher = match endpoint.publisher_with_options(request.publish_options) {
+            Ok(publisher) => publisher,
+            Err(source) => {
+                self.servers.write().await.entries.remove(&server_name);
+                if let Err(error) = endpoint.shutdown().await {
+                    tracing::warn!(
+                        %server_name,
+                        error = %snafu::Report::from_error(&error),
+                        "failed to shut down endpoint after publisher setup failed"
+                    );
+                }
+                return Err(register_error::CreatePublisherSnafu.into_error(source));
+            }
+        };
 
         // Phase 3: promote sentinel to `Active`.
         {
@@ -142,6 +175,13 @@ impl RootState {
                     return Err(RegisterError::ConflictedName);
                 }
             }
+
+            let publish_task = Some(AbortOnDropHandle::new(tokio::spawn(
+                async move {
+                    publisher.run().await;
+                }
+                .in_current_span(),
+            )));
 
             registry.entries.insert(
                 server_name.clone(),
@@ -239,5 +279,33 @@ impl RootState {
         }
 
         conflicted
+    }
+
+    async fn build_endpoint_resolver(
+        self: &Arc<Self>,
+        identity: Arc<Identity>,
+        bind_patterns: Arc<Vec<BindPattern>>,
+        dns_resolver_url: Option<Uri>,
+    ) -> std::io::Result<Resolvers> {
+        let dns_endpoint = Endpoint::builder()
+            .network(self.network.clone())
+            .identity(identity)
+            .server(self.server_qcfg.clone())
+            .bind(bind_patterns.clone())
+            .resolver(Arc::new(dhttp::dquic::resolver::handy::SystemResolver))
+            .build()
+            .await;
+
+        let base_url = dns_resolver_url
+            .map(|url| url.to_string())
+            .unwrap_or_else(|| DHTTP_H3_DNS_SERVER.to_owned());
+
+        let builder = Resolvers::builder()
+            .mdns(self.network.clone(), bind_patterns)
+            .await
+            .system()
+            .h3_with_base_url(base_url, dns_endpoint.as_h3())?;
+
+        Ok(builder.build())
     }
 }

@@ -8,13 +8,17 @@ fn main_uses_shared_root_cert_store() {
 }
 
 #[test]
-fn register_listener_no_longer_uses_legacy_bind_uri_dns_publish() {
+fn register_listener_uses_dhttp_dns_publisher() {
     let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
         state_source.contains("publish_task"),
         "ServerEntry keeps a publish_task slot for the DnsPublisher migration"
     );
     let server_ops_source = include_str!("../src/hypervisor/state/server_ops.rs");
+    assert!(
+        server_ops_source.contains("publisher_with_options"),
+        "register_listener must publish through dhttp Endpoint publisher"
+    );
     assert!(
         !server_ops_source.contains("spawn_server_publish_task("),
         "register_listener must not use the legacy BindUri-based DNS publisher"

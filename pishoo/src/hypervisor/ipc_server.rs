@@ -60,23 +60,27 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let server_name = request.identity.name().as_full().to_owned();
         let owner = ServiceOwner::Worker(self.caller_pid);
 
-        let adapter = self
-            .state
-            .register_listener(owner, request)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    caller_pid = %self.caller_pid,
-                    %server_name,
-                    error = %snafu::Report::from_error(&error),
-                    "listen request failed"
-                );
-                match error {
-                    RegisterError::DuplicateListen | RegisterError::ConflictedName => {
-                        ListenError::Conflict
+        let adapter =
+            self.state
+                .register_listener(owner, request)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        caller_pid = %self.caller_pid,
+                        %server_name,
+                        error = %snafu::Report::from_error(&error),
+                        "listen request failed"
+                    );
+                    match error {
+                        RegisterError::DuplicateListen | RegisterError::ConflictedName => {
+                            ListenError::Conflict
+                        }
+                        RegisterError::BuildResolver { .. }
+                        | RegisterError::CreatePublisher { .. } => ListenError::Internal {
+                            message: format!("failed to prepare endpoint for `{server_name}`"),
+                        },
                     }
-                }
-            })?;
+                })?;
 
         // Wrap adapter in ListenAdapter for IPC capability forwarding.
         let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
