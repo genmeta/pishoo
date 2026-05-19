@@ -5,8 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use dhttp::name::DhttpName;
-use h3x::endpoint::H3Endpoint;
+use dhttp::{endpoint::Endpoint, name::DhttpName};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -66,13 +65,13 @@ fn configure_tcp_keepalive(stream: &TcpStream) {
 ///
 /// # Arguments
 /// * `node` - The configuration node
-/// * `client` - Pre-built H3 client for QUIC proxying
+/// * `client` - DHTTP endpoint used for outbound QUIC proxying
 ///
 /// # Returns
 /// * `Result<(SocketAddr, impl Future)>` - The address and server task
-pub async fn serve<C: h3x::quic::Connect + 'static>(
+pub async fn serve(
     node: Arc<Node>,
-    client: Arc<H3Endpoint<C, C::Connection>>,
+    client: Arc<Endpoint>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,

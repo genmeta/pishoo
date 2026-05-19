@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use dhttp::{ddns::DnsScheme, endpoint::Endpoint};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::ipc::{
     quic::{
@@ -112,20 +113,20 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             });
         }
 
-        // Build a QuicClient with the requested client identity (if any).
-        let root_store = crate::tls::root_cert_store();
-        let builder = h3x::dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
-        let quic_client = match request.identity {
-            Some(identity) => builder
-                .with_cert(identity.certs().to_vec(), identity.key().clone_key())
-                .with_alpns(vec!["h3"])
-                .build(),
-            None => builder.without_cert().with_alpns(vec!["h3"]).build(),
-        };
+        // Build a DHTTP endpoint with the requested client identity (if any).
+        let endpoint = Arc::new(
+            Endpoint::builder()
+                .network(self.state.network.clone())
+                .maybe_identity(request.identity.map(Arc::new))
+                .dns(DnsScheme::H3)
+                .dns(DnsScheme::Mdns)
+                .dns(DnsScheme::System)
+                .build()
+                .await,
+        );
 
-        // Wrap QuicClient in ConnectAdapter for IPC capability forwarding.
-        let connect_adapter =
-            ConnectAdapter::<_, IpcCodec>::new(Arc::new(quic_client), self.fd_sender.clone());
+        // Wrap the endpoint in ConnectAdapter for IPC capability forwarding.
+        let connect_adapter = ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_sender.clone());
         let (server, client) = IpcConnectServerShared::new(Arc::new(connect_adapter), 64);
         self.state
             .spawn_worker_task(

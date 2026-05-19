@@ -18,6 +18,22 @@ fn worker_requests_root_owned_connector() {
 }
 
 #[test]
+fn local_connector_type_is_dhttp_endpoint() {
+    use gateway::control_plane::ProvideConnector;
+
+    type Connector =
+        <pishoo::hypervisor::local_plane::LocalControlPlane as ProvideConnector>::Connector;
+
+    fn assert_same_type(
+        value: Option<Connector>,
+    ) -> Option<std::sync::Arc<dhttp::endpoint::Endpoint>> {
+        value
+    }
+
+    let _ = assert_same_type;
+}
+
+#[test]
 fn worker_uses_shared_tls_validator() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
     assert!(

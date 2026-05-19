@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use h3x::{connection::Connection, endpoint::H3Endpoint, quic};
+use dhttp::endpoint::Endpoint;
+use h3x::{connection::Connection, quic};
 use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
@@ -15,9 +16,9 @@ use crate::{
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
-pub async fn proxy<C: quic::Connect>(
+pub async fn proxy(
     mut req: Request<hyper::body::Incoming>,
-    client: Arc<H3Endpoint<C, C::Connection>>,
+    client: Arc<Endpoint>,
 ) -> Result<BoxResponse, hyper::Error> {
     // 验证主机合法性
     let host = match validate_host(&mut req) {
@@ -55,9 +56,9 @@ pub async fn proxy<C: quic::Connect>(
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect_tunnel<C: quic::Connect + 'static>(
+pub async fn connect_tunnel(
     req: Request<hyper::body::Incoming>,
-    client: Arc<H3Endpoint<C, C::Connection>>,
+    client: Arc<Endpoint>,
 ) -> Result<BoxResponse, hyper::Error> {
     tokio::spawn(
         async move {
@@ -108,10 +109,10 @@ async fn send<Conn: quic::Connection>(
 }
 
 /// 通过 h3x 连接池获取连接
-async fn connect<C: quic::Connect>(
-    client: &H3Endpoint<C, C::Connection>,
+async fn connect(
+    client: &Endpoint,
     host: &str,
-) -> Result<Arc<Connection<C::Connection>>, Whatever> {
+) -> Result<Arc<Connection<<Endpoint as quic::Connect>::Connection>>, Whatever> {
     let authority: Authority = host
         .parse()
         .whatever_context(format!("invalid host: {host}"))?;

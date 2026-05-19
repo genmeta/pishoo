@@ -16,7 +16,7 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner, register_error};
-use crate::listen::WorkerEndpoint;
+use crate::listen::RegisteredEndpoint;
 
 impl RootState {
     // -----------------------------------------------------------------------
@@ -32,12 +32,12 @@ impl RootState {
     /// - **Registering/Active, different owner** → poison to `Conflicted`.
     /// - **Conflicted** → `ConflictedName`.
     ///
-    /// Returns a [`WorkerEndpoint`] on success.
+    /// Returns a [`RegisteredEndpoint`] on success.
     pub async fn register_listener(
         self: &Arc<Self>,
         owner: ServiceOwner,
         request: ListenRequest,
-    ) -> Result<WorkerEndpoint, RegisterError> {
+    ) -> Result<RegisteredEndpoint, RegisterError> {
         let server_name =
             DhttpName::try_from_str_full(request.identity.name().as_full().to_owned())
                 .expect("listen request identity must be a dhttp name");
@@ -216,7 +216,7 @@ impl RootState {
             }
 
             tracing::debug!(%server_name, ?owner, "server registered");
-            Ok(WorkerEndpoint::new_registered(
+            Ok(RegisteredEndpoint::new_registered(
                 endpoint,
                 shutdown_token,
                 self,

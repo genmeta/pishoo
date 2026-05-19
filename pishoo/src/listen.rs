@@ -16,15 +16,15 @@ use crate::hypervisor::state::{RootState, ServiceOwner};
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum WorkerEndpointError {
-    #[snafu(display("worker endpoint shut down"))]
+pub enum RegisteredEndpointError {
+    #[snafu(display("registered endpoint shut down"))]
     Shutdown,
     #[snafu(transparent)]
     Accept { source: h3x::dquic::AcceptError },
 }
 
 /// Root-held endpoint belonging to one registered service owner.
-pub struct WorkerEndpoint {
+pub struct RegisteredEndpoint {
     endpoint: Endpoint,
     shutdown_token: CancellationToken,
     root_state: Weak<RootState>,
@@ -32,7 +32,7 @@ pub struct WorkerEndpoint {
     owner: ServiceOwner,
 }
 
-impl WorkerEndpoint {
+impl RegisteredEndpoint {
     pub fn new_registered(
         endpoint: Endpoint,
         shutdown_token: CancellationToken,
@@ -54,14 +54,14 @@ impl WorkerEndpoint {
     }
 }
 
-impl h3x::quic::Listen for WorkerEndpoint {
+impl h3x::quic::Listen for RegisteredEndpoint {
     type Connection = h3x::dquic::prelude::Connection;
-    type Error = WorkerEndpointError;
+    type Error = RegisteredEndpointError;
 
     async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
         tokio::select! {
             result = self.endpoint.accept() => Ok(result?),
-            () = self.shutdown_token.cancelled() => Err(WorkerEndpointError::Shutdown),
+            () = self.shutdown_token.cancelled() => Err(RegisteredEndpointError::Shutdown),
         }
     }
 

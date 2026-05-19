@@ -7,21 +7,23 @@
 use std::os::fd::AsRawFd;
 #[cfg(feature = "sshd")]
 use std::process::Stdio;
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
-use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
+use dhttp::{ddns::DnsScheme, endpoint::Endpoint};
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
+#[cfg(feature = "sshd")]
 use snafu::Snafu;
 
 use crate::{
     hypervisor::state::{RegisterError, ServiceOwner},
-    listen::WorkerEndpoint,
+    listen::RegisteredEndpoint,
 };
 
 /// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
-/// [`WorkerEndpoint`] that implements [`h3x::quic::Listen`].
+/// [`RegisteredEndpoint`] that implements [`h3x::quic::Listen`].
 pub struct LocalControlPlane {
     state: Arc<super::state::RootState>,
 }
@@ -30,14 +32,6 @@ impl LocalControlPlane {
     pub fn new(state: Arc<super::state::RootState>) -> Self {
         Self { state }
     }
-}
-
-/// Error from a local connect request.
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum LocalConnectError {
-    #[snafu(display("failed to build quic client"))]
-    BuildClient { source: StringError },
 }
 
 /// Error from a local session spawn.
@@ -123,7 +117,7 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
 }
 
 impl gateway::control_plane::ProvideListener for LocalControlPlane {
-    type Listener = WorkerEndpoint;
+    type Listener = RegisteredEndpoint;
     type ListenError = RegisterError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
@@ -134,22 +128,21 @@ impl gateway::control_plane::ProvideListener for LocalControlPlane {
 }
 
 impl gateway::control_plane::ProvideConnector for LocalControlPlane {
-    type Connector = Arc<h3x::dquic::prelude::QuicClient>;
-    type ConnectError = LocalConnectError;
+    type Connector = Arc<Endpoint>;
+    type ConnectError = Infallible;
 
     async fn connector(
         &self,
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
-        let root_store = crate::tls::root_cert_store();
-        let builder = h3x::dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
-        let quic_client = match request.identity {
-            Some(identity) => builder
-                .with_cert(identity.certs().to_vec(), identity.key().clone_key())
-                .with_alpns(vec!["h3"])
-                .build(),
-            None => builder.without_cert().with_alpns(vec!["h3"]).build(),
-        };
-        Ok(Arc::new(quic_client))
+        let endpoint = Endpoint::builder()
+            .network(self.state.network.clone())
+            .maybe_identity(request.identity.map(Arc::new))
+            .dns(DnsScheme::H3)
+            .dns(DnsScheme::Mdns)
+            .dns(DnsScheme::System)
+            .build()
+            .await;
+        Ok(Arc::new(endpoint))
     }
 }

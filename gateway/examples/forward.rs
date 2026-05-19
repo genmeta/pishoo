@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use dhttp::endpoint::Endpoint;
 use gateway::{
     forward,
     parse::{self, Value},
 };
-use h3x::{dquic::prelude::QuicClient, endpoint::H3Endpoint};
 use snafu::{ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
@@ -48,15 +48,8 @@ async fn main() -> Result<(), Whatever> {
         whatever!("no proxy found in pishoo configuration");
     };
 
-    // Build a minimal H3 client without identity for the example
-    let quic_client = Arc::new(
-        QuicClient::builder()
-            .with_root_certificates(Arc::new(rustls::RootCertStore::empty()))
-            .without_cert()
-            .with_alpns(vec!["h3"])
-            .build(),
-    );
-    let client = Arc::new(H3Endpoint::new(quic_client));
+    // Build a DHTTP endpoint for outbound proxying.
+    let client = Arc::new(Endpoint::builder().build().await);
 
     let mut handler = JoinSet::new();
 
