@@ -132,3 +132,9 @@ dhttp-identity = { path = "../dhttp/identity" }
 [patch."ssh://git@github.com/genmeta/dhttp.git"]
 dhttp = { path = "../dhttp/dhttp" }
 dhttp-identity = { path = "../dhttp/identity" }
+dhttp-home = { path = "../dhttp/home" }
+
+[patch."ssh://git@github.com/genmeta/firewall.git"]
+firewall-base = { path = "../firewall/firewall-base" }
+firewall-db = { path = "../firewall/firewall-db" }
+firewall-migration = { path = "../firewall/firewall-migration" }
