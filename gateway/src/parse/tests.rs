@@ -93,7 +93,7 @@ pishoo {
     match server.get("server_name") {
         Some(Value::ServerName(names)) => {
             assert_eq!(names.len(), 1);
-            assert_eq!(names[0].name, "example.com");
+            assert_eq!(names[0].name.as_partial(), "example.com");
         }
         _ => panic!("server_name 解析失败"),
     }
@@ -161,7 +161,9 @@ pishoo {
     // 验证第一个 server
     let server1 = &servers[0];
     match server1.get("server_name") {
-        Some(Value::ServerName(names)) => assert_eq!(names[0].name, "main.example.com"),
+        Some(Value::ServerName(names)) => {
+            assert_eq!(names[0].name.as_partial(), "main.example.com")
+        }
         _ => panic!("第一个 server 的 server_name 解析失败"),
     }
     match server1.get("server_id") {
@@ -172,7 +174,9 @@ pishoo {
     // 验证第二个 server
     let server2 = &servers[1];
     match server2.get("server_name") {
-        Some(Value::ServerName(names)) => assert_eq!(names[0].name, "backup.example.com"),
+        Some(Value::ServerName(names)) => {
+            assert_eq!(names[0].name.as_partial(), "backup.example.com")
+        }
         _ => panic!("第二个 server 的 server_name 解析失败"),
     }
     match server2.get("server_id") {
@@ -236,7 +240,7 @@ pishoo {{
 
     // 验证 server_name
     match server.get("server_name") {
-        Some(Value::ServerName(names)) => assert_eq!(names[0].name, "example.com"),
+        Some(Value::ServerName(names)) => assert_eq!(names[0].name.as_partial(), "example.com"),
         _ => panic!("server_name 解析失败"),
     }
 

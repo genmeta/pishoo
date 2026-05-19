@@ -6,6 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use dhttp::ddns::PublishOptions;
 use dhttp_home::DhttpHome;
 use futures::StreamExt;
 use gateway::{
@@ -133,8 +134,9 @@ pub async fn build_service_config(
         }
 
         // Extract bind specifications and find the matching server node.
-        let mut binds: HashMap<String, Vec<Listens>> = HashMap::new();
-        let mut server_nodes_by_name: HashMap<String, Arc<Node>> = HashMap::new();
+        let mut binds: HashMap<dhttp::name::DhttpName<'static>, Vec<Listens>> = HashMap::new();
+        let mut server_nodes_by_name: HashMap<dhttp::name::DhttpName<'static>, Arc<Node>> =
+            HashMap::new();
         for server_node in &identity_server_nodes {
             if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
                 (server_node.get("server_name"), server_node.get("listen"))
@@ -148,7 +150,7 @@ pub async fn build_service_config(
 
         // Build the listen request using the identity's server name as primary bind key,
         // falling back to default bind if not explicitly configured.
-        let primary_name = name.as_full().to_owned();
+        let primary_name = name.clone();
         let bind = binds.remove(&primary_name).unwrap_or_default();
         if bind.is_empty() {
             tracing::warn!(%name, "no listen specifications, skipping listener request");
@@ -159,14 +161,24 @@ pub async fn build_service_config(
         let dns_resolver_url = server_nodes_by_name
             .get(&primary_name)
             .and_then(|node| match node.get("dns") {
-                Some(Value::Resolver(url)) => Some(url.to_string()),
+                Some(Value::Resolver(url)) => Some(url.clone()),
                 _ => None,
             });
+        let publish_options = server_nodes_by_name
+            .get(&primary_name)
+            .map(|node| PublishOptions {
+                server_id: match node.get("server_id") {
+                    Some(Value::ServerId(id)) => Some(*id),
+                    _ => None,
+                },
+            })
+            .unwrap_or_default();
 
         let listen_request = ListenRequest {
             identity: ssl,
             bind,
             dns_resolver_url,
+            publish_options,
         };
 
         // Use the parsed server node (with location blocks etc.) instead of

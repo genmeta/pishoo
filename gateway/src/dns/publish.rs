@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use dhttp::identity::Identity;
 use dhttp_identity::identity::{LocalAgent, SignError};
 use futures::future::BoxFuture;
 use gmdns::{
@@ -30,7 +31,6 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info};
 
 use crate::{
-    control_plane::Identity,
     dns::{MDNS_SERVICE, resolve::DnsResolver},
     error::{Result, Whatever},
     parse::{Node, ServerIdentity, Value, server_identity},
@@ -176,15 +176,12 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
         };
 
         for server_name in server_names {
-            let domain = match server_name.name.strip_suffix('~') {
-                Some(prefix) => format!("{prefix}.genmeta.net"),
-                None => server_name.name.clone(),
-            };
+            let domain = server_name.name.clone();
 
             let identity = server_identity(server, domain.clone())
                 .expect("missing ssl_certificate or ssl_certificate_key");
 
-            let resolvers = if domain.ends_with("user.genmeta.net") {
+            let resolvers = if domain.as_full().ends_with("user.genmeta.net") {
                 tracing::warn!(server_name = %domain, "domain excluded from publishing");
                 vec![]
             } else {
@@ -193,7 +190,7 @@ pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, Pu
             };
 
             configs.insert(
-                domain,
+                domain.as_full().to_owned(),
                 PublishConfig {
                     resolvers,
                     server_id: identity.server_id,

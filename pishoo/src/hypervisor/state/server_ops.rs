@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use dhttp::name::DhttpName;
 use gateway::control_plane::ListenRequest;
 use h3x::dquic::ServerBinding;
 use snafu::IntoError;
@@ -32,7 +33,9 @@ impl RootState {
         owner: ServiceOwner,
         request: ListenRequest,
     ) -> Result<PerServerListener, RegisterError> {
-        let server_name = request.identity.name().as_full().to_owned();
+        let server_name =
+            DhttpName::try_from_str_full(request.identity.name().as_full().to_owned())
+                .expect("listen request identity must be a dhttp name");
 
         // Phase 1: claim the name by inserting a `Registering` sentinel.
         {
@@ -120,7 +123,10 @@ impl RootState {
                 // Rollback the sentinel. Dropping `bind_handles` releases the
                 // bindings acquired above (no other server uses them).
                 self.servers.write().await.entries.remove(&server_name);
-                return Err(register_error::BindServerSnafu { server_name }.into_error(source));
+                return Err(register_error::BindServerSnafu {
+                    server_name: server_name.clone(),
+                }
+                .into_error(source));
             }
         };
 
@@ -204,7 +210,7 @@ impl RootState {
     }
 
     /// Release a single active server entry owned by the specified owner.
-    pub async fn release_server(&self, server_name: &str, owner: ServiceOwner) {
+    pub async fn release_server(&self, server_name: &DhttpName<'static>, owner: ServiceOwner) {
         let retired = {
             let mut registry = self.servers.write().await;
             let owned = matches!(
@@ -236,9 +242,9 @@ impl RootState {
     ///
     /// Called during reload (SIGHUP) **before** forwarding the signal to
     /// workers, so that workers can re-register previously-conflicted names.
-    pub async fn scrub_conflicts(&self) -> Vec<String> {
+    pub async fn scrub_conflicts(&self) -> Vec<DhttpName<'static>> {
         let mut registry = self.servers.write().await;
-        let conflicted: Vec<String> = registry
+        let conflicted: Vec<DhttpName<'static>> = registry
             .entries
             .iter()
             .filter_map(|(name, entry)| {

@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
 };
 
+use dhttp::name::DhttpName;
 use h3x::dquic::{
     BindHandle, BindServerError, Network, binds::BindPattern, server::ServerQuicConfig,
 };
@@ -46,7 +47,7 @@ pub enum RegisterError {
     /// Failed to register the server's identity on the shared [`Network`].
     #[snafu(display("failed to bind server `{server_name}` on network"))]
     BindServer {
-        server_name: String,
+        server_name: DhttpName<'static>,
         source: BindServerError,
     },
 }
@@ -110,7 +111,7 @@ pub(super) struct WorkerProcessRecord {
     /// The username this worker runs as.
     pub(super) username: String,
     /// Set of server_names owned by this worker.
-    pub(super) owned_servers: HashSet<String>,
+    pub(super) owned_servers: HashSet<DhttpName<'static>>,
     /// Handle to the spawned worker process.
     pub(super) worker_handle: WorkerHandle,
 }
@@ -168,7 +169,7 @@ pub struct RootState {
 /// Entry lifecycle: `(vacant) → Registering → Active → (removed)`.
 /// Conflict: any state → `Conflicted`, cleared by `scrub_conflicts`.
 pub(super) struct ServerRegistry {
-    pub(super) entries: HashMap<String, ServerEntry>,
+    pub(super) entries: HashMap<DhttpName<'static>, ServerEntry>,
 }
 
 impl ServerRegistry {
@@ -194,7 +195,7 @@ impl ServerRegistry {
     /// Caller must already hold a write lock on this `ServerRegistry`.
     pub(super) fn retire_entry(
         &mut self,
-        server_name: &str,
+        server_name: &DhttpName<'static>,
     ) -> Option<tokio_util::task::AbortOnDropHandle<()>> {
         let entry = self.entries.remove(server_name)?;
         match entry {

@@ -272,11 +272,14 @@ pub(crate) fn parse_string_vec(directive: Directive<Nginx>) -> Result<Value> {
 }
 
 pub(crate) fn parse_server_name(directive: Directive<Nginx>) -> Result<Value> {
-    let names: Vec<ServerName> = directive
-        .args
-        .into_iter()
-        .map(|name| ServerName { name })
-        .collect();
+    let mut names = Vec::with_capacity(directive.args.len());
+    for name in directive.args {
+        let name = dhttp::name::DhttpName::try_from(name).whatever_context(format!(
+            "invalid server_name while parsing directive {}",
+            directive.name
+        ))?;
+        names.push(ServerName { name });
+    }
     Ok(Value::ServerName(names))
 }
 

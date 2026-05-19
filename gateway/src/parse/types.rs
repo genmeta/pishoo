@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
+use dhttp::name::DhttpName;
 use h3x::dquic::binds::BindPattern;
 use snafu::whatever;
 
@@ -7,7 +8,7 @@ use super::{Result, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServerName {
-    pub name: String,
+    pub name: DhttpName<'static>,
 }
 
 // TLS identity configuration for clients/servers that need certificates
@@ -15,7 +16,7 @@ pub struct ServerName {
 pub struct ServerIdentity {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
-    pub server_name: String,
+    pub server_name: DhttpName<'static>,
     pub server_id: u8,
 }
 
@@ -26,7 +27,10 @@ pub fn server_id_or_default(node: &super::Node) -> u8 {
     }
 }
 
-pub fn server_identity(node: &super::Node, server_name: String) -> Option<ServerIdentity> {
+pub fn server_identity(
+    node: &super::Node,
+    server_name: DhttpName<'static>,
+) -> Option<ServerIdentity> {
     let (Some(Value::Path(cert_path)), Some(Value::Path(key_path))) =
         (node.get("ssl_certificate"), node.get("ssl_certificate_key"))
     else {
@@ -49,7 +53,8 @@ pub fn optional_server_identity(
         return None;
     };
 
-    server_identity(node, server_name.clone())
+    let server_name = DhttpName::try_from(server_name.clone()).ok()?;
+    server_identity(node, server_name)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

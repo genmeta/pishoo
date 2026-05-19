@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
+use dhttp::name::DhttpName;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -56,7 +57,7 @@ pub struct PerServerListener {
     rx: mpsc::Receiver<Arc<h3x::dquic::prelude::Connection>>,
     shutdown_token: CancellationToken,
     root_state: Weak<RootState>,
-    server_name: String,
+    server_name: DhttpName<'static>,
     owner: ServiceOwner,
 }
 
@@ -69,7 +70,7 @@ impl PerServerListener {
         rx: mpsc::Receiver<Arc<h3x::dquic::prelude::Connection>>,
         shutdown_token: CancellationToken,
         root_state: &Arc<RootState>,
-        server_name: String,
+        server_name: DhttpName<'static>,
         owner: ServiceOwner,
     ) -> Self {
         Self {

@@ -120,7 +120,7 @@ impl RootState {
             let mut retired: Vec<tokio_util::task::AbortOnDropHandle<()>> = Vec::new();
             for server_name in &owned_servers {
                 let dominated = matches!(
-                    registry.entries.get(server_name.as_str()),
+                    registry.entries.get(server_name),
                     Some(ServerEntry::Active { owner: ServiceOwner::Worker(p), .. }) if *p == pid
                 );
                 if dominated {
@@ -131,7 +131,7 @@ impl RootState {
                 }
             }
             // Full-scan for Registering sentinels owned by the dead worker.
-            let orphaned: Vec<String> = registry
+            let orphaned: Vec<_> = registry
                 .entries
                 .iter()
                 .filter(|&(_, entry)| {

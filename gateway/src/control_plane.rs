@@ -2,11 +2,11 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp_home::identity::DnsName;
-pub use dhttp_home::identity::ssl::Identity;
+use dhttp::{ddns::PublishOptions, identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
 use h3x::quic;
+use http::Uri;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,9 @@ pub struct ListenRequest {
     pub bind: Vec<gateway_parse::Listens>,
     /// Optional DNS resolver URL for publishing this server's endpoints.
     /// When `None`, the default H3 DNS server is used.
-    pub dns_resolver_url: Option<String>,
+    pub dns_resolver_url: Option<Uri>,
+    /// Optional metadata applied to published endpoint DNS records.
+    pub publish_options: PublishOptions,
 }
 
 /// Capability to create QUIC listeners.
@@ -177,7 +179,7 @@ impl<T: ProvideListener + ProvideConnector> ControlPlane for T {}
 
 #[derive(Serialize, Deserialize)]
 struct IdentityHelper {
-    name: DnsName<'static>,
+    name: Name<'static>,
     certs: Vec<Vec<u8>>,
     key: Vec<u8>,
 }
@@ -198,12 +200,35 @@ impl IdentityHelper {
     }
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct PublishOptionsHelper {
+    server_id: Option<u8>,
+}
+
+impl From<PublishOptions> for PublishOptionsHelper {
+    fn from(options: PublishOptions) -> Self {
+        Self {
+            server_id: options.server_id,
+        }
+    }
+}
+
+impl From<PublishOptionsHelper> for PublishOptions {
+    fn from(helper: PublishOptionsHelper) -> Self {
+        Self {
+            server_id: helper.server_id,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ListenRequestHelper {
     identity: IdentityHelper,
     bind: Vec<gateway_parse::Listens>,
     #[serde(default)]
     dns_resolver_url: Option<String>,
+    #[serde(default)]
+    publish_options: PublishOptionsHelper,
 }
 
 impl Serialize for ListenRequest {
@@ -211,7 +236,8 @@ impl Serialize for ListenRequest {
         ListenRequestHelper {
             identity: IdentityHelper::from_identity(&self.identity),
             bind: self.bind.clone(),
-            dns_resolver_url: self.dns_resolver_url.clone(),
+            dns_resolver_url: self.dns_resolver_url.as_ref().map(ToString::to_string),
+            publish_options: self.publish_options.into(),
         }
         .serialize(serializer)
     }
@@ -223,7 +249,11 @@ impl<'de> Deserialize<'de> for ListenRequest {
         Ok(Self {
             identity: helper.identity.into_identity()?,
             bind: helper.bind,
-            dns_resolver_url: helper.dns_resolver_url,
+            dns_resolver_url: helper
+                .dns_resolver_url
+                .map(|uri| uri.parse().map_err(serde::de::Error::custom))
+                .transpose()?,
+            publish_options: helper.publish_options.into(),
         })
     }
 }

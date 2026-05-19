@@ -23,6 +23,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
+dhttp = { workspace = true }
 dhttp-home = { workspace = true }
 
 # --- QUIC & HTTP/3 ---

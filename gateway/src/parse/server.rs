@@ -1,4 +1,4 @@
-use dhttp_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
+use dhttp::home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use misc_conf::{ast::Directive, nginx::Nginx};
 use snafu::ensure_whatever;
 
@@ -46,10 +46,11 @@ pub(crate) fn parse_server(directive: Directive<Nginx>) -> Result<Value, Whateve
     // Root pishoo.conf server blocks must configure these explicitly.
     if let Some(identity_home) = IDENTITY_HOME.with(|r| r.borrow().clone()) {
         if !values.contains_key("server_name") {
-            let server_name = identity_home.name().as_full().to_string();
             values.insert(
                 "server_name".to_string(),
-                Value::ServerName(vec![ServerName { name: server_name }]),
+                Value::ServerName(vec![ServerName {
+                    name: identity_home.name().to_owned(),
+                }]),
             );
         }
 

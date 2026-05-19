@@ -4,8 +4,9 @@ use std::{
     sync::Arc,
 };
 
+use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
 use gateway::{
-    control_plane::{Identity, ListenRequest},
+    control_plane::ListenRequest,
     error::Whatever,
     parse::{Node, Value},
 };
@@ -18,7 +19,7 @@ use crate::{
 
 #[allow(dead_code)]
 struct LocalServerDef {
-    server_name: String,
+    server_name: DhttpName<'static>,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
 }
@@ -124,7 +125,7 @@ pub enum BuildLocalServiceError {
     #[snafu(display("invalid server name `{name}`"))]
     InvalidServerName {
         name: String,
-        source: dhttp_home::identity::InvalidName,
+        source: dhttp::name::InvalidDhttpName,
     },
 
     #[snafu(display("failed to load local access rules"))]
@@ -190,20 +191,27 @@ pub async fn build_local_service_config(
 
         // Extract DNS resolver URL from the server node's `dns` directive.
         let dns_resolver_url = match server.get("dns") {
-            Some(Value::Resolver(url)) => Some(url.to_string()),
+            Some(Value::Resolver(url)) => Some(url.clone()),
             _ => None,
+        };
+        let publish_options = PublishOptions {
+            server_id: match server.get("server_id") {
+                Some(Value::ServerId(id)) => Some(*id),
+                _ => None,
+            },
         };
 
         for configured_name in server_names {
-            let name = dhttp_home::identity::Name::try_from_str(configured_name.name.clone())
-                .context(build_local_service_error::InvalidServerNameSnafu {
-                    name: &configured_name.name,
-                })?;
             server_configs.push(crate::service::ServerConfig {
                 listen_request: ListenRequest {
-                    identity: Identity::new(name.into(), certs.clone(), key.clone_key()),
+                    identity: Identity::new(
+                        configured_name.name.clone().into(),
+                        certs.clone(),
+                        key.clone_key(),
+                    ),
                     bind: listens.clone(),
                     dns_resolver_url: dns_resolver_url.clone(),
+                    publish_options,
                 },
                 server_node: server.clone(),
                 access_log_dir: None,
@@ -228,7 +236,7 @@ pub async fn build_local_service_config(
 pub async fn spawn_local_service(
     state: &Arc<RootState>,
     entry_config: &crate::config::EntryConfig,
-    existing_listeners: HashMap<String, PerServerListener>,
+    existing_listeners: HashMap<DhttpName<'static>, PerServerListener>,
 ) -> Result<Option<LocalServiceHandle>, Whatever> {
     if entry_config.local_servers.is_empty() {
         tracing::debug!("no local servers configured");

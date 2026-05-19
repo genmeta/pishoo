@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use dhttp_home::identity::Name;
+use dhttp::name::DhttpName;
 use h3x::endpoint::H3Endpoint;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
@@ -238,15 +238,11 @@ fn canonicalize_forward_host(host: &str) -> Option<String> {
         return None;
     }
 
-    if host.ends_with(Name::SUFFIX) {
+    if host.ends_with(DhttpName::SUFFIX) {
         return None;
     }
 
-    if let Ok(Some(name)) = Name::try_expand_from(host) {
-        return Some(name.as_full().to_string());
-    }
-
-    Name::try_from_str_partial(host)
+    DhttpName::try_from(host.to_owned())
         .ok()
         .map(|name| name.as_full().to_string())
 }

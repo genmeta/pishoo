@@ -62,6 +62,7 @@ x509-parser = { workspace = true }
 
 genmeta-ssh = { workspace = true, optional = true }
 remoc = { workspace = true }
+dhttp = { workspace = true }
 dhttp-home = { workspace = true }
 dhttp-identity = { workspace = true }
 async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }

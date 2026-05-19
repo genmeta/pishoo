@@ -86,7 +86,7 @@ impl DnsResolver {
 
         let quic = QuicClient::builder()
             .with_root_certificates(root_store)
-            .with_name(name.clone())
+            .with_name(name.as_full().to_owned())
             .with_cert(cert_chain, private_key)
             .with_alpns(vec!["h3"])
             .build();
@@ -115,13 +115,10 @@ pub fn build_query_resolver_chain(servers: &[Arc<Node>]) -> Resolvers {
         };
 
         for server_name in server_names {
-            let domain = match server_name.name.strip_suffix('~') {
-                Some(prefix) => format!("{prefix}.genmeta.net"),
-                None => server_name.name.clone(),
-            };
+            let domain = server_name.name.clone();
             let resolver_key = (resolver.base_url.to_string(), domain.clone());
             if seen.insert(resolver_key) {
-                let identity = server_identity(server, domain)
+                let identity = server_identity(server, domain.clone())
                     .expect("missing ssl_certificate or ssl_certificate_key");
                 resolvers = resolvers.with(resolver.build_query_resolver(Some(&identity)));
             }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dhttp_home::identity::{Name, ssl::Identity};
+use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
 use gateway::control_plane::ListenRequest;
 use nix::unistd::{Pid, Uid};
 
@@ -9,11 +9,16 @@ use crate::hypervisor::worker_handle::WorkerHandle;
 
 /// Test helper: is there an `Active` entry for `server_name`?
 async fn is_active(state: &RootState, server_name: &str) -> bool {
+    let server_name = DhttpName::try_from_str_full(server_name.to_owned()).unwrap();
     let registry = state.servers.read().await;
     matches!(
-        registry.entries.get(server_name),
+        registry.entries.get(&server_name),
         Some(ServerEntry::Active { .. })
     )
+}
+
+fn dhttp_name(label: &str) -> DhttpName<'static> {
+    DhttpName::try_from_str_full(format!("{label}.user.genmeta.net")).unwrap()
 }
 
 // -----------------------------------------------------------------------
@@ -46,8 +51,7 @@ fn test_identity(label: &str) -> Identity {
     let cert = params.self_signed(&key_pair).unwrap();
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
-    let name = Name::try_from_str(&fqdn).unwrap().into_owned();
-    Identity::new(name.into(), vec![cert_der], key_der)
+    Identity::new(dhttp_name(label).into(), vec![cert_der], key_der)
 }
 
 /// Build a ListenRequest with no bind addresses (no actual sockets).
@@ -56,6 +60,7 @@ fn test_request(label: &str) -> ListenRequest {
         identity: test_identity(label),
         bind: vec![],
         dns_resolver_url: None,
+        publish_options: PublishOptions::default(),
     }
 }
 
@@ -203,7 +208,12 @@ async fn test_register_then_release() {
 
     assert!(is_active(&state, server_name).await);
 
-    state.release_server(server_name, owner).await;
+    state
+        .release_server(
+            &DhttpName::try_from_str_full(server_name.to_owned()).unwrap(),
+            owner,
+        )
+        .await;
     assert!(!is_active(&state, server_name).await);
 }
 
@@ -311,7 +321,7 @@ async fn test_scrub_then_reregister() {
 
     // Scrub should clear the conflict.
     let scrubbed = state.scrub_conflicts().await;
-    assert!(scrubbed.contains(&"scrub-re.user.genmeta.net".to_owned()));
+    assert!(scrubbed.contains(&dhttp_name("scrub-re")));
 
     // Re-register should now succeed.
     let _listener = state
@@ -341,7 +351,7 @@ async fn test_release_wrong_owner() {
 
     // Release with wrong owner should be a no-op.
     state
-        .release_server("wrong-owner.user.genmeta.net", ServiceOwner::Worker(pid))
+        .release_server(&dhttp_name("wrong-owner"), ServiceOwner::Worker(pid))
         .await;
 
     // Server should still be active.
@@ -353,7 +363,7 @@ async fn test_release_nonexistent() {
     let state = test_state();
     // Should not panic.
     state
-        .release_server("does-not-exist.user.genmeta.net", ServiceOwner::Local)
+        .release_server(&dhttp_name("does-not-exist"), ServiceOwner::Local)
         .await;
 }
 

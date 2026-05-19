@@ -9,6 +9,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::middleware::from_fn_with_state;
+use dhttp::{identity::Identity, name::DhttpName};
 use gateway::{
     control_plane::{ControlPlane, ListenRequest},
     parse::{Node, Value},
@@ -63,7 +64,7 @@ pub struct ServiceConfig {
 /// reused across reloads.
 pub struct PreparedServer<L: quic::Listen> {
     /// Server name (SNI).
-    pub server_name: String,
+    pub server_name: DhttpName<'static>,
     /// Original listen request, retained for diffing on reload.
     pub listen_request: ListenRequest,
     /// The QUIC listener. `Some` when idle, `None` while `run_service` is active.
@@ -85,7 +86,7 @@ pub struct PreparedServer<L: quic::Listen> {
 pub async fn setup_service<P: ControlPlane + 'static>(
     plane: &P,
     config: &ServiceConfig,
-    mut existing_listeners: HashMap<String, P::Listener>,
+    mut existing_listeners: HashMap<DhttpName<'static>, P::Listener>,
 ) -> Result<Vec<PreparedServer<P::Listener>>, P::ListenError>
 where
     P::Listener: 'static,
@@ -93,25 +94,29 @@ where
     let mut result = Vec::new();
 
     for server_config in &config.servers {
-        let server_name = server_config
-            .listen_request
-            .identity
-            .name()
-            .as_full()
-            .to_owned();
+        let server_name = DhttpName::try_from_str_full(
+            server_config
+                .listen_request
+                .identity
+                .name()
+                .as_full()
+                .to_owned(),
+        )
+        .expect("listen request identity must be a dhttp name");
 
         let listener = if let Some(listener) = existing_listeners.remove(&server_name) {
             tracing::debug!(%server_name, "reusing existing listener");
             listener
         } else {
             let request = ListenRequest {
-                identity: gateway::control_plane::Identity::new(
+                identity: Identity::new(
                     server_config.listen_request.identity.name().clone(),
                     server_config.listen_request.identity.certs().to_vec(),
                     server_config.listen_request.identity.key().clone_key(),
                 ),
                 bind: server_config.listen_request.bind.clone(),
                 dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
+                publish_options: server_config.listen_request.publish_options,
             };
             let listener = plane.listener(request).await?;
             tracing::debug!(%server_name, "listener registered");
@@ -121,13 +126,14 @@ where
         result.push(PreparedServer {
             server_name,
             listen_request: ListenRequest {
-                identity: gateway::control_plane::Identity::new(
+                identity: Identity::new(
                     server_config.listen_request.identity.name().clone(),
                     server_config.listen_request.identity.certs().to_vec(),
                     server_config.listen_request.identity.key().clone_key(),
                 ),
                 bind: server_config.listen_request.bind.clone(),
                 dns_resolver_url: server_config.listen_request.dns_resolver_url.clone(),
+                publish_options: server_config.listen_request.publish_options,
             },
             listener: Some(listener),
             server_node: server_config.server_node.clone(),
@@ -176,7 +182,7 @@ pub async fn run_service<L>(
         return;
     }
 
-    let mut tasks: JoinSet<(String, L)> = JoinSet::new();
+    let mut tasks: JoinSet<(DhttpName<'static>, L)> = JoinSet::new();
 
     for server in prepared.iter_mut() {
         let listener = server
@@ -194,7 +200,7 @@ pub async fn run_service<L>(
         let nginx_router = NginxRouter::new(locations, router_state.clone());
         let access_state = AccessControlState {
             access_rules: access_rules.clone(),
-            server_name: Arc::from(server_name.as_str()),
+            server_name: Arc::from(server_name.as_full()),
         };
 
         let access_log_writer = match &server.access_log_dir {
@@ -265,7 +271,7 @@ pub async fn run_service<L>(
     tracing::info!(server_count, "worker ready");
 
     // Wait for all server tasks to complete.
-    let mut recovered: HashMap<String, L> = HashMap::new();
+    let mut recovered: HashMap<DhttpName<'static>, L> = HashMap::new();
     while let Some(result) = tasks.join_next().await {
         match result {
             Ok((name, listener)) => {
@@ -290,12 +296,15 @@ pub async fn run_service<L>(
 pub async fn collect_reusable_listeners<L: quic::Listen>(
     old_prepared: Vec<PreparedServer<L>>,
     new_config: &ServiceConfig,
-) -> HashMap<String, L> {
-    let new_requests: HashMap<&str, &ListenRequest> = new_config
+) -> HashMap<DhttpName<'static>, L> {
+    let new_requests: HashMap<DhttpName<'static>, &ListenRequest> = new_config
         .servers
         .iter()
         .map(|sc| {
-            let name = sc.listen_request.identity.name().as_full();
+            let name = DhttpName::try_from_str_full(
+                sc.listen_request.identity.name().as_full().to_owned(),
+            )
+            .expect("listen request identity must be a dhttp name");
             (name, &sc.listen_request)
         })
         .collect();
@@ -308,7 +317,7 @@ pub async fn collect_reusable_listeners<L: quic::Listen>(
         };
 
         let should_reuse = new_requests
-            .get(server.server_name.as_str())
+            .get(&server.server_name)
             .is_some_and(|new_req| **new_req == server.listen_request);
 
         if should_reuse {
