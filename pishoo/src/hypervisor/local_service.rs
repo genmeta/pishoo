@@ -201,7 +201,7 @@ pub async fn build_local_service_config(
                 })?;
             server_configs.push(crate::service::ServerConfig {
                 listen_request: ListenRequest {
-                    identity: Identity::new(name, certs.clone(), key.clone_key()),
+                    identity: Identity::new(name.into(), certs.clone(), key.clone_key()),
                     bind: listens.clone(),
                     dns_resolver_url: dns_resolver_url.clone(),
                 },

@@ -2,7 +2,7 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp_home::identity::Name;
+use dhttp_home::identity::DnsName;
 pub use dhttp_home::identity::ssl::Identity;
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
@@ -177,7 +177,7 @@ impl<T: ProvideListener + ProvideConnector> ControlPlane for T {}
 
 #[derive(Serialize, Deserialize)]
 struct IdentityHelper {
-    name: Name<'static>,
+    name: DnsName<'static>,
     certs: Vec<Vec<u8>>,
     key: Vec<u8>,
 }

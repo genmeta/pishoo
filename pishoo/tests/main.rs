@@ -8,11 +8,16 @@ fn main_uses_shared_root_cert_store() {
 }
 
 #[test]
-fn main_uses_reactive_per_server_dns_publish() {
+fn register_listener_no_longer_uses_legacy_bind_uri_dns_publish() {
     let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
         state_source.contains("publish_task"),
-        "register_listener must spawn per-server DNS publish tasks via ServerEntry"
+        "ServerEntry keeps a publish_task slot for the DnsPublisher migration"
+    );
+    let server_ops_source = include_str!("../src/hypervisor/state/server_ops.rs");
+    assert!(
+        !server_ops_source.contains("spawn_server_publish_task("),
+        "register_listener must not use the legacy BindUri-based DNS publisher"
     );
 }
 
@@ -25,8 +30,7 @@ fn main_force_kills_lingering_workers_during_shutdown() {
     );
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("let _ = monitor_handle.await;")
-            && main_source.contains("let _ = network_watch_handle.await;"),
+        main_source.contains("let _ = monitor_handle.await;"),
         "root shutdown must await aborted background tasks"
     );
 }

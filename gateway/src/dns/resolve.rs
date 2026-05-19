@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use gmdns::resolvers::{H3Resolver, Resolvers};
 use h3x::{
-    client::Client,
     dquic::{
-        prelude::QuicClient,
+        prelude::{Connection, QuicClient},
         qresolve::{Resolve as GmdnsResolver, SystemResolver},
     },
+    endpoint::H3Endpoint,
 };
 use http::Uri;
 
 use super::H3_DNS_SERVER;
 use crate::parse::{Node, ServerIdentity, Value, optional_server_identity, server_identity};
+
+type DnsH3Client = H3Endpoint<Arc<QuicClient>, Connection>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolver {
@@ -50,20 +52,18 @@ impl DnsResolver {
         )
     }
 
-    pub(crate) fn create_h3_client_no_auth(&self) -> Client<Arc<QuicClient>> {
+    pub(crate) fn create_h3_client_no_auth(&self) -> DnsH3Client {
         let root_store = crate::common::root_cert();
-        Client::<Arc<QuicClient>>::builder()
+        let quic = QuicClient::builder()
             .with_root_certificates(root_store)
-            .without_identity()
-            .expect("failed to create client builder")
-            .build()
+            .without_cert()
+            .with_alpns(vec!["h3"])
+            .build();
+        H3Endpoint::new(Arc::new(quic))
     }
 
-    pub(crate) fn create_h3_client(&self, config: &ServerIdentity) -> Client<Arc<QuicClient>> {
+    pub(crate) fn create_h3_client(&self, config: &ServerIdentity) -> DnsH3Client {
         let root_store = crate::common::root_cert();
-
-        let client_builder =
-            Client::<Arc<QuicClient>>::builder().with_root_certificates(root_store.clone());
 
         let (cert_path, key_path, name) =
             (&config.cert_path, &config.key_path, &config.server_name);
@@ -84,10 +84,13 @@ impl DnsResolver {
             .expect("failed to parse private key")
             .expect("no private key found");
 
-        client_builder
-            .with_identity(name.clone(), cert_chain, private_key)
-            .expect("failed to configure client identity")
-            .build()
+        let quic = QuicClient::builder()
+            .with_root_certificates(root_store)
+            .with_name(name.clone())
+            .with_cert(cert_chain, private_key)
+            .with_alpns(vec!["h3"])
+            .build();
+        H3Endpoint::new(Arc::new(quic))
     }
 }
 

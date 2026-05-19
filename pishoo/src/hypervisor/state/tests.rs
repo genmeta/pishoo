@@ -25,12 +25,12 @@ fn test_state() -> Arc<RootState> {
     // Ensure the rustls CryptoProvider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let network = h3x::endpoint::Network::builder()
+    let network = h3x::dquic::Network::builder()
         .stun_server(Arc::<str>::from(""))
         .build();
     Arc::new(RootState::new(
         network,
-        h3x::endpoint::config::ServerQuicConfig::default(),
+        h3x::dquic::server::ServerQuicConfig::default(),
     ))
 }
 
@@ -47,7 +47,7 @@ fn test_identity(label: &str) -> Identity {
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
     let name = Name::try_from_str(&fqdn).unwrap().into_owned();
-    Identity::new(name, vec![cert_der], key_der)
+    Identity::new(name.into(), vec![cert_der], key_der)
 }
 
 /// Build a ListenRequest with no bind addresses (no actual sockets).

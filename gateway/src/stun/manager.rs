@@ -6,26 +6,24 @@ use std::{
 };
 
 use gmdns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
-use h3x::{
-    dquic::{
-        prelude::{BindUri, BoundAddr, IO},
-        qbase::net::Family,
-        qinterface::{
-            BindInterface, WeakInterface,
-            bind_uri::BindUriScheme,
-            component::location::Locations,
-            io::{ProductIO, handy::DEFAULT_IO_FACTORY},
-        },
-        qtraversal::{
-            nat::{
-                client::{NatType, StunClientsComponent},
-                router::{StunRouter, StunRouterComponent},
-                server::{StunServer, StunServerConfig},
-            },
-            route::ReceiveAndDeliverPacket,
-        },
+use h3x::dquic::{
+    Network,
+    net::Scheme,
+    prelude::{BindUri, IO},
+    qbase::net::Family,
+    qinterface::{
+        BindInterface, WeakInterface,
+        component::location::Locations,
+        io::{ProductIO, handy::DEFAULT_IO_FACTORY},
     },
-    endpoint::Network,
+    qtraversal::{
+        nat::{
+            client::{NatType, StunClientsComponent},
+            router::{StunRouter, StunRouterComponent},
+            server::{StunServer, StunServerConfig},
+        },
+        route::ReceiveAndDeliverPacket,
+    },
 };
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
@@ -181,7 +179,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     // 主 socket
     let main_iface: Arc<dyn IO> = Arc::from(factory.bind(bind_cfg.bind_address.into()));
     let main_port = match main_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!(bind = %bind_cfg.bind_address, "configured main iface has no internet bound addr");
             return None;
@@ -198,7 +196,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     let aux_addr = SocketAddr::new(bind_cfg.bind_address.ip(), aux_port_cfg);
     let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_addr.into()));
     let aux_port = match aux_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!("configured aux iface has no internet bound addr");
             return None;
@@ -349,7 +347,7 @@ fn start_dynamic_stun_pair(
     let iface = bind_iface.borrow();
 
     let main_addr = match iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr,
+        Ok(addr) => addr,
         _ => {
             warn!(%bind_uri, "main iface has no internet bound addr");
             return None;
@@ -372,7 +370,7 @@ fn start_dynamic_stun_pair(
     let factory: Arc<dyn ProductIO> = Arc::new(DEFAULT_IO_FACTORY);
     let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_bind_uri));
     let aux_port = match aux_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!("aux iface has no internet bound addr");
             return None;
@@ -429,11 +427,11 @@ fn is_ipv4_bind_uri(bind_uri: &BindUri) -> bool {
 fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<BindUri> {
     let port = fixed_port.unwrap_or(0);
     match bind_uri.scheme() {
-        BindUriScheme::Iface => {
+        Scheme::Iface => {
             let (family, device, _port) = bind_uri.as_iface_bind_uri()?;
             Some(format!("iface://{family}.{device}:{port}").into())
         }
-        BindUriScheme::Inet => {
+        Scheme::Inet => {
             let addr = bind_uri.as_inet_bind_uri()?;
             Some(SocketAddr::new(addr.ip(), port).into())
         }

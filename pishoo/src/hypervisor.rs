@@ -7,7 +7,6 @@ pub mod launcher;
 pub mod local_plane;
 pub mod local_service;
 pub mod log;
-pub mod network;
 pub mod process;
 pub mod reload;
 pub mod shutdown;

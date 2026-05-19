@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
-use h3x::dquic::prelude::BindUri;
+use h3x::dquic::binds::BindPattern;
 use snafu::whatever;
 
 use super::{Result, Value};
@@ -125,54 +125,96 @@ impl Listens {
         }
     }
 
-    pub fn contains(&self, bind_uri: &BindUri) -> bool {
-        use h3x::dquic::qbase::net::*;
-        // TODO: check specific_addrs
-        let Some((ip_family, device, port)) = bind_uri.as_iface_bind_uri() else {
-            return false;
-        };
-
-        (matches!(self.families, IpFamilies::Dual)
-            || (matches!(self.families, IpFamilies::V4) && matches!(ip_family, Family::V4))
-            || (matches!(self.families, IpFamilies::V6) && matches!(ip_family, Family::V6)))
-            && self.range.contains(device)
-            && self.port == port
-    }
-
-    pub fn resolve<'i, I>(&'i self, devices: I) -> Box<dyn Iterator<Item = BindUri> + Send + 'i>
-    where
-        I: IntoIterator<Item = &'i str>,
-        I::IntoIter: Send + 'i,
-    {
-        if let Some(ref specific_addrs) = self.specific_addrs {
-            return Box::new(specific_addrs.clone().into_iter().map(BindUri::from));
+    pub fn to_bind_patterns(&self) -> Vec<BindPattern> {
+        fn parse_pattern(input: String) -> BindPattern {
+            input
+                .parse()
+                .expect("generated bind pattern should be valid")
         }
 
-        Box::new(
-            devices
-                .into_iter()
-                .filter(|name| {
-                    matches!(self.range, IfaceRange::All)
-                        || matches!(self.range, IfaceRange::Exact(ref iface_name) if iface_name == *name)
-                })
-                .flat_map(move |name| {
-                    let mut ipv4_bind_uri =
-                        BindUri::from(format!("iface://v4.{name}:{}", self.port));
-                    let mut ipv6_bind_uri =
-                        BindUri::from(format!("iface://v6.{name}:{}", self.port));
-                    if self.port == 0 {
-                        ipv4_bind_uri = ipv4_bind_uri.alloc_port();
-                        ipv6_bind_uri = ipv6_bind_uri.alloc_port();
-                    }
+        if let Some(specific_addrs) = &self.specific_addrs {
+            return specific_addrs
+                .iter()
+                .map(|addr| parse_pattern(format!("inet://{addr}")))
+                .collect();
+        }
 
-                    match self.families {
-                        IpFamilies::V4 => [Some(ipv4_bind_uri), None],
-                        IpFamilies::V6 => [None, Some(ipv6_bind_uri)],
-                        IpFamilies::Dual => [Some(ipv4_bind_uri), Some(ipv6_bind_uri)],
-                    }
-                    .into_iter()
-                    .flatten()
-                }),
-        )
+        let host = match &self.range {
+            IfaceRange::All => "*",
+            IfaceRange::Exact(name) => name.as_str(),
+            IfaceRange::External | IfaceRange::Internal => {
+                // External/Internal require classifying interfaces via
+                // routing-table and loopback checks. Keep them explicitly
+                // unimplemented instead of silently changing the bind set.
+                unimplemented!("iface range external/internal is not implemented yet")
+            }
+        };
+
+        let family_prefix = match self.families {
+            IpFamilies::V4 => "v4.",
+            IpFamilies::V6 => "v6.",
+            IpFamilies::Dual => "",
+        };
+
+        vec![parse_pattern(format!(
+            "iface://{family_prefix}{host}:{}",
+            self.port
+        ))]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    use super::*;
+
+    fn pattern_strings(listen: Listens) -> Vec<String> {
+        listen
+            .to_bind_patterns()
+            .into_iter()
+            .map(|pattern| pattern.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn listens_all_dual_preserves_wildcard_pattern() {
+        let listen = Listens::new(IfaceRange::All, IpFamilies::Dual, 443);
+
+        assert_eq!(pattern_strings(listen), vec!["iface://*:443"]);
+    }
+
+    #[test]
+    fn listens_exact_family_preserves_family_pattern() {
+        assert_eq!(
+            pattern_strings(Listens::new(
+                IfaceRange::Exact("eth0".to_owned()),
+                IpFamilies::V4,
+                443
+            )),
+            vec!["iface://v4.eth0:443"]
+        );
+        assert_eq!(
+            pattern_strings(Listens::new(
+                IfaceRange::Exact("eth0".to_owned()),
+                IpFamilies::V6,
+                443
+            )),
+            vec!["iface://v6.eth0:443"]
+        );
+    }
+
+    #[test]
+    fn listens_specific_addrs_become_inet_patterns() {
+        let mut listen = Listens::new(IfaceRange::All, IpFamilies::Dual, 443);
+        listen.specific_addrs = Some(vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 8443)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 9443)),
+        ]);
+
+        assert_eq!(
+            pattern_strings(listen),
+            vec!["inet://127.0.0.1:8443", "inet://[::1]:9443"]
+        );
     }
 }

@@ -6,7 +6,7 @@ use std::{
 
 use bytes::Bytes;
 use dhttp_home::identity::Name;
-use h3x::client::Client;
+use h3x::endpoint::H3Endpoint;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -73,7 +73,7 @@ fn configure_tcp_keepalive(stream: &TcpStream) {
 /// * `Result<(SocketAddr, impl Future)>` - The address and server task
 pub async fn serve<C: h3x::quic::Connect + 'static>(
     node: Arc<Node>,
-    client: Arc<Client<C>>,
+    client: Arc<H3Endpoint<C, C::Connection>>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,

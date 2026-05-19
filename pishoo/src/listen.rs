@@ -1,23 +1,21 @@
 //! Per-server listen adapter for routing connections from a
-//! [`h3x::endpoint::ServerBinding`] drain task to individual per-server
+//! [`h3x::dquic::ServerBinding`] drain task to individual per-server
 //! consumers.
 //!
-//! The root process owns an [`h3x::endpoint::Network`]; `register_listener`
+//! The root process owns an [`h3x::dquic::Network`]; `register_listener`
 //! calls [`Network::bind_server`] to obtain a [`ServerBinding`], then spawns a
 //! drain task that forwards accepted connections to the registered per-server
 //! mpsc channel. Each server gets a `PerServerListener` backed by that mpsc
 //! receiver so the local/forwarded worker can drive [`h3x::quic::Listen`].
 //!
-//! [`Network::bind_server`]: h3x::endpoint::Network::bind_server
-//! [`ServerBinding`]: h3x::endpoint::ServerBinding
+//! [`Network::bind_server`]: h3x::dquic::Network::bind_server
+//! [`ServerBinding`]: h3x::dquic::ServerBinding
 
 use std::{
-    collections::HashSet,
     fmt,
     sync::{Arc, Weak},
 };
 
-use gateway::parse::Listens;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -53,7 +51,7 @@ impl std::error::Error for PerServerListenerError {}
 /// adapter's mpsc channel. Wraps the receiver side so it implements
 /// [`h3x::quic::Listen`].
 ///
-/// [`ServerBinding`]: h3x::endpoint::ServerBinding
+/// [`ServerBinding`]: h3x::dquic::ServerBinding
 pub struct PerServerListener {
     rx: mpsc::Receiver<Arc<h3x::dquic::prelude::Connection>>,
     shutdown_token: CancellationToken,
@@ -108,19 +106,4 @@ impl h3x::quic::Listen for PerServerListener {
         }
         Ok(())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Bind URI resolution
-// ---------------------------------------------------------------------------
-
-pub fn resolve_bind_uris(listens: &[Listens], device_names: &[String]) -> Vec<String> {
-    listens
-        .iter()
-        .flat_map(|listen| listen.resolve(device_names.iter().map(String::as_str)))
-        .filter(|uri| uri.resolve().is_ok())
-        .map(|uri| uri.to_string())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
 }

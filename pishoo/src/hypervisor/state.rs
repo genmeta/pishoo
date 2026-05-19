@@ -2,7 +2,7 @@
 //!
 //! Tracks which worker process owns which server names, provides conflict
 //! detection, and manages the lifecycle of per-server listen adapters routed
-//! from the shared [`Network`](h3x::endpoint::Network)'s SNI dispatcher.
+//! from the shared [`Network`](h3x::dquic::Network)'s SNI dispatcher.
 //!
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
@@ -15,9 +15,8 @@ use std::{
     sync::Arc,
 };
 
-use h3x::{
-    dquic::{prelude::BindUri, qinterface::BindInterface},
-    endpoint::{config::ServerQuicConfig, network::Network},
+use h3x::dquic::{
+    BindHandle, BindServerError, Network, binds::BindPattern, server::ServerQuicConfig,
 };
 use nix::unistd::{Pid, Uid};
 use snafu::Snafu;
@@ -48,7 +47,7 @@ pub enum RegisterError {
     #[snafu(display("failed to bind server `{server_name}` on network"))]
     BindServer {
         server_name: String,
-        source: h3x::endpoint::network::BindServerError,
+        source: BindServerError,
     },
 }
 
@@ -75,14 +74,13 @@ pub enum ServerEntry {
         /// compatibility; the real fanout is driven by `_accept_task`.
         conn_tx: mpsc::Sender<Arc<h3x::dquic::prelude::Connection>>,
         shutdown_token: CancellationToken,
-        /// Original listen specifications for network-change reconciliation.
-        listens: Vec<gateway::parse::Listens>,
-        /// Bind URIs currently bound on the shared [`Network`] on behalf of
-        /// this server. Each entry holds a live [`BindInterface`] to keep
-        /// the underlying socket alive; dropping the entry releases one
-        /// reference in [`InterfaceManager`], which closes the socket when
-        /// it is the last outstanding reference.
-        bound_ifaces: HashMap<BindUri, BindInterface>,
+        /// Original bind patterns for this server. These preserve the
+        /// declarative listen intent; Network owns expansion to concrete
+        /// interfaces and reconciliation when devices change.
+        bind_patterns: Vec<BindPattern>,
+        /// Handles keeping this server's bind patterns alive in the shared
+        /// [`Network`].
+        bind_handles: Vec<BindHandle>,
         /// SNI registration handle on the shared [`Network`]. Owns the
         /// fanout task that drains inbound connections into `conn_tx`;
         /// dropping releases the SNI entry.

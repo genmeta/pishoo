@@ -4,7 +4,7 @@ use gateway::{
     forward,
     parse::{self, Value},
 };
-use h3x::{client::Client, dquic::prelude::QuicClient};
+use h3x::{dquic::prelude::QuicClient, endpoint::H3Endpoint};
 use snafu::{ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Whatever> {
             .with_alpns(vec!["h3"])
             .build(),
     );
-    let client = Arc::new(Client::from_quic_client().client(quic_client).build());
+    let client = Arc::new(H3Endpoint::new(quic_client));
 
     let mut handler = JoinSet::new();
 

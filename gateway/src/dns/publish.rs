@@ -1,5 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use dhttp_identity::identity::{LocalAgent, SignError};
+use futures::future::BoxFuture;
 use gmdns::{
     MdnsPacket,
     mdns::Mdns,
@@ -8,15 +10,20 @@ use gmdns::{
 };
 use h3x::{
     dquic::{
-        prelude::{BindUri, BoundAddr, IO},
-        qbase::net::addr::SocketEndpointAddr,
+        Network,
+        net::EndpointAddr,
+        prelude::{BindUri, Connection, IO, QuicClient},
         qinterface::{BindInterface, component::location::Locations},
         qresolve::Publish as DnsPublisher,
         qtraversal::nat::client::{NatType, StunClientsComponent},
     },
-    endpoint::Network,
+    endpoint::H3Endpoint,
 };
-use rustls::{SignatureScheme, pki_types::PrivateKeyDer, sign::SigningKey};
+use rustls::{
+    SignatureScheme,
+    pki_types::{CertificateDer, PrivateKeyDer},
+    sign::SigningKey,
+};
 use snafu::{OptionExt, Report, ResultExt, whatever};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
@@ -30,6 +37,7 @@ use crate::{
 };
 
 pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
+type DnsH3Client = H3Endpoint<Arc<QuicClient>, Connection>;
 
 #[derive(Clone)]
 pub struct PublishConfig {
@@ -39,14 +47,54 @@ pub struct PublishConfig {
 }
 
 impl PublishConfig {
-    pub(crate) fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
+    pub(crate) async fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
         ep.set_main(self.server_id == MAIN_SERVER_ID);
         ep.set_sequence(self.server_id as u64);
         if let Some((key, scheme)) = &self.signing_key
-            && let Err(e) = ep.sign_with(key.as_ref(), *scheme)
+            && let Err(e) = ep
+                .sign_with_agent(&SigningKeyAgent {
+                    key: key.as_ref(),
+                    scheme: *scheme,
+                })
+                .await
         {
-            tracing::warn!(error = %Report::from_error(e), "failed to sign endpoint");
+            tracing::warn!(error = %Report::from_error(&e), "failed to sign endpoint");
         }
+    }
+}
+
+#[derive(Debug)]
+struct SigningKeyAgent<'a> {
+    key: &'a dyn SigningKey,
+    scheme: SignatureScheme,
+}
+
+impl LocalAgent for SigningKeyAgent<'_> {
+    fn name(&self) -> &str {
+        ""
+    }
+
+    fn cert_chain(&self) -> &[CertificateDer<'static>] {
+        &[]
+    }
+
+    fn sign_algorithm(&self) -> rustls::SignatureAlgorithm {
+        self.key.algorithm()
+    }
+
+    fn sign(
+        &self,
+        scheme: SignatureScheme,
+        data: &[u8],
+    ) -> BoxFuture<'_, Result<Vec<u8>, SignError>> {
+        if scheme != self.scheme {
+            return Box::pin(std::future::ready(Err(SignError::UnsupportedScheme {
+                scheme,
+            })));
+        }
+
+        let result = dhttp_identity::identity::sign_with_key(self.key, scheme, data);
+        Box::pin(std::future::ready(result))
     }
 }
 
@@ -70,7 +118,9 @@ pub async fn publish_host_endpoints(
         tracing::warn!(host, "no endpoints to publish for this server");
     }
 
-    endpoints.iter_mut().for_each(|ep| config.sign_endpoint(ep));
+    for endpoint in &mut endpoints {
+        config.sign_endpoint(endpoint).await;
+    }
 
     let mut hosts = HashMap::new();
     hosts.insert(host.to_string(), endpoints);
@@ -163,7 +213,7 @@ fn ensure_mdns_resolver(
     let iface = bind_iface.borrow();
 
     let (_, device, _) = bind_uri.as_iface_bind_uri()?;
-    let Ok(BoundAddr::Internet(local_addr)) = iface.bound_addr() else {
+    let Ok(local_addr) = iface.bound_addr() else {
         return None;
     };
 
@@ -211,7 +261,7 @@ async fn publish_single_mdns(
             SocketAddr::V4(addr) => DnsEndpointAddr::direct_v4(addr),
             SocketAddr::V6(addr) => DnsEndpointAddr::direct_v6(addr),
         };
-        config.sign_endpoint(&mut ep);
+        config.sign_endpoint(&mut ep).await;
 
         let mut hosts = std::collections::HashMap::new();
         hosts.insert(server_name.to_string(), vec![ep]);
@@ -247,15 +297,15 @@ async fn publish_resolvers(
                             match client.get_nat_type() {
                                 Some(Ok(NatType::FullCone)) => {
                                     tracing::debug!(outer = ?outer, "client behind full cone nat, suitable for dns publication");
-                                    Some(SocketEndpointAddr::direct(outer))
+                                    Some(EndpointAddr::direct(outer))
                                 }
                                 Some(Ok(_)) => {
                                     tracing::debug!(outer = ?outer, "found stun client with non-full-cone nat for dns publication");
-                                    Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                                    Some(EndpointAddr::with_agent(client.agent_addr(), outer))
                                 }
                                 _ => {
                                     tracing::debug!(outer = ?outer, "found stun client with unknown nat type for dns publication");
-                                    Some(SocketEndpointAddr::with_agent(client.agent_addr(), outer))
+                                    Some(EndpointAddr::with_agent(client.agent_addr(), outer))
                                 }
                             }
                         })
@@ -267,7 +317,7 @@ async fn publish_resolvers(
             .unwrap_or_default()
         {
             if let Ok(mut ep) = DnsEndpointAddr::try_from(sock_ep) {
-                config.sign_endpoint(&mut ep);
+                config.sign_endpoint(&mut ep).await;
                 endpoints.push(ep);
             }
         }
@@ -362,9 +412,9 @@ pub type BindUriProvider = Arc<dyn Fn() -> Vec<BindUri> + Send + Sync>;
 /// and reacts to endpoint changes (network interface events, STUN
 /// binding updates). Dropping the returned handle aborts the task.
 ///
-/// `bind_uris` is re-invoked on every publish tick, so pishoo can return
-/// an updated URI set after `reconcile_binds` reshapes the server's
-/// listens. The task terminates naturally when the returned handle is
+/// `bind_uris` is re-invoked on every publish tick, so callers can return
+/// an updated URI set after their bind ownership changes. The task terminates
+/// naturally when the returned handle is
 /// dropped, which happens at server retirement.
 pub fn spawn_server_publish_task(
     server_name: String,
@@ -433,22 +483,15 @@ pub async fn publish_server(
     publish_resolvers(server_name, config, ifaces.iter().map(|(u, i)| (u, i))).await;
 }
 
-fn create_h3_client_from_identity(
-    _resolver: &DnsResolver,
-    identity: &Identity,
-) -> h3x::client::Client<Arc<h3x::dquic::prelude::QuicClient>> {
+fn create_h3_client_from_identity(_resolver: &DnsResolver, identity: &Identity) -> DnsH3Client {
     let root_store = crate::common::root_cert();
-    let builder = h3x::client::Client::<Arc<h3x::dquic::prelude::QuicClient>>::builder()
-        .with_root_certificates(root_store);
-
-    builder
-        .with_identity(
-            identity.name().as_full().to_owned(),
-            identity.certs().to_vec(),
-            identity.key().clone_key(),
-        )
-        .expect("failed to configure client identity for dns publisher")
-        .build()
+    let quic = QuicClient::builder()
+        .with_root_certificates(root_store)
+        .with_name(identity.name().as_full().to_owned())
+        .with_cert(identity.certs().to_vec(), identity.key().clone_key())
+        .with_alpns(vec!["h3"])
+        .build();
+    H3Endpoint::new(Arc::new(quic))
 }
 
 fn compute_server_id(name: &str) -> u8 {

@@ -4,13 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use gateway::error::Whatever;
-use h3x::{
-    dquic::prelude::handy::server_parameters,
-    endpoint::{
-        Network,
-        config::{ServerOnlyConfig, ServerQuicConfig},
-    },
-};
+use h3x::dquic::{Network, param::handy::server_parameters, server::ServerQuicConfig};
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
 use rustls::server::WebPkiClientVerifier;
@@ -92,15 +86,11 @@ async fn main() -> Result<(), Whatever> {
         .build()
         .expect("failed to build tls client cert verifier");
 
-    let server_only = ServerOnlyConfig {
+    let server_qcfg = ServerQuicConfig {
         parameters: server_parameters(),
         alpns: vec![b"h3".to_vec()],
         backlog: 1024,
         client_cert_verifier: tls_client_cert_verifier,
-        ..Default::default()
-    };
-    let server_qcfg = ServerQuicConfig {
-        own: Arc::new(server_only),
         ..Default::default()
     };
 
@@ -137,9 +127,6 @@ async fn main() -> Result<(), Whatever> {
     // central accept loop is needed here.
 
     let monitor_handle = pishoo::hypervisor::process::spawn_monitor_loop(state.clone());
-
-    // Watch for network interface changes and reconcile bind URIs
-    let network_watch_handle = pishoo::hypervisor::network::spawn_network_watch_loop(state.clone());
 
     tracing::info!("pishoo ready");
 
@@ -182,8 +169,6 @@ async fn main() -> Result<(), Whatever> {
 
     monitor_handle.abort();
     let _ = monitor_handle.await;
-    network_watch_handle.abort();
-    let _ = network_watch_handle.await;
     if let Some(handle) = local_service_handle.take() {
         handle.shutdown().await;
     }
