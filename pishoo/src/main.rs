@@ -96,7 +96,6 @@ async fn main() -> Result<(), Whatever> {
 
     let network = Network::builder()
         .stun_server(Arc::<str>::from(gateway::dns::DEFAULT_STUN_SERVER))
-        .stun_resolver(Arc::new(gateway::dns::build_query_resolver_chain(&[])))
         .build();
 
     // Create RootState (interior mutability — no external Mutex needed)
