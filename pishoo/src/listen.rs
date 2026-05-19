@@ -1,100 +1,67 @@
-//! Per-server listen adapter for routing connections from a
-//! [`h3x::dquic::ServerBinding`] drain task to individual per-server
-//! consumers.
+//! Root-owned endpoint wrapper for local and worker services.
 //!
-//! The root process owns an [`h3x::dquic::Network`]; `register_listener`
-//! calls [`Network::bind_server`] to obtain a [`ServerBinding`], then spawns a
-//! drain task that forwards accepted connections to the registered per-server
-//! mpsc channel. Each server gets a `PerServerListener` backed by that mpsc
-//! receiver so the local/forwarded worker can drive [`h3x::quic::Listen`].
-//!
-//! [`Network::bind_server`]: h3x::dquic::Network::bind_server
-//! [`ServerBinding`]: h3x::dquic::ServerBinding
+//! The root process owns the shared DHTTP network. Each registered server gets
+//! a [`dhttp::endpoint::Endpoint`] built from its identity and bind patterns;
+//! workers receive this wrapper through IPC as an [`h3x::quic::Listen`]
+//! capability. Shutdown routes back through [`RootState`] so registry ownership
+//! and endpoint lifetime stay synchronized.
 
-use std::{
-    fmt,
-    sync::{Arc, Weak},
-};
+use std::sync::{Arc, Weak};
 
-use dhttp::name::DhttpName;
-use tokio::sync::mpsc;
+use dhttp::{endpoint::Endpoint, name::DhttpName};
+use snafu::Snafu;
 use tokio_util::sync::CancellationToken;
 
 use crate::hypervisor::state::{RootState, ServiceOwner};
 
-/// Error type for [`PerServerListener`].
-///
-/// Implements `std::error::Error + std::any::Any` as required by
-/// [`h3x::quic::Listen::Error`].
-#[derive(Debug)]
-pub enum PerServerListenerError {
-    /// The mpsc channel was closed (server removed or root shutting down).
-    ChannelClosed,
-    /// The adapter was explicitly shut down via [`PerServerListener::shutdown`].
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum WorkerEndpointError {
+    #[snafu(display("worker endpoint shut down"))]
     Shutdown,
+    #[snafu(transparent)]
+    Accept { source: h3x::dquic::AcceptError },
 }
 
-impl fmt::Display for PerServerListenerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ChannelClosed => write!(f, "per-server listen channel closed"),
-            Self::Shutdown => write!(f, "per-server listener shut down"),
-        }
-    }
-}
-
-impl std::error::Error for PerServerListenerError {}
-
-/// Per-server listener adapter.
-///
-/// Root creates one per `server_name`; the drain task attached to the
-/// corresponding [`ServerBinding`] forwards accepted connections into this
-/// adapter's mpsc channel. Wraps the receiver side so it implements
-/// [`h3x::quic::Listen`].
-///
-/// [`ServerBinding`]: h3x::dquic::ServerBinding
-pub struct PerServerListener {
-    rx: mpsc::Receiver<Arc<h3x::dquic::prelude::Connection>>,
+/// Root-held endpoint belonging to one registered service owner.
+pub struct WorkerEndpoint {
+    endpoint: Endpoint,
     shutdown_token: CancellationToken,
     root_state: Weak<RootState>,
     server_name: DhttpName<'static>,
     owner: ServiceOwner,
 }
 
-impl PerServerListener {
-    /// Create a new per-server listen adapter.
-    ///
-    /// * `rx` — receives connections forwarded by the `ServerBinding` drain task
-    /// * `shutdown_token` — signals shutdown of this adapter
+impl WorkerEndpoint {
     pub fn new_registered(
-        rx: mpsc::Receiver<Arc<h3x::dquic::prelude::Connection>>,
+        endpoint: Endpoint,
         shutdown_token: CancellationToken,
         root_state: &Arc<RootState>,
         server_name: DhttpName<'static>,
         owner: ServiceOwner,
     ) -> Self {
         Self {
-            rx,
+            endpoint,
             shutdown_token,
             root_state: Arc::downgrade(root_state),
             server_name,
             owner,
         }
     }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
 }
 
-impl h3x::quic::Listen for PerServerListener {
+impl h3x::quic::Listen for WorkerEndpoint {
     type Connection = h3x::dquic::prelude::Connection;
-    type Error = PerServerListenerError;
+    type Error = WorkerEndpointError;
 
     async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
         tokio::select! {
-            conn = self.rx.recv() => {
-                conn.ok_or(PerServerListenerError::ChannelClosed)
-            }
-            _ = self.shutdown_token.cancelled() => {
-                Err(PerServerListenerError::Shutdown)
-            }
+            result = self.endpoint.accept() => Ok(result?),
+            () = self.shutdown_token.cancelled() => Err(WorkerEndpointError::Shutdown),
         }
     }
 
@@ -105,6 +72,7 @@ impl h3x::quic::Listen for PerServerListener {
                 .release_server(&self.server_name, self.owner)
                 .await;
         }
+        self.endpoint.shutdown().await?;
         Ok(())
     }
 }

@@ -9,7 +9,9 @@ use nix::{
 use snafu::Report;
 use tokio::task::JoinSet;
 
-use super::{CleanupSummary, RootState, ServerEntry, ServiceOwner, WorkerProcessRecord};
+use super::{
+    CleanupSummary, RetiredServer, RootState, ServerEntry, ServiceOwner, WorkerProcessRecord,
+};
 use crate::hypervisor::worker_handle::WorkerHandle;
 
 impl RootState {
@@ -114,10 +116,10 @@ impl RootState {
         // Also scan for `Registering` entries owned by this worker — they are
         // not yet recorded in `owned_servers` because `register_listener`
         // Phase 3 has not completed.
-        let (servers_cleaned, retired_tasks) = {
+        let (servers_cleaned, retired_servers) = {
             let mut registry = self.servers.write().await;
             let mut cleaned = 0usize;
-            let mut retired: Vec<tokio_util::task::AbortOnDropHandle<()>> = Vec::new();
+            let mut retired: Vec<RetiredServer> = Vec::new();
             for server_name in &owned_servers {
                 let dominated = matches!(
                     registry.entries.get(server_name),
@@ -150,10 +152,10 @@ impl RootState {
             }
             (cleaned, retired)
         };
-        // servers lock released here — await the retired fanout tasks so
-        // their captured `ServerBinding`s are dropped before we return.
-        for task in retired_tasks {
-            let _ = task.await;
+        // servers lock released here — shut down retired endpoints so their
+        // SNI bindings and bind handles are released before we return.
+        for retired in retired_servers {
+            retired.shutdown().await;
         }
 
         let background_tasks_cleaned = background_tasks.len();

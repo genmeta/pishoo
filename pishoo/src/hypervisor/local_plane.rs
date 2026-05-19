@@ -14,14 +14,14 @@ use snafu::Snafu;
 
 use crate::{
     hypervisor::state::{RegisterError, ServiceOwner},
-    listen::PerServerListener,
+    listen::WorkerEndpoint,
 };
 
 /// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
-/// [`PerServerListener`] that implements [`h3x::quic::Listen`].
+/// [`WorkerEndpoint`] that implements [`h3x::quic::Listen`].
 pub struct LocalControlPlane {
     state: Arc<super::state::RootState>,
 }
@@ -123,7 +123,7 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
 }
 
 impl gateway::control_plane::ProvideListener for LocalControlPlane {
-    type Listener = PerServerListener;
+    type Listener = WorkerEndpoint;
     type ListenError = RegisterError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {

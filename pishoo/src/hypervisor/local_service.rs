@@ -13,9 +13,7 @@ use gateway::{
 use snafu::{ResultExt, Snafu, whatever};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use crate::{
-    hypervisor::state::RootState, listen::PerServerListener, service::PreparedServer, tls,
-};
+use crate::{hypervisor::state::RootState, listen::WorkerEndpoint, service::PreparedServer, tls};
 
 #[allow(dead_code)]
 struct LocalServerDef {
@@ -87,12 +85,12 @@ async fn collect_local_server_defs(servers: &[Arc<Node>]) -> Result<Vec<LocalSer
 /// Handle to a running root-local service, used for shutdown and replacement.
 pub struct LocalServiceHandle {
     shutdown: CancellationToken,
-    task: AbortOnDropHandle<Vec<PreparedServer<PerServerListener>>>,
+    task: AbortOnDropHandle<Vec<PreparedServer<WorkerEndpoint>>>,
 }
 
 impl LocalServiceHandle {
     /// Cancel the running service and recover prepared servers with listeners.
-    pub async fn shutdown(self) -> Vec<PreparedServer<PerServerListener>> {
+    pub async fn shutdown(self) -> Vec<PreparedServer<WorkerEndpoint>> {
         self.shutdown.cancel();
         self.task.await.unwrap_or_default()
     }
@@ -236,7 +234,7 @@ pub async fn build_local_service_config(
 pub async fn spawn_local_service(
     state: &Arc<RootState>,
     entry_config: &crate::config::EntryConfig,
-    existing_listeners: HashMap<DhttpName<'static>, PerServerListener>,
+    existing_listeners: HashMap<DhttpName<'static>, WorkerEndpoint>,
 ) -> Result<Option<LocalServiceHandle>, Whatever> {
     if entry_config.local_servers.is_empty() {
         tracing::debug!("no local servers configured");

@@ -1,8 +1,8 @@
 //! Root-side ownership registry for server_name → local/worker mappings.
 //!
 //! Tracks which worker process owns which server names, provides conflict
-//! detection, and manages the lifecycle of per-server listen adapters routed
-//! from the shared [`Network`](h3x::dquic::Network)'s SNI dispatcher.
+//! detection, and manages the lifecycle of per-server DHTTP endpoints built
+//! on the shared [`Network`](h3x::dquic::Network).
 //!
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
@@ -15,14 +15,15 @@ use std::{
     sync::Arc,
 };
 
-use dhttp::name::DhttpName;
-use h3x::dquic::{
-    BindHandle, BindServerError, Network, binds::BindPattern, server::ServerQuicConfig,
+use dhttp::{endpoint::Endpoint, name::DhttpName};
+use h3x::{
+    dquic::{Network, server::ServerQuicConfig},
+    quic::Listen as _,
 };
 use nix::unistd::{Pid, Uid};
-use snafu::Snafu;
+use snafu::{Report, Snafu};
 use tokio::{
-    sync::{Mutex, RwLock, mpsc},
+    sync::{Mutex, RwLock},
     task::JoinSet,
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -44,12 +45,6 @@ pub enum RegisterError {
     /// The entry has been poisoned (set to `Conflicted`).
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
-    /// Failed to register the server's identity on the shared [`Network`].
-    #[snafu(display("failed to bind server `{server_name}` on network"))]
-    BindServer {
-        server_name: DhttpName<'static>,
-        source: BindServerError,
-    },
 }
 
 /// Identifies the owner of a server_name registration.
@@ -70,22 +65,10 @@ pub enum ServerEntry {
     /// Name is actively owned and serving.
     Active {
         owner: ServiceOwner,
-        /// Channel to route accepted connections into the worker/local
-        /// service's [`PerServerListener`]. Retained only for legacy API
-        /// compatibility; the real fanout is driven by `_accept_task`.
-        conn_tx: mpsc::Sender<Arc<h3x::dquic::prelude::Connection>>,
+        /// DHTTP endpoint built for this registered server.
+        endpoint: Endpoint,
+        /// Cancels accept calls currently blocked on this endpoint wrapper.
         shutdown_token: CancellationToken,
-        /// Original bind patterns for this server. These preserve the
-        /// declarative listen intent; Network owns expansion to concrete
-        /// interfaces and reconciliation when devices change.
-        bind_patterns: Vec<BindPattern>,
-        /// Handles keeping this server's bind patterns alive in the shared
-        /// [`Network`].
-        bind_handles: Vec<BindHandle>,
-        /// SNI registration handle on the shared [`Network`]. Owns the
-        /// fanout task that drains inbound connections into `conn_tx`;
-        /// dropping releases the SNI entry.
-        _accept_task: AbortOnDropHandle<()>,
         /// Per-server DNS publish task, aborted when the entry is retired.
         publish_task: Option<AbortOnDropHandle<()>>,
     },
@@ -152,9 +135,8 @@ pub struct RootState {
     /// Shared QUIC network with installed SNI dispatcher.
     pub network: Arc<Network>,
     /// Server-side QUIC/TLS configuration shared across every registered
-    /// SNI. `Network::bind_server` rejects registrations whose config
-    /// does not match this one, so a single instance is kept here and
-    /// cloned (cheap — inner `Arc`s) for every `bind_server` call.
+    /// SNI. A single instance is kept here and cloned (cheap — inner `Arc`s)
+    /// for every DHTTP endpoint built by the root.
     pub server_qcfg: ServerQuicConfig,
     /// Server entries (behind RwLock for concurrent reads).
     pub(super) servers: RwLock<ServerRegistry>,
@@ -172,6 +154,28 @@ pub(super) struct ServerRegistry {
     pub(super) entries: HashMap<DhttpName<'static>, ServerEntry>,
 }
 
+pub(super) struct RetiredServer {
+    endpoint: Endpoint,
+    shutdown_token: CancellationToken,
+    publish_task: Option<AbortOnDropHandle<()>>,
+}
+
+impl RetiredServer {
+    pub(super) async fn shutdown(self) {
+        self.shutdown_token.cancel();
+        if let Some(task) = self.publish_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Err(error) = self.endpoint.shutdown().await {
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "failed to shut down retired endpoint"
+            );
+        }
+    }
+}
+
 impl ServerRegistry {
     pub(super) fn new() -> Self {
         Self {
@@ -179,39 +183,32 @@ impl ServerRegistry {
         }
     }
 
-    /// Remove a server entry and return its accept task, if any.
+    /// Remove a server entry and return the endpoint to shut down, if any.
     ///
-    /// Callers **must** await the returned [`AbortOnDropHandle`] after
-    /// releasing any locks — dropping it triggers the abort but the
-    /// runtime drops the task's captured [`ServerBinding`] asynchronously,
-    /// so a subsequent `bind_server` call for the same SNI may otherwise
-    /// race against the old binding's `SniGuard::Drop` and fail with
-    /// `SniInUse`. Awaiting the handle blocks until the task's locals
-    /// (including the `ServerBinding`) have been dropped.
+    /// Callers **must** shut down the returned endpoint after releasing any
+    /// locks so the SNI binding and bind handles are released before a later
+    /// registration for the same name.
     ///
-    /// For `Registering` sentinels there is no `ServerBinding` yet, so
-    /// removal of the map entry is sufficient and `None` is returned.
+    /// For `Registering` sentinels there is no endpoint yet, so removal of the
+    /// map entry is sufficient and `None` is returned.
     ///
     /// Caller must already hold a write lock on this `ServerRegistry`.
     pub(super) fn retire_entry(
         &mut self,
         server_name: &DhttpName<'static>,
-    ) -> Option<tokio_util::task::AbortOnDropHandle<()>> {
+    ) -> Option<RetiredServer> {
         let entry = self.entries.remove(server_name)?;
         match entry {
             ServerEntry::Active {
+                endpoint,
                 shutdown_token,
-                _accept_task,
+                publish_task,
                 ..
-            } => {
-                shutdown_token.cancel();
-                // Abort the accept task eagerly so its captured
-                // `ServerBinding` is released; callers await the handle to
-                // observe the drop synchronously before the next
-                // `bind_server` for the same SNI.
-                _accept_task.abort();
-                Some(_accept_task)
-            }
+            } => Some(RetiredServer {
+                endpoint,
+                shutdown_token,
+                publish_task,
+            }),
             ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
         }
     }
