@@ -243,6 +243,12 @@ async fn run_ssh_session(
     // Set up control stream via Unix socketpair + FD passing.
     let (ctrl_srv, ctrl_cli) =
         std::os::unix::net::UnixStream::pair().context(ControlSocketpairSnafu)?;
+    ctrl_srv
+        .set_nonblocking(true)
+        .context(ControlFromStdSnafu)?;
+    ctrl_cli
+        .set_nonblocking(true)
+        .context(ControlFromStdSnafu)?;
     let ctrl_fd_id = fd_sender
         .queue_fds(vec![ctrl_cli.into()].into())
         .context(QueueControlFdSnafu)?;

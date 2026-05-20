@@ -142,11 +142,19 @@ async fn main() {
                         .ok_or_else(|| SessionRunError::ConversationBuild {
                             reason: "expected 1 FD for control stream, got 0".into(),
                         })?;
-                let ctrl_unix =
-                    tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(ctrl_fd))
-                        .map_err(|e| SessionRunError::ConversationBuild {
+                let ctrl_unix = {
+                    let ctrl_std = std::os::unix::net::UnixStream::from(ctrl_fd);
+                    ctrl_std.set_nonblocking(true).map_err(|e| {
+                        SessionRunError::ConversationBuild {
+                            reason: format!("failed to set control FD nonblocking: {e}"),
+                        }
+                    })?;
+                    tokio::net::UnixStream::from_std(ctrl_std).map_err(|e| {
+                        SessionRunError::ConversationBuild {
                             reason: format!("failed to convert control FD to tokio stream: {e}"),
-                        })?;
+                        }
+                    })?
+                };
                 let (control_reader, control_writer) = ctrl_unix.into_split();
 
                 // Create IPC manage stream handle.
