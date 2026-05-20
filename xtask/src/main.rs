@@ -114,6 +114,32 @@ pub enum Feature {
     Pam,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildProfile {
+    Release,
+    Debug,
+}
+
+impl BuildProfile {
+    fn from_debug(debug: bool) -> Self {
+        if debug { Self::Debug } else { Self::Release }
+    }
+
+    pub fn cargo_profile_args(self) -> Vec<&'static str> {
+        match self {
+            Self::Release => vec!["--release"],
+            Self::Debug => Vec::new(),
+        }
+    }
+
+    pub fn target_dir_name(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Debug => "debug",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum DistFormat {
     /// Build .deb packages (via Docker container + cargo-zigbuild)
@@ -121,6 +147,9 @@ enum DistFormat {
         /// Target triples (or "common" for arch-independent config package)
         #[arg(long = "target", required = true)]
         targets: Vec<DebTarget>,
+        /// Build debug-profile binaries instead of release-profile binaries
+        #[arg(long)]
+        debug: bool,
         /// Cargo features to enable
         #[arg(long = "features", value_delimiter = ',')]
         features: Vec<Feature>,
@@ -227,6 +256,23 @@ pub async fn run_cmd(cmd: &mut tokio::process::Command) -> Result<(), Whatever> 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::BuildProfile;
+
+    #[test]
+    fn release_profile_uses_release_cargo_flag_and_dir() {
+        assert_eq!(BuildProfile::Release.cargo_profile_args(), ["--release"]);
+        assert_eq!(BuildProfile::Release.target_dir_name(), "release");
+    }
+
+    #[test]
+    fn debug_profile_omits_release_cargo_flag_and_uses_debug_dir() {
+        assert!(BuildProfile::Debug.cargo_profile_args().is_empty());
+        assert_eq!(BuildProfile::Debug.target_dir_name(), "debug");
+    }
+}
+
 /// Run an external command quietly, suppressing stdout/stderr.
 pub async fn run_cmd_quiet(cmd: &mut tokio::process::Command) -> Result<(), Whatever> {
     let status = cmd
@@ -266,10 +312,17 @@ async fn main() -> Result<(), Whatever> {
         Command::Dist { format } => match format {
             DistFormat::Deb {
                 targets,
+                debug,
                 features,
                 siblings,
             } => {
-                deb::run(&targets, &features, &siblings).await?;
+                deb::run(
+                    &targets,
+                    BuildProfile::from_debug(debug),
+                    &features,
+                    &siblings,
+                )
+                .await?;
             }
             DistFormat::Rpm {
                 targets,
