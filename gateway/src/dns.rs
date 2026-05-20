@@ -3,7 +3,7 @@ pub mod resolve;
 
 pub const HTTP_DNS_SERVER: &str = "https://dns.genmeta.net/";
 pub const H3_DNS_SERVER: &str = "https://dns.genmeta.net:4433";
-pub const DEFAULT_STUN_SERVER: &str = "nat.genmeta.net:20004";
+pub const DEFAULT_STUN_SERVER: &str = dhttp::endpoint::STUN_SERVER;
 pub const MDNS_SERVICE: &str = "_genmeta.local";
 
 pub use publish::{

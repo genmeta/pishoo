@@ -244,7 +244,7 @@ fn ensure_mdns_resolver(
     }
 }
 
-pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
+pub const DNS_PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 const MAIN_SERVER_ID: u8 = 0;
 
 async fn publish_single_mdns(
