@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use firewall_db::{
-    base::matcher::LocationRulesMatcher, service::location_service::LocationService,
+use dhttp_access::db::{
+    base::matcher::LocationRulesMatcher,
+    service::{error::ListAllRulesError, location_service::LocationService},
 };
 use snafu::{ResultExt, Snafu};
 
@@ -23,7 +24,10 @@ pub enum PolicyError {
     #[snafu(display("failed to connect access_rules database `{uri}`"))]
     ConnectDb { uri: String, source: sea_orm::DbErr },
     #[snafu(display("failed to load location rules from `{uri}`"))]
-    LoadLocationRules { uri: String, source: sea_orm::DbErr },
+    LoadLocationRules {
+        uri: String,
+        source: ListAllRulesError,
+    },
 }
 
 pub async fn load_policy_bundle(uri: Option<&str>) -> Result<PolicyBundle, PolicyError> {

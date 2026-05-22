@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use gmdns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
+use ddns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 use h3x::dquic::{
     Network,
     net::Scheme,
@@ -306,14 +306,15 @@ async fn reconcile_dynamic(
 }
 
 fn find_bind_iface(network: &Arc<Network>, bind_uri: &BindUri) -> Option<BindInterface> {
-    network.get_iface(bind_uri)
+    network.quic().get_iface(bind_uri)
 }
 
 /// 收集所有当前已被任一 STUN client 判定为 `FullCone` 的 listener。
 fn collect_fullcone_bind_uris(network: &Arc<Network>) -> HashSet<BindUri> {
     let mut result = HashSet::new();
-    for bind_uri in network.current_bind_uris() {
-        let Some(bind_iface) = network.get_iface(&bind_uri) else {
+    let quic = network.quic();
+    for bind_uri in quic.current_bind_uris() {
+        let Some(bind_iface) = quic.get_iface(&bind_uri) else {
             continue;
         };
         let is_fullcone = bind_iface

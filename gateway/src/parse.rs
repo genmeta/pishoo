@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use conf::parse_conf;
-use dhttp_home::identity::IdentityHome;
+use dhttp_config::identity::IdentityConfig;
 use misc_conf::{
     ast::{Directive, DirectiveTrait},
     nginx::Nginx,
@@ -51,7 +51,7 @@ pub(crate) type ParseFn = fn(Directive<Nginx>) -> Result<Value>;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    pub(crate) static IDENTITY_HOME: std::cell::RefCell<Option<IdentityHome>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static IDENTITY_HOME: std::cell::RefCell<Option<IdentityConfig>> = const { std::cell::RefCell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ pub fn parse(configure: &[u8], root: Option<&Path>) -> Result<Arc<Node>> {
     parse_conf(directives)
 }
 
-pub fn parse_server_config(configure: &[u8], identity_home: &IdentityHome) -> Result<Arc<Node>> {
+pub fn parse_server_config(configure: &[u8], identity_home: &IdentityConfig) -> Result<Arc<Node>> {
     IDENTITY_HOME.with(|r| *r.borrow_mut() = Some(identity_home.clone()));
 
     let mut directives =

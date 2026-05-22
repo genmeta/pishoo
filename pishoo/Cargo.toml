@@ -24,7 +24,7 @@ required-features = ["sshd"]
 # --- Workspace Member ---
 gateway = { workspace = true }
 dhttp = { workspace = true }
-dhttp-home = { workspace = true }
+dhttp-config = { workspace = true }
 
 # --- QUIC & HTTP/3 ---
 h3x = { workspace = true, features = ["ipc"] }
@@ -54,10 +54,10 @@ tower = { workspace = true }
 clap = { workspace = true }
 
 # --- Firewall ---
-firewall-db = { workspace = true }
+dhttp-access = { workspace = true, features = ["orm"] }
 
 # --- SSH3 ---
-genmeta-ssh = { workspace = true, optional = true }
+dssh = { workspace = true, optional = true }
 
 # --- Database & ORM ---
 sea-orm = { workspace = true }
@@ -77,12 +77,12 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 default = ["sqlx-sqlite"]
 sshd = [
     "gateway/sshd",
-    "dep:genmeta-ssh",
-    "genmeta-ssh/server",
+    "dep:dssh",
+    "dssh/server",
     "nix/socket",
     "nix/uio",
 ]
-pam = ["sshd", "genmeta-ssh/pam", "gateway/pam"]
+pam = ["sshd", "dssh/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]

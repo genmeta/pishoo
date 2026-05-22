@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use dhttp_home::DhttpHome;
+use dhttp_config::DhttpConfig;
 use gateway::error::Whatever;
 use h3x::ipc::transport::MuxChannel;
 use pishoo::{
@@ -95,9 +95,9 @@ async fn main() -> Result<(), Whatever> {
         fd_registry,
     ));
 
-    let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));
+    let dhttp_config = DhttpConfig::new(bootstrap.home.join(".dhttp"));
 
-    let mut config = build_service_config(&dhttp_home)
+    let mut config = build_service_config(&dhttp_config)
         .await
         .whatever_context("failed to build service config")?;
 
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Whatever> {
                 }
                 _ = hup_signal.recv() => {
                     tracing::info!("received reload signal");
-                    let rebuilt_config = match build_service_config(&dhttp_home).await {
+                    let rebuilt_config = match build_service_config(&dhttp_config).await {
                         Ok(config) => config,
                         Err(error) => {
                             tracing::warn!(

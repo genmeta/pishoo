@@ -38,9 +38,8 @@ impl RootState {
         owner: ServiceOwner,
         request: ListenRequest,
     ) -> Result<RegisteredEndpoint, RegisterError> {
-        let server_name =
-            DhttpName::try_from_str_full(request.identity.name().as_full().to_owned())
-                .expect("listen request identity must be a dhttp name");
+        let server_name = DhttpName::try_from(request.identity.name().as_full().to_owned())
+            .expect("listen request identity must be a dhttp name");
 
         // Phase 1: claim the name by inserting a `Registering` sentinel.
         {

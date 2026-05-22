@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dhttp_home::identity::IdentityHome;
+use dhttp_config::identity::IdentityConfig;
 use gateway::{
     error::Whatever,
     parse::{Node, Value},
@@ -10,7 +10,7 @@ use snafu::ResultExt;
 use crate::naming::canonicalize_server_nodes;
 
 pub async fn load_identity_servers(
-    identity_home: &IdentityHome,
+    identity_home: &IdentityConfig,
 ) -> Result<Vec<Arc<Node>>, Whatever> {
     let conf_path = identity_home.server_conf_path();
     let raw = tokio::fs::read(&conf_path).await.whatever_context(format!(

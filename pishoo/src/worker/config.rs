@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dhttp::ddns::PublishOptions;
-use dhttp_home::DhttpHome;
+use dhttp_config::DhttpConfig;
 use futures::StreamExt;
 use gateway::{
     control_plane::ListenRequest,
@@ -45,13 +45,13 @@ impl snafu::FromString for BuildConfigError {
 }
 
 /// Build a [`ServiceConfig`] by scanning all identities under the given
-/// [`DhttpHome`], loading their TLS material and server.conf definitions.
+/// [`DhttpConfig`], loading their TLS material and server.conf definitions.
 pub async fn build_service_config(
-    dhttp_home: &DhttpHome,
+    dhttp_config: &DhttpConfig,
 ) -> Result<ServiceConfig, BuildConfigError> {
     // Collect identity names from the stream.
     let mut identity_names = Vec::new();
-    let mut stream = std::pin::pin!(dhttp_home.identities());
+    let mut stream = std::pin::pin!(dhttp_config.identities());
     while let Some(result) = stream.next().await {
         match result {
             Ok(name) => identity_names.push(name),
@@ -70,7 +70,7 @@ pub async fn build_service_config(
     let mut access_rules_uri: Option<String> = None;
 
     for name in &identity_names {
-        let identity_home = match dhttp_home.load_identity(name.borrow()).await {
+        let identity_home = match dhttp_config.load_identity(name.borrow()).await {
             Ok(home) => home,
             Err(error) => {
                 tracing::warn!(
@@ -127,7 +127,7 @@ pub async fn build_service_config(
 
         // Default access_rules: IDENTITY_HOME/db/access.db
         if access_rules_uri.is_none() {
-            let default_db = identity_home.access_db_path();
+            let default_db = dhttp_access::db::identity_access_db_path(&identity_home);
             if default_db.is_file() {
                 access_rules_uri = Some(format!("sqlite://{}?mode=ro", default_db.display()));
             }

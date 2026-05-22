@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Extension, extract::State, response::IntoResponse};
-use genmeta_ssh::{
+use dssh::{
     auth::AuthCredential,
     constants::SSH_VERSION,
     conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
@@ -52,12 +52,10 @@ pub enum RunSshSessionError {
     #[snafu(display("child did not send AuthenticateFn"))]
     NoAuthFn,
     #[snafu(display("authentication rejected by child"))]
-    AuthRejected {
-        source: genmeta_ssh::session::AuthError,
-    },
+    AuthRejected { source: dssh::session::AuthError },
     #[snafu(display("child session failed"))]
     SessionFailed {
-        source: genmeta_ssh::session::SessionRunError,
+        source: dssh::session::SessionRunError,
     },
     #[snafu(display("failed to create control stream socketpair"))]
     ControlSocketpair { source: std::io::Error },
@@ -120,10 +118,7 @@ pub async fn sshd_handle(
     // Register the conversation BEFORE returning 200 OK. This ensures the
     // protocol layer can route incoming channel streams as soon as the client
     // receives the response and opens new QUIC bidi streams.
-    let handle = match connection
-        .protocols()
-        .get::<genmeta_ssh::protocol::Ssh3Protocol>()
-    {
+    let handle = match connection.protocols().get::<dssh::protocol::Ssh3Protocol>() {
         Some(proto) => match proto.register(conversation_id) {
             Ok(h) => h,
             Err(e) => {
@@ -257,14 +252,14 @@ async fn run_ssh_session(
 
     // Bridge QUIC CONNECT streams ↔ control stream socketpair.
     tokio::spawn(
-        genmeta_ssh::conversation::ipc::bridge_message_reader_to_unix(
+        dssh::conversation::ipc::bridge_message_reader_to_unix(
             Box::pin(recver.into_bytes_stream()),
             ctrl_write,
         )
         .in_current_span(),
     );
     tokio::spawn(
-        genmeta_ssh::conversation::ipc::bridge_unix_to_message_writer(
+        dssh::conversation::ipc::bridge_unix_to_message_writer(
             ctrl_read,
             Box::pin(sender.into_bytes_sink()),
         )

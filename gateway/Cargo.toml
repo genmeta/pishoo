@@ -33,7 +33,7 @@ hyper-util = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-service = { workspace = true }
-firewall-base = { workspace = true, features = ["http"] }
+dhttp-access = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---
 rustls = { workspace = true }
@@ -43,7 +43,7 @@ rustls-pemfile = "2"
 getrandom = { workspace = true }
 
 # --- DNS resolver ---
-gmdns = { workspace = true }
+ddns = { workspace = true }
 h3x = { workspace = true, features = ["rpc"] }
 
 # --- Data Structures & Utilities ---
@@ -60,10 +60,10 @@ derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
 x509-parser = { workspace = true }
 
-genmeta-ssh = { workspace = true, optional = true }
+dssh = { workspace = true, optional = true }
 remoc = { workspace = true }
 dhttp = { workspace = true }
-dhttp-home = { workspace = true }
+dhttp-config = { workspace = true }
 dhttp-identity = { workspace = true }
 async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }
 chrono = "0.4.42"
@@ -82,7 +82,7 @@ clap = { workspace = true }
 
 
 [features]
-sshd = ["dep:genmeta-ssh", "genmeta-ssh/server", "remoc/rfn", "h3x/ipc"]
-pam = ["sshd", "genmeta-ssh/pam"]
+sshd = ["dep:dssh", "dssh/server", "remoc/rfn", "h3x/ipc"]
+pam = ["sshd", "dssh/pam"]
 stun_traversal = []
 qlog = []

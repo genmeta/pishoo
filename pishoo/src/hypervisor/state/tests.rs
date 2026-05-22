@@ -9,7 +9,7 @@ use crate::hypervisor::worker_handle::WorkerHandle;
 
 /// Test helper: is there an `Active` entry for `server_name`?
 async fn is_active(state: &RootState, server_name: &str) -> bool {
-    let server_name = DhttpName::try_from_str_full(server_name.to_owned()).unwrap();
+    let server_name = DhttpName::try_from(server_name.to_owned()).unwrap();
     let registry = state.servers.read().await;
     matches!(
         registry.entries.get(&server_name),
@@ -18,7 +18,7 @@ async fn is_active(state: &RootState, server_name: &str) -> bool {
 }
 
 fn dhttp_name(label: &str) -> DhttpName<'static> {
-    DhttpName::try_from_str_full(format!("{label}.user.genmeta.net")).unwrap()
+    DhttpName::try_from(format!("{label}.user.genmeta.net")).unwrap()
 }
 
 // -----------------------------------------------------------------------
@@ -209,10 +209,7 @@ async fn test_register_then_release() {
     assert!(is_active(&state, server_name).await);
 
     state
-        .release_server(
-            &DhttpName::try_from_str_full(server_name.to_owned()).unwrap(),
-            owner,
-        )
+        .release_server(&DhttpName::try_from(server_name.to_owned()).unwrap(), owner)
         .await;
     assert!(!is_active(&state, server_name).await);
 }

@@ -54,7 +54,7 @@ pub struct ServiceConfig {
     /// HTTP/3 settings for all servers.
     pub h3_settings: Arc<Settings>,
     /// Access control rules.
-    pub access_rules: Arc<firewall_db::base::matcher::LocationRulesMatcher>,
+    pub access_rules: Arc<dhttp_access::db::base::matcher::LocationRulesMatcher>,
 }
 
 /// A server whose QUIC listener has been registered and is ready to run.
@@ -94,7 +94,7 @@ where
     let mut result = Vec::new();
 
     for server_config in &config.servers {
-        let server_name = DhttpName::try_from_str_full(
+        let server_name = DhttpName::try_from(
             server_config
                 .listen_request
                 .identity
@@ -164,7 +164,7 @@ where
 pub async fn run_service<L>(
     prepared: &mut [PreparedServer<L>],
     h3_settings: &Arc<Settings>,
-    access_rules: &Arc<firewall_db::base::matcher::LocationRulesMatcher>,
+    access_rules: &Arc<dhttp_access::db::base::matcher::LocationRulesMatcher>,
     router_state: RouterState,
     shutdown: CancellationToken,
 ) where
@@ -237,7 +237,7 @@ pub async fn run_service<L>(
         // Build H3 connection builder with configured settings
         let builder = ConnectionBuilder::new(h3_settings.clone());
         #[cfg(feature = "sshd")]
-        let builder = builder.protocol(genmeta_ssh::protocol::Ssh3ProtocolFactory);
+        let builder = builder.protocol(dssh::protocol::Ssh3ProtocolFactory);
 
         let mut servers = Servers::from_quic_listener()
             .listener(listener)
@@ -301,10 +301,8 @@ pub async fn collect_reusable_listeners<L: quic::Listen>(
         .servers
         .iter()
         .map(|sc| {
-            let name = DhttpName::try_from_str_full(
-                sc.listen_request.identity.name().as_full().to_owned(),
-            )
-            .expect("listen request identity must be a dhttp name");
+            let name = DhttpName::try_from(sc.listen_request.identity.name().as_full().to_owned())
+                .expect("listen request identity must be a dhttp name");
             (name, &sc.listen_request)
         })
         .collect();

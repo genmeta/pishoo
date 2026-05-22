@@ -1,14 +1,14 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use dhttp::identity::Identity;
-use dhttp_identity::identity::{LocalAgent, SignError};
-use futures::future::BoxFuture;
-use gmdns::{
+use ddns::{
     MdnsPacket,
     mdns::Mdns,
     parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
     resolvers::{H3Publisher, MdnsResolver},
 };
+use dhttp::identity::Identity;
+use dhttp_identity::identity::{LocalAgent, SignError};
+use futures::future::BoxFuture;
 use h3x::{
     dquic::{
         Network,
@@ -458,7 +458,7 @@ pub fn spawn_server_publish_task(
 ///
 /// The caller provides the authoritative set of bind URIs for the server;
 /// this function resolves each URI to a live [`BindInterface`] via
-/// [`Network::get_iface`], silently skipping URIs that have already been
+/// [`Network::quic().get_iface`], silently skipping URIs that have already been
 /// released.
 pub async fn publish_server(
     server_name: &str,
@@ -468,7 +468,12 @@ pub async fn publish_server(
 ) {
     let ifaces: Vec<(BindUri, BindInterface)> = uris
         .iter()
-        .filter_map(|uri| network.get_iface(uri).map(|iface| (uri.clone(), iface)))
+        .filter_map(|uri| {
+            network
+                .quic()
+                .get_iface(uri)
+                .map(|iface| (uri.clone(), iface))
+        })
         .collect();
 
     // mDNS publish
