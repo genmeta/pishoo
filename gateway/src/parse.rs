@@ -18,6 +18,7 @@ pub mod ast;
 mod commands;
 pub mod conf;
 pub mod directives;
+pub mod grammar;
 mod location;
 pub mod node;
 pub mod pattern;
