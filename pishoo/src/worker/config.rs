@@ -12,7 +12,10 @@ use futures::StreamExt;
 use gateway::{
     control_plane::ListenRequest,
     error::Whatever,
-    parse::{Listens, Node, Value},
+    parse::{
+        document::ConfigNode,
+        types::{ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames, StringConfig},
+    },
 };
 use snafu::{ResultExt, Snafu};
 
@@ -105,7 +108,8 @@ pub async fn build_service_config(
                 Err(error) => {
                     tracing::warn!(
                         %name,
-                        error = %snafu::Report::from_error(&error),
+                        error = %snafu::Report::from_error(&error.error),
+                        diagnostic = %error.diagnostic(),
                         "failed to load identity config, skipping"
                     );
                     continue;
@@ -118,8 +122,12 @@ pub async fn build_service_config(
         // Pick up access_rules from server nodes if not yet found.
         if access_rules_uri.is_none() {
             for server_node in &identity_server_nodes {
-                if let Some(Value::String(uri)) = server_node.get("access_rules") {
-                    access_rules_uri = Some(uri.clone());
+                if let Some(uri) =
+                    server_node
+                        .get::<StringConfig>("access_rules")
+                        .whatever_context::<_, BuildConfigError>("failed to read access_rules")?
+                {
+                    access_rules_uri = Some(uri.0.clone());
                     break;
                 }
             }
@@ -135,13 +143,24 @@ pub async fn build_service_config(
 
         // Extract bind specifications and find the matching server node.
         let mut binds: HashMap<dhttp::name::DhttpName<'static>, Vec<Listens>> = HashMap::new();
-        let mut server_nodes_by_name: HashMap<dhttp::name::DhttpName<'static>, Arc<Node>> =
+        let mut server_nodes_by_name: HashMap<dhttp::name::DhttpName<'static>, Arc<ConfigNode>> =
             HashMap::new();
         for server_node in &identity_server_nodes {
-            if let (Some(Value::ServerName(server_names)), Some(Value::Listen(listens))) =
-                (server_node.get("server_name"), server_node.get("listen"))
-            {
-                for sn in server_names {
+            let Some(server_names) =
+                server_node
+                    .get::<ServerNames>("server_name")
+                    .whatever_context::<_, BuildConfigError>("failed to read server_name")?
+            else {
+                continue;
+            };
+            let listens: Vec<Listens> = server_node
+                .get_all::<ListenConfig>("listen")
+                .whatever_context::<_, BuildConfigError>("failed to read listen")?
+                .into_iter()
+                .flat_map(|listen| listen.0.clone())
+                .collect();
+            if !listens.is_empty() {
+                for sn in &server_names.0 {
                     binds.insert(sn.name.clone(), listens.clone());
                     server_nodes_by_name.insert(sn.name.clone(), server_node.clone());
                 }
@@ -160,17 +179,16 @@ pub async fn build_service_config(
         // Extract DNS resolver URL from the server node's `dns` directive.
         let dns_resolver_url = server_nodes_by_name
             .get(&primary_name)
-            .and_then(|node| match node.get("dns") {
-                Some(Value::Resolver(url)) => Some(url.clone()),
-                _ => None,
-            });
+            .and_then(|node| node.get::<ResolverConfig>("dns").ok().flatten())
+            .map(|resolver| resolver.0.clone());
         let publish_options = server_nodes_by_name
             .get(&primary_name)
             .map(|node| PublishOptions {
-                server_id: match node.get("server_id") {
-                    Some(Value::ServerId(id)) => Some(*id),
-                    _ => None,
-                },
+                server_id: node
+                    .get::<ServerIdConfig>("server_id")
+                    .ok()
+                    .flatten()
+                    .map(|id| id.0),
             })
             .unwrap_or_default();
 
@@ -186,7 +204,7 @@ pub async fn build_service_config(
         // through to the service layer.
         let server_node = server_nodes_by_name
             .remove(&primary_name)
-            .unwrap_or_else(|| Arc::new(Node::new(Value::ValueMap(HashMap::new()))));
+            .expect("primary server node should exist when a bind was configured");
 
         servers.push(ServerConfig {
             listen_request,

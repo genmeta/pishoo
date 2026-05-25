@@ -1,4 +1,5 @@
-use gateway::parse::Node;
+use gateway::parse::{document::ConfigNode, types::StringList};
+use snafu::ResultExt;
 
 use super::{
     ConfigError, first_pishoo_node, parse_pid_file,
@@ -12,15 +13,15 @@ pub struct RootConfig {
     pub workers: Vec<WorkerTarget>,
 }
 
-pub fn parse_root_config(root: &std::sync::Arc<Node>) -> Result<RootConfig, ConfigError> {
+pub fn parse_root_config(root: &std::sync::Arc<ConfigNode>) -> Result<RootConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
 
-    let groups = match pishoo.get("groups") {
-        Some(gateway::parse::Value::StringVec(names)) => names.clone(),
-        Some(_) => return super::InvalidGroupsSnafu.fail(),
-        None => Vec::new(),
-    };
+    let groups = pishoo
+        .get::<StringList>("groups")
+        .context(super::ConfigQuerySnafu)?
+        .map(|groups| groups.0.clone())
+        .unwrap_or_default();
 
     let workers = resolve_all_workers(&pishoo, false)?;
 

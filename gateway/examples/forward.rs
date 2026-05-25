@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use dhttp::endpoint::Endpoint;
-use gateway::{
-    forward,
-    parse::{self, Value},
-};
-use snafu::{ResultExt, Whatever, whatever};
+use gateway::{forward, parse};
+use snafu::{FromString, OptionExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -30,23 +27,41 @@ async fn main() -> Result<(), Whatever> {
         std::process::exit(1);
     };
     let config_file = std::path::Path::new(config_file);
-    let configure = std::fs::read(config_file).unwrap();
-    let config =
-        parse::parse(&configure, config_file.parent()).whatever_context("parse config failed")?;
+    let registry = parse::default_registry();
+    let config = match parse::load_config_file(
+        config_file,
+        &registry,
+        parse::registry::BuildOptions::default(),
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(failure) => {
+            tracing::error!(
+                error = %snafu::Report::from_error(&failure.error),
+                diagnostic = %failure.diagnostic(),
+                "failed to load configuration"
+            );
+            return Err(Whatever::with_source(
+                Box::new(failure),
+                "failed to load configuration".to_owned(),
+            ));
+        }
+    };
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
-    let pishoo = if let Some(Value::Nodes(pishoo)) = config.get("pishoo") {
-        pishoo
-            .first()
-            .expect("no pishoo block found, but pishoo key exists")
-    } else {
-        unreachable!("parse error")
-    };
+    let pishoo = config
+        .root
+        .children("pishoo")
+        .ok()
+        .and_then(|pishoo| pishoo.first())
+        .whatever_context("no pishoo block found")?;
 
-    let Some(Value::Nodes(proxies)) = pishoo.get("proxy").cloned() else {
+    let proxies = pishoo.children_optional("proxy").to_vec();
+    if proxies.is_empty() {
         whatever!("no proxy found in pishoo configuration");
-    };
+    }
 
     // Build a DHTTP endpoint for outbound proxying.
     let client = Arc::new(Endpoint::builder().build().await);

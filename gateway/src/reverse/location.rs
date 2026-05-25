@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::parse::{Node, Value, pattern::Pattern};
+use crate::parse::{document::ConfigNode, pattern::Pattern};
 
 /// Result of matching a request path against configured location blocks.
 ///
@@ -10,7 +10,7 @@ use crate::parse::{Node, Value, pattern::Pattern};
 #[derive(Clone, Debug)]
 pub struct LocationMatch {
     /// The matched location configuration node.
-    pub location: Arc<Node>,
+    pub location: Arc<ConfigNode>,
     /// The portion of the path that was matched by the pattern.
     ///
     /// For prefix patterns, this is the pattern string itself (e.g. "/ssh/").
@@ -27,11 +27,13 @@ pub struct LocationMatch {
 
 impl LocationMatch {
     /// Extract the `Pattern` from the location node.
-    pub fn pattern(&self) -> &Pattern {
-        match self.location.value() {
-            Value::Pattern(pattern, _) => pattern,
-            _ => unreachable!("LocationMatch must reference a location node"),
-        }
+    pub fn pattern(&self) -> Pattern {
+        self.location
+            .payload::<Pattern>()
+            .expect("location payload type should be a pattern")
+            .expect("location node should contain a pattern payload")
+            .as_ref()
+            .clone()
     }
 }
 
@@ -42,16 +44,17 @@ impl LocationMatch {
 /// Within the same priority level, the longest match wins.
 ///
 /// Returns `None` if no location matches.
-pub fn match_location(locations: &[Arc<Node>], path: &str) -> Option<LocationMatch> {
+pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<LocationMatch> {
     tracing::debug!("all locations {:#?}, path: {:?}", locations, path);
 
-    let mut best: Option<(&Arc<Node>, &str, usize)> = None; // (node, matched_str, priority)
+    let mut best: Option<(&Arc<ConfigNode>, String, usize)> = None; // (node, matched_str, priority)
 
     for location in locations {
-        let pattern = match location.value() {
-            Value::Pattern(pattern, _) => pattern,
-            _ => unreachable!("invalid location pattern"),
-        };
+        let pattern = location
+            .payload::<Pattern>()
+            .ok()
+            .flatten()
+            .expect("location node should contain a pattern payload");
 
         let priority = pattern.priority();
 
@@ -68,30 +71,30 @@ pub fn match_location(locations: &[Arc<Node>], path: &str) -> Option<LocationMat
             });
 
             if dominated {
-                best = Some((location, matched, priority));
+                best = Some((location, matched.to_owned(), priority));
             }
         }
     }
 
     let (location, matched, _) = best?;
 
-    let remaining = compute_remaining(location, path, matched);
+    let remaining = compute_remaining(location, path, &matched);
 
     Some(LocationMatch {
         location: Arc::clone(location),
-        matched: matched.to_string(),
+        matched,
         remaining,
     })
 }
 
 /// Compute the remaining path suffix after the matched portion.
-fn compute_remaining(location: &Node, path: &str, matched: &str) -> String {
-    let pattern = match location.value() {
-        Value::Pattern(pattern, _) => pattern,
-        _ => unreachable!(),
-    };
+fn compute_remaining(location: &ConfigNode, path: &str, matched: &str) -> String {
+    let pattern = location
+        .payload::<Pattern>()
+        .expect("location payload type should be a pattern")
+        .expect("location node should contain a pattern payload");
 
-    match pattern {
+    match pattern.as_ref() {
         // For prefix-style patterns, the matched string IS the prefix — strip it.
         Pattern::Exact(_) | Pattern::Prefix(_) | Pattern::NormalPrefix(_) | Pattern::Common => {
             path.strip_prefix(matched).unwrap_or("").to_string()
@@ -104,15 +107,20 @@ fn compute_remaining(location: &Node, path: &str, matched: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use regex::Regex;
 
     use super::*;
-    use crate::parse::pattern::Pattern;
+    use crate::parse::{
+        registry::context,
+        source::{SourceId, SourceSpan},
+        value::TypedValue,
+    };
 
-    fn make_location(pattern: Pattern) -> Arc<Node> {
-        Arc::new(Node::new(Value::Pattern(pattern, HashMap::new())))
+    fn make_location(pattern: Pattern) -> Arc<ConfigNode> {
+        let span = SourceSpan::new(SourceId(0), 0, 0);
+        let mut node = ConfigNode::new(context::LOCATION, None, span);
+        node.set_payload(TypedValue::new(pattern, span));
+        Arc::new(node)
     }
 
     #[test]

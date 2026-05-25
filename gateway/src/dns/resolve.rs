@@ -11,7 +11,12 @@ use h3x::{
 use http::Uri;
 
 use super::H3_DNS_SERVER;
-use crate::parse::{Node, ServerIdentity, Value, optional_server_identity, server_identity};
+use crate::parse::{
+    document::ConfigNode,
+    types::{
+        ResolverConfig, ServerIdentity, ServerNames, optional_server_identity, server_identity,
+    },
+};
 
 type DnsH3Client = H3Endpoint<Arc<QuicClient>, Connection>;
 
@@ -27,13 +32,14 @@ impl DnsResolver {
         }
     }
 
-    pub fn from_node_or_default(node: &Node) -> Self {
-        match node.get("dns") {
-            Some(Value::Resolver(base_url)) => Self {
-                base_url: base_url.clone(),
-            },
-            _ => Self::default_h3(),
-        }
+    pub fn from_node_or_default(node: &ConfigNode) -> Self {
+        node.get::<ResolverConfig>("dns")
+            .ok()
+            .flatten()
+            .map(|resolver| Self {
+                base_url: resolver.0.clone(),
+            })
+            .unwrap_or_else(Self::default_h3)
     }
 
     pub fn build_query_resolver(
@@ -94,7 +100,7 @@ impl DnsResolver {
     }
 }
 
-pub fn build_query_resolvers(node: &Node, server_name_key: &str) -> Resolvers {
+pub fn build_query_resolvers(node: &ConfigNode, server_name_key: &str) -> Resolvers {
     let resolver = DnsResolver::from_node_or_default(node);
     let identity = optional_server_identity(node, server_name_key);
 
@@ -103,18 +109,17 @@ pub fn build_query_resolvers(node: &Node, server_name_key: &str) -> Resolvers {
         .with(Arc::new(SystemResolver))
 }
 
-pub fn build_query_resolver_chain(servers: &[Arc<Node>]) -> Resolvers {
+pub fn build_query_resolver_chain(servers: &[Arc<ConfigNode>]) -> Resolvers {
     let mut resolvers = Resolvers::default();
     let mut seen = std::collections::HashSet::new();
 
     for server in servers {
         let resolver = DnsResolver::from_node_or_default(server);
-        let server_names = match server.get("server_name") {
-            Some(Value::ServerName(names)) => names,
-            _ => unreachable!("invalid server name"),
-        };
+        let server_names = server
+            .require::<ServerNames>("server_name")
+            .expect("server_name is required for server config");
 
-        for server_name in server_names {
+        for server_name in &server_names.0 {
             let domain = server_name.name.clone();
             let resolver_key = (resolver.base_url.to_string(), domain.clone());
             if seen.insert(resolver_key) {
@@ -134,19 +139,29 @@ pub fn build_query_resolver_chain(servers: &[Arc<Node>]) -> Resolvers {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
+    use crate::parse::{
+        document::ConfigNode,
+        registry::context,
+        source::{SourceId, SourceSpan},
+        types::ResolverConfig,
+        value::TypedValue,
+    };
+
+    fn test_node() -> ConfigNode {
+        ConfigNode::new(context::SERVER, None, SourceSpan::new(SourceId(0), 0, 0))
+    }
 
     #[test]
     fn test_from_node_or_default_reads_dns_directive() {
         let base_url: Uri = "https://dns.example.com/dns-query"
             .parse()
             .expect("valid uri");
-        let node = Node::new(Value::ValueMap(HashMap::from([(
-            "dns".to_string(),
-            Value::Resolver(base_url.clone()),
-        )])));
+        let mut node = test_node();
+        node.insert_slot(
+            "dns",
+            TypedValue::new(ResolverConfig(base_url.clone()), node.span),
+        );
 
         let resolver = DnsResolver::from_node_or_default(&node);
 
@@ -155,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_from_node_or_default_falls_back_to_default_h3() {
-        let node = Node::new(Value::ValueMap(HashMap::new()));
+        let node = test_node();
 
         let resolver = DnsResolver::from_node_or_default(&node);
 

@@ -101,7 +101,7 @@ impl RootState {
         let bind_patterns = request
             .bind
             .iter()
-            .flat_map(gateway::parse::Listens::to_bind_patterns)
+            .flat_map(gateway::parse::types::Listens::to_bind_patterns)
             .collect::<Vec<_>>();
         let identity = Arc::new(request.identity.clone());
         let bind_patterns = Arc::new(bind_patterns);

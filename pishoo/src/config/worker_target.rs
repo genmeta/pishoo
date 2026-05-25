@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use gateway::parse::{Node, Value};
+use gateway::parse::{document::ConfigNode, types::StringList};
 pub use nix::unistd::{Gid, Uid, User as ResolvedWorkerTarget};
 use snafu::{OptionExt, ResultExt};
 
 use super::{
-    ConfigError, EmptyWorkerNameSnafu, GroupNotFoundSnafu, GroupResolveSnafu, InvalidGroupsSnafu,
-    InvalidWorkersSnafu, MissingHomeSnafu, UserNotFoundSnafu, UserResolveSnafu,
+    ConfigError, ConfigQuerySnafu, EmptyWorkerNameSnafu, GroupNotFoundSnafu, GroupResolveSnafu,
+    MissingHomeSnafu, UserNotFoundSnafu, UserResolveSnafu,
 };
 
 #[derive(Debug, Clone)]
@@ -31,20 +31,22 @@ fn parse_worker_names(names: &[String]) -> Result<Vec<WorkerTarget>, ConfigError
         .collect()
 }
 
-fn parse_configured_workers(pishoo: &Node) -> Result<Vec<WorkerTarget>, ConfigError> {
-    match pishoo.get("workers") {
-        Some(Value::StringVec(names)) => parse_worker_names(names),
-        Some(_) => InvalidWorkersSnafu.fail(),
+fn parse_configured_workers(pishoo: &ConfigNode) -> Result<Vec<WorkerTarget>, ConfigError> {
+    match pishoo
+        .get::<StringList>("workers")
+        .context(ConfigQuerySnafu)?
+    {
+        Some(names) => parse_worker_names(&names.0),
         None => Ok(Vec::new()),
     }
 }
 
-fn parse_groups(pishoo: &Node) -> Result<Vec<String>, ConfigError> {
-    match pishoo.get("groups") {
-        Some(Value::StringVec(names)) => Ok(names.clone()),
-        Some(_) => InvalidGroupsSnafu.fail(),
-        None => Ok(Vec::new()),
-    }
+fn parse_groups(pishoo: &ConfigNode) -> Result<Vec<String>, ConfigError> {
+    Ok(pishoo
+        .get::<StringList>("groups")
+        .context(ConfigQuerySnafu)?
+        .map(|names| names.0.clone())
+        .unwrap_or_default())
 }
 
 fn resolve_group_members(group_names: &[String]) -> Result<Vec<WorkerTarget>, ConfigError> {
@@ -63,7 +65,7 @@ fn resolve_group_members(group_names: &[String]) -> Result<Vec<WorkerTarget>, Co
 }
 
 pub(super) fn resolve_all_workers(
-    pishoo: &Node,
+    pishoo: &ConfigNode,
     has_local_servers: bool,
 ) -> Result<Vec<WorkerTarget>, ConfigError> {
     let explicit_workers = parse_configured_workers(pishoo)?;

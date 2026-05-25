@@ -12,7 +12,7 @@ use axum::middleware::from_fn_with_state;
 use dhttp::{identity::Identity, name::DhttpName};
 use gateway::{
     control_plane::{ControlPlane, ListenRequest},
-    parse::{Node, Value},
+    parse::document::ConfigNode,
     reverse::{
         access_control::{AccessControlState, access_control},
         access_log::{AccessLogState, access_log},
@@ -39,7 +39,7 @@ pub struct ServerConfig {
     /// The listen request to send to the control plane.
     pub listen_request: ListenRequest,
     /// Parsed nginx-style server configuration node.
-    pub server_node: Arc<Node>,
+    pub server_node: Arc<ConfigNode>,
     /// Directory for per-identity access logs (e.g. `~/.dhttp/{name}/logs/`).
     /// `None` disables access logging for this server.
     pub access_log_dir: Option<PathBuf>,
@@ -70,7 +70,7 @@ pub struct PreparedServer<L: quic::Listen> {
     /// The QUIC listener. `Some` when idle, `None` while `run_service` is active.
     pub listener: Option<L>,
     /// Parsed nginx-style server configuration node.
-    pub server_node: Arc<Node>,
+    pub server_node: Arc<ConfigNode>,
     /// Access log directory (or `None` to disable).
     pub access_log_dir: Option<PathBuf>,
 }
@@ -192,10 +192,7 @@ pub async fn run_service<L>(
         let server_name = server.server_name.clone();
 
         // Build the service stack: BodyAdapter → AccessLog → AccessControl → NginxRouter
-        let locations = match server.server_node.get("location") {
-            Some(Value::Nodes(locations)) => locations.clone(),
-            _ => Vec::new(),
-        };
+        let locations = server.server_node.children_optional("location").to_vec();
 
         let nginx_router = NginxRouter::new(locations, router_state.clone());
         let access_state = AccessControlState {

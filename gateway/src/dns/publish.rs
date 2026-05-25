@@ -25,7 +25,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
     sign::SigningKey,
 };
-use snafu::{OptionExt, Report, ResultExt, whatever};
+use snafu::{OptionExt, Report, ResultExt};
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info};
@@ -33,7 +33,10 @@ use tracing::{Instrument, info};
 use crate::{
     dns::{MDNS_SERVICE, resolve::DnsResolver},
     error::{Result, Whatever},
-    parse::{Node, ServerIdentity, Value, server_identity},
+    parse::{
+        document::ConfigNode,
+        types::{PathConfig, ServerIdentity, ServerNames, server_identity},
+    },
 };
 
 pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
@@ -158,24 +161,24 @@ fn build_publisher(
     )
 }
 
-pub fn build_publish_configs(servers: &[Arc<Node>]) -> Result<HashMap<String, PublishConfig>> {
+pub fn build_publish_configs(
+    servers: &[Arc<ConfigNode>],
+) -> Result<HashMap<String, PublishConfig>> {
     let mut configs = HashMap::new();
 
     for server in servers {
-        let key_path = match server.get("ssl_certificate_key") {
-            Some(Value::Path(path)) => path,
-            _ => whatever!("missing or invalid ssl_certificate_key for server"),
-        };
+        let key_path = server
+            .require::<PathConfig>("ssl_certificate_key")
+            .whatever_context::<_, Whatever>("missing or invalid ssl_certificate_key for server")?;
 
         let resolver = DnsResolver::from_node_or_default(server);
-        let signing_key = load_signing_key(key_path).ok();
+        let signing_key = load_signing_key(&key_path.0).ok();
 
-        let server_names = match server.get("server_name") {
-            Some(Value::ServerName(names)) => names,
-            _ => unreachable!("invalid server name"),
-        };
+        let server_names = server
+            .require::<ServerNames>("server_name")
+            .whatever_context::<_, Whatever>("missing or invalid server_name for server")?;
 
-        for server_name in server_names {
+        for server_name in &server_names.0 {
             let domain = server_name.name.clone();
 
             let identity = server_identity(server, domain.clone())

@@ -1,9 +1,9 @@
 use std::{io, sync::Arc};
 
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use tokio::fs::File;
 
-use crate::parse::Node;
+use crate::parse::{document::ConfigNode, types::StringList};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -30,7 +30,7 @@ pub enum IndexError {
 ///
 /// # Arguments
 ///
-/// * `node` - An `Arc<Node>` used to retrieve the list of potential index filenames.
+/// * `node` - The config node used to retrieve the list of potential index filenames.
 /// * `file_path` - The path to the file or directory to serve.
 ///
 /// # Returns
@@ -40,7 +40,7 @@ pub enum IndexError {
 /// Returns an `io::Error` if the path doesn't exist, if it's a directory without a
 /// suitable index file, or if file/metadata operations fail.
 pub(crate) async fn index(
-    node: &Arc<Node>,
+    node: &Arc<ConfigNode>,
     file_path: impl Into<String>,
 ) -> Result<(File, u64, String), IndexError> {
     let mut file_path = file_path.into();
@@ -61,10 +61,7 @@ pub(crate) async fn index(
         return File::open(&file_path)
             .await
             .map(|file| (file, metadata.len(), file_path.clone()))
-            .map_err(|source| IndexError::OpenFile {
-                source,
-                path: file_path,
-            });
+            .context(OpenFileSnafu { path: file_path });
     }
 
     // 2. 检查是否是目录
@@ -74,13 +71,12 @@ pub(crate) async fn index(
         }
         let base_dir_path = file_path.clone();
 
-        let index_files = node.get_string_vec("index");
-
-        let index_files = if let Some(index_files) = index_files {
-            index_files
-        } else {
-            return Err(IndexError::MissingIndexFiles);
-        };
+        let index_files = node
+            .get::<StringList>("index")
+            .ok()
+            .flatten()
+            .map(|index| index.0.clone())
+            .ok_or(IndexError::MissingIndexFiles)?;
 
         for index_filename in index_files {
             let mut potential_path = base_dir_path.clone();
@@ -92,8 +88,7 @@ pub(crate) async fn index(
                 return File::open(&*potential_path)
                     .await
                     .map(|file| (file, metadata.len(), potential_path.clone()))
-                    .map_err(|source| IndexError::OpenFile {
-                        source,
+                    .context(OpenFileSnafu {
                         path: potential_path,
                     });
             }

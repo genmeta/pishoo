@@ -13,7 +13,7 @@ use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use snafu::{Report, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
@@ -25,7 +25,7 @@ use crate::{
     command,
     error::{BoxError, Result, Whatever},
     forward,
-    parse::{Node, Value},
+    parse::document::ConfigNode,
 };
 
 mod normal;
@@ -73,16 +73,19 @@ fn configure_tcp_keepalive(stream: &TcpStream) {
 /// # Returns
 /// * `Result<(SocketAddr, impl Future)>` - The address and server task
 pub async fn serve(
-    node: Arc<Node>,
+    node: Arc<ConfigNode>,
     client: Arc<Endpoint>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
     tracing::info!("starting forward proxy server");
-    let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
-        unreachable!()
-    };
+    let listen = node
+        .require::<Vec<SocketAddr>>("listen")
+        .whatever_context::<_, Whatever>("failed to read forward proxy listen directive")?;
+    let addr = *listen
+        .first()
+        .whatever_context::<_, Whatever>("missing forward proxy listen address")?;
 
     let (listener, local_addr) = async {
         let listener = TcpListener::bind(addr).await?;

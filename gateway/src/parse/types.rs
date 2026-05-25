@@ -4,7 +4,7 @@ use dhttp::name::DhttpName;
 use h3x::dquic::binds::BindPattern;
 use snafu::whatever;
 
-use super::{Result, Value};
+use super::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServerName {
@@ -20,41 +20,98 @@ pub struct ServerIdentity {
     pub server_id: u8,
 }
 
-pub fn server_id_or_default(node: &super::Node) -> u8 {
-    match node.get("server_id") {
-        Some(Value::ServerId(id)) => *id,
-        _ => 0,
-    }
+pub fn server_id_or_default(node: &crate::parse::document::ConfigNode) -> u8 {
+    node.get::<ServerIdConfig>("server_id")
+        .ok()
+        .flatten()
+        .map(|id| id.0)
+        .unwrap_or(0)
 }
 
 pub fn server_identity(
-    node: &super::Node,
+    node: &crate::parse::document::ConfigNode,
     server_name: DhttpName<'static>,
 ) -> Option<ServerIdentity> {
-    let (Some(Value::Path(cert_path)), Some(Value::Path(key_path))) =
-        (node.get("ssl_certificate"), node.get("ssl_certificate_key"))
-    else {
-        return None;
-    };
-
+    let cert_path = node.get::<PathConfig>("ssl_certificate").ok().flatten()?;
+    let key_path = node
+        .get::<PathConfig>("ssl_certificate_key")
+        .ok()
+        .flatten()?;
     Some(ServerIdentity {
-        cert_path: cert_path.clone(),
-        key_path: key_path.clone(),
+        cert_path: cert_path.0.clone(),
+        key_path: key_path.0.clone(),
         server_name,
         server_id: server_id_or_default(node),
     })
 }
 
 pub fn optional_server_identity(
-    node: &super::Node,
+    node: &crate::parse::document::ConfigNode,
     server_name_key: &str,
 ) -> Option<ServerIdentity> {
-    let Some(Value::String(server_name)) = node.get(server_name_key) else {
-        return None;
-    };
-
-    let server_name = DhttpName::try_from(server_name.clone()).ok()?;
+    let server_name = node.get::<StringConfig>(server_name_key).ok().flatten()?;
+    let server_name = DhttpName::try_from(server_name.0.clone()).ok()?;
     server_identity(node, server_name)
+}
+
+#[derive(Debug, Clone)]
+pub struct BoolConfig(pub bool);
+
+#[derive(Debug, Clone)]
+pub struct StringConfig(pub String);
+
+#[derive(Debug, Clone)]
+pub struct StringList(pub Vec<String>);
+
+#[derive(Debug, Clone)]
+pub struct PathConfig(pub std::path::PathBuf);
+
+#[derive(Debug, Clone)]
+pub struct ProxyPass(pub http::Uri);
+
+#[derive(Debug, Clone)]
+pub struct ResolverConfig(pub http::Uri);
+
+#[derive(Debug, Clone)]
+pub struct ListenConfig(pub Vec<Listens>);
+
+#[derive(Debug, Clone)]
+pub struct ServerNames(pub Vec<ServerName>);
+
+#[derive(Debug, Clone)]
+pub struct ServerIdConfig(pub u8);
+
+#[derive(Debug, Clone)]
+pub struct HeaderRule {
+    pub name: http::HeaderName,
+    pub value: http::HeaderValue,
+    pub always: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeaderRules(pub Vec<HeaderRule>);
+
+#[derive(Debug, Clone)]
+pub struct MimeTypes(pub std::collections::HashMap<String, http::HeaderValue>);
+
+#[derive(Debug, Clone)]
+pub struct DefaultType(pub http::HeaderValue);
+
+#[derive(Debug, Clone)]
+pub struct SshSslUser {
+    pub name: String,
+    pub user: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SshSslUsers(pub Vec<SshSslUser>);
+
+#[derive(Debug, Clone)]
+pub struct StunBindConfigValue {
+    pub bind: std::net::SocketAddr,
+    pub outer_addr: Option<std::net::SocketAddr>,
+    pub change_addr: Option<std::net::SocketAddr>,
+    pub change_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

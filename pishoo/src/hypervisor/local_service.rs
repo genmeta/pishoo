@@ -8,7 +8,14 @@ use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
 use gateway::{
     control_plane::ListenRequest,
     error::Whatever,
-    parse::{Node, Value},
+    parse::{
+        document::ConfigNode,
+        error::ConfigQueryError,
+        types::{
+            ListenConfig, Listens, PathConfig, ResolverConfig, ServerIdConfig, ServerNames,
+            StringConfig,
+        },
+    },
 };
 use snafu::{ResultExt, Snafu, whatever};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -24,34 +31,35 @@ struct LocalServerDef {
     key_pem: Vec<u8>,
 }
 
-pub async fn validate_local_servers(servers: &[Arc<Node>]) -> Result<(), Whatever> {
+pub async fn validate_local_servers(servers: &[Arc<ConfigNode>]) -> Result<(), Whatever> {
     let _ = collect_local_server_defs(servers).await?;
     Ok(())
 }
 
-async fn collect_local_server_defs(servers: &[Arc<Node>]) -> Result<Vec<LocalServerDef>, Whatever> {
+async fn collect_local_server_defs(
+    servers: &[Arc<ConfigNode>],
+) -> Result<Vec<LocalServerDef>, Whatever> {
     let mut seen_server_names = HashSet::new();
     let mut defs = Vec::new();
 
     for server in servers {
-        let Some(Value::Listen(listens)) = server.get("listen") else {
-            whatever!("local server missing `listen`");
-        };
+        let listens = listen_values(server).whatever_context("failed to read local listen")?;
         if listens.is_empty() {
-            whatever!("local server has empty listen specification");
+            whatever!("local server missing `listen`");
         }
-        let Some(Value::ServerName(server_names)) = server.get("server_name") else {
-            whatever!("local server missing `server_name`");
-        };
-        let server_names = server_names.clone();
-        let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
-            whatever!("local server missing `ssl_certificate`");
-        };
-        let cert_path = cert_path.clone();
-        let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
-            whatever!("local server missing `ssl_certificate_key`");
-        };
-        let key_path = key_path.clone();
+        let server_names = server
+            .require::<ServerNames>("server_name")
+            .whatever_context("local server missing `server_name`")?;
+        let cert_path = server
+            .require::<PathConfig>("ssl_certificate")
+            .whatever_context("local server missing `ssl_certificate`")?
+            .0
+            .clone();
+        let key_path = server
+            .require::<PathConfig>("ssl_certificate_key")
+            .whatever_context("local server missing `ssl_certificate_key`")?
+            .0
+            .clone();
 
         let cert_pem = tokio::fs::read(&cert_path).await.whatever_context(format!(
             "failed to read local certificate file `{}`",
@@ -64,8 +72,8 @@ async fn collect_local_server_defs(servers: &[Arc<Node>]) -> Result<Vec<LocalSer
         let _ = tls::validate_tls_material(&cert_pem, &key_pem)
             .whatever_context("invalid local tls material")?;
 
-        for configured_name in server_names {
-            let server_name = configured_name.name;
+        for configured_name in &server_names.0 {
+            let server_name = configured_name.name.clone();
             if !seen_server_names.insert(server_name.clone()) {
                 whatever!("duplicate local server_name `{server_name}` in entry config");
             }
@@ -107,6 +115,9 @@ pub enum BuildLocalServiceError {
     #[snafu(display("local server missing `{directive}`"))]
     MissingDirective { directive: &'static str },
 
+    #[snafu(display("failed to read typed configuration value"))]
+    ConfigQuery { source: ConfigQueryError },
+
     #[snafu(display("failed to read certificate at `{}`", path.display()))]
     ReadCert {
         path: PathBuf,
@@ -135,7 +146,7 @@ pub enum BuildLocalServiceError {
 /// Build a [`ServiceConfig`](crate::service::ServiceConfig) from the
 /// root-local server blocks in the entry configuration.
 pub async fn build_local_service_config(
-    local_servers: &[Arc<Node>],
+    local_servers: &[Arc<ConfigNode>],
 ) -> Result<crate::service::ServiceConfig, BuildLocalServiceError> {
     let canonicalized = crate::naming::canonicalize_server_nodes(local_servers)
         .context(build_local_service_error::CanonicalizeSnafu)?;
@@ -145,39 +156,21 @@ pub async fn build_local_service_config(
 
     let mut server_configs = Vec::new();
     for server in &canonicalized {
-        let Some(Value::Listen(listens)) = server.get("listen") else {
-            return build_local_service_error::MissingDirectiveSnafu {
-                directive: "listen",
-            }
-            .fail();
-        };
-        let listens = listens.clone();
-        let Some(Value::ServerName(server_names)) = server.get("server_name") else {
-            return build_local_service_error::MissingDirectiveSnafu {
-                directive: "server_name",
-            }
-            .fail();
-        };
-        let server_names = server_names.clone();
-        let Some(Value::Path(cert_path)) = server.get("ssl_certificate") else {
-            return build_local_service_error::MissingDirectiveSnafu {
-                directive: "ssl_certificate",
-            }
-            .fail();
-        };
-        let cert_path = cert_path.clone();
-        let Some(Value::Path(key_path)) = server.get("ssl_certificate_key") else {
-            return build_local_service_error::MissingDirectiveSnafu {
-                directive: "ssl_certificate_key",
-            }
-            .fail();
-        };
-        let key_path = key_path.clone();
+        let listens = listen_values_for_local_service(server)?;
+        let server_names = require_local::<ServerNames>(server, "server_name")?;
+        let cert_path = require_local::<PathConfig>(server, "ssl_certificate")?
+            .0
+            .clone();
+        let key_path = require_local::<PathConfig>(server, "ssl_certificate_key")?
+            .0
+            .clone();
 
         if access_rules_uri.is_none()
-            && let Some(Value::String(uri)) = server.get("access_rules")
+            && let Some(uri) = server
+                .get::<StringConfig>("access_rules")
+                .context(build_local_service_error::ConfigQuerySnafu)?
         {
-            access_rules_uri = Some(uri.clone());
+            access_rules_uri = Some(uri.0.clone());
         }
 
         let cert_pem = tokio::fs::read(&cert_path)
@@ -190,18 +183,18 @@ pub async fn build_local_service_config(
             .context(build_local_service_error::InvalidTlsSnafu)?;
 
         // Extract DNS resolver URL from the server node's `dns` directive.
-        let dns_resolver_url = match server.get("dns") {
-            Some(Value::Resolver(url)) => Some(url.clone()),
-            _ => None,
-        };
+        let dns_resolver_url = server
+            .get::<ResolverConfig>("dns")
+            .context(build_local_service_error::ConfigQuerySnafu)?
+            .map(|resolver| resolver.0.clone());
         let publish_options = PublishOptions {
-            server_id: match server.get("server_id") {
-                Some(Value::ServerId(id)) => Some(*id),
-                _ => None,
-            },
+            server_id: server
+                .get::<ServerIdConfig>("server_id")
+                .context(build_local_service_error::ConfigQuerySnafu)?
+                .map(|id| id.0),
         };
 
-        for configured_name in server_names {
+        for configured_name in &server_names.0 {
             server_configs.push(crate::service::ServerConfig {
                 listen_request: ListenRequest {
                     identity: Identity::new(
@@ -311,4 +304,41 @@ pub async fn replace_local_service(
 
     *handle = spawn_local_service(state, entry_config, existing_listeners).await?;
     Ok(())
+}
+
+fn listen_values(server: &ConfigNode) -> Result<Vec<Listens>, ConfigQueryError> {
+    Ok(server
+        .get_all::<ListenConfig>("listen")?
+        .into_iter()
+        .flat_map(|listen| listen.0.clone())
+        .collect())
+}
+
+fn listen_values_for_local_service(
+    server: &ConfigNode,
+) -> Result<Vec<Listens>, BuildLocalServiceError> {
+    let listens = listen_values(server).context(build_local_service_error::ConfigQuerySnafu)?;
+    if listens.is_empty() {
+        return build_local_service_error::MissingDirectiveSnafu {
+            directive: "listen",
+        }
+        .fail();
+    }
+    Ok(listens)
+}
+
+fn require_local<T>(
+    server: &ConfigNode,
+    directive: &'static str,
+) -> Result<Arc<T>, BuildLocalServiceError>
+where
+    T: gateway::parse::value::ConfigValue,
+{
+    match server
+        .get::<T>(directive)
+        .context(build_local_service_error::ConfigQuerySnafu)?
+    {
+        Some(value) => Ok(value),
+        None => build_local_service_error::MissingDirectiveSnafu { directive }.fail(),
+    }
 }

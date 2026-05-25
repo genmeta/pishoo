@@ -14,7 +14,7 @@ use tracing::{Instrument, debug, error};
 use crate::{
     command,
     error::{Result, Whatever},
-    parse::{Node, Value, pattern::Pattern},
+    parse::{document::ConfigNode, pattern::Pattern, types::ProxyPass},
     reverse::location::LocationMatch,
 };
 
@@ -71,15 +71,16 @@ async fn proxy_inner(
 
 /// Forward the request to the configured upstream.
 fn pass(
-    location: &Arc<Node>,
+    location: &Arc<ConfigNode>,
     req: Request<axum::body::Body>,
 ) -> impl std::future::Future<Output = Result<Response<Incoming>>> + Send {
     let location = Arc::clone(location);
     async move {
         let (parts, body) = req.into_parts();
-        let Some(Value::Uri(proxy_pass)) = location.get("proxy_pass") else {
-            unreachable!("proxy_pass is required for reverse proxy");
-        };
+        let proxy_pass = location
+            .require::<ProxyPass>("proxy_pass")
+            .whatever_context::<_, Whatever>("failed to read proxy_pass directive")?;
+        let proxy_pass = &proxy_pass.0;
 
         tracing::debug!(%proxy_pass, "resolved proxy_pass target");
 
@@ -92,13 +93,12 @@ fn pass(
         tracing::debug!(path_and_query, "original request path and query");
 
         if !proxy_pass.path().eq("/") {
-            let pattern = if let Value::Pattern(pattern, _) = location.value() {
-                pattern
-            } else {
-                unreachable!("invalid location pattern");
-            };
+            let pattern = location
+                .payload::<Pattern>()
+                .whatever_context::<_, Whatever>("failed to read location pattern")?
+                .expect("location node should contain a pattern payload");
 
-            match pattern {
+            match pattern.as_ref() {
                 Pattern::Exact(_) | Pattern::Regex(_) | Pattern::CRegex(_) | Pattern::Common => {
                     // exact/regex: ignore proxy_pass path
                 }

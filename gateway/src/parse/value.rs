@@ -1,38 +1,60 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    fmt,
+    sync::Arc,
+};
 
-use http::{HeaderName, HeaderValue, Uri};
+use crate::parse::source::SourceSpan;
 
-use super::{Node, ServerName, pattern::Pattern, types::Listens};
+pub trait ConfigValue: fmt::Debug + Send + Sync + 'static {}
 
-#[derive(Debug, Clone)]
-pub enum Value {
-    String(String),
-    Uri(Uri),
-    Resolver(Uri),
-    StringVec(Vec<String>),
-    ServerName(Vec<ServerName>),
-    ServerId(u8),
-    StringMap(HashMap<String, String>),
-    Boolean(bool),
-    Addr(std::net::SocketAddr),
-    AddrVec(Vec<std::net::SocketAddr>),
-    Path(PathBuf),
-    Header(Vec<(HeaderName, HeaderValue, bool)>),
-    Types(HashMap<String, HeaderValue>),
-    HeaderValue(HeaderValue),
-    Listen(Vec<Listens>),
-    Pattern(Pattern, HashMap<String, Value>),
-    SshSslUser(Vec<(String, String)>),
-    ValueMap(HashMap<String, Value>),
-    Nodes(Vec<Arc<Node>>),
+impl<T> ConfigValue for T where T: fmt::Debug + Send + Sync + 'static {}
+
+#[derive(Clone)]
+pub struct TypedValue {
+    value: Arc<dyn Any + Send + Sync>,
+    type_id: TypeId,
+    type_name: &'static str,
+    span: SourceSpan,
 }
 
-impl Value {
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        match self {
-            Value::ValueMap(map) => map.get(key),
-            Value::Pattern(_, map) => map.get(key),
-            _ => None,
+impl TypedValue {
+    pub fn new<T>(value: T, span: SourceSpan) -> Self
+    where
+        T: ConfigValue,
+    {
+        Self {
+            value: Arc::new(value),
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            span,
         }
+    }
+
+    pub fn downcast<T>(&self) -> Option<Arc<T>>
+    where
+        T: ConfigValue,
+    {
+        if self.type_id != TypeId::of::<T>() {
+            return None;
+        }
+        Arc::clone(&self.value).downcast::<T>().ok()
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    pub fn span(&self) -> SourceSpan {
+        self.span
+    }
+}
+
+impl fmt::Debug for TypedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedValue")
+            .field("type_name", &self.type_name)
+            .field("span", &self.span)
+            .finish_non_exhaustive()
     }
 }

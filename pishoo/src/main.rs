@@ -8,7 +8,7 @@ use h3x::dquic::{Network, param::handy::server_parameters, server::ServerQuicCon
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
 use rustls::server::WebPkiClientVerifier;
-use snafu::ResultExt;
+use snafu::{FromString, ResultExt};
 use tokio::fs;
 
 #[derive(Parser, Debug)]
@@ -39,16 +39,29 @@ async fn main() -> Result<(), Whatever> {
 
     let config_file = args.config_file;
 
-    let config = fs::read(&config_file).await.whatever_context(format!(
-        "failed to read configuration file at `{}`",
-        config_file.display()
-    ))?;
-    let config = gateway::parse::parse(&config, config_file.parent()).whatever_context(format!(
-        "failed to parse configuration file at `{}`",
-        config_file.display()
-    ))?;
+    let registry = gateway::parse::default_registry();
+    let config = match gateway::parse::load_config_file(
+        &config_file,
+        &registry,
+        gateway::parse::registry::BuildOptions::default(),
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(failure) => {
+            tracing::error!(
+                error = %snafu::Report::from_error(&failure.error),
+                diagnostic = %failure.diagnostic(),
+                "failed to load configuration"
+            );
+            return Err(Whatever::with_source(
+                Box::new(failure),
+                "failed to load configuration".to_owned(),
+            ));
+        }
+    };
 
-    let entry_config = pishoo::config::parse_entry_config(&config)
+    let entry_config = pishoo::config::parse_entry_config(&config.root)
         .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {

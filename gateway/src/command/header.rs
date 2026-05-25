@@ -1,22 +1,22 @@
 use std::{collections::HashMap, sync::Arc};
 
-use http::{HeaderValue, Request, Uri, header, response::Parts};
+use http::{HeaderValue, Request, header, response::Parts};
 
 use super::variables;
-use crate::parse::{Node, Value};
+use crate::parse::{
+    document::ConfigNode,
+    types::{DefaultType, HeaderRule, HeaderRules, MimeTypes, ProxyPass},
+};
 
-pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<T> {
+pub(crate) fn proxy_set_header<T>(node: &Arc<ConfigNode>, req: Request<T>) -> Request<T> {
     let (mut parts, body) = req.into_parts();
 
     // 默认将 Host 变更为 proxy_pass target
-    let proxy_host = match node.get("proxy_pass") {
-        Some(Value::Uri(uri)) => uri.host().map(|h| h.to_string()),
-        Some(Value::String(s)) => s
-            .parse::<Uri>()
-            .ok()
-            .and_then(|u| u.host().map(|h| h.to_string())),
-        _ => None,
-    };
+    let proxy_host = node
+        .get::<ProxyPass>("proxy_pass")
+        .ok()
+        .flatten()
+        .and_then(|proxy_pass| proxy_pass.0.host().map(str::to_owned));
     if let Some(host) = proxy_host {
         parts.headers.insert(
             header::HOST,
@@ -30,18 +30,17 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
         .headers
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
     // 遍历 proxy_set_header 中的记录, 匹配 Header, 设置支持的字段
-    let proxy_set_header = if let Some(Value::Header(header)) = node.get("proxy_set_header") {
-        header.clone()
-    } else {
-        Vec::new()
-    };
+    let proxy_set_header = header_rules(node, "proxy_set_header");
 
-    for (header, value, _) in proxy_set_header {
+    for HeaderRule {
+        name,
+        value,
+        always: _,
+    } in proxy_set_header
+    {
         // 匹配变量进行转换
         // TODO 变量拼接
-        parts
-            .headers
-            .insert(header, variables::search(&parts, value));
+        parts.headers.insert(name, variables::search(&parts, value));
     }
 
     Request::from_parts(parts, body)
@@ -56,33 +55,46 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<Node>, req: Request<T>) -> Request<
 ///
 /// # Arguments
 ///
-/// * `node` - An `Arc<Node>` potentially containing header configurations under the key "add_header".
+/// * `node` - A config node potentially containing header configurations under the key "add_header".
 /// * `parts` - A mutable reference to `http::response::Parts` where headers will be added.
-pub(crate) fn add_header(node: &Arc<Node>, parts: &mut Parts) {
-    let add_header = if let Some(Value::Header(header)) = node.get("add_header") {
-        header
-    } else {
-        &Vec::new()
-    };
+pub(crate) fn add_header(node: &Arc<ConfigNode>, parts: &mut Parts) {
+    let add_header = header_rules(node, "add_header");
 
-    for (header, value, always) in add_header {
-        if parts.status.is_success() || parts.status.is_redirection() || *always {
-            parts.headers.insert(header, value.clone());
+    for HeaderRule {
+        name,
+        value,
+        always,
+    } in add_header
+    {
+        if parts.status.is_success() || parts.status.is_redirection() || always {
+            parts.headers.insert(name, value);
         }
     }
 }
 
 /// Determines and sets the "Content-Type" header for a given file path based on configuration.
-pub(crate) fn content_type(node: &Arc<Node>, parts: &mut Parts, file_path: &str) {
-    let mime_types = node.get_types("types");
-    let default_type = node.get_header_value("default_type");
+pub(crate) fn content_type(node: &Arc<ConfigNode>, parts: &mut Parts, file_path: &str) {
+    let mime_types = node.inherited::<MimeTypes>("types").ok().flatten();
+    let default_type = node.inherited::<DefaultType>("default_type").ok().flatten();
 
     if let Some(mime_types) = mime_types
-        && let Some(content_type) =
-            infer_content_type(file_path, &mime_types, default_type.as_ref())
+        && let Some(content_type) = infer_content_type(
+            file_path,
+            &mime_types.0,
+            default_type.as_ref().map(|v| &v.0),
+        )
     {
         parts.headers.insert("Content-Type", content_type.clone());
     }
+}
+
+fn header_rules(node: &ConfigNode, name: &str) -> Vec<HeaderRule> {
+    node.get_all::<HeaderRules>(name)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flat_map(|headers| headers.0.clone())
+        .collect()
 }
 
 /// Infers the `Content-Type` `HeaderValue` for a given file path based on its extension.

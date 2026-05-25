@@ -9,7 +9,10 @@ use futures::future::BoxFuture;
 use http::StatusCode;
 
 use super::location::match_location;
-use crate::parse::Node;
+use crate::parse::{
+    document::ConfigNode,
+    types::{PathConfig, ProxyPass},
+};
 
 /// Shared state for all reverse-proxy handlers.
 ///
@@ -30,12 +33,12 @@ pub struct RouterState {
 /// handler (proxy, file, or sshd).
 #[derive(Clone)]
 pub struct NginxRouter {
-    locations: Vec<Arc<Node>>,
+    locations: Vec<Arc<ConfigNode>>,
     state: RouterState,
 }
 
 impl NginxRouter {
-    pub fn new(locations: Vec<Arc<Node>>, state: RouterState) -> Self {
+    pub fn new(locations: Vec<Arc<ConfigNode>>, state: RouterState) -> Self {
         Self { locations, state }
     }
 }
@@ -66,13 +69,25 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
 
             let location = &loc_match.location;
 
-            let response = if location.get("proxy_pass").is_some() {
+            let response = if location
+                .get::<ProxyPass>("proxy_pass")
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 Handler::call(super::proxy::proxy_handle, request, state).await
-            } else if location.get("root").is_some() || location.get("alias").is_some() {
+            } else if location.get::<PathConfig>("root").ok().flatten().is_some()
+                || location.get::<PathConfig>("alias").ok().flatten().is_some()
+            {
                 Handler::call(super::file::file_handle, request, state).await
             } else {
                 #[cfg(feature = "sshd")]
-                if location.get("ssh_login").is_some() {
+                if location
+                    .get::<crate::parse::types::StringList>("ssh_login")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
                     return Ok(Handler::call(super::sshd::sshd_handle, request, state).await);
                 }
                 StatusCode::NOT_FOUND.into_response()

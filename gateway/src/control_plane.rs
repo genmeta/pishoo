@@ -10,7 +10,7 @@ use http::Uri;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 
-use crate::parse as gateway_parse;
+use crate::parse::types::Listens;
 
 /// A simple error type wrapping a string message.
 ///
@@ -39,7 +39,7 @@ pub struct ListenRequest {
     /// The identity to use for the server's TLS configuration.
     pub identity: Identity,
     /// Listen specifications; resolved to bind URIs by the root process.
-    pub bind: Vec<gateway_parse::Listens>,
+    pub bind: Vec<Listens>,
     /// Optional DNS resolver URL for publishing this server's endpoints.
     /// When `None`, the default H3 DNS server is used.
     pub dns_resolver_url: Option<Uri>,
@@ -224,7 +224,7 @@ impl From<PublishOptionsHelper> for PublishOptions {
 #[derive(Serialize, Deserialize)]
 struct ListenRequestHelper {
     identity: IdentityHelper,
-    bind: Vec<gateway_parse::Listens>,
+    bind: Vec<Listens>,
     #[serde(default)]
     dns_resolver_url: Option<String>,
     #[serde(default)]

@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     command::{self, IndexError, content_type, index},
-    parse::{Node, Value},
+    parse::{document::ConfigNode, types::PathConfig},
     reverse::location::LocationMatch,
 };
 
@@ -21,10 +21,10 @@ pub async fn file_handle(
 ) -> impl IntoResponse {
     let location = &loc.location;
 
-    let file_path = if let Some(Value::Path(alias)) = location.get("alias") {
-        format!("{}{}", alias.display(), loc.remaining)
-    } else if let Some(Value::Path(root)) = location.get("root") {
-        format!("{}{}", root.display(), req.uri().path())
+    let file_path = if let Some(alias) = location.get::<PathConfig>("alias").ok().flatten() {
+        format!("{}{}", alias.0.display(), loc.remaining)
+    } else if let Some(root) = location.get::<PathConfig>("root").ok().flatten() {
+        format!("{}{}", root.0.display(), req.uri().path())
     } else {
         unreachable!("file_handle requires root or alias")
     };
@@ -43,7 +43,7 @@ pub async fn file_handle(
 }
 
 async fn serve_static_file(
-    location: Arc<Node>,
+    location: Arc<ConfigNode>,
     file_path: &str,
     uri: &http::Uri,
     accept_encoding: Option<&str>,
