@@ -6,7 +6,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::parse::{
     document::ConfigNode,
-    types::{BoolConfig, StringConfig, StringList},
+    types::{BoolConfig, GzipCompLevel, GzipMinLength, StringList},
 };
 
 /// Gzip 压缩配置，从 location 节点中提取
@@ -39,16 +39,16 @@ impl GzipConfig {
                 .map(|value| value.0)
                 .unwrap_or(false),
             min_length: location
-                .inherited::<StringConfig>("gzip_min_length")
+                .inherited::<GzipMinLength>("gzip_min_length")
                 .ok()
                 .flatten()
-                .and_then(|value| value.0.parse().ok())
+                .map(|value| value.0)
                 .unwrap_or(20),
             comp_level: location
-                .inherited::<StringConfig>("gzip_comp_level")
+                .inherited::<GzipCompLevel>("gzip_comp_level")
                 .ok()
                 .flatten()
-                .and_then(|value| value.0.parse().ok())
+                .map(|value| value.0)
                 .unwrap_or(1),
             types: location
                 .inherited::<StringList>("gzip_types")

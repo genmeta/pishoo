@@ -43,7 +43,7 @@ pub fn register(registry: &mut ConfigRegistry) {
         ),
         (
             "client_name",
-            common::parse_string,
+            common::parse_client_name,
             MergePolicy::RejectDuplicate,
         ),
         ("dns", common::parse_resolver, MergePolicy::RejectDuplicate),

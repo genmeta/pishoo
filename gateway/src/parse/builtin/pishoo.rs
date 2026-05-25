@@ -31,8 +31,8 @@ pub fn register(registry: &mut ConfigRegistry) {
         ("access_rules", common::parse_string),
         ("gzip", common::parse_boolean),
         ("gzip_vary", common::parse_boolean),
-        ("gzip_min_length", common::parse_string),
-        ("gzip_comp_level", common::parse_string),
+        ("gzip_min_length", common::parse_gzip_min_length),
+        ("gzip_comp_level", common::parse_gzip_comp_level),
         ("gzip_types", common::parse_string_list),
         ("default_type", common::parse_default_type),
     ] {

@@ -42,7 +42,7 @@ pub fn register(registry: &mut ConfigRegistry) {
         ),
         (
             "change_port",
-            common::parse_string,
+            common::parse_stun_change_port,
             MergePolicy::RejectDuplicate,
         ),
     ] {

@@ -2,7 +2,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use crate::parse::{
     document::ConfigNode,
-    types::{BoolConfig, StringConfig, StunBindConfigValue},
+    types::{BoolConfig, StunBindConfigValue, StunChangePort},
 };
 
 /// 本节点的 STUN 运行时配置。
@@ -59,10 +59,10 @@ impl StunNodeConfig {
                 let outer_address = first_addr(node, "outer_addr");
                 let change_address = first_addr(node, "change_addr");
                 let change_port = node
-                    .get::<StringConfig>("change_port")
+                    .get::<StunChangePort>("change_port")
                     .ok()
                     .flatten()
-                    .and_then(|port| port.0.parse::<u16>().ok());
+                    .map(|port| port.0);
 
                 node.get_all::<StunBindConfigValue>("bind")
                     .ok()

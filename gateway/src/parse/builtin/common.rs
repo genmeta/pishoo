@@ -8,9 +8,10 @@ use crate::parse::{
     registry::{DirectiveInput, ParsedDirective},
     source::SourceSpan,
     types::{
-        BoolConfig, DefaultType, HeaderRule, HeaderRules, IfaceRange, IpFamilies, ListenConfig,
-        Listens, MimeTypes, PathConfig, ProxyPass, ResolverConfig, ServerIdConfig, ServerName,
-        ServerNames, SshSslUser, SshSslUsers, StringConfig, StringList, StunBindConfigValue,
+        BoolConfig, ClientNameConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRule,
+        HeaderRules, IfaceRange, IpFamilies, ListenConfig, Listens, MimeTypes, PathConfig,
+        ProxyPass, ResolverConfig, ServerIdConfig, ServerName, ServerNames, SshSslUser,
+        SshSslUsers, StringConfig, StringList, StunBindConfigValue, StunChangePort,
     },
     value::TypedValue,
 };
@@ -44,6 +45,16 @@ pub enum ParseDirectiveValueError {
     },
     #[snafu(display("invalid port directive value"))]
     Port {
+        span: SourceSpan,
+        source: std::num::ParseIntError,
+    },
+    #[snafu(display("invalid unsigned integer directive value"))]
+    UnsignedInteger {
+        span: SourceSpan,
+        source: std::num::ParseIntError,
+    },
+    #[snafu(display("invalid signed integer directive value"))]
+    SignedInteger {
         span: SourceSpan,
         source: std::num::ParseIntError,
     },
@@ -171,6 +182,34 @@ pub fn parse_default_type(
     )))
 }
 
+pub fn parse_gzip_min_length(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
+    let arg = exactly_one(input.directive)?;
+    let value = arg
+        .value
+        .parse::<u64>()
+        .context(parse_directive_value_error::UnsignedIntegerSnafu { span: arg.span })?;
+    Ok(ParsedDirective::Slot(TypedValue::new(
+        GzipMinLength(value),
+        arg.span,
+    )))
+}
+
+pub fn parse_gzip_comp_level(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
+    let arg = exactly_one(input.directive)?;
+    let value = arg
+        .value
+        .parse::<i32>()
+        .context(parse_directive_value_error::SignedIntegerSnafu { span: arg.span })?;
+    Ok(ParsedDirective::Slot(TypedValue::new(
+        GzipCompLevel(value),
+        arg.span,
+    )))
+}
+
 pub fn parse_proxy_pass(
     input: &DirectiveInput<'_>,
 ) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
@@ -256,6 +295,18 @@ pub fn parse_server_name(
     Ok(ParsedDirective::Slot(TypedValue::new(
         ServerNames(names),
         input.directive.span,
+    )))
+}
+
+pub fn parse_client_name(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
+    let arg = exactly_one(input.directive)?;
+    let name = dhttp::name::DhttpName::try_from(arg.value.clone())
+        .context(parse_directive_value_error::ServerNameSnafu { span: arg.span })?;
+    Ok(ParsedDirective::Slot(TypedValue::new(
+        ClientNameConfig(name),
+        arg.span,
     )))
 }
 
@@ -397,6 +448,20 @@ pub fn parse_stun_bind(
     Ok(ParsedDirective::Slot(TypedValue::new(
         value,
         input.directive.span,
+    )))
+}
+
+pub fn parse_stun_change_port(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
+    let arg = exactly_one(input.directive)?;
+    let port = arg
+        .value
+        .parse::<u16>()
+        .context(parse_directive_value_error::PortSnafu { span: arg.span })?;
+    Ok(ParsedDirective::Slot(TypedValue::new(
+        StunChangePort(port),
+        arg.span,
     )))
 }
 

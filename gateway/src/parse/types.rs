@@ -49,9 +49,11 @@ pub fn optional_server_identity(
     node: &crate::parse::document::ConfigNode,
     server_name_key: &str,
 ) -> Option<ServerIdentity> {
-    let server_name = node.get::<StringConfig>(server_name_key).ok().flatten()?;
-    let server_name = DhttpName::try_from(server_name.0.clone()).ok()?;
-    server_identity(node, server_name)
+    let server_name = node
+        .get::<ClientNameConfig>(server_name_key)
+        .ok()
+        .flatten()?;
+    server_identity(node, server_name.0.clone())
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,9 @@ pub struct ListenConfig(pub Vec<Listens>);
 pub struct ServerNames(pub Vec<ServerName>);
 
 #[derive(Debug, Clone)]
+pub struct ClientNameConfig(pub DhttpName<'static>);
+
+#[derive(Debug, Clone)]
 pub struct ServerIdConfig(pub u8);
 
 #[derive(Debug, Clone)]
@@ -98,6 +103,12 @@ pub struct MimeTypes(pub std::collections::HashMap<String, http::HeaderValue>);
 pub struct DefaultType(pub http::HeaderValue);
 
 #[derive(Debug, Clone)]
+pub struct GzipMinLength(pub u64);
+
+#[derive(Debug, Clone)]
+pub struct GzipCompLevel(pub i32);
+
+#[derive(Debug, Clone)]
 pub struct SshSslUser {
     pub name: String,
     pub user: String,
@@ -113,6 +124,9 @@ pub struct StunBindConfigValue {
     pub change_addr: Option<std::net::SocketAddr>,
     pub change_port: Option<u16>,
 }
+
+#[derive(Debug, Clone)]
+pub struct StunChangePort(pub u16);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IpFamilies {

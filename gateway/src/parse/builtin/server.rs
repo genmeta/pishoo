@@ -63,12 +63,12 @@ pub fn register(registry: &mut ConfigRegistry) {
             ),
             (
                 "gzip_min_length",
-                common::parse_string,
+                common::parse_gzip_min_length,
                 MergePolicy::RejectDuplicate,
             ),
             (
                 "gzip_comp_level",
-                common::parse_string,
+                common::parse_gzip_comp_level,
                 MergePolicy::RejectDuplicate,
             ),
             (

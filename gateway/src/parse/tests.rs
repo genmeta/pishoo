@@ -8,7 +8,10 @@ use std::{
 
 use crate::parse::{
     document::{ConfigDocument, ConfigNode},
-    types::{PathConfig, ProxyPass, ResolverConfig, ServerIdConfig, ServerNames},
+    types::{
+        ClientNameConfig, GzipCompLevel, GzipMinLength, PathConfig, ProxyPass, ResolverConfig,
+        ServerIdConfig, ServerNames,
+    },
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -163,6 +166,78 @@ fn parse_dns_resolver_and_publisher() {
     assert_eq!(resolver.0.to_string(), "https://dns.example.com/dns-query");
 
     cleanup_temp_files(&[&cert, &key]);
+}
+
+#[test]
+fn parse_gzip_numeric_directives_reject_invalid_values() {
+    let cert = create_temp_file("gzip_numeric_cert");
+    let key = create_temp_file("gzip_numeric_key");
+    let conf = format!(
+        "pishoo {{ server {{ listen all 5378; server_name example.com; gzip_min_length invalid; ssl_certificate {}; ssl_certificate_key {}; }} }}",
+        cert.display(),
+        key.display()
+    );
+
+    let failure = crate::parse::parse_config_str_for_test(&conf)
+        .expect_err("invalid gzip number should fail");
+    let report = snafu::Report::from_error(&failure.error).to_string();
+
+    assert!(report.contains("failed to parse directive `gzip_min_length`"));
+    assert_error_chain_display_single_line(&failure.error);
+
+    cleanup_temp_files(&[&cert, &key]);
+}
+
+#[test]
+fn parse_stun_change_port_rejects_invalid_value() {
+    let cert = create_temp_file("stun_port_cert");
+    let key = create_temp_file("stun_port_key");
+    let conf = format!(
+        "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; change_port invalid; }} }} }}",
+        cert.display(),
+        key.display()
+    );
+
+    let failure = crate::parse::parse_config_str_for_test(&conf)
+        .expect_err("invalid change_port should fail");
+    let report = snafu::Report::from_error(&failure.error).to_string();
+
+    assert!(report.contains("failed to parse directive `change_port`"));
+    assert_error_chain_display_single_line(&failure.error);
+
+    cleanup_temp_files(&[&cert, &key]);
+}
+
+#[test]
+fn parse_numeric_and_identity_directives_keep_typed_values() {
+    let conf = "pishoo { gzip_min_length 1100; gzip_comp_level 6; proxy { listen 127.0.0.1:8080; client_name example.com; } }";
+
+    let document = parse_doc(conf);
+    let pishoo = first_pishoo(&document);
+    let proxy = pishoo.children("proxy").expect("proxy should exist")[0].clone();
+
+    assert_eq!(
+        pishoo
+            .require::<GzipMinLength>("gzip_min_length")
+            .expect("gzip_min_length should be typed")
+            .0,
+        1100
+    );
+    assert_eq!(
+        pishoo
+            .require::<GzipCompLevel>("gzip_comp_level")
+            .expect("gzip_comp_level should be typed")
+            .0,
+        6
+    );
+    assert_eq!(
+        proxy
+            .require::<ClientNameConfig>("client_name")
+            .expect("client_name should be typed")
+            .0
+            .as_partial(),
+        "example.com"
+    );
 }
 
 #[test]
