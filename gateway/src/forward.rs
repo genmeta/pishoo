@@ -5,7 +5,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use dhttp::{endpoint::Endpoint, name::DhttpName};
+use dhttp::{
+    endpoint::Endpoint,
+    name::{DhttpName, Name},
+};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
@@ -236,11 +239,15 @@ fn canonicalize_forward_host(host: &str) -> Option<String> {
         return None;
     }
 
-    if host.ends_with(DhttpName::SUFFIX) {
-        return None;
+    if host.len() >= DhttpName::SUFFIX.len()
+        && host[host.len() - DhttpName::SUFFIX.len()..].eq_ignore_ascii_case(DhttpName::SUFFIX)
+    {
+        let name = Name::try_from(host).ok()?;
+        let name = DhttpName::try_from(name).ok()?;
+        return (host != name.as_full()).then(|| name.as_full().to_owned());
     }
 
-    DhttpName::try_from(host.to_owned())
+    DhttpName::try_from(host)
         .ok()
         .map(|name| name.as_full().to_string())
 }
@@ -334,6 +341,14 @@ mod tests {
         );
         assert_eq!(
             canonicalize_forward_host("borber.pilot~").as_deref(),
+            Some("borber.pilot.genmeta.net")
+        );
+        assert_eq!(
+            canonicalize_forward_host("BORBER.PILOT~").as_deref(),
+            Some("borber.pilot.genmeta.net")
+        );
+        assert_eq!(
+            canonicalize_forward_host("Borber.Pilot.GenMeta.Net").as_deref(),
             Some("borber.pilot.genmeta.net")
         );
         assert_eq!(canonicalize_forward_host("127.0.0.1"), None);
