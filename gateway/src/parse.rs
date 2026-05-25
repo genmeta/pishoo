@@ -14,6 +14,7 @@ use crate::error::Whatever;
 // Submodules
 // ---------------------------------------------------------------------------
 
+pub mod ast;
 mod commands;
 pub mod conf;
 pub mod directives;
@@ -23,6 +24,7 @@ pub mod pattern;
 mod pishoo;
 mod proxy;
 pub(crate) mod server;
+pub mod source;
 pub mod types;
 pub mod value;
 
