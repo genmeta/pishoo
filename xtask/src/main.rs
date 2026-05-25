@@ -1,6 +1,7 @@
 mod brew;
 mod container;
 mod deb;
+mod release;
 mod rpm;
 
 use std::{io::IsTerminal, path::PathBuf, process::Stdio};
@@ -22,6 +23,32 @@ enum Command {
     Dist {
         #[command(subcommand)]
         format: DistFormat,
+    },
+    /// Assemble publishable artifacts under target/common
+    Stage {
+        #[command(subcommand)]
+        format: release::StageFormat,
+    },
+    /// Validate target/common before publishing
+    Verify {
+        #[command(flatten)]
+        options: release::VerifyOptions,
+    },
+    /// Publish staged artifacts
+    Publish {
+        #[command(subcommand)]
+        target: release::PublishTarget,
+    },
+    /// Update a Homebrew tap checkout from staged formulae
+    Tap {
+        /// Homebrew tap repository checkout path
+        repo: PathBuf,
+        /// Commit changes after copying formulae
+        #[arg(long)]
+        commit: bool,
+        /// Push the tap repository after committing
+        #[arg(long)]
+        push: bool,
     },
 }
 
@@ -258,7 +285,9 @@ pub async fn run_cmd(cmd: &mut tokio::process::Command) -> Result<(), Whatever> 
 
 #[cfg(test)]
 mod tests {
-    use super::BuildProfile;
+    use clap::CommandFactory;
+
+    use super::{BuildProfile, Cli};
 
     #[test]
     fn release_profile_uses_release_cargo_flag_and_dir() {
@@ -270,6 +299,20 @@ mod tests {
     fn debug_profile_omits_release_cargo_flag_and_uses_debug_dir() {
         assert!(BuildProfile::Debug.cargo_profile_args().is_empty());
         assert_eq!(BuildProfile::Debug.target_dir_name(), "debug");
+    }
+
+    #[test]
+    fn release_pipeline_subcommands_are_registered() {
+        let command = Cli::command();
+        let names = command
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"stage"));
+        assert!(names.contains(&"verify"));
+        assert!(names.contains(&"publish"));
+        assert!(names.contains(&"tap"));
     }
 }
 
@@ -333,6 +376,10 @@ async fn main() -> Result<(), Whatever> {
             }
             DistFormat::Brew { targets, features } => brew::run(&targets, &features).await?,
         },
+        Command::Stage { format } => release::stage(format).await?,
+        Command::Verify { options } => release::verify(options).await?,
+        Command::Publish { target } => release::publish(target).await?,
+        Command::Tap { repo, commit, push } => release::tap(repo, commit, push).await?,
     }
     Ok(())
 }

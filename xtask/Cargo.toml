@@ -5,15 +5,24 @@ edition = "2024"
 publish = false
 
 [dependencies]
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-s3 = "1"
+aws-types = "1"
 bollard = "0.19"
 cargo_metadata = "0.19"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 snafu = "0.9"
 tar = "0.4"
+tempfile = "3"
+toml = "0.9"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
+walkdir = "2"
