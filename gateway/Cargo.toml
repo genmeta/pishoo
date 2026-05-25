@@ -49,6 +49,7 @@ h3x = { workspace = true, features = ["rpc"] }
 # --- Data Structures & Utilities ---
 dashmap = { workspace = true }
 misc-conf = { workspace = true }
+peg = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
