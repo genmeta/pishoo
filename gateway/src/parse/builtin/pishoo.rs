@@ -1,8 +1,8 @@
 use crate::parse::{
-    builtin::common,
-    registry::{
-        ConfigRegistry, DirectiveParserFn, DirectiveShape, DirectiveSpec, MergePolicy, PayloadMode,
-        context,
+    registry::{ConfigRegistry, DirectiveSpec, MergePolicy, context},
+    types::{
+        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, MimeTypes,
+        PathConfig, StringList,
     },
 };
 
@@ -13,60 +13,43 @@ pub fn register(registry: &mut ConfigRegistry) {
     });
     registry.register_directive(
         context::ROOT,
-        DirectiveSpec {
-            name: "pishoo",
-            allowed_in: vec![context::ROOT],
-            shape: DirectiveShape::ContextBlock {
-                child_context: context::PISHOO,
-                payload: PayloadMode::None,
-            },
-            parser: common::parse_empty,
-            merge: MergePolicy::Append,
-        },
-    );
-    for (name, parser) in [
-        ("pid", common::parse_string as DirectiveParserFn),
-        ("workers", common::parse_string_list),
-        ("groups", common::parse_string_list),
-        ("access_rules", common::parse_string),
-        ("gzip", common::parse_boolean),
-        ("gzip_vary", common::parse_boolean),
-        ("gzip_min_length", common::parse_gzip_min_length),
-        ("gzip_comp_level", common::parse_gzip_comp_level),
-        ("gzip_types", common::parse_string_list),
-        ("default_type", common::parse_default_type),
-    ] {
-        registry.register_directive(
+        DirectiveSpec::context_empty(
+            "pishoo",
+            vec![context::ROOT],
             context::PISHOO,
-            leaf(name, parser, MergePolicy::RejectDuplicate),
-        );
-    }
+            MergePolicy::Append,
+        ),
+    );
+    register_leaf::<PathConfig>(registry, "pid");
+    register_leaf::<StringList>(registry, "workers");
+    register_leaf::<StringList>(registry, "groups");
+    register_leaf::<AccessRulesUri>(registry, "access_rules");
+    register_leaf::<BoolConfig>(registry, "gzip");
+    register_leaf::<BoolConfig>(registry, "gzip_vary");
+    register_leaf::<GzipMinLength>(registry, "gzip_min_length");
+    register_leaf::<GzipCompLevel>(registry, "gzip_comp_level");
+    register_leaf::<StringList>(registry, "gzip_types");
+    register_leaf::<DefaultType>(registry, "default_type");
     registry.register_directive(
         context::PISHOO,
-        raw(
+        DirectiveSpec::raw_value::<MimeTypes>(
             "types",
-            common::parse_types_raw_block,
+            vec![context::PISHOO],
             MergePolicy::RejectDuplicate,
         ),
     );
 }
 
-fn leaf(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::PISHOO],
-        shape: DirectiveShape::Leaf,
-        parser,
-        merge,
-    }
-}
-
-fn raw(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::PISHOO],
-        shape: DirectiveShape::RawBlock,
-        parser,
-        merge,
-    }
+fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str)
+where
+    T: crate::parse::registry::DirectiveValue,
+    for<'input, 'directive> T: TryFrom<
+            &'input crate::parse::registry::DirectiveInput<'directive>,
+            Error = <T as crate::parse::registry::DirectiveValue>::Error,
+        >,
+{
+    registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<T>(name, vec![context::PISHOO], MergePolicy::RejectDuplicate),
+    );
 }

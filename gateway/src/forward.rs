@@ -25,7 +25,7 @@ use crate::{
     command,
     error::{BoxError, Result, Whatever},
     forward,
-    parse::document::ConfigNode,
+    parse::{document::ConfigNode, types::SocketAddrs},
 };
 
 mod normal;
@@ -81,9 +81,10 @@ pub async fn serve(
 )> {
     tracing::info!("starting forward proxy server");
     let listen = node
-        .require::<Vec<SocketAddr>>("listen")
+        .require::<SocketAddrs>("listen")
         .whatever_context::<_, Whatever>("failed to read forward proxy listen directive")?;
     let addr = *listen
+        .0
         .first()
         .whatever_context::<_, Whatever>("missing forward proxy listen address")?;
 

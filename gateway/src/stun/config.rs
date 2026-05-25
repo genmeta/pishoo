@@ -2,7 +2,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use crate::parse::{
     document::ConfigNode,
-    types::{BoolConfig, StunBindConfigValue, StunChangePort},
+    types::{BoolConfig, SocketAddrs, StunBindConfigValue, StunChangePort},
 };
 
 /// 本节点的 STUN 运行时配置。
@@ -103,8 +103,8 @@ impl StunNodeConfig {
 }
 
 fn first_addr(node: &ConfigNode, name: &str) -> Option<SocketAddr> {
-    node.get::<Vec<SocketAddr>>(name)
+    node.get::<SocketAddrs>(name)
         .ok()
         .flatten()
-        .and_then(|addrs| addrs.first().copied())
+        .and_then(|addrs| addrs.0.first().copied())
 }

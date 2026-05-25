@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use gateway::parse::document::ConfigNode;
 
@@ -9,7 +9,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct EntryConfig {
-    pub pid_file: String,
+    pub pid_file: PathBuf,
     pub workers: Vec<WorkerTarget>,
     pub local_servers: Vec<Arc<ConfigNode>>,
 }

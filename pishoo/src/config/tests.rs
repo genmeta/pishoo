@@ -37,7 +37,7 @@ fn extracts_pid_and_workers() {
     let conf = "pishoo { pid /tmp/pishoo-test.pid; workers alice bob; }";
     let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
     let root = parse_root_config(&parsed.root).expect("parse root config");
-    assert_eq!(root.pid_file, "/tmp/pishoo-test.pid");
+    assert_eq!(root.pid_file, PathBuf::from("/tmp/pishoo-test.pid"));
     assert_eq!(root.workers.len(), 2);
     assert_eq!(root.workers[0].username, "alice");
     assert_eq!(root.workers[1].username, "bob");
@@ -48,7 +48,7 @@ fn parse_workers_from_root_config() {
     let conf = "pishoo { workers alice bob; }";
     let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
     let root = parse_root_config(&parsed.root).expect("parse root config");
-    assert_eq!(root.pid_file, PID_FILE_DEFAULT);
+    assert_eq!(root.pid_file, PathBuf::from(PID_FILE_DEFAULT));
     assert_eq!(root.workers.len(), 2);
     assert_eq!(root.workers[0].username, "alice");
     assert_eq!(root.workers[1].username, "bob");

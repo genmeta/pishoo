@@ -14,7 +14,9 @@ use gateway::{
     error::Whatever,
     parse::{
         document::ConfigNode,
-        types::{ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames, StringConfig},
+        types::{
+            AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames,
+        },
     },
 };
 use snafu::{ResultExt, Snafu};
@@ -124,10 +126,10 @@ pub async fn build_service_config(
             for server_node in &identity_server_nodes {
                 if let Some(uri) =
                     server_node
-                        .get::<StringConfig>("access_rules")
+                        .get::<AccessRulesUri>("access_rules")
                         .whatever_context::<_, BuildConfigError>("failed to read access_rules")?
                 {
-                    access_rules_uri = Some(uri.0.clone());
+                    access_rules_uri = Some(uri.0.as_str().to_owned());
                     break;
                 }
             }

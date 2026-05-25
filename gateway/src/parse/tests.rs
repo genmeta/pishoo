@@ -9,8 +9,8 @@ use std::{
 use crate::parse::{
     document::{ConfigDocument, ConfigNode},
     types::{
-        ClientNameConfig, GzipCompLevel, GzipMinLength, PathConfig, ProxyPass, ResolverConfig,
-        ServerIdConfig, ServerNames,
+        AccessRulesUri, ClientNameConfig, GzipCompLevel, GzipMinLength, PathConfig, ProxyPass,
+        ResolverConfig, ServerIdConfig, ServerNames, SocketAddrs, SshLoginMethods,
     },
 };
 
@@ -238,6 +238,82 @@ fn parse_numeric_and_identity_directives_keep_typed_values() {
             .as_partial(),
         "example.com"
     );
+}
+
+#[test]
+fn parse_pid_and_access_rules_keep_domain_types() {
+    let conf = "pishoo { pid /tmp/pishoo-test.pid; access_rules sqlite:///tmp/rules.db?mode=ro; }";
+
+    let document = parse_doc(conf);
+    let pishoo = first_pishoo(&document);
+
+    assert_eq!(
+        pishoo
+            .require::<PathConfig>("pid")
+            .expect("pid should be typed")
+            .0,
+        PathBuf::from("/tmp/pishoo-test.pid")
+    );
+    assert_eq!(
+        pishoo
+            .require::<AccessRulesUri>("access_rules")
+            .expect("access_rules should be typed")
+            .0
+            .as_str(),
+        "sqlite:///tmp/rules.db?mode=ro"
+    );
+}
+
+#[test]
+fn parse_access_rules_rejects_invalid_uri() {
+    let conf = "pishoo { access_rules not-a-uri; }";
+
+    let failure = crate::parse::parse_config_str_for_test(conf)
+        .expect_err("invalid access_rules URI should fail");
+    let report = snafu::Report::from_error(&failure.error).to_string();
+
+    assert!(report.contains("failed to parse directive `access_rules`"));
+    assert_error_chain_display_single_line(&failure.error);
+}
+
+#[test]
+fn parse_address_directives_keep_socket_addrs_type() {
+    let conf = "pishoo { proxy { listen 127.0.0.1:8080; } }";
+
+    let document = parse_doc(conf);
+    let pishoo = first_pishoo(&document);
+    let proxy = pishoo.children("proxy").expect("proxy should exist")[0].clone();
+
+    assert_eq!(
+        proxy
+            .require::<SocketAddrs>("listen")
+            .expect("proxy listen should be typed")
+            .0,
+        vec!["127.0.0.1:8080".parse().expect("address should parse")]
+    );
+}
+
+#[test]
+fn parse_ssh_login_keeps_semantic_type() {
+    let cert = create_temp_file("ssh_login_cert");
+    let key = create_temp_file("ssh_login_key");
+    let conf = build_proxy_conf(&cert, &key, "ssh_login ssl;");
+
+    let document = parse_doc(&conf);
+    let location = first_server(&document)
+        .children("location")
+        .expect("location exists")[0]
+        .clone();
+
+    assert_eq!(
+        location
+            .require::<SshLoginMethods>("ssh_login")
+            .expect("ssh_login should be typed")
+            .0,
+        vec!["ssl".to_owned()]
+    );
+
+    cleanup_temp_files(&[&cert, &key]);
 }
 
 #[test]

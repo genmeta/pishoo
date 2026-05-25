@@ -26,6 +26,7 @@ tracing-subscriber = { workspace = true }
 # --- Networking & HTTP ---
 bytes = { workspace = true }
 http = { workspace = true }
+url = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }

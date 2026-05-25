@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use gateway::parse::{document::ConfigNode, error::ConfigQueryError, types::StringConfig};
+use gateway::parse::{document::ConfigNode, error::ConfigQueryError, types::PathConfig};
 use snafu::{OptionExt, ResultExt, Snafu};
 
 mod discovery;
@@ -27,7 +27,7 @@ pub enum ConfigError {
     #[snafu(display("invalid workers directive: expected string list"))]
     InvalidWorkers,
 
-    #[snafu(display("invalid pid directive: expected string"))]
+    #[snafu(display("invalid pid directive: expected path"))]
     InvalidPid,
 
     #[snafu(display("failed to read typed configuration value"))]
@@ -70,10 +70,10 @@ fn first_pishoo_node(root: &Arc<ConfigNode>) -> Result<Arc<ConfigNode>, ConfigEr
         .context(MissingPishooSnafu)
 }
 
-fn parse_pid_file(pishoo: &Arc<ConfigNode>) -> Result<String, ConfigError> {
+fn parse_pid_file(pishoo: &Arc<ConfigNode>) -> Result<PathBuf, ConfigError> {
     Ok(pishoo
-        .get::<StringConfig>("pid")
+        .get::<PathConfig>("pid")
         .context(ConfigQuerySnafu)?
         .map(|pid_file| pid_file.0.clone())
-        .unwrap_or_else(|| PID_FILE_DEFAULT.to_string()))
+        .unwrap_or_else(|| PathBuf::from(PID_FILE_DEFAULT)))
 }

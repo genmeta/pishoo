@@ -36,6 +36,7 @@ console-subscriber = "0.4"
 # --- Networking & HTTP ---
 bytes = "1"
 http = "1"
+url = "2"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }

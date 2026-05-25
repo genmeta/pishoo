@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, error::Error, sync::Arc};
 
 use snafu::{OptionExt, ResultExt};
 
@@ -7,7 +7,7 @@ use crate::parse::{
     document::{ConfigDocument, ConfigNode},
     error::{BuildDocumentError, build_document_error},
     source::{SourceMap, SourceSpan},
-    value::TypedValue,
+    value::{ConfigValue, TypedValue},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +39,7 @@ pub struct DirectiveSpec {
     pub name: &'static str,
     pub allowed_in: Vec<ContextKey>,
     pub shape: DirectiveShape,
-    pub parser: DirectiveParserFn,
+    parser: DirectiveParserFn,
     pub merge: MergePolicy,
 }
 
@@ -68,10 +68,18 @@ pub enum MergePolicy {
     MergeWithParent,
 }
 
-pub type DirectiveParserFn =
+type DirectiveParserFn =
     fn(&DirectiveInput<'_>) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>>;
 pub type ContextFinalizeFn =
     fn(&mut ConfigNode, &BuildOptions<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+pub trait DirectiveValue: ConfigValue + Sized {
+    type Error: Error + Send + Sync + 'static;
+
+    fn span(input: &DirectiveInput<'_>) -> SourceSpan {
+        input.directive.span
+    }
+}
 
 pub struct DirectiveInput<'a> {
     pub directive: &'a AstDirective,
@@ -82,6 +90,119 @@ pub enum ParsedDirective {
     Slot(TypedValue),
     Payload(TypedValue),
     Empty,
+}
+
+impl DirectiveSpec {
+    pub fn leaf_value<T>(
+        name: &'static str,
+        allowed_in: Vec<ContextKey>,
+        merge: MergePolicy,
+    ) -> Self
+    where
+        T: DirectiveValue,
+        for<'input, 'directive> T:
+            TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+    {
+        Self {
+            name,
+            allowed_in,
+            shape: DirectiveShape::Leaf,
+            parser: slot_value_parser::<T>,
+            merge,
+        }
+    }
+
+    pub fn raw_value<T>(name: &'static str, allowed_in: Vec<ContextKey>, merge: MergePolicy) -> Self
+    where
+        T: DirectiveValue,
+        for<'input, 'directive> T:
+            TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+    {
+        Self {
+            name,
+            allowed_in,
+            shape: DirectiveShape::RawBlock,
+            parser: slot_value_parser::<T>,
+            merge,
+        }
+    }
+
+    pub fn context_empty(
+        name: &'static str,
+        allowed_in: Vec<ContextKey>,
+        child_context: ContextKey,
+        merge: MergePolicy,
+    ) -> Self {
+        Self {
+            name,
+            allowed_in,
+            shape: DirectiveShape::ContextBlock {
+                child_context,
+                payload: PayloadMode::None,
+            },
+            parser: empty_parser,
+            merge,
+        }
+    }
+
+    pub fn context_payload<T>(
+        name: &'static str,
+        allowed_in: Vec<ContextKey>,
+        child_context: ContextKey,
+        merge: MergePolicy,
+    ) -> Self
+    where
+        T: DirectiveValue,
+        for<'input, 'directive> T:
+            TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+    {
+        Self {
+            name,
+            allowed_in,
+            shape: DirectiveShape::ContextBlock {
+                child_context,
+                payload: PayloadMode::Parser,
+            },
+            parser: payload_value_parser::<T>,
+            merge,
+        }
+    }
+}
+
+fn slot_value_parser<T>(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>>
+where
+    T: DirectiveValue,
+    for<'input, 'directive> T:
+        TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+{
+    let span = T::span(input);
+    match T::try_from(input) {
+        Ok(value) => Ok(ParsedDirective::Slot(TypedValue::new(value, span))),
+        Err(source) => Err(Box::new(source)),
+    }
+}
+
+fn payload_value_parser<T>(
+    input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>>
+where
+    T: DirectiveValue,
+    for<'input, 'directive> T:
+        TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+{
+    let span = T::span(input);
+    match T::try_from(input) {
+        Ok(value) => Ok(ParsedDirective::Payload(TypedValue::new(value, span))),
+        Err(source) => Err(Box::new(source)),
+    }
+}
+
+fn empty_parser(
+    _input: &DirectiveInput<'_>,
+) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(ParsedDirective::Empty)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

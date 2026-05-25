@@ -9,6 +9,8 @@ use futures::future::BoxFuture;
 use http::StatusCode;
 
 use super::location::match_location;
+#[cfg(feature = "sshd")]
+use crate::parse::types::SshLoginMethods;
 use crate::parse::{
     document::ConfigNode,
     types::{PathConfig, ProxyPass},
@@ -83,7 +85,7 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
             } else {
                 #[cfg(feature = "sshd")]
                 if location
-                    .get::<crate::parse::types::StringList>("ssh_login")
+                    .get::<SshLoginMethods>("ssh_login")
                     .ok()
                     .flatten()
                     .is_some()

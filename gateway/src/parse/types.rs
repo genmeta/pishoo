@@ -69,10 +69,16 @@ pub struct StringList(pub Vec<String>);
 pub struct PathConfig(pub std::path::PathBuf);
 
 #[derive(Debug, Clone)]
+pub struct AccessRulesUri(pub url::Url);
+
+#[derive(Debug, Clone)]
 pub struct ProxyPass(pub http::Uri);
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig(pub http::Uri);
+
+#[derive(Debug, Clone)]
+pub struct SocketAddrs(pub Vec<std::net::SocketAddr>);
 
 #[derive(Debug, Clone)]
 pub struct ListenConfig(pub Vec<Listens>);
@@ -107,6 +113,9 @@ pub struct GzipMinLength(pub u64);
 
 #[derive(Debug, Clone)]
 pub struct GzipCompLevel(pub i32);
+
+#[derive(Debug, Clone)]
+pub struct SshLoginMethods(pub Vec<String>);
 
 #[derive(Debug, Clone)]
 pub struct SshSslUser {

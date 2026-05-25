@@ -4,14 +4,13 @@ use dhttp_config::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
-    builtin::common,
     document::ConfigNode,
-    registry::{
-        BuildOptions, ConfigRegistry, DirectiveParserFn, DirectiveShape, DirectiveSpec,
-        MergePolicy, PayloadMode, context,
-    },
+    registry::{BuildOptions, ConfigRegistry, ContextKey, DirectiveSpec, MergePolicy, context},
     source::SourceSpan,
-    types::{ListenConfig, PathConfig, ServerName, ServerNames},
+    types::{
+        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, ListenConfig,
+        MimeTypes, PathConfig, ResolverConfig, ServerIdConfig, ServerName, ServerNames, StringList,
+    },
     value::TypedValue,
 };
 
@@ -37,123 +36,59 @@ pub fn register(registry: &mut ConfigRegistry) {
     });
     registry.register_directive(context::ROOT, server_block(context::ROOT));
     registry.register_directive(context::PISHOO, server_block(context::PISHOO));
-    for context in [context::SERVER] {
-        for (name, parser, merge) in [
-            (
-                "listen",
-                common::parse_listen as DirectiveParserFn,
-                MergePolicy::Append,
-            ),
-            (
-                "server_name",
-                common::parse_server_name,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "server_id",
-                common::parse_server_id,
-                MergePolicy::RejectDuplicate,
-            ),
-            ("dns", common::parse_resolver, MergePolicy::RejectDuplicate),
-            ("gzip", common::parse_boolean, MergePolicy::RejectDuplicate),
-            (
-                "gzip_vary",
-                common::parse_boolean,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "gzip_min_length",
-                common::parse_gzip_min_length,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "gzip_comp_level",
-                common::parse_gzip_comp_level,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "gzip_types",
-                common::parse_string_list,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "ssl_certificate",
-                common::parse_path,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "ssl_certificate_key",
-                common::parse_path,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "default_type",
-                common::parse_default_type,
-                MergePolicy::RejectDuplicate,
-            ),
-            (
-                "access_rules",
-                common::parse_string,
-                MergePolicy::RejectDuplicate,
-            ),
-            ("relay", common::parse_boolean, MergePolicy::RejectDuplicate),
-            ("stun", common::parse_boolean, MergePolicy::RejectDuplicate),
-        ] {
-            registry.register_directive(context, leaf(context, name, parser, merge));
-        }
-        registry.register_directive(
-            context,
-            raw(
-                context,
-                "types",
-                common::parse_types_raw_block,
-                MergePolicy::RejectDuplicate,
-            ),
-        );
-    }
+    register_server_leaf::<ListenConfig>(registry, "listen", MergePolicy::Append);
+    register_server_leaf::<ServerNames>(registry, "server_name", MergePolicy::RejectDuplicate);
+    register_server_leaf::<ServerIdConfig>(registry, "server_id", MergePolicy::RejectDuplicate);
+    register_server_leaf::<ResolverConfig>(registry, "dns", MergePolicy::RejectDuplicate);
+    register_server_leaf::<BoolConfig>(registry, "gzip", MergePolicy::RejectDuplicate);
+    register_server_leaf::<BoolConfig>(registry, "gzip_vary", MergePolicy::RejectDuplicate);
+    register_server_leaf::<GzipMinLength>(
+        registry,
+        "gzip_min_length",
+        MergePolicy::RejectDuplicate,
+    );
+    register_server_leaf::<GzipCompLevel>(
+        registry,
+        "gzip_comp_level",
+        MergePolicy::RejectDuplicate,
+    );
+    register_server_leaf::<StringList>(registry, "gzip_types", MergePolicy::RejectDuplicate);
+    register_server_leaf::<PathConfig>(registry, "ssl_certificate", MergePolicy::RejectDuplicate);
+    register_server_leaf::<PathConfig>(
+        registry,
+        "ssl_certificate_key",
+        MergePolicy::RejectDuplicate,
+    );
+    register_server_leaf::<DefaultType>(registry, "default_type", MergePolicy::RejectDuplicate);
+    register_server_leaf::<AccessRulesUri>(registry, "access_rules", MergePolicy::RejectDuplicate);
+    register_server_leaf::<BoolConfig>(registry, "relay", MergePolicy::RejectDuplicate);
+    register_server_leaf::<BoolConfig>(registry, "stun", MergePolicy::RejectDuplicate);
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::raw_value::<MimeTypes>(
+            "types",
+            vec![context::SERVER],
+            MergePolicy::RejectDuplicate,
+        ),
+    );
 }
 
-fn server_block(parent: crate::parse::registry::ContextKey) -> DirectiveSpec {
-    DirectiveSpec {
-        name: "server",
-        allowed_in: vec![parent],
-        shape: DirectiveShape::ContextBlock {
-            child_context: context::SERVER,
-            payload: PayloadMode::None,
-        },
-        parser: common::parse_empty,
-        merge: MergePolicy::Append,
-    }
+fn server_block(parent: ContextKey) -> DirectiveSpec {
+    DirectiveSpec::context_empty("server", vec![parent], context::SERVER, MergePolicy::Append)
 }
 
-fn leaf(
-    context: crate::parse::registry::ContextKey,
-    name: &'static str,
-    parser: DirectiveParserFn,
-    merge: MergePolicy,
-) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context],
-        shape: DirectiveShape::Leaf,
-        parser,
-        merge,
-    }
-}
-
-fn raw(
-    context: crate::parse::registry::ContextKey,
-    name: &'static str,
-    parser: DirectiveParserFn,
-    merge: MergePolicy,
-) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context],
-        shape: DirectiveShape::RawBlock,
-        parser,
-        merge,
-    }
+fn register_server_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, merge: MergePolicy)
+where
+    T: crate::parse::registry::DirectiveValue,
+    for<'input, 'directive> T: TryFrom<
+            &'input crate::parse::registry::DirectiveInput<'directive>,
+            Error = <T as crate::parse::registry::DirectiveValue>::Error,
+        >,
+{
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::leaf_value::<T>(name, vec![context::SERVER], merge),
+    );
 }
 
 fn finalize_server(

@@ -2,14 +2,17 @@ use http::{HeaderName, HeaderValue};
 use snafu::{Snafu, ensure};
 
 use crate::parse::{
-    builtin::common,
     document::ConfigNode,
+    pattern::{ParsePatternError, Pattern},
     registry::{
-        BuildOptions, ConfigRegistry, DirectiveParserFn, DirectiveShape, DirectiveSpec,
-        MergePolicy, PayloadMode, context,
+        BuildOptions, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue, MergePolicy,
+        context,
     },
     source::SourceSpan,
-    types::{HeaderRule, HeaderRules, PathConfig},
+    types::{
+        BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
+        PathConfig, ProxyPass, SshLoginMethods, SshSslUsers, StringList,
+    },
     value::TypedValue,
 };
 
@@ -22,6 +25,18 @@ pub enum FinalizeLocationError {
     ProxyTlsPair { span: SourceSpan },
 }
 
+impl DirectiveValue for Pattern {
+    type Error = ParsePatternError;
+}
+
+impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for Pattern {
+    type Error = ParsePatternError;
+
+    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
+        crate::parse::pattern::parse_spanned_pattern(&input.directive.args)
+    }
+}
+
 pub fn register(registry: &mut ConfigRegistry) {
     registry.register_context(crate::parse::registry::ContextSpec {
         key: context::LOCATION,
@@ -29,126 +44,65 @@ pub fn register(registry: &mut ConfigRegistry) {
     });
     registry.register_directive(
         context::SERVER,
-        DirectiveSpec {
-            name: "location",
-            allowed_in: vec![context::SERVER],
-            shape: DirectiveShape::ContextBlock {
-                child_context: context::LOCATION,
-                payload: PayloadMode::Parser,
-            },
-            parser: common::parse_location_payload,
-            merge: MergePolicy::Append,
-        },
+        DirectiveSpec::context_payload::<Pattern>(
+            "location",
+            vec![context::SERVER],
+            context::LOCATION,
+            MergePolicy::Append,
+        ),
     );
-    for (name, parser, merge) in [
-        (
-            "root",
-            common::parse_path as DirectiveParserFn,
-            MergePolicy::RejectDuplicate,
-        ),
-        ("alias", common::parse_path, MergePolicy::RejectDuplicate),
-        ("gzip", common::parse_boolean, MergePolicy::RejectDuplicate),
-        (
-            "gzip_vary",
-            common::parse_boolean,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "gzip_min_length",
-            common::parse_gzip_min_length,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "gzip_comp_level",
-            common::parse_gzip_comp_level,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "gzip_types",
-            common::parse_string_list,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "index",
-            common::parse_string_list,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "add_header",
-            common::parse_header_always,
-            MergePolicy::Append,
-        ),
-        (
-            "proxy_set_header",
-            common::parse_header,
-            MergePolicy::Append,
-        ),
-        (
-            "proxy_pass",
-            common::parse_proxy_pass,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "proxy_ssl_certificate",
-            common::parse_path,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "proxy_ssl_certificate_key",
-            common::parse_path,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "proxy_ssl_trusted_certificate",
-            common::parse_path,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "ssh_login",
-            common::parse_ssh_login,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "ssh_ssl_user",
-            common::parse_ssh_ssl_user,
-            MergePolicy::Append,
-        ),
-        (
-            "ssh_deny",
-            common::parse_string_list,
-            MergePolicy::RejectDuplicate,
-        ),
-    ] {
-        registry.register_directive(context::LOCATION, leaf(name, parser, merge));
-    }
+    register_leaf::<PathConfig>(registry, "root", MergePolicy::RejectDuplicate);
+    register_leaf::<PathConfig>(registry, "alias", MergePolicy::RejectDuplicate);
+    register_leaf::<BoolConfig>(registry, "gzip", MergePolicy::RejectDuplicate);
+    register_leaf::<BoolConfig>(registry, "gzip_vary", MergePolicy::RejectDuplicate);
+    register_leaf::<GzipMinLength>(registry, "gzip_min_length", MergePolicy::RejectDuplicate);
+    register_leaf::<GzipCompLevel>(registry, "gzip_comp_level", MergePolicy::RejectDuplicate);
+    register_leaf::<StringList>(registry, "gzip_types", MergePolicy::RejectDuplicate);
+    register_leaf::<StringList>(registry, "index", MergePolicy::RejectDuplicate);
+    register_leaf::<HeaderRules>(registry, "add_header", MergePolicy::Append);
+    register_leaf::<HeaderRules>(registry, "proxy_set_header", MergePolicy::Append);
+    register_leaf::<ProxyPass>(registry, "proxy_pass", MergePolicy::RejectDuplicate);
+    register_leaf::<PathConfig>(
+        registry,
+        "proxy_ssl_certificate",
+        MergePolicy::RejectDuplicate,
+    );
+    register_leaf::<PathConfig>(
+        registry,
+        "proxy_ssl_certificate_key",
+        MergePolicy::RejectDuplicate,
+    );
+    register_leaf::<PathConfig>(
+        registry,
+        "proxy_ssl_trusted_certificate",
+        MergePolicy::RejectDuplicate,
+    );
+    register_leaf::<SshLoginMethods>(registry, "ssh_login", MergePolicy::RejectDuplicate);
+    register_leaf::<SshSslUsers>(registry, "ssh_ssl_user", MergePolicy::Append);
+    register_leaf::<StringList>(registry, "ssh_deny", MergePolicy::RejectDuplicate);
+    register_leaf::<DefaultType>(registry, "default_type", MergePolicy::RejectDuplicate);
     registry.register_directive(
         context::LOCATION,
-        raw(
+        DirectiveSpec::raw_value::<MimeTypes>(
             "types",
-            common::parse_types_raw_block,
+            vec![context::LOCATION],
             MergePolicy::RejectDuplicate,
         ),
     );
 }
 
-fn leaf(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::LOCATION],
-        shape: DirectiveShape::Leaf,
-        parser,
-        merge,
-    }
-}
-
-fn raw(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::LOCATION],
-        shape: DirectiveShape::RawBlock,
-        parser,
-        merge,
-    }
+fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, merge: MergePolicy)
+where
+    T: crate::parse::registry::DirectiveValue,
+    for<'input, 'directive> T: TryFrom<
+            &'input crate::parse::registry::DirectiveInput<'directive>,
+            Error = <T as crate::parse::registry::DirectiveValue>::Error,
+        >,
+{
+    registry.register_directive(
+        context::LOCATION,
+        DirectiveSpec::leaf_value::<T>(name, vec![context::LOCATION], merge),
+    );
 }
 
 fn finalize_location(

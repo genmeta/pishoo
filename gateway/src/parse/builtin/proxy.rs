@@ -1,13 +1,13 @@
 use snafu::{Snafu, ensure};
 
 use crate::parse::{
-    builtin::common,
     document::ConfigNode,
-    registry::{
-        BuildOptions, ConfigRegistry, DirectiveParserFn, DirectiveShape, DirectiveSpec,
-        MergePolicy, PayloadMode, context,
-    },
+    registry::{BuildOptions, ConfigRegistry, DirectiveSpec, MergePolicy, context},
     source::SourceSpan,
+    types::{
+        ClientNameConfig, DefaultType, MimeTypes, PathConfig, ResolverConfig, SocketAddrs,
+        StringList,
+    },
 };
 
 #[derive(Debug, Snafu)]
@@ -24,85 +24,43 @@ pub fn register(registry: &mut ConfigRegistry) {
     });
     registry.register_directive(
         context::PISHOO,
-        DirectiveSpec {
-            name: "proxy",
-            allowed_in: vec![context::PISHOO],
-            shape: DirectiveShape::ContextBlock {
-                child_context: context::PROXY,
-                payload: PayloadMode::None,
-            },
-            parser: common::parse_empty,
-            merge: MergePolicy::Append,
-        },
+        DirectiveSpec::context_empty(
+            "proxy",
+            vec![context::PISHOO],
+            context::PROXY,
+            MergePolicy::Append,
+        ),
     );
-    for (name, parser, merge) in [
-        (
-            "listen",
-            common::parse_address as DirectiveParserFn,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "client_name",
-            common::parse_client_name,
-            MergePolicy::RejectDuplicate,
-        ),
-        ("dns", common::parse_resolver, MergePolicy::RejectDuplicate),
-        (
-            "ssl_certificate",
-            common::parse_path,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "ssl_certificate_key",
-            common::parse_path,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "allow",
-            common::parse_string_list,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "deny",
-            common::parse_string_list,
-            MergePolicy::RejectDuplicate,
-        ),
-        (
-            "default_type",
-            common::parse_default_type,
-            MergePolicy::RejectDuplicate,
-        ),
-    ] {
-        registry.register_directive(context::PROXY, leaf(name, parser, merge));
-    }
+    register_leaf::<SocketAddrs>(registry, "listen");
+    register_leaf::<ClientNameConfig>(registry, "client_name");
+    register_leaf::<ResolverConfig>(registry, "dns");
+    register_leaf::<PathConfig>(registry, "ssl_certificate");
+    register_leaf::<PathConfig>(registry, "ssl_certificate_key");
+    register_leaf::<StringList>(registry, "allow");
+    register_leaf::<StringList>(registry, "deny");
+    register_leaf::<DefaultType>(registry, "default_type");
     registry.register_directive(
         context::PROXY,
-        raw(
+        DirectiveSpec::raw_value::<MimeTypes>(
             "types",
-            common::parse_types_raw_block,
+            vec![context::PROXY],
             MergePolicy::RejectDuplicate,
         ),
     );
 }
 
-fn leaf(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::PROXY],
-        shape: DirectiveShape::Leaf,
-        parser,
-        merge,
-    }
-}
-
-fn raw(name: &'static str, parser: DirectiveParserFn, merge: MergePolicy) -> DirectiveSpec {
-    DirectiveSpec {
-        name,
-        allowed_in: vec![context::PROXY],
-        shape: DirectiveShape::RawBlock,
-        parser,
-        merge,
-    }
+fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str)
+where
+    T: crate::parse::registry::DirectiveValue,
+    for<'input, 'directive> T: TryFrom<
+            &'input crate::parse::registry::DirectiveInput<'directive>,
+            Error = <T as crate::parse::registry::DirectiveValue>::Error,
+        >,
+{
+    registry.register_directive(
+        context::PROXY,
+        DirectiveSpec::leaf_value::<T>(name, vec![context::PROXY], MergePolicy::RejectDuplicate),
+    );
 }
 
 fn finalize_proxy(

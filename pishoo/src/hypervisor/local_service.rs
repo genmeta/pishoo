@@ -12,8 +12,8 @@ use gateway::{
         document::ConfigNode,
         error::ConfigQueryError,
         types::{
-            ListenConfig, Listens, PathConfig, ResolverConfig, ServerIdConfig, ServerNames,
-            StringConfig,
+            AccessRulesUri, ListenConfig, Listens, PathConfig, ResolverConfig, ServerIdConfig,
+            ServerNames,
         },
     },
 };
@@ -167,10 +167,10 @@ pub async fn build_local_service_config(
 
         if access_rules_uri.is_none()
             && let Some(uri) = server
-                .get::<StringConfig>("access_rules")
+                .get::<AccessRulesUri>("access_rules")
                 .context(build_local_service_error::ConfigQuerySnafu)?
         {
-            access_rules_uri = Some(uri.0.clone());
+            access_rules_uri = Some(uri.0.as_str().to_owned());
         }
 
         let cert_pem = tokio::fs::read(&cert_path)

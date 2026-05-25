@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use gateway::parse::{document::ConfigNode, types::StringList};
 use snafu::ResultExt;
 
@@ -8,7 +10,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct RootConfig {
-    pub pid_file: String,
+    pub pid_file: PathBuf,
     pub groups: Vec<String>,
     pub workers: Vec<WorkerTarget>,
 }

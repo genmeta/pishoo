@@ -84,7 +84,7 @@ async fn main() -> Result<(), Whatever> {
             .whatever_context("failed to resolve configured worker users")?;
 
     tracing::info!(
-        pid_file = %current_entry_config.pid_file,
+        pid_file = %current_entry_config.pid_file.display(),
         "pishoo starting"
     );
 
