@@ -50,6 +50,7 @@ h3x = { workspace = true, features = ["rpc"] }
 dashmap = { workspace = true }
 misc-conf = { workspace = true }
 peg = { workspace = true }
+glob = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

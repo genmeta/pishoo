@@ -1,4 +1,4 @@
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, Snafu};
 
 use crate::parse::{
     ast::{AstBody, AstDirective, Spanned},
@@ -11,6 +11,7 @@ pub enum ParseSyntaxError {
     #[snafu(display("failed to parse configuration syntax"))]
     Syntax {
         source_id: SourceId,
+        span: SourceSpan,
         source: peg::error::ParseError<peg::str::LineCol>,
     },
 }
@@ -19,10 +20,36 @@ pub fn parse_source(
     input: &str,
     source_id: SourceId,
 ) -> Result<Vec<AstDirective>, ParseSyntaxError> {
-    config_grammar::file(input, source_id).context(parse_syntax_error::SyntaxSnafu { source_id })
+    match config_grammar::file(input, source_id) {
+        Ok(directives) => Ok(directives),
+        Err(source) => {
+            let span = syntax_error_span(input, source_id, source.location.offset);
+            Err(parse_syntax_error::SyntaxSnafu { source_id, span }.into_error(source))
+        }
+    }
 }
 
 fn span(source_id: SourceId, start: usize, end: usize) -> SourceSpan {
+    SourceSpan::new(source_id, start, end)
+}
+
+fn syntax_error_span(input: &str, source_id: SourceId, offset: usize) -> SourceSpan {
+    let offset = offset.min(input.len());
+    let start = if offset >= input.len() && offset > 0 {
+        input[..offset]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| !matches!(ch, '\n' | '\r'))
+            .map(|(index, _)| index)
+            .unwrap_or(offset)
+    } else {
+        offset
+    };
+    let end = input
+        .get(start..)
+        .and_then(|rest| rest.chars().next())
+        .map(|ch| start + ch.len_utf8())
+        .unwrap_or_else(|| start.saturating_add(1));
     SourceSpan::new(source_id, start, end)
 }
 
