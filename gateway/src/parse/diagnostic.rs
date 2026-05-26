@@ -223,4 +223,18 @@ mod tests {
         assert!(diagnostic.contains("included from"));
         assert!(diagnostic.contains('^'));
     }
+
+    #[test]
+    fn diagnostic_contains_source_snippet_but_display_is_single_line() {
+        let conf = "pishoo { server { listen all 5378; server_name example.com; ssl_certificate /missing/cert.pem; ssl_certificate_key /missing/key.pem; location /api { proxy_pass ftp://backend.example.com; } } }";
+        let failure =
+            crate::parse::parse_config_str_for_test(conf).expect_err("config should fail");
+        let report = snafu::Report::from_error(&failure.error).to_string();
+        let diagnostic = failure.diagnostic().to_string();
+
+        assert!(report.contains("unsupported proxy_pass uri scheme"));
+        assert!(!failure.error.to_string().contains('\n'));
+        assert!(diagnostic.contains("proxy_pass ftp://backend.example.com"));
+        assert!(diagnostic.contains("^"));
+    }
 }

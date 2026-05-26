@@ -75,3 +75,100 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for SshSslU
         }]))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::parse::{
+        tests::{build_proxy_conf, cleanup_temp_files, create_temp_file, first_server, parse_doc},
+        types::{SshLoginMethods, SshSslUsers},
+    };
+
+    #[test]
+    fn parse_ssh_ssl_users_keeps_name_user_tuple() {
+        let cert = create_temp_file("ssh_ssl_user_cert");
+        let key = create_temp_file("ssh_ssl_user_key");
+        let conf = build_proxy_conf(&cert, &key, "ssh_ssl_user alice aliceroot;");
+
+        let location = first_server(&parse_doc(&conf))
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+
+        let users = location
+            .require::<SshSslUsers>("ssh_ssl_user")
+            .expect("ssh_ssl_user should be typed")
+            .0
+            .clone();
+        assert_eq!(users[0].name, "alice");
+        assert_eq!(users[0].user, "aliceroot");
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_ssh_ssl_users_rejects_invalid_argument_count() {
+        let cert = create_temp_file("ssh_ssl_user_invalid_cert");
+        let key = create_temp_file("ssh_ssl_user_invalid_key");
+        let conf = build_proxy_conf(&cert, &key, "ssh_ssl_user alice; ");
+
+        let failure = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("ssh_ssl_user requires two args");
+
+        assert!(
+            snafu::Report::from_error(&failure.error)
+                .to_string()
+                .contains("invalid ssh_ssl_user directive argument count")
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_ssh_login_rejects_invalid_method() {
+        let cert = create_temp_file("ssh_login_invalid_cert");
+        let key = create_temp_file("ssh_login_invalid_key");
+
+        let missing_method = build_proxy_conf(&cert, &key, "ssh_login;");
+        let missing = crate::parse::parse_config_str_for_test(&missing_method)
+            .expect_err("missing ssh login method should fail");
+        assert!(
+            snafu::Report::from_error(&missing.error)
+                .to_string()
+                .contains("missing ssh login method")
+        );
+
+        let invalid_method = build_proxy_conf(&cert, &key, "ssh_login tls;");
+        let invalid = crate::parse::parse_config_str_for_test(&invalid_method)
+            .expect_err("invalid ssh login method should fail");
+        assert!(
+            snafu::Report::from_error(&invalid.error)
+                .to_string()
+                .contains("invalid ssh login method")
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_ssh_login_keeps_semantic_type() {
+        let cert = create_temp_file("ssh_login_cert");
+        let key = create_temp_file("ssh_login_key");
+        let conf = build_proxy_conf(&cert, &key, "ssh_login ssl;");
+
+        let document = parse_doc(&conf);
+        let location = first_server(&document)
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+
+        assert_eq!(
+            location
+                .require::<SshLoginMethods>("ssh_login")
+                .expect("ssh_login should be typed")
+                .0,
+            vec!["ssl".to_owned()]
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+}

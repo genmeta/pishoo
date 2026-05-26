@@ -47,3 +47,20 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for AccessR
         Ok(Self(uri))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::parse::tests::assert_error_chain_display_single_line;
+
+    #[test]
+    fn parse_access_rules_rejects_invalid_uri() {
+        let conf = "pishoo { access_rules not-a-uri; }";
+
+        let failure = crate::parse::parse_config_str_for_test(conf)
+            .expect_err("invalid access_rules URI should fail");
+        let report = snafu::Report::from_error(&failure.error).to_string();
+
+        assert!(report.contains("failed to parse directive `access_rules`"));
+        assert_error_chain_display_single_line(&failure.error);
+    }
+}

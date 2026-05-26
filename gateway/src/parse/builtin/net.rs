@@ -358,3 +358,61 @@ fn ip_families_from_value(value: &str, span: SourceSpan) -> Result<IpFamilies, L
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::parse::{tests::parse_doc, types::SocketAddrs};
+
+    #[test]
+    fn parse_socket_addrs_keeps_multiple_addresses() {
+        let conf =
+            "pishoo { proxy { listen 127.0.0.1:8080,127.0.0.2:8081; allow any; deny none; } }";
+
+        let document = parse_doc(conf);
+        let pishoo = document.root.children("pishoo").expect("pishoo children")[0].clone();
+        let proxy = pishoo.children("proxy").expect("proxy should exist")[0].clone();
+
+        assert_eq!(
+            proxy.require::<SocketAddrs>("listen").unwrap().0,
+            vec![
+                "127.0.0.1:8080"
+                    .parse()
+                    .expect("first address should parse"),
+                "127.0.0.2:8081"
+                    .parse()
+                    .expect("second address should parse"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_socket_addrs_rejects_invalid_address() {
+        let conf = "pishoo { proxy { listen not-a-socket; } }";
+
+        let failure = crate::parse::parse_config_str_for_test(conf)
+            .expect_err("invalid socket addr should fail");
+
+        assert!(
+            snafu::Report::from_error(&failure.error)
+                .to_string()
+                .contains("failed to parse directive `listen`")
+        );
+    }
+
+    #[test]
+    fn parse_address_directives_keep_socket_addrs_type() {
+        let conf = "pishoo { proxy { listen 127.0.0.1:8080; } }";
+
+        let document = parse_doc(conf);
+        let pishoo = document.root.children("pishoo").expect("pishoo children")[0].clone();
+        let proxy = pishoo.children("proxy").expect("proxy should exist")[0].clone();
+
+        assert_eq!(
+            proxy
+                .require::<SocketAddrs>("listen")
+                .expect("proxy listen should be typed")
+                .0,
+            vec!["127.0.0.1:8080".parse().expect("address should parse")]
+        );
+    }
+}

@@ -182,3 +182,152 @@ pub fn register(registry: &mut ConfigRegistry) {
         ),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::parse::{
+        tests::{
+            assert_error_chain_display_single_line, cleanup_temp_files, create_temp_file,
+            first_server, parse_doc,
+        },
+        types::{SocketAddrs, StunBindConfigValue, StunChangePort},
+    };
+
+    #[test]
+    fn parse_stun_bind_and_ports() {
+        let cert = create_temp_file("stun_bind_cert");
+        let key = create_temp_file("stun_bind_key");
+        let conf = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 10.0.0.1:20000 outer_addr 10.0.0.2:20001 change_addr 10.0.0.3:20002 change_port 3478; }} }} }}",
+            cert.display(),
+            key.display()
+        );
+
+        let server = first_server(&parse_doc(&conf));
+        let stun = server
+            .children("stun_server")
+            .expect("stun_server should exist")[0]
+            .clone();
+        let bind = stun.require::<StunBindConfigValue>("bind").unwrap();
+        assert_eq!(
+            bind.bind,
+            "10.0.0.1:20000".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            bind.outer_addr.unwrap(),
+            "10.0.0.2:20001".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            bind.change_addr.unwrap(),
+            "10.0.0.3:20002".parse::<std::net::SocketAddr>().unwrap()
+        );
+        assert_eq!(bind.change_port.unwrap(), 3478);
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_stun_bind_config_rejects_unknown_option() {
+        let cert = create_temp_file("stun_bind_unknown_cert");
+        let key = create_temp_file("stun_bind_unknown_key");
+        let conf = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 10.0.0.1:20000 bad 10.0.0.1:20001; }} }} }}",
+            cert.display(),
+            key.display()
+        );
+
+        let failure = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("unknown bind option should fail");
+
+        assert!(
+            snafu::Report::from_error(&failure.error)
+                .to_string()
+                .contains("invalid stun_server bind directive option")
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_stun_change_port_accepts_valid_port() {
+        let cert = create_temp_file("stun_port_valid_cert");
+        let key = create_temp_file("stun_port_valid_key");
+        let conf = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; change_port 3478; }} }} }}",
+            cert.display(),
+            key.display()
+        );
+
+        let server = first_server(&parse_doc(&conf));
+        let stun = server
+            .children("stun_server")
+            .expect("stun_server should exist")[0]
+            .clone();
+        assert_eq!(
+            stun.require::<StunChangePort>("change_port").unwrap().0,
+            3478
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_stun_server_accepts_outer_addr_and_change_addr() {
+        let cert = create_temp_file("stun_addr_cert");
+        let key = create_temp_file("stun_addr_key");
+        let conf = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; outer_addr 127.0.0.1:20001; change_addr 127.0.0.1:20002; }} }} }}",
+            cert.display(),
+            key.display()
+        );
+
+        let server = first_server(&parse_doc(&conf));
+        let stun = server
+            .children("stun_server")
+            .expect("stun_server should exist")[0]
+            .clone();
+
+        assert_eq!(
+            stun.require::<SocketAddrs>("outer_addr")
+                .expect("outer_addr should be typed")
+                .0,
+            vec![
+                "127.0.0.1:20001"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("outer address should parse")
+            ]
+        );
+        assert_eq!(
+            stun.require::<SocketAddrs>("change_addr")
+                .expect("change_addr should be typed")
+                .0,
+            vec![
+                "127.0.0.1:20002"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("change address should parse")
+            ]
+        );
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_stun_change_port_rejects_invalid_value() {
+        let cert = create_temp_file("stun_port_cert");
+        let key = create_temp_file("stun_port_key");
+        let conf = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; change_port invalid; }} }} }}",
+            cert.display(),
+            key.display()
+        );
+
+        let failure = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("invalid change_port should fail");
+        let report = snafu::Report::from_error(&failure.error).to_string();
+
+        assert!(report.contains("failed to parse directive `change_port`"));
+        assert_error_chain_display_single_line(&failure.error);
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+}

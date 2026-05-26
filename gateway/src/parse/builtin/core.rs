@@ -162,6 +162,30 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for PathCon
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::parse::tests::*;
+
+    #[test]
+    fn parse_bool_directive_rejects_invalid_value() {
+        let cert = create_temp_file("bool_invalid_cert");
+        let key = create_temp_file("bool_invalid_key");
+        let conf = build_server_conf(&cert, &key, "gzip yes;");
+
+        let failure = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("invalid bool value should fail");
+
+        assert!(
+            snafu::Report::from_error(&failure.error)
+                .to_string()
+                .contains("invalid boolean directive value")
+        );
+        assert_error_chain_display_single_line(&failure.error);
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+}
+
 #[derive(Debug)]
 pub struct ExistingPathConfig(pub PathConfig);
 
