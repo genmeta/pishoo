@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
@@ -8,8 +8,8 @@ use tracing::info;
 
 use super::{
     artifact::{
-        ArtifactEntry, ArtifactRoot, ReleaseManifest, copy_artifact, read_manifest, relative_path,
-        sha256_file, write_manifest,
+        ArtifactEntry, ArtifactRoot, ReleaseManifest, copy_artifact, read_manifest, sha256_file,
+        write_manifest,
     },
     paths::{common_paths, promote_staged_outputs, recreate_dir},
 };
@@ -38,6 +38,12 @@ struct RpmInfo {
     sha256: String,
 }
 
+#[derive(Debug, Clone)]
+struct PlannedRpm {
+    source: PathBuf,
+    info: RpmInfo,
+}
+
 pub async fn stage() -> Result<(), Whatever> {
     info!("starting rpm stage");
 
@@ -45,22 +51,18 @@ pub async fn stage() -> Result<(), Whatever> {
     let paths = common_paths()?;
     let rpms = discover_rpms(&target_dir).await?;
     let version = release_version(&rpms)?;
-    validate_unique_artifact_paths(&rpms, &version)?;
+    let planned_rpms = plan_rpm_artifacts(&rpms, &version).await?;
     let manifest = read_existing_manifest(&paths.manifest).await?;
     let staging = paths.root.join("rpm.staging");
     recreate_dir(&staging).await?;
 
-    let mut rpm_infos = Vec::new();
-    for rpm in rpms {
-        let relative = rpm_artifact_path(&version, &rpm.filename);
-        let destination = staging.join(&relative);
+    for rpm in &planned_rpms {
+        let destination = staging.join(&rpm.info.path);
         copy_artifact(&rpm.source, &destination).await?;
-        let sha256 = sha256_file(&destination).await?;
-        let path = relative_path(&staging, &destination)?;
         info!(path = %destination.display(), "staged rpm package");
-        rpm_infos.push(RpmInfo { path, sha256 });
     }
 
+    let rpm_infos = planned_rpms.into_iter().map(|rpm| rpm.info).collect();
     let manifest = merge_rpm_manifest(manifest, &version, rpm_infos);
     let manifest_staging = paths.root.join("manifest.toml.staging");
     write_manifest(&manifest_staging, &manifest).await?;
@@ -172,28 +174,52 @@ fn rpm_artifact_path(version: &str, filename: &str) -> PathBuf {
     PathBuf::from(PACKAGE_NAME).join(version).join(filename)
 }
 
-fn validate_unique_artifact_paths(rpms: &[RpmSource], version: &str) -> Result<(), Whatever> {
-    let mut seen = HashSet::new();
+async fn plan_rpm_artifacts(
+    rpms: &[RpmSource],
+    version: &str,
+) -> Result<Vec<PlannedRpm>, Whatever> {
+    let mut seen = HashMap::new();
+    let mut planned = Vec::new();
+
     for rpm in rpms {
-        let path = rpm_artifact_path(version, &rpm.filename);
-        let path = path
-            .components()
-            .map(|component| {
-                component
-                    .as_os_str()
-                    .to_str()
-                    .whatever_context("failed to convert rpm artifact path component to utf-8")
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .join("/");
-        snafu::ensure_whatever!(
-            seen.insert(path.clone()),
-            "duplicate rpm artifact path {path}"
-        );
+        let relative = rpm_artifact_path(version, &rpm.filename);
+        let path = artifact_path_string(&relative)?;
+        let sha256 = sha256_file(&rpm.source).await?;
+
+        if let Some(&index) = seen.get(&path) {
+            let existing: &PlannedRpm = &planned[index];
+            if rpm.package == COMMON_PACKAGE_NAME && existing.info.sha256 == sha256 {
+                continue;
+            }
+            if rpm.package == COMMON_PACKAGE_NAME {
+                snafu::whatever!(
+                    "duplicate pishoo-common rpm artifact {path} has different sha256"
+                );
+            }
+            snafu::whatever!("duplicate rpm artifact path {path}");
+        }
+
+        seen.insert(path.clone(), planned.len());
+        planned.push(PlannedRpm {
+            source: rpm.source.clone(),
+            info: RpmInfo { path, sha256 },
+        });
     }
-    Ok(())
+
+    Ok(planned)
 }
 
+fn artifact_path_string(path: &Path) -> Result<String, Whatever> {
+    path.components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .whatever_context("failed to convert rpm artifact path component to utf-8")
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
 async fn read_existing_manifest(path: &Path) -> Result<ReleaseManifest, Whatever> {
     if tokio::fs::try_exists(path)
         .await
@@ -236,8 +262,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RpmInfo, RpmSource, merge_rpm_manifest, parse_rpm_filename, release_version,
-        rpm_artifact_path, validate_unique_artifact_paths,
+        RpmInfo, RpmSource, merge_rpm_manifest, parse_rpm_filename, plan_rpm_artifacts,
+        release_version, rpm_artifact_path,
     };
     use crate::release::artifact::{ArtifactEntry, ArtifactRoot, ReleaseManifest};
 
@@ -293,27 +319,122 @@ mod tests {
         );
     }
 
-    #[test]
-    fn duplicate_rpm_artifact_paths_are_rejected() {
+    #[tokio::test]
+    async fn duplicate_identical_common_rpm_artifacts_are_deduped() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let first = temp.path().join("x86_64/pishoo-common-0.5.1-1.noarch.rpm");
+        let second = temp.path().join("aarch64/pishoo-common-0.5.1-1.noarch.rpm");
+        std::fs::create_dir_all(first.parent().expect("first should have parent"))
+            .expect("first parent should be created");
+        std::fs::create_dir_all(second.parent().expect("second should have parent"))
+            .expect("second parent should be created");
+        std::fs::write(&first, "common rpm").expect("first rpm should be written");
+        std::fs::write(&second, "common rpm").expect("second rpm should be written");
+        let rpms = vec![
+            RpmSource {
+                package: "pishoo-common".to_string(),
+                version: "0.5.1".to_string(),
+                filename: "pishoo-common-0.5.1-1.noarch.rpm".to_string(),
+                source: first,
+            },
+            RpmSource {
+                package: "pishoo-common".to_string(),
+                version: "0.5.1".to_string(),
+                filename: "pishoo-common-0.5.1-1.noarch.rpm".to_string(),
+                source: second,
+            },
+        ];
+
+        let planned = plan_rpm_artifacts(&rpms, "0.5.1")
+            .await
+            .expect("identical common rpms should dedupe");
+        let merged = merge_rpm_manifest(
+            ReleaseManifest {
+                schema_version: 1,
+                package: "pishoo".to_string(),
+                version: String::new(),
+                artifacts: Vec::new(),
+            },
+            "0.5.1",
+            planned
+                .iter()
+                .map(|artifact| artifact.info.clone())
+                .collect(),
+        );
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(
+            planned[0].info.path,
+            "pishoo/0.5.1/pishoo-common-0.5.1-1.noarch.rpm"
+        );
+        assert_eq!(merged.artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_differing_common_rpm_artifacts_fail() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let first = temp.path().join("x86_64/pishoo-common-0.5.1-1.noarch.rpm");
+        let second = temp.path().join("aarch64/pishoo-common-0.5.1-1.noarch.rpm");
+        std::fs::create_dir_all(first.parent().expect("first should have parent"))
+            .expect("first parent should be created");
+        std::fs::create_dir_all(second.parent().expect("second should have parent"))
+            .expect("second parent should be created");
+        std::fs::write(&first, "common rpm one").expect("first rpm should be written");
+        std::fs::write(&second, "common rpm two").expect("second rpm should be written");
+        let rpms = vec![
+            RpmSource {
+                package: "pishoo-common".to_string(),
+                version: "0.5.1".to_string(),
+                filename: "pishoo-common-0.5.1-1.noarch.rpm".to_string(),
+                source: first,
+            },
+            RpmSource {
+                package: "pishoo-common".to_string(),
+                version: "0.5.1".to_string(),
+                filename: "pishoo-common-0.5.1-1.noarch.rpm".to_string(),
+                source: second,
+            },
+        ];
+
+        let error = plan_rpm_artifacts(&rpms, "0.5.1")
+            .await
+            .expect_err("differing common rpms should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "duplicate pishoo-common rpm artifact pishoo/0.5.1/pishoo-common-0.5.1-1.noarch.rpm has different sha256"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_identical_arch_specific_rpm_artifacts_still_fail() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let first = temp.path().join("x86_64-a/pishoo-0.5.1-1.x86_64.rpm");
+        let second = temp.path().join("x86_64-b/pishoo-0.5.1-1.x86_64.rpm");
+        std::fs::create_dir_all(first.parent().expect("first should have parent"))
+            .expect("first parent should be created");
+        std::fs::create_dir_all(second.parent().expect("second should have parent"))
+            .expect("second parent should be created");
+        std::fs::write(&first, "same arch rpm").expect("first rpm should be written");
+        std::fs::write(&second, "same arch rpm").expect("second rpm should be written");
         let rpms = vec![
             RpmSource {
                 package: "pishoo".to_string(),
                 version: "0.5.1".to_string(),
                 filename: "pishoo-0.5.1-1.x86_64.rpm".to_string(),
-                source: PathBuf::from(
-                    "x86_64-unknown-linux-gnu/release/rpm/pishoo-0.5.1-1.x86_64.rpm",
-                ),
+                source: first,
             },
             RpmSource {
                 package: "pishoo".to_string(),
                 version: "0.5.1".to_string(),
                 filename: "pishoo-0.5.1-1.x86_64.rpm".to_string(),
-                source: PathBuf::from("common/release/rpm/pishoo-0.5.1-1.x86_64.rpm"),
+                source: second,
             },
         ];
 
-        let error =
-            validate_unique_artifact_paths(&rpms, "0.5.1").expect_err("duplicates should fail");
+        let error = plan_rpm_artifacts(&rpms, "0.5.1")
+            .await
+            .expect_err("arch-specific duplicate should fail");
 
         assert!(
             error
@@ -321,7 +442,6 @@ mod tests {
                 .starts_with("duplicate rpm artifact path pishoo/0.5.1/pishoo-0.5.1-1.x86_64.rpm")
         );
     }
-
     #[test]
     fn manifest_merge_preserves_non_rpm_entries_and_replaces_stale_rpm() {
         let existing = ReleaseManifest {
