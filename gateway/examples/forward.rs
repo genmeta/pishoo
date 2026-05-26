@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dhttp::endpoint::Endpoint;
 use gateway::{forward, parse};
-use snafu::{FromString, OptionExt, Whatever, whatever};
+use snafu::{FromString, OptionExt, ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -64,7 +64,12 @@ async fn main() -> Result<(), Whatever> {
     }
 
     // Build a DHTTP endpoint for outbound proxying.
-    let client = Arc::new(Endpoint::builder().build().await);
+    let client = Arc::new(
+        Endpoint::builder()
+            .build()
+            .await
+            .whatever_context("failed to build outbound dhttp endpoint")?,
+    );
 
     let mut handler = JoinSet::new();
 

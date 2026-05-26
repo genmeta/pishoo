@@ -7,12 +7,11 @@
 use std::os::fd::AsRawFd;
 #[cfg(feature = "sshd")]
 use std::process::Stdio;
-use std::{convert::Infallible, sync::Arc};
+use std::sync::Arc;
 
 use dhttp::{ddns::DnsScheme, endpoint::Endpoint};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
-#[cfg(feature = "sshd")]
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 use crate::{
     hypervisor::state::{RegisterError, ServiceOwner},
@@ -43,6 +42,15 @@ pub enum LocalSpawnSessionError {
     CreateSocketpair { source: std::io::Error },
     #[snafu(display("failed to spawn session process"))]
     Spawn { source: std::io::Error },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum LocalConnectorError {
+    #[snafu(display("failed to build connector endpoint"))]
+    BuildEndpoint {
+        source: dhttp::endpoint::InvalidEndpointIdentityError,
+    },
 }
 
 #[cfg(feature = "sshd")]
@@ -129,7 +137,7 @@ impl gateway::control_plane::ProvideListener for LocalControlPlane {
 
 impl gateway::control_plane::ProvideConnector for LocalControlPlane {
     type Connector = Arc<Endpoint>;
-    type ConnectError = Infallible;
+    type ConnectError = LocalConnectorError;
 
     async fn connector(
         &self,
@@ -142,7 +150,8 @@ impl gateway::control_plane::ProvideConnector for LocalControlPlane {
             .dns(DnsScheme::Mdns)
             .dns(DnsScheme::System)
             .build()
-            .await;
+            .await
+            .context(local_connector_error::BuildEndpointSnafu)?;
         Ok(Arc::new(endpoint))
     }
 }

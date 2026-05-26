@@ -11,11 +11,14 @@ use dhttp::{
 use gateway::control_plane::ListenRequest;
 use h3x::{dquic::binds::BindPattern, quic::Listen as _};
 use http::Uri;
-use snafu::IntoError;
+use snafu::{IntoError, ResultExt};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
-use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner, register_error};
+use super::{
+    BuildEndpointResolverError, RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner,
+    build_endpoint_resolver_error, register_error,
+};
 use crate::listen::RegisteredEndpoint;
 
 impl RootState {
@@ -127,6 +130,13 @@ impl RootState {
             .resolver(Arc::new(resolver))
             .build()
             .await;
+        let endpoint = match endpoint {
+            Ok(endpoint) => endpoint,
+            Err(source) => {
+                self.servers.write().await.entries.remove(&server_name);
+                return Err(register_error::BuildEndpointSnafu.into_error(source));
+            }
+        };
         let shutdown_token = CancellationToken::new();
 
         let publisher = match endpoint.publisher_with_options(request.publish_options) {
@@ -285,7 +295,7 @@ impl RootState {
         identity: Arc<Identity>,
         bind_patterns: Arc<Vec<BindPattern>>,
         dns_resolver_url: Option<Uri>,
-    ) -> std::io::Result<Resolvers> {
+    ) -> Result<Resolvers, BuildEndpointResolverError> {
         let dns_endpoint = Endpoint::builder()
             .network(self.network.clone())
             .identity(identity)
@@ -293,7 +303,8 @@ impl RootState {
             .bind(bind_patterns.clone())
             .resolver(Arc::new(dhttp::dquic::resolver::handy::SystemResolver))
             .build()
-            .await;
+            .await
+            .context(build_endpoint_resolver_error::BuildEndpointSnafu)?;
 
         let base_url = dns_resolver_url
             .map(|url| url.to_string())
@@ -303,7 +314,8 @@ impl RootState {
             .mdns(self.network.clone(), bind_patterns)
             .await
             .system()
-            .h3_with_base_url(base_url, dns_endpoint.as_h3())?;
+            .h3_with_base_url(base_url, dns_endpoint.as_h3())
+            .context(build_endpoint_resolver_error::H3ResolverSnafu)?;
 
         Ok(builder.build())
     }

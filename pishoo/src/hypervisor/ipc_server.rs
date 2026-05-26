@@ -61,27 +61,28 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let server_name = request.identity.name().as_full().to_owned();
         let owner = ServiceOwner::Worker(self.caller_pid);
 
-        let adapter =
-            self.state
-                .register_listener(owner, request)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        caller_pid = %self.caller_pid,
-                        %server_name,
-                        error = %snafu::Report::from_error(&error),
-                        "listen request failed"
-                    );
-                    match error {
-                        RegisterError::DuplicateListen | RegisterError::ConflictedName => {
-                            ListenError::Conflict
-                        }
-                        RegisterError::BuildResolver { .. }
-                        | RegisterError::CreatePublisher { .. } => ListenError::Internal {
-                            message: format!("failed to prepare endpoint for `{server_name}`"),
-                        },
+        let adapter = self
+            .state
+            .register_listener(owner, request)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    caller_pid = %self.caller_pid,
+                    %server_name,
+                    error = %snafu::Report::from_error(&error),
+                    "listen request failed"
+                );
+                match error {
+                    RegisterError::DuplicateListen | RegisterError::ConflictedName => {
+                        ListenError::Conflict
                     }
-                })?;
+                    RegisterError::BuildResolver { .. }
+                    | RegisterError::BuildEndpoint { .. }
+                    | RegisterError::CreatePublisher { .. } => ListenError::Internal {
+                        message: format!("failed to prepare endpoint for `{server_name}`"),
+                    },
+                }
+            })?;
 
         // Wrap adapter in ListenAdapter for IPC capability forwarding.
         let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
@@ -114,16 +115,25 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         }
 
         // Build a DHTTP endpoint with the requested client identity (if any).
-        let endpoint = Arc::new(
-            Endpoint::builder()
-                .network(self.state.network.clone())
-                .maybe_identity(request.identity.map(Arc::new))
-                .dns(DnsScheme::H3)
-                .dns(DnsScheme::Mdns)
-                .dns(DnsScheme::System)
-                .build()
-                .await,
-        );
+        let endpoint = Endpoint::builder()
+            .network(self.state.network.clone())
+            .maybe_identity(request.identity.map(Arc::new))
+            .dns(DnsScheme::H3)
+            .dns(DnsScheme::Mdns)
+            .dns(DnsScheme::System)
+            .build()
+            .await;
+        let endpoint = Arc::new(match endpoint {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return Err(ConnectError::Internal {
+                    message: format!(
+                        "failed to build connector endpoint: {}",
+                        snafu::Report::from_error(&error)
+                    ),
+                });
+            }
+        });
 
         // Wrap the endpoint in ConnectAdapter for IPC capability forwarding.
         let connect_adapter = ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_sender.clone());

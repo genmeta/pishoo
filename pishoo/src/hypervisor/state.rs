@@ -46,11 +46,26 @@ pub enum RegisterError {
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
     #[snafu(display("failed to build dns resolver for registered endpoint"))]
-    BuildResolver { source: std::io::Error },
+    BuildResolver { source: BuildEndpointResolverError },
+    #[snafu(display("failed to build registered endpoint"))]
+    BuildEndpoint {
+        source: dhttp::endpoint::InvalidEndpointIdentityError,
+    },
     #[snafu(display("failed to create dns publisher for registered endpoint"))]
     CreatePublisher {
         source: dhttp::ddns::CreatePublisherError,
     },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module(build_endpoint_resolver_error))]
+pub enum BuildEndpointResolverError {
+    #[snafu(display("failed to build dns endpoint"))]
+    BuildEndpoint {
+        source: dhttp::endpoint::InvalidEndpointIdentityError,
+    },
+    #[snafu(display("failed to attach h3 resolver"))]
+    H3Resolver { source: std::io::Error },
 }
 
 /// Identifies the owner of a server_name registration.
