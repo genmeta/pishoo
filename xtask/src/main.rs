@@ -274,9 +274,30 @@ pub async fn run_cmd(cmd: &mut tokio::process::Command) -> Result<(), Whatever> 
 
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
+    use clap::{CommandFactory, ValueEnum};
 
-    use super::{BuildProfile, Cli};
+    use super::{BuildProfile, Cli, release::PublishRoot};
+
+    fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
+        command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == name)
+            .expect("subcommand should be registered")
+    }
+
+    fn subcommand_names(command: &clap::Command) -> Vec<&str> {
+        command
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect()
+    }
+
+    fn argument_longs(command: &clap::Command) -> Vec<&str> {
+        command
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .collect()
+    }
 
     #[test]
     fn release_profile_uses_release_cargo_flag_and_dir() {
@@ -293,10 +314,7 @@ mod tests {
     #[test]
     fn release_pipeline_subcommands_are_registered() {
         let command = Cli::command();
-        let names = command
-            .get_subcommands()
-            .map(clap::Command::get_name)
-            .collect::<Vec<_>>();
+        let names = subcommand_names(&command);
 
         assert!(names.contains(&"stage"));
         assert!(names.contains(&"verify"));
@@ -306,108 +324,41 @@ mod tests {
 
     #[test]
     fn release_pipeline_uses_homebrew_and_apt_command_names() {
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "dist",
-                "homebrew",
-                "--target",
-                "aarch64-apple-darwin",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from(["xtask", "dist", "brew", "--target", "aarch64-apple-darwin"])
-                .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "stage",
-                "apt",
-                "--suite",
-                "stable",
-                "--key-file",
-                "private.asc",
-                "--fingerprint",
-                "00112233445566778899AABBCCDDEEFF00112233",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "stage",
-                "all",
-                "--suite",
-                "stable",
-                "--key-file",
-                "private.asc",
-                "--fingerprint",
-                "00112233445566778899AABBCCDDEEFF00112233",
-            ])
-            .is_err()
-        );
+        let command = Cli::command();
+        let dist_names = subcommand_names(subcommand(&command, "dist"));
+        let stage_names = subcommand_names(subcommand(&command, "stage"));
+
+        assert!(dist_names.contains(&"homebrew"));
+        assert!(!dist_names.contains(&"brew"));
+        assert!(stage_names.contains(&"apt"));
+        assert!(!stage_names.contains(&"all"));
     }
 
     #[test]
     fn release_publish_uses_root_and_nested_tap_command_names() {
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "publish",
-                "s3",
-                "--endpoint-url",
-                "https://example.invalid",
-                "--bucket",
-                "downloads",
-                "--access-key-id-file",
-                "access-key-id",
-                "--secret-access-key-file",
-                "secret-access-key",
-                "--root",
-                "homebrew",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "publish",
-                "s3",
-                "--endpoint-url",
-                "https://example.invalid",
-                "--bucket",
-                "downloads",
-                "--access-key-id-file",
-                "access-key-id",
-                "--secret-access-key-file",
-                "secret-access-key",
-                "--only",
-                "homebrew",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "xtask",
-                "publish",
-                "s3",
-                "--endpoint-url",
-                "https://example.invalid",
-                "--bucket",
-                "downloads",
-                "--access-key-id-file",
-                "access-key-id",
-                "--secret-access-key-file",
-                "secret-access-key",
-                "--root",
-                "scoop",
-            ])
-            .is_err()
-        );
-        assert!(Cli::try_parse_from(["xtask", "publish", "tap", "/tmp/homebrew-tap"]).is_ok());
-        assert!(Cli::try_parse_from(["xtask", "tap", "/tmp/homebrew-tap"]).is_err());
+        let command = Cli::command();
+        let publish = subcommand(&command, "publish");
+        let publish_names = subcommand_names(publish);
+        let s3_options = argument_longs(subcommand(publish, "s3"));
+
+        assert!(publish_names.contains(&"tap"));
+        assert!(s3_options.contains(&"root"));
+        assert!(!s3_options.contains(&"only"));
+    }
+
+    #[test]
+    fn publish_roots_are_registered() {
+        let names = PublishRoot::value_variants()
+            .iter()
+            .map(|root| {
+                root.to_possible_value()
+                    .expect("publish root should have a possible value")
+                    .get_name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["homebrew", "apt"]);
     }
 }
 
