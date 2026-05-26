@@ -24,9 +24,9 @@ use gateway::{
 use h3x::{
     connection::ConnectionBuilder,
     dhttp::settings::Settings,
+    endpoint::H3Endpoint,
     hyper::server::TowerService,
     quic::{self, Listen as _},
-    server::Servers,
 };
 use snafu::Report;
 use tokio::task::JoinSet;
@@ -236,29 +236,36 @@ pub async fn run_service<L>(
         #[cfg(feature = "sshd")]
         let builder = builder.protocol(dssh::protocol::Ssh3ProtocolFactory);
 
-        let mut servers = Servers::from_quic_listener()
-            .listener(listener)
-            .service(TowerService(service_stack))
+        let mut endpoint = H3Endpoint::builder()
+            .quic(listener)
             .builder(Arc::new(builder))
             .build();
+        let service = TowerService(service_stack);
 
         let cancel = shutdown.clone();
         tasks.spawn(
             async move {
                 tokio::select! {
-                    error = servers.run() => {
-                        tracing::warn!(
-                            %server_name,
-                            error = %Report::from_error(&error),
-                            "server stopped"
-                        );
+                    result = endpoint.serve(service) => {
+                        match result {
+                            Ok(()) => {
+                                tracing::warn!(%server_name, "server stopped");
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %server_name,
+                                    error = %Report::from_error(&error),
+                                    "server stopped"
+                                );
+                            }
+                        }
                     }
                     () = cancel.cancelled() => {
-                        // Intentionally not calling servers.shutdown() —
+                        // Intentionally not calling endpoint.shutdown() —
                         // preserve the underlying QUIC listener bindings.
                     }
                 }
-                let (_, listener, _, _) = servers.into_parts();
+                let listener = endpoint.into_quic();
                 (server_name, listener)
             }
             .in_current_span(),
