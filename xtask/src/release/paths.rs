@@ -15,6 +15,7 @@ pub struct CommonPaths {
     pub root: PathBuf,
     pub homebrew: PathBuf,
     pub apt: PathBuf,
+    pub rpm: PathBuf,
     pub manifest: PathBuf,
 }
 
@@ -23,6 +24,7 @@ impl CommonPaths {
         Self {
             homebrew: root.join("homebrew"),
             apt: root.join("apt"),
+            rpm: root.join("rpm"),
             manifest: root.join("manifest.toml"),
             root,
         }
@@ -229,7 +231,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{normalize_s3_key, recreate_dir};
+    use super::{CommonPaths, normalize_s3_key, recreate_dir};
 
     fn temp_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -253,6 +255,13 @@ mod tests {
             normalize_s3_key(&path).unwrap(),
             "apt/pool/main/g/gmutils.deb"
         );
+    }
+
+    #[test]
+    fn common_paths_include_rpm_directory() {
+        let paths = CommonPaths::new(PathBuf::from("/tmp/target/common"));
+
+        assert_eq!(paths.rpm, PathBuf::from("/tmp/target/common/rpm"));
     }
 
     #[cfg(unix)]

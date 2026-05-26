@@ -13,8 +13,8 @@ use crate::{
     BuildProfile, DebTarget, Feature,
     container::{
         CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts, check_docker,
-        exec_in_container, force_remove_container, host_uid_gid, remove_container_if_exists,
-        resolve_siblings, start_container,
+        dhttp_bootstrap_from_env, exec_in_container, force_remove_container, host_uid_gid,
+        remove_container_if_exists, resolve_siblings, start_container,
     },
     package_version, target_dir,
 };
@@ -448,22 +448,8 @@ async fn build_one(
 
     mounts.extend(cargo_cache_mounts());
 
-    // Forward ROOT_CA into the container if set on the host.
-    let root_ca_env = if let Ok(host_path) = std::env::var("ROOT_CA") {
-        let host_path = std::path::Path::new(&host_path)
-            .canonicalize()
-            .whatever_context(format!("ROOT_CA path not found: {host_path}"))?;
-        mounts.push(Mount {
-            target: Some("/root-ca/root.crt".into()),
-            source: Some(host_path.to_string_lossy().into_owned()),
-            typ: Some(MountTypeEnum::BIND),
-            read_only: Some(true),
-            ..Default::default()
-        });
-        "export ROOT_CA=/root-ca/root.crt && "
-    } else {
-        ""
-    };
+    let bootstrap = dhttp_bootstrap_from_env()?;
+    mounts.extend(bootstrap.mounts);
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
@@ -530,7 +516,7 @@ async fn build_one(
         arch,
         gnu,
         profile,
-        root_ca_env,
+        &bootstrap.exports,
         &worker_env,
         &ssh_session_env,
         &cargo_features_env,
@@ -552,7 +538,7 @@ async fn build_one_inner(
     arch: &str,
     gnu: &str,
     profile: BuildProfile,
-    root_ca_env: &str,
+    dhttp_bootstrap_exports: &str,
     worker_env: &str,
     ssh_session_env: &str,
     cargo_features_env: &str,
@@ -589,7 +575,7 @@ export ZIG_TARGET={triple}.{ZIG_GLIBC_VERSION}
 export BUILD_PROFILE={profile_dir}
 export CARGO_PROFILE_ARGS="{cargo_profile_args}"
 export DEB_HOST_MULTIARCH={gnu}
-{root_ca_env}{worker_env}{ssh_session_env}{cargo_features_env}
+{dhttp_bootstrap_exports}{worker_env}{ssh_session_env}{cargo_features_env}
 SRC=/workspace/target/{triple}/{profile_dir}/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"

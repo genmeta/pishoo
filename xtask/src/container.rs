@@ -1,9 +1,11 @@
 //! Shared helpers for running cross-compilation builds inside Docker/Podman
 //! containers. Used by both the deb and rpm packaging flows.
 
+use std::collections::BTreeMap;
+
 use bollard::{
     Docker,
-    models::Mount,
+    models::{Mount, MountTypeEnum},
     query_parameters::{RemoveContainerOptionsBuilder, StartContainerOptions},
 };
 use futures_util::StreamExt;
@@ -16,6 +18,96 @@ pub(crate) const RUSTUP_HOME: &str = "/opt/rustup";
 /// Minimum glibc version baked into linux-gnu binaries via cargo-zigbuild.
 /// Chosen to match RHEL 8 / Ubuntu 18.04 / Debian 10 / openSUSE Leap 15 baselines.
 pub(crate) const ZIG_GLIBC_VERSION: &str = "2.28";
+
+pub(crate) const DHTTP_BOOTSTRAP_ROOT_CA_TARGET: &str = "/dhttp-bootstrap/root.crt";
+
+const DHTTP_ROOT_CA: &str = "DHTTP_ROOT_CA";
+const DHTTP_STUN_SERVER: &str = "DHTTP_STUN_SERVER";
+const DHTTP_H3_DNS_SERVER: &str = "DHTTP_H3_DNS_SERVER";
+const DHTTP_HTTP_DNS_SERVER: &str = "DHTTP_HTTP_DNS_SERVER";
+const DHTTP_MDNS_SERVICE: &str = "DHTTP_MDNS_SERVICE";
+
+const DHTTP_BOOTSTRAP_VARS: [&str; 5] = [
+    DHTTP_ROOT_CA,
+    DHTTP_STUN_SERVER,
+    DHTTP_H3_DNS_SERVER,
+    DHTTP_HTTP_DNS_SERVER,
+    DHTTP_MDNS_SERVICE,
+];
+
+const DHTTP_BOOTSTRAP_SCALAR_VARS: [&str; 4] = [
+    DHTTP_STUN_SERVER,
+    DHTTP_H3_DNS_SERVER,
+    DHTTP_HTTP_DNS_SERVER,
+    DHTTP_MDNS_SERVICE,
+];
+
+#[derive(Debug)]
+pub(crate) struct DhttpBootstrap {
+    pub(crate) exports: String,
+    pub(crate) mounts: Vec<Mount>,
+}
+
+pub(crate) fn dhttp_bootstrap_from_env() -> Result<DhttpBootstrap, Whatever> {
+    let mut values = BTreeMap::new();
+    for name in DHTTP_BOOTSTRAP_VARS {
+        if let Ok(value) = std::env::var(name) {
+            values.insert(name.to_string(), value);
+        }
+    }
+    dhttp_bootstrap_from_values(values)
+}
+
+pub(crate) fn dhttp_bootstrap_from_values(
+    values: BTreeMap<String, String>,
+) -> Result<DhttpBootstrap, Whatever> {
+    let mut exports = String::new();
+    let mut mounts = Vec::new();
+
+    if let Some(host_path) = values.get(DHTTP_ROOT_CA) {
+        if host_path.is_empty() {
+            snafu::whatever!("{DHTTP_ROOT_CA} must not be empty");
+        }
+        let host_path = std::path::Path::new(host_path)
+            .canonicalize()
+            .whatever_context(format!("{DHTTP_ROOT_CA} path not found: {host_path}"))?;
+        mounts.push(Mount {
+            target: Some(DHTTP_BOOTSTRAP_ROOT_CA_TARGET.to_string()),
+            source: Some(host_path.to_string_lossy().into_owned()),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        exports.push_str(&format!(
+            "export {DHTTP_ROOT_CA}={DHTTP_BOOTSTRAP_ROOT_CA_TARGET}\n"
+        ));
+    }
+
+    for name in DHTTP_BOOTSTRAP_SCALAR_VARS {
+        if let Some(value) = values.get(name) {
+            if value.is_empty() {
+                snafu::whatever!("{name} must not be empty");
+            }
+            exports.push_str(&format!("export {name}={}\n", shell_single_quote(value)));
+        }
+    }
+
+    Ok(DhttpBootstrap { exports, mounts })
+}
+
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
 
 pub(crate) async fn check_docker(docker: &Docker) -> Result<(), Whatever> {
     docker
@@ -177,4 +269,125 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
         out.push(Sibling { host, basename });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use bollard::models::MountTypeEnum;
+
+    use super::*;
+
+    #[test]
+    fn dhttp_bootstrap_exports_scalars_and_mounts_root_ca() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let root_ca = tempdir.path().join("root.crt");
+        std::fs::write(&root_ca, "test root ca").expect("write root ca");
+
+        let mut values = BTreeMap::new();
+        values.insert(
+            "DHTTP_ROOT_CA".to_string(),
+            root_ca.to_string_lossy().into_owned(),
+        );
+        values.insert(
+            "DHTTP_STUN_SERVER".to_string(),
+            "nat.genmeta.net:20004".to_string(),
+        );
+        values.insert(
+            "DHTTP_H3_DNS_SERVER".to_string(),
+            "https://dns.genmeta.net:4433".to_string(),
+        );
+        values.insert(
+            "DHTTP_HTTP_DNS_SERVER".to_string(),
+            "https://dns.genmeta.net".to_string(),
+        );
+        values.insert(
+            "DHTTP_MDNS_SERVICE".to_string(),
+            "_genmeta.local".to_string(),
+        );
+
+        let bootstrap = dhttp_bootstrap_from_values(values).expect("build bootstrap");
+
+        assert_eq!(bootstrap.mounts.len(), 1);
+        let mount = &bootstrap.mounts[0];
+        assert_eq!(
+            mount.target.as_deref(),
+            Some(DHTTP_BOOTSTRAP_ROOT_CA_TARGET)
+        );
+        assert_eq!(
+            mount.source.as_deref(),
+            Some(
+                root_ca
+                    .canonicalize()
+                    .expect("canonicalize root ca")
+                    .to_str()
+                    .expect("utf-8 path")
+            )
+        );
+        assert_eq!(mount.typ, Some(MountTypeEnum::BIND));
+        assert_eq!(mount.read_only, Some(true));
+
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_ROOT_CA=/dhttp-bootstrap/root.crt\n")
+        );
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_STUN_SERVER='nat.genmeta.net:20004'\n")
+        );
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_H3_DNS_SERVER='https://dns.genmeta.net:4433'\n")
+        );
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_HTTP_DNS_SERVER='https://dns.genmeta.net'\n")
+        );
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_MDNS_SERVICE='_genmeta.local'\n")
+        );
+    }
+
+    #[test]
+    fn dhttp_bootstrap_allows_missing_values() {
+        let bootstrap =
+            dhttp_bootstrap_from_values(BTreeMap::new()).expect("missing values are allowed");
+
+        assert!(bootstrap.exports.is_empty());
+        assert!(bootstrap.mounts.is_empty());
+    }
+
+    #[test]
+    fn dhttp_bootstrap_rejects_empty_root_ca() {
+        let mut values = BTreeMap::new();
+        values.insert("DHTTP_ROOT_CA".to_string(), String::new());
+
+        let error = dhttp_bootstrap_from_values(values).expect_err("empty value must fail");
+
+        assert_eq!(error.to_string(), "DHTTP_ROOT_CA must not be empty");
+    }
+
+    #[test]
+    fn dhttp_bootstrap_escapes_single_quotes_in_scalar_values() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "DHTTP_STUN_SERVER".to_string(),
+            "nat'genmeta.net:20004".to_string(),
+        );
+
+        let bootstrap = dhttp_bootstrap_from_values(values).expect("build bootstrap");
+
+        assert_eq!(
+            bootstrap.exports,
+            "export DHTTP_STUN_SERVER='nat'\\''genmeta.net:20004'\n"
+        );
+        assert!(bootstrap.mounts.is_empty());
+    }
 }
