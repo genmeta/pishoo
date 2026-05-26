@@ -28,8 +28,7 @@ pub struct ArtifactEntry {
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactRoot {
     Homebrew,
-    Scoop,
-    Ppa,
+    Apt,
 }
 
 pub async fn sha256_file(path: &Path) -> Result<String, Whatever> {

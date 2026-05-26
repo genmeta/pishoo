@@ -1,7 +1,7 @@
+pub mod apt;
 pub mod artifact;
 pub mod homebrew;
 pub mod paths;
-pub mod ppa;
 pub mod s3;
 pub mod tap;
 pub mod verify;
@@ -15,22 +15,17 @@ use snafu::Whatever;
 pub enum StageFormat {
     /// Stage Homebrew formulae and archives
     Homebrew,
-    /// Stage Ubuntu PPA artifacts
-    Ppa {
+    /// Stage APT repository packages and metadata
+    Apt {
         #[command(flatten)]
-        options: PpaOptions,
-    },
-    /// Stage all supported formats
-    All {
-        #[command(flatten)]
-        options: PpaOptions,
+        options: AptOptions,
     },
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct PpaOptions {
+pub struct AptOptions {
     /// APT suite name
-    #[arg(long, default_value = "genmeta")]
+    #[arg(long)]
     pub suite: String,
     /// Package components to stage
     #[arg(long = "component", default_values_t = default_components())]
@@ -38,7 +33,7 @@ pub struct PpaOptions {
     /// ASCII-armored GPG private key file used to sign Release metadata
     #[arg(long)]
     pub key_file: PathBuf,
-    /// Expected signing key fingerprint or long key id
+    /// Expected full signing key fingerprint
     #[arg(long)]
     pub fingerprint: String,
     /// Optional file containing the GPG key passphrase
@@ -56,6 +51,11 @@ pub enum PublishTarget {
         #[command(flatten)]
         options: S3Options,
     },
+    /// Publish Homebrew formulae to a tap checkout
+    Tap {
+        #[command(flatten)]
+        options: TapOptions,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -72,13 +72,28 @@ pub struct S3Options {
     /// File containing AWS secret access key
     #[arg(long)]
     pub secret_access_key_file: PathBuf,
-    /// Upload only selected roots: homebrew, scoop, ppa
-    #[arg(long, value_enum, value_delimiter = ',')]
-    pub only: Vec<PublishRoot>,
+    /// Upload selected staged roots: homebrew, apt
+    #[arg(long = "root", value_enum, value_delimiter = ',')]
+    pub roots: Vec<PublishRoot>,
     /// Remote prefix for APT repository files
-    #[arg(long, default_value = "ppa/genmeta")]
-    pub apt_prefix: String,
+    #[arg(long)]
+    pub apt_prefix: Option<String>,
     /// Print planned uploads without writing to S3
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TapOptions {
+    /// Homebrew tap repository checkout path
+    pub repo: PathBuf,
+    /// Commit changes after copying formulae
+    #[arg(long)]
+    pub commit: bool,
+    /// Push the tap repository after committing
+    #[arg(long)]
+    pub push: bool,
+    /// Print planned tap updates without mutating the repository
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -87,18 +102,15 @@ pub struct S3Options {
 pub enum PublishRoot {
     /// target/common/homebrew
     Homebrew,
-    /// target/common/scoop
-    Scoop,
-    /// target/common/ppa
-    Ppa,
+    /// target/common/apt
+    Apt,
 }
 
 impl std::fmt::Display for PublishRoot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Homebrew => formatter.write_str("homebrew"),
-            Self::Scoop => formatter.write_str("scoop"),
-            Self::Ppa => formatter.write_str("ppa"),
+            Self::Apt => formatter.write_str("apt"),
         }
     }
 }
@@ -106,11 +118,7 @@ impl std::fmt::Display for PublishRoot {
 pub async fn stage(format: StageFormat) -> Result<(), Whatever> {
     match format {
         StageFormat::Homebrew => homebrew::stage().await,
-        StageFormat::Ppa { options } => ppa::stage(options).await,
-        StageFormat::All { options } => {
-            homebrew::stage().await?;
-            ppa::stage(options).await
-        }
+        StageFormat::Apt { options } => apt::stage(options).await,
     }
 }
 
@@ -121,17 +129,10 @@ pub async fn verify(options: VerifyOptions) -> Result<(), Whatever> {
 pub async fn publish(target: PublishTarget) -> Result<(), Whatever> {
     match target {
         PublishTarget::S3 { options } => s3::publish(options).await,
+        PublishTarget::Tap { options } => tap::publish(options).await,
     }
 }
 
-pub async fn tap(repo: PathBuf, commit: bool, push: bool) -> Result<(), Whatever> {
-    tap::update(repo, commit, push).await
-}
-
 fn default_components() -> Vec<String> {
-    vec![
-        "main".to_owned(),
-        "contrib".to_owned(),
-        "non-free".to_owned(),
-    ]
+    vec!["main".to_owned()]
 }

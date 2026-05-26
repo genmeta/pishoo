@@ -1,16 +1,13 @@
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{io::Write, path::Path};
 
 use snafu::{OptionExt, ResultExt, Whatever};
 use tracing::info;
 
-use super::paths::common_paths;
+use super::{TapOptions, paths::common_paths};
 
-pub async fn update(repo: PathBuf, commit: bool, push: bool) -> Result<(), Whatever> {
-    validate_options(commit, push)?;
-    ensure_git_repo(&repo).await?;
+pub async fn publish(options: TapOptions) -> Result<(), Whatever> {
+    validate_options(options.commit, options.push, options.dry_run)?;
+    ensure_git_repo(&options.repo).await?;
     let homebrew = common_paths()?.homebrew;
     snafu::ensure_whatever!(
         tokio::fs::try_exists(&homebrew)
@@ -20,24 +17,40 @@ pub async fn update(repo: PathBuf, commit: bool, push: bool) -> Result<(), Whate
         homebrew.display()
     );
 
-    let formulae = copy_formulae(&homebrew, &repo).await?;
-    print_git_diff(&repo, &formulae).await?;
-    if commit {
-        run_git_with_formulae(&repo, &["add"], &formulae).await?;
+    let formulae = collect_formulae(&homebrew).await?;
+    if options.dry_run {
+        for formula in formulae {
+            info!(
+                source = %homebrew.join(&formula).display(),
+                destination = %options.repo.join(&formula).display(),
+                "would copy homebrew formula to tap"
+            );
+        }
+        return Ok(());
+    }
+
+    copy_formulae(&homebrew, &options.repo, &formulae).await?;
+    print_git_diff(&options.repo, &formulae).await?;
+    if options.commit {
+        run_git_with_formulae(&options.repo, &["add"], &formulae).await?;
         run_git(
-            &repo,
+            &options.repo,
             &["commit", "-m", "release: update Homebrew formulae"],
         )
         .await?;
     }
-    if push {
-        run_git(&repo, &["push"]).await?;
+    if options.push {
+        run_git(&options.repo, &["push"]).await?;
     }
     Ok(())
 }
 
-fn validate_options(commit: bool, push: bool) -> Result<(), Whatever> {
+fn validate_options(commit: bool, push: bool, dry_run: bool) -> Result<(), Whatever> {
     snafu::ensure_whatever!(commit || !push, "tap push requires --commit");
+    snafu::ensure_whatever!(
+        !dry_run || (!commit && !push),
+        "tap dry-run cannot be combined with --commit or --push"
+    );
     Ok(())
 }
 
@@ -53,7 +66,7 @@ async fn ensure_git_repo(repo: &Path) -> Result<(), Whatever> {
     Ok(())
 }
 
-async fn copy_formulae(homebrew: &Path, repo: &Path) -> Result<Vec<String>, Whatever> {
+async fn collect_formulae(homebrew: &Path) -> Result<Vec<String>, Whatever> {
     let mut formulae = Vec::new();
     let mut entries = tokio::fs::read_dir(homebrew)
         .await
@@ -78,20 +91,27 @@ async fn copy_formulae(homebrew: &Path, repo: &Path) -> Result<Vec<String>, What
             .and_then(|name| name.to_str())
             .whatever_context("failed to read formula filename as utf-8")?
             .to_string();
-        let destination = repo.join(&filename);
-        tokio::fs::copy(&path, &destination)
-            .await
-            .whatever_context(format!(
-                "failed to copy {} to {}",
-                path.display(),
-                destination.display()
-            ))?;
-        info!(formula = %filename, "copied homebrew formula to tap");
         formulae.push(filename);
     }
     snafu::ensure_whatever!(!formulae.is_empty(), "no staged homebrew formulae found");
     formulae.sort();
     Ok(formulae)
+}
+
+async fn copy_formulae(homebrew: &Path, repo: &Path, formulae: &[String]) -> Result<(), Whatever> {
+    for formula in formulae {
+        let source = homebrew.join(formula);
+        let destination = repo.join(formula);
+        tokio::fs::copy(&source, &destination)
+            .await
+            .whatever_context(format!(
+                "failed to copy {} to {}",
+                source.display(),
+                destination.display()
+            ))?;
+        info!(formula = %formula, "copied homebrew formula to tap");
+    }
+    Ok(())
 }
 
 async fn print_git_diff(repo: &Path, formulae: &[String]) -> Result<(), Whatever> {
@@ -143,13 +163,25 @@ mod tests {
 
     #[test]
     fn push_requires_commit() {
-        let error = validate_options(false, true).expect_err("push without commit should fail");
+        let error =
+            validate_options(false, true, false).expect_err("push without commit should fail");
 
         assert_eq!(error.to_string(), "tap push requires --commit");
     }
 
     #[test]
     fn commit_with_push_is_valid() {
-        validate_options(true, true).expect("push with commit should be valid");
+        validate_options(true, true, false).expect("push with commit should be valid");
+    }
+
+    #[test]
+    fn dry_run_rejects_mutating_flags() {
+        let error =
+            validate_options(true, false, true).expect_err("dry run with commit should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "tap dry-run cannot be combined with --commit or --push"
+        );
     }
 }

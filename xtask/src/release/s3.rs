@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{Client, config::Region, primitives::ByteStream};
-use snafu::{ResultExt, Whatever};
+use snafu::{OptionExt, ResultExt, Whatever};
 use tracing::info;
 use walkdir::WalkDir;
 
@@ -16,7 +16,7 @@ struct PlannedUpload {
 
 pub async fn publish(options: S3Options) -> Result<(), Whatever> {
     let common = common_paths()?.root;
-    let uploads = plan_uploads(&common, &options.only, &options.apt_prefix)?;
+    let uploads = plan_uploads(&common, &options.roots, options.apt_prefix.as_deref())?;
     if options.dry_run {
         for upload in uploads {
             info!(
@@ -76,21 +76,24 @@ async fn client(options: &S3Options) -> Result<Client, Whatever> {
 
 fn plan_uploads(
     common: &Path,
-    only: &[PublishRoot],
-    apt_prefix: &str,
+    roots: &[PublishRoot],
+    apt_prefix: Option<&str>,
 ) -> Result<Vec<PlannedUpload>, Whatever> {
     let mut uploads = Vec::new();
-    for root in selected_roots(only) {
-        let directory = match root {
-            PublishRoot::Homebrew => common.join("homebrew"),
-            PublishRoot::Scoop => common.join("scoop"),
-            PublishRoot::Ppa => common.join("ppa"),
-        };
+    let explicit_roots = !roots.is_empty();
+    for root in selected_roots(roots) {
+        let directory = root_directory(common, root);
         if !directory.exists() {
+            snafu::ensure_whatever!(
+                !explicit_roots,
+                "requested publish root {root} is missing at {}",
+                directory.display()
+            );
             continue;
         }
         uploads.extend(plan_root_uploads(common, root, apt_prefix)?);
     }
+    snafu::ensure_whatever!(!uploads.is_empty(), "no staged artifacts found to publish");
     uploads.sort_by(|left, right| {
         upload_order(left)
             .cmp(&upload_order(right))
@@ -99,23 +102,22 @@ fn plan_uploads(
     Ok(uploads)
 }
 
-fn selected_roots(only: &[PublishRoot]) -> Vec<PublishRoot> {
-    if only.is_empty() {
-        vec![PublishRoot::Homebrew, PublishRoot::Scoop, PublishRoot::Ppa]
+fn selected_roots(roots: &[PublishRoot]) -> Vec<PublishRoot> {
+    if roots.is_empty() {
+        vec![PublishRoot::Homebrew, PublishRoot::Apt]
     } else {
-        only.to_vec()
+        roots.to_vec()
     }
 }
 
 fn plan_root_uploads(
     common: &Path,
     root: PublishRoot,
-    apt_prefix: &str,
+    apt_prefix: Option<&str>,
 ) -> Result<Vec<PlannedUpload>, Whatever> {
     let (directory, key_prefix) = match root {
         PublishRoot::Homebrew => (common.join("homebrew"), "homebrew".to_string()),
-        PublishRoot::Scoop => (common.join("scoop"), "scoop".to_string()),
-        PublishRoot::Ppa => (common.join("ppa"), trim_slashes(apt_prefix)),
+        PublishRoot::Apt => (common.join("apt"), require_apt_prefix(apt_prefix)?),
     };
 
     let mut uploads = Vec::new();
@@ -132,6 +134,20 @@ fn plan_root_uploads(
         });
     }
     Ok(uploads)
+}
+
+fn root_directory(common: &Path, root: PublishRoot) -> PathBuf {
+    match root {
+        PublishRoot::Homebrew => common.join("homebrew"),
+        PublishRoot::Apt => common.join("apt"),
+    }
+}
+
+fn require_apt_prefix(apt_prefix: Option<&str>) -> Result<String, Whatever> {
+    let prefix = apt_prefix.whatever_context("apt prefix is required when publishing apt root")?;
+    let prefix = trim_slashes(prefix);
+    snafu::ensure_whatever!(!prefix.is_empty(), "apt prefix must not be empty");
+    Ok(prefix)
 }
 
 fn trim_slashes(value: &str) -> String {
@@ -173,21 +189,21 @@ mod tests {
     use crate::release::PublishRoot;
 
     #[test]
-    fn ppa_pool_file_maps_under_apt_prefix() {
+    fn apt_pool_file_maps_under_explicit_apt_prefix() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let common = temp.path().join("common");
-        let deb = common.join("ppa").join("pool/main/g/gmutils/file.deb");
+        let deb = common.join("apt").join("pool/main/p/pishoo/file.deb");
         std::fs::create_dir_all(deb.parent().expect("deb should have a parent"))
             .expect("deb parent should be created");
         std::fs::write(&deb, "deb").expect("deb should be written");
 
-        let uploads =
-            plan_uploads(&common, &[PublishRoot::Ppa], "ppa/genmeta").expect("uploads should plan");
+        let uploads = plan_uploads(&common, &[PublishRoot::Apt], Some("releases/apt"))
+            .expect("uploads should plan");
 
         assert!(
             uploads
                 .iter()
-                .any(|upload| upload.key == "ppa/genmeta/pool/main/g/gmutils/file.deb")
+                .any(|upload| upload.key == "releases/apt/pool/main/p/pishoo/file.deb")
         );
     }
 
@@ -195,34 +211,76 @@ mod tests {
     fn inrelease_sorts_after_release_gpg() {
         let release_gpg = PlannedUpload {
             path: "Release.gpg".into(),
-            key: "ppa/genmeta/dists/genmeta/Release.gpg".to_string(),
+            key: "apt/stable/dists/stable/Release.gpg".to_string(),
         };
         let in_release = PlannedUpload {
             path: "InRelease".into(),
-            key: "ppa/genmeta/dists/genmeta/InRelease".to_string(),
+            key: "apt/stable/dists/stable/InRelease".to_string(),
         };
 
         assert!(upload_order(&release_gpg) < upload_order(&in_release));
     }
 
     #[test]
-    fn only_homebrew_excludes_scoop_and_ppa_roots() {
+    fn explicit_homebrew_root_excludes_apt_root() {
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let common = temp.path().join("common");
         for path in [
-            common.join("homebrew/gmutils.rb"),
-            common.join("scoop/gmutils.json"),
-            common.join("ppa/dists/genmeta/InRelease"),
+            common.join("homebrew/pishoo.rb"),
+            common.join("apt/dists/stable/InRelease"),
         ] {
             std::fs::create_dir_all(path.parent().expect("path should have a parent"))
                 .expect("parent should be created");
             std::fs::write(path, "artifact").expect("artifact should be written");
         }
 
-        let uploads = plan_uploads(&common, &[PublishRoot::Homebrew], "ppa/genmeta")
-            .expect("uploads should plan");
+        let uploads =
+            plan_uploads(&common, &[PublishRoot::Homebrew], None).expect("uploads should plan");
 
         assert_eq!(uploads.len(), 1);
-        assert_eq!(uploads[0].key, "homebrew/gmutils.rb");
+        assert_eq!(uploads[0].key, "homebrew/pishoo.rb");
+    }
+
+    #[test]
+    fn explicit_missing_root_fails() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let common = temp.path().join("common");
+
+        let error = plan_uploads(&common, &[PublishRoot::Homebrew], None)
+            .expect_err("missing explicit root should fail");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("requested publish root homebrew is missing at")
+        );
+    }
+
+    #[test]
+    fn empty_publish_plan_fails() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let common = temp.path().join("common");
+
+        let error = plan_uploads(&common, &[], None).expect_err("empty plan should fail");
+
+        assert_eq!(error.to_string(), "no staged artifacts found to publish");
+    }
+
+    #[test]
+    fn apt_root_requires_explicit_apt_prefix() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let common = temp.path().join("common");
+        let release = common.join("apt/dists/stable/InRelease");
+        std::fs::create_dir_all(release.parent().expect("release should have a parent"))
+            .expect("release parent should be created");
+        std::fs::write(release, "release").expect("release should be written");
+
+        let error = plan_uploads(&common, &[PublishRoot::Apt], None)
+            .expect_err("apt root without prefix should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "apt prefix is required when publishing apt root"
+        );
     }
 }

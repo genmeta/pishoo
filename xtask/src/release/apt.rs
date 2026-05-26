@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tracing::info;
 
 use super::{
-    PpaOptions,
+    AptOptions,
     artifact::{
         ArtifactEntry, ArtifactRoot, ReleaseManifest, copy_artifact, read_manifest, relative_path,
         sha256_file, write_manifest,
@@ -43,7 +43,7 @@ struct BinaryMetadataPaths {
     release: PathBuf,
 }
 
-pub async fn stage(options: PpaOptions) -> Result<(), Whatever> {
+pub async fn stage(options: AptOptions) -> Result<(), Whatever> {
     info!(suite = %options.suite, "starting apt repository stage");
     validate_options(&options)?;
     ensure_apt_ftparchive().await?;
@@ -53,7 +53,7 @@ pub async fn stage(options: PpaOptions) -> Result<(), Whatever> {
     let debs = discover_debs(&target_dir).await?;
     let version = release_version(&debs)?;
     let manifest = read_existing_manifest(&paths.manifest).await?;
-    let staging = paths.root.join("ppa.staging");
+    let staging = paths.root.join("apt.staging");
     recreate_dir(&staging).await?;
 
     let mut artifact_entries = Vec::new();
@@ -75,24 +75,24 @@ pub async fn stage(options: PpaOptions) -> Result<(), Whatever> {
         artifact_entries.push(artifact_entry(&staging, &metadata_file, false).await?);
     }
 
-    let manifest = merge_ppa_manifest(manifest, &version, artifact_entries);
+    let manifest = merge_apt_manifest(manifest, &version, artifact_entries);
     let manifest_staging = paths.root.join("manifest.toml.staging");
     write_manifest(&manifest_staging, &manifest).await?;
 
     promote_staged_outputs(
-        "ppa",
+        "apt",
         &staging,
-        &paths.ppa,
+        &paths.apt,
         &manifest_staging,
         &paths.manifest,
     )
     .await?;
 
-    info!(path = %paths.ppa.display(), "finished apt repository stage");
+    info!(path = %paths.apt.display(), "finished apt repository stage");
     Ok(())
 }
 
-fn validate_options(options: &PpaOptions) -> Result<(), Whatever> {
+fn validate_options(options: &AptOptions) -> Result<(), Whatever> {
     validate_path_segment("suite", &options.suite)?;
     snafu::ensure_whatever!(
         !options.components.is_empty(),
@@ -238,7 +238,7 @@ fn release_version(debs: &[DebSource]) -> Result<String, Whatever> {
 
 async fn generate_binary_metadata(
     repository: &Path,
-    options: &PpaOptions,
+    options: &AptOptions,
 ) -> Result<Vec<PathBuf>, Whatever> {
     let mut metadata_files = Vec::new();
     for component in &options.components {
@@ -362,7 +362,7 @@ async fn ensure_apt_ftparchive() -> Result<(), Whatever> {
 
 async fn sign_suite_release(
     repository: &Path,
-    options: &PpaOptions,
+    options: &AptOptions,
 ) -> Result<Vec<PathBuf>, Whatever> {
     let homedir = tempfile::tempdir().whatever_context("failed to create temporary gpg home")?;
     import_key(&homedir, &options.key_file).await?;
@@ -444,10 +444,14 @@ async fn verify_fingerprint(homedir: &TempDir, fingerprint: &str) -> Result<(), 
         fields
             .nth(8)
             .map(normalize_fingerprint)
-            .is_some_and(|actual| actual.ends_with(&expected))
+            .is_some_and(|actual| fingerprint_matches(&actual, &expected))
     });
     snafu::ensure_whatever!(matched, "gpg fingerprint did not match imported key");
     Ok(())
+}
+
+fn fingerprint_matches(actual: &str, expected: &str) -> bool {
+    !expected.is_empty() && actual == expected
 }
 
 fn normalize_fingerprint(value: &str) -> String {
@@ -458,7 +462,7 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn base_gpg_sign_command(homedir: &TempDir, options: &PpaOptions) -> tokio::process::Command {
+fn base_gpg_sign_command(homedir: &TempDir, options: &AptOptions) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("gpg");
     command
         .arg("--batch")
@@ -481,7 +485,7 @@ async fn artifact_entry(
     immutable: bool,
 ) -> Result<ArtifactEntry, Whatever> {
     Ok(ArtifactEntry {
-        root: ArtifactRoot::Ppa,
+        root: ArtifactRoot::Apt,
         path: relative_path(root, file)?,
         sha256: sha256_file(file).await?,
         immutable,
@@ -504,7 +508,7 @@ async fn read_existing_manifest(path: &Path) -> Result<ReleaseManifest, Whatever
     }
 }
 
-fn merge_ppa_manifest(
+fn merge_apt_manifest(
     mut manifest: ReleaseManifest,
     version: &str,
     artifacts: Vec<ArtifactEntry>,
@@ -513,7 +517,7 @@ fn merge_ppa_manifest(
     manifest.version = version.to_string();
     manifest
         .artifacts
-        .retain(|artifact| artifact.root != ArtifactRoot::Ppa);
+        .retain(|artifact| artifact.root != ArtifactRoot::Apt);
     manifest.artifacts.extend(artifacts);
     manifest
 }
@@ -521,8 +525,8 @@ fn merge_ppa_manifest(
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_metadata_paths, normalize_fingerprint, parse_deb_filename, pool_path,
-        validate_path_segment,
+        binary_metadata_paths, fingerprint_matches, normalize_fingerprint, parse_deb_filename,
+        pool_path, validate_path_segment,
     };
 
     #[test]
@@ -543,19 +547,19 @@ mod tests {
 
     #[test]
     fn binary_metadata_paths_use_apt_layout() {
-        let paths = binary_metadata_paths("genmeta", "main", "amd64");
+        let paths = binary_metadata_paths("stable", "main", "amd64");
 
         assert_eq!(
             paths.packages,
-            std::path::PathBuf::from("dists/genmeta/main/binary-amd64/Packages")
+            std::path::PathBuf::from("dists/stable/main/binary-amd64/Packages")
         );
         assert_eq!(
             paths.packages_gz,
-            std::path::PathBuf::from("dists/genmeta/main/binary-amd64/Packages.gz")
+            std::path::PathBuf::from("dists/stable/main/binary-amd64/Packages.gz")
         );
         assert_eq!(
             paths.release,
-            std::path::PathBuf::from("dists/genmeta/main/binary-amd64/Release")
+            std::path::PathBuf::from("dists/stable/main/binary-amd64/Release")
         );
     }
 
@@ -583,5 +587,17 @@ mod tests {
     #[test]
     fn fingerprint_normalization_removes_spaces_and_uppercases() {
         assert_eq!(normalize_fingerprint("ab cd ef"), "ABCDEF");
+    }
+
+    #[test]
+    fn fingerprint_matching_requires_full_fingerprint() {
+        assert!(fingerprint_matches(
+            "00112233445566778899AABBCCDDEEFF00112233",
+            "00112233445566778899AABBCCDDEEFF00112233"
+        ));
+        assert!(!fingerprint_matches(
+            "00112233445566778899AABBCCDDEEFF00112233",
+            "CCDDEEFF00112233"
+        ));
     }
 }
