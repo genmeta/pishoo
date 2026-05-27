@@ -36,6 +36,13 @@ use crate::{
     package_meta, target_dir,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpmArtifact {
+    pub target: String,
+    pub path: std::path::PathBuf,
+    pub features: Vec<String>,
+}
+
 const CARGO_NAME: &str = "pishoo";
 const PACKAGE_NAME: &str = "pishoo";
 const COMMON_PACKAGE_NAME: &str = "pishoo-common";
@@ -73,7 +80,7 @@ pub async fn run(
     targets: &[RpmTarget],
     features: &[Feature],
     siblings: &[std::path::PathBuf],
-) -> Result<(), Whatever> {
+) -> Result<Vec<RpmArtifact>, Whatever> {
     info!(target_count = targets.len(), "starting rpm dist build");
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
@@ -111,12 +118,14 @@ pub async fn run(
         );
     }
 
+    let mut artifacts = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        result.whatever_context("rpm build task panicked")??;
+        artifacts.extend(result.whatever_context("rpm build task panicked")??);
     }
 
     info!("finished rpm dist build");
-    Ok(())
+    artifacts.sort_by(|left, right| left.target.cmp(&right.target));
+    Ok(artifacts)
 }
 
 async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever> {
@@ -258,7 +267,7 @@ async fn build_one(
     target_dir: &std::path::Path,
     features: &[Feature],
     siblings: &[Sibling],
-) -> Result<(), Whatever> {
+) -> Result<Vec<RpmArtifact>, Whatever> {
     let arch = rpm_arch(triple)?;
     let libdir = sysroot_libdir(arch);
     info!(triple, arch, "ensuring build image");
@@ -337,7 +346,25 @@ async fn build_one(
     result?;
 
     info!(triple, out = %out_dir.display(), "produced rpm(s)");
-    Ok(())
+    let mut artifacts = Vec::new();
+    let mut entries = tokio::fs::read_dir(&out_dir)
+        .await
+        .whatever_context(format!("failed to read {}", out_dir.display()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .whatever_context(format!("failed to read entry in {}", out_dir.display()))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("rpm") {
+            artifacts.push(RpmArtifact {
+                target: triple.to_string(),
+                path,
+                features: crate::brew::feature_names(features),
+            });
+        }
+    }
+    Ok(artifacts)
 }
 
 #[allow(clippy::too_many_arguments)]

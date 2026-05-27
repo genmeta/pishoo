@@ -35,6 +35,14 @@ const BUILD_ATTEMPTS: usize = 2;
 /// Relative path from workspace root to the debian packaging source files.
 const DEBIAN_PKG_DIR: &str = "xtask/deb";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebArtifact {
+    pub target: String,
+    pub path: std::path::PathBuf,
+    pub features: Vec<String>,
+    pub profile: BuildProfile,
+}
+
 fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
         "x86_64-unknown-linux-gnu" => Ok("amd64"),
@@ -204,7 +212,7 @@ chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME}
 }
 
 /// Build the arch-independent pishoo-common config package.
-async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
+async fn run_common(docker: &Docker, version: &str) -> Result<DebArtifact, Whatever> {
     info!("starting common deb package build");
     let target_dir = target_dir()?;
     let out_dir = target_dir.join("common").join("deb");
@@ -254,7 +262,12 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
     let deb_name = format!("pishoo-common_{version}-1_all.deb");
     info!(deb_name, "produced");
     info!("finished common deb package build");
-    Ok(())
+    Ok(DebArtifact {
+        target: "common".to_string(),
+        path: out_dir.join(deb_name),
+        features: Vec::new(),
+        profile: BuildProfile::Release,
+    })
 }
 
 async fn run_common_inner(
@@ -303,7 +316,7 @@ pub async fn run(
     profile: BuildProfile,
     features: &[Feature],
     siblings: &[std::path::PathBuf],
-) -> Result<(), Whatever> {
+) -> Result<Vec<DebArtifact>, Whatever> {
     info!(
         target_count = targets.len(),
         profile = profile.target_dir_name(),
@@ -359,13 +372,15 @@ pub async fn run(
         );
     }
 
+    let mut artifacts = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        result.whatever_context("deb build task panicked")??;
+        artifacts.push(result.whatever_context("deb build task panicked")??);
     }
+    artifacts.sort_by(|left, right| left.target.cmp(&right.target));
 
     info!("finished deb dist build");
 
-    Ok(())
+    Ok(artifacts)
 }
 
 async fn build_one_with_retry(
@@ -376,14 +391,14 @@ async fn build_one_with_retry(
     profile: BuildProfile,
     features: &[Feature],
     siblings: &[Sibling],
-) -> Result<(), Whatever> {
+) -> Result<DebArtifact, Whatever> {
     for attempt in 1..=BUILD_ATTEMPTS {
         match build_one(
             docker, triple, version, target_dir, profile, features, siblings,
         )
         .await
         {
-            Ok(()) => return Ok(()),
+            Ok(artifact) => return Ok(artifact),
             Err(error) if attempt < BUILD_ATTEMPTS => {
                 let report = Report::from_error(&error);
                 tracing::warn!(
@@ -408,7 +423,7 @@ async fn build_one(
     profile: BuildProfile,
     features: &[Feature],
     siblings: &[Sibling],
-) -> Result<(), Whatever> {
+) -> Result<DebArtifact, Whatever> {
     let has_sshd = features
         .iter()
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
@@ -526,7 +541,12 @@ async fn build_one(
     result?;
 
     info!(deb_name, "produced");
-    Ok(())
+    Ok(DebArtifact {
+        target: triple.to_string(),
+        path: out_dir.join(deb_name),
+        features: crate::brew::feature_names(features),
+        profile,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

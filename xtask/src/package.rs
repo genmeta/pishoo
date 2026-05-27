@@ -1,5 +1,8 @@
+pub mod brew;
+pub mod deb;
 pub mod manifest;
 pub mod prompt;
+pub mod rpm;
 
 use std::ffi::OsString;
 
@@ -75,7 +78,33 @@ pub fn parse_package_sections(tokens: &[OsString]) -> Result<Vec<PackageFormat>,
 }
 
 pub async fn run(options: PackageOptions) -> Result<(), Whatever> {
-    let _formats = parse_package_sections(&options.targets).unwrap_or_else(|error| error.exit());
-    let _ = options.overwrite_manifest;
-    snafu::whatever!("package target execution is not wired yet")
+    let formats = parse_package_sections(&options.targets).unwrap_or_else(|error| error.exit());
+    for format in formats {
+        match format {
+            PackageFormat::Deb {
+                targets,
+                debug,
+                features,
+                siblings,
+            } => {
+                deb::run(
+                    &targets,
+                    crate::BuildProfile::from_debug(debug),
+                    &features,
+                    &siblings,
+                    options.overwrite_manifest,
+                )
+                .await?
+            }
+            PackageFormat::Rpm {
+                targets,
+                features,
+                siblings,
+            } => rpm::run(&targets, &features, &siblings, options.overwrite_manifest).await?,
+            PackageFormat::Brew { targets, features } => {
+                brew::run(&targets, &features, options.overwrite_manifest).await?
+            }
+        }
+    }
+    Ok(())
 }

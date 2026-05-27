@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::{Compression, write::GzEncoder};
 use serde::Serialize;
@@ -10,6 +10,14 @@ use crate::{BrewTarget, Feature, package_meta, run_cmd, run_cmd_quiet, sha256_fi
 const CARGO_NAME: &str = "pishoo";
 
 const BREW_FEATURES_FILE: &str = "pishoo-brew-features.toml";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrewArchive {
+    pub target: String,
+    pub archive_name: String,
+    pub path: PathBuf,
+    pub features: Vec<String>,
+}
 
 async fn check_cargo() -> Result<(), Whatever> {
     run_cmd_quiet(tokio::process::Command::new("which").arg("cargo")).await
@@ -36,7 +44,10 @@ struct BrewFeatures {
     pam: bool,
 }
 
-pub async fn run(targets: &[BrewTarget], features: &[Feature]) -> Result<(), Whatever> {
+pub async fn run(
+    targets: &[BrewTarget],
+    features: &[Feature],
+) -> Result<Vec<BrewArchive>, Whatever> {
     info!(target_count = targets.len(), "starting brew dist build");
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
@@ -58,12 +69,14 @@ pub async fn run(targets: &[BrewTarget], features: &[Feature]) -> Result<(), Wha
     }
 
     info!("waiting for brew target builds to finish");
+    let mut archives = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        result.whatever_context("brew build task panicked")??;
+        archives.push(result.whatever_context("brew build task panicked")??);
     }
+    archives.sort_by(|left, right| left.target.cmp(&right.target));
     info!("finished brew dist build");
 
-    Ok(())
+    Ok(archives)
 }
 
 async fn build_one(
@@ -72,7 +85,7 @@ async fn build_one(
     target_dir: &Path,
     workspace: &Path,
     features: &[Feature],
-) -> Result<(), Whatever> {
+) -> Result<BrewArchive, Whatever> {
     let has_sshd = features
         .iter()
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
@@ -185,7 +198,23 @@ async fn build_one(
     write_feature_sidecar(&brew_dir, feature_sidecar).await?;
 
     info!(path = %archive_path.display(), sha256 = %sha, "produced archive");
-    Ok(())
+    Ok(BrewArchive {
+        target: triple.to_string(),
+        archive_name,
+        path: archive_path,
+        features: feature_names(features),
+    })
+}
+
+pub(crate) fn feature_names(features: &[Feature]) -> Vec<String> {
+    features
+        .iter()
+        .map(|feature| match feature {
+            Feature::Sshd => "sshd",
+            Feature::Pam => "pam",
+        })
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 async fn write_feature_sidecar(directory: &Path, features: BrewFeatures) -> Result<(), Whatever> {
