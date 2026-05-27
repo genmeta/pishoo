@@ -84,7 +84,13 @@ clap = { workspace = true }
 
 
 [features]
-sshd = ["dep:dssh", "dssh/server", "remoc/rfn", "h3x/ipc"]
+sshd = [
+    "dep:dssh",
+    "dssh/server",
+    "remoc/rfn",
+    "h3x/ipc",
+    "h3x/webtransport",
+]
 pam = ["sshd", "dssh/pam"]
 stun_traversal = []
 qlog = []

@@ -234,7 +234,7 @@ pub async fn run_service<L>(
         // Build H3 connection builder with configured settings
         let builder = ConnectionBuilder::new(h3_settings.clone());
         #[cfg(feature = "sshd")]
-        let builder = builder.protocol(dssh::protocol::Ssh3ProtocolFactory);
+        let builder = builder.protocol(h3x::webtransport::WebTransportProtocolFactory);
 
         let mut endpoint = H3Endpoint::builder()
             .quic(listener)

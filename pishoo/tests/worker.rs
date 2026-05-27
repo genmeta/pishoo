@@ -87,3 +87,17 @@ fn worker_reload_rebuilds_all_listener_handles() {
         "worker reload path should rebuild config and restart the service"
     );
 }
+
+#[test]
+fn sshd_service_registers_webtransport_protocol_layer() {
+    let service_source = include_str!("../src/service.rs");
+
+    assert!(
+        service_source.contains("WebTransportProtocolFactory"),
+        "sshd services must register h3x WebTransport protocol routing"
+    );
+    assert!(
+        !service_source.contains("Ssh3ProtocolFactory"),
+        "sshd services must not keep the legacy SSH3 stream protocol routing"
+    );
+}

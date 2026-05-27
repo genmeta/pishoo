@@ -3,21 +3,14 @@ use std::sync::Arc;
 use axum::{Extension, extract::State, response::IntoResponse};
 use dssh::{
     auth::AuthCredential,
-    constants::SSH_VERSION,
     conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
-    protocol::ConversationHandle,
     session::{AuthRequest, AuthenticateFn, SessionBootstrap},
 };
-use h3x::{
-    connection::ConnectionState,
-    hyper::upgrade,
-    message::stream::{ReadStream, WriteStream},
-    quic,
-    stream_id::StreamId,
-};
+use h3x::{qpack::field::Protocol, stream_id::StreamId};
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::Instrument;
 
 use crate::{
@@ -67,17 +60,40 @@ pub enum RunSshSessionError {
     ControlFromStd { source: std::io::Error },
 }
 
-/// Axum-style handler for SSH3 CONNECT sessions.
+fn is_webtransport_request<B>(request: &Request<B>) -> bool {
+    request
+        .extensions()
+        .get::<Protocol>()
+        .is_some_and(|protocol| protocol.as_str() == h3x::webtransport::WEBTRANSPORT_H3)
+}
+
+fn accept_server_session_error_status(
+    error: &dssh::webtransport::AcceptServerSessionError,
+) -> StatusCode {
+    match error {
+        dssh::webtransport::AcceptServerSessionError::UnexpectedPath { .. }
+        | dssh::webtransport::AcceptServerSessionError::PeerVersion { .. }
+        | dssh::webtransport::AcceptServerSessionError::Accept {
+            source: h3x::hyper::extended_connect::AcceptError::NotConnect { .. },
+        } => StatusCode::BAD_REQUEST,
+        dssh::webtransport::AcceptServerSessionError::Accept { .. }
+        | dssh::webtransport::AcceptServerSessionError::RegisterSession { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Axum-style handler for DSSH WebTransport CONNECT sessions.
 ///
 /// Extracts the username from `LocationMatch.remaining` (e.g. for `/ssh/yiyue`,
 /// remaining is `"yiyue"`). Spawns the SSH session in a background task and
-/// returns 200 OK with `ssh-version` header to complete the CONNECT upgrade.
+/// returns 200 OK with `ssh-version` header to complete the WebTransport
+/// Extended CONNECT handshake.
 pub async fn sshd_handle(
     Extension(loc): Extension<LocationMatch>,
-    Extension(connection): Extension<Arc<ConnectionState<dyn quic::DynConnection>>>,
     Extension(stream_id): Extension<StreamId>,
     State(state): State<RouterState>,
-    mut req: Request<axum::body::Body>,
+    req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
     let username = loc.remaining.trim_matches('/');
     if username.is_empty() {
@@ -98,94 +114,80 @@ pub async fn sshd_handle(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let peer_version = match req
-        .headers()
-        .get("ssh-version")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(v) if v == SSH_VERSION => v.to_owned(),
-        _ => {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-    };
-
     let conversation_id = stream_id;
     let username = username.to_owned();
 
-    // Register the conversation BEFORE returning 200 OK. This ensures the
-    // protocol layer can route incoming channel streams as soon as the client
-    // receives the response and opens new QUIC bidi streams.
-    let handle = match connection.protocols().get::<dssh::protocol::Ssh3Protocol>() {
-        Some(proto) => match proto.register(conversation_id) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(error = %Report::from_error(&e), "failed to register SSH3 conversation");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        },
-        None => {
-            tracing::error!("ssh3 protocol not registered on connection");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    if !is_webtransport_request(&req) {
+        tracing::warn!("dssh request is not webtransport extended connect");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let path = req.uri().path().to_owned();
+    let accepted = match dssh::webtransport::accept_server_session(req, &path).await {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            let status = accept_server_session_error_status(&error);
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "failed to accept dssh webtransport session"
+            );
+            return status.into_response();
         }
     };
 
     let span = tracing::info_span!("ssh-session", %conversation_id, user = %username);
-
-    // Spawn the SSH session in a background task. The CONNECT upgrade streams
-    // become available after this handler returns the 200 response.
+    let response = accepted.response;
     tokio::spawn(
         async move {
-            // Extract raw read/write streams via CONNECT upgrade.
-            let read_stream = match upgrade::take::<ReadStream>(&mut req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %Report::from_error(&e), "failed to take over read stream");
-                    return;
-                }
-            };
-            let write_stream = match upgrade::take::<WriteStream>(&mut req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %Report::from_error(&e), "failed to take over write stream");
+            let manager = dssh::webtransport::WebTransportStreamManager::new(accepted.session);
+            let (control_reader, control_writer) = match manager.accept_control().await {
+                Ok(streams) => streams,
+                Err(error) => {
+                    tracing::error!(
+                        error = %Report::from_error(&error),
+                        "failed to accept dssh webtransport control stream"
+                    );
                     return;
                 }
             };
 
-            if let Err(e) = run_ssh_session(
+            if let Err(error) = run_ssh_session(
                 &username,
                 conversation_id,
-                peer_version,
-                handle,
+                accepted.peer_version,
+                manager,
                 state.session_spawner.as_ref(),
-                read_stream,
-                write_stream,
+                control_reader,
+                control_writer,
             )
             .await
             {
-                tracing::error!(error = %Report::from_error(&e), "ssh session failed");
+                tracing::error!(error = %Report::from_error(&error), "ssh session failed");
             }
         }
         .instrument(span),
     );
 
-    // Return 200 OK with ssh-version header to accept the CONNECT.
-    http::Response::builder()
-        .status(StatusCode::OK)
-        .header("ssh-version", SSH_VERSION)
-        .body(axum::body::Body::empty())
-        .unwrap()
-        .into_response()
+    response.into_response()
 }
 
-async fn run_ssh_session(
+async fn run_ssh_session<M, R, W>(
     username: &str,
     conversation_id: StreamId,
     peer_version: String,
-    handle: ConversationHandle,
+    manage_stream: M,
     spawner: &dyn DynSpawnSession,
-    recver: ReadStream,
-    sender: WriteStream,
-) -> Result<(), RunSshSessionError> {
+    control_reader: R,
+    control_writer: W,
+) -> Result<(), RunSshSessionError>
+where
+    M: dssh::conversation::ManageSessionStream + 'static,
+    M::StreamReader: AsyncRead + Unpin + Send + 'static,
+    M::StreamWriter: AsyncWrite + Unpin + Send + 'static,
+    M::Error: Send + Sync + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     use run_ssh_session_error::*;
 
     // Spawn the session child process via the control plane.
@@ -247,24 +249,17 @@ async fn run_ssh_session(
     let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
     let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
 
-    // Bridge QUIC CONNECT streams ↔ control stream socketpair.
+    // Bridge DSSH control stream ↔ control stream socketpair.
     tokio::spawn(
-        dssh::conversation::ipc::bridge_message_reader_to_unix(
-            Box::pin(recver.into_bytes_stream()),
-            ctrl_write,
-        )
-        .in_current_span(),
+        dssh::conversation::ipc::bridge_reader_to_unix(control_reader, ctrl_write)
+            .in_current_span(),
     );
     tokio::spawn(
-        dssh::conversation::ipc::bridge_unix_to_message_writer(
-            ctrl_read,
-            Box::pin(sender.into_bytes_sink()),
-        )
-        .in_current_span(),
+        dssh::conversation::ipc::bridge_unix_to_writer(ctrl_read, control_writer).in_current_span(),
     );
 
     // Set up manage-stream RPC via IPC FD passing.
-    let adapter = IpcManageStreamAdapter::new(handle, fd_sender);
+    let adapter = IpcManageStreamAdapter::new(manage_stream, fd_sender);
     let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
     tokio::spawn(
         async move {
@@ -299,4 +294,28 @@ async fn run_ssh_session(
     session_result?;
     tracing::info!(%conversation_id, "session ended");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use h3x::qpack::field::Protocol;
+
+    use super::*;
+
+    #[test]
+    fn webtransport_connect_request_is_detected_by_protocol_extension() {
+        let mut request = Request::builder().body(()).expect("request should build");
+        request
+            .extensions_mut()
+            .insert(Protocol::new(h3x::webtransport::WEBTRANSPORT_H3));
+
+        assert!(is_webtransport_request(&request));
+    }
+
+    #[test]
+    fn plain_connect_request_is_not_dssh_transport() {
+        let request = Request::builder().body(()).expect("request should build");
+
+        assert!(!is_webtransport_request(&request));
+    }
 }

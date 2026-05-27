@@ -79,6 +79,7 @@ sshd = [
     "gateway/sshd",
     "dep:dssh",
     "dssh/server",
+    "h3x/webtransport",
     "nix/socket",
     "nix/uio",
 ]
