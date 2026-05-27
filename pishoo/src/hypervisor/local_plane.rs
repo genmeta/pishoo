@@ -82,14 +82,8 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         // all FDs >= 4 (same as launcher.rs session_child_exec).
         unsafe {
             cmd.pre_exec(move || {
-                use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
-
-                if child_raw_fd != 3 {
-                    let old_fd = BorrowedFd::borrow_raw(child_raw_fd);
-                    let mut fd3 = OwnedFd::from_raw_fd(3);
-                    nix::unistd::dup2(old_fd, &mut fd3)?;
-                    std::mem::forget(fd3);
-                }
+                let old_fd = std::os::fd::BorrowedFd::borrow_raw(child_raw_fd);
+                crate::hypervisor::launcher::install_child_ipc_fd(old_fd)?;
                 // Close FDs from 4 upwards.
                 let max_fd = nix::unistd::sysconf(nix::unistd::SysconfVar::OPEN_MAX)
                     .ok()
