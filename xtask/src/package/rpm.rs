@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use snafu::{ResultExt, Snafu, Whatever};
 
@@ -121,8 +124,10 @@ pub async fn run(
     }
 
     let mut artifacts = Vec::new();
+    let mut package_architectures = BTreeSet::new();
     for rpm_artifact in &rpm_artifacts {
-        artifacts.push(manifest_artifact(rpm_artifact, &target_dir).await?);
+        let artifact = manifest_artifact(rpm_artifact, &target_dir).await?;
+        push_unique_package_architecture(&mut artifacts, &mut package_architectures, artifact);
     }
 
     let manifest = PackageManifest {
@@ -173,6 +178,19 @@ async fn manifest_artifact(
     })
 }
 
+fn push_unique_package_architecture(
+    artifacts: &mut Vec<PackageArtifact>,
+    package_architectures: &mut BTreeSet<(String, String)>,
+    artifact: PackageArtifact,
+) {
+    if let (Some(package), Some(architecture)) = (&artifact.package_name, &artifact.architecture)
+        && !package_architectures.insert((package.clone(), architecture.clone()))
+    {
+        return;
+    }
+    artifacts.push(artifact);
+}
+
 fn target_relative_artifact_path(
     path: &Path,
     target_dir: &Path,
@@ -193,7 +211,9 @@ fn generated_at() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rpm_query_output;
+    use std::collections::BTreeSet;
+
+    use super::{PackageArtifact, parse_rpm_query_output, push_unique_package_architecture};
 
     #[test]
     fn parses_rpm_query_output() {
@@ -213,5 +233,40 @@ mod tests {
             error.to_string(),
             "rpm metadata query returned incomplete output"
         );
+    }
+
+    #[test]
+    fn duplicate_common_package_architecture_is_written_once() {
+        let mut artifacts = Vec::new();
+        let mut keys = BTreeSet::new();
+
+        push_unique_package_architecture(
+            &mut artifacts,
+            &mut keys,
+            artifact("x86_64-unknown-linux-gnu", "pishoo-common", "noarch"),
+        );
+        push_unique_package_architecture(
+            &mut artifacts,
+            &mut keys,
+            artifact("aarch64-unknown-linux-gnu", "pishoo-common", "noarch"),
+        );
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].target, "x86_64-unknown-linux-gnu");
+    }
+
+    fn artifact(target: &str, package: &str, architecture: &str) -> PackageArtifact {
+        PackageArtifact {
+            target: target.to_string(),
+            path: format!("{target}/release/rpm/{package}.rpm"),
+            sha256: "0".repeat(64),
+            size: 1,
+            package_name: Some(package.to_string()),
+            package_version: Some("0.5.2-1".to_string()),
+            architecture: Some(architecture.to_string()),
+            archive_name: Some(format!("{package}.rpm")),
+            features: Vec::new(),
+            profile: Some("release".to_string()),
+        }
     }
 }

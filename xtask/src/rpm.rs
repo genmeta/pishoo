@@ -124,7 +124,11 @@ pub async fn run(
     }
 
     info!("finished rpm dist build");
-    artifacts.sort_by(|left, right| left.target.cmp(&right.target));
+    artifacts.sort_by(|left, right| {
+        left.target
+            .cmp(&right.target)
+            .then_with(|| left.path.cmp(&right.path))
+    });
     Ok(artifacts)
 }
 
@@ -364,6 +368,7 @@ async fn build_one(
             });
         }
     }
+    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(artifacts)
 }
 
