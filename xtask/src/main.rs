@@ -4,7 +4,6 @@ mod deb;
 mod grouped;
 mod package;
 mod publish;
-mod release;
 mod rpm;
 
 use std::{ffi::OsString, io::IsTerminal, path::PathBuf, process::Stdio};
@@ -191,8 +190,6 @@ fn package_version(name: &str) -> Result<String, Whatever> {
 struct PackageMeta {
     version: String,
     description: String,
-    homepage: String,
-    license: String,
 }
 
 fn package_meta(name: &str) -> Result<PackageMeta, Whatever> {
@@ -208,8 +205,6 @@ fn package_meta(name: &str) -> Result<PackageMeta, Whatever> {
     Ok(PackageMeta {
         version: pkg.version.to_string(),
         description: pkg.description.clone().unwrap_or_default(),
-        homepage: pkg.homepage.clone().unwrap_or_default(),
-        license: pkg.license.clone().unwrap_or_default(),
     })
 }
 
