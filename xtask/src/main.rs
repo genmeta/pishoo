@@ -406,7 +406,7 @@ mod tests {
             "apt",
             "--suite",
             "stable",
-            "--key-file",
+            "--signing-key",
             "key.asc",
             "--fingerprint",
             "00112233445566778899AABBCCDDEEFF00112233",
@@ -423,7 +423,7 @@ mod tests {
                         "apt",
                         "--suite",
                         "stable",
-                        "--key-file",
+                        "--signing-key",
                         "key.asc",
                         "--fingerprint",
                         "00112233445566778899AABBCCDDEEFF00112233",
@@ -462,6 +462,44 @@ mod tests {
     }
 
     #[test]
+    fn verify_remote_s3_accepts_secret_values_directly() {
+        let cli = Cli::try_parse_from([
+            "xtask",
+            "verify",
+            "remote",
+            "s3",
+            "--endpoint-url",
+            "https://s3.example.test",
+            "--bucket",
+            "downloads",
+            "--access-key-id",
+            "access",
+            "--secret-access-key",
+            "secret",
+            "apt",
+            "--prefix",
+            "apt/stable",
+        ])
+        .expect("verify remote s3 should accept direct secret values");
+
+        match cli.command {
+            Command::Verify {
+                command:
+                    VerifyCommand::Remote {
+                        target: crate::release::RemoteVerifyTarget::S3 { options, targets },
+                    },
+            } => {
+                assert_eq!(options.bucket, "downloads");
+                assert_eq!(
+                    targets,
+                    ["apt", "--prefix", "apt/stable"].map(std::ffi::OsString::from)
+                );
+            }
+            _ => panic!("expected verify remote s3 command"),
+        }
+    }
+
+    #[test]
     fn verify_remote_s3_accepts_global_options_before_grouped_targets() {
         let cli = Cli::try_parse_from([
             "xtask",
@@ -472,9 +510,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
             "apt",
             "--prefix",
@@ -521,9 +559,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
         ])
         .expect_err("verify remote s3 should require grouped targets");
@@ -542,8 +580,12 @@ mod tests {
 
         assert!(help.contains("--endpoint-url"));
         assert!(help.contains("--bucket"));
-        assert!(help.contains("--access-key-id-file"));
-        assert!(help.contains("--secret-access-key-file"));
+        assert!(help.contains("--access-key-id"));
+        assert!(help.contains("XTASK_RELEASE_S3_ACCESS_KEY_ID"));
+        assert!(help.contains("--secret-access-key"));
+        assert!(help.contains("XTASK_RELEASE_S3_SECRET_ACCESS_KEY"));
+        assert!(!help.contains("--access-key-id-file"));
+        assert!(!help.contains("--secret-access-key-file"));
         assert!(!help.contains("--root"));
         assert!(!help.contains("--apt-prefix"));
         assert!(!help.contains("--dry-run"));
@@ -560,9 +602,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
             "--root",
             "homebrew",
@@ -591,9 +633,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
             "--dry-run",
             "homebrew",
@@ -694,9 +736,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
         ])
         .expect_err("publish s3 should require grouped targets");
@@ -714,9 +756,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
             "--root",
             "homebrew",
@@ -743,9 +785,9 @@ mod tests {
             "https://s3.example.test",
             "--bucket",
             "downloads",
-            "--access-key-id-file",
+            "--access-key-id",
             "access",
-            "--secret-access-key-file",
+            "--secret-access-key",
             "secret",
             "rpm",
             "--prefix",

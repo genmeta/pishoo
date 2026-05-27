@@ -1,9 +1,13 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-};
+use std::path::{Path, PathBuf};
 
-use flate2::{Compression, write::GzEncoder};
+use bollard::{
+    Docker,
+    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountTypeEnum},
+    query_parameters::{
+        CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
+    },
+};
+use futures_util::StreamExt;
 use snafu::{OptionExt, ResultExt, Whatever};
 use tempfile::TempDir;
 use tracing::info;
@@ -16,7 +20,13 @@ use super::{
     },
     paths::{common_paths, promote_staged_outputs, recreate_dir},
 };
-use crate::{run_cmd, target_dir};
+use crate::{
+    container::{
+        check_docker, exec_in_container, force_remove_container, host_uid_gid,
+        remove_container_if_exists, start_container,
+    },
+    target_dir,
+};
 
 const PACKAGE_NAME: &str = "pishoo";
 const DEB_SEARCH_DIRS: [&str; 5] = [
@@ -27,6 +37,12 @@ const DEB_SEARCH_DIRS: [&str; 5] = [
     "common/deb",
 ];
 const APT_ARCHES: [&str; 4] = ["amd64", "arm64", "armhf", "i386"];
+const APT_STAGE_BASE_IMAGE: &str = "debian:bookworm";
+const APT_STAGE_IMAGE: &str = "xtask-apt-stage:bookworm-v1";
+const APT_REPOSITORY_TARGET: &str = "/apt-repository";
+const APT_KEY_TARGET: &str = "/apt-secrets/key.asc";
+const APT_PASSPHRASE_TARGET: &str = "/apt-secrets/passphrase";
+const APT_GPG_HOME: &str = "/tmp/xtask-apt-gpg";
 
 #[derive(Debug)]
 struct DebSource {
@@ -43,10 +59,237 @@ struct BinaryMetadataPaths {
     release: PathBuf,
 }
 
+#[derive(Debug)]
+struct AptContainerOptions {
+    suite: String,
+    fingerprint: String,
+    has_passphrase_file: bool,
+}
+
+struct AptStageContainer {
+    docker: Docker,
+    container_id: String,
+    user: String,
+    _secrets: TempDir,
+}
+
+impl AptStageContainer {
+    async fn start(repository: &Path, options: &AptOptions) -> Result<Self, Whatever> {
+        let docker = Docker::connect_with_local_defaults()
+            .whatever_context("failed to connect to Docker/Podman")?;
+        check_docker(&docker).await?;
+        ensure_apt_stage_image(&docker).await?;
+
+        let repository = repository.canonicalize().whatever_context(format!(
+            "apt staging path not found: {}",
+            repository.display()
+        ))?;
+        let secrets = tempfile::tempdir()
+            .whatever_context("failed to create temporary apt secret directory")?;
+        let key_file = secrets.path().join("key.asc");
+        write_secret_file(&key_file, &options.signing_key, "signing key").await?;
+        let key_file = key_file
+            .canonicalize()
+            .whatever_context("failed to resolve temporary apt signing key")?;
+        let passphrase_file = if let Some(passphrase) = &options.signing_passphrase {
+            let path = secrets.path().join("passphrase");
+            write_secret_file(&path, passphrase, "signing passphrase").await?;
+            Some(
+                path.canonicalize()
+                    .whatever_context("failed to resolve temporary apt signing passphrase")?,
+            )
+        } else {
+            None
+        };
+
+        let container_name = format!("{PACKAGE_NAME}-xtask-apt-stage");
+        remove_container_if_exists(&docker, &container_name).await;
+
+        let mut mounts = vec![
+            Mount {
+                target: Some(APT_REPOSITORY_TARGET.to_string()),
+                source: Some(repository.to_string_lossy().into_owned()),
+                typ: Some(MountTypeEnum::BIND),
+                ..Default::default()
+            },
+            Mount {
+                target: Some(APT_KEY_TARGET.to_string()),
+                source: Some(key_file.to_string_lossy().into_owned()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            },
+        ];
+        if let Some(passphrase_file) = passphrase_file {
+            mounts.push(Mount {
+                target: Some(APT_PASSPHRASE_TARGET.to_string()),
+                source: Some(passphrase_file.to_string_lossy().into_owned()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
+        let container = docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(&container_name)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(APT_STAGE_IMAGE.to_string()),
+                    cmd: Some(vec!["sleep".into(), "infinity".into()]),
+                    host_config: Some(HostConfig {
+                        mounts: Some(mounts),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .whatever_context("failed to create apt stage container")?;
+        start_container(&docker, &container.id).await?;
+
+        Ok(Self {
+            docker,
+            container_id: container.id,
+            user: host_uid_gid()?,
+            _secrets: secrets,
+        })
+    }
+
+    async fn run_in_repository(&self, script: &str) -> Result<(), Whatever> {
+        let script = format!("set -euo pipefail\ncd {APT_REPOSITORY_TARGET}\n{script}");
+        exec_in_container(
+            &self.docker,
+            &self.container_id,
+            &["bash", "-lc", &script],
+            Some(&self.user),
+        )
+        .await
+    }
+
+    async fn cleanup(self) {
+        force_remove_container(&self.docker, &self.container_id).await;
+    }
+}
+
+async fn write_secret_file(path: &Path, value: &str, description: &str) -> Result<(), Whatever> {
+    tokio::fs::write(path, value)
+        .await
+        .whatever_context(format!("failed to write temporary apt {description}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .whatever_context(format!("failed to protect temporary apt {description}"))?;
+    }
+    Ok(())
+}
+
+async fn ensure_apt_stage_image(docker: &Docker) -> Result<(), Whatever> {
+    if docker.inspect_image(APT_STAGE_IMAGE).await.is_ok() {
+        info!(tag = APT_STAGE_IMAGE, "apt stage image already exists");
+        return Ok(());
+    }
+
+    ensure_apt_stage_base_image(docker).await?;
+
+    let container_name = format!("{PACKAGE_NAME}-xtask-apt-stage-setup");
+    remove_container_if_exists(docker, &container_name).await;
+    let container = docker
+        .create_container(
+            Some(
+                CreateContainerOptionsBuilder::default()
+                    .name(&container_name)
+                    .build(),
+            ),
+            ContainerCreateBody {
+                image: Some(APT_STAGE_BASE_IMAGE.to_string()),
+                cmd: Some(vec!["sleep".into(), "infinity".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .whatever_context("failed to create apt stage setup container")?;
+
+    let setup_result = ensure_apt_stage_image_inner(docker, &container.id).await;
+    if setup_result.is_err() {
+        force_remove_container(docker, &container.id).await;
+        setup_result?;
+        unreachable!();
+    }
+
+    let repo = APT_STAGE_IMAGE.split(':').next().unwrap_or(APT_STAGE_IMAGE);
+    let tag = APT_STAGE_IMAGE.split(':').nth(1).unwrap_or("latest");
+    let commit_result = docker
+        .commit_container(
+            CommitContainerOptionsBuilder::default()
+                .container(&container.id)
+                .repo(repo)
+                .tag(tag)
+                .build(),
+            ContainerConfig::default(),
+        )
+        .await
+        .whatever_context("failed to commit apt stage image");
+
+    force_remove_container(docker, &container.id).await;
+    commit_result?;
+
+    info!(tag = APT_STAGE_IMAGE, "apt stage image ready");
+    Ok(())
+}
+
+async fn ensure_apt_stage_base_image(docker: &Docker) -> Result<(), Whatever> {
+    if docker.inspect_image(APT_STAGE_BASE_IMAGE).await.is_ok() {
+        info!(
+            image = APT_STAGE_BASE_IMAGE,
+            "apt stage base image already exists"
+        );
+        return Ok(());
+    }
+
+    let mut pull_stream = docker.create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image(APT_STAGE_BASE_IMAGE)
+                .build(),
+        ),
+        None,
+        None,
+    );
+    while let Some(result) = pull_stream.next().await {
+        result.whatever_context(format!("failed to pull base image {APT_STAGE_BASE_IMAGE}"))?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_apt_stage_image_inner(docker: &Docker, container_id: &str) -> Result<(), Whatever> {
+    start_container(docker, container_id).await?;
+    exec_in_container(
+        docker,
+        container_id,
+        &[
+            "bash",
+            "-lc",
+            "set -euo pipefail\n\
+             export DEBIAN_FRONTEND=noninteractive\n\
+             apt-get update -qq\n\
+             apt-get install --assume-yes -qq apt-utils ca-certificates dpkg-dev gnupg gzip",
+        ],
+        None,
+    )
+    .await
+}
+
 pub async fn stage(options: AptOptions) -> Result<(), Whatever> {
     info!(suite = %options.suite, "starting apt repository stage");
     validate_options(&options)?;
-    ensure_apt_ftparchive().await?;
 
     let target_dir = target_dir()?;
     let paths = common_paths()?;
@@ -65,11 +308,18 @@ pub async fn stage(options: AptOptions) -> Result<(), Whatever> {
         info!(path = %destination.display(), "staged deb package");
     }
 
-    let mut metadata_files = generate_binary_metadata(&staging, &options).await?;
-    let release = generate_suite_release(&staging, &options.suite).await?;
-    metadata_files.push(release.clone());
-    let signed = sign_suite_release(&staging, &options).await?;
-    metadata_files.extend(signed);
+    let tools = AptStageContainer::start(&staging, &options).await?;
+    let result = async {
+        let mut metadata_files = generate_binary_metadata(&staging, &options, &tools).await?;
+        let release = generate_suite_release(&staging, &options.suite, &tools).await?;
+        metadata_files.push(release.clone());
+        let signed = sign_suite_release(&staging, &options, &tools).await?;
+        metadata_files.extend(signed);
+        Ok::<_, Whatever>(metadata_files)
+    }
+    .await;
+    tools.cleanup().await;
+    let metadata_files = result?;
 
     for metadata_file in metadata_files {
         artifact_entries.push(artifact_entry(&staging, &metadata_file, false).await?);
@@ -162,7 +412,7 @@ async fn discover_debs(target_dir: &Path) -> Result<Vec<DebSource>, Whatever> {
                 .whatever_context("failed to read deb filename as utf-8")?
                 .to_string();
             let (binary_package, version) = parse_deb_filename(&filename)?;
-            let package = source_package(&path).await?.unwrap_or(binary_package);
+            let package = pool_package(&binary_package);
             debs.push(DebSource {
                 package,
                 version,
@@ -179,34 +429,12 @@ async fn discover_debs(target_dir: &Path) -> Result<Vec<DebSource>, Whatever> {
     Ok(debs)
 }
 
-async fn source_package(path: &Path) -> Result<Option<String>, Whatever> {
-    let output = tokio::process::Command::new("dpkg-deb")
-        .arg("-f")
-        .arg(path)
-        .arg("Source")
-        .output()
-        .await;
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).whatever_context(format!(
-                "failed to inspect source package for {}",
-                path.display()
-            ));
-        }
-    };
-    let stdout = String::from_utf8(output.stdout).whatever_context(format!(
-        "failed to decode source package for {}",
-        path.display()
-    ))?;
-    let source = stdout
-        .split_whitespace()
-        .next()
-        .filter(|source| !source.is_empty())
-        .map(str::to_string);
-    Ok(source)
+fn pool_package(binary_package: &str) -> String {
+    if binary_package == format!("{PACKAGE_NAME}-common") {
+        PACKAGE_NAME.to_string()
+    } else {
+        binary_package.to_string()
+    }
 }
 
 fn parse_deb_filename(filename: &str) -> Result<(String, String), Whatever> {
@@ -239,6 +467,7 @@ fn release_version(debs: &[DebSource]) -> Result<String, Whatever> {
 async fn generate_binary_metadata(
     repository: &Path,
     options: &AptOptions,
+    tools: &AptStageContainer,
 ) -> Result<Vec<PathBuf>, Whatever> {
     let mut metadata_files = Vec::new();
     for component in &options.components {
@@ -255,7 +484,7 @@ async fn generate_binary_metadata(
                 .whatever_context(format!("failed to create {}", directory.display()))?;
             let packages = repository.join(&paths.packages);
             if component == "main" {
-                scan_packages(repository, arch, &packages).await?;
+                scan_packages(arch, &paths.packages, tools).await?;
             } else {
                 tokio::fs::write(&packages, "")
                     .await
@@ -263,7 +492,7 @@ async fn generate_binary_metadata(
             }
 
             let packages_gz = repository.join(&paths.packages_gz);
-            gzip_file(&packages, &packages_gz).await?;
+            gzip_file(&paths.packages, &paths.packages_gz, tools).await?;
             let release = repository.join(&paths.release);
             write_binary_release(&release, &options.suite, component, arch).await?;
             metadata_files.extend([packages, packages_gz, release]);
@@ -284,37 +513,36 @@ fn binary_metadata_paths(suite: &str, component: &str, arch: &str) -> BinaryMeta
     }
 }
 
-async fn scan_packages(repository: &Path, arch: &str, packages: &Path) -> Result<(), Whatever> {
-    let output = std::fs::File::create(packages)
-        .whatever_context(format!("failed to create {}", packages.display()))?;
-    run_cmd(
-        tokio::process::Command::new("dpkg-scanpackages")
-            .current_dir(repository)
-            .args(["--arch", arch, "pool", "/dev/null"])
-            .stdout(Stdio::from(output)),
-    )
-    .await
-    .whatever_context(format!("failed to generate {}", packages.display()))
+async fn scan_packages(
+    arch: &str,
+    packages: &Path,
+    tools: &AptStageContainer,
+) -> Result<(), Whatever> {
+    let script = format!(
+        "dpkg-scanpackages --arch {} pool /dev/null > {}",
+        shell_quote(arch),
+        shell_quote_path(packages)
+    );
+    tools
+        .run_in_repository(&script)
+        .await
+        .whatever_context(format!("failed to generate {}", packages.display()))
 }
 
-async fn gzip_file(source: &Path, destination: &Path) -> Result<(), Whatever> {
-    let source = source.to_owned();
-    let destination = destination.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let mut input = std::fs::File::open(&source)
-            .whatever_context(format!("failed to open {}", source.display()))?;
-        let output = std::fs::File::create(&destination)
-            .whatever_context(format!("failed to create {}", destination.display()))?;
-        let mut encoder = GzEncoder::new(output, Compression::default());
-        std::io::copy(&mut input, &mut encoder)
-            .whatever_context(format!("failed to compress {}", source.display()))?;
-        encoder
-            .finish()
-            .whatever_context(format!("failed to finish {}", destination.display()))?;
-        Ok(())
-    })
-    .await
-    .whatever_context("gzip task panicked")?
+async fn gzip_file(
+    source: &Path,
+    destination: &Path,
+    tools: &AptStageContainer,
+) -> Result<(), Whatever> {
+    let script = format!(
+        "gzip -n -c {} > {}",
+        shell_quote_path(source),
+        shell_quote_path(destination)
+    );
+    tools
+        .run_in_repository(&script)
+        .await
+        .whatever_context(format!("failed to compress {}", source.display()))
 }
 
 async fn write_binary_release(
@@ -329,45 +557,31 @@ async fn write_binary_release(
         .whatever_context(format!("failed to write {}", path.display()))
 }
 
-async fn generate_suite_release(repository: &Path, suite: &str) -> Result<PathBuf, Whatever> {
+async fn generate_suite_release(
+    repository: &Path,
+    suite: &str,
+    tools: &AptStageContainer,
+) -> Result<PathBuf, Whatever> {
     let release = repository.join("dists").join(suite).join("Release");
-    ensure_apt_ftparchive().await?;
-    let output = std::fs::File::create(&release)
-        .whatever_context(format!("failed to create {}", release.display()))?;
-    run_cmd(
-        tokio::process::Command::new("apt-ftparchive")
-            .current_dir(repository)
-            .args(["release", &format!("dists/{suite}")])
-            .stdout(Stdio::from(output)),
-    )
-    .await
-    .whatever_context(format!("failed to generate {}", release.display()))?;
-    Ok(release)
-}
-
-async fn ensure_apt_ftparchive() -> Result<(), Whatever> {
-    let status = tokio::process::Command::new("which")
-        .arg("apt-ftparchive")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .whatever_context("failed to spawn which")?;
-    snafu::ensure_whatever!(
-        status.success(),
-        "apt-ftparchive is required to stage apt metadata; install apt-utils"
+    let relative = PathBuf::from("dists").join(suite).join("Release");
+    let suite_dir = PathBuf::from("dists").join(suite);
+    let script = format!(
+        "apt-ftparchive release {} > {}",
+        shell_quote_path(&suite_dir),
+        shell_quote_path(&relative)
     );
-    Ok(())
+    tools
+        .run_in_repository(&script)
+        .await
+        .whatever_context(format!("failed to generate {}", release.display()))?;
+    Ok(release)
 }
 
 async fn sign_suite_release(
     repository: &Path,
     options: &AptOptions,
+    tools: &AptStageContainer,
 ) -> Result<Vec<PathBuf>, Whatever> {
-    let homedir = tempfile::tempdir().whatever_context("failed to create temporary gpg home")?;
-    import_key(&homedir, &options.key_file).await?;
-    verify_fingerprint(&homedir, &options.fingerprint).await?;
-
     let release = repository
         .join("dists")
         .join(&options.suite)
@@ -381,75 +595,20 @@ async fn sign_suite_release(
         .join(&options.suite)
         .join("InRelease");
 
-    let mut detach = base_gpg_sign_command(&homedir, options);
-    detach
-        .args(["--detach-sign", "--armor", "-o"])
-        .arg(&release_gpg)
-        .arg(&release);
-    run_cmd(&mut detach)
+    let script = sign_suite_release_script(&AptContainerOptions {
+        suite: options.suite.clone(),
+        fingerprint: options.fingerprint.clone(),
+        has_passphrase_file: options.signing_passphrase.is_some(),
+    });
+    tools
+        .run_in_repository(&script)
         .await
         .whatever_context(format!("failed to sign {}", release.display()))?;
-
-    let mut clearsign = base_gpg_sign_command(&homedir, options);
-    clearsign
-        .args(["--clearsign", "-o"])
-        .arg(&in_release)
-        .arg(&release);
-    run_cmd(&mut clearsign)
-        .await
-        .whatever_context(format!("failed to clearsign {}", release.display()))?;
 
     Ok(vec![release_gpg, in_release])
 }
 
-async fn import_key(homedir: &TempDir, key_file: &Path) -> Result<(), Whatever> {
-    run_cmd(
-        tokio::process::Command::new("gpg")
-            .arg("--batch")
-            .arg("--homedir")
-            .arg(homedir.path())
-            .arg("--import")
-            .arg(key_file),
-    )
-    .await
-    .whatever_context(format!(
-        "failed to import gpg key from {}",
-        key_file.display()
-    ))
-}
-
-async fn verify_fingerprint(homedir: &TempDir, fingerprint: &str) -> Result<(), Whatever> {
-    let output = tokio::process::Command::new("gpg")
-        .arg("--batch")
-        .arg("--homedir")
-        .arg(homedir.path())
-        .arg("--with-colons")
-        .arg("--fingerprint")
-        .arg(fingerprint)
-        .output()
-        .await
-        .whatever_context("failed to run gpg fingerprint verification")?;
-    snafu::ensure_whatever!(
-        output.status.success(),
-        "gpg fingerprint verification failed"
-    );
-    let stdout = String::from_utf8(output.stdout)
-        .whatever_context("failed to decode gpg fingerprint output")?;
-    let expected = normalize_fingerprint(fingerprint);
-    let matched = stdout.lines().any(|line| {
-        let mut fields = line.split(':');
-        if fields.next() != Some("fpr") {
-            return false;
-        }
-        fields
-            .nth(8)
-            .map(normalize_fingerprint)
-            .is_some_and(|actual| fingerprint_matches(&actual, &expected))
-    });
-    snafu::ensure_whatever!(matched, "gpg fingerprint did not match imported key");
-    Ok(())
-}
-
+#[cfg(test)]
 fn fingerprint_matches(actual: &str, expected: &str) -> bool {
     !expected.is_empty() && actual == expected
 }
@@ -462,21 +621,58 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn base_gpg_sign_command(homedir: &TempDir, options: &AptOptions) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("gpg");
-    command
-        .arg("--batch")
-        .arg("--yes")
-        .arg("--homedir")
-        .arg(homedir.path())
-        .arg("--pinentry-mode")
-        .arg("loopback")
-        .arg("--default-key")
-        .arg(&options.fingerprint);
-    if let Some(passphrase_file) = &options.passphrase_file {
-        command.arg("--passphrase-file").arg(passphrase_file);
+fn sign_suite_release_script(options: &AptContainerOptions) -> String {
+    let expected = normalize_fingerprint(&options.fingerprint);
+    let release = PathBuf::from("dists").join(&options.suite).join("Release");
+    let release_gpg = PathBuf::from("dists")
+        .join(&options.suite)
+        .join("Release.gpg");
+    let in_release = PathBuf::from("dists")
+        .join(&options.suite)
+        .join("InRelease");
+    let passphrase = if options.has_passphrase_file {
+        format!(" --passphrase-file {}", shell_quote(APT_PASSPHRASE_TARGET))
+    } else {
+        String::new()
+    };
+
+    format!(
+        "rm -rf {gpg_home}\n\
+         mkdir -m 700 {gpg_home}\n\
+         gpg --batch --homedir {gpg_home} --import {key}\n\
+         actual=\"$(gpg --batch --homedir {gpg_home} --with-colons --fingerprint {fingerprint} | awk -F: '$1 == \"fpr\" {{ print toupper($10); exit }}')\"\n\
+         if [ \"$actual\" != {fingerprint} ]; then\n\
+         \techo 'gpg fingerprint did not match imported key' >&2\n\
+         \texit 1\n\
+         fi\n\
+         gpg --batch --yes --homedir {gpg_home} --pinentry-mode loopback --default-key {fingerprint}{passphrase} --detach-sign --armor -o {release_gpg} {release}\n\
+         gpg --batch --yes --homedir {gpg_home} --pinentry-mode loopback --default-key {fingerprint}{passphrase} --clearsign -o {in_release} {release}\n",
+        gpg_home = shell_quote(APT_GPG_HOME),
+        key = shell_quote(APT_KEY_TARGET),
+        fingerprint = shell_quote(&expected),
+        passphrase = passphrase,
+        release = shell_quote_path(&release),
+        release_gpg = shell_quote_path(&release_gpg),
+        in_release = shell_quote_path(&in_release),
+    )
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
     }
-    command
+    quoted.push('\'');
+    quoted
 }
 
 async fn artifact_entry(
@@ -525,8 +721,9 @@ fn merge_apt_manifest(
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_metadata_paths, fingerprint_matches, normalize_fingerprint, parse_deb_filename,
-        pool_path, validate_path_segment,
+        AptContainerOptions, binary_metadata_paths, fingerprint_matches, normalize_fingerprint,
+        parse_deb_filename, pool_package, pool_path, sign_suite_release_script,
+        validate_path_segment,
     };
 
     #[test]
@@ -539,6 +736,7 @@ mod tests {
 
     #[test]
     fn common_package_pool_path_uses_source_package() {
+        assert_eq!(pool_package("pishoo-common"), "pishoo");
         assert_eq!(
             pool_path("pishoo", "pishoo-common_0.5.1-1_all.deb"),
             std::path::PathBuf::from("pool/main/p/pishoo/pishoo-common_0.5.1-1_all.deb")
@@ -599,5 +797,20 @@ mod tests {
             "00112233445566778899AABBCCDDEEFF00112233",
             "CCDDEEFF00112233"
         ));
+    }
+
+    #[test]
+    fn sign_script_uses_container_secret_paths() {
+        let script = sign_suite_release_script(&AptContainerOptions {
+            suite: "stable".to_string(),
+            fingerprint: "00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF 00 11 22 33".to_string(),
+            has_passphrase_file: true,
+        });
+
+        assert!(script.contains("--import '/apt-secrets/key.asc'"));
+        assert!(script.contains("--passphrase-file '/apt-secrets/passphrase'"));
+        assert!(script.contains("'dists/stable/Release.gpg'"));
+        assert!(script.contains("'dists/stable/InRelease'"));
+        assert!(!script.contains("apt-ftparchive"));
     }
 }

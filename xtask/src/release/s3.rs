@@ -73,8 +73,8 @@ struct PrefixOptions {
 trait S3ConnectionOptions {
     fn endpoint_url(&self) -> &str;
     fn bucket(&self) -> &str;
-    fn access_key_id_file(&self) -> &Path;
-    fn secret_access_key_file(&self) -> &Path;
+    fn access_key_id(&self) -> &str;
+    fn secret_access_key(&self) -> &str;
 }
 
 impl S3ConnectionOptions for S3Options {
@@ -86,12 +86,12 @@ impl S3ConnectionOptions for S3Options {
         &self.bucket
     }
 
-    fn access_key_id_file(&self) -> &Path {
-        &self.access_key_id_file
+    fn access_key_id(&self) -> &str {
+        &self.access_key_id
     }
 
-    fn secret_access_key_file(&self) -> &Path {
-        &self.secret_access_key_file
+    fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
     }
 }
 
@@ -104,12 +104,12 @@ impl S3ConnectionOptions for S3VerifyOptions {
         &self.bucket
     }
 
-    fn access_key_id_file(&self) -> &Path {
-        &self.access_key_id_file
+    fn access_key_id(&self) -> &str {
+        &self.access_key_id
     }
 
-    fn secret_access_key_file(&self) -> &Path {
-        &self.secret_access_key_file
+    fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
     }
 }
 
@@ -300,19 +300,10 @@ pub fn verify_immutable_collision(
     }
 }
 
-async fn read_secret(path: &Path) -> Result<String, Whatever> {
-    let value = tokio::fs::read_to_string(path)
-        .await
-        .whatever_context(format!("failed to read {}", path.display()))?;
-    Ok(value.trim().to_string())
-}
-
 async fn client(options: &impl S3ConnectionOptions) -> Result<Client, Whatever> {
-    let access_key_id = read_secret(options.access_key_id_file()).await?;
-    let secret_access_key = read_secret(options.secret_access_key_file()).await?;
     let credentials = Credentials::new(
-        access_key_id,
-        secret_access_key,
+        options.access_key_id().trim().to_string(),
+        options.secret_access_key().trim().to_string(),
         None,
         None,
         "xtask-release",

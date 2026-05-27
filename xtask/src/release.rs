@@ -47,15 +47,23 @@ pub struct AptOptions {
     /// Package components to stage
     #[arg(long = "component", default_values_t = default_components())]
     pub components: Vec<String>,
-    /// ASCII-armored GPG private key file used to sign Release metadata
-    #[arg(long)]
-    pub key_file: PathBuf,
+    /// ASCII-armored GPG private key used to sign Release metadata
+    #[arg(
+        long = "signing-key",
+        env = "XTASK_RELEASE_APT_SIGNING_KEY",
+        hide_env_values = true
+    )]
+    pub signing_key: String,
     /// Expected full signing key fingerprint
     #[arg(long)]
     pub fingerprint: String,
-    /// Optional file containing the GPG key passphrase
-    #[arg(long)]
-    pub passphrase_file: Option<PathBuf>,
+    /// Optional GPG key passphrase
+    #[arg(
+        long = "signing-passphrase",
+        env = "XTASK_RELEASE_APT_SIGNING_PASSPHRASE",
+        hide_env_values = true
+    )]
+    pub signing_passphrase: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -120,12 +128,16 @@ pub struct S3Options {
     /// S3 bucket name
     #[arg(long)]
     pub bucket: String,
-    /// File containing AWS access key id
-    #[arg(long)]
-    pub access_key_id_file: PathBuf,
-    /// File containing AWS secret access key
-    #[arg(long)]
-    pub secret_access_key_file: PathBuf,
+    /// AWS access key id
+    #[arg(long, env = "XTASK_RELEASE_S3_ACCESS_KEY_ID", hide_env_values = true)]
+    pub access_key_id: String,
+    /// AWS secret access key
+    #[arg(
+        long,
+        env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY",
+        hide_env_values = true
+    )]
+    pub secret_access_key: String,
     /// Print planned uploads without writing to S3
     #[arg(long)]
     pub dry_run: bool,
@@ -139,12 +151,16 @@ pub struct S3VerifyOptions {
     /// S3 bucket name
     #[arg(long)]
     pub bucket: String,
-    /// File containing AWS access key id
-    #[arg(long)]
-    pub access_key_id_file: PathBuf,
-    /// File containing AWS secret access key
-    #[arg(long)]
-    pub secret_access_key_file: PathBuf,
+    /// AWS access key id
+    #[arg(long, env = "XTASK_RELEASE_S3_ACCESS_KEY_ID", hide_env_values = true)]
+    pub access_key_id: String,
+    /// AWS secret access key
+    #[arg(
+        long,
+        env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY",
+        hide_env_values = true
+    )]
+    pub secret_access_key: String,
 }
 
 fn verify_s3_target_token(value: &str) -> Result<OsString, String> {
@@ -356,8 +372,15 @@ mod tests {
         };
 
         assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        assert!(error.to_string().contains("Stage APT repository"));
-        assert!(error.to_string().contains("Usage: xtask stage apt"));
+        let text = error.to_string();
+        assert!(text.contains("Stage APT repository"));
+        assert!(text.contains("Usage: xtask stage apt"));
+        assert!(text.contains("--signing-key"));
+        assert!(text.contains("XTASK_RELEASE_APT_SIGNING_KEY"));
+        assert!(text.contains("--signing-passphrase"));
+        assert!(text.contains("XTASK_RELEASE_APT_SIGNING_PASSPHRASE"));
+        assert!(!text.contains("--key-file"));
+        assert!(!text.contains("--passphrase-file"));
     }
 
     #[test]
@@ -367,7 +390,7 @@ mod tests {
             os("apt"),
             os("--suite"),
             os("../bad"),
-            os("--key-file"),
+            os("--signing-key"),
             os("key.asc"),
             os("--fingerprint"),
             os("00112233445566778899AABBCCDDEEFF00112233"),
@@ -414,6 +437,25 @@ mod tests {
     }
 
     #[test]
+    fn stage_sections_accept_apt_signing_key_value() {
+        let tokens = [
+            os("apt"),
+            os("--suite"),
+            os("stable"),
+            os("--signing-key"),
+            os("private-key"),
+            os("--fingerprint"),
+            os("00112233445566778899AABBCCDDEEFF00112233"),
+            os("--signing-passphrase"),
+            os("secret"),
+        ];
+
+        let sections = parse_stage_sections(&tokens).expect("apt signing key values should parse");
+
+        assert!(matches!(sections[0], StageSection::Apt(_)));
+    }
+
+    #[test]
     fn stage_sections_reject_no_option_target_arguments() {
         let tokens = [os("rpm"), os("--prefix"), os("download")];
 
@@ -434,7 +476,7 @@ mod tests {
             os("apt"),
             os("--suite"),
             os("stable"),
-            os("--key-file"),
+            os("--signing-key"),
             os("key.asc"),
             os("--fingerprint"),
             os("00112233445566778899AABBCCDDEEFF00112233"),
