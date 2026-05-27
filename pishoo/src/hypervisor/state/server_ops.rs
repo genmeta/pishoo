@@ -44,6 +44,19 @@ impl RootState {
         let server_name = DhttpName::try_from(request.identity.name().as_full().to_owned())
             .expect("listen request identity must be a dhttp name");
 
+        // Validate and normalize listen declarations before claiming the name.
+        // This is a pure conversion, so invalid scopes should not create any
+        // registry state.
+        let bind_patterns = request
+            .bind
+            .iter()
+            .map(gateway::parse::types::Listens::try_to_bind_patterns)
+            .collect::<Result<Vec<_>, _>>()
+            .context(register_error::BuildBindPatternsSnafu)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
         // Phase 1: claim the name by inserting a `Registering` sentinel.
         {
             let mut registry = self.servers.write().await;
@@ -98,14 +111,9 @@ impl RootState {
             }
         }
 
-        // Phase 2: name is claimed — convert Listen declarations to
-        // BindPatterns and let dhttp::Endpoint bind them on the shared Network.
+        // Phase 2: name is claimed — let dhttp::Endpoint bind the normalized
+        // patterns on the shared Network.
         // No lock held — other server_names can be read/written concurrently.
-        let bind_patterns = request
-            .bind
-            .iter()
-            .flat_map(gateway::parse::types::Listens::to_bind_patterns)
-            .collect::<Vec<_>>();
         let identity = Arc::new(request.identity.clone());
         let bind_patterns = Arc::new(bind_patterns);
         let resolver = match self
@@ -118,7 +126,7 @@ impl RootState {
         {
             Ok(resolver) => resolver,
             Err(source) => {
-                self.servers.write().await.entries.remove(&server_name);
+                self.rollback_registering(&server_name, owner).await;
                 return Err(register_error::BuildResolverSnafu.into_error(source));
             }
         };
@@ -133,7 +141,7 @@ impl RootState {
         let endpoint = match endpoint {
             Ok(endpoint) => endpoint,
             Err(source) => {
-                self.servers.write().await.entries.remove(&server_name);
+                self.rollback_registering(&server_name, owner).await;
                 return Err(register_error::BuildEndpointSnafu.into_error(source));
             }
         };
@@ -142,7 +150,7 @@ impl RootState {
         let publisher = match endpoint.publisher_with_options(request.publish_options) {
             Ok(publisher) => publisher,
             Err(source) => {
-                self.servers.write().await.entries.remove(&server_name);
+                self.rollback_registering(&server_name, owner).await;
                 if let Err(error) = endpoint.shutdown().await {
                     tracing::warn!(
                         %server_name,
@@ -232,6 +240,17 @@ impl RootState {
                 server_name,
                 owner,
             ))
+        }
+    }
+
+    async fn rollback_registering(&self, server_name: &DhttpName<'static>, owner: ServiceOwner) {
+        let mut registry = self.servers.write().await;
+        let owned = matches!(
+            registry.entries.get(server_name),
+            Some(ServerEntry::Registering { owner: existing_owner }) if *existing_owner == owner
+        );
+        if owned {
+            registry.entries.remove(server_name);
         }
     }
 

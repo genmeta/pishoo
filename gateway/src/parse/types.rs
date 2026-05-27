@@ -1,8 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 use dhttp::name::DhttpName;
 use h3x::dquic::binds::BindPattern;
-use snafu::whatever;
+use snafu::{Snafu, whatever};
 
 use super::Result;
 
@@ -171,12 +171,24 @@ impl IfaceRange {
         match self {
             IfaceRange::All => true,
             IfaceRange::Exact(name) => name == iface_name,
-            IfaceRange::External | IfaceRange::Internal => {
+            IfaceRange::Internal => matches!(iface_name, "lo" | "lo0"),
+            IfaceRange::External => {
                 tracing::warn!(
-                    "iface range external/internal is not implemented yet, treating as non-match"
+                    "iface range external is not implemented yet, treating as non-match"
                 );
                 false
             }
+        }
+    }
+}
+
+impl fmt::Display for IfaceRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::All => f.write_str("all"),
+            Self::External => f.write_str("external"),
+            Self::Internal => f.write_str("internal"),
+            Self::Exact(name) => f.write_str(name),
         }
     }
 }
@@ -200,6 +212,13 @@ pub struct Listens {
     pub specific_addrs: Option<Vec<SocketAddr>>,
 }
 
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum ListenBindPatternError {
+    #[snafu(display("unsupported listen iface range `{range}`"))]
+    UnsupportedIfaceRange { range: IfaceRange },
+}
+
 impl Listens {
     pub fn new(range: IfaceRange, families: IpFamilies, port: u16) -> Self {
         Self {
@@ -210,7 +229,7 @@ impl Listens {
         }
     }
 
-    pub fn to_bind_patterns(&self) -> Vec<BindPattern> {
+    pub fn try_to_bind_patterns(&self) -> Result<Vec<BindPattern>, ListenBindPatternError> {
         fn parse_pattern(input: String) -> BindPattern {
             input
                 .parse()
@@ -218,20 +237,32 @@ impl Listens {
         }
 
         if let Some(specific_addrs) = &self.specific_addrs {
-            return specific_addrs
+            return Ok(specific_addrs
                 .iter()
                 .map(|addr| parse_pattern(format!("inet://{addr}")))
-                .collect();
+                .collect());
         }
 
         let host = match &self.range {
             IfaceRange::All => "*",
             IfaceRange::Exact(name) => name.as_str(),
-            IfaceRange::External | IfaceRange::Internal => {
-                // External/Internal require classifying interfaces via
-                // routing-table and loopback checks. Keep them explicitly
-                // unimplemented instead of silently changing the bind set.
-                unimplemented!("iface range external/internal is not implemented yet")
+            IfaceRange::Internal => {
+                return Ok(match self.families {
+                    IpFamilies::V4 => {
+                        vec![parse_pattern(format!("inet://127.0.0.1:{}", self.port))]
+                    }
+                    IpFamilies::V6 => vec![parse_pattern(format!("inet://[::1]:{}", self.port))],
+                    IpFamilies::Dual => vec![
+                        parse_pattern(format!("inet://127.0.0.1:{}", self.port)),
+                        parse_pattern(format!("inet://[::1]:{}", self.port)),
+                    ],
+                });
+            }
+            IfaceRange::External => {
+                return listen_bind_pattern_error::UnsupportedIfaceRangeSnafu {
+                    range: self.range.clone(),
+                }
+                .fail();
             }
         };
 
@@ -241,10 +272,10 @@ impl Listens {
             IpFamilies::Dual => "",
         };
 
-        vec![parse_pattern(format!(
+        Ok(vec![parse_pattern(format!(
             "iface://{family_prefix}{host}:{}",
             self.port
-        ))]
+        ))])
     }
 }
 
@@ -256,10 +287,20 @@ mod tests {
 
     fn pattern_strings(listen: Listens) -> Vec<String> {
         listen
-            .to_bind_patterns()
+            .try_to_bind_patterns()
+            .expect("listen should produce bind patterns")
             .into_iter()
             .map(|pattern| pattern.to_string())
             .collect()
+    }
+
+    fn try_pattern_strings(listen: Listens) -> Result<Vec<String>, ListenBindPatternError> {
+        listen.try_to_bind_patterns().map(|patterns| {
+            patterns
+                .into_iter()
+                .map(|pattern| pattern.to_string())
+                .collect()
+        })
     }
 
     #[test]
@@ -301,5 +342,40 @@ mod tests {
             pattern_strings(listen),
             vec!["inet://127.0.0.1:8443", "inet://[::1]:9443"]
         );
+    }
+
+    #[test]
+    fn listens_internal_dual_becomes_loopback_patterns() {
+        assert_eq!(
+            try_pattern_strings(Listens::new(IfaceRange::Internal, IpFamilies::Dual, 443))
+                .expect("internal dual listen should be supported"),
+            vec!["inet://127.0.0.1:443", "inet://[::1]:443"]
+        );
+    }
+
+    #[test]
+    fn listens_internal_family_becomes_matching_loopback_pattern() {
+        assert_eq!(
+            try_pattern_strings(Listens::new(IfaceRange::Internal, IpFamilies::V4, 443))
+                .expect("internal v4 listen should be supported"),
+            vec!["inet://127.0.0.1:443"]
+        );
+        assert_eq!(
+            try_pattern_strings(Listens::new(IfaceRange::Internal, IpFamilies::V6, 443))
+                .expect("internal v6 listen should be supported"),
+            vec!["inet://[::1]:443"]
+        );
+    }
+
+    #[test]
+    fn listens_external_returns_typed_error() {
+        let error = Listens::new(IfaceRange::External, IpFamilies::Dual, 443)
+            .try_to_bind_patterns()
+            .expect_err("external listen should be explicitly unsupported");
+
+        assert!(matches!(
+            error,
+            ListenBindPatternError::UnsupportedIfaceRange { .. }
+        ));
     }
 }

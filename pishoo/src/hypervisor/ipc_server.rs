@@ -66,15 +66,19 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             .register_listener(owner, request)
             .await
             .map_err(|error| {
+                let report = snafu::Report::from_error(&error).to_string();
                 tracing::warn!(
                     caller_pid = %self.caller_pid,
                     %server_name,
-                    error = %snafu::Report::from_error(&error),
+                    error = %report,
                     "listen request failed"
                 );
                 match error {
                     RegisterError::DuplicateListen | RegisterError::ConflictedName => {
                         ListenError::Conflict
+                    }
+                    RegisterError::BuildBindPatterns { .. } => {
+                        ListenError::InvalidRequest { reason: report }
                     }
                     RegisterError::BuildResolver { .. }
                     | RegisterError::BuildEndpoint { .. }

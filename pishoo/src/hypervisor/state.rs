@@ -45,6 +45,10 @@ pub enum RegisterError {
     /// The entry has been poisoned (set to `Conflicted`).
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
+    #[snafu(display("failed to build listen bind patterns"))]
+    BuildBindPatterns {
+        source: gateway::parse::types::ListenBindPatternError,
+    },
     #[snafu(display("failed to build dns resolver for registered endpoint"))]
     BuildResolver { source: BuildEndpointResolverError },
     #[snafu(display("failed to build registered endpoint"))]

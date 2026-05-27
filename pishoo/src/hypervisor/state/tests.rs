@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
-use gateway::control_plane::ListenRequest;
+use gateway::{
+    control_plane::ListenRequest,
+    parse::types::{IfaceRange, IpFamilies, Listens},
+};
 use nix::unistd::{Pid, Uid};
 
 use super::*;
@@ -15,6 +18,12 @@ async fn is_active(state: &RootState, server_name: &str) -> bool {
         registry.entries.get(&server_name),
         Some(ServerEntry::Active { .. })
     )
+}
+
+async fn has_entry(state: &RootState, server_name: &str) -> bool {
+    let server_name = DhttpName::try_from(server_name.to_owned()).unwrap();
+    let registry = state.servers.read().await;
+    registry.entries.contains_key(&server_name)
 }
 
 fn dhttp_name(label: &str) -> DhttpName<'static> {
@@ -61,6 +70,13 @@ fn test_request(label: &str) -> ListenRequest {
         bind: vec![],
         dns_resolver_url: None,
         publish_options: PublishOptions::default(),
+    }
+}
+
+fn test_request_with_bind(label: &str, bind: Vec<Listens>) -> ListenRequest {
+    ListenRequest {
+        bind,
+        ..test_request(label)
     }
 }
 
@@ -212,6 +228,27 @@ async fn test_register_then_release() {
         .release_server(&DhttpName::try_from(server_name.to_owned()).unwrap(), owner)
         .await;
     assert!(!is_active(&state, server_name).await);
+}
+
+#[tokio::test]
+async fn test_register_listener_rejects_external_listen_without_registry_entry() {
+    let state = test_state();
+    let owner = ServiceOwner::Local;
+
+    let err = state
+        .register_listener(
+            owner,
+            test_request_with_bind(
+                "external-listen",
+                vec![Listens::new(IfaceRange::External, IpFamilies::Dual, 443)],
+            ),
+        )
+        .await
+        .err()
+        .expect("external listen should fail");
+
+    assert!(matches!(err, RegisterError::BuildBindPatterns { .. }));
+    assert!(!has_entry(&state, "external-listen.user.genmeta.net").await);
 }
 
 #[tokio::test]
