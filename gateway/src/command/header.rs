@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use http::{HeaderValue, Request, header, response::Parts};
 
@@ -73,7 +73,7 @@ pub(crate) fn add_header(node: &Arc<ConfigNode>, parts: &mut Parts) {
 }
 
 /// Determines and sets the "Content-Type" header for a given file path based on configuration.
-pub(crate) fn content_type(node: &Arc<ConfigNode>, parts: &mut Parts, file_path: &str) {
+pub(crate) fn content_type(node: &Arc<ConfigNode>, parts: &mut Parts, file_path: &Path) {
     let mime_types = node.inherited::<MimeTypes>("types").ok().flatten();
     let default_type = node.inherited::<DefaultType>("default_type").ok().flatten();
 
@@ -99,14 +99,14 @@ fn header_rules(node: &ConfigNode, name: &str) -> Vec<HeaderRule> {
 
 /// Infers the `Content-Type` `HeaderValue` for a given file path based on its extension.
 fn infer_content_type<'a>(
-    file_path: &str,
+    file_path: &Path,
     mime_types: &'a HashMap<String, HeaderValue>,
     default_type: Option<&'a HeaderValue>,
 ) -> Option<&'a HeaderValue> {
-    let ext = match file_path.rsplit(".").next() {
-        Some(ext) => ext.to_lowercase(),
-        None => return default_type,
+    let Some(ext) = file_path.extension().and_then(|ext| ext.to_str()) else {
+        return default_type;
     };
+    let ext = ext.to_lowercase();
     match mime_types.get(&ext) {
         Some(content_type) => Some(content_type),
         None => default_type,
