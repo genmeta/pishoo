@@ -1,12 +1,15 @@
 mod brew;
 mod container;
 mod deb;
+mod grouped;
+mod package;
+mod publish;
 mod release;
 mod rpm;
 
 use std::{ffi::OsString, io::IsTerminal, path::PathBuf, process::Stdio};
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{Parser, Subcommand, ValueEnum};
 use snafu::{OptionExt, ResultExt, Whatever};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -19,28 +22,32 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Distribution packaging
-    Dist {
-        /// Grouped dist targets: deb/rpm/homebrew followed by target-local options
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    /// Build package artifacts and write package manifests
+    Package {
+        /// Allow replacing an existing target/common/<kind>/manifest.toml
+        #[arg(long)]
+        overwrite_manifest: bool,
+        /// Grouped package targets: deb/rpm/brew followed by target-local options
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_parser = package_token
+        )]
         targets: Vec<OsString>,
     },
-    /// Assemble publishable artifacts under target/common
-    Stage {
-        /// Grouped stage targets: homebrew/apt/rpm followed by target-local options
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-        targets: Vec<OsString>,
-    },
-    /// Validate target/common before publishing
-    Verify {
-        #[command(subcommand)]
-        command: release::VerifyCommand,
-    },
-    /// Publish staged artifacts
+    /// Publish package manifests
     Publish {
         #[command(subcommand)]
-        target: release::PublishTarget,
+        command: publish::PublishCommand,
     },
+}
+
+fn package_token(value: &str) -> Result<OsString, String> {
+    if value == "scoop" || value == "homebrew" {
+        return Err("unknown package target".to_string());
+    }
+    Ok(OsString::from(value))
 }
 
 /// Supported target triples for .deb builds.
@@ -158,54 +165,6 @@ impl BuildProfile {
     }
 }
 
-#[derive(Debug, Subcommand)]
-enum DistFormat {
-    /// Build .deb packages (via Docker container + cargo-zigbuild)
-    Deb {
-        /// Target triples (or "common" for arch-independent config package)
-        #[arg(long = "target", required = true)]
-        targets: Vec<DebTarget>,
-        /// Build debug-profile binaries instead of release-profile binaries
-        #[arg(long)]
-        debug: bool,
-        /// Cargo features to enable
-        #[arg(long = "features", value_delimiter = ',')]
-        features: Vec<Feature>,
-        /// Sibling crate directories to bind-mount into the build container
-        /// at `/{basename}`, matching `path = "../{basename}"` in Cargo.toml.
-        /// Repeatable. Each path must exist and be a directory.
-        #[arg(long = "sibling")]
-        siblings: Vec<PathBuf>,
-    },
-    /// Build .rpm packages (via Fedora container + cargo-zigbuild + rpmbuild)
-    Rpm {
-        /// Target triples to build for
-        #[arg(long = "target", required = true)]
-        targets: Vec<RpmTarget>,
-        /// Cargo features to enable
-        #[arg(long = "features", value_delimiter = ',')]
-        features: Vec<Feature>,
-        /// Sibling crate directories to bind-mount into the build container.
-        #[arg(long = "sibling")]
-        siblings: Vec<PathBuf>,
-    },
-    /// Build Homebrew archives
-    Homebrew {
-        /// Target triples to build for
-        #[arg(long = "target", required = true)]
-        targets: Vec<BrewTarget>,
-        /// Cargo features to enable
-        #[arg(long = "features", value_delimiter = ',')]
-        features: Vec<Feature>,
-    },
-}
-
-#[derive(Parser)]
-struct DistCli {
-    #[command(subcommand)]
-    format: DistFormat,
-}
-
 /// Resolve the workspace target directory via cargo_metadata.
 fn target_dir() -> Result<PathBuf, Whatever> {
     let metadata = cargo_metadata::MetadataCommand::new()
@@ -284,29 +243,12 @@ pub async fn run_cmd(cmd: &mut tokio::process::Command) -> Result<(), Whatever> 
 mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
-    use super::{
-        BuildProfile, Cli, Command, parse_dist_format, parse_dist_sections,
-        release::{PublishTarget, VerifyCommand},
-    };
-
-    fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {
-        command
-            .get_subcommands()
-            .find(|subcommand| subcommand.get_name() == name)
-            .expect("subcommand should be registered")
-    }
+    use super::{BuildProfile, Cli, Command};
 
     fn subcommand_names(command: &clap::Command) -> Vec<&str> {
         command
             .get_subcommands()
             .map(clap::Command::get_name)
-            .collect()
-    }
-
-    fn argument_longs(command: &clap::Command) -> Vec<&str> {
-        command
-            .get_arguments()
-            .filter_map(clap::Arg::get_long)
             .collect()
     }
 
@@ -323,460 +265,59 @@ mod tests {
     }
 
     #[test]
-    fn release_pipeline_subcommands_are_registered() {
+    fn release_pipeline_subcommands_are_package_and_publish() {
         let command = Cli::command();
         let names = subcommand_names(&command);
 
-        assert!(names.contains(&"stage"));
-        assert!(names.contains(&"verify"));
+        assert!(names.contains(&"package"));
         assert!(names.contains(&"publish"));
-        assert!(!names.contains(&"tap"));
+        assert!(!names.contains(&"dist"));
+        assert!(!names.contains(&"stage"));
+        assert!(!names.contains(&"verify"));
     }
 
     #[test]
-    fn release_pipeline_uses_grouped_stage_targets() {
-        let command = Cli::command();
-        let stage = subcommand(&command, "stage");
-
-        assert!(
-            stage
-                .clone()
-                .render_long_help()
-                .to_string()
-                .contains("homebrew/apt/rpm")
-        );
-        assert!(stage.get_subcommands().next().is_none());
-    }
-
-    #[test]
-    fn dist_accepts_grouped_targets_as_trailing_args() {
+    fn gateway_package_accepts_features_and_common_deb() {
         let cli = Cli::try_parse_from([
             "xtask",
-            "dist",
+            "package",
+            "--overwrite-manifest",
             "deb",
             "--target",
+            "common",
+            "--target",
             "x86_64-unknown-linux-gnu",
-            "rpm",
+            "--features",
+            "sshd,pam",
+            "brew",
             "--target",
-            "aarch64-unknown-linux-gnu",
-            "homebrew",
-            "--target",
-            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "--features",
+            "sshd,pam",
         ])
-        .expect("grouped dist targets should parse at outer level");
+        .expect("gateway package should parse");
 
         match cli.command {
-            Command::Dist { targets } => {
-                assert_eq!(
-                    targets,
-                    [
-                        "deb",
-                        "--target",
-                        "x86_64-unknown-linux-gnu",
-                        "rpm",
-                        "--target",
-                        "aarch64-unknown-linux-gnu",
-                        "homebrew",
-                        "--target",
-                        "x86_64-apple-darwin",
-                    ]
-                    .map(std::ffi::OsString::from)
-                );
-            }
-            _ => panic!("expected dist command"),
-        }
-    }
-
-    #[test]
-    fn dist_help_mentions_grouped_targets() {
-        let help = subcommand(&Cli::command(), "dist")
-            .clone()
-            .render_long_help()
-            .to_string();
-
-        assert!(help.contains("Grouped dist targets: deb/rpm/homebrew"));
-    }
-
-    #[test]
-    fn stage_accepts_grouped_targets_as_trailing_args() {
-        let cli = Cli::try_parse_from([
-            "xtask",
-            "stage",
-            "homebrew",
-            "apt",
-            "--suite",
-            "stable",
-            "--signing-key",
-            "key.asc",
-            "--fingerprint",
-            "00112233445566778899AABBCCDDEEFF00112233",
-            "rpm",
-        ])
-        .expect("grouped stage targets should parse at outer level");
-
-        match cli.command {
-            Command::Stage { targets } => {
-                assert_eq!(
-                    targets,
-                    [
-                        "homebrew",
-                        "apt",
-                        "--suite",
-                        "stable",
-                        "--signing-key",
-                        "key.asc",
-                        "--fingerprint",
-                        "00112233445566778899AABBCCDDEEFF00112233",
-                        "rpm",
-                    ]
-                    .map(std::ffi::OsString::from)
-                );
-            }
-            _ => panic!("expected stage command"),
-        }
-    }
-
-    #[test]
-    fn stage_help_mentions_grouped_targets() {
-        let help = subcommand(&Cli::command(), "stage")
-            .clone()
-            .render_long_help()
-            .to_string();
-
-        assert!(help.contains("Grouped stage targets: homebrew/apt/rpm"));
-    }
-
-    #[test]
-    fn verify_local_accepts_grouped_targets_as_trailing_args() {
-        let cli = Cli::try_parse_from(["xtask", "verify", "local", "homebrew", "rpm"])
-            .expect("grouped verify local targets should parse at outer level");
-
-        match cli.command {
-            Command::Verify {
-                command: VerifyCommand::Local { targets },
+            Command::Package {
+                overwrite_manifest,
+                targets,
             } => {
-                assert_eq!(targets, ["homebrew", "rpm"].map(std::ffi::OsString::from));
+                assert!(overwrite_manifest);
+                assert_eq!(targets[0], std::ffi::OsString::from("deb"));
             }
-            _ => panic!("expected verify local command"),
+            _ => panic!("expected package command"),
         }
     }
 
     #[test]
-    fn verify_remote_s3_accepts_secret_values_directly() {
-        let cli = Cli::try_parse_from([
-            "xtask",
-            "verify",
-            "remote",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-            "apt",
-            "--prefix",
-            "apt/stable",
-        ])
-        .expect("verify remote s3 should accept direct secret values");
-
-        match cli.command {
-            Command::Verify {
-                command:
-                    VerifyCommand::Remote {
-                        target: crate::release::RemoteVerifyTarget::S3 { options, targets },
-                    },
-            } => {
-                assert_eq!(options.bucket, "downloads");
-                assert_eq!(
-                    targets,
-                    ["apt", "--prefix", "apt/stable"].map(std::ffi::OsString::from)
-                );
-            }
-            _ => panic!("expected verify remote s3 command"),
-        }
-    }
-
-    #[test]
-    fn verify_remote_s3_accepts_global_options_before_grouped_targets() {
-        let cli = Cli::try_parse_from([
-            "xtask",
-            "verify",
-            "remote",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-            "apt",
-            "--prefix",
-            "apt/stable",
-            "rpm",
-            "--prefix",
-            "rpm/stable",
-        ])
-        .expect("grouped verify remote s3 targets should parse at outer level");
-
-        match cli.command {
-            Command::Verify {
-                command:
-                    VerifyCommand::Remote {
-                        target: crate::release::RemoteVerifyTarget::S3 { options, targets },
-                    },
-            } => {
-                assert_eq!(options.bucket, "downloads");
-                assert_eq!(
-                    targets,
-                    [
-                        "apt",
-                        "--prefix",
-                        "apt/stable",
-                        "rpm",
-                        "--prefix",
-                        "rpm/stable",
-                    ]
-                    .map(std::ffi::OsString::from)
-                );
-            }
-            _ => panic!("expected verify remote s3 command"),
-        }
-    }
-
-    #[test]
-    fn verify_remote_s3_requires_at_least_one_target() {
-        let error = Cli::try_parse_from([
-            "xtask",
-            "verify",
-            "remote",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-        ])
-        .expect_err("verify remote s3 should require grouped targets");
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn verify_remote_s3_help_excludes_publish_only_options() {
-        let command = Cli::command();
-        let verify = subcommand(&command, "verify");
-        let remote = subcommand(verify, "remote");
-        let s3 = subcommand(remote, "s3");
-
-        let help = s3.clone().render_long_help().to_string();
-
-        assert!(help.contains("--endpoint-url"));
-        assert!(help.contains("--bucket"));
-        assert!(help.contains("--access-key-id"));
-        assert!(help.contains("XTASK_RELEASE_S3_ACCESS_KEY_ID"));
-        assert!(help.contains("--secret-access-key"));
-        assert!(help.contains("XTASK_RELEASE_S3_SECRET_ACCESS_KEY"));
-        assert!(!help.contains("--access-key-id-file"));
-        assert!(!help.contains("--secret-access-key-file"));
-        assert!(!help.contains("--root"));
-        assert!(!help.contains("--apt-prefix"));
-        assert!(!help.contains("--dry-run"));
-    }
-
-    #[test]
-    fn verify_remote_s3_rejects_legacy_root_option_with_grouped_target_message() {
-        let error = match Cli::try_parse_from([
-            "xtask",
-            "verify",
-            "remote",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-            "--root",
-            "homebrew",
-            "homebrew",
-        ]) {
-            Ok(_) => panic!("verify remote s3 should reject legacy --root"),
-            Err(error) => error,
-        };
-
+    fn gateway_rejects_scoop_target() {
+        let error = Cli::try_parse_from(["xtask", "package", "scoop"])
+            .expect_err("gateway should not support scoop");
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
-        assert!(
-            error
-                .to_string()
-                .contains("--root has been replaced by grouped s3 targets")
-        );
     }
 
     #[test]
-    fn verify_remote_s3_rejects_dry_run_as_publish_only() {
-        let error = match Cli::try_parse_from([
-            "xtask",
-            "verify",
-            "remote",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-            "--dry-run",
-            "homebrew",
-        ]) {
-            Ok(_) => panic!("verify remote s3 should reject publish-only --dry-run"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation);
-        assert!(
-            error
-                .to_string()
-                .contains("--dry-run is only supported by publish s3")
-        );
-    }
-
-    #[test]
-    fn dist_target_local_help_remains_clap_display_help() {
-        let error = match parse_dist_format("deb", [std::ffi::OsString::from("--help")]) {
-            Ok(_) => panic!("target-local help should be reported as clap display help"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        assert!(error.to_string().contains("Build .deb packages"));
-        assert!(error.to_string().contains("Usage: xtask dist deb"));
-    }
-
-    #[test]
-    fn dist_target_local_parse_errors_use_clap_usage() {
-        let error = match parse_dist_format("deb", [std::ffi::OsString::from("--bogus")]) {
-            Ok(_) => panic!("invalid target-local options should be reported as clap errors"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-        assert!(error.to_string().contains("Usage: xtask dist deb"));
-        assert!(
-            !error
-                .to_string()
-                .contains("failed to parse dist deb options")
-        );
-    }
-
-    #[test]
-    fn dist_sections_parse_later_help_before_execution() {
-        let tokens = [
-            std::ffi::OsString::from("deb"),
-            std::ffi::OsString::from("--target"),
-            std::ffi::OsString::from("x86_64-unknown-linux-gnu"),
-            std::ffi::OsString::from("rpm"),
-            std::ffi::OsString::from("--help"),
-        ];
-
-        let error = match parse_dist_sections(&tokens) {
-            Ok(_) => panic!("later target-local help should stop grouped dist parsing"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        assert!(error.to_string().contains("Build .rpm packages"));
-        assert!(error.to_string().contains("Usage: xtask dist rpm"));
-    }
-
-    #[test]
-    fn release_publish_uses_grouped_s3_targets_and_nested_tap_command_names() {
-        let command = Cli::command();
-        let publish = subcommand(&command, "publish");
-        let publish_names = subcommand_names(publish);
-        let s3_options = argument_longs(subcommand(publish, "s3"));
-
-        assert!(publish_names.contains(&"s3"));
-        assert!(publish_names.contains(&"tap"));
-        assert!(!s3_options.contains(&"root"));
-        assert!(!s3_options.contains(&"apt-prefix"));
-    }
-
-    #[test]
-    fn publish_s3_help_mentions_grouped_targets_not_legacy_roots() {
-        let command = Cli::command();
-        let publish = subcommand(&command, "publish");
-        let s3 = subcommand(publish, "s3");
-
-        let help = s3.clone().render_long_help().to_string();
-
-        assert!(help.contains("Grouped S3 targets: homebrew/apt/rpm"));
-        assert!(!help.contains("--root"));
-        assert!(!help.contains("--apt-prefix"));
-    }
-
-    #[test]
-    fn publish_s3_requires_at_least_one_grouped_target() {
-        let error = Cli::try_parse_from([
-            "xtask",
-            "publish",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-        ])
-        .expect_err("publish s3 should require grouped targets");
-
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn publish_s3_rejects_legacy_root_option() {
-        let error = match Cli::try_parse_from([
-            "xtask",
-            "publish",
-            "s3",
-            "--endpoint-url",
-            "https://s3.example.test",
-            "--bucket",
-            "downloads",
-            "--access-key-id",
-            "access",
-            "--secret-access-key",
-            "secret",
-            "--root",
-            "homebrew",
-        ]) {
-            Ok(_) => panic!("publish s3 should reject legacy --root"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation);
-        assert!(
-            error
-                .to_string()
-                .contains("--root has been replaced by grouped s3 targets")
-        );
-    }
-
-    #[test]
-    fn publish_s3_accepts_grouped_rpm_target_with_prefix() {
+    fn publish_s3_accepts_grouped_targets() {
         let cli = Cli::try_parse_from([
             "xtask",
             "publish",
@@ -789,23 +330,31 @@ mod tests {
             "access",
             "--secret-access-key",
             "secret",
-            "rpm",
+            "brew",
             "--prefix",
-            "rpm/genmeta",
+            "brew/gateway",
+            "--public-base-url",
+            "https://download.example/brew/gateway",
         ])
-        .expect("publish s3 should accept grouped rpm target");
+        .expect("publish s3 should accept grouped targets");
 
         match cli.command {
             Command::Publish {
-                target: PublishTarget::S3 { options, targets },
+                command: crate::publish::PublishCommand::S3 { options, targets },
             } => {
                 assert_eq!(options.bucket, "downloads");
-                assert_eq!(
-                    targets,
-                    ["rpm", "--prefix", "rpm/genmeta"].map(std::ffi::OsString::from)
-                );
+                assert_eq!(targets[0], std::ffi::OsString::from("brew"));
             }
             _ => panic!("expected publish s3 command"),
+        }
+    }
+
+    #[test]
+    fn old_release_commands_are_rejected() {
+        for command in ["dist", "stage", "verify"] {
+            let error = Cli::try_parse_from(["xtask", command])
+                .expect_err("old release command should be rejected");
+            assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         }
     }
 }
@@ -839,59 +388,6 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     guard
 }
 
-fn parse_dist_format<I, T>(section_name: &str, args: I) -> Result<DistFormat, clap::Error>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString>,
-{
-    let mut argv = vec![OsString::from("xtask dist"), section_name.to_owned().into()];
-    argv.extend(args.into_iter().map(Into::into));
-    DistCli::try_parse_from(argv).map(|cli| cli.format)
-}
-
-fn parse_dist_sections(tokens: &[OsString]) -> Result<Vec<DistFormat>, clap::Error> {
-    let sections = release::grouped::parse_grouped_targets(tokens, &["deb", "rpm", "homebrew"])
-        .map_err(|error| DistCli::command().error(ErrorKind::ValueValidation, error))?;
-
-    sections
-        .into_iter()
-        .map(|section| parse_dist_format(&section.name, section.args))
-        .collect()
-}
-
-async fn run_dist_sections(tokens: Vec<OsString>) -> Result<(), Whatever> {
-    let formats = parse_dist_sections(&tokens).unwrap_or_else(|error| {
-        error.exit();
-    });
-
-    for format in formats {
-        match format {
-            DistFormat::Deb {
-                targets,
-                debug,
-                features,
-                siblings,
-            } => {
-                deb::run(
-                    &targets,
-                    BuildProfile::from_debug(debug),
-                    &features,
-                    &siblings,
-                )
-                .await?
-            }
-            DistFormat::Rpm {
-                targets,
-                features,
-                siblings,
-            } => rpm::run(&targets, &features, &siblings).await?,
-            DistFormat::Homebrew { targets, features } => brew::run(&targets, &features).await?,
-        }
-    }
-
-    Ok(())
-}
-
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), Whatever> {
@@ -899,10 +395,17 @@ async fn main() -> Result<(), Whatever> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Dist { targets } => run_dist_sections(targets).await?,
-        Command::Stage { targets } => release::stage_sections(targets).await?,
-        Command::Verify { command } => release::verify(command).await?,
-        Command::Publish { target } => release::publish(target).await?,
+        Command::Package {
+            overwrite_manifest,
+            targets,
+        } => {
+            package::run(package::PackageOptions {
+                overwrite_manifest,
+                targets,
+            })
+            .await?
+        }
+        Command::Publish { command } => publish::run(command).await?,
     }
     Ok(())
 }

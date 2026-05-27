@@ -1,0 +1,81 @@
+pub mod manifest;
+pub mod prompt;
+
+use std::ffi::OsString;
+
+use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
+#[allow(unused_imports)]
+pub use manifest::{ArtifactKind, PackageArtifact, PackageManifest};
+use snafu::Whatever;
+
+use crate::{BrewTarget, DebTarget, Feature, RpmTarget, grouped};
+
+pub const KNOWN_PACKAGE_TARGETS: &[&str] = &["deb", "rpm", "brew"];
+
+#[derive(Debug)]
+pub struct PackageOptions {
+    pub overwrite_manifest: bool,
+    pub targets: Vec<OsString>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PackageFormat {
+    Deb {
+        #[arg(long = "target", required = true)]
+        targets: Vec<DebTarget>,
+        #[arg(long)]
+        debug: bool,
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
+        #[arg(long = "sibling")]
+        siblings: Vec<std::path::PathBuf>,
+    },
+    Rpm {
+        #[arg(long = "target", required = true)]
+        targets: Vec<RpmTarget>,
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
+        #[arg(long = "sibling")]
+        siblings: Vec<std::path::PathBuf>,
+    },
+    Brew {
+        #[arg(long = "target", required = true)]
+        targets: Vec<BrewTarget>,
+        #[arg(long = "features", value_delimiter = ',')]
+        features: Vec<Feature>,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct PackageCli {
+    #[command(subcommand)]
+    format: PackageFormat,
+}
+
+pub fn parse_package_format<I, T>(section_name: &str, args: I) -> Result<PackageFormat, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut argv = vec![
+        OsString::from("xtask package"),
+        section_name.to_owned().into(),
+    ];
+    argv.extend(args.into_iter().map(Into::into));
+    PackageCli::try_parse_from(argv).map(|cli| cli.format)
+}
+
+pub fn parse_package_sections(tokens: &[OsString]) -> Result<Vec<PackageFormat>, clap::Error> {
+    let sections = grouped::parse_grouped_targets(tokens, KNOWN_PACKAGE_TARGETS)
+        .map_err(|error| PackageCli::command().error(ErrorKind::ValueValidation, error))?;
+    sections
+        .into_iter()
+        .map(|section| parse_package_format(&section.name, section.args))
+        .collect()
+}
+
+pub async fn run(options: PackageOptions) -> Result<(), Whatever> {
+    let _formats = parse_package_sections(&options.targets).unwrap_or_else(|error| error.exit());
+    let _ = options.overwrite_manifest;
+    snafu::whatever!("package target execution is not wired yet")
+}
