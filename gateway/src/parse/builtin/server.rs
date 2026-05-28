@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use dhttp_config::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
+use dhttp_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
@@ -99,20 +99,20 @@ fn finalize_server(
         !node.get_all::<ListenConfig>("listen")?.is_empty(),
         finalize_server_error::MissingListenSnafu { span: node.span }
     );
-    if let Some(identity_home) = options.identity_home {
+    if let Some(identity_profile) = options.identity_profile {
         if node.get::<ServerNames>("server_name")?.is_none() {
             node.insert_slot(
                 "server_name",
                 TypedValue::new(
                     ServerNames(vec![ServerName {
-                        name: identity_home.name().to_owned(),
+                        name: identity_profile.name().to_owned(),
                     }]),
                     node.span,
                 ),
             );
         }
         if node.get::<PathConfig>("ssl_certificate")?.is_none() {
-            let path = identity_home.ssl_dir().join(CERT_FILE_NAME);
+            let path = identity_profile.ssl_dir().join(CERT_FILE_NAME);
             ensure!(
                 path.exists(),
                 finalize_server_error::MissingDefaultCertificateSnafu {
@@ -126,7 +126,7 @@ fn finalize_server(
             );
         }
         if node.get::<PathConfig>("ssl_certificate_key")?.is_none() {
-            let path = identity_home.ssl_dir().join(KEY_FILE_NAME);
+            let path = identity_profile.ssl_dir().join(KEY_FILE_NAME);
             ensure!(
                 path.exists(),
                 finalize_server_error::MissingDefaultCertificateKeySnafu {

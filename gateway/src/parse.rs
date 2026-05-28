@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use dhttp_config::identity::IdentityConfig;
+use dhttp_home::identity::IdentityProfile;
 use snafu::ResultExt;
 
 pub mod ast;
@@ -36,15 +36,15 @@ pub fn parse_config_str_for_test(
 
 pub fn parse_server_config_str_for_test(
     text: &str,
-    identity_home: &IdentityConfig,
+    identity_profile: &IdentityProfile,
 ) -> Result<document::ConfigDocument, error::ConfigLoadFailure> {
     let registry = default_registry();
     load_config_text(
         text,
-        Some(identity_home.path()),
+        Some(identity_profile.path()),
         &registry,
         registry::BuildOptions {
-            identity_home: Some(identity_home),
+            identity_profile: Some(identity_profile),
         },
     )
 }

@@ -1,6 +1,6 @@
 use std::{io::Write, path::PathBuf, sync::Arc};
 
-use dhttp_config::identity::IdentityConfig;
+use dhttp_home::identity::IdentityProfile;
 use tracing_appender::{
     non_blocking::{NonBlocking, WorkerGuard},
     rolling::{RollingFileAppender, Rotation},
@@ -28,7 +28,7 @@ impl AccessLogWriter {
         std::fs::create_dir_all(&log_dir)?;
 
         let appender =
-            RollingFileAppender::new(Rotation::NEVER, log_dir, IdentityConfig::ACCESS_LOG_FILE);
+            RollingFileAppender::new(Rotation::NEVER, log_dir, IdentityProfile::ACCESS_LOG_FILE);
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
         Ok(Self {

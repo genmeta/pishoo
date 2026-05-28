@@ -24,7 +24,7 @@ required-features = ["sshd"]
 # --- Workspace Member ---
 gateway = { workspace = true }
 dhttp = { workspace = true }
-dhttp-config = { workspace = true }
+dhttp-home = { workspace = true }
 
 # --- QUIC & HTTP/3 ---
 h3x = { workspace = true, features = ["ipc"] }

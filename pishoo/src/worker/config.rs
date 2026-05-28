@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dhttp::ddns::PublishOptions;
-use dhttp_config::DhttpConfig;
+use dhttp_home::DhttpHome;
 use futures::StreamExt;
 use gateway::{
     control_plane::ListenRequest,
@@ -50,13 +50,13 @@ impl snafu::FromString for BuildConfigError {
 }
 
 /// Build a [`ServiceConfig`] by scanning all identities under the given
-/// [`DhttpConfig`], loading their TLS material and server.conf definitions.
+/// [`DhttpHome`], loading their TLS material and server.conf definitions.
 pub async fn build_service_config(
-    dhttp_config: &DhttpConfig,
+    dhttp_home: &DhttpHome,
 ) -> Result<ServiceConfig, BuildConfigError> {
     // Collect identity names from the stream.
     let mut identity_names = Vec::new();
-    let mut stream = std::pin::pin!(dhttp_config.identities());
+    let mut stream = std::pin::pin!(dhttp_home.identity_profile_names());
     while let Some(result) = stream.next().await {
         match result {
             Ok(name) => identity_names.push(name),
@@ -75,7 +75,7 @@ pub async fn build_service_config(
     let mut access_rules_uri: Option<String> = None;
 
     for name in &identity_names {
-        let identity_home = match dhttp_config.load_identity(name.borrow()).await {
+        let identity_profile = match dhttp_home.resolve_identity_profile(name.borrow()).await {
             Ok(home) => home,
             Err(error) => {
                 tracing::warn!(
@@ -88,7 +88,7 @@ pub async fn build_service_config(
         };
 
         // Load TLS material.
-        let ssl = match identity_home.identity().await {
+        let ssl = match identity_profile.load_identity().await {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(
@@ -103,9 +103,9 @@ pub async fn build_service_config(
         // Always register a fallback server node for the identity name.
 
         // Load per-identity server.conf if present.
-        let conf_path = identity_home.server_conf_path();
+        let conf_path = identity_profile.server_conf_path();
         let identity_server_nodes = if conf_path.is_file() {
-            match load_identity_servers(&identity_home).await {
+            match load_identity_servers(&identity_profile).await {
                 Ok(nodes) => nodes,
                 Err(error) => {
                     tracing::warn!(
@@ -137,7 +137,7 @@ pub async fn build_service_config(
 
         // Default access_rules: IDENTITY_HOME/db/access.db
         if access_rules_uri.is_none() {
-            let default_db = dhttp_access::db::identity_access_db_path(&identity_home);
+            let default_db = dhttp_access::db::identity_access_db_path(&identity_profile);
             if default_db.is_file() {
                 access_rules_uri = Some(format!("sqlite://{}?mode=ro", default_db.display()));
             }
@@ -211,7 +211,7 @@ pub async fn build_service_config(
         servers.push(ServerConfig {
             listen_request,
             server_node,
-            access_log_dir: Some(identity_home.logs_dir()),
+            access_log_dir: Some(identity_profile.logs_dir()),
         });
     }
 
