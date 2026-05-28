@@ -130,3 +130,29 @@ fn sshd_service_registers_webtransport_protocol_layer() {
         "sshd services must not keep the legacy SSH3 stream protocol routing"
     );
 }
+
+#[test]
+fn accept_state_owns_listener_via_join_handle() {
+    let service_source = include_str!("../src/service.rs");
+    let accept_source = include_str!("../src/service/accept.rs");
+
+    assert!(
+        service_source.contains("pub mod accept;"),
+        "service module must expose the accept submodule"
+    );
+    assert!(
+        accept_source.contains("pub enum AcceptState"),
+        "service::accept must define an AcceptState enum"
+    );
+    assert!(
+        accept_source.contains("task: JoinHandle<L>"),
+        "AcceptState::Running must own the listener via JoinHandle<L> so the \
+         accept task moves the listener in and returns it on shutdown"
+    );
+    assert!(
+        !accept_source.contains("listener: L,\n        service:")
+            && !accept_source.contains("listener: L,\n        task:"),
+        "AcceptState must not hold listener and task side by side; the listener \
+         must be owned by the spawned task"
+    );
+}

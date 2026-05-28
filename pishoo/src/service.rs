@@ -6,6 +6,8 @@
 //! the [`PreparedServer`]s so they can be reused on the next reload without
 //! tearing down underlying QUIC bindings.
 
+pub mod accept;
+
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::middleware::from_fn_with_state;
