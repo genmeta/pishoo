@@ -7,6 +7,9 @@
 //! tearing down underlying QUIC bindings.
 
 pub mod accept;
+pub mod runtime;
+pub mod snapshot;
+pub mod source;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
