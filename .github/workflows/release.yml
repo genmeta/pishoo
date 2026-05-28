@@ -140,7 +140,7 @@ jobs:
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
           XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
         run: |
           : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
@@ -189,7 +189,7 @@ jobs:
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
           XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
           APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
           APT_SIGNING_FINGERPRINT: ${{ steps.apt_key.outputs.fingerprint }}
@@ -299,7 +299,7 @@ jobs:
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
         run: |
           : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
@@ -321,7 +321,7 @@ jobs:
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
         run: |
           cargo xtask publish s3 --dry-run \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
