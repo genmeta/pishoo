@@ -39,7 +39,7 @@ on:
       homebrew_tap_repository:
         description: GitHub repository that owns the Homebrew tap.
         required: true
-        default: genmeta/homebrew-tap
+        default: genmeta/homebrew-genmeta
       homebrew_tap_base_branch:
         description: Base branch for Homebrew tap pull requests.
         required: true
