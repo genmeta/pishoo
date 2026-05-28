@@ -34,33 +34,6 @@ fn local_connector_type_is_dhttp_endpoint() {
 }
 
 #[test]
-fn worker_uses_shared_tls_validator() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
-    assert!(
-        worker_source.contains("build_service_config("),
-        "worker TLS path must delegate to build_service_config which handles TLS validation"
-    );
-}
-
-#[test]
-fn worker_reload_uses_single_helper_path() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
-
-    assert!(
-        worker_source.contains("build_service_config("),
-        "worker should build config through the shared builder"
-    );
-    assert!(
-        worker_source.contains("setup_service("),
-        "worker should set up through the unified setup_service entry point"
-    );
-    assert!(
-        worker_source.contains("service::run_service("),
-        "worker should run through the unified run_service entry point"
-    );
-}
-
-#[test]
 fn worker_does_not_embed_root_cert_store() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
     assert!(
@@ -75,16 +48,6 @@ fn worker_stops_server_runtimes_before_exit() {
     assert!(
         worker_source.contains("tokio::select!"),
         "worker shutdown must use select to handle signals and service exit"
-    );
-}
-
-#[test]
-fn worker_reload_rebuilds_all_listener_handles() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
-    assert!(
-        worker_source.contains("received reload signal")
-            && worker_source.contains("reload complete"),
-        "worker reload path should rebuild config and restart the service"
     );
 }
 
@@ -154,5 +117,29 @@ fn accept_state_owns_listener_via_join_handle() {
             && !accept_source.contains("listener: L,\n        task:"),
         "AcceptState must not hold listener and task side by side; the listener \
          must be owned by the spawned task"
+    );
+}
+
+#[test]
+fn worker_reload_uses_worker_runtime() {
+    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
+
+    assert!(
+        worker_source.contains("WorkerRuntime::new(")
+            && worker_source.contains("runtime.reload().await")
+            && worker_source.contains("runtime.shutdown().await"),
+        "worker must delegate reload/shutdown to WorkerRuntime"
+    );
+    assert!(
+        !worker_source.contains("setup_service("),
+        "worker must not call the legacy setup_service entry point"
+    );
+    assert!(
+        !worker_source.contains("service::run_service("),
+        "worker must not call the legacy run_service entry point"
+    );
+    assert!(
+        !worker_source.contains("collect_reusable_listeners("),
+        "worker must not call the legacy collect_reusable_listeners entry point"
     );
 }
