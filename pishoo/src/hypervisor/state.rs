@@ -11,7 +11,7 @@ mod process_ops;
 mod server_ops;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -20,7 +20,10 @@ use h3x::{
     dquic::{Network, server::ServerQuicConfig},
     quic::Listen as _,
 };
-use nix::unistd::{Pid, Uid};
+use nix::{
+    sys::wait::WaitStatus,
+    unistd::{Pid, Uid},
+};
 use snafu::{Report, Snafu};
 use tokio::{
     sync::{Mutex, RwLock},
@@ -29,8 +32,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::hypervisor::{
-    endpoint_factory::BuildEndpointResolverError, task_scope::TaskScope,
-    worker_handle::WorkerHandle,
+    endpoint_factory::BuildEndpointResolverError,
+    task_scope::TaskScope,
+    worker_handle::{WorkerHandle, WorkerHandleError},
 };
 
 // ---------------------------------------------------------------------------
@@ -71,6 +75,79 @@ pub enum ServiceOwner {
     Local,
     /// Owned by a specific worker process.
     Worker(Pid),
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum WorkerStartupError {
+    #[snafu(display("worker startup timed out"))]
+    Timeout,
+    #[snafu(display("failed to create mux channel from worker fd"))]
+    MuxChannelFromFd { source: std::io::Error },
+    #[snafu(display("failed to split worker mux channel"))]
+    MuxChannelSplit {
+        source: h3x::ipc::transport::SplitError,
+    },
+    #[snafu(display("failed to establish worker remoc transport"))]
+    ConnectTransport {
+        source: remoc::ConnectError<
+            h3x::ipc::transport::MuxSinkError,
+            h3x::ipc::transport::MuxStreamError,
+        >,
+    },
+    #[snafu(display("failed to send worker bootstrap"))]
+    SendBootstrap {
+        source: remoc::rch::base::SendError<crate::ipc::WorkerBootstrap>,
+    },
+    #[snafu(display("failed to receive worker hello"))]
+    ReceiveHello { source: remoc::rch::base::RecvError },
+    #[snafu(display("worker closed channel without sending startup hello"))]
+    MissingHello,
+    #[snafu(display("worker was unregistered during startup"))]
+    WorkerUnregistered,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum WorkerProcessError {
+    #[snafu(display("worker startup failed"))]
+    Startup { source: WorkerStartupError },
+    #[snafu(display("worker ipc disconnected"))]
+    IpcDisconnected,
+    #[snafu(display("worker exited with status {status:?}"))]
+    ChildExited { status: WaitStatus },
+    #[snafu(display("failed to poll worker status"))]
+    PollStatus { source: WorkerHandleError },
+    #[snafu(display("worker replaced by another process for the same uid"))]
+    UidReplaced,
+    #[snafu(display("worker removed by configuration reload"))]
+    ReloadRemoved,
+    #[snafu(display("worker changed by configuration reload"))]
+    ReloadChanged,
+    #[snafu(display("worker shutdown timed out"))]
+    ShutdownTimeout,
+    #[snafu(display("worker force-killed during shutdown"))]
+    ForcedShutdown,
+    #[snafu(display("worker stopped during root shutdown"))]
+    RootShutdown,
+}
+
+impl WorkerProcessError {
+    pub fn is_restartable(&self) -> bool {
+        matches!(
+            self,
+            Self::Startup { .. }
+                | Self::IpcDisconnected
+                | Self::ChildExited { .. }
+                | Self::PollStatus { .. }
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkerFailure {
+    pub pid: Pid,
+    pub error: WorkerProcessError,
 }
 
 /// Per-server ownership record stored in the root registry.
@@ -138,6 +215,10 @@ pub(super) struct Inner {
     pub(super) processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping (one worker per uid).
     pub(super) users: HashMap<Uid, Pid>,
+    /// uid → desired worker target from the current root configuration.
+    pub(super) desired_workers: HashMap<Uid, crate::config::ResolvedWorkerTarget>,
+    /// Pending process-level failures reported by worker-scoped tasks.
+    pub(super) worker_failures: VecDeque<WorkerFailure>,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +330,8 @@ impl RootState {
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
                 users: HashMap::new(),
+                desired_workers: HashMap::new(),
+                worker_failures: VecDeque::new(),
             }),
             local_tasks: TaskScope::new(),
             worker_notify: tokio::sync::Notify::new(),

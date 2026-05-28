@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    ffi::CString,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
@@ -146,7 +149,7 @@ async fn test_register_worker_uid_replacement() {
 async fn test_cleanup_unknown_pid() {
     let state = test_state();
     let result = state
-        .cleanup_worker_with_reason(Pid::from_raw(77777), "test")
+        .cleanup_worker(Pid::from_raw(77777), WorkerProcessError::RootShutdown)
         .await;
     assert!(result.is_none());
 }
@@ -164,10 +167,19 @@ async fn test_cleanup_idempotent() {
         )
         .await;
 
-    let first = state.cleanup_worker_with_reason(pid, "exit").await;
+    let first = state
+        .cleanup_worker(
+            pid,
+            WorkerProcessError::ChildExited {
+                status: nix::sys::wait::WaitStatus::Exited(pid, 1),
+            },
+        )
+        .await;
     assert!(first.is_some());
 
-    let second = state.cleanup_worker_with_reason(pid, "exit").await;
+    let second = state
+        .cleanup_worker(pid, WorkerProcessError::RootShutdown)
+        .await;
     assert!(second.is_none());
 }
 
@@ -218,7 +230,7 @@ async fn test_cleanup_cancels_and_waits_worker_tasks() {
     assert!(spawned, "registered worker task should be tracked");
 
     state
-        .cleanup_worker_with_reason(pid, "test_cancel_wait")
+        .cleanup_worker(pid, WorkerProcessError::RootShutdown)
         .await
         .expect("cleanup should find worker");
 
@@ -257,7 +269,9 @@ async fn test_worker_pids_after_cleanup() {
 
     assert_eq!(state.worker_pids().await.len(), 2);
 
-    state.cleanup_worker_with_reason(p1, "exit").await;
+    state
+        .cleanup_worker(p1, WorkerProcessError::RootShutdown)
+        .await;
 
     let pids = state.worker_pids().await;
     assert_eq!(pids.len(), 1);
@@ -516,11 +530,77 @@ async fn test_cleanup_worker_releases_servers() {
 
     // Cleanup the worker — its server should also be gone.
     let summary = state
-        .cleanup_worker_with_reason(pid, "exit")
+        .cleanup_worker(
+            pid,
+            WorkerProcessError::ChildExited {
+                status: nix::sys::wait::WaitStatus::Exited(pid, 1),
+            },
+        )
         .await
         .expect("cleanup should find the worker");
     assert_eq!(summary.servers_cleaned, 1);
 
     assert!(!is_active(&state, "cleanup-srv.user.genmeta.net").await);
     assert!(!state.has_worker(pid).await);
+}
+
+#[tokio::test]
+async fn test_fail_worker_queues_typed_error_without_cleanup() {
+    let state = test_state();
+    let pid = Pid::from_raw(10002);
+    state
+        .register_worker(
+            pid,
+            Uid::from_raw(6001),
+            "failed-worker".into(),
+            fake_worker_handle(10002),
+        )
+        .await;
+
+    state
+        .fail_worker(pid, WorkerProcessError::IpcDisconnected)
+        .await;
+
+    assert!(
+        state.has_worker(pid).await,
+        "recording failure must not clean up from inside a worker task"
+    );
+
+    let failures = state.collect_worker_failures().await;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].pid, pid);
+    assert!(matches!(
+        &failures[0].error,
+        WorkerProcessError::IpcDisconnected
+    ));
+}
+
+#[tokio::test]
+async fn test_desired_worker_targets_are_uid_keyed() {
+    let state = test_state();
+    let target = nix::unistd::User {
+        name: "restart-user".to_owned(),
+        passwd: CString::new("x").unwrap(),
+        uid: Uid::from_raw(7001),
+        gid: nix::unistd::Gid::from_raw(7001),
+        gecos: CString::new("").unwrap(),
+        dir: std::path::PathBuf::from("/home/restart-user"),
+        shell: std::path::PathBuf::from("/bin/sh"),
+    };
+
+    state.set_desired_workers(vec![target.clone()]).await;
+
+    assert_eq!(
+        state
+            .desired_worker_target(Uid::from_raw(7001))
+            .await
+            .map(|worker| worker.name),
+        Some(target.name)
+    );
+    assert!(
+        state
+            .desired_worker_target(Uid::from_raw(7002))
+            .await
+            .is_none()
+    );
 }

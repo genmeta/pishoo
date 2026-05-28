@@ -10,7 +10,8 @@ use snafu::Report;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CleanupSummary, RetiredServer, RootState, ServerEntry, ServiceOwner, WorkerProcessRecord,
+    CleanupSummary, RetiredServer, RootState, ServerEntry, ServiceOwner, WorkerFailure,
+    WorkerProcessError, WorkerProcessRecord,
 };
 use crate::hypervisor::{task_scope::TaskScope, worker_handle::WorkerHandle};
 
@@ -93,7 +94,7 @@ impl RootState {
 
         if let Some(old_pid) = replaced_pid {
             let _ = self
-                .cleanup_worker_with_reason(old_pid, "uid_replaced")
+                .cleanup_worker(old_pid, WorkerProcessError::UidReplaced)
                 .await;
         }
 
@@ -145,11 +146,12 @@ impl RootState {
     /// Acquires `inner` lock first (to collect owned servers), releases it,
     /// then acquires `servers` write lock for cleanup. The two locks are
     /// never held simultaneously.
-    pub async fn cleanup_worker_with_reason(
+    pub async fn cleanup_worker(
         &self,
         pid: Pid,
-        reason: &str,
+        error: WorkerProcessError,
     ) -> Option<CleanupSummary> {
+        let report = Report::from_error(&error);
         // Step 1: remove process record and collect owned server names.
         let (record_uid, record_username, owned_servers, tasks) = {
             let mut inner = self.inner.lock().await;
@@ -231,24 +233,46 @@ impl RootState {
             pid = %summary.pid,
             username = %record_username,
             servers_cleaned = summary.servers_cleaned,
-            %reason,
+            error = %report,
             "worker stopped"
         );
 
         Some(summary)
     }
 
-    /// Collect PIDs of workers whose processes have exited.
-    pub async fn collect_exited_workers(&self) -> Vec<Pid> {
+    pub async fn fail_worker(&self, pid: Pid, error: WorkerProcessError) {
         let mut inner = self.inner.lock().await;
-        let mut exited = Vec::new();
+        if !inner.processes.contains_key(&pid) {
+            return;
+        }
+        inner
+            .worker_failures
+            .push_back(WorkerFailure { pid, error });
+        drop(inner);
+        self.worker_notify.notify_one();
+    }
+
+    /// Collect worker failures reported by IPC tasks and exited processes.
+    pub async fn collect_worker_failures(&self) -> Vec<WorkerFailure> {
+        let mut inner = self.inner.lock().await;
+        let mut failures = inner.worker_failures.drain(..).collect::<Vec<_>>();
+        let queued_pids = failures
+            .iter()
+            .map(|failure| failure.pid)
+            .collect::<HashSet<_>>();
         for (pid, process) in &mut inner.processes {
+            if queued_pids.contains(pid) {
+                continue;
+            }
             match process.worker_handle.try_wait() {
                 Ok(Some(status)) => match status {
                     WaitStatus::StillAlive => {}
                     _ => {
                         tracing::warn!(pid = %pid, ?status, "worker exited");
-                        exited.push(*pid);
+                        failures.push(WorkerFailure {
+                            pid: *pid,
+                            error: WorkerProcessError::ChildExited { status },
+                        });
                     }
                 },
                 Ok(None) => {}
@@ -258,11 +282,14 @@ impl RootState {
                         error = %Report::from_error(&error),
                         "failed to poll worker status"
                     );
-                    exited.push(*pid);
+                    failures.push(WorkerFailure {
+                        pid: *pid,
+                        error: WorkerProcessError::PollStatus { source: error },
+                    });
                 }
             }
         }
-        exited
+        failures
     }
 
     /// Get all registered worker PIDs.
@@ -271,19 +298,23 @@ impl RootState {
     }
 
     /// Send SIGKILL to all registered workers.
-    pub async fn force_kill_workers(&self, reason: &str) -> Vec<Pid> {
+    pub async fn force_kill_workers(&self, cause: &WorkerProcessError) -> Vec<Pid> {
         let mut inner = self.inner.lock().await;
         let mut killed = Vec::new();
         for (pid, process) in &mut inner.processes {
             match process.worker_handle.start_kill() {
                 Ok(()) => {
-                    tracing::warn!(pid = %pid, %reason, "sent SIGKILL to worker");
+                    tracing::warn!(
+                        pid = %pid,
+                        cause = %Report::from_error(cause),
+                        "sent SIGKILL to worker"
+                    );
                     killed.push(*pid);
                 }
                 Err(error) => {
                     tracing::warn!(
                         pid = %pid,
-                        %reason,
+                        cause = %Report::from_error(cause),
                         error = %Report::from_error(&error),
                         "failed to force kill worker"
                     );
@@ -360,18 +391,42 @@ impl RootState {
     }
 
     /// Send SIGKILL to a specific worker by PID.
-    pub async fn force_kill_worker(&self, pid: Pid) {
+    pub async fn force_kill_worker(&self, pid: Pid, cause: &WorkerProcessError) {
         let mut inner = self.inner.lock().await;
         if let Some(record) = inner.processes.get_mut(&pid) {
             if let Err(error) = record.worker_handle.start_kill() {
                 tracing::warn!(
                     pid = %pid,
+                    cause = %Report::from_error(cause),
                     error = %Report::from_error(&error),
                     "failed to force kill worker"
                 );
             } else {
-                tracing::warn!(pid = %pid, "sent SIGKILL to worker");
+                tracing::warn!(
+                    pid = %pid,
+                    cause = %Report::from_error(cause),
+                    "sent SIGKILL to worker"
+                );
             }
         }
+    }
+
+    pub async fn set_desired_workers(&self, targets: Vec<crate::config::ResolvedWorkerTarget>) {
+        let mut inner = self.inner.lock().await;
+        inner.desired_workers = targets
+            .into_iter()
+            .map(|target| (target.uid, target))
+            .collect();
+    }
+
+    pub async fn clear_desired_workers(&self) {
+        self.inner.lock().await.desired_workers.clear();
+    }
+
+    pub async fn desired_worker_target(
+        &self,
+        uid: Uid,
+    ) -> Option<crate::config::ResolvedWorkerTarget> {
+        self.inner.lock().await.desired_workers.get(&uid).cloned()
     }
 }

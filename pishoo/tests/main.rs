@@ -29,7 +29,8 @@ fn register_listener_uses_dhttp_dns_publisher() {
 fn main_force_kills_lingering_workers_during_shutdown() {
     let shutdown_source = include_str!("../src/hypervisor/shutdown.rs");
     assert!(
-        shutdown_source.contains("state.force_kill_workers(\"shutdown_timeout\")"),
+        shutdown_source.contains("WorkerProcessError::ShutdownTimeout")
+            && shutdown_source.contains("state.force_kill_workers(&shutdown_timeout)"),
         "root shutdown must SIGKILL lingering workers after graceful timeout"
     );
     let main_source = include_str!("../src/main.rs");
@@ -40,10 +41,43 @@ fn main_force_kills_lingering_workers_during_shutdown() {
 }
 
 #[test]
+fn worker_startup_is_scoped_and_timeout_bound() {
+    let spawn_source = include_str!("../src/hypervisor/process/spawn.rs");
+    assert!(
+        spawn_source.contains("WORKER_STARTUP_TIMEOUT")
+            && spawn_source.contains("std::time::Duration::from_secs(30)"),
+        "worker startup handshake must have a 30 second timeout"
+    );
+    assert!(
+        spawn_source.contains(".spawn_worker_task(pid")
+            && spawn_source.contains("start_worker_ipc("),
+        "worker startup/remoc setup must run inside the worker task scope"
+    );
+    assert!(
+        spawn_source.contains("Ok(SpawnedWorker { pid })"),
+        "spawn_worker should return after scheduling startup instead of waiting for worker hello"
+    );
+}
+
+#[test]
+fn ipc_disconnect_uses_typed_worker_failure() {
+    let spawn_source = include_str!("../src/hypervisor/process/spawn.rs");
+    assert!(
+        spawn_source.contains("WorkerProcessError::IpcDisconnected")
+            && spawn_source.contains("state.fail_worker(pid, error).await"),
+        "root/worker IPC disconnect must enter the typed worker failure path"
+    );
+}
+
+#[test]
 fn main_reload_uses_worker_diff() {
     let orchestrate_source = include_str!("../src/hypervisor/reload/orchestrate.rs");
     assert!(
         orchestrate_source.contains("compute_worker_diff"),
         "reload should use diff-based worker management instead of whole-set replacement"
+    );
+    assert!(
+        orchestrate_source.contains("missing_unchanged_workers"),
+        "reload should respawn desired workers that are unchanged in config but not running"
     );
 }

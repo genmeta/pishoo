@@ -129,6 +129,9 @@ async fn main() -> Result<(), Whatever> {
     .await?;
     drop(current_entry_config);
 
+    state
+        .set_desired_workers(current_worker_targets.clone())
+        .await;
     pishoo::hypervisor::process::spawn_configured_workers(&state, current_worker_targets.clone())
         .await;
 
@@ -189,7 +192,12 @@ async fn main() -> Result<(), Whatever> {
     }
     state.cleanup_local_resources().await;
     for pid in state.worker_pids().await {
-        state.cleanup_worker_with_reason(pid, "root_shutdown").await;
+        state
+            .cleanup_worker(
+                pid,
+                pishoo::hypervisor::state::WorkerProcessError::RootShutdown,
+            )
+            .await;
     }
     _ = fs::remove_file(&pid_file).await;
     Ok(())
