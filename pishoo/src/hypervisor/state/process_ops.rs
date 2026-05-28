@@ -10,8 +10,7 @@ use snafu::Report;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CleanupSummary, RetiredServer, RootState, ServerEntry, ServiceOwner, WorkerFailure,
-    WorkerProcessError, WorkerProcessRecord,
+    CleanupSummary, RootState, WorkerFailure, WorkerProcessError, WorkerProcessRecord, owner::Owner,
 };
 use crate::hypervisor::{task_scope::TaskScope, worker_handle::WorkerHandle};
 
@@ -35,35 +34,24 @@ impl RootState {
 
     /// Cancel root-local background tasks and retire root-local listeners.
     pub async fn cleanup_local_resources(&self) -> usize {
-        self.local_tasks.cancel_and_wait().await;
-
-        let retired_servers = {
-            let mut registry = self.servers.write().await;
-            let local_servers = registry
-                .entries
-                .iter()
-                .filter_map(|(server_name, entry)| {
-                    matches!(
-                        entry,
-                        ServerEntry::Active {
-                            owner: ServiceOwner::Local,
-                            ..
-                        }
-                    )
-                    .then_some(server_name.clone())
-                })
-                .collect::<Vec<_>>();
-
-            local_servers
-                .iter()
-                .filter_map(|server_name| registry.retire_entry(server_name))
-                .collect::<Vec<_>>()
+        let owner = Owner::Local;
+        let local_listeners = {
+            let mut registry = self.listeners.write().await;
+            registry.abort_creating_owned(owner);
+            registry.owned_names(owner)
         };
-
-        let cleaned = retired_servers.len();
-        for retired in retired_servers {
-            retired.shutdown().await;
+        let cleaned = local_listeners.len();
+        for server_name in &local_listeners {
+            if let Err(error) = self.release_listener(owner, server_name).await {
+                tracing::warn!(
+                    %server_name,
+                    error = %Report::from_error(&error),
+                    "failed to release local listener"
+                );
+            }
         }
+
+        self.local_tasks.cancel_and_wait().await;
 
         cleaned
     }
@@ -143,17 +131,16 @@ impl RootState {
 
     /// Remove all resources for a dead/exited worker process.
     ///
-    /// Acquires `inner` lock first (to collect owned servers), releases it,
-    /// then acquires `servers` write lock for cleanup. The two locks are
-    /// never held simultaneously.
+    /// Acquires `inner` lock first to remove process bookkeeping, then
+    /// releases listener resources through the listener registry.
     pub async fn cleanup_worker(
         &self,
         pid: Pid,
         error: WorkerProcessError,
     ) -> Option<CleanupSummary> {
         let report = Report::from_error(&error);
-        // Step 1: remove process record and collect owned server names.
-        let (record_uid, record_username, owned_servers, tasks) = {
+        // Step 1: remove process record.
+        let (record_uid, record_username, tasks) = {
             let mut inner = self.inner.lock().await;
             let record = inner.processes.remove(&pid)?;
 
@@ -162,66 +149,34 @@ impl RootState {
                 inner.users.remove(&record.uid);
             }
 
-            (
-                record.uid,
-                record.username,
-                record.owned_servers,
-                record.tasks,
-            )
+            (record.uid, record.username, record.tasks)
         };
         // inner lock released here.
 
+        let owner = Owner::worker(record_uid, pid);
+        let owned_listeners = {
+            let mut registry = self.listeners.write().await;
+            registry.abort_creating_owned(owner);
+            registry.owned_names(owner)
+        };
+
+        let mut servers_cleaned = 0usize;
+        for server_name in &owned_listeners {
+            match self.release_listener(owner, server_name).await {
+                Ok(()) => servers_cleaned += 1,
+                Err(error) => tracing::warn!(
+                    %server_name,
+                    pid = %pid,
+                    error = %Report::from_error(&error),
+                    "failed to release worker listener"
+                ),
+            }
+        }
+
         // Step 2: request all scoped worker tasks to shut down and wait for
-        // them to finish. Tasks are expected to observe the cancellation token
-        // and drop/release their resources cooperatively.
+        // them to finish after listener resources have been explicitly retired.
         let background_tasks_cleaned = tasks.len();
         tasks.cancel_and_wait().await;
-
-        // Step 3: retire owned servers under the servers write lock.
-        // Also scan for `Registering` entries owned by this worker — they are
-        // not yet recorded in `owned_servers` because `register_listener`
-        // Phase 3 has not completed.
-        let (servers_cleaned, retired_servers) = {
-            let mut registry = self.servers.write().await;
-            let mut cleaned = 0usize;
-            let mut retired: Vec<RetiredServer> = Vec::new();
-            for server_name in &owned_servers {
-                let dominated = matches!(
-                    registry.entries.get(server_name),
-                    Some(ServerEntry::Active { owner: ServiceOwner::Worker(p), .. }) if *p == pid
-                );
-                if dominated {
-                    if let Some(task) = registry.retire_entry(server_name) {
-                        retired.push(task);
-                    }
-                    cleaned += 1;
-                }
-            }
-            // Full-scan for Registering sentinels owned by the dead worker.
-            let orphaned: Vec<_> = registry
-                .entries
-                .iter()
-                .filter(|&(_, entry)| {
-                    matches!(
-                        entry,
-                        ServerEntry::Registering { owner: ServiceOwner::Worker(p) } if *p == pid
-                    )
-                })
-                .map(|(name, _)| name.clone())
-                .collect();
-            for name in &orphaned {
-                if let Some(task) = registry.retire_entry(name) {
-                    retired.push(task);
-                }
-                cleaned += 1;
-            }
-            (cleaned, retired)
-        };
-        // servers lock released here — shut down retired endpoints so their
-        // SNI bindings and bind handles are released before we return.
-        for retired in retired_servers {
-            retired.shutdown().await;
-        }
 
         let summary = CleanupSummary {
             pid,
@@ -238,6 +193,21 @@ impl RootState {
         );
 
         Some(summary)
+    }
+
+    pub async fn retire_owner(&self, owner: Owner) -> usize {
+        let owned_listeners = {
+            let mut registry = self.listeners.write().await;
+            registry.abort_creating_owned(owner);
+            registry.owned_names(owner)
+        };
+        let mut cleaned = 0usize;
+        for server_name in &owned_listeners {
+            if self.release_listener(owner, server_name).await.is_ok() {
+                cleaned += 1;
+            }
+        }
+        cleaned
     }
 
     pub async fn fail_worker(&self, pid: Pid, error: WorkerProcessError) {

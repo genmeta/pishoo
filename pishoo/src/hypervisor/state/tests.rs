@@ -13,33 +13,20 @@ use gateway::{
 };
 use nix::unistd::{Pid, Uid};
 
-use super::*;
+use super::{owner::Owner, *};
 use crate::hypervisor::worker_handle::WorkerHandle;
 
 /// Test helper: is there an `Active` entry for `server_name`?
 async fn is_active(state: &RootState, server_name: &str) -> bool {
     let server_name = DhttpName::try_from(server_name.to_owned()).unwrap();
-    let registry = state.servers.read().await;
-    matches!(
-        registry.entries.get(&server_name),
-        Some(ServerEntry::Active { .. })
-    )
+    let registry = state.listeners.read().await;
+    registry.is_active(&server_name)
 }
 
 async fn has_entry(state: &RootState, server_name: &str) -> bool {
     let server_name = DhttpName::try_from(server_name.to_owned()).unwrap();
-    let registry = state.servers.read().await;
-    registry.entries.contains_key(&server_name)
-}
-
-async fn wait_until_no_entry(state: &RootState, server_name: &str) -> bool {
-    for _ in 0..20 {
-        if !has_entry(state, server_name).await {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    false
+    let registry = state.listeners.read().await;
+    registry.contains(&server_name)
 }
 
 fn dhttp_name(label: &str) -> DhttpName<'static> {
@@ -285,40 +272,47 @@ async fn test_worker_pids_after_cleanup() {
 #[tokio::test]
 async fn test_register_then_release() {
     let state = test_state();
-    let owner = ServiceOwner::Local;
+    let owner = Owner::Local;
     let server_name = "reg-release.user.genmeta.net";
 
     let _listener = state
-        .register_listener(owner, test_request("reg-release"))
+        .acquire_listener(owner, test_request("reg-release"))
         .await
-        .expect("register_listener should succeed");
+        .expect("acquire_listener should succeed");
 
     assert!(is_active(&state, server_name).await);
 
     state
-        .release_server(&DhttpName::try_from(server_name.to_owned()).unwrap(), owner)
-        .await;
+        .release_listener(owner, &DhttpName::try_from(server_name.to_owned()).unwrap())
+        .await
+        .expect("release should succeed");
     assert!(!is_active(&state, server_name).await);
 }
 
 #[tokio::test]
-async fn test_registered_endpoint_drop_releases_server() {
+async fn test_registered_endpoint_drop_does_not_release_listener() {
     let state = test_state();
-    let owner = ServiceOwner::Local;
+    let owner = Owner::Local;
     let server_name = "drop-release.user.genmeta.net";
 
     let listener = state
-        .register_listener(owner, test_request("drop-release"))
+        .acquire_listener(owner, test_request("drop-release"))
         .await
-        .expect("register_listener should succeed");
+        .expect("acquire_listener should succeed");
     assert!(is_active(&state, server_name).await);
 
     drop(listener);
 
+    tokio::task::yield_now().await;
     assert!(
-        wait_until_no_entry(&state, server_name).await,
-        "dropping a registered endpoint should release the registry entry"
+        has_entry(&state, server_name).await,
+        "dropping a registered endpoint must not release the registry entry"
     );
+
+    state
+        .release_listener(owner, &DhttpName::try_from(server_name.to_owned()).unwrap())
+        .await
+        .expect("release should succeed");
 }
 
 #[tokio::test]
@@ -326,9 +320,9 @@ async fn test_cleanup_local_resources_retires_local_servers() {
     let state = test_state();
     let server_name = "cleanup-local.user.genmeta.net";
     let listener = state
-        .register_listener(ServiceOwner::Local, test_request("cleanup-local"))
+        .acquire_listener(Owner::Local, test_request("cleanup-local"))
         .await
-        .expect("register_listener should succeed");
+        .expect("acquire_listener should succeed");
 
     assert!(is_active(&state, server_name).await);
 
@@ -341,12 +335,12 @@ async fn test_cleanup_local_resources_retires_local_servers() {
 }
 
 #[tokio::test]
-async fn test_register_listener_rejects_external_listen_without_registry_entry() {
+async fn test_acquire_listener_rejects_external_listen_without_registry_entry() {
     let state = test_state();
-    let owner = ServiceOwner::Local;
+    let owner = Owner::Local;
 
     let err = state
-        .register_listener(
+        .acquire_listener(
             owner,
             test_request_with_bind(
                 "external-listen",
@@ -357,54 +351,57 @@ async fn test_register_listener_rejects_external_listen_without_registry_entry()
         .err()
         .expect("external listen should fail");
 
-    assert!(matches!(err, RegisterError::BuildBindPatterns { .. }));
+    assert!(matches!(
+        err,
+        AcquireListenerError::BuildBindPatterns { .. }
+    ));
     assert!(!has_entry(&state, "external-listen.user.genmeta.net").await);
 }
 
 #[tokio::test]
 async fn test_register_duplicate_same_owner() {
     let state = test_state();
-    let owner = ServiceOwner::Local;
+    let owner = Owner::Local;
 
     let _listener = state
-        .register_listener(owner, test_request("dup-same"))
+        .acquire_listener(owner, test_request("dup-same"))
         .await
         .expect("first register should succeed");
 
     let err = state
-        .register_listener(owner, test_request("dup-same"))
+        .acquire_listener(owner, test_request("dup-same"))
         .await
         .err()
         .expect("second register should fail");
 
-    assert!(matches!(err, RegisterError::DuplicateListen));
+    assert!(matches!(err, AcquireListenerError::DuplicateListen));
 }
 
 #[tokio::test]
 async fn test_register_cross_owner_conflict() {
     let state = test_state();
-    let owner_local = ServiceOwner::Local;
+    let owner_local = Owner::Local;
     let pid = Pid::from_raw(33333);
     let uid = Uid::from_raw(3000);
-    let owner_worker = ServiceOwner::Worker(pid);
+    let owner_worker = Owner::worker(uid, pid);
 
     state
         .register_worker(pid, uid, "worker".into(), fake_worker_handle(33333))
         .await;
 
     let _listener = state
-        .register_listener(owner_local, test_request("cross-conflict"))
+        .acquire_listener(owner_local, test_request("cross-conflict"))
         .await
         .expect("first register should succeed");
 
     // Different owner for same name → ConflictedName.
     let err = state
-        .register_listener(owner_worker, test_request("cross-conflict"))
+        .acquire_listener(owner_worker, test_request("cross-conflict"))
         .await
         .err()
         .expect("cross-owner should conflict");
 
-    assert!(matches!(err, RegisterError::ConflictedName));
+    assert!(matches!(err, AcquireListenerError::ConflictedName));
 
     // Original server's conn_sender should be None (poisoned).
     assert!(!is_active(&state, "cross-conflict.user.genmeta.net").await);
@@ -425,20 +422,23 @@ async fn test_register_on_conflicted() {
 
     // Create a conflict first.
     let _l = state
-        .register_listener(ServiceOwner::Local, test_request("on-conflict"))
+        .acquire_listener(Owner::Local, test_request("on-conflict"))
         .await
         .unwrap();
     let _ = state
-        .register_listener(ServiceOwner::Worker(pid), test_request("on-conflict"))
+        .acquire_listener(
+            Owner::worker(Uid::from_raw(4000), pid),
+            test_request("on-conflict"),
+        )
         .await;
 
     // Name is now Conflicted. Any new register should fail.
     let err = state
-        .register_listener(ServiceOwner::Local, test_request("on-conflict"))
+        .acquire_listener(Owner::Local, test_request("on-conflict"))
         .await
         .err()
         .expect("register on conflicted should fail");
-    assert!(matches!(err, RegisterError::ConflictedName));
+    assert!(matches!(err, AcquireListenerError::ConflictedName));
 }
 
 #[tokio::test]
@@ -456,20 +456,23 @@ async fn test_scrub_then_reregister() {
 
     // Create conflict.
     let _l = state
-        .register_listener(ServiceOwner::Local, test_request("scrub-re"))
+        .acquire_listener(Owner::Local, test_request("scrub-re"))
         .await
         .unwrap();
     let _ = state
-        .register_listener(ServiceOwner::Worker(pid), test_request("scrub-re"))
+        .acquire_listener(
+            Owner::worker(Uid::from_raw(4001), pid),
+            test_request("scrub-re"),
+        )
         .await;
 
     // Scrub should clear the conflict.
-    let scrubbed = state.scrub_conflicts().await;
+    let scrubbed = state.clear_listener_poison().await;
     assert!(scrubbed.contains(&dhttp_name("scrub-re")));
 
     // Re-register should now succeed.
     let _listener = state
-        .register_listener(ServiceOwner::Local, test_request("scrub-re"))
+        .acquire_listener(Owner::Local, test_request("scrub-re"))
         .await
         .expect("re-register after scrub should succeed");
     assert!(is_active(&state, "scrub-re.user.genmeta.net").await);
@@ -489,14 +492,18 @@ async fn test_release_wrong_owner() {
         .await;
 
     let _listener = state
-        .register_listener(ServiceOwner::Local, test_request("wrong-owner"))
+        .acquire_listener(Owner::Local, test_request("wrong-owner"))
         .await
         .unwrap();
 
-    // Release with wrong owner should be a no-op.
+    // Release with wrong owner should return a typed error.
     state
-        .release_server(&dhttp_name("wrong-owner"), ServiceOwner::Worker(pid))
-        .await;
+        .release_listener(
+            Owner::worker(Uid::from_raw(5000), pid),
+            &dhttp_name("wrong-owner"),
+        )
+        .await
+        .expect_err("wrong-owner release should be typed");
 
     // Server should still be active.
     assert!(is_active(&state, "wrong-owner.user.genmeta.net").await);
@@ -507,8 +514,9 @@ async fn test_release_nonexistent() {
     let state = test_state();
     // Should not panic.
     state
-        .release_server(&dhttp_name("does-not-exist"), ServiceOwner::Local)
-        .await;
+        .release_listener(Owner::Local, &dhttp_name("does-not-exist"))
+        .await
+        .expect("release of nonexistent listener should succeed");
 }
 
 #[tokio::test]
@@ -516,14 +524,14 @@ async fn test_cleanup_worker_releases_servers() {
     let state = test_state();
     let pid = Pid::from_raw(10001);
     let uid = Uid::from_raw(6000);
-    let owner = ServiceOwner::Worker(pid);
+    let owner = Owner::worker(uid, pid);
 
     state
         .register_worker(pid, uid, "cleaner".into(), fake_worker_handle(10001))
         .await;
 
     let _listener = state
-        .register_listener(owner, test_request("cleanup-srv"))
+        .acquire_listener(owner, test_request("cleanup-srv"))
         .await
         .expect("register should succeed");
     assert!(is_active(&state, "cleanup-srv.user.genmeta.net").await);

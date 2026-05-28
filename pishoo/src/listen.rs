@@ -3,8 +3,8 @@
 //! The root process owns the shared DHTTP network. Each registered server gets
 //! a [`dhttp::endpoint::Endpoint`] built from its identity and bind patterns;
 //! workers receive this wrapper through IPC as an [`h3x::quic::Listen`]
-//! capability. Shutdown routes back through [`RootState`] so registry ownership
-//! and endpoint lifetime stay synchronized.
+//! capability. Shutdown is an explicit release operation; dropping this handle
+//! only cancels local accept waits.
 
 use std::sync::{
     Arc, Weak,
@@ -12,13 +12,11 @@ use std::sync::{
 };
 
 use dhttp::{endpoint::Endpoint, name::DhttpName};
+use h3x::quic::Listen as _;
 use snafu::Snafu;
 use tokio_util::sync::CancellationToken;
 
-use crate::hypervisor::{
-    state::{RootState, ServiceOwner},
-    task_scope::TaskScope,
-};
+use crate::hypervisor::state::{ReleaseListenerError, RootState, owner::Owner};
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -27,6 +25,8 @@ pub enum RegisteredEndpointError {
     Shutdown,
     #[snafu(transparent)]
     Accept { source: h3x::dquic::AcceptError },
+    #[snafu(display("failed to release registered listener"))]
+    Release { source: ReleaseListenerError },
 }
 
 /// Root-held endpoint belonging to one registered service owner.
@@ -35,8 +35,7 @@ pub struct RegisteredEndpoint {
     shutdown_token: CancellationToken,
     root_state: Weak<RootState>,
     server_name: DhttpName<'static>,
-    owner: ServiceOwner,
-    release_scope: TaskScope,
+    owner: Owner,
     released: Arc<AtomicBool>,
 }
 
@@ -46,8 +45,7 @@ impl RegisteredEndpoint {
         shutdown_token: CancellationToken,
         root_state: &Arc<RootState>,
         server_name: DhttpName<'static>,
-        owner: ServiceOwner,
-        release_scope: TaskScope,
+        owner: Owner,
     ) -> Self {
         Self {
             endpoint,
@@ -55,13 +53,22 @@ impl RegisteredEndpoint {
             root_state: Arc::downgrade(root_state),
             server_name,
             owner,
-            release_scope,
             released: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    pub(crate) async fn destroy_without_registry_release(self) {
+        self.shutdown_token.cancel();
+        if let Err(error) = self.endpoint.shutdown().await {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to shut down unregistered endpoint"
+            );
+        }
     }
 }
 
@@ -82,10 +89,10 @@ impl h3x::quic::Listen for RegisteredEndpoint {
             && let Some(root_state) = self.root_state.upgrade()
         {
             root_state
-                .release_server(&self.server_name, self.owner)
-                .await;
+                .release_listener(self.owner, &self.server_name)
+                .await
+                .map_err(|source| RegisteredEndpointError::Release { source })?;
         }
-        self.endpoint.shutdown().await?;
         Ok(())
     }
 }
@@ -93,20 +100,5 @@ impl h3x::quic::Listen for RegisteredEndpoint {
 impl Drop for RegisteredEndpoint {
     fn drop(&mut self) {
         self.shutdown_token.cancel();
-        if self.released.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        let Some(root_state) = self.root_state.upgrade() else {
-            return;
-        };
-        if self.release_scope.is_cancelled() {
-            return;
-        }
-        let server_name = self.server_name.clone();
-        let owner = self.owner;
-        self.release_scope.spawn(move |_token| async move {
-            root_state.release_server(&server_name, owner).await;
-        });
     }
 }

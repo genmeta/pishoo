@@ -139,7 +139,7 @@ async fn main() -> Result<(), Whatever> {
     // arriving during reload are never lost.
     let mut signals = signal::RootSignalHandler::new()?;
 
-    // Per-server accept tasks are spawned inside `register_listener`; no
+    // Per-server accept tasks are spawned through listener acquisition; no
     // central accept loop is needed here.
 
     let monitor_shutdown = CancellationToken::new();

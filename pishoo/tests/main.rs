@@ -8,20 +8,20 @@ fn main_uses_shared_root_cert_store() {
 }
 
 #[test]
-fn register_listener_uses_dhttp_dns_publisher() {
+fn acquire_listener_uses_dhttp_dns_publisher() {
     let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
         state_source.contains("publish_task"),
-        "ServerEntry keeps a publish_task slot for the DnsPublisher migration"
+        "ListenerResource keeps a publish_task slot for the DnsPublisher migration"
     );
     let server_ops_source = include_str!("../src/hypervisor/state/server_ops.rs");
     assert!(
         server_ops_source.contains("publisher_with_options"),
-        "register_listener must publish through dhttp Endpoint publisher"
+        "acquire_listener must publish through dhttp Endpoint publisher"
     );
     assert!(
         !server_ops_source.contains("spawn_server_publish_task("),
-        "register_listener must not use the legacy BindUri-based DNS publisher"
+        "acquire_listener must not use the legacy BindUri-based DNS publisher"
     );
 }
 
@@ -79,5 +79,30 @@ fn main_reload_uses_worker_diff() {
     assert!(
         orchestrate_source.contains("missing_unchanged_workers"),
         "reload should respawn desired workers that are unchanged in config but not running"
+    );
+}
+
+#[test]
+fn root_state_exposes_explicit_listener_operations() {
+    let source = include_str!("../src/hypervisor/state/server_ops.rs");
+
+    assert!(source.contains("pub async fn acquire_listener"));
+    assert!(source.contains("pub async fn release_listener"));
+    assert!(source.contains("pub async fn rebuild_listener"));
+    assert!(source.contains("pub async fn clear_listener_poison"));
+    assert!(!source.contains("pub async fn release_server"));
+}
+
+#[test]
+fn registered_endpoint_drop_does_not_release_registry() {
+    let source = include_str!("../src/listen.rs");
+    let drop_impl = source
+        .split("impl Drop for RegisteredEndpoint")
+        .nth(1)
+        .expect("RegisteredEndpoint should implement Drop");
+
+    assert!(
+        !drop_impl.contains("release_listener") && !drop_impl.contains("release_server"),
+        "RegisteredEndpoint::Drop must not mutate the root listener registry"
     );
 }

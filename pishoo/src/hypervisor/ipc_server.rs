@@ -33,7 +33,7 @@ use tracing::Instrument;
 
 use super::{endpoint_factory, state::RootState};
 use crate::{
-    hypervisor::state::{RegisterError, ServiceOwner},
+    hypervisor::state::AcquireListenerError,
     ipc::{ConnectError, ListenError},
 };
 
@@ -71,11 +71,17 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         request: ListenRequest,
     ) -> Result<h3x::ipc::quic::IpcListenClient, ListenError> {
         let server_name = request.identity.name().as_full().to_owned();
-        let owner = ServiceOwner::Worker(self.caller_pid);
+        let owner = self
+            .state
+            .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| ListenError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
 
         let adapter = self
             .state
-            .register_listener(owner, request)
+            .acquire_listener(owner, request)
             .await
             .map_err(|error| {
                 let report = snafu::Report::from_error(&error).to_string();
@@ -86,15 +92,15 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     "listen request failed"
                 );
                 match error {
-                    RegisterError::DuplicateListen | RegisterError::ConflictedName => {
-                        ListenError::Conflict
-                    }
-                    RegisterError::BuildBindPatterns { .. } => {
+                    AcquireListenerError::DuplicateListen
+                    | AcquireListenerError::ConflictedName => ListenError::Conflict,
+                    AcquireListenerError::BuildBindPatterns { .. } => {
                         ListenError::InvalidRequest { reason: report }
                     }
-                    RegisterError::BuildResolver { .. }
-                    | RegisterError::BuildEndpoint { .. }
-                    | RegisterError::CreatePublisher { .. } => ListenError::Internal {
+                    AcquireListenerError::BuildResolver { .. }
+                    | AcquireListenerError::BuildEndpoint { .. }
+                    | AcquireListenerError::CreatePublisher { .. }
+                    | AcquireListenerError::OwnerUnavailable => ListenError::Internal {
                         message: format!("failed to prepare endpoint for `{server_name}`"),
                     },
                 }
@@ -119,7 +125,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         if !spawned {
             let server_name = DhttpName::try_from(server_name)
                 .expect("listen request identity must be a dhttp name");
-            self.state.release_server(&server_name, owner).await;
+            let _ = self.state.release_listener(owner, &server_name).await;
             return Err(ListenError::Internal {
                 message: format!(
                     "worker {} exited before IPC listener was ready",

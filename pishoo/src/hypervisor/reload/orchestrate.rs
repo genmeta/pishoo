@@ -134,7 +134,7 @@ pub async fn run_reload(
     }
 
     // Scrub conflicted names before forwarding reload to workers.
-    state.scrub_conflicts().await;
+    state.clear_listener_poison().await;
 
     // Phase 2: Forward SIGHUP to unchanged workers.
     for target in &diff.unchanged {

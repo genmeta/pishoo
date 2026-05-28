@@ -44,10 +44,10 @@ use crate::hypervisor::{
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Error returned when `register_listener` fails.
+/// Error returned when `acquire_listener` fails.
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum RegisterError {
+pub enum AcquireListenerError {
     /// The name is already owned by the same owner — duplicate listen attempt.
     #[snafu(display("duplicate listen for the same owner"))]
     DuplicateListen,
@@ -69,15 +69,26 @@ pub enum RegisterError {
     CreatePublisher {
         source: dhttp::ddns::CreatePublisherError,
     },
+    #[snafu(display("listener owner is not available"))]
+    OwnerUnavailable,
 }
 
-/// Identifies the owner of a server_name registration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceOwner {
-    /// Owned by the root-local service.
-    Local,
-    /// Owned by a specific worker process.
-    Worker(Pid),
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum ReleaseListenerError {
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RebuildListenerError {
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+    #[snafu(display("server name conflicted"))]
+    ConflictedName,
+    #[snafu(display("failed to acquire replacement listener"))]
+    Replacement { source: AcquireListenerError },
 }
 
 #[derive(Debug, Snafu)]
@@ -153,39 +164,6 @@ pub struct WorkerFailure {
     pub error: WorkerProcessError,
 }
 
-/// Per-server ownership record stored in the root registry.
-pub enum ServerEntry {
-    /// A registration is in progress — the async bind is running. Acts as
-    /// a sentinel so concurrent callers see the name as occupied.
-    /// Transitions to `Active` on success, removed on failure.
-    Registering { owner: ServiceOwner },
-    /// Name is actively owned and serving.
-    Active {
-        owner: ServiceOwner,
-        /// DHTTP endpoint built for this registered server.
-        endpoint: Endpoint,
-        /// Cancels accept calls currently blocked on this endpoint wrapper.
-        shutdown_token: CancellationToken,
-        /// Cancels the per-server DNS publish task when the entry is retired.
-        publish_token: CancellationToken,
-        /// Per-server DNS publish task.
-        publish_task: Option<JoinHandle<()>>,
-    },
-    /// Name is poisoned due to a cross-owner conflict.
-    /// Only cleared by `scrub_conflicts()` during reload.
-    Conflicted,
-}
-
-impl ServerEntry {
-    /// Return the owner if this entry is `Registering` or `Active`.
-    pub(super) fn owner(&self) -> Option<ServiceOwner> {
-        match self {
-            Self::Registering { owner } | Self::Active { owner, .. } => Some(*owner),
-            Self::Conflicted => None,
-        }
-    }
-}
-
 /// Per-worker-process tracking record.
 pub(super) struct WorkerProcessRecord {
     /// The UID this worker runs as.
@@ -241,8 +219,8 @@ pub struct RootState {
     /// SNI. A single instance is kept here and cloned (cheap — inner `Arc`s)
     /// for every DHTTP endpoint built by the root.
     pub server_qcfg: ServerQuicConfig,
-    /// Server entries (behind RwLock for concurrent reads).
-    pub(super) servers: RwLock<ServerRegistry>,
+    /// Listener entries (behind RwLock for concurrent reads).
+    listeners: RwLock<listener_registry::ListenerRegistry<ListenerResource>>,
     /// Process/user bookkeeping (behind Mutex).
     pub(super) inner: Mutex<Inner>,
     /// Structured task scope for root-local service resources.
@@ -251,73 +229,39 @@ pub struct RootState {
     pub worker_notify: tokio::sync::Notify,
 }
 
-/// Server-name registry: `server_name → ServerEntry` state machine.
-///
-/// Entry lifecycle: `(vacant) → Registering → Active → (removed)`.
-/// Conflict: any state → `Conflicted`, cleared by `scrub_conflicts`.
-pub(super) struct ServerRegistry {
-    pub(super) entries: HashMap<DhttpName<'static>, ServerEntry>,
-}
-
-pub(super) struct RetiredServer {
+pub(super) struct ListenerResource {
     endpoint: Endpoint,
     shutdown_token: CancellationToken,
     publish_token: CancellationToken,
     publish_task: Option<JoinHandle<()>>,
 }
 
-impl RetiredServer {
-    pub(super) async fn shutdown(self) {
+impl ListenerResource {
+    pub(super) fn new(
+        endpoint: Endpoint,
+        shutdown_token: CancellationToken,
+        publish_token: CancellationToken,
+        publish_task: Option<JoinHandle<()>>,
+    ) -> Self {
+        Self {
+            endpoint,
+            shutdown_token,
+            publish_token,
+            publish_task,
+        }
+    }
+
+    pub(super) async fn destroy(mut self) {
         self.shutdown_token.cancel();
         self.publish_token.cancel();
-        if let Some(task) = self.publish_task {
+        if let Some(task) = self.publish_task.take() {
             let _ = task.await;
         }
         if let Err(error) = self.endpoint.shutdown().await {
             tracing::warn!(
                 error = %Report::from_error(&error),
-                "failed to shut down retired endpoint"
+                "failed to shut down listener resource"
             );
-        }
-    }
-}
-
-impl ServerRegistry {
-    pub(super) fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
-
-    /// Remove a server entry and return the endpoint to shut down, if any.
-    ///
-    /// Callers **must** shut down the returned endpoint after releasing any
-    /// locks so the SNI binding and bind handles are released before a later
-    /// registration for the same name.
-    ///
-    /// For `Registering` sentinels there is no endpoint yet, so removal of the
-    /// map entry is sufficient and `None` is returned.
-    ///
-    /// Caller must already hold a write lock on this `ServerRegistry`.
-    pub(super) fn retire_entry(
-        &mut self,
-        server_name: &DhttpName<'static>,
-    ) -> Option<RetiredServer> {
-        let entry = self.entries.remove(server_name)?;
-        match entry {
-            ServerEntry::Active {
-                endpoint,
-                shutdown_token,
-                publish_token,
-                publish_task,
-                ..
-            } => Some(RetiredServer {
-                endpoint,
-                shutdown_token,
-                publish_token,
-                publish_task,
-            }),
-            ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
         }
     }
 }
@@ -329,7 +273,7 @@ impl RootState {
         Self {
             network,
             server_qcfg,
-            servers: RwLock::new(ServerRegistry::new()),
+            listeners: RwLock::new(listener_registry::ListenerRegistry::new()),
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
                 users: HashMap::new(),

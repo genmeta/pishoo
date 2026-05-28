@@ -1,4 +1,4 @@
-//! Server registry operations on [`RootState`].
+//! Listener registry operations on [`RootState`].
 
 use std::sync::Arc;
 
@@ -9,120 +9,217 @@ use snafu::{IntoError, ResultExt};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner, register_error};
+use super::{
+    AcquireListenerError, ListenerResource, RebuildListenerError, ReleaseListenerError, RootState,
+    acquire_listener_error,
+    listener_registry::{AcquirePlan, DestroyFinish, DestroyReason, RebuildPlan, ReleasePlan},
+    owner::Owner,
+    rebuild_listener_error,
+};
 use crate::{hypervisor::endpoint_factory, listen::RegisteredEndpoint};
 
 impl RootState {
     // -----------------------------------------------------------------------
-    // Server registry
+    // Listener registry
     // -----------------------------------------------------------------------
 
-    /// Unified entry point for registering a listener.
-    ///
-    /// State machine:
-    /// - **Vacant** → insert `Registering` sentinel → build DHTTP endpoint
-    ///   → promote to `Active`.
-    /// - **Registering/Active, same owner** → `DuplicateListen`.
-    /// - **Registering/Active, different owner** → poison to `Conflicted`.
-    /// - **Conflicted** → `ConflictedName`.
-    ///
-    /// Returns a [`RegisteredEndpoint`] on success.
-    pub async fn register_listener(
+    /// Acquire a listener for an owner and listen request.
+    pub async fn acquire_listener(
         self: &Arc<Self>,
-        owner: ServiceOwner,
+        owner: Owner,
         request: ListenRequest,
-    ) -> Result<RegisteredEndpoint, RegisterError> {
-        let server_name = DhttpName::try_from(request.identity.name().as_full().to_owned())
-            .expect("listen request identity must be a dhttp name");
-
-        // Validate and normalize listen declarations before claiming the name.
-        // This is a pure conversion, so invalid scopes should not create any
-        // registry state.
+    ) -> Result<RegisteredEndpoint, AcquireListenerError> {
+        let server_name = self.listener_name(&request);
         let bind_patterns = request
             .bind
             .iter()
             .map(gateway::parse::types::Listens::try_to_bind_patterns)
             .collect::<Result<Vec<_>, _>>()
-            .context(register_error::BuildBindPatternsSnafu)?
+            .context(acquire_listener_error::BuildBindPatternsSnafu)?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        let bind_patterns = Arc::new(bind_patterns);
 
-        // Phase 1: claim the name by inserting a `Registering` sentinel.
-        {
-            let mut registry = self.servers.write().await;
-            match registry.entries.get(&server_name) {
-                Some(entry) if entry.owner() == Some(owner) => {
-                    return Err(RegisterError::DuplicateListen);
-                }
-                Some(ServerEntry::Conflicted) => {
-                    return Err(RegisterError::ConflictedName);
-                }
-                Some(_) => {
-                    // Different owner occupies the name — conflict + poison.
-                    let old = registry
-                        .entries
-                        .insert(server_name.clone(), ServerEntry::Conflicted);
-                    drop(registry);
+        loop {
+            let plan = {
+                let mut registry = self.listeners.write().await;
+                registry.plan_acquire(owner, server_name.clone())
+            };
 
-                    if let Some(ServerEntry::Active {
-                        owner: old_owner,
-                        endpoint,
-                        shutdown_token,
-                        publish_token,
-                        publish_task,
-                    }) = old
-                    {
-                        if let ServiceOwner::Worker(pid) = old_owner {
-                            let mut inner = self.inner.lock().await;
-                            if let Some(proc) = inner.processes.get_mut(&pid) {
-                                proc.owned_servers.remove(&server_name);
-                            }
-                        }
-                        RetiredServer {
-                            endpoint,
-                            shutdown_token,
-                            publish_token,
-                            publish_task,
-                        }
-                        .shutdown()
+            match plan {
+                AcquirePlan::Build { done } => {
+                    let built = self
+                        .build_listener_resource(
+                            owner,
+                            &server_name,
+                            &request,
+                            bind_patterns.clone(),
+                        )
                         .await;
-                    }
-                    tracing::warn!(
-                        %server_name,
-                        new_owner = ?owner,
-                        "cross-owner conflict: name poisoned"
-                    );
-                    return Err(RegisterError::ConflictedName);
+                    return self
+                        .commit_acquired_listener(owner, server_name, done, built)
+                        .await;
                 }
-                None => {
-                    // Vacant — claim with sentinel.
-                    registry
-                        .entries
-                        .insert(server_name.clone(), ServerEntry::Registering { owner });
+                AcquirePlan::Wait(done) => done.wait().await,
+                AcquirePlan::Duplicate => return Err(AcquireListenerError::DuplicateListen),
+                AcquirePlan::Conflict => return Err(AcquireListenerError::ConflictedName),
+                AcquirePlan::DestroyConflict {
+                    owner: old_owner,
+                    resource,
+                    done,
+                } => {
+                    resource.destroy().await;
+                    self.remove_owned_listener(old_owner, &server_name).await;
+                    let mut registry = self.listeners.write().await;
+                    registry.finish_destroying(&server_name, &done, DestroyFinish::Poisoned);
+                    return Err(AcquireListenerError::ConflictedName);
                 }
             }
         }
+    }
 
-        // Phase 2: name is claimed — let dhttp::Endpoint bind the normalized
-        // patterns on the shared Network.
-        // No lock held — other server_names can be read/written concurrently.
+    /// Release a listener owned by the caller.
+    pub async fn release_listener(
+        &self,
+        owner: Owner,
+        server_name: &DhttpName<'static>,
+    ) -> Result<(), ReleaseListenerError> {
+        loop {
+            let plan = {
+                let mut registry = self.listeners.write().await;
+                registry.plan_release(owner, server_name, DestroyReason::Release)
+            };
+
+            match plan {
+                ReleasePlan::Destroy { resource, done } => {
+                    resource.destroy().await;
+                    self.remove_owned_listener(owner, server_name).await;
+                    let mut registry = self.listeners.write().await;
+                    registry.finish_destroying(server_name, &done, DestroyFinish::Vacant);
+                    return Ok(());
+                }
+                ReleasePlan::Wait(done) => done.wait().await,
+                ReleasePlan::NotOwner => return Err(ReleaseListenerError::NotOwner),
+                ReleasePlan::NotFound | ReleasePlan::Poisoned => return Ok(()),
+            }
+        }
+    }
+
+    /// Rebuild an owned listener without exposing a vacant interleaving window.
+    pub async fn rebuild_listener(
+        self: &Arc<Self>,
+        owner: Owner,
+        request: ListenRequest,
+    ) -> Result<RegisteredEndpoint, RebuildListenerError> {
+        let server_name = self.listener_name(&request);
+
+        loop {
+            let plan = {
+                let mut registry = self.listeners.write().await;
+                registry.plan_rebuild(owner, &server_name)
+            };
+
+            match plan {
+                RebuildPlan::Destroy { resource, done } => {
+                    resource.destroy().await;
+                    self.remove_owned_listener(owner, &server_name).await;
+
+                    let creating_done = {
+                        let mut registry = self.listeners.write().await;
+                        registry.begin_creating_after_destroy(owner, server_name.clone(), &done)
+                    };
+                    let Some(creating_done) = creating_done else {
+                        return Err(RebuildListenerError::NotOwner);
+                    };
+
+                    let bind_patterns = match request
+                        .bind
+                        .iter()
+                        .map(gateway::parse::types::Listens::try_to_bind_patterns)
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(patterns) => patterns.into_iter().flatten().collect::<Vec<_>>(),
+                        Err(source) => {
+                            let mut registry = self.listeners.write().await;
+                            registry.abort_creating(owner, &server_name, &creating_done);
+                            return Err(RebuildListenerError::Replacement {
+                                source: AcquireListenerError::BuildBindPatterns { source },
+                            });
+                        }
+                    };
+                    let built = self
+                        .build_listener_resource(
+                            owner,
+                            &server_name,
+                            &request,
+                            Arc::new(bind_patterns),
+                        )
+                        .await;
+                    return self
+                        .commit_acquired_listener(owner, server_name, creating_done, built)
+                        .await
+                        .context(rebuild_listener_error::ReplacementSnafu);
+                }
+                RebuildPlan::Wait(done) => done.wait().await,
+                RebuildPlan::NotOwner => return Err(RebuildListenerError::NotOwner),
+                RebuildPlan::NotFound => {
+                    return self
+                        .acquire_listener(owner, request)
+                        .await
+                        .context(rebuild_listener_error::ReplacementSnafu);
+                }
+                RebuildPlan::Conflict => return Err(RebuildListenerError::ConflictedName),
+            }
+        }
+    }
+
+    /// Remove all poisoned listener entries from the registry.
+    pub async fn clear_listener_poison(&self) -> Vec<DhttpName<'static>> {
+        let mut registry = self.listeners.write().await;
+        let cleared = registry.clear_poisoned();
+        if !cleared.is_empty() {
+            tracing::info!(
+                count = cleared.len(),
+                names = ?cleared,
+                "cleared poisoned listener entries during reload"
+            );
+        }
+        cleared
+    }
+
+    pub(crate) async fn owner_for_pid(&self, pid: nix::unistd::Pid) -> Option<Owner> {
+        let inner = self.inner.lock().await;
+        let process = inner.processes.get(&pid)?;
+        Some(Owner::worker(process.uid, pid))
+    }
+
+    fn listener_name(&self, request: &ListenRequest) -> DhttpName<'static> {
+        DhttpName::try_from(request.identity.name().as_full().to_owned())
+            .expect("listen request identity must be a dhttp name")
+    }
+
+    async fn build_listener_resource(
+        self: &Arc<Self>,
+        owner: Owner,
+        server_name: &DhttpName<'static>,
+        request: &ListenRequest,
+        bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+    ) -> Result<(ListenerResource, RegisteredEndpoint), AcquireListenerError> {
+        let release_scope = self
+            .task_scope_for_owner(owner)
+            .await
+            .ok_or(AcquireListenerError::OwnerUnavailable)?;
+
         let identity = Arc::new(request.identity.clone());
-        let bind_patterns = Arc::new(bind_patterns);
-        let resolver = match endpoint_factory::build_resolver(
+        let resolver = endpoint_factory::build_resolver(
             identity.clone(),
             self.network.clone(),
             bind_patterns.clone(),
             request.dns_resolver_url.clone(),
         )
         .await
-        {
-            Ok(resolver) => resolver,
-            Err(source) => {
-                self.rollback_registering(&server_name, owner).await;
-                return Err(register_error::BuildResolverSnafu.into_error(source));
-            }
-        };
+        .context(acquire_listener_error::BuildResolverSnafu)?;
         let endpoint = endpoint_factory::build_registered_endpoint(
             identity,
             self.network.clone(),
@@ -130,20 +227,12 @@ impl RootState {
             bind_patterns,
             resolver,
         )
-        .await;
-        let endpoint = match endpoint {
-            Ok(endpoint) => endpoint,
-            Err(source) => {
-                self.rollback_registering(&server_name, owner).await;
-                return Err(register_error::BuildEndpointSnafu.into_error(source));
-            }
-        };
+        .await
+        .context(acquire_listener_error::BuildEndpointSnafu)?;
         let shutdown_token = CancellationToken::new();
-
         let publisher = match endpoint.publisher_with_options(request.publish_options) {
             Ok(publisher) => publisher,
             Err(source) => {
-                self.rollback_registering(&server_name, owner).await;
                 if let Err(error) = endpoint.shutdown().await {
                     tracing::warn!(
                         %server_name,
@@ -151,40 +240,13 @@ impl RootState {
                         "failed to shut down endpoint after publisher setup failed"
                     );
                 }
-                return Err(register_error::CreatePublisherSnafu.into_error(source));
-            }
-        };
-
-        let release_scope = match owner {
-            ServiceOwner::Local => self.local_tasks.clone(),
-            ServiceOwner::Worker(pid) => {
-                let mut inner = self.inner.lock().await;
-                if let Some(process) = inner.processes.get_mut(&pid) {
-                    process.owned_servers.insert(server_name.clone());
-                    process.tasks.clone()
-                } else {
-                    drop(inner);
-                    self.rollback_registering(&server_name, owner).await;
-                    if let Err(error) = endpoint.shutdown().await {
-                        tracing::warn!(
-                            %server_name,
-                            error = %snafu::Report::from_error(&error),
-                            "failed to shut down rolled back endpoint"
-                        );
-                    }
-                    tracing::warn!(
-                        %server_name,
-                        pid = %pid,
-                        "worker vanished during register_listener; rolled back"
-                    );
-                    return Err(RegisterError::ConflictedName);
-                }
+                return Err(acquire_listener_error::CreatePublisherSnafu.into_error(source));
             }
         };
 
         let publish_token = CancellationToken::new();
         let publish_shutdown = publish_token.clone();
-        let mut publish_task = Some(release_scope.spawn(move |owner_token| {
+        let publish_task = Some(release_scope.spawn(move |owner_token| {
             async move {
                 tokio::select! {
                     () = owner_token.cancelled() => {}
@@ -194,133 +256,82 @@ impl RootState {
             }
             .in_current_span()
         }));
-
-        // Phase 3: promote sentinel to `Active`.
-        let mut registry = self.servers.write().await;
-
-        // Verify our sentinel is still there. Another operation (conflict
-        // or cleanup) may have replaced/removed it.
-        match registry.entries.get(&server_name) {
-            Some(ServerEntry::Registering { owner: o }) if *o == owner => {
-                // Good — our sentinel is intact.
-            }
-            _ => {
-                // Sentinel was replaced (e.g. by cross-owner conflict or
-                // cleanup). Shut down the endpoint so its binds/SNI do not
-                // leak.
-                drop(registry);
-                publish_token.cancel();
-                if let Some(task) = publish_task.take() {
-                    let _ = task.await;
-                }
-                if let ServiceOwner::Worker(pid) = owner {
-                    let mut inner = self.inner.lock().await;
-                    if let Some(process) = inner.processes.get_mut(&pid) {
-                        process.owned_servers.remove(&server_name);
-                    }
-                }
-                if let Err(error) = endpoint.shutdown().await {
-                    tracing::warn!(
-                        %server_name,
-                        error = %snafu::Report::from_error(&error),
-                        "failed to shut down rolled back endpoint"
-                    );
-                }
-                tracing::warn!(
-                    %server_name,
-                    ?owner,
-                    "sentinel lost during register_listener; rolled back"
-                );
-                return Err(RegisterError::ConflictedName);
-            }
-        }
-
-        registry.entries.insert(
-            server_name.clone(),
-            ServerEntry::Active {
-                owner,
-                endpoint: endpoint.clone(),
-                shutdown_token: shutdown_token.clone(),
-                publish_token,
-                publish_task,
-            },
+        let resource = ListenerResource::new(
+            endpoint.clone(),
+            shutdown_token.clone(),
+            publish_token,
+            publish_task,
         );
-        drop(registry);
-
-        tracing::debug!(%server_name, ?owner, "server registered");
-        Ok(RegisteredEndpoint::new_registered(
+        let registered = RegisteredEndpoint::new_registered(
             endpoint,
             shutdown_token,
             self,
-            server_name,
+            server_name.clone(),
             owner,
-            release_scope,
-        ))
-    }
-
-    async fn rollback_registering(&self, server_name: &DhttpName<'static>, owner: ServiceOwner) {
-        let mut registry = self.servers.write().await;
-        let owned = matches!(
-            registry.entries.get(server_name),
-            Some(ServerEntry::Registering { owner: existing_owner }) if *existing_owner == owner
         );
-        if owned {
-            registry.entries.remove(server_name);
-        }
+        Ok((resource, registered))
     }
 
-    /// Release a single active server entry owned by the specified owner.
-    pub async fn release_server(&self, server_name: &DhttpName<'static>, owner: ServiceOwner) {
-        let retired = {
-            let mut registry = self.servers.write().await;
-            let owned = matches!(
-                registry.entries.get(server_name),
-                Some(ServerEntry::Active { owner: existing_owner, .. }) if *existing_owner == owner
-            );
-            if !owned {
-                return;
+    async fn commit_acquired_listener(
+        &self,
+        owner: Owner,
+        server_name: DhttpName<'static>,
+        done: super::completion::Completion,
+        built: Result<(ListenerResource, RegisteredEndpoint), AcquireListenerError>,
+    ) -> Result<RegisteredEndpoint, AcquireListenerError> {
+        let (resource, registered) = match built {
+            Ok(built) => built,
+            Err(error) => {
+                let mut registry = self.listeners.write().await;
+                registry.abort_creating(owner, &server_name, &done);
+                return Err(error);
             }
-            registry.retire_entry(server_name)
         };
 
-        if let Some(retired) = retired {
-            retired.shutdown().await;
+        let committed = {
+            let mut registry = self.listeners.write().await;
+            registry.commit_creating(owner, server_name.clone(), &done, resource)
+        };
+        if committed {
+            self.record_owned_listener(owner, server_name).await;
+            Ok(registered)
+        } else {
+            registered.destroy_without_registry_release().await;
+            Err(AcquireListenerError::ConflictedName)
         }
+    }
 
-        if let ServiceOwner::Worker(pid) = owner {
-            let mut inner = self.inner.lock().await;
-            if let Some(process) = inner.processes.get_mut(&pid) {
-                process.owned_servers.remove(server_name);
+    async fn task_scope_for_owner(
+        &self,
+        owner: Owner,
+    ) -> Option<crate::hypervisor::task_scope::TaskScope> {
+        match owner {
+            Owner::Local => Some(self.local_tasks.clone()),
+            Owner::Worker { uid, pid } => {
+                let inner = self.inner.lock().await;
+                let process = inner.processes.get(&pid)?;
+                (process.uid == uid).then(|| process.tasks.clone())
             }
         }
     }
 
-    /// Remove all `Conflicted` entries from the registry.
-    ///
-    /// Called during reload (SIGHUP) **before** forwarding the signal to
-    /// workers, so that workers can re-register previously-conflicted names.
-    pub async fn scrub_conflicts(&self) -> Vec<DhttpName<'static>> {
-        let mut registry = self.servers.write().await;
-        let conflicted: Vec<DhttpName<'static>> = registry
-            .entries
-            .iter()
-            .filter_map(|(name, entry)| {
-                matches!(entry, ServerEntry::Conflicted).then_some(name.clone())
-            })
-            .collect();
-
-        for name in &conflicted {
-            registry.entries.remove(name);
+    async fn record_owned_listener(&self, owner: Owner, server_name: DhttpName<'static>) {
+        let Owner::Worker { pid, .. } = owner else {
+            return;
+        };
+        let mut inner = self.inner.lock().await;
+        if let Some(process) = inner.processes.get_mut(&pid) {
+            process.owned_servers.insert(server_name);
         }
+    }
 
-        if !conflicted.is_empty() {
-            tracing::info!(
-                count = conflicted.len(),
-                names = ?conflicted,
-                "scrubbed conflicted server entries during reload"
-            );
+    async fn remove_owned_listener(&self, owner: Owner, server_name: &DhttpName<'static>) {
+        let Owner::Worker { pid, .. } = owner else {
+            return;
+        };
+        let mut inner = self.inner.lock().await;
+        if let Some(process) = inner.processes.get_mut(&pid) {
+            process.owned_servers.remove(server_name);
         }
-
-        conflicted
     }
 }
