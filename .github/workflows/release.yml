@@ -1,78 +1,373 @@
-name: Release
+name: Release Dry Run
 
 on:
   workflow_dispatch:
+    inputs:
+      bucket:
+        description: S3/R2 bucket name.
+        required: true
+        default: download
+      apt_suite:
+        description: APT suite to render and sign.
+        required: true
+        default: stable
+      apt_prefix:
+        description: Remote prefix for pishoo APT repository objects.
+        required: true
+        default: apt/pishoo
+      rpm_prefix:
+        description: Remote prefix for pishoo RPM repository objects.
+        required: true
+        default: rpm/pishoo
+      brew_prefix:
+        description: Remote prefix for pishoo Homebrew archives and formula.
+        required: true
+        default: brew/pishoo
+      brew_public_base_url:
+        description: Public base URL corresponding to brew_prefix.
+        required: true
+        default: https://download.genmeta.net/brew/pishoo
+      linux_targets:
+        description: Space-separated Linux Rust targets for deb/rpm package build; override to all supported targets for a full Linux dry run.
+        required: true
+        default: x86_64-unknown-linux-gnu
+      create_homebrew_tap_pr:
+        description: Create or update a Homebrew tap pull request from the generated formula.
+        required: true
+        type: boolean
+        default: true
+      homebrew_tap_repository:
+        description: GitHub repository that owns the Homebrew tap.
+        required: true
+        default: genmeta/homebrew-tap
+      homebrew_tap_base_branch:
+        description: Base branch for Homebrew tap pull requests.
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  DHTTP_STUN_SERVER: nat.genmeta.net:20004
+  DHTTP_H3_DNS_SERVER: https://dns.genmeta.net:4433
+  DHTTP_HTTP_DNS_SERVER: https://dns.genmeta.net
+  DHTTP_MDNS_SERVICE: _genmeta.local
 
 jobs:
-  build:
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - platform: "ubuntu-22.04"
-            target: "x86_64-unknown-linux-musl"
-          - platform: "ubuntu-22.04"
-            target: "aarch64-unknown-linux-musl"
-          - platform: "ubuntu-22.04"
-            target: "mipsel-unknown-linux-musl"
-
-    runs-on: ${{ matrix.platform }}
-
+  linux:
+    name: Linux packages and S3 dry run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
+      RELEASE_BUCKET: ${{ inputs.bucket }}
+      APT_SUITE: ${{ inputs.apt_suite }}
+      APT_PREFIX: ${{ inputs.apt_prefix }}
+      RPM_PREFIX: ${{ inputs.rpm_prefix }}
+      LINUX_TARGETS: ${{ inputs.linux_targets }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: gateway
     steps:
-      - uses: actions/checkout@v4
-
-      # 设置 SSH 环境
-      - uses: webfactory/ssh-agent@v0.9.0
+      - name: Checkout gateway
+        uses: actions/checkout@v6
         with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY_CARGO }}
+          path: gateway
+          persist-credentials: false
 
-      # 安装 Rust
-      - name: install Rust
-        if: matrix.target != 'mipsel-unknown-linux-musl'
-        uses: dtolnay/rust-toolchain@nightly
-        id: rust_toolchain
+      - name: Checkout dhttp
+        uses: actions/checkout@v6
         with:
-          target: ${{ matrix.target }}
+          repository: genmeta/dhttp
+          ref: main
+          path: dhttp
+          persist-credentials: false
 
-      # 安装交叉编译工具链
-      - name: Install Cross-Compilation Toolchain
+      - name: Checkout ddns
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/ddns
+          ref: endpoint
+          path: ddns
+          persist-credentials: false
+
+      - name: Checkout h3x
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/h3x
+          ref: endpoint
+          path: h3x
+          persist-credentials: false
+
+      - name: Checkout dssh
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/dssh
+          ref: endpoint
+          path: dssh
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: gateway-linux-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          restore-keys: |
+            gateway-linux-cargo-
+
+      - name: Install Linux package tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu gcc-mipsel-linux-gnu
+          sudo apt-get install --assume-yes --no-install-recommends gpg rpm
+          docker info
 
-      # 安装 cargo-cross 以简化交叉编译
-      - name: Install cargo-cross
+      - name: Check release secrets and derive APT fingerprint
+        id: apt_key
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
         run: |
-          cargo install cross --git https://github.com/cross-rs/cross
+          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
+          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
+          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
+          : "${XTASK_RELEASE_APT_SIGNING_KEY:?missing XTASK_RELEASE_APT_SIGNING_KEY}"
 
-      - name: Setup Cross.toml for mipsel
-        if: matrix.target == 'mipsel-unknown-linux-musl'
+          key_file="$RUNNER_TEMP/apt-signing-key.asc"
+          install -m 700 -d "$(dirname "$key_file")"
+          printf '%s' "$XTASK_RELEASE_APT_SIGNING_KEY" > "$key_file"
+          fingerprint="$(gpg --batch --import-options show-only --with-colons --import "$key_file" \
+            | awk -F: '$1 == "fpr" { print toupper($10); exit }')"
+          rm -f "$key_file"
+          if [ -z "$fingerprint" ]; then
+            echo "failed to derive APT signing key fingerprint" >&2
+            exit 1
+          fi
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Package Linux artifacts
         run: |
-          cat > Cross.toml << 'EOF'
-          [target.mipsel-unknown-linux-musl]
-          build-std = ["std", "alloc", "core", "proc_macro", "panic_abort"]
-          image = "docker.io/rustembedded/cross:mipsel-unknown-linux-musl"
-          EOF
+          deb_args=(--target common)
+          rpm_args=()
+          for target in ${LINUX_TARGETS}; do
+            deb_args+=(--target "$target")
+            rpm_args+=(--target "$target")
+          done
+          if [ "${#rpm_args[@]}" -eq 0 ]; then
+            echo "linux_targets must not be empty" >&2
+            exit 1
+          fi
 
-      # 使用 cross 编译项目
-      - name: Build release
+          cargo xtask package --overwrite-manifest \
+            deb "${deb_args[@]}" --features sshd,pam \
+              --sibling ../dhttp \
+              --sibling ../ddns \
+              --sibling ../h3x \
+              --sibling ../dssh \
+            rpm "${rpm_args[@]}" --features sshd,pam \
+              --sibling ../dhttp \
+              --sibling ../ddns \
+              --sibling ../h3x \
+              --sibling ../dssh
+
+      - name: Publish S3 dry run for Linux artifacts
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
+          APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
+          APT_SIGNING_FINGERPRINT: ${{ steps.apt_key.outputs.fingerprint }}
         run: |
-          cross +nightly build --bin pishoo --target ${{ matrix.target }}  --release
+          if [ -n "${APT_SIGNING_PASSPHRASE:-}" ]; then
+            export XTASK_RELEASE_APT_SIGNING_PASSPHRASE="$APT_SIGNING_PASSPHRASE"
+          else
+            unset XTASK_RELEASE_APT_SIGNING_PASSPHRASE
+          fi
 
-      # 准备部署工件
-      - name: Prepare Artifact
-        run: |
-          mkdir -p deploy
-          cp target/${{ matrix.target }}/release/pishoo deploy/pishoo-${{ matrix.target }}
+          cargo xtask publish s3 --dry-run \
+            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
+            --bucket "$RELEASE_BUCKET" \
+            deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT" \
+            rpm --prefix "$RPM_PREFIX"
 
-      # 上传编译产物
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Linux dry-run manifests
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: pishoo-${{ matrix.target }}
-          path: deploy/pishoo-${{ matrix.target }}
+          name: gateway-linux-release-dry-run
+          if-no-files-found: ignore
+          path: |
+            gateway/target/common/**
+
+  macos:
+    name: Homebrew package and S3 dry run
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
+      RELEASE_BUCKET: ${{ inputs.bucket }}
+      BREW_PREFIX: ${{ inputs.brew_prefix }}
+      BREW_PUBLIC_BASE_URL: ${{ inputs.brew_public_base_url }}
+      CREATE_HOMEBREW_TAP_PR: ${{ inputs.create_homebrew_tap_pr }}
+      HOMEBREW_TAP_REPOSITORY: ${{ inputs.homebrew_tap_repository }}
+      HOMEBREW_TAP_BASE_BRANCH: ${{ inputs.homebrew_tap_base_branch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: gateway
+    steps:
+      - name: Checkout gateway
+        uses: actions/checkout@v6
+        with:
+          path: gateway
+          persist-credentials: false
+
+      - name: Checkout dhttp
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/dhttp
+          ref: main
+          path: dhttp
+          persist-credentials: false
+
+      - name: Checkout ddns
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/ddns
+          ref: endpoint
+          path: ddns
+          persist-credentials: false
+
+      - name: Checkout h3x
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/h3x
+          ref: endpoint
+          path: h3x
+          persist-credentials: false
+
+      - name: Checkout dssh
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/dssh
+          ref: endpoint
+          path: dssh
+          persist-credentials: false
+
+      - name: Checkout Homebrew tap
+        if: ${{ inputs.create_homebrew_tap_pr }}
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.homebrew_tap_repository }}
+          ref: ${{ inputs.homebrew_tap_base_branch }}
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: gateway-macos-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          restore-keys: |
+            gateway-macos-cargo-
+
+      - name: Check release secrets
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
+          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
+          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
+          if [ "$CREATE_HOMEBREW_TAP_PR" = "true" ]; then
+            : "${HOMEBREW_TAP_GITHUB_TOKEN:?missing HOMEBREW_TAP_GITHUB_TOKEN}"
+          fi
+
+      - name: Package Homebrew artifacts
+        run: |
+          cargo xtask package --overwrite-manifest \
+            brew \
+              --target aarch64-apple-darwin \
+              --target x86_64-apple-darwin \
+              --features sshd,pam
+
+      - name: Publish S3 dry run for Homebrew artifacts
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: ${{ secrets.XTASK_RELEASE_S3_ENDPOINT_URL }}
+        run: |
+          cargo xtask publish s3 --dry-run \
+            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
+            --bucket "$RELEASE_BUCKET" \
+            brew --prefix "$BREW_PREFIX" --public-base-url "$BREW_PUBLIC_BASE_URL"
+
+      - name: Create Homebrew tap pull request
+        if: ${{ inputs.create_homebrew_tap_pr }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          FORMULA_NAME: pishoo.rb
+        run: |
+          set -euo pipefail
+          tap_dir="$GITHUB_WORKSPACE/homebrew-tap"
+          formula_source="$PWD/target/common/brew/$FORMULA_NAME"
+          formula_dest="$tap_dir/Formula/$FORMULA_NAME"
+          test -f "$formula_source"
+
+          mkdir -p "$tap_dir/Formula"
+          cp "$formula_source" "$formula_dest"
+
+          cd "$tap_dir"
+          if git diff --quiet -- "Formula/$FORMULA_NAME"; then
+            echo "homebrew tap formula is unchanged"
+            exit 0
+          fi
+
+          branch="release-dry-run/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add "Formula/$FORMULA_NAME"
+          git commit -m "brew: update $FORMULA_NAME"
+          git push origin "$branch"
+          gh pr create \
+            --repo "$HOMEBREW_TAP_REPOSITORY" \
+            --base "$HOMEBREW_TAP_BASE_BRANCH" \
+            --head "$branch" \
+            --title "brew: update $FORMULA_NAME from gateway dry run" \
+            --body "Generated by $GITHUB_REPOSITORY release dry run $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT."
+
+      - name: Upload Homebrew dry-run manifests
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-homebrew-release-dry-run
+          if-no-files-found: ignore
+          path: |
+            gateway/target/common/**
