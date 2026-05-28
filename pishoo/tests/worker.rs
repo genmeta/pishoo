@@ -89,6 +89,35 @@ fn worker_reload_rebuilds_all_listener_handles() {
 }
 
 #[test]
+fn listener_rebuild_uses_control_plane_rebuild_call() {
+    let ipc_source = include_str!("../src/ipc.rs");
+    let remote_source = include_str!("../src/worker/remote_plane.rs");
+    let local_source = include_str!("../src/hypervisor/local_plane.rs");
+    let ipc_server_source = include_str!("../src/hypervisor/ipc_server.rs");
+
+    assert!(
+        ipc_source.contains("async fn rebuild_listener"),
+        "ipc ControlPlane trait must expose async fn rebuild_listener"
+    );
+    assert!(
+        ipc_source.contains("RebuildListenError"),
+        "ipc must define a dedicated RebuildListenError type"
+    );
+    assert!(
+        ipc_server_source.contains("rebuild_listener"),
+        "root WorkerControlPlane must implement rebuild_listener"
+    );
+    assert!(
+        remote_source.contains("rebuild_listener"),
+        "RemoteControlPlane must expose rebuild_listener consuming the old IpcListener"
+    );
+    assert!(
+        local_source.contains("rebuild_listener"),
+        "LocalControlPlane must expose rebuild_listener consuming the old RegisteredEndpoint"
+    );
+}
+
+#[test]
 fn sshd_service_registers_webtransport_protocol_layer() {
     let service_source = include_str!("../src/service.rs");
 

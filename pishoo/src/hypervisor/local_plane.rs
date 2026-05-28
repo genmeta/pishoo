@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     hypervisor::{
         endpoint_factory,
-        state::{AcquireListenerError, owner::Owner},
+        state::{AcquireListenerError, RebuildListenerError, owner::Owner},
     },
     listen::RegisteredEndpoint,
 };
@@ -43,6 +43,20 @@ pub struct LocalControlPlane {
 impl LocalControlPlane {
     pub fn new(state: Arc<super::state::RootState>) -> Self {
         Self { state }
+    }
+
+    /// Atomically replace `_old` with a listener matching `request`.
+    ///
+    /// The old [`RegisteredEndpoint`] is consumed and dropped; its `Drop`
+    /// only cancels the accept token, which is what we want because root
+    /// destroyed the underlying resource as part of the rebuild critical
+    /// section. Calling `shutdown` on it would attempt a redundant release.
+    pub async fn rebuild_listener(
+        &self,
+        _old: RegisteredEndpoint,
+        request: ListenRequest,
+    ) -> Result<RegisteredEndpoint, RebuildListenerError> {
+        self.state.rebuild_listener(Owner::Local, request).await
     }
 }
 

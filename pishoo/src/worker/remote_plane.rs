@@ -117,6 +117,33 @@ pub enum RemoteConnectError {
     Protocol { source: crate::ipc::ConnectError },
 }
 
+/// Error from a remote rebuild request.
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RemoteRebuildError {
+    #[snafu(transparent)]
+    Protocol {
+        source: crate::ipc::RebuildListenError,
+    },
+}
+
+impl RemoteControlPlane {
+    /// Atomically replace `_old` with a listener matching `request`.
+    ///
+    /// The old listener is consumed and dropped without explicit shutdown:
+    /// root destroys its side of the listener as part of the rebuild critical
+    /// section, so calling `shutdown` on the old IpcListener would race
+    /// against a server that has already gone away.
+    pub async fn rebuild_listener(
+        &self,
+        _old: IpcListener<IpcCodec>,
+        request: ListenRequest,
+    ) -> Result<IpcListener<IpcCodec>, RemoteRebuildError> {
+        let ipc_client = self.client.rebuild_listener(request).await?;
+        Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
+    }
+}
+
 impl gateway::control_plane::ProvideListener for RemoteControlPlane {
     type Listener = IpcListener<IpcCodec>;
     type ListenError = RemoteListenError;

@@ -33,8 +33,8 @@ use tracing::Instrument;
 
 use super::{endpoint_factory, state::RootState};
 use crate::{
-    hypervisor::state::AcquireListenerError,
-    ipc::{ConnectError, ListenError},
+    hypervisor::state::{AcquireListenerError, RebuildListenerError},
+    ipc::{ConnectError, ListenError, RebuildListenError},
 };
 
 /// Per-worker [`ControlPlane`](crate::ipc::ControlPlane) implementation.
@@ -56,6 +56,45 @@ impl WorkerControlPlane {
             state,
             fd_sender,
         }
+    }
+
+    async fn wrap_listener(
+        &self,
+        owner: super::state::owner::Owner,
+        server_name: String,
+        adapter: crate::listen::RegisteredEndpoint,
+    ) -> Result<h3x::ipc::quic::IpcListenClient, String> {
+        let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
+        let (server, client) =
+            IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
+        let spawned = self
+            .state
+            .spawn_worker_task(self.caller_pid, |token| {
+                async move {
+                    tokio::select! {
+                        () = token.cancelled() => {}
+                        _ = server.serve(true) => {}
+                    }
+                }
+                .in_current_span()
+            })
+            .await;
+        if !spawned {
+            let dhttp_name = DhttpName::try_from(server_name.clone())
+                .expect("listen request identity must be a dhttp name");
+            let _ = self.state.release_listener(owner, &dhttp_name).await;
+            return Err(format!(
+                "worker {} exited before IPC listener was ready",
+                self.caller_pid
+            ));
+        }
+
+        tracing::debug!(
+            caller_pid = %self.caller_pid,
+            %server_name,
+            "listener request fulfilled (IPC)"
+        );
+        Ok(client)
     }
 }
 
@@ -106,40 +145,58 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 }
             })?;
 
-        // Wrap adapter in ListenAdapter for IPC capability forwarding.
-        let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
-        let (server, client) =
-            IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
-        let spawned = self
-            .state
-            .spawn_worker_task(self.caller_pid, |token| {
-                async move {
-                    tokio::select! {
-                        () = token.cancelled() => {}
-                        _ = server.serve(true) => {}
-                    }
-                }
-                .in_current_span()
-            })
-            .await;
-        if !spawned {
-            let server_name = DhttpName::try_from(server_name)
-                .expect("listen request identity must be a dhttp name");
-            let _ = self.state.release_listener(owner, &server_name).await;
-            return Err(ListenError::Internal {
-                message: format!(
-                    "worker {} exited before IPC listener was ready",
-                    self.caller_pid
-                ),
-            });
-        }
+        self.wrap_listener(owner, server_name.clone(), adapter)
+            .await
+            .map_err(|message| ListenError::Internal { message })
+    }
 
-        tracing::debug!(
-            caller_pid = %self.caller_pid,
-            %server_name,
-            "listen request fulfilled (IPC)"
-        );
-        Ok(client)
+    async fn rebuild_listener(
+        &self,
+        request: ListenRequest,
+    ) -> Result<h3x::ipc::quic::IpcListenClient, RebuildListenError> {
+        let server_name = request.identity.name().as_full().to_owned();
+        let owner = self
+            .state
+            .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| RebuildListenError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
+
+        let adapter = self
+            .state
+            .rebuild_listener(owner, request)
+            .await
+            .map_err(|error| {
+                let report = snafu::Report::from_error(&error).to_string();
+                tracing::warn!(
+                    caller_pid = %self.caller_pid,
+                    %server_name,
+                    error = %report,
+                    "rebuild listener request failed"
+                );
+                match error {
+                    RebuildListenerError::NotOwner => RebuildListenError::NotOwner,
+                    RebuildListenerError::ConflictedName => RebuildListenError::Conflict,
+                    RebuildListenerError::Replacement { source } => match source {
+                        AcquireListenerError::BuildBindPatterns { .. } => {
+                            RebuildListenError::InvalidRequest { reason: report }
+                        }
+                        AcquireListenerError::DuplicateListen
+                        | AcquireListenerError::ConflictedName => RebuildListenError::Conflict,
+                        AcquireListenerError::BuildResolver { .. }
+                        | AcquireListenerError::BuildEndpoint { .. }
+                        | AcquireListenerError::CreatePublisher { .. }
+                        | AcquireListenerError::OwnerUnavailable => {
+                            RebuildListenError::Replacement { reason: report }
+                        }
+                    },
+                }
+            })?;
+
+        self.wrap_listener(owner, server_name.clone(), adapter)
+            .await
+            .map_err(|message| RebuildListenError::Internal { message })
     }
 
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError> {

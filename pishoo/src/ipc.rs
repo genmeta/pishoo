@@ -55,6 +55,27 @@ pub enum ListenError {
     Call { source: remoc::rtc::CallError },
 }
 
+/// Error returned by [`ControlPlane::rebuild_listener`].
+///
+/// Rebuild atomically replaces an owned listener so the server name is never
+/// momentarily vacant during reload.
+#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
+#[snafu(module)]
+pub enum RebuildListenError {
+    #[snafu(display("listener is not owned by this worker"))]
+    NotOwner,
+    #[snafu(display("server name conflicts with an existing listener"))]
+    Conflict,
+    #[snafu(display("replacement listener failed after old listener was destroyed: {reason}"))]
+    Replacement { reason: String },
+    #[snafu(display("invalid rebuild request: {reason}"))]
+    InvalidRequest { reason: String },
+    #[snafu(display("internal error: {message}"))]
+    Internal { message: String },
+    #[snafu(transparent)]
+    Call { source: remoc::rtc::CallError },
+}
+
 /// Error returned by [`ControlPlane::connect`].
 #[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
@@ -97,6 +118,14 @@ pub trait ControlPlane: Send + Sync {
     /// returns an [`IpcListenClient`] that the worker constructs an
     /// [`IpcListener`](h3x::ipc::capability::listener::IpcListener) from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
+
+    /// Atomically replace a previously acquired listener with one matching the
+    /// new request. The previous listener is destroyed by root as part of the
+    /// same critical section, so the server name is never observed vacant.
+    async fn rebuild_listener(
+        &self,
+        request: ListenRequest,
+    ) -> Result<IpcListenClient, RebuildListenError>;
 
     /// Request an outbound QUIC connector.
     ///
