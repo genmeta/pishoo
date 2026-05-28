@@ -44,7 +44,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
-dhttp-access = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main", default-features = false }
+dhttp-access = { git = "https://github.com/genmeta/dhttp.git", branch = "main", default-features = false }
 
 # --- QUIC Implementation ---
 h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint" }
@@ -59,10 +59,10 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- SSH3 ---
-dssh = { git = "ssh://git@github.com/genmeta/dssh.git", branch = "endpoint" }
+dssh = { git = "https://github.com/genmeta/dssh.git", branch = "endpoint" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-ddns = { git = "ssh://git@github.com/genmeta/ddns.git", branch = "endpoint", features = [
+ddns = { git = "https://github.com/genmeta/ddns.git", branch = "endpoint", features = [
     "h3x-resolver",
     "mdns-resolver",
 ] }
@@ -90,9 +90,9 @@ pin-project-lite = "0.2"
 form_urlencoded = "1"
 socket2 = "0.5"
 x509-parser = "0.18"
-dhttp-config = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
-dhttp-identity = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
-dhttp = { git = "ssh://git@github.com/genmeta/dhttp.git", branch = "main" }
+dhttp-config = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
+dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
 
 # --- System Interaction ---
 libc = "0.2"
@@ -119,16 +119,16 @@ strip = "symbols"
 # Temporary root-only provider patches for Task 7 migration.
 # Remove these once the referenced remote branches contain dhttp-config,
 # dhttp-access, consolidated ddns, and dssh.
-[patch."ssh://git@github.com/genmeta/dhttp.git"]
+[patch."https://github.com/genmeta/dhttp.git"]
 dhttp = { path = "../dhttp/dhttp" }
 dhttp-access = { path = "../dhttp/access" }
 dhttp-config = { path = "../dhttp/config" }
 dhttp-identity = { path = "../dhttp/identity" }
 
-[patch."ssh://git@github.com/genmeta/ddns.git"]
+[patch."https://github.com/genmeta/ddns.git"]
 ddns = { path = "../ddns" }
 
-[patch."ssh://git@github.com/genmeta/dssh.git"]
+[patch."https://github.com/genmeta/dssh.git"]
 dssh = { path = "../dssh" }
 
 # Temporary root-only stack coherence patch while local ddns depends on the
