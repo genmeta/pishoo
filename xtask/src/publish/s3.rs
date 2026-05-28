@@ -398,6 +398,7 @@ async fn client(options: &S3Options) -> Result<Client, Whatever> {
         "xtask-release",
     );
     let s3_config = aws_sdk_s3::config::Builder::new()
+        .behavior_version_latest()
         .region(Region::new("auto"))
         .endpoint_url(options.endpoint_url.to_owned())
         .credentials_provider(credentials)
