@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use tokio_util::task::AbortOnDropHandle;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::hypervisor::state::RootState;
@@ -12,9 +13,10 @@ use crate::hypervisor::state::RootState;
 ///
 /// SIGCHLD signals may be coalesced by the kernel, so we loop `collect_exited_workers`
 /// until no more exits are found after each wake-up.
-pub async fn run_monitor_loop(state: Arc<RootState>) {
+pub async fn run_monitor_loop(state: Arc<RootState>, shutdown: CancellationToken) {
     loop {
         tokio::select! {
+            () = shutdown.cancelled() => break,
             _ = state.worker_notify.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
         }
@@ -32,6 +34,6 @@ pub async fn run_monitor_loop(state: Arc<RootState>) {
 }
 
 /// Spawn the monitor loop as a background task. Returns the join handle.
-pub fn spawn_monitor_loop(state: Arc<RootState>) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(tokio::spawn(run_monitor_loop(state).in_current_span()))
+pub fn spawn_monitor_loop(state: Arc<RootState>, shutdown: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(run_monitor_loop(state, shutdown).in_current_span())
 }

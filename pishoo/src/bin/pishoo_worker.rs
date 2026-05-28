@@ -19,7 +19,7 @@ use pishoo::{
     worker::{config::build_service_config, remote_plane::RemoteControlPlane},
 };
 use snafu::{OptionExt, Report, ResultExt};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -58,7 +58,20 @@ async fn main() -> Result<(), Whatever> {
     ) = remoc::Connect::framed(remoc::Cfg::default(), sink, stream)
         .await
         .whatever_context("failed to establish remoc transport")?;
-    let _conn_handle = AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
+    let worker_tasks = Arc::new(pishoo::hypervisor::task_scope::TaskScope::new());
+    worker_tasks.spawn(|token| async move {
+        tokio::select! {
+            () = token.cancelled() => {}
+            result = conn.in_current_span() => {
+                if let Err(error) = result {
+                    tracing::debug!(
+                        error = %Report::from_error(&error),
+                        "root remoc connection ended"
+                    );
+                }
+            }
+        }
+    });
 
     // Receive bootstrap payload from root.
     let bootstrap = base_rx
@@ -141,6 +154,8 @@ async fn main() -> Result<(), Whatever> {
             let router_state = gateway::reverse::router::RouterState {
                 #[cfg(feature = "sshd")]
                 session_spawner: plane.clone(),
+                #[cfg(feature = "sshd")]
+                task_scope: worker_tasks.clone(),
             };
             let service = service::run_service(
                 &mut prepared,
@@ -209,5 +224,6 @@ async fn main() -> Result<(), Whatever> {
     }
 
     tracing::info!("exiting");
+    worker_tasks.cancel_and_wait().await;
     Ok(())
 }

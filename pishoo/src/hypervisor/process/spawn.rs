@@ -46,6 +46,8 @@ pub enum SpawnWorkerError {
     ReceiveHello { source: remoc::rch::base::RecvError },
     #[snafu(display("worker closed channel without sending startup hello"))]
     MissingHello,
+    #[snafu(display("worker {pid} was unregistered during startup"))]
+    WorkerUnregistered { pid: nix::unistd::Pid },
 }
 
 /// Spawn a worker process with the new MuxChannel protocol.
@@ -96,26 +98,37 @@ pub async fn spawn_worker(
         .register_worker(pid, target.uid, target.name.clone(), launched.handle)
         .await;
 
-    state
-        .spawn_worker_task(pid, async move {
-            let _ = conn.in_current_span().await;
+    let spawned_connection_task = state
+        .spawn_worker_task(pid, |token| async move {
+            tokio::select! {
+                () = token.cancelled() => {}
+                _ = conn.in_current_span() => {}
+            }
         })
         .await;
+    if !spawned_connection_task {
+        return Err(SpawnWorkerError::WorkerUnregistered { pid });
+    }
 
     // Create per-worker ControlPlane RPC server with FdSender for FD passing.
     let rpc_impl = WorkerControlPlane::new(pid, state.clone(), fd_sender);
 
     // ControlPlane methods use &self, so ServerShared is appropriate.
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);
-    state
-        .spawn_worker_task(
-            pid,
+    let spawned_server_task = state
+        .spawn_worker_task(pid, |token| {
             async move {
-                let _ = server.serve(true).await;
+                tokio::select! {
+                    () = token.cancelled() => {}
+                    _ = server.serve(true) => {}
+                }
             }
-            .in_current_span(),
-        )
+            .in_current_span()
+        })
         .await;
+    if !spawned_server_task {
+        return Err(SpawnWorkerError::WorkerUnregistered { pid });
+    }
 
     // Send bootstrap with new ControlPlane client.
     let bootstrap = WorkerBootstrap {

@@ -8,13 +8,26 @@ use std::os::fd::AsRawFd;
 #[cfg(feature = "sshd")]
 use std::process::Stdio;
 use std::sync::Arc;
+#[cfg(feature = "sshd")]
+use std::time::Duration;
 
-use dhttp::{ddns::DnsScheme, endpoint::Endpoint};
+use dhttp::endpoint::Endpoint;
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
+#[cfg(feature = "sshd")]
+use nix::{
+    errno::Errno,
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
 use snafu::{ResultExt, Snafu};
+#[cfg(feature = "sshd")]
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    hypervisor::state::{RegisterError, ServiceOwner},
+    hypervisor::{
+        endpoint_factory,
+        state::{RegisterError, ServiceOwner},
+    },
     listen::RegisteredEndpoint,
 };
 
@@ -96,18 +109,16 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
             });
         }
 
-        let mut child = cmd.spawn().context(SpawnSnafu)?;
+        let child = cmd.spawn().context(SpawnSnafu)?;
 
-        // Reap the child asynchronously so it does not become a zombie when
-        // the session ends. The session lifecycle is controlled by the remoc
-        // connection teardown — once the parent drops the socketpair, the
-        // child sees EOF and exits.
-        tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => tracing::debug!(?status, "ssh-session child exited"),
-                Err(e) => tracing::warn!(error = %e, "failed to wait on ssh-session child"),
-            }
-        });
+        // Track the session child under the local service scope so root
+        // shutdown can cancel the reaper, terminate the child, and wait until
+        // it is reaped.
+        self.state
+            .spawn_local_task(move |token| async move {
+                reap_local_session_child(child, token).await;
+            })
+            .await;
 
         // Drop the child end in the parent; the child has it via FD 3.
         drop(child_sock);
@@ -115,6 +126,132 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         let parent_fd = std::os::fd::OwnedFd::from(parent_sock);
 
         Ok(gateway::control_plane::SessionTransport { mux_fd: parent_fd })
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn reap_local_session_child(mut child: tokio::process::Child, token: CancellationToken) {
+    let poll_interval = Duration::from_millis(50);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::debug!(?status, "ssh-session child exited");
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %snafu::Report::from_error(&error),
+                    "failed to poll ssh-session child"
+                );
+                return;
+            }
+        }
+
+        tokio::select! {
+            () = token.cancelled() => {
+                terminate_local_session_child(child).await;
+                return;
+            }
+            () = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn terminate_local_session_child(mut child: tokio::process::Child) {
+    const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to poll ssh-session child"
+            );
+            return;
+        }
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+            return;
+        }
+        Err(_) => {}
+    }
+
+    if let Some(raw_pid) = child.id() {
+        send_local_session_signal(Pid::from_raw(raw_pid as i32), Signal::SIGTERM);
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+            return;
+        }
+        Err(_) => {}
+    }
+
+    tracing::warn!("ssh-session child did not exit after SIGTERM");
+    if let Err(error) = child.start_kill() {
+        tracing::warn!(
+            error = %snafu::Report::from_error(&error),
+            "failed to kill ssh-session child"
+        );
+        return;
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+        }
+        Err(_) => {
+            tracing::warn!("ssh-session child did not reap after SIGKILL");
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+fn send_local_session_signal(child_pid: Pid, signal: Signal) {
+    match kill(child_pid, signal) {
+        Ok(()) => {
+            tracing::debug!(child_pid = %child_pid, ?signal, "sent signal to ssh-session child");
+        }
+        Err(Errno::ESRCH) => {}
+        Err(error) => {
+            tracing::warn!(
+                child_pid = %child_pid,
+                ?signal,
+                error = %snafu::Report::from_error(&error),
+                "failed to signal ssh-session child"
+            );
+        }
     }
 }
 
@@ -137,15 +274,44 @@ impl gateway::control_plane::ProvideConnector for LocalControlPlane {
         &self,
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
-        let endpoint = Endpoint::builder()
-            .network(self.state.network.clone())
-            .maybe_identity(request.identity.map(Arc::new))
-            .dns(DnsScheme::H3)
-            .dns(DnsScheme::Mdns)
-            .dns(DnsScheme::System)
-            .build()
-            .await
-            .context(local_connector_error::BuildEndpointSnafu)?;
+        let endpoint = endpoint_factory::build_connector_endpoint(
+            self.state.network.clone(),
+            request.identity,
+        )
+        .await
+        .context(local_connector_error::BuildEndpointSnafu)?;
         Ok(Arc::new(endpoint))
+    }
+}
+
+#[cfg(all(test, feature = "sshd"))]
+mod tests {
+    use nix::{
+        errno::Errno,
+        sys::wait::{WaitPidFlag, waitpid},
+        unistd::Pid,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::reap_local_session_child;
+
+    #[tokio::test]
+    async fn local_session_reaper_terminates_and_reaps_child_on_cancel() {
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = Pid::from_raw(child.id().expect("child should have pid") as i32);
+
+        let token = CancellationToken::new();
+        let task = tokio::spawn(reap_local_session_child(child, token.clone()));
+
+        token.cancel();
+        task.await.expect("reaper task should finish");
+
+        assert!(matches!(
+            waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        ));
     }
 }

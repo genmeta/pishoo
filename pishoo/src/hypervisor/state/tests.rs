@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
 use gateway::{
@@ -24,6 +27,16 @@ async fn has_entry(state: &RootState, server_name: &str) -> bool {
     let server_name = DhttpName::try_from(server_name.to_owned()).unwrap();
     let registry = state.servers.read().await;
     registry.entries.contains_key(&server_name)
+}
+
+async fn wait_until_no_entry(state: &RootState, server_name: &str) -> bool {
+    for _ in 0..20 {
+        if !has_entry(state, server_name).await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
 }
 
 fn dhttp_name(label: &str) -> DhttpName<'static> {
@@ -164,15 +177,59 @@ async fn test_spawn_task_unregistered() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
 
     // Task for an unregistered PID should not be spawned.
-    state
-        .spawn_worker_task(Pid::from_raw(55555), async move {
+    let spawned = state
+        .spawn_worker_task(Pid::from_raw(55555), |_token| async move {
             let _ = tx.send(());
         })
         .await;
 
     // Give the runtime a chance to run the task (if it were spawned).
     tokio::task::yield_now().await;
+    assert!(!spawned, "unregistered worker task should be rejected");
     assert!(rx.try_recv().is_err(), "task should not have been spawned");
+}
+
+#[tokio::test]
+async fn test_cleanup_cancels_and_waits_worker_tasks() {
+    let state = test_state();
+    let pid = Pid::from_raw(55556);
+    state
+        .register_worker(
+            pid,
+            Uid::from_raw(1003),
+            "cancel-wait".into(),
+            fake_worker_handle(55556),
+        )
+        .await;
+
+    let observed_cancel = Arc::new(AtomicBool::new(false));
+    let completed_cleanup = Arc::new(AtomicBool::new(false));
+    let observed_cancel_for_task = observed_cancel.clone();
+    let completed_cleanup_for_task = completed_cleanup.clone();
+
+    let spawned = state
+        .spawn_worker_task(pid, move |token| async move {
+            token.cancelled().await;
+            observed_cancel_for_task.store(true, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            completed_cleanup_for_task.store(true, Ordering::SeqCst);
+        })
+        .await;
+    assert!(spawned, "registered worker task should be tracked");
+
+    state
+        .cleanup_worker_with_reason(pid, "test_cancel_wait")
+        .await
+        .expect("cleanup should find worker");
+
+    assert!(
+        observed_cancel.load(Ordering::SeqCst),
+        "worker task should observe cancellation"
+    );
+    assert!(
+        completed_cleanup.load(Ordering::SeqCst),
+        "cleanup should wait for worker task to finish"
+    );
 }
 
 #[tokio::test]
@@ -228,6 +285,45 @@ async fn test_register_then_release() {
         .release_server(&DhttpName::try_from(server_name.to_owned()).unwrap(), owner)
         .await;
     assert!(!is_active(&state, server_name).await);
+}
+
+#[tokio::test]
+async fn test_registered_endpoint_drop_releases_server() {
+    let state = test_state();
+    let owner = ServiceOwner::Local;
+    let server_name = "drop-release.user.genmeta.net";
+
+    let listener = state
+        .register_listener(owner, test_request("drop-release"))
+        .await
+        .expect("register_listener should succeed");
+    assert!(is_active(&state, server_name).await);
+
+    drop(listener);
+
+    assert!(
+        wait_until_no_entry(&state, server_name).await,
+        "dropping a registered endpoint should release the registry entry"
+    );
+}
+
+#[tokio::test]
+async fn test_cleanup_local_resources_retires_local_servers() {
+    let state = test_state();
+    let server_name = "cleanup-local.user.genmeta.net";
+    let listener = state
+        .register_listener(ServiceOwner::Local, test_request("cleanup-local"))
+        .await
+        .expect("register_listener should succeed");
+
+    assert!(is_active(&state, server_name).await);
+
+    let cleaned = state.cleanup_local_resources().await;
+
+    assert_eq!(cleaned, 1);
+    assert!(!is_active(&state, server_name).await);
+
+    drop(listener);
 }
 
 #[tokio::test]

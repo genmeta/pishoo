@@ -18,7 +18,8 @@ use gateway::{
     },
 };
 use snafu::{ResultExt, Snafu, whatever};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     hypervisor::state::RootState, listen::RegisteredEndpoint, service::PreparedServer, tls,
@@ -95,14 +96,23 @@ async fn collect_local_server_defs(
 /// Handle to a running root-local service, used for shutdown and replacement.
 pub struct LocalServiceHandle {
     shutdown: CancellationToken,
-    task: AbortOnDropHandle<Vec<PreparedServer<RegisteredEndpoint>>>,
+    task: Option<JoinHandle<Vec<PreparedServer<RegisteredEndpoint>>>>,
 }
 
 impl LocalServiceHandle {
     /// Cancel the running service and recover prepared servers with listeners.
-    pub async fn shutdown(self) -> Vec<PreparedServer<RegisteredEndpoint>> {
+    pub async fn shutdown(mut self) -> Vec<PreparedServer<RegisteredEndpoint>> {
         self.shutdown.cancel();
-        self.task.await.unwrap_or_default()
+        let Some(task) = self.task.take() else {
+            return Vec::new();
+        };
+        task.await.unwrap_or_default()
+    }
+}
+
+impl Drop for LocalServiceHandle {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
     }
 }
 
@@ -261,9 +271,11 @@ pub async fn spawn_local_service(
     let router_state = gateway::reverse::router::RouterState {
         #[cfg(feature = "sshd")]
         session_spawner: plane.clone(),
+        #[cfg(feature = "sshd")]
+        task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         crate::service::run_service(
             &mut prepared,
             &h3_settings,
@@ -273,13 +285,13 @@ pub async fn spawn_local_service(
         )
         .await;
         prepared
-    }));
+    });
 
     tracing::info!(servers = server_count, "local service started");
 
     Ok(Some(LocalServiceHandle {
         shutdown,
-        task: handle,
+        task: Some(handle),
     }))
 }
 

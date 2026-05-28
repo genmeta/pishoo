@@ -10,6 +10,7 @@ use pishoo::hypervisor::signal;
 use rustls::server::WebPkiClientVerifier;
 use snafu::{FromString, ResultExt};
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -138,7 +139,9 @@ async fn main() -> Result<(), Whatever> {
     // Per-server accept tasks are spawned inside `register_listener`; no
     // central accept loop is needed here.
 
-    let monitor_handle = pishoo::hypervisor::process::spawn_monitor_loop(state.clone());
+    let monitor_shutdown = CancellationToken::new();
+    let monitor_handle =
+        pishoo::hypervisor::process::spawn_monitor_loop(state.clone(), monitor_shutdown.clone());
 
     tracing::info!("pishoo ready");
 
@@ -179,11 +182,12 @@ async fn main() -> Result<(), Whatever> {
         }
     }
 
-    monitor_handle.abort();
+    monitor_shutdown.cancel();
     let _ = monitor_handle.await;
     if let Some(handle) = local_service_handle.take() {
         handle.shutdown().await;
     }
+    state.cleanup_local_resources().await;
     for pid in state.worker_pids().await {
         state.cleanup_worker_with_reason(pid, "root_shutdown").await;
     }

@@ -7,6 +7,8 @@ use std::{
 use axum::{body::Body, handler::Handler, response::IntoResponse};
 use futures::future::BoxFuture;
 use http::StatusCode;
+#[cfg(feature = "sshd")]
+use tokio_util::sync::CancellationToken;
 
 use super::location::match_location;
 #[cfg(feature = "sshd")]
@@ -15,6 +17,13 @@ use crate::parse::{
     document::ConfigNode,
     types::{PathConfig, ProxyPass},
 };
+
+#[cfg(feature = "sshd")]
+pub trait DynTaskScope: Send + Sync {
+    fn token(&self) -> CancellationToken;
+
+    fn spawn(&self, task: BoxFuture<'static, ()>);
+}
 
 /// Shared state for all reverse-proxy handlers.
 ///
@@ -25,6 +34,8 @@ use crate::parse::{
 pub struct RouterState {
     #[cfg(feature = "sshd")]
     pub session_spawner: std::sync::Arc<dyn crate::control_plane::DynSpawnSession>,
+    #[cfg(feature = "sshd")]
+    pub task_scope: Arc<dyn DynTaskScope>,
 }
 
 /// Nginx-style location router implementing `tower::Service`.

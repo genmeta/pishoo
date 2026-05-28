@@ -41,7 +41,7 @@ snafu = { workspace = true }
 # --- Async Runtime ---
 futures = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 
 # --- HTTP ---
 http = { workspace = true }

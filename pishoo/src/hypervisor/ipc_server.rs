@@ -5,8 +5,10 @@
 //! module creates the actual QUIC resources and returns IPC capability handles.
 
 use std::sync::Arc;
+#[cfg(feature = "sshd")]
+use std::time::Duration;
 
-use dhttp::{ddns::DnsScheme, endpoint::Endpoint};
+use dhttp::name::DhttpName;
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::ipc::{
     quic::{
@@ -16,10 +18,20 @@ use h3x::ipc::{
     transport::FdSender,
 };
 use nix::unistd::Pid;
+#[cfg(feature = "sshd")]
+use nix::{
+    errno::Errno,
+    sys::{
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
+};
 use remoc::prelude::{ServerShared, ServerSharedMut};
+#[cfg(feature = "sshd")]
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::state::RootState;
+use super::{endpoint_factory, state::RootState};
 use crate::{
     hypervisor::state::{RegisterError, ServiceOwner},
     ipc::{ConnectError, ListenError},
@@ -92,15 +104,29 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
         let (server, client) =
             IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
-        self.state
-            .spawn_worker_task(
-                self.caller_pid,
+        let spawned = self
+            .state
+            .spawn_worker_task(self.caller_pid, |token| {
                 async move {
-                    let _ = server.serve(true).await;
+                    tokio::select! {
+                        () = token.cancelled() => {}
+                        _ = server.serve(true) => {}
+                    }
                 }
-                .in_current_span(),
-            )
+                .in_current_span()
+            })
             .await;
+        if !spawned {
+            let server_name = DhttpName::try_from(server_name)
+                .expect("listen request identity must be a dhttp name");
+            self.state.release_server(&server_name, owner).await;
+            return Err(ListenError::Internal {
+                message: format!(
+                    "worker {} exited before IPC listener was ready",
+                    self.caller_pid
+                ),
+            });
+        }
 
         tracing::debug!(
             caller_pid = %self.caller_pid,
@@ -119,14 +145,11 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         }
 
         // Build a DHTTP endpoint with the requested client identity (if any).
-        let endpoint = Endpoint::builder()
-            .network(self.state.network.clone())
-            .maybe_identity(request.identity.map(Arc::new))
-            .dns(DnsScheme::H3)
-            .dns(DnsScheme::Mdns)
-            .dns(DnsScheme::System)
-            .build()
-            .await;
+        let endpoint = endpoint_factory::build_connector_endpoint(
+            self.state.network.clone(),
+            request.identity,
+        )
+        .await;
         let endpoint = Arc::new(match endpoint {
             Ok(endpoint) => endpoint,
             Err(error) => {
@@ -142,15 +165,26 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         // Wrap the endpoint in ConnectAdapter for IPC capability forwarding.
         let connect_adapter = ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_sender.clone());
         let (server, client) = IpcConnectServerShared::new(Arc::new(connect_adapter), 64);
-        self.state
-            .spawn_worker_task(
-                self.caller_pid,
+        let spawned = self
+            .state
+            .spawn_worker_task(self.caller_pid, |token| {
                 async move {
-                    let _ = server.serve(true).await;
+                    tokio::select! {
+                        () = token.cancelled() => {}
+                        _ = server.serve(true) => {}
+                    }
                 }
-                .in_current_span(),
-            )
+                .in_current_span()
+            })
             .await;
+        if !spawned {
+            return Err(ConnectError::Internal {
+                message: format!(
+                    "worker {} exited before IPC connector was ready",
+                    self.caller_pid
+                ),
+            });
+        }
 
         tracing::debug!(
             caller_pid = %self.caller_pid,
@@ -179,25 +213,35 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             // Send the session child's MuxChannel FD to the worker via the
             // root-side MuxChannel's FD sender. The worker will pick it up
             // from FdRegistry using the returned VarInt id.
-            let fd_id = self
-                .fd_sender
-                .queue_fds(vec![transport.mux_fd].into())
-                .map_err(|e| crate::ipc::SpawnSessionError::SpawnFailed {
-                    reason: snafu::Report::from_error(e).to_string(),
-                })?;
-
-            // Reap the session child process to avoid zombies.
             let child_pid = transport.child_pid;
+            let fd_id = match self.fd_sender.queue_fds(vec![transport.mux_fd].into()) {
+                Ok(fd_id) => fd_id,
+                Err(error) => {
+                    terminate_session_child(child_pid).await;
+                    return Err(crate::ipc::SpawnSessionError::SpawnFailed {
+                        reason: snafu::Report::from_error(error).to_string(),
+                    });
+                }
+            };
+
+            // Reap the session child process to avoid zombies. The reaper is
+            // scoped to the worker so worker cleanup can cancel it and then
+            // wait for the session child to be terminated and reaped.
             let state = self.state.clone();
             let caller_pid = self.caller_pid;
-            state
-                .spawn_worker_task(caller_pid, async move {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = nix::sys::wait::waitpid(child_pid, None);
-                    })
-                    .await;
+            let spawned_reaper = state
+                .spawn_worker_task(caller_pid, move |token| async move {
+                    reap_session_child(child_pid, token).await;
                 })
                 .await;
+            if !spawned_reaper {
+                terminate_session_child(child_pid).await;
+                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: format!(
+                        "worker {caller_pid} exited before session reaper was registered"
+                    ),
+                });
+            }
 
             tracing::info!(
                 caller_pid = %self.caller_pid,
@@ -212,5 +256,141 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             let _ = username;
             Err(crate::ipc::SpawnSessionError::NotSupported)
         }
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn reap_session_child(child_pid: Pid, token: CancellationToken) {
+    let poll_interval = Duration::from_millis(50);
+
+    loop {
+        if poll_session_child(child_pid) {
+            return;
+        }
+
+        tokio::select! {
+            () = token.cancelled() => {
+                terminate_session_child(child_pid).await;
+                return;
+            }
+            () = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn terminate_session_child(child_pid: Pid) {
+    const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+
+    if poll_session_child(child_pid) {
+        return;
+    }
+
+    if wait_session_child_for(child_pid, TERMINATE_GRACE).await {
+        return;
+    }
+
+    send_session_signal(child_pid, Signal::SIGTERM);
+    if wait_session_child_for(child_pid, TERMINATE_GRACE).await {
+        return;
+    }
+
+    tracing::warn!(
+        child_pid = %child_pid,
+        "session child did not exit after SIGTERM"
+    );
+    send_session_signal(child_pid, Signal::SIGKILL);
+    if !wait_session_child_for(child_pid, TERMINATE_GRACE).await {
+        tracing::warn!(
+            child_pid = %child_pid,
+            "session child did not reap after SIGKILL"
+        );
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn wait_session_child_for(child_pid: Pid, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if poll_session_child(child_pid) {
+            return true;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(feature = "sshd")]
+fn poll_session_child(child_pid: Pid) -> bool {
+    match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::StillAlive) => false,
+        Ok(status) => {
+            tracing::debug!(child_pid = %child_pid, ?status, "session child exited");
+            true
+        }
+        Err(Errno::ECHILD) => true,
+        Err(error) => {
+            tracing::warn!(
+                child_pid = %child_pid,
+                error = %snafu::Report::from_error(&error),
+                "failed to wait for session child"
+            );
+            true
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+fn send_session_signal(child_pid: Pid, signal: Signal) {
+    match kill(child_pid, signal) {
+        Ok(()) => {
+            tracing::debug!(child_pid = %child_pid, ?signal, "sent signal to session child");
+        }
+        Err(Errno::ESRCH) => {}
+        Err(error) => {
+            tracing::warn!(
+                child_pid = %child_pid,
+                ?signal,
+                error = %snafu::Report::from_error(&error),
+                "failed to signal session child"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "sshd"))]
+mod tests {
+    use nix::{
+        errno::Errno,
+        sys::wait::{WaitPidFlag, waitpid},
+        unistd::Pid,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::reap_session_child;
+
+    #[tokio::test]
+    async fn session_reaper_terminates_and_reaps_child_on_cancel() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = Pid::from_raw(child.id() as i32);
+        drop(child);
+
+        let token = CancellationToken::new();
+        let task = tokio::spawn(reap_session_child(pid, token.clone()));
+
+        token.cancel();
+        task.await.expect("reaper task should finish");
+
+        assert!(matches!(
+            waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        ));
     }
 }

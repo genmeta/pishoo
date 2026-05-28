@@ -24,7 +24,6 @@ use dssh::{
 };
 use h3x::ipc::transport::MuxChannel;
 use snafu::Report;
-use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -62,9 +61,7 @@ async fn main() {
         )
         .await
         .expect("failed to establish remoc channel");
-    let conn_handle = AbortOnDropHandle::new(tokio::spawn(
-        conn.instrument(tracing::info_span!("remoc_conn")),
-    ));
+    let mut conn = Box::pin(conn.instrument(tracing::info_span!("remoc_conn")));
 
     // Create the outer RFnOnce: authentication.
     let auth_fn = remoc::rfn::RFnOnce::new_1(|auth_request: AuthRequest| async move {
@@ -184,10 +181,27 @@ async fn main() {
         Ok(start_session_fn)
     });
 
-    tx.send(auth_fn)
-        .await
-        .expect("failed to send AuthenticateFn to parent");
+    tokio::select! {
+        result = &mut conn => {
+            if let Err(error) = result {
+                tracing::warn!(
+                    error = %Report::from_error(&error),
+                    "remoc connection ended before AuthenticateFn was sent"
+                );
+            }
+            return;
+        }
+        result = tx.send(auth_fn) => {
+            result.expect("failed to send AuthenticateFn to parent");
+        }
+    }
 
-    let _ = conn_handle.await;
+    drop(tx);
+    if let Err(error) = conn.await {
+        tracing::debug!(
+            error = %Report::from_error(&error),
+            "remoc connection ended"
+        );
+    }
     tracing::info!("ssh session process exiting");
 }

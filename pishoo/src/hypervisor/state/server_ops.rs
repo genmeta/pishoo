@@ -2,24 +2,15 @@
 
 use std::sync::Arc;
 
-use dhttp::{
-    ddns::{DHTTP_H3_DNS_SERVER, Resolvers},
-    endpoint::Endpoint,
-    identity::Identity,
-    name::DhttpName,
-};
+use dhttp::name::DhttpName;
 use gateway::control_plane::ListenRequest;
-use h3x::{dquic::binds::BindPattern, quic::Listen as _};
-use http::Uri;
+use h3x::quic::Listen as _;
 use snafu::{IntoError, ResultExt};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{
-    BuildEndpointResolverError, RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner,
-    build_endpoint_resolver_error, register_error,
-};
-use crate::listen::RegisteredEndpoint;
+use super::{RegisterError, RetiredServer, RootState, ServerEntry, ServiceOwner, register_error};
+use crate::{hypervisor::endpoint_factory, listen::RegisteredEndpoint};
 
 impl RootState {
     // -----------------------------------------------------------------------
@@ -78,6 +69,7 @@ impl RootState {
                         owner: old_owner,
                         endpoint,
                         shutdown_token,
+                        publish_token,
                         publish_task,
                     }) = old
                     {
@@ -90,6 +82,7 @@ impl RootState {
                         RetiredServer {
                             endpoint,
                             shutdown_token,
+                            publish_token,
                             publish_task,
                         }
                         .shutdown()
@@ -116,13 +109,13 @@ impl RootState {
         // No lock held — other server_names can be read/written concurrently.
         let identity = Arc::new(request.identity.clone());
         let bind_patterns = Arc::new(bind_patterns);
-        let resolver = match self
-            .build_endpoint_resolver(
-                identity.clone(),
-                bind_patterns.clone(),
-                request.dns_resolver_url.clone(),
-            )
-            .await
+        let resolver = match endpoint_factory::build_resolver(
+            identity.clone(),
+            self.network.clone(),
+            bind_patterns.clone(),
+            request.dns_resolver_url.clone(),
+        )
+        .await
         {
             Ok(resolver) => resolver,
             Err(source) => {
@@ -130,14 +123,14 @@ impl RootState {
                 return Err(register_error::BuildResolverSnafu.into_error(source));
             }
         };
-        let endpoint = Endpoint::builder()
-            .network(self.network.clone())
-            .identity(identity)
-            .server(self.server_qcfg.clone())
-            .bind(bind_patterns)
-            .resolver(Arc::new(resolver))
-            .build()
-            .await;
+        let endpoint = endpoint_factory::build_registered_endpoint(
+            identity,
+            self.network.clone(),
+            self.server_qcfg.clone(),
+            bind_patterns,
+            resolver,
+        )
+        .await;
         let endpoint = match endpoint {
             Ok(endpoint) => endpoint,
             Err(source) => {
@@ -162,21 +155,16 @@ impl RootState {
             }
         };
 
-        // Phase 3: promote sentinel to `Active`.
-        {
-            let mut registry = self.servers.write().await;
-
-            // Verify our sentinel is still there. Another operation (conflict
-            // or cleanup) may have replaced/removed it.
-            match registry.entries.get(&server_name) {
-                Some(ServerEntry::Registering { owner: o }) if *o == owner => {
-                    // Good — our sentinel is intact.
-                }
-                _ => {
-                    // Sentinel was replaced (e.g. by cross-owner conflict or
-                    // cleanup). Shut down the endpoint so its binds/SNI do not
-                    // leak.
-                    drop(registry);
+        let release_scope = match owner {
+            ServiceOwner::Local => self.local_tasks.clone(),
+            ServiceOwner::Worker(pid) => {
+                let mut inner = self.inner.lock().await;
+                if let Some(process) = inner.processes.get_mut(&pid) {
+                    process.owned_servers.insert(server_name.clone());
+                    process.tasks.clone()
+                } else {
+                    drop(inner);
+                    self.rollback_registering(&server_name, owner).await;
                     if let Err(error) = endpoint.shutdown().await {
                         tracing::warn!(
                             %server_name,
@@ -186,61 +174,88 @@ impl RootState {
                     }
                     tracing::warn!(
                         %server_name,
-                        ?owner,
-                        "sentinel lost during register_listener; rolled back"
-                    );
-                    return Err(RegisterError::ConflictedName);
-                }
-            }
-
-            let publish_task = Some(AbortOnDropHandle::new(tokio::spawn(
-                async move {
-                    publisher.run().await;
-                }
-                .in_current_span(),
-            )));
-
-            registry.entries.insert(
-                server_name.clone(),
-                ServerEntry::Active {
-                    owner,
-                    endpoint: endpoint.clone(),
-                    shutdown_token: shutdown_token.clone(),
-                    publish_task,
-                },
-            );
-            drop(registry);
-
-            // Track in the worker's owned_servers set.
-            if let ServiceOwner::Worker(pid) = owner {
-                let mut inner = self.inner.lock().await;
-                if let Some(process) = inner.processes.get_mut(&pid) {
-                    process.owned_servers.insert(server_name.clone());
-                } else {
-                    // Worker died during async gap — rollback.
-                    drop(inner);
-                    let retired = self.servers.write().await.retire_entry(&server_name);
-                    if let Some(retired) = retired {
-                        retired.shutdown().await;
-                    }
-                    tracing::warn!(
-                        %server_name,
                         pid = %pid,
                         "worker vanished during register_listener; rolled back"
                     );
                     return Err(RegisterError::ConflictedName);
                 }
             }
+        };
 
-            tracing::debug!(%server_name, ?owner, "server registered");
-            Ok(RegisteredEndpoint::new_registered(
-                endpoint,
-                shutdown_token,
-                self,
-                server_name,
-                owner,
-            ))
+        let publish_token = CancellationToken::new();
+        let publish_shutdown = publish_token.clone();
+        let mut publish_task = Some(release_scope.spawn(move |owner_token| {
+            async move {
+                tokio::select! {
+                    () = owner_token.cancelled() => {}
+                    () = publish_shutdown.cancelled() => {}
+                    () = async { publisher.run().await } => {}
+                }
+            }
+            .in_current_span()
+        }));
+
+        // Phase 3: promote sentinel to `Active`.
+        let mut registry = self.servers.write().await;
+
+        // Verify our sentinel is still there. Another operation (conflict
+        // or cleanup) may have replaced/removed it.
+        match registry.entries.get(&server_name) {
+            Some(ServerEntry::Registering { owner: o }) if *o == owner => {
+                // Good — our sentinel is intact.
+            }
+            _ => {
+                // Sentinel was replaced (e.g. by cross-owner conflict or
+                // cleanup). Shut down the endpoint so its binds/SNI do not
+                // leak.
+                drop(registry);
+                publish_token.cancel();
+                if let Some(task) = publish_task.take() {
+                    let _ = task.await;
+                }
+                if let ServiceOwner::Worker(pid) = owner {
+                    let mut inner = self.inner.lock().await;
+                    if let Some(process) = inner.processes.get_mut(&pid) {
+                        process.owned_servers.remove(&server_name);
+                    }
+                }
+                if let Err(error) = endpoint.shutdown().await {
+                    tracing::warn!(
+                        %server_name,
+                        error = %snafu::Report::from_error(&error),
+                        "failed to shut down rolled back endpoint"
+                    );
+                }
+                tracing::warn!(
+                    %server_name,
+                    ?owner,
+                    "sentinel lost during register_listener; rolled back"
+                );
+                return Err(RegisterError::ConflictedName);
+            }
         }
+
+        registry.entries.insert(
+            server_name.clone(),
+            ServerEntry::Active {
+                owner,
+                endpoint: endpoint.clone(),
+                shutdown_token: shutdown_token.clone(),
+                publish_token,
+                publish_task,
+            },
+        );
+        drop(registry);
+
+        tracing::debug!(%server_name, ?owner, "server registered");
+        Ok(RegisteredEndpoint::new_registered(
+            endpoint,
+            shutdown_token,
+            self,
+            server_name,
+            owner,
+            release_scope,
+        ))
     }
 
     async fn rollback_registering(&self, server_name: &DhttpName<'static>, owner: ServiceOwner) {
@@ -307,35 +322,5 @@ impl RootState {
         }
 
         conflicted
-    }
-
-    async fn build_endpoint_resolver(
-        self: &Arc<Self>,
-        identity: Arc<Identity>,
-        bind_patterns: Arc<Vec<BindPattern>>,
-        dns_resolver_url: Option<Uri>,
-    ) -> Result<Resolvers, BuildEndpointResolverError> {
-        let dns_endpoint = Endpoint::builder()
-            .network(self.network.clone())
-            .identity(identity)
-            .server(self.server_qcfg.clone())
-            .bind(bind_patterns.clone())
-            .resolver(Arc::new(dhttp::dquic::resolver::handy::SystemResolver))
-            .build()
-            .await
-            .context(build_endpoint_resolver_error::BuildEndpointSnafu)?;
-
-        let base_url = dns_resolver_url
-            .map(|url| url.to_string())
-            .unwrap_or_else(|| DHTTP_H3_DNS_SERVER.to_owned());
-
-        let builder = Resolvers::builder()
-            .mdns(self.network.clone(), bind_patterns)
-            .await
-            .system()
-            .h3_with_base_url(base_url, dns_endpoint.as_h3())
-            .context(build_endpoint_resolver_error::H3ResolverSnafu)?;
-
-        Ok(builder.build())
     }
 }

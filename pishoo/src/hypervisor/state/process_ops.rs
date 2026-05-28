@@ -7,14 +7,66 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use snafu::Report;
-use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     CleanupSummary, RetiredServer, RootState, ServerEntry, ServiceOwner, WorkerProcessRecord,
 };
-use crate::hypervisor::worker_handle::WorkerHandle;
+use crate::hypervisor::{task_scope::TaskScope, worker_handle::WorkerHandle};
 
 impl RootState {
+    // -----------------------------------------------------------------------
+    // Root-local task/resource scope
+    // -----------------------------------------------------------------------
+
+    pub fn local_task_scope(&self) -> TaskScope {
+        self.local_tasks.clone()
+    }
+
+    /// Spawn and track a root-side background task owned by the local service.
+    pub async fn spawn_local_task<F, Fut>(&self, task: F)
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.local_tasks.spawn(task);
+    }
+
+    /// Cancel root-local background tasks and retire root-local listeners.
+    pub async fn cleanup_local_resources(&self) -> usize {
+        self.local_tasks.cancel_and_wait().await;
+
+        let retired_servers = {
+            let mut registry = self.servers.write().await;
+            let local_servers = registry
+                .entries
+                .iter()
+                .filter_map(|(server_name, entry)| {
+                    matches!(
+                        entry,
+                        ServerEntry::Active {
+                            owner: ServiceOwner::Local,
+                            ..
+                        }
+                    )
+                    .then_some(server_name.clone())
+                })
+                .collect::<Vec<_>>();
+
+            local_servers
+                .iter()
+                .filter_map(|server_name| registry.retire_entry(server_name))
+                .collect::<Vec<_>>()
+        };
+
+        let cleaned = retired_servers.len();
+        for retired in retired_servers {
+            retired.shutdown().await;
+        }
+
+        cleaned
+    }
+
     // -----------------------------------------------------------------------
     // Worker registry
     // -----------------------------------------------------------------------
@@ -52,6 +104,7 @@ impl RootState {
                 uid,
                 username: username.clone(),
                 owned_servers: HashSet::new(),
+                tasks: TaskScope::new(),
                 worker_handle,
             },
         );
@@ -67,19 +120,24 @@ impl RootState {
     /// Spawn and track a root-side background task for a worker.
     ///
     /// If the worker is no longer registered, the task is not spawned.
-    pub async fn spawn_worker_task<F>(&self, pid: Pid, task: F)
+    pub async fn spawn_worker_task<F, Fut>(&self, pid: Pid, task: F) -> bool
     where
-        F: std::future::Future<Output = ()> + Send + 'static,
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let mut inner = self.inner.lock().await;
-        if !inner.processes.contains_key(&pid) {
-            return;
+        let scope = {
+            let inner = self.inner.lock().await;
+            inner
+                .processes
+                .get(&pid)
+                .map(|process| process.tasks.clone())
+        };
+        if let Some(scope) = scope {
+            scope.spawn(task);
+            true
+        } else {
+            false
         }
-        inner
-            .worker_tasks
-            .entry(pid)
-            .or_insert_with(JoinSet::new)
-            .spawn(task);
     }
 
     /// Remove all resources for a dead/exited worker process.
@@ -93,7 +151,7 @@ impl RootState {
         reason: &str,
     ) -> Option<CleanupSummary> {
         // Step 1: remove process record and collect owned server names.
-        let (record_uid, record_username, owned_servers, background_tasks) = {
+        let (record_uid, record_username, owned_servers, tasks) = {
             let mut inner = self.inner.lock().await;
             let record = inner.processes.remove(&pid)?;
 
@@ -102,17 +160,22 @@ impl RootState {
                 inner.users.remove(&record.uid);
             }
 
-            let background_tasks = inner.worker_tasks.remove(&pid).unwrap_or_default();
             (
                 record.uid,
                 record.username,
                 record.owned_servers,
-                background_tasks,
+                record.tasks,
             )
         };
         // inner lock released here.
 
-        // Step 2: retire owned servers under the servers write lock.
+        // Step 2: request all scoped worker tasks to shut down and wait for
+        // them to finish. Tasks are expected to observe the cancellation token
+        // and drop/release their resources cooperatively.
+        let background_tasks_cleaned = tasks.len();
+        tasks.cancel_and_wait().await;
+
+        // Step 3: retire owned servers under the servers write lock.
         // Also scan for `Registering` entries owned by this worker — they are
         // not yet recorded in `owned_servers` because `register_listener`
         // Phase 3 has not completed.
@@ -158,7 +221,6 @@ impl RootState {
             retired.shutdown().await;
         }
 
-        let background_tasks_cleaned = background_tasks.len();
         let summary = CleanupSummary {
             pid,
             uid: record_uid,
@@ -172,11 +234,6 @@ impl RootState {
             %reason,
             "worker stopped"
         );
-
-        // Step 3: drain background tasks (no lock held).
-        let mut tasks = background_tasks;
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
 
         Some(summary)
     }

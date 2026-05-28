@@ -24,11 +24,14 @@ use nix::unistd::{Pid, Uid};
 use snafu::{Report, Snafu};
 use tokio::{
     sync::{Mutex, RwLock},
-    task::JoinSet,
+    task::JoinHandle,
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use tokio_util::sync::CancellationToken;
 
-use crate::hypervisor::worker_handle::WorkerHandle;
+use crate::hypervisor::{
+    endpoint_factory::BuildEndpointResolverError, task_scope::TaskScope,
+    worker_handle::WorkerHandle,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -61,17 +64,6 @@ pub enum RegisterError {
     },
 }
 
-#[derive(Debug, Snafu)]
-#[snafu(module(build_endpoint_resolver_error))]
-pub enum BuildEndpointResolverError {
-    #[snafu(display("failed to build dns endpoint"))]
-    BuildEndpoint {
-        source: dhttp::endpoint::InvalidEndpointIdentityError,
-    },
-    #[snafu(display("failed to attach h3 resolver"))]
-    H3Resolver { source: std::io::Error },
-}
-
 /// Identifies the owner of a server_name registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceOwner {
@@ -94,8 +86,10 @@ pub enum ServerEntry {
         endpoint: Endpoint,
         /// Cancels accept calls currently blocked on this endpoint wrapper.
         shutdown_token: CancellationToken,
-        /// Per-server DNS publish task, aborted when the entry is retired.
-        publish_task: Option<AbortOnDropHandle<()>>,
+        /// Cancels the per-server DNS publish task when the entry is retired.
+        publish_token: CancellationToken,
+        /// Per-server DNS publish task.
+        publish_task: Option<JoinHandle<()>>,
     },
     /// Name is poisoned due to a cross-owner conflict.
     /// Only cleared by `scrub_conflicts()` during reload.
@@ -120,6 +114,8 @@ pub(super) struct WorkerProcessRecord {
     pub(super) username: String,
     /// Set of server_names owned by this worker.
     pub(super) owned_servers: HashSet<DhttpName<'static>>,
+    /// Structured task scope for root-side tasks owned by this worker.
+    pub(super) tasks: TaskScope,
     /// Handle to the spawned worker process.
     pub(super) worker_handle: WorkerHandle,
 }
@@ -142,8 +138,6 @@ pub(super) struct Inner {
     pub(super) processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping (one worker per uid).
     pub(super) users: HashMap<Uid, Pid>,
-    /// Root-side background tasks grouped by worker pid.
-    pub(super) worker_tasks: HashMap<Pid, JoinSet<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +161,8 @@ pub struct RootState {
     pub(super) servers: RwLock<ServerRegistry>,
     /// Process/user bookkeeping (behind Mutex).
     pub(super) inner: Mutex<Inner>,
+    /// Structured task scope for root-local service resources.
+    pub(super) local_tasks: TaskScope,
     /// Notified when SIGCHLD arrives so the monitor loop wakes immediately.
     pub worker_notify: tokio::sync::Notify,
 }
@@ -182,14 +178,15 @@ pub(super) struct ServerRegistry {
 pub(super) struct RetiredServer {
     endpoint: Endpoint,
     shutdown_token: CancellationToken,
-    publish_task: Option<AbortOnDropHandle<()>>,
+    publish_token: CancellationToken,
+    publish_task: Option<JoinHandle<()>>,
 }
 
 impl RetiredServer {
     pub(super) async fn shutdown(self) {
         self.shutdown_token.cancel();
+        self.publish_token.cancel();
         if let Some(task) = self.publish_task {
-            task.abort();
             let _ = task.await;
         }
         if let Err(error) = self.endpoint.shutdown().await {
@@ -227,11 +224,13 @@ impl ServerRegistry {
             ServerEntry::Active {
                 endpoint,
                 shutdown_token,
+                publish_token,
                 publish_task,
                 ..
             } => Some(RetiredServer {
                 endpoint,
                 shutdown_token,
+                publish_token,
                 publish_task,
             }),
             ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
@@ -250,8 +249,8 @@ impl RootState {
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
                 users: HashMap::new(),
-                worker_tasks: HashMap::new(),
             }),
+            local_tasks: TaskScope::new(),
             worker_notify: tokio::sync::Notify::new(),
         }
     }

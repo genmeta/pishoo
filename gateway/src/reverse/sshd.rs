@@ -10,7 +10,11 @@ use h3x::{qpack::field::Protocol, stream_id::StreamId};
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    task::JoinSet,
+};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
@@ -23,6 +27,8 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum RunSshSessionError {
+    #[snafu(display("ssh session cancelled"))]
+    Cancelled,
     #[snafu(display("failed to spawn session child process"))]
     SpawnSession {
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -40,6 +46,15 @@ pub enum RunSshSessionError {
             h3x::ipc::transport::MuxStreamError,
         >,
     },
+    #[snafu(display("remoc channel with child terminated"))]
+    RemocConnection {
+        source: remoc::chmux::ChMuxError<
+            h3x::ipc::transport::MuxSinkError,
+            h3x::ipc::transport::MuxStreamError,
+        >,
+    },
+    #[snafu(display("remoc channel with child closed"))]
+    RemocClosed,
     #[snafu(display("failed to receive AuthenticateFn from child"))]
     RecvAuthFn { source: remoc::rch::base::RecvError },
     #[snafu(display("child did not send AuthenticateFn"))]
@@ -137,10 +152,19 @@ pub async fn sshd_handle(
 
     let span = tracing::info_span!("ssh-session", %conversation_id, user = %username);
     let response = accepted.response;
-    tokio::spawn(
+    let session_spawner = state.session_spawner.clone();
+    let task_scope = state.task_scope.clone();
+    let task_token = task_scope.token();
+    task_scope.spawn(Box::pin(
         async move {
             let manager = dssh::webtransport::WebTransportStreamManager::new(accepted.session);
-            let (control_reader, control_writer) = match manager.accept_control().await {
+            let (control_reader, control_writer) = match tokio::select! {
+                () = task_token.cancelled() => {
+                    tracing::debug!("ssh session cancelled before control stream was accepted");
+                    return;
+                }
+                result = manager.accept_control() => result,
+            } {
                 Ok(streams) => streams,
                 Err(error) => {
                     tracing::error!(
@@ -154,31 +178,46 @@ pub async fn sshd_handle(
             if let Err(error) = run_ssh_session(
                 &username,
                 conversation_id,
-                accepted.peer_version,
-                manager,
-                state.session_spawner.as_ref(),
-                control_reader,
-                control_writer,
+                AcceptedSshSession {
+                    peer_version: accepted.peer_version,
+                    manage_stream: manager,
+                    control_reader,
+                    control_writer,
+                },
+                session_spawner.as_ref(),
+                task_token,
             )
             .await
             {
-                tracing::error!(error = %Report::from_error(&error), "ssh session failed");
+                match error {
+                    RunSshSessionError::Cancelled => {
+                        tracing::debug!("ssh session cancelled");
+                    }
+                    error => {
+                        tracing::error!(error = %Report::from_error(&error), "ssh session failed");
+                    }
+                }
             }
         }
         .instrument(span),
-    );
+    ));
 
     response.into_response()
+}
+
+struct AcceptedSshSession<M, R, W> {
+    peer_version: String,
+    manage_stream: M,
+    control_reader: R,
+    control_writer: W,
 }
 
 async fn run_ssh_session<M, R, W>(
     username: &str,
     conversation_id: StreamId,
-    peer_version: String,
-    manage_stream: M,
+    accepted: AcceptedSshSession<M, R, W>,
     spawner: &dyn DynSpawnSession,
-    control_reader: R,
-    control_writer: W,
+    token: CancellationToken,
 ) -> Result<(), RunSshSessionError>
 where
     M: dssh::conversation::ManageSessionStream + 'static,
@@ -190,11 +229,18 @@ where
 {
     use run_ssh_session_error::*;
 
+    let AcceptedSshSession {
+        peer_version,
+        manage_stream,
+        control_reader,
+        control_writer,
+    } = accepted;
+
     // Spawn the session child process via the control plane.
-    let transport = spawner
-        .spawn_session(username)
-        .await
-        .context(SpawnSessionSnafu)?;
+    let transport = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = spawner.spawn_session(username) => result.context(SpawnSessionSnafu)?,
+    };
 
     // Establish remoc channel over MuxChannel with the session child.
     let mux =
@@ -204,35 +250,41 @@ where
     // Capture FD sender before remoc consumes the sink.
     let fd_sender = sink.fd_sender();
 
-    let (conn, _tx, mut rx) =
-        remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
-            remoc::Cfg::default(),
-            sink,
-            stream,
-        )
-        .await
-        .context(RemocConnectSnafu)?;
-    // Wrap in AbortOnDropHandle so an early return / panic tears down the
-    // remoc connection (and its sink/stream, i.e. the socketpair) instead of
-    // leaking a task that keeps the child process alive forever.
-    let conn_handle =
-        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
+    let connect = remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
+        remoc::Cfg::default(),
+        sink,
+        stream,
+    );
+    let (conn, tx, mut rx) = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = connect => result.context(RemocConnectSnafu)?,
+    };
+    let mut conn = Box::pin(conn.in_current_span());
 
-    let auth_fn: AuthenticateFn = rx
-        .recv()
-        .await
-        .context(RecvAuthFnSnafu)?
-        .context(NoAuthFnSnafu)?;
+    let auth_fn: AuthenticateFn = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = rx.recv() => result,
+    }
+    .context(RecvAuthFnSnafu)?
+    .context(NoAuthFnSnafu)?;
 
     let auth_request = AuthRequest {
         username: username.to_owned(),
         credential: AuthCredential::Certificate,
     };
 
-    let start_session_fn = auth_fn
-        .call(auth_request)
-        .await
-        .context(AuthRejectedSnafu)?;
+    let start_session_fn = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = auth_fn.call(auth_request) => result.context(AuthRejectedSnafu)?,
+    };
 
     // Set up control stream via Unix socketpair + FD passing.
     let (ctrl_srv, ctrl_cli) =
@@ -249,21 +301,41 @@ where
     let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
     let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
 
+    let session_shutdown = token.child_token();
+    let mut tasks = JoinSet::new();
+
     // Bridge DSSH control stream ↔ control stream socketpair.
-    tokio::spawn(
-        dssh::conversation::ipc::bridge_reader_to_unix(control_reader, ctrl_write)
-            .in_current_span(),
+    let bridge_shutdown = session_shutdown.clone();
+    tasks.spawn(
+        async move {
+            tokio::select! {
+                () = bridge_shutdown.cancelled() => {}
+                _ = dssh::conversation::ipc::bridge_reader_to_unix(control_reader, ctrl_write) => {}
+            }
+        }
+        .in_current_span(),
     );
-    tokio::spawn(
-        dssh::conversation::ipc::bridge_unix_to_writer(ctrl_read, control_writer).in_current_span(),
+    let bridge_shutdown = session_shutdown.clone();
+    tasks.spawn(
+        async move {
+            tokio::select! {
+                () = bridge_shutdown.cancelled() => {}
+                _ = dssh::conversation::ipc::bridge_unix_to_writer(ctrl_read, control_writer) => {}
+            }
+        }
+        .in_current_span(),
     );
 
     // Set up manage-stream RPC via IPC FD passing.
     let adapter = IpcManageStreamAdapter::new(manage_stream, fd_sender);
     let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
-    tokio::spawn(
+    let manage_shutdown = session_shutdown.clone();
+    tasks.spawn(
         async move {
-            let _ = ms.serve(true).await;
+            tokio::select! {
+                () = manage_shutdown.cancelled() => {}
+                _ = ms.serve(true) => {}
+            }
         }
         .in_current_span(),
     );
@@ -277,19 +349,32 @@ where
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
 
-    let session_result = start_session_fn
-        .call(bootstrap)
-        .await
-        .context(SessionFailedSnafu);
+    let session_result = tokio::select! {
+        () = token.cancelled() => CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            RemocClosedSnafu.fail()
+        }
+        result = start_session_fn.call(bootstrap) => result.context(SessionFailedSnafu),
+    };
 
     // Session is done — tear down the remoc connection so the child sees
     // transport EOF on the socketpair and exits cleanly. Without this the
-    // child's `conn_handle.await` would hang forever and the
+    // child's remoc connection future would hang forever and the
     // `pishoo-ssh-session` process would linger after the SSH session ends.
-    drop(_tx);
+    session_shutdown.cancel();
+    drop(tx);
     drop(rx);
-    conn_handle.abort();
-    let _ = conn_handle.await;
+    drop(conn);
+
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "ssh session helper task failed"
+            );
+        }
+    }
 
     session_result?;
     tracing::info!(%conversation_id, "session ended");
