@@ -7,6 +7,9 @@
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
 
+mod completion;
+mod listener_registry;
+pub(crate) mod owner;
 mod process_ops;
 mod server_ops;
 
