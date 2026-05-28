@@ -111,10 +111,7 @@ where
             }
         };
 
-        let request = prepared
-            .listen_request
-            .clone()
-            .expect("production prepare must populate listen_request");
+        let request = prepared.listen_request.clone();
 
         match self.plane.rebuild_listener(old_listener, request).await {
             Ok(new_listener) => {
