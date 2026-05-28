@@ -315,7 +315,7 @@ jobs:
             brew \
               --target aarch64-apple-darwin \
               --target x86_64-apple-darwin \
-              --features sshd,pam
+              --features sshd
 
       - name: Publish S3 dry run for Homebrew artifacts
         env:

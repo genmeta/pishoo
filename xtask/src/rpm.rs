@@ -209,14 +209,13 @@ async fn ensure_image_inner(
     start_container(docker, container_id).await?;
 
     // Install rpmbuild stack, Rust nightly, Zig, cargo-zigbuild, and pull a
-    // cross-arch PAM/glibc sysroot via `dnf download --forcearch` + rpm2cpio.
-    // The host arch's pam/glibc are already installed by dnf so linking for
-    // the native arch works without sysroot indirection; for foreign arches
-    // the sysroot at /opt/sysroots/<arch>/ carries headers and shared libs.
+    // per-arch PAM/glibc sysroot via `dnf download --forcearch` + rpm2cpio.
+    // The devel packages carry linker symlinks while the runtime packages carry
+    // the symlink targets; both are required for zig/lld to resolve `-lpam`.
     let sysroot_setup = format!(
         r#"mkdir -p /opt/sysroots/{rpm_arch}
 cd /tmp
-for pkg in pam-devel glibc-devel; do
+for pkg in pam-devel pam-libs glibc-devel glibc; do
     dnf download --forcearch={rpm_arch} --downloaddir=/tmp/rpms "$pkg"
 done
 cd /opt/sysroots/{rpm_arch}
