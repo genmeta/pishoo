@@ -164,6 +164,11 @@ pub struct WorkerFailure {
     pub error: WorkerProcessError,
 }
 
+pub(super) struct FailedWorkerRecord {
+    pub(super) target: crate::config::ResolvedWorkerTarget,
+    pub(super) reason: String,
+}
+
 /// Per-worker-process tracking record.
 pub(super) struct WorkerProcessRecord {
     /// The UID this worker runs as.
@@ -198,6 +203,8 @@ pub(super) struct Inner {
     pub(super) users: HashMap<Uid, Pid>,
     /// uid → desired worker target from the current root configuration.
     pub(super) desired_workers: HashMap<Uid, crate::config::ResolvedWorkerTarget>,
+    /// uid → failed worker target waiting for the next reload retry.
+    pub(super) failed_workers: HashMap<Uid, FailedWorkerRecord>,
     /// Pending process-level failures reported by worker-scoped tasks.
     pub(super) worker_failures: VecDeque<WorkerFailure>,
 }
@@ -278,6 +285,7 @@ impl RootState {
                 processes: HashMap::new(),
                 users: HashMap::new(),
                 desired_workers: HashMap::new(),
+                failed_workers: HashMap::new(),
                 worker_failures: VecDeque::new(),
             }),
             local_tasks: TaskScope::new(),

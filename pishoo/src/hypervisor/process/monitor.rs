@@ -2,12 +2,10 @@
 
 use std::sync::Arc;
 
-use snafu::Report;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{batch::worker_binary_path, spawn::spawn_worker};
 use crate::hypervisor::state::{RootState, WorkerFailure};
 
 /// Run the worker monitor loop: wait for worker-failure notification,
@@ -37,28 +35,7 @@ pub async fn run_monitor_loop(state: Arc<RootState>, shutdown: CancellationToken
 }
 
 async fn handle_worker_failure(state: &Arc<RootState>, failure: WorkerFailure) {
-    let restartable = failure.error.is_restartable();
-    let Some(summary) = state.cleanup_worker(failure.pid, failure.error).await else {
-        return;
-    };
-
-    if !restartable || state.pid_for_uid(summary.uid).await.is_some() {
-        return;
-    }
-
-    let Some(target) = state.desired_worker_target(summary.uid).await else {
-        return;
-    };
-
-    let worker_bin = worker_binary_path();
-    if let Err(error) = spawn_worker(&worker_bin, &target, state.clone()).await {
-        tracing::error!(
-            uid = summary.uid.as_raw(),
-            user = %target.name,
-            error = %Report::from_error(&error),
-            "failed to restart worker"
-        );
-    }
+    let _ = state.cleanup_worker(failure.pid, failure.error).await;
 }
 
 /// Spawn the monitor loop as a background task. Returns the join handle.

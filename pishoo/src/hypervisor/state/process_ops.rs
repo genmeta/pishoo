@@ -10,7 +10,8 @@ use snafu::Report;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CleanupSummary, RootState, WorkerFailure, WorkerProcessError, WorkerProcessRecord, owner::Owner,
+    CleanupSummary, FailedWorkerRecord, RootState, WorkerFailure, WorkerProcessError,
+    WorkerProcessRecord, owner::Owner,
 };
 use crate::hypervisor::{task_scope::TaskScope, worker_handle::WorkerHandle};
 
@@ -140,6 +141,7 @@ impl RootState {
     ) -> Option<CleanupSummary> {
         let report = Report::from_error(&error);
         // Step 1: remove process record.
+        let restartable = error.is_restartable();
         let (record_uid, record_username, tasks) = {
             let mut inner = self.inner.lock().await;
             let record = inner.processes.remove(&pid)?;
@@ -147,6 +149,20 @@ impl RootState {
             // Only remove uid→pid mapping if it still points to this pid.
             if inner.users.get(&record.uid).copied() == Some(pid) {
                 inner.users.remove(&record.uid);
+            }
+
+            // If the worker is still desired and failed in a restartable way,
+            // park its target into `failed_workers` so the next reload can
+            // retry it. Non-restartable failures (e.g. reload-driven removal)
+            // are not parked.
+            if restartable && let Some(target) = inner.desired_workers.get(&record.uid).cloned() {
+                inner.failed_workers.insert(
+                    record.uid,
+                    FailedWorkerRecord {
+                        target,
+                        reason: report.to_string(),
+                    },
+                );
             }
 
             (record.uid, record.username, record.tasks)
@@ -383,10 +399,34 @@ impl RootState {
 
     pub async fn set_desired_workers(&self, targets: Vec<crate::config::ResolvedWorkerTarget>) {
         let mut inner = self.inner.lock().await;
-        inner.desired_workers = targets
+        let desired: std::collections::HashMap<_, _> = targets
             .into_iter()
             .map(|target| (target.uid, target))
             .collect();
+        inner
+            .failed_workers
+            .retain(|uid, _| desired.contains_key(uid));
+        inner.desired_workers = desired;
+    }
+
+    /// Drain the set of failed-but-still-desired workers so the reload
+    /// orchestrator can retry spawning them. After draining, the registry
+    /// is empty until the next worker failure parks another entry.
+    pub async fn take_failed_desired_workers(&self) -> Vec<crate::config::ResolvedWorkerTarget> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .failed_workers
+            .drain()
+            .map(|(uid, record)| {
+                tracing::info!(
+                    uid = uid.as_raw(),
+                    user = %record.target.name,
+                    reason = %record.reason,
+                    "retrying failed worker on reload"
+                );
+                record.target
+            })
+            .collect()
     }
 
     pub async fn clear_desired_workers(&self) {

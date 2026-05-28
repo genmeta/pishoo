@@ -106,3 +106,21 @@ fn registered_endpoint_drop_does_not_release_registry() {
         "RegisteredEndpoint::Drop must not mutate the root listener registry"
     );
 }
+
+#[test]
+fn monitor_does_not_restart_failed_workers() {
+    let source = include_str!("../src/hypervisor/process/monitor.rs");
+
+    assert!(!source.contains("spawn_worker(&worker_bin"));
+    assert!(!source.contains("failed to restart worker"));
+}
+
+#[test]
+fn reload_retries_failed_workers() {
+    let source = include_str!("../src/hypervisor/reload/orchestrate.rs");
+
+    assert!(
+        source.contains("failed_desired_workers"),
+        "root reload must include failed desired workers in the spawn set"
+    );
+}

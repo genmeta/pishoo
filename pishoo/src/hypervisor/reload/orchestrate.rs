@@ -148,13 +148,17 @@ pub async fn run_reload(
         }
     }
 
-    // Phase 3: Spawn added + changed workers and unchanged desired workers
-    // that were already cleaned up before this reload finished.
+    let failed_desired_workers = state.take_failed_desired_workers().await;
+
+    // Phase 3: Spawn added + changed workers, unchanged desired workers that
+    // were already cleaned up before this reload finished, and any desired
+    // workers parked in the failed registry from prior restartable failures.
     let workers_to_spawn: Vec<_> = diff
         .added
         .into_iter()
         .chain(diff.changed.into_iter().map(|(_old, new)| new))
         .chain(missing_unchanged_workers)
+        .chain(failed_desired_workers)
         .collect();
     if !workers_to_spawn.is_empty() {
         crate::hypervisor::process::spawn_configured_workers(state, workers_to_spawn).await;
