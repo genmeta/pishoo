@@ -127,29 +127,26 @@ pub enum RemoteRebuildError {
     },
 }
 
-impl RemoteControlPlane {
-    /// Atomically replace `_old` with a listener matching `request`.
-    ///
-    /// The old listener is consumed and dropped without explicit shutdown:
-    /// root destroys its side of the listener as part of the rebuild critical
-    /// section, so calling `shutdown` on the old IpcListener would race
-    /// against a server that has already gone away.
-    pub async fn rebuild_listener(
-        &self,
-        _old: IpcListener<IpcCodec>,
-        request: ListenRequest,
-    ) -> Result<IpcListener<IpcCodec>, RemoteRebuildError> {
-        let ipc_client = self.client.rebuild_listener(request).await?;
-        Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
-    }
-}
-
 impl gateway::control_plane::ProvideListener for RemoteControlPlane {
     type Listener = IpcListener<IpcCodec>;
     type ListenError = RemoteListenError;
+    type RebuildError = RemoteRebuildError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         let ipc_client = self.client.listener(request).await?;
+        Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
+    }
+
+    async fn rebuild_listener(
+        &self,
+        _old: Self::Listener,
+        request: ListenRequest,
+    ) -> Result<Self::Listener, Self::RebuildError> {
+        // _old is consumed without explicit shutdown: root destroys its side
+        // of the listener as part of the rebuild critical section, so calling
+        // shutdown on the old IpcListener would race against a server that
+        // has already gone away.
+        let ipc_client = self.client.rebuild_listener(request).await?;
         Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
     }
 }

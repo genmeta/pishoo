@@ -44,20 +44,6 @@ impl LocalControlPlane {
     pub fn new(state: Arc<super::state::RootState>) -> Self {
         Self { state }
     }
-
-    /// Atomically replace `_old` with a listener matching `request`.
-    ///
-    /// The old [`RegisteredEndpoint`] is consumed and dropped; its `Drop`
-    /// only cancels the accept token, which is what we want because root
-    /// destroyed the underlying resource as part of the rebuild critical
-    /// section. Calling `shutdown` on it would attempt a redundant release.
-    pub async fn rebuild_listener(
-        &self,
-        _old: RegisteredEndpoint,
-        request: ListenRequest,
-    ) -> Result<RegisteredEndpoint, RebuildListenerError> {
-        self.state.rebuild_listener(Owner::Local, request).await
-    }
 }
 
 /// Error from a local session spawn.
@@ -272,9 +258,22 @@ fn send_local_session_signal(child_pid: Pid, signal: Signal) {
 impl gateway::control_plane::ProvideListener for LocalControlPlane {
     type Listener = RegisteredEndpoint;
     type ListenError = AcquireListenerError;
+    type RebuildError = RebuildListenerError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         self.state.acquire_listener(Owner::Local, request).await
+    }
+
+    async fn rebuild_listener(
+        &self,
+        _old: Self::Listener,
+        request: ListenRequest,
+    ) -> Result<Self::Listener, Self::RebuildError> {
+        // _old is consumed and dropped; its Drop only cancels the accept
+        // token, which is what we want because root destroyed the underlying
+        // resource as part of the rebuild critical section. Calling shutdown
+        // on it would attempt a redundant release.
+        self.state.rebuild_listener(Owner::Local, request).await
     }
 }
 
