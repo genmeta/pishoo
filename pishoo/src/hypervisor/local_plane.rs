@@ -1,7 +1,7 @@
 //! LocalControlPlane: in-process ControlPlane for root-local services.
 //!
-//! This allows root-local servers to use the same `run_service()` code
-//! as workers, but without any IPC — operations go directly to RootState.
+//! This allows root-local services to use the same runtime path as workers, but
+//! without any IPC — operations go directly to RootState.
 
 #[cfg(feature = "sshd")]
 use std::os::fd::AsRawFd;

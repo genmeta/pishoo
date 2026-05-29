@@ -121,12 +121,10 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut local_service_handle = pishoo::hypervisor::local_service::spawn_local_service(
-        &state,
-        &current_entry_config,
-        std::collections::HashMap::new(),
-    )
-    .await?;
+    let mut local_service_handle =
+        pishoo::hypervisor::local_service::spawn_local_service(&state, &current_entry_config)
+            .await
+            .whatever_context("failed to spawn local service")?;
     drop(current_entry_config);
 
     state

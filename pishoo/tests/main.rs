@@ -124,3 +124,21 @@ fn reload_retries_failed_workers() {
         "root reload must include failed desired workers in the spawn set"
     );
 }
+
+#[test]
+fn local_service_uses_worker_runtime_path() {
+    let source = include_str!("../src/hypervisor/local_service.rs");
+    assert!(source.contains("RuntimeRegistry::new("));
+    assert!(!source.contains("setup_service("));
+    assert!(!source.contains("run_service("));
+}
+
+#[test]
+fn service_module_no_longer_exposes_batch_lifecycle() {
+    let source = include_str!("../src/service.rs");
+    assert!(!source.contains("pub async fn setup_service"));
+    assert!(!source.contains("pub async fn run_service"));
+    assert!(!source.contains("pub async fn collect_reusable_listeners"));
+    assert!(!source.contains("pub struct PreparedServer"));
+    assert!(!source.contains("pub struct ServiceConfig"));
+}

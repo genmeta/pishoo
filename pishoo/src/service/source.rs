@@ -50,10 +50,6 @@ pub enum PrepareServerUpdateError {
     Worker {
         source: crate::worker::config::BuildConfigError,
     },
-    #[snafu(display("failed to build local server config"))]
-    Local {
-        source: crate::hypervisor::local_service::BuildLocalServiceError,
-    },
     #[cfg(test)]
     #[snafu(display("synthetic prepare failure for {server_name}"))]
     SyntheticFailure { server_name: String },
@@ -114,8 +110,8 @@ impl LocalServerSource {
         let mut seen_server_names = std::collections::HashSet::new();
 
         for server in &canonicalized {
-            let listens = crate::hypervisor::local_service::listen_values(server)
-                .context(build_local_sources_error::ConfigQuerySnafu)?;
+            let listens =
+                listen_values(server).context(build_local_sources_error::ConfigQuerySnafu)?;
             if listens.is_empty() {
                 return build_local_sources_error::MissingListenSnafu.fail();
             }
@@ -253,6 +249,16 @@ impl LocalServerSource {
             },
         })
     }
+}
+
+fn listen_values(
+    server: &ConfigNode,
+) -> Result<Vec<Listens>, gateway::parse::error::ConfigQueryError> {
+    Ok(server
+        .get_all::<ListenConfig>("listen")?
+        .into_iter()
+        .flat_map(|node| node.0.clone())
+        .collect())
 }
 
 impl ServerSource {

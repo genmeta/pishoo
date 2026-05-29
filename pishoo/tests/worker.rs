@@ -82,7 +82,7 @@ fn listener_rebuild_uses_control_plane_rebuild_call() {
 
 #[test]
 fn sshd_service_registers_webtransport_protocol_layer() {
-    let service_source = include_str!("../src/service.rs");
+    let service_source = include_str!("../src/service/snapshot.rs");
 
     assert!(
         service_source.contains("WebTransportProtocolFactory"),

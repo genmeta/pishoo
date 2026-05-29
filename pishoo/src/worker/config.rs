@@ -1,31 +1,15 @@
-//! Worker identity configuration: scan identities and build [`ServiceConfig`].
+//! Worker-side configuration source loading.
 //!
-//! Workers scan the user's `~/.dhttp/` directory for identities, load
-//! per-identity server.conf files, and produce a [`ServiceConfig`] to
-//! feed into [`run_service()`](crate::service::run_service).
+//! Workers scan the configured DHTTP home for identities and return
+//! [`WorkerServerSource`](crate::service::source::WorkerServerSource) values.
+//! Runtime preparation happens in [`crate::service::source`].
 
-use std::{collections::HashMap, sync::Arc};
-
-use dhttp::ddns::PublishOptions;
 use dhttp_home::DhttpHome;
 use futures::StreamExt;
-use gateway::{
-    control_plane::ListenRequest,
-    error::Whatever,
-    parse::{
-        document::ConfigNode,
-        types::{
-            AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames,
-        },
-    },
-};
-use snafu::{ResultExt, Snafu};
+use gateway::error::Whatever;
+use snafu::Snafu;
 
-use crate::{
-    config::load_identity_servers,
-    policy,
-    service::{ServerConfig, ServiceConfig},
-};
+use crate::policy;
 
 /// Errors during worker configuration loading.
 #[derive(Debug, Snafu)]
@@ -47,187 +31,6 @@ impl snafu::FromString for BuildConfigError {
     fn with_source(source: Self::Source, message: String) -> Self {
         Whatever::with_source(source, message).into()
     }
-}
-
-/// Build a [`ServiceConfig`] by scanning all identities under the given
-/// [`DhttpHome`], loading their TLS material and server.conf definitions.
-pub async fn build_service_config(
-    dhttp_home: &DhttpHome,
-) -> Result<ServiceConfig, BuildConfigError> {
-    // Collect identity names from the stream.
-    let mut identity_names = Vec::new();
-    let mut stream = std::pin::pin!(dhttp_home.identity_profile_names());
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(name) => identity_names.push(name),
-            Err(error) => {
-                tracing::warn!(
-                    error = %snafu::Report::from_error(&error),
-                    "failed to read identity entry, skipping"
-                );
-            }
-        }
-    }
-
-    // For each identity, load TLS material + config → build ServerConfigs.
-    let mut servers = Vec::new();
-    // Collect the first explicit access_rules URI found, or use default.
-    let mut access_rules_uri: Option<String> = None;
-
-    for name in &identity_names {
-        let identity_profile = match dhttp_home.resolve_identity_profile(name.borrow()).await {
-            Ok(home) => home,
-            Err(error) => {
-                tracing::warn!(
-                    %name,
-                    error = %snafu::Report::from_error(&error),
-                    "failed to load identity home, skipping"
-                );
-                continue;
-            }
-        };
-
-        // Load TLS material.
-        let ssl = match identity_profile.load_identity().await {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::warn!(
-                    %name,
-                    error = %snafu::Report::from_error(&error),
-                    "failed to load TLS material, skipping"
-                );
-                continue;
-            }
-        };
-
-        // Always register a fallback server node for the identity name.
-
-        // Load per-identity server.conf if present.
-        let conf_path = identity_profile.server_conf_path();
-        let identity_server_nodes = if conf_path.is_file() {
-            match load_identity_servers(&identity_profile).await {
-                Ok(nodes) => nodes,
-                Err(error) => {
-                    tracing::warn!(
-                        %name,
-                        error = %snafu::Report::from_error(&error.error),
-                        diagnostic = %error.diagnostic(),
-                        "failed to load identity config, skipping"
-                    );
-                    continue;
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Pick up access_rules from server nodes if not yet found.
-        if access_rules_uri.is_none() {
-            for server_node in &identity_server_nodes {
-                if let Some(uri) =
-                    server_node
-                        .get::<AccessRulesUri>("access_rules")
-                        .whatever_context::<_, BuildConfigError>("failed to read access_rules")?
-                {
-                    access_rules_uri = Some(uri.0.as_str().to_owned());
-                    break;
-                }
-            }
-        }
-
-        // Default access_rules: IDENTITY_HOME/db/access.db
-        if access_rules_uri.is_none() {
-            let default_db = dhttp_access::db::identity_access_db_path(&identity_profile);
-            if default_db.is_file() {
-                access_rules_uri = Some(format!("sqlite://{}?mode=ro", default_db.display()));
-            }
-        }
-
-        // Extract bind specifications and find the matching server node.
-        let mut binds: HashMap<dhttp::name::DhttpName<'static>, Vec<Listens>> = HashMap::new();
-        let mut server_nodes_by_name: HashMap<dhttp::name::DhttpName<'static>, Arc<ConfigNode>> =
-            HashMap::new();
-        for server_node in &identity_server_nodes {
-            let Some(server_names) =
-                server_node
-                    .get::<ServerNames>("server_name")
-                    .whatever_context::<_, BuildConfigError>("failed to read server_name")?
-            else {
-                continue;
-            };
-            let listens: Vec<Listens> = server_node
-                .get_all::<ListenConfig>("listen")
-                .whatever_context::<_, BuildConfigError>("failed to read listen")?
-                .into_iter()
-                .flat_map(|listen| listen.0.clone())
-                .collect();
-            if !listens.is_empty() {
-                for sn in &server_names.0 {
-                    binds.insert(sn.name.clone(), listens.clone());
-                    server_nodes_by_name.insert(sn.name.clone(), server_node.clone());
-                }
-            }
-        }
-
-        // Build the listen request using the identity's server name as primary bind key,
-        // falling back to default bind if not explicitly configured.
-        let primary_name = name.clone();
-        let bind = binds.remove(&primary_name).unwrap_or_default();
-        if bind.is_empty() {
-            tracing::warn!(%name, "no listen specifications, skipping listener request");
-            continue;
-        }
-
-        // Extract DNS resolver URL from the server node's `dns` directive.
-        let dns_resolver_url = server_nodes_by_name
-            .get(&primary_name)
-            .and_then(|node| node.get::<ResolverConfig>("dns").ok().flatten())
-            .map(|resolver| resolver.0.clone());
-        let publish_options = server_nodes_by_name
-            .get(&primary_name)
-            .map(|node| PublishOptions {
-                server_id: node
-                    .get::<ServerIdConfig>("server_id")
-                    .ok()
-                    .flatten()
-                    .map(|id| id.0),
-            })
-            .unwrap_or_default();
-
-        let listen_request = ListenRequest {
-            identity: ssl,
-            bind,
-            dns_resolver_url,
-            publish_options,
-        };
-
-        // Use the parsed server node (with location blocks etc.) instead of
-        // an empty node — this is what carries proxy/file/location config
-        // through to the service layer.
-        let server_node = server_nodes_by_name
-            .remove(&primary_name)
-            .expect("primary server node should exist when a bind was configured");
-
-        servers.push(ServerConfig {
-            listen_request,
-            server_node,
-            access_log_dir: Some(identity_profile.logs_dir()),
-        });
-    }
-
-    // Load worker access rules policy.
-    let access_rules_bundle = policy::load_policy_bundle(access_rules_uri.as_deref())
-        .await
-        .context(build_config_error::PolicySnafu)?;
-
-    // TODO: parse HTTP/3 settings from config once schema is finalized.
-    let h3_settings = Arc::new(h3x::dhttp::settings::Settings::default());
-
-    Ok(ServiceConfig {
-        servers,
-        h3_settings,
-        access_rules: access_rules_bundle.location_rules,
-    })
 }
 
 pub async fn load_worker_server_sources(

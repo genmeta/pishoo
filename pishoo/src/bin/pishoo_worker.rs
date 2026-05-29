@@ -2,9 +2,9 @@
 //!
 //! Spawned by the root pishoo process with a MuxChannel socketpair on FD 3.
 //! Receives [`WorkerBootstrap`] from the root (containing a
-//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, builds a
-//! [`pishoo::service::ServiceConfig`], and calls [`run_service()`] — the same generic
-//! code path used by root-local services.
+//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, and drives
+//! [`pishoo::service::runtime::WorkerRuntime`] over the root-provided control
+//! plane.
 //!
 //! **FD 3 is reserved for MuxChannel transport** — all logging goes to stderr.
 
