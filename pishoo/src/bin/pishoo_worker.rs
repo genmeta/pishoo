@@ -15,11 +15,9 @@ use gateway::error::Whatever;
 use h3x::ipc::transport::MuxChannel;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
-    service::{self, PreparedServer, setup_service},
-    worker::{config::build_service_config, remote_plane::RemoteControlPlane},
+    worker::remote_plane::RemoteControlPlane,
 };
 use snafu::{OptionExt, Report, ResultExt};
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 #[tokio::main]
@@ -110,10 +108,6 @@ async fn main() -> Result<(), Whatever> {
 
     let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));
 
-    let mut config = build_service_config(&dhttp_home)
-        .await
-        .whatever_context("failed to build service config")?;
-
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create SIGTERM listener")?;
     let mut int_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -123,105 +117,39 @@ async fn main() -> Result<(), Whatever> {
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .whatever_context("failed to create SIGHUP listener")?;
 
-    let mut prepared: Vec<PreparedServer<_>> = Vec::new();
+    let router_state = gateway::reverse::router::RouterState {
+        #[cfg(feature = "sshd")]
+        session_spawner: plane.clone(),
+        #[cfg(feature = "sshd")]
+        task_scope: worker_tasks.clone(),
+    };
+    let mut runtime =
+        pishoo::service::runtime::WorkerRuntime::new(plane.clone(), dhttp_home, router_state);
+    runtime.start().await;
 
     loop {
-        // Collect reusable listeners from the previous cycle.
-        let existing_listeners =
-            service::collect_reusable_listeners(std::mem::take(&mut prepared), &config).await;
-
-        tracing::debug!(
-            servers = config.servers.len(),
-            "service config built, starting service"
-        );
-
-        prepared = match setup_service(&*plane, &config, existing_listeners).await {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::error!(
-                    error = %Report::from_error(&error),
-                    "failed to set up service"
-                );
+        tokio::select! {
+            _ = term_signal.recv() => {
+                tracing::info!(signal = "SIGTERM", "received shutdown signal");
                 break;
             }
-        };
-
-        let shutdown = CancellationToken::new();
-        let mut next_config = None;
-        let mut should_exit = false;
-
-        {
-            let router_state = gateway::reverse::router::RouterState {
-                #[cfg(feature = "sshd")]
-                session_spawner: plane.clone(),
-                #[cfg(feature = "sshd")]
-                task_scope: worker_tasks.clone(),
-            };
-            let service = service::run_service(
-                &mut prepared,
-                &config.h3_settings,
-                &config.access_rules,
-                router_state,
-                shutdown.clone(),
-            );
-            tokio::pin!(service);
-
-            tokio::select! {
-                () = &mut service => {
-                    tracing::info!("service exited");
-                    should_exit = true;
-                }
-                _ = term_signal.recv() => {
-                    tracing::info!(signal = "SIGTERM", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = int_signal.recv() => {
-                    tracing::info!(signal = "SIGINT", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = quit_signal.recv() => {
-                    tracing::info!(signal = "SIGQUIT", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = hup_signal.recv() => {
-                    tracing::info!("received reload signal");
-                    let rebuilt_config = match build_service_config(&dhttp_home).await {
-                        Ok(config) => config,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %Report::from_error(&error),
-                                "failed to rebuild service config, keeping current service"
-                            );
-                            // Cancel and recover listeners before continuing
-                            // so they are not leaked.
-                            shutdown.cancel();
-                            service.await;
-                            continue;
-                        }
-                    };
-
-                    shutdown.cancel();
-                    service.await;
-                    next_config = Some(rebuilt_config);
-                }
+            _ = int_signal.recv() => {
+                tracing::info!(signal = "SIGINT", "received shutdown signal");
+                break;
+            }
+            _ = quit_signal.recv() => {
+                tracing::info!(signal = "SIGQUIT", "received shutdown signal");
+                break;
+            }
+            _ = hup_signal.recv() => {
+                tracing::info!("received reload signal");
+                runtime.reload().await;
+                tracing::info!("reload complete");
             }
         }
-
-        if should_exit {
-            break;
-        }
-
-        if let Some(rebuilt_config) = next_config {
-            config = rebuilt_config;
-            tracing::info!(servers = config.servers.len(), "reload complete");
-        }
     }
+
+    runtime.shutdown().await;
 
     tracing::info!("exiting");
     worker_tasks.cancel_and_wait().await;

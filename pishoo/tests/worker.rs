@@ -130,16 +130,7 @@ fn worker_reload_uses_worker_runtime() {
             && worker_source.contains("runtime.shutdown().await"),
         "worker must delegate reload/shutdown to WorkerRuntime"
     );
-    assert!(
-        !worker_source.contains("setup_service("),
-        "worker must not call the legacy setup_service entry point"
-    );
-    assert!(
-        !worker_source.contains("service::run_service("),
-        "worker must not call the legacy run_service entry point"
-    );
-    assert!(
-        !worker_source.contains("collect_reusable_listeners("),
-        "worker must not call the legacy collect_reusable_listeners entry point"
-    );
+    assert!(!worker_source.contains("setup_service("));
+    assert!(!worker_source.contains("service::run_service("));
+    assert!(!worker_source.contains("collect_reusable_listeners("));
 }

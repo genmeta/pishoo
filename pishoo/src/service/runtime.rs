@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dhttp::name::DhttpName;
-use gateway::control_plane::ProvideListener;
+use gateway::control_plane::{ControlPlane, ProvideListener};
 use snafu::Report;
 
 use super::{
@@ -25,6 +25,18 @@ pub trait ReleaseListener<L> {
         &self,
         listener: L,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
+}
+
+impl<P> ReleaseListener<P::Listener> for P
+where
+    P: ProvideListener + Send + Sync,
+    P::Listener: h3x::quic::Listen + Send,
+    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
+{
+    type Error = <P::Listener as h3x::quic::Listen>::Error;
+    async fn release_listener(&self, listener: P::Listener) -> Result<(), Self::Error> {
+        h3x::quic::Listen::shutdown(&listener).await
+    }
 }
 
 pub struct ServerRuntime<P>
@@ -181,22 +193,23 @@ where
     pub async fn remove(mut self) {
         let recovered = self.stop_accept().await;
         if let Some(listener) = recovered {
-            if let Err(error) = self.plane.release_listener(listener).await {
-                tracing::error!(
-                    server_name = %self.name,
-                    error = %Report::from_error(&error),
-                    "failed to release listener to control plane during removal"
-                );
-            }
+            let _ = self
+                .plane
+                .release_listener(listener)
+                .await
+                .inspect_err(|error| {
+                    tracing::error!(
+                        server_name = %self.name,
+                        error = %Report::from_error(error),
+                        "failed to release listener to control plane during removal"
+                    );
+                });
         }
     }
 
     async fn stop_accept(&mut self) -> Option<P::Listener> {
         let old = std::mem::replace(&mut self.accept, AcceptState::Transitioning);
-        match old.into_listener().await {
-            Ok(listener) => Some(listener),
-            Err(_) => None,
-        }
+        old.into_listener().await.ok()
     }
 
     fn start_accept(&mut self, listener: P::Listener) {
@@ -213,6 +226,141 @@ where
     #[cfg(test)]
     pub(crate) fn accept_state(&self) -> &AcceptState<P::Listener> {
         &self.accept
+    }
+}
+
+pub struct WorkerRuntime<P>
+where
+    P: ControlPlane + ProvideListener + ReleaseListener<P::Listener>,
+{
+    plane: Arc<P>,
+    dhttp_config: dhttp_home::DhttpHome,
+    router_state: gateway::reverse::router::RouterState,
+    servers: HashMap<DhttpName<'static>, ServerRuntime<P>>,
+}
+
+impl<P> WorkerRuntime<P>
+where
+    P: ControlPlane + ProvideListener + ReleaseListener<P::Listener> + Send + Sync + 'static,
+    P::Listener: h3x::quic::Listen + Send + 'static,
+    <P::Listener as h3x::quic::Listen>::Error: Send,
+    <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
+        Send + Sync,
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
+        Send + Sync,
+{
+    pub fn new(
+        plane: Arc<P>,
+        dhttp_config: dhttp_home::DhttpHome,
+        router_state: gateway::reverse::router::RouterState,
+    ) -> Self {
+        Self {
+            plane,
+            dhttp_config,
+            router_state,
+            servers: HashMap::new(),
+        }
+    }
+
+    pub async fn start(&mut self) {
+        self.reload().await;
+    }
+
+    pub async fn reload(&mut self) {
+        let sources =
+            match crate::worker::config::load_worker_server_sources(&self.dhttp_config).await {
+                Ok(sources) => sources,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %snafu::Report::from_error(&error),
+                        "failed to load worker server sources"
+                    );
+                    return;
+                }
+            };
+
+        self.apply_sources(sources).await;
+    }
+
+    async fn apply_sources(&mut self, sources: Vec<WorkerServerSource>) {
+        let ctx = match crate::service::source::WorkerPrepareContext::load(
+            &self.dhttp_config,
+            self.router_state.clone(),
+        )
+        .await
+        {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::warn!(
+                    error = %snafu::Report::from_error(&error),
+                    "failed to load worker prepare context"
+                );
+                return;
+            }
+        };
+
+        let mut new_names = std::collections::HashSet::new();
+
+        for source in sources {
+            let name = source.name.clone();
+            new_names.insert(name.clone());
+
+            match self.servers.entry(name.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().reload(source, &ctx).await;
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let prepared = match source.prepare(&ctx).await {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            tracing::warn!(
+                                server_name = %name,
+                                error = %snafu::Report::from_error(&error),
+                                "failed to prepare new server"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let listener = match self.plane.listener(prepared.listen_request.clone()).await
+                    {
+                        Ok(listener) => listener,
+                        Err(error) => {
+                            tracing::error!(
+                                server_name = %name,
+                                error = %snafu::Report::from_error(&error),
+                                "control plane failed to provide listener"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let server =
+                        ServerRuntime::start(source, prepared, self.plane.clone(), listener);
+                    entry.insert(server);
+                }
+            }
+        }
+
+        let mut to_remove = Vec::new();
+        for name in self.servers.keys() {
+            if !new_names.contains(name) {
+                to_remove.push(name.clone());
+            }
+        }
+        for name in to_remove {
+            if let Some(server) = self.servers.remove(&name) {
+                server.remove().await;
+            }
+        }
+    }
+
+    pub async fn shutdown(mut self) {
+        let servers = std::mem::take(&mut self.servers);
+        for (_, server) in servers {
+            server.remove().await;
+        }
     }
 }
 
@@ -268,13 +416,6 @@ mod tests {
             _request: gateway::control_plane::ListenRequest,
         ) -> Result<Self::Listener, Self::RebuildError> {
             Err(FakeRebuildError)
-        }
-    }
-
-    impl ReleaseListener<FakeListener> for FakePlane {
-        type Error = FakeRebuildError;
-        async fn release_listener(&self, _listener: FakeListener) -> Result<(), Self::Error> {
-            Ok(())
         }
     }
 
@@ -358,13 +499,25 @@ mod tests {
 
     #[tokio::test]
     async fn remove_completes_even_when_release_fails() {
+        struct FailingListener {}
+        impl h3x::quic::Listen for FailingListener {
+            type Connection = h3x::dquic::prelude::Connection;
+            type Error = FakeListenerError;
+            async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
+                std::future::pending().await
+            }
+            async fn shutdown(&self) -> Result<(), Self::Error> {
+                Err(FakeListenerError)
+            }
+        }
+
         struct FailingPlane;
         #[derive(Debug, snafu::Snafu)]
         #[snafu(display("fake release error"))]
         struct FakeReleaseError;
 
         impl gateway::control_plane::ProvideListener for FailingPlane {
-            type Listener = FakeListener;
+            type Listener = FailingListener;
             type ListenError = FakeRebuildError;
             type RebuildError = FakeRebuildError;
 
@@ -383,19 +536,13 @@ mod tests {
             }
         }
 
-        impl ReleaseListener<FakeListener> for FailingPlane {
-            type Error = FakeReleaseError;
-            async fn release_listener(&self, _listener: FakeListener) -> Result<(), Self::Error> {
-                Err(FakeReleaseError)
-            }
-        }
         let runtime = ServerRuntime {
             name: DhttpName::try_from("alpha.example".to_owned()).unwrap(),
             source: ServerSource::fake_success("alpha.example", 1, ListenerSpec::fake("same")),
             listener_spec: ListenerSpec::fake("same"),
             service: Arc::new(ServerService::fake()),
             accept: AcceptState::Stopped {
-                listener: FakeListener,
+                listener: FailingListener {},
             },
             fingerprint: ServerFingerprint {
                 listener_spec: ListenerSpec::fake("same"),

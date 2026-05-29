@@ -229,3 +229,43 @@ pub async fn build_service_config(
         access_rules: access_rules_bundle.location_rules,
     })
 }
+
+pub async fn load_worker_server_sources(
+    dhttp_home: &DhttpHome,
+) -> Result<Vec<crate::service::source::WorkerServerSource>, BuildConfigError> {
+    let mut identity_names = Vec::new();
+    let mut stream = std::pin::pin!(dhttp_home.identity_profile_names());
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(name) => identity_names.push(name),
+            Err(error) => {
+                tracing::warn!(
+                    error = %snafu::Report::from_error(&error),
+                    "failed to read identity entry, skipping"
+                );
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    for name in identity_names {
+        let identity_profile = match dhttp_home.resolve_identity_profile(name.borrow()).await {
+            Ok(home) => home,
+            Err(error) => {
+                tracing::warn!(
+                    %name,
+                    error = %snafu::Report::from_error(&error),
+                    "failed to load identity home, skipping"
+                );
+                continue;
+            }
+        };
+
+        sources.push(crate::service::source::WorkerServerSource {
+            name,
+            identity_profile,
+        });
+    }
+
+    Ok(sources)
+}
