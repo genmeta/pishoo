@@ -108,26 +108,11 @@ impl ServerSource {
             Self::Fake(source) => &source.name,
         }
     }
-
-    /// Legacy dispatcher kept only for the cfg(test) ServerRuntime smoke
-    /// tests. Production paths use [`WorkerServerSource::prepare`] with an
-    /// explicit [`WorkerPrepareContext`]; this dispatcher is removed in
-    /// Task 7 Phase 2 when ServerRuntime's reload signature changes to
-    /// `reload(new_source, &ctx)`.
-    pub async fn prepare(&self) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
-        match self {
-            Self::Worker(_) | Self::Local(_) => {
-                unimplemented!("legacy dispatcher; removed in Task 7 Phase 2")
-            }
-            #[cfg(test)]
-            Self::Fake(source) => source.prepare(),
-        }
-    }
 }
 
 #[cfg(test)]
 impl FakeServerSource {
-    fn prepare(&self) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
+    pub(crate) fn prepare(&self) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
         match &self.outcome {
             FakePrepareOutcome::Success {
                 listener_spec,
