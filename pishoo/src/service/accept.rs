@@ -1,6 +1,5 @@
 use snafu::{ResultExt, Snafu};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 pub(crate) trait AcceptDriver<L>: Send + Sync + 'static {
@@ -14,7 +13,7 @@ pub(crate) trait AcceptDriver<L>: Send + Sync + 'static {
 pub enum AcceptState<L> {
     Running {
         shutdown: CancellationToken,
-        task: JoinHandle<L>,
+        task: AbortOnDropHandle<L>,
     },
     Stopped {
         listener: L,
@@ -44,9 +43,9 @@ where
     {
         let shutdown = CancellationToken::new();
         let task_shutdown = shutdown.clone();
-        let task = tokio::spawn(
+        let task = AbortOnDropHandle::new(tokio::spawn(
             async move { driver.drive(listener, task_shutdown).await }.in_current_span(),
-        );
+        ));
         Self::Running { shutdown, task }
     }
 
@@ -100,6 +99,12 @@ mod tests {
         id: usize,
     }
 
+    struct PendingDriver;
+
+    struct DropSignalListener {
+        dropped: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
     impl AcceptDriver<FakeListener> for FakeDriver {
         async fn drive(
             self: Arc<Self>,
@@ -109,6 +114,25 @@ mod tests {
             self.entered.store(true, Ordering::SeqCst);
             shutdown.cancelled().await;
             listener
+        }
+    }
+
+    impl AcceptDriver<DropSignalListener> for PendingDriver {
+        async fn drive(
+            self: Arc<Self>,
+            listener: DropSignalListener,
+            _shutdown: CancellationToken,
+        ) -> DropSignalListener {
+            std::future::pending::<()>().await;
+            listener
+        }
+    }
+
+    impl Drop for DropSignalListener {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _ = dropped.send(());
+            }
         }
     }
 
@@ -146,6 +170,25 @@ mod tests {
             .expect("into_listener should return listener");
 
         assert_eq!(listener.id, 42);
+    }
+
+    #[tokio::test]
+    async fn dropping_running_state_aborts_accept_task() {
+        let driver = Arc::new(PendingDriver);
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let state = AcceptState::start(
+            DropSignalListener {
+                dropped: Some(dropped_tx),
+            },
+            driver,
+        );
+
+        drop(state);
+
+        timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("listener should be dropped after abort")
+            .expect("drop signal sender should fire");
     }
 
     #[tokio::test]

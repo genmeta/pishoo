@@ -6,14 +6,17 @@ use snafu::{Report, ResultExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, debug, error, info};
 
-use super::BoxResponse;
+use super::{BoxResponse, task_scope::ForwardTaskSpawner};
 use crate::{
     error::{BoxError, Whatever},
     forward::{ForwardRequestError, build_empty_response, build_error_response, tunnel_upgrade},
 };
 
 /// 普通代理 HTTP 请求
-pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
+pub async fn proxy(
+    mut req: Request<hyper::body::Incoming>,
+    task_spawner: ForwardTaskSpawner,
+) -> Result<BoxResponse, hyper::Error> {
     let original_uri = req.uri().clone();
 
     let host = match original_uri.host() {
@@ -45,7 +48,7 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
         .await?;
 
     // Terminates when the HTTP/1.1 connection closes or encounters an error.
-    tokio::spawn(
+    task_spawner.spawn(
         async move {
             // 启用连接升级支持,用于处理 WebSocket
             if let Err(error) = conn.with_upgrades().await {
@@ -78,12 +81,15 @@ pub async fn proxy(mut req: Request<hyper::body::Incoming>) -> Result<BoxRespons
     let response_upgrade = hyper::upgrade::on(&mut resp);
 
     // Terminates when either end of the tunnel closes the connection.
-    tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
+    task_spawner.spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
 
     Ok(resp.map(|b| UnsyncBoxBody::new(b.map_err(BoxError::from))))
 }
 
-pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse, hyper::Error> {
+pub async fn connect(
+    req: Request<hyper::body::Incoming>,
+    task_spawner: ForwardTaskSpawner,
+) -> Result<BoxResponse, hyper::Error> {
     let Some(addr) = req.uri().authority().map(|auth| auth.to_string()) else {
         let error = ForwardRequestError::MissingConnectAuthority;
         error!(error = %Report::from_error(&error), "missing host in connect uri");
@@ -92,7 +98,7 @@ pub async fn connect(req: Request<hyper::body::Incoming>) -> Result<BoxResponse,
         return Ok(resp);
     };
     // 升级连接并处理后续请求
-    tokio::task::spawn(
+    task_spawner.spawn(
         async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {

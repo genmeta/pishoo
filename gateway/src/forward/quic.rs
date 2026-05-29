@@ -8,7 +8,7 @@ use hyper::{server::conn::http1, service::service_fn};
 use snafu::{Report, ResultExt, Whatever};
 use tracing::{Instrument, error, info};
 
-use super::BoxResponse;
+use super::{BoxResponse, task_scope::ForwardTaskSpawner};
 use crate::{
     error::BoxError,
     forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host},
@@ -19,6 +19,7 @@ use crate::{
 pub async fn proxy(
     mut req: Request<hyper::body::Incoming>,
     client: Arc<Endpoint>,
+    task_spawner: ForwardTaskSpawner,
 ) -> Result<BoxResponse, hyper::Error> {
     // 验证主机合法性
     let host = match validate_host(&mut req) {
@@ -44,7 +45,7 @@ pub async fn proxy(
         Ok(mut response) => {
             let response_upgrade = hyper::upgrade::on(&mut response);
             // Terminates when either end of the tunnel closes the connection.
-            tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
+            task_spawner.spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
             info!(?response, "request proxied successfully");
             Ok(response)
         }
@@ -59,16 +60,20 @@ pub async fn proxy(
 pub async fn connect_tunnel(
     req: Request<hyper::body::Incoming>,
     client: Arc<Endpoint>,
+    task_spawner: ForwardTaskSpawner,
 ) -> Result<BoxResponse, hyper::Error> {
-    tokio::spawn(
+    let tunnel_spawner = task_spawner.clone();
+    task_spawner.spawn(
         async move {
             // 升级连接并处理后续请求
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     info!("establishing tunnel to request uri");
+                    let service_spawner = tunnel_spawner.clone();
                     let service = service_fn(move |req| {
                         let client = client.clone();
-                        async move { proxy(req, client).await }
+                        let request_spawner = service_spawner.clone();
+                        async move { proxy(req, client, request_spawner).await }
                     });
                     if let Err(error) = http1::Builder::new()
                         .preserve_header_case(true)

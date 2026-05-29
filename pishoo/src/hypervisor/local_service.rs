@@ -46,10 +46,11 @@ impl LocalServiceHandle {
 
 impl Drop for LocalServiceHandle {
     fn drop(&mut self) {
-        // RuntimeRegistry's ServerRuntime members each own AbortOnDropHandle
-        // for their accept loops; dropping the registry aborts them. Listener
-        // shutdown still requires the async shutdown() above for explicit
-        // cleanup, but Drop is safe (no panic, no leak of accept tasks).
+        // Explicit shutdown() remains the authoritative cleanup path because
+        // listener shutdown is async. If the handle is dropped unexpectedly,
+        // AcceptState's AbortOnDropHandle prevents accept tasks from detaching;
+        // RootState::cleanup_local_resources() remains responsible for retiring
+        // any root-local listener resources.
     }
 }
 

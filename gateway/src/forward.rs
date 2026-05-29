@@ -30,6 +30,9 @@ use crate::{
 
 mod normal;
 mod quic;
+mod task_scope;
+
+use task_scope::ForwardTaskScope;
 
 #[allow(dead_code)]
 pub static ALPN: &[u8] = b"h3";
@@ -101,6 +104,8 @@ pub async fn serve(
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
     let semaphore = Arc::new(Semaphore::new(1024));
+    let task_scope = ForwardTaskScope::new();
+    let task_spawner = task_scope.spawner();
 
     let task = async move {
         loop {
@@ -111,15 +116,18 @@ pub async fn serve(
                     };
                     let acl = acl.clone();
                     let client = client.clone();
+                    let task_spawner = task_spawner.clone();
                     async {
                         let _permit = permit;
                         configure_tcp_keepalive(&stream);
                         let io = TokioIo::new(stream);
 
+                        let service_task_spawner = task_spawner.clone();
                         // 为每个连接创建服务处理器
                         let service = service_fn(move |mut req| {
                             let acl = acl.clone();
                             let client = client.clone();
+                            let request_task_spawner = service_task_spawner.clone();
                             let span =
                                 info_span!("forward_proxy", uri=%req.uri(), method=%req.method());
                             async move {
@@ -142,28 +150,32 @@ pub async fn serve(
                                 match acl.check(&host) {
                                     true if is_connect => {
                                         debug!(%host, "quic proxying connect request");
-                                        forward::quic::connect_tunnel(req, client).await
+                                        forward::quic::connect_tunnel(
+                                            req,
+                                            client,
+                                            request_task_spawner,
+                                        )
+                                        .await
                                     }
                                     true => {
                                         debug!(%host, "quic proxying request");
-                                        forward::quic::proxy(req, client).await
+                                        forward::quic::proxy(req, client, request_task_spawner)
+                                            .await
                                     }
                                     false if is_connect => {
                                         debug!(%host, "normal proxying connect request");
-                                        forward::normal::connect(req).await
+                                        forward::normal::connect(req, request_task_spawner).await
                                     }
                                     false => {
                                         debug!(%host, "normal proxying request");
-                                        forward::normal::proxy(req).await
+                                        forward::normal::proxy(req, request_task_spawner).await
                                     }
                                 }
                             }
                             .instrument(span)
                         });
 
-                        // Inherent termination: TCP keepalive detects dead peers (~90s),
-                        // header_read_timeout closes idle keep-alive connections (120s).
-                        tokio::task::spawn(
+                        task_spawner.spawn(
                             async move {
                                 let result = http1::Builder::new()
                                     .timer(hyper_util::rt::tokio::TokioTimer::new())
@@ -200,6 +212,7 @@ pub async fn serve(
                 }
             }
         }
+        task_scope.shutdown().await;
         Ok(())
     };
 
