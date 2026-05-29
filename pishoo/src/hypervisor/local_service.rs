@@ -318,7 +318,7 @@ pub async fn replace_local_service(
     Ok(())
 }
 
-fn listen_values(server: &ConfigNode) -> Result<Vec<Listens>, ConfigQueryError> {
+pub(crate) fn listen_values(server: &ConfigNode) -> Result<Vec<Listens>, ConfigQueryError> {
     Ok(server
         .get_all::<ListenConfig>("listen")?
         .into_iter()
@@ -326,7 +326,9 @@ fn listen_values(server: &ConfigNode) -> Result<Vec<Listens>, ConfigQueryError> 
         .collect())
 }
 
-fn listen_values_for_local_service(
+// TODO(phase 3): move helper into source.rs and delete local_service.rs
+// TODO(phase 3): move helper into source.rs and delete local_service.rs
+pub(crate) fn listen_values_for_local_service(
     server: &ConfigNode,
 ) -> Result<Vec<Listens>, BuildLocalServiceError> {
     let listens = listen_values(server).context(build_local_service_error::ConfigQuerySnafu)?;

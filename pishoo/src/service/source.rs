@@ -10,7 +10,7 @@ use gateway::{
     },
     reverse::router::RouterState,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use super::snapshot::ServerService;
 use crate::config::load_identity_servers;
@@ -54,8 +54,6 @@ pub enum PrepareServerUpdateError {
     Local {
         source: crate::hypervisor::local_service::BuildLocalServiceError,
     },
-    #[snafu(display("local source preparation is not yet implemented in Phase 1"))]
-    LocalNotYetImplemented,
     #[cfg(test)]
     #[snafu(display("synthetic prepare failure for {server_name}"))]
     SyntheticFailure { server_name: String },
@@ -80,8 +78,12 @@ pub struct WorkerServerSource {
 }
 
 pub struct LocalServerSource {
-    pub server_node: Arc<ConfigNode>,
     pub name: DhttpName<'static>,
+    pub identity: dhttp::identity::Identity,
+    pub bind: Vec<Listens>,
+    pub dns_resolver_url: Option<http::Uri>,
+    pub publish_options: dhttp::ddns::PublishOptions,
+    pub server_node: Arc<ConfigNode>,
 }
 
 #[cfg(test)]
@@ -97,6 +99,160 @@ pub enum FakePrepareOutcome {
         service_generation: u64,
     },
     Failure,
+}
+
+impl LocalServerSource {
+    pub async fn load_all(
+        local_servers: &[Arc<ConfigNode>],
+        router_state: RouterState,
+    ) -> Result<(Vec<ServerSource>, PrepareContext), BuildLocalSourcesError> {
+        let canonicalized = crate::naming::canonicalize_server_nodes(local_servers)
+            .context(build_local_sources_error::CanonicalizeSnafu)?;
+
+        let mut access_rules_uri: Option<String> = None;
+        let mut sources = Vec::new();
+        let mut seen_server_names = std::collections::HashSet::new();
+
+        for server in &canonicalized {
+            let listens = crate::hypervisor::local_service::listen_values(server)
+                .context(build_local_sources_error::ConfigQuerySnafu)?;
+            if listens.is_empty() {
+                return build_local_sources_error::MissingListenSnafu.fail();
+            }
+
+            let server_names = server
+                .get::<gateway::parse::types::ServerNames>("server_name")
+                .context(build_local_sources_error::ConfigQuerySnafu)?
+                .context(build_local_sources_error::MissingDirectiveSnafu {
+                    directive: "server_name",
+                })?;
+
+            let cert_path = server
+                .get::<gateway::parse::types::PathConfig>("ssl_certificate")
+                .context(build_local_sources_error::ConfigQuerySnafu)?
+                .context(build_local_sources_error::MissingDirectiveSnafu {
+                    directive: "ssl_certificate",
+                })?
+                .0
+                .clone();
+
+            let key_path = server
+                .get::<gateway::parse::types::PathConfig>("ssl_certificate_key")
+                .context(build_local_sources_error::ConfigQuerySnafu)?
+                .context(build_local_sources_error::MissingDirectiveSnafu {
+                    directive: "ssl_certificate_key",
+                })?
+                .0
+                .clone();
+
+            if access_rules_uri.is_none()
+                && let Some(uri) = server
+                    .get::<gateway::parse::types::AccessRulesUri>("access_rules")
+                    .context(build_local_sources_error::ConfigQuerySnafu)?
+            {
+                access_rules_uri = Some(uri.0.as_str().to_owned());
+            }
+
+            let cert_pem = tokio::fs::read(&cert_path)
+                .await
+                .context(build_local_sources_error::ReadCertSnafu { path: &cert_path })?;
+            let key_pem = tokio::fs::read(&key_path)
+                .await
+                .context(build_local_sources_error::ReadKeySnafu { path: &key_path })?;
+            let (certs, key) = crate::tls::validate_tls_material(&cert_pem, &key_pem)
+                .context(build_local_sources_error::InvalidTlsSnafu)?;
+
+            let dns_resolver_url = server
+                .get::<gateway::parse::types::ResolverConfig>("dns")
+                .context(build_local_sources_error::ConfigQuerySnafu)?
+                .map(|resolver| resolver.0.clone());
+
+            let publish_options = dhttp::ddns::PublishOptions {
+                server_id: server
+                    .get::<gateway::parse::types::ServerIdConfig>("server_id")
+                    .context(build_local_sources_error::ConfigQuerySnafu)?
+                    .map(|id| id.0),
+            };
+
+            for configured_name in &server_names.0 {
+                let server_name = configured_name.name.clone();
+                if !seen_server_names.insert(server_name.clone()) {
+                    return build_local_sources_error::DuplicateServerNameSnafu {
+                        name: server_name.to_string(),
+                    }
+                    .fail();
+                }
+
+                sources.push(ServerSource::Local(LocalServerSource {
+                    name: server_name.clone(),
+                    identity: dhttp::identity::Identity::new(
+                        server_name.into(),
+                        certs.clone(),
+                        key.clone_key(),
+                    ),
+                    bind: listens.clone(),
+                    dns_resolver_url: dns_resolver_url.clone(),
+                    publish_options,
+                    server_node: server.clone(),
+                }));
+            }
+        }
+
+        let ctx = PrepareContext::load_local(access_rules_uri.as_deref(), router_state)
+            .await
+            .context(build_local_sources_error::PrepareContextSnafu)?;
+
+        Ok((sources, ctx))
+    }
+
+    pub async fn prepare(
+        &self,
+        ctx: &PrepareContext,
+    ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
+        let listen_request = ListenRequest {
+            identity: self.identity.clone(),
+            bind: self.bind.clone(),
+            dns_resolver_url: self.dns_resolver_url.clone(),
+            publish_options: self.publish_options,
+        };
+
+        let request_fingerprint = ListenRequestFingerprint {
+            server_name: self.name.clone(),
+            bind_debug: format!("{:?}", self.bind),
+            identity_debug: compute_identity_fingerprint(&self.identity),
+            dns_resolver_debug: self.dns_resolver_url.as_ref().map(|u| u.to_string()),
+            publish_server_id: self.publish_options.server_id,
+        };
+
+        let listener_spec = ListenerSpec {
+            request_fingerprint,
+        };
+
+        let service_generation = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let service = Arc::new(ServerService {
+            h3_settings: ctx.h3_settings.clone(),
+            access_rules: ctx.access_rules.clone(),
+            router_state: ctx.router_state.clone(),
+            server_node: self.server_node.clone(),
+            access_log_dir: None,
+            server_name: self.name.clone(),
+        });
+
+        Ok(PreparedServerUpdate {
+            name: self.name.clone(),
+            listen_request,
+            listener_spec: listener_spec.clone(),
+            service,
+            fingerprint: ServerFingerprint {
+                listener_spec,
+                service_generation,
+            },
+        })
+    }
 }
 
 impl ServerSource {
@@ -115,7 +271,7 @@ impl ServerSource {
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
         match self {
             Self::Worker(source) => source.prepare(ctx).await,
-            Self::Local(_) => Err(PrepareServerUpdateError::LocalNotYetImplemented),
+            Self::Local(source) => source.prepare(ctx).await,
             #[cfg(test)]
             Self::Fake(source) => source.prepare(),
         }
@@ -222,12 +378,74 @@ fn fake_name(name: &str) -> DhttpName<'static> {
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
+pub enum BuildLocalSourcesError {
+    #[snafu(display("failed to canonicalize local server nodes"))]
+    Canonicalize { source: gateway::error::Whatever },
+
+    #[snafu(display("local server missing `{directive}`"))]
+    MissingDirective { directive: &'static str },
+
+    #[snafu(display("failed to read typed configuration value"))]
+    ConfigQuery {
+        source: gateway::parse::error::ConfigQueryError,
+    },
+
+    #[snafu(display("failed to read certificate at `{}`", path.display()))]
+    ReadCert {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("failed to read private key at `{}`", path.display()))]
+    ReadKey {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("invalid TLS material"))]
+    InvalidTls {
+        source: crate::tls::TlsMaterialError,
+    },
+
+    #[snafu(display("invalid server name `{name}`"))]
+    InvalidServerName {
+        name: String,
+        source: dhttp::name::InvalidDhttpName,
+    },
+
+    #[snafu(display("duplicate local server_name `{name}` in entry config"))]
+    DuplicateServerName { name: String },
+
+    #[snafu(display("local server missing `listen`"))]
+    MissingListen,
+
+    #[snafu(display("failed to prepare context"))]
+    PrepareContext { source: BuildPrepareContextError },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
 pub enum BuildPrepareContextError {
     #[snafu(display("failed to load default policy bundle"))]
     Policy { source: crate::policy::PolicyError },
 }
 
 impl PrepareContext {
+    pub async fn load_local(
+        access_rules_uri: Option<&str>,
+        router_state: RouterState,
+    ) -> Result<Self, BuildPrepareContextError> {
+        let policy_bundle = crate::policy::load_policy_bundle(access_rules_uri)
+            .await
+            .context(build_prepare_context_error::PolicySnafu)?;
+
+        Ok(Self {
+            h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
+            access_rules: policy_bundle.location_rules,
+            router_state,
+        })
+    }
+
     pub async fn load_worker(
         _home: &DhttpHome,
         router_state: RouterState,
@@ -410,5 +628,122 @@ mod tests {
 
         assert_ne!(fp1, fp2, "Fingerprints must differ when cert/key differ");
         assert!(fp1.starts_with("test.genmeta.net@"));
+    }
+
+    #[cfg(feature = "sshd")]
+    struct DummySpawner;
+    #[cfg(feature = "sshd")]
+    impl gateway::control_plane::DynSpawnSession for DummySpawner {
+        fn spawn_session<'a>(
+            &'a self,
+            _username: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<
+                gateway::control_plane::SessionTransport,
+                Box<dyn std::error::Error + Send + Sync>,
+            >,
+        > {
+            Box::pin(async { Err("dummy".into()) })
+        }
+    }
+    #[cfg(feature = "sshd")]
+    struct DummyScope;
+    #[cfg(feature = "sshd")]
+    impl gateway::reverse::router::DynTaskScope for DummyScope {
+        fn token(&self) -> tokio_util::sync::CancellationToken {
+            tokio_util::sync::CancellationToken::new()
+        }
+        fn spawn(&self, _task: futures::future::BoxFuture<'static, ()>) {}
+    }
+
+    fn dummy_router_state() -> gateway::reverse::router::RouterState {
+        gateway::reverse::router::RouterState {
+            #[cfg(feature = "sshd")]
+            session_spawner: std::sync::Arc::new(DummySpawner),
+            #[cfg(feature = "sshd")]
+            task_scope: std::sync::Arc::new(DummyScope),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_server_source_prepare_produces_listener_spec_with_cert_fingerprint() {
+        let name = DhttpName::try_from("test.genmeta.net".to_owned()).unwrap();
+        let req1 = FakeServerSource::fake_listen_request(&name);
+
+        let config = gateway::parse::parse_config_str_for_test("server { listen 127.0.0.1:443; server_name localhost; ssl_certificate a; ssl_certificate_key b; }").unwrap();
+        let server_node = config.root.children("server").unwrap()[0].clone();
+
+        let source = LocalServerSource {
+            name: name.clone(),
+            identity: req1.identity.clone(),
+            bind: req1.bind.clone(),
+            dns_resolver_url: req1.dns_resolver_url.clone(),
+            publish_options: req1.publish_options,
+            server_node,
+        };
+
+        let ctx = PrepareContext {
+            h3_settings: std::sync::Arc::new(h3x::dhttp::settings::Settings::default()),
+            access_rules: std::sync::Arc::new(
+                dhttp_access::db::base::matcher::LocationRulesMatcher::default(),
+            ),
+            router_state: dummy_router_state(),
+        };
+
+        let prepared = source.prepare(&ctx).await.expect("prepare success");
+
+        let identity_debug = &prepared.listener_spec.request_fingerprint.identity_debug;
+        assert!(
+            identity_debug.starts_with("test.genmeta.net@"),
+            "fingerprint should contain name and separator: {}",
+            identity_debug
+        );
+        assert!(identity_debug.len() > 20, "fingerprint should contain hash");
+    }
+
+    #[tokio::test]
+    async fn local_server_source_prepare_two_rotated_certs_produce_distinct_fingerprints() {
+        let name = DhttpName::try_from("rotated.genmeta.net".to_owned()).unwrap();
+        let req1 = FakeServerSource::fake_listen_request(&name);
+        let req2 = FakeServerSource::fake_listen_request(&name);
+
+        let config = gateway::parse::parse_config_str_for_test("server { listen 127.0.0.1:443; server_name localhost; ssl_certificate a; ssl_certificate_key b; }").unwrap();
+        let server_node = config.root.children("server").unwrap()[0].clone();
+
+        let source1 = LocalServerSource {
+            name: name.clone(),
+            identity: req1.identity.clone(),
+            bind: req1.bind.clone(),
+            dns_resolver_url: req1.dns_resolver_url.clone(),
+            publish_options: req1.publish_options,
+            server_node: server_node.clone(),
+        };
+
+        let source2 = LocalServerSource {
+            name: name.clone(),
+            identity: req2.identity.clone(),
+            bind: req2.bind.clone(),
+            dns_resolver_url: req2.dns_resolver_url.clone(),
+            publish_options: req2.publish_options,
+            server_node: server_node.clone(),
+        };
+
+        let ctx = PrepareContext {
+            h3_settings: std::sync::Arc::new(h3x::dhttp::settings::Settings::default()),
+            access_rules: std::sync::Arc::new(
+                dhttp_access::db::base::matcher::LocationRulesMatcher::default(),
+            ),
+            router_state: dummy_router_state(),
+        };
+
+        let prepared1 = source1.prepare(&ctx).await.expect("prepare success");
+        let prepared2 = source2.prepare(&ctx).await.expect("prepare success");
+
+        assert_ne!(
+            prepared1.listener_spec.request_fingerprint.identity_debug,
+            prepared2.listener_spec.request_fingerprint.identity_debug,
+            "Rotated certs should produce distinct fingerprints"
+        );
     }
 }
