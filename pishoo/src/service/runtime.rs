@@ -13,33 +13,9 @@ use super::{
     },
 };
 
-/// Task 7 Phase 2 transitional trait: ProvideListener is supposed to have
-/// `release_listener` but it's missing from `gateway/src/control_plane.rs`
-/// in this branch. We define it here to satisfy the requirements without
-/// modifying outside files.
-pub trait ReleaseListener<L> {
-    type Error: std::error::Error + Send + Sync + 'static;
-    fn release_listener(
-        &self,
-        listener: L,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
-}
-
-impl<P> ReleaseListener<P::Listener> for P
-where
-    P: ProvideListener + Send + Sync,
-    P::Listener: h3x::quic::Listen + Send,
-    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
-{
-    type Error = <P::Listener as h3x::quic::Listen>::Error;
-    async fn release_listener(&self, listener: P::Listener) -> Result<(), Self::Error> {
-        h3x::quic::Listen::shutdown(&listener).await
-    }
-}
-
 pub struct ServerRuntime<P>
 where
-    P: ProvideListener + ReleaseListener<P::Listener>,
+    P: ProvideListener,
 {
     name: DhttpName<'static>,
     source: ServerSource,
@@ -60,9 +36,9 @@ pub enum ReloadServerOutcome {
 
 impl<P> ServerRuntime<P>
 where
-    P: ProvideListener + ReleaseListener<P::Listener> + Send + Sync + 'static,
+    P: ProvideListener + Send + Sync + 'static,
     P::Listener: h3x::quic::Listen + Send + 'static,
-    <P::Listener as h3x::quic::Listen>::Error: Send,
+    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
     <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
         Send + Sync,
@@ -191,15 +167,13 @@ where
     pub async fn remove(mut self) {
         let recovered = self.stop_accept().await;
         if let Some(listener) = recovered {
-            let _ = self
-                .plane
-                .release_listener(listener)
+            let _ = h3x::quic::Listen::shutdown(&listener)
                 .await
                 .inspect_err(|error| {
                     tracing::error!(
                         server_name = %self.name,
                         error = %Report::from_error(error),
-                        "failed to release listener to control plane during removal"
+                        "failed to shut down listener during removal"
                     );
                 });
         }
@@ -229,7 +203,7 @@ where
 
 pub struct WorkerRuntime<P>
 where
-    P: ControlPlane + ProvideListener + ReleaseListener<P::Listener>,
+    P: ControlPlane + ProvideListener,
 {
     plane: Arc<P>,
     dhttp_config: dhttp_home::DhttpHome,
@@ -239,9 +213,9 @@ where
 
 impl<P> WorkerRuntime<P>
 where
-    P: ControlPlane + ProvideListener + ReleaseListener<P::Listener> + Send + Sync + 'static,
+    P: ControlPlane + ProvideListener + Send + Sync + 'static,
     P::Listener: h3x::quic::Listen + Send + 'static,
-    <P::Listener as h3x::quic::Listen>::Error: Send,
+    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
     <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
         Send + Sync,
@@ -510,9 +484,6 @@ mod tests {
         }
 
         struct FailingPlane;
-        #[derive(Debug, snafu::Snafu)]
-        #[snafu(display("fake release error"))]
-        struct FakeReleaseError;
 
         impl gateway::control_plane::ProvideListener for FailingPlane {
             type Listener = FailingListener;
