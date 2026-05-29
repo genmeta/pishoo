@@ -7,10 +7,7 @@ use snafu::Report;
 use super::{
     accept::AcceptState,
     snapshot::ServerService,
-    source::{
-        ListenerSpec, PreparedServerUpdate, ServerFingerprint, ServerSource, WorkerPrepareContext,
-        WorkerServerSource,
-    },
+    source::{ListenerSpec, PrepareContext, PreparedServerUpdate, ServerFingerprint, ServerSource},
 };
 
 pub struct ServerRuntime<P>
@@ -46,14 +43,14 @@ where
         Send + Sync,
 {
     pub fn start(
-        source: WorkerServerSource,
+        source: ServerSource,
         prepared: PreparedServerUpdate,
         plane: Arc<P>,
         listener: P::Listener,
     ) -> Self {
         Self {
             name: prepared.name,
-            source: ServerSource::Worker(source),
+            source,
             listener_spec: prepared.listener_spec,
             service: prepared.service.clone(),
             accept: AcceptState::start(listener, prepared.service),
@@ -72,8 +69,8 @@ where
 
     pub async fn reload(
         &mut self,
-        new_source: WorkerServerSource,
-        ctx: &WorkerPrepareContext,
+        new_source: ServerSource,
+        ctx: &PrepareContext,
     ) -> ReloadServerOutcome {
         let prepared = match new_source.prepare(ctx).await {
             Ok(prepared) => prepared,
@@ -87,8 +84,7 @@ where
             }
         };
 
-        self.apply_reload(ServerSource::Worker(new_source), prepared)
-            .await
+        self.apply_reload(new_source, prepared).await
     }
 
     #[cfg(test)]
@@ -201,19 +197,17 @@ where
     }
 }
 
-pub struct WorkerRuntime<P>
+pub struct RuntimeRegistry<P>
 where
-    P: ControlPlane + ProvideListener,
+    P: ProvideListener,
 {
     plane: Arc<P>,
-    dhttp_config: dhttp_home::DhttpHome,
-    router_state: gateway::reverse::router::RouterState,
     servers: HashMap<DhttpName<'static>, ServerRuntime<P>>,
 }
 
-impl<P> WorkerRuntime<P>
+impl<P> RuntimeRegistry<P>
 where
-    P: ControlPlane + ProvideListener + Send + Sync + 'static,
+    P: ProvideListener + Send + Sync + 'static,
     P::Listener: h3x::quic::Listen + Send + 'static,
     <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
@@ -222,68 +216,27 @@ where
     <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
         Send + Sync,
 {
-    pub fn new(
-        plane: Arc<P>,
-        dhttp_config: dhttp_home::DhttpHome,
-        router_state: gateway::reverse::router::RouterState,
-    ) -> Self {
+    pub fn new(plane: Arc<P>) -> Self {
         Self {
             plane,
-            dhttp_config,
-            router_state,
             servers: HashMap::new(),
         }
     }
 
-    pub async fn start(&mut self) {
-        self.reload().await;
-    }
-
-    pub async fn reload(&mut self) {
-        let sources =
-            match crate::worker::config::load_worker_server_sources(&self.dhttp_config).await {
-                Ok(sources) => sources,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %snafu::Report::from_error(&error),
-                        "failed to load worker server sources"
-                    );
-                    return;
-                }
-            };
-
-        self.apply_sources(sources).await;
-    }
-
-    async fn apply_sources(&mut self, sources: Vec<WorkerServerSource>) {
-        let ctx = match crate::service::source::WorkerPrepareContext::load(
-            &self.dhttp_config,
-            self.router_state.clone(),
-        )
-        .await
-        {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::warn!(
-                    error = %snafu::Report::from_error(&error),
-                    "failed to load worker prepare context"
-                );
-                return;
-            }
-        };
-
+    pub async fn apply_sources(&mut self, sources: Vec<ServerSource>, ctx: &PrepareContext) {
         let mut new_names = std::collections::HashSet::new();
 
         for source in sources {
-            let name = source.name.clone();
+            let name = source.name().clone();
             new_names.insert(name.clone());
 
-            match self.servers.entry(name.clone()) {
+            let is_fatal = match self.servers.entry(name.clone()) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().reload(source, &ctx).await;
+                    let outcome = entry.get_mut().reload(source, ctx).await;
+                    matches!(outcome, ReloadServerOutcome::StoppedAfterFatalRebuild)
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    let prepared = match source.prepare(&ctx).await {
+                    let prepared = match source.prepare(ctx).await {
                         Ok(prepared) => prepared,
                         Err(error) => {
                             tracing::warn!(
@@ -311,6 +264,14 @@ where
                     let server =
                         ServerRuntime::start(source, prepared, self.plane.clone(), listener);
                     entry.insert(server);
+                    false
+                }
+            };
+
+            if is_fatal {
+                let removed = self.servers.remove(&name);
+                if let Some(server) = removed {
+                    server.remove().await;
                 }
             }
         }
@@ -333,6 +294,81 @@ where
         for (_, server) in servers {
             server.remove().await;
         }
+    }
+}
+
+pub struct WorkerRuntime<P>
+where
+    P: ControlPlane + ProvideListener,
+{
+    registry: RuntimeRegistry<P>,
+    dhttp_config: dhttp_home::DhttpHome,
+    router_state: gateway::reverse::router::RouterState,
+}
+
+impl<P> WorkerRuntime<P>
+where
+    P: ControlPlane + ProvideListener + Send + Sync + 'static,
+    P::Listener: h3x::quic::Listen + Send + 'static,
+    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
+    <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
+        Send + Sync,
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
+        Send + Sync,
+{
+    pub fn new(
+        plane: Arc<P>,
+        dhttp_config: dhttp_home::DhttpHome,
+        router_state: gateway::reverse::router::RouterState,
+    ) -> Self {
+        Self {
+            registry: RuntimeRegistry::new(plane),
+            dhttp_config,
+            router_state,
+        }
+    }
+
+    pub async fn start(&mut self) {
+        self.reload().await;
+    }
+
+    pub async fn reload(&mut self) {
+        let sources =
+            match crate::worker::config::load_worker_server_sources(&self.dhttp_config).await {
+                Ok(sources) => sources,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %snafu::Report::from_error(&error),
+                        "failed to load worker server sources"
+                    );
+                    return;
+                }
+            };
+
+        let ctx = match crate::service::source::PrepareContext::load_worker(
+            &self.dhttp_config,
+            self.router_state.clone(),
+        )
+        .await
+        {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                tracing::warn!(
+                    error = %snafu::Report::from_error(&error),
+                    "failed to load worker prepare context"
+                );
+                return;
+            }
+        };
+
+        let server_sources: Vec<ServerSource> =
+            sources.into_iter().map(ServerSource::Worker).collect();
+        self.registry.apply_sources(server_sources, &ctx).await;
+    }
+
+    pub async fn shutdown(self) {
+        self.registry.shutdown().await;
     }
 }
 

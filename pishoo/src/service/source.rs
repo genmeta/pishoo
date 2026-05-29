@@ -54,6 +54,8 @@ pub enum PrepareServerUpdateError {
     Local {
         source: crate::hypervisor::local_service::BuildLocalServiceError,
     },
+    #[snafu(display("local source preparation is not yet implemented in Phase 1"))]
+    LocalNotYetImplemented,
     #[cfg(test)]
     #[snafu(display("synthetic prepare failure for {server_name}"))]
     SyntheticFailure { server_name: String },
@@ -66,7 +68,7 @@ pub enum ServerSource {
     Fake(FakeServerSource),
 }
 
-pub struct WorkerPrepareContext {
+pub struct PrepareContext {
     pub h3_settings: Arc<h3x::dhttp::settings::Settings>,
     pub access_rules: Arc<dhttp_access::db::base::matcher::LocationRulesMatcher>,
     pub router_state: gateway::reverse::router::RouterState,
@@ -104,6 +106,18 @@ impl ServerSource {
             Self::Local(source) => &source.name,
             #[cfg(test)]
             Self::Fake(source) => &source.name,
+        }
+    }
+
+    pub async fn prepare(
+        &self,
+        ctx: &PrepareContext,
+    ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
+        match self {
+            Self::Worker(source) => source.prepare(ctx).await,
+            Self::Local(_) => Err(PrepareServerUpdateError::LocalNotYetImplemented),
+            #[cfg(test)]
+            Self::Fake(source) => source.prepare(),
         }
     }
 }
@@ -208,19 +222,19 @@ fn fake_name(name: &str) -> DhttpName<'static> {
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum BuildContextError {
+pub enum BuildPrepareContextError {
     #[snafu(display("failed to load default policy bundle"))]
     Policy { source: crate::policy::PolicyError },
 }
 
-impl WorkerPrepareContext {
-    pub async fn load(
+impl PrepareContext {
+    pub async fn load_worker(
         _home: &DhttpHome,
         router_state: RouterState,
-    ) -> Result<Self, BuildContextError> {
+    ) -> Result<Self, BuildPrepareContextError> {
         let policy_bundle = crate::policy::load_policy_bundle(None)
             .await
-            .context(build_context_error::PolicySnafu)?;
+            .context(build_prepare_context_error::PolicySnafu)?;
 
         Ok(Self {
             h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
@@ -233,7 +247,7 @@ impl WorkerPrepareContext {
 impl WorkerServerSource {
     pub async fn prepare(
         &self,
-        ctx: &WorkerPrepareContext,
+        ctx: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
         use dhttp::ddns::PublishOptions;
 
@@ -314,7 +328,7 @@ impl WorkerServerSource {
         let request_fingerprint = ListenRequestFingerprint {
             server_name: self.name.clone(),
             bind_debug: format!("{:?}", target_binds),
-            identity_debug: format!("{:?}", identity.name()),
+            identity_debug: crate::service::source::compute_identity_fingerprint(&identity),
             dns_resolver_debug: dns_resolver_url.map(|u| u.to_string()),
             publish_server_id,
         };
@@ -361,5 +375,40 @@ impl WorkerServerSource {
                 service_generation,
             },
         })
+    }
+}
+
+pub(crate) fn compute_identity_fingerprint(identity: &dhttp::identity::Identity) -> String {
+    use sha2::{Digest, Sha256};
+    let mut cert_digest = Sha256::new();
+    for cert in identity.certs.iter() {
+        cert_digest.update(cert.as_ref());
+    }
+    let cert_digest = cert_digest.finalize();
+
+    let mut key_digest = Sha256::new();
+    key_digest.update(identity.key.secret_der());
+    let key_digest = key_digest.finalize();
+
+    format!("{}@{:x}@{:x}", identity.name(), cert_digest, key_digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use dhttp::name::DhttpName;
+
+    use super::*;
+
+    #[test]
+    fn fingerprint_incorporates_cert_and_key() {
+        let name = DhttpName::try_from("test.genmeta.net".to_owned()).unwrap();
+        let req1 = FakeServerSource::fake_listen_request(&name);
+        let req2 = FakeServerSource::fake_listen_request(&name);
+
+        let fp1 = compute_identity_fingerprint(&req1.identity);
+        let fp2 = compute_identity_fingerprint(&req2.identity);
+
+        assert_ne!(fp1, fp2, "Fingerprints must differ when cert/key differ");
+        assert!(fp1.starts_with("test.genmeta.net@"));
     }
 }

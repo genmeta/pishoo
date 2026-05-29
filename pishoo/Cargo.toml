@@ -72,6 +72,7 @@ console-subscriber = { workspace = true, optional = true }
 # --- System / OS ---
 libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
+sha2 = "0.10"
 
 [features]
 default = ["sqlx-sqlite"]
