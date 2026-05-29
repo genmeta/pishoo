@@ -1,8 +1,3 @@
-// Production consumers are introduced in Task 5 (ServerService implements
-// AcceptDriver) and Task 7 (ServerRuntime drives AcceptState). Until then
-// AcceptDriver and AcceptState::start are exercised only by tests.
-#![allow(dead_code)]
-
 use snafu::{ResultExt, Snafu};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
