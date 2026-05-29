@@ -1,6 +1,9 @@
-name: Release Dry Run
+name: Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       bucket:
@@ -28,14 +31,9 @@ on:
         required: true
         default: https://download.genmeta.net/brew/pishoo
       linux_targets:
-        description: Space-separated Linux Rust targets for deb/rpm package build; override to all supported targets for a full Linux dry run.
+        description: Space-separated Linux Rust targets for deb/rpm package build.
         required: true
-        default: x86_64-unknown-linux-gnu
-      create_homebrew_tap_pr:
-        description: Create or update a Homebrew tap pull request from the generated formula.
-        required: true
-        type: boolean
-        default: true
+        default: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
       homebrew_tap_repository:
         description: GitHub repository that owns the Homebrew tap.
         required: true
@@ -49,7 +47,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-dry-run-${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -60,17 +58,17 @@ env:
   DHTTP_MDNS_SERVICE: _genmeta.local
 
 jobs:
-  linux:
-    name: Linux packages and S3 dry run
+  linux-deb:
+    name: Linux deb packages and S3 publish
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: ${{ inputs.bucket }}
-      APT_SUITE: ${{ inputs.apt_suite }}
-      APT_PREFIX: ${{ inputs.apt_prefix }}
-      RPM_PREFIX: ${{ inputs.rpm_prefix }}
-      LINUX_TARGETS: ${{ inputs.linux_targets }}
+      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
+      APT_SUITE: ${{ inputs.apt_suite || 'stable' }}
+      APT_PREFIX: ${{ inputs.apt_prefix || 'apt/pishoo' }}
+      LINUX_TARGETS: ${{ inputs.linux_targets || 'x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu' }}
+      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
     defaults:
       run:
         shell: bash
@@ -125,14 +123,14 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-linux-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          key: gateway-linux-deb-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
           restore-keys: |
-            gateway-linux-cargo-
+            gateway-linux-deb-cargo-
 
-      - name: Install Linux package tooling
+      - name: Install Linux deb tooling
         run: |
           sudo apt-get update
-          sudo apt-get install --assume-yes --no-install-recommends gpg rpm
+          sudo apt-get install --assume-yes --no-install-recommends gpg
           docker info
 
       - name: Check release secrets and derive APT fingerprint
@@ -151,7 +149,7 @@ jobs:
           key_file="$RUNNER_TEMP/apt-signing-key.asc"
           install -m 700 -d "$(dirname "$key_file")"
           printf '%s' "$XTASK_RELEASE_APT_SIGNING_KEY" > "$key_file"
-          fingerprint="$(gpg --batch --import-options show-only --with-colons --import "$key_file" \
+          fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" \
             | awk -F: '$1 == "fpr" { print toupper($10); exit }')"
           rm -f "$key_file"
           if [ -z "$fingerprint" ]; then
@@ -160,32 +158,21 @@ jobs:
           fi
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
-      - name: Package Linux artifacts
+      - name: Package deb artifacts
         run: |
           deb_args=(--target common)
-          rpm_args=()
           for target in ${LINUX_TARGETS}; do
             deb_args+=(--target "$target")
-            rpm_args+=(--target "$target")
           done
-          if [ "${#rpm_args[@]}" -eq 0 ]; then
-            echo "linux_targets must not be empty" >&2
-            exit 1
-          fi
 
           cargo xtask package --overwrite-manifest \
             deb "${deb_args[@]}" --features sshd,pam \
               --sibling ../dhttp \
               --sibling ../ddns \
               --sibling ../h3x \
-              --sibling ../dssh \
-            rpm "${rpm_args[@]}" --features sshd,pam \
-              --sibling ../dhttp \
-              --sibling ../ddns \
-              --sibling ../h3x \
               --sibling ../dssh
 
-      - name: Publish S3 dry run for Linux artifacts
+      - name: Publish S3 for deb artifacts
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
@@ -200,33 +187,150 @@ jobs:
             unset XTASK_RELEASE_APT_SIGNING_PASSPHRASE
           fi
 
-          cargo xtask publish s3 --dry-run \
+          cargo xtask publish s3 $DRY_RUN_FLAG \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
-            deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT" \
-            rpm --prefix "$RPM_PREFIX"
+            deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT"
 
-      - name: Upload Linux dry-run manifests
+      - name: Upload deb manifests
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gateway-linux-release-dry-run
+          name: gateway-deb-release
           if-no-files-found: ignore
           path: |
-            gateway/target/common/**
+            gateway/target/common/deb/**
+
+  linux-rpm:
+    name: Linux rpm packages and S3 publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
+      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
+      RPM_PREFIX: ${{ inputs.rpm_prefix || 'rpm/pishoo' }}
+      LINUX_TARGETS: ${{ inputs.linux_targets || 'x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu' }}
+      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: gateway
+    steps:
+      - name: Checkout gateway
+        uses: actions/checkout@v6
+        with:
+          path: gateway
+          persist-credentials: false
+
+      - name: Checkout dhttp
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/dhttp
+          ref: main
+          path: dhttp
+          persist-credentials: false
+
+      - name: Checkout ddns
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/ddns
+          ref: endpoint
+          path: ddns
+          persist-credentials: false
+
+      - name: Checkout h3x
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/h3x
+          ref: endpoint
+          path: h3x
+          persist-credentials: false
+
+      - name: Checkout dssh
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/dssh
+          ref: endpoint
+          path: dssh
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: gateway-linux-rpm-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          restore-keys: |
+            gateway-linux-rpm-cargo-
+
+      - name: Install Linux rpm tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --assume-yes --no-install-recommends rpm
+          docker info
+
+      - name: Check release secrets
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
+        run: |
+          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
+          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
+          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
+
+      - name: Package rpm artifacts
+        run: |
+          rpm_args=(--target common)
+          for target in ${LINUX_TARGETS}; do
+            rpm_args+=(--target "$target")
+          done
+
+          cargo xtask package --overwrite-manifest \
+            rpm "${rpm_args[@]}" --features sshd,pam \
+              --sibling ../dhttp \
+              --sibling ../ddns \
+              --sibling ../h3x \
+              --sibling ../dssh
+
+      - name: Publish S3 for rpm artifacts
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
+        run: |
+          cargo xtask publish s3 $DRY_RUN_FLAG \
+            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
+            --bucket "$RELEASE_BUCKET" \
+            rpm --prefix "$RPM_PREFIX"
+
+      - name: Upload rpm manifests
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-rpm-release
+          if-no-files-found: ignore
+          path: |
+            gateway/target/common/rpm/**
 
   macos:
-    name: Homebrew package and S3 dry run
+    name: Homebrew package and S3 publish
     runs-on: macos-15
     timeout-minutes: 120
     env:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: ${{ inputs.bucket }}
-      BREW_PREFIX: ${{ inputs.brew_prefix }}
-      BREW_PUBLIC_BASE_URL: ${{ inputs.brew_public_base_url }}
-      CREATE_HOMEBREW_TAP_PR: ${{ inputs.create_homebrew_tap_pr }}
-      HOMEBREW_TAP_REPOSITORY: ${{ inputs.homebrew_tap_repository }}
-      HOMEBREW_TAP_BASE_BRANCH: ${{ inputs.homebrew_tap_base_branch }}
+      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
+      BREW_PREFIX: ${{ inputs.brew_prefix || 'brew/pishoo' }}
+      BREW_PUBLIC_BASE_URL: ${{ inputs.brew_public_base_url || 'https://download.genmeta.net/brew/pishoo' }}
+      HOMEBREW_TAP_REPOSITORY: ${{ inputs.homebrew_tap_repository || 'genmeta/homebrew-genmeta' }}
+      HOMEBREW_TAP_BASE_BRANCH: ${{ inputs.homebrew_tap_base_branch || 'main' }}
+      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
     defaults:
       run:
         shell: bash
@@ -271,11 +375,11 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Homebrew tap
-        if: ${{ inputs.create_homebrew_tap_pr }}
+        if: github.event_name == 'push'
         uses: actions/checkout@v6
         with:
-          repository: ${{ inputs.homebrew_tap_repository }}
-          ref: ${{ inputs.homebrew_tap_base_branch }}
+          repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
+          ref: ${{ env.HOMEBREW_TAP_BASE_BRANCH }}
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
@@ -305,7 +409,7 @@ jobs:
           : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
           : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
           : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
-          if [ "$CREATE_HOMEBREW_TAP_PR" = "true" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             : "${HOMEBREW_TAP_GITHUB_TOKEN:?missing HOMEBREW_TAP_GITHUB_TOKEN}"
           fi
 
@@ -317,19 +421,19 @@ jobs:
               --target x86_64-apple-darwin \
               --features sshd
 
-      - name: Publish S3 dry run for Homebrew artifacts
+      - name: Publish S3 for Homebrew artifacts
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
           XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
         run: |
-          cargo xtask publish s3 --dry-run \
+          cargo xtask publish s3 $DRY_RUN_FLAG \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             brew --prefix "$BREW_PREFIX" --public-base-url "$BREW_PUBLIC_BASE_URL"
 
       - name: Create Homebrew tap pull request
-        if: ${{ inputs.create_homebrew_tap_pr }}
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           FORMULA_NAME: pishoo.rb
@@ -349,7 +453,7 @@ jobs:
             exit 0
           fi
 
-          branch="release-dry-run/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          branch="release/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
@@ -360,14 +464,14 @@ jobs:
             --repo "$HOMEBREW_TAP_REPOSITORY" \
             --base "$HOMEBREW_TAP_BASE_BRANCH" \
             --head "$branch" \
-            --title "brew: update $FORMULA_NAME from gateway dry run" \
-            --body "Generated by $GITHUB_REPOSITORY release dry run $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT."
+            --title "brew: update $FORMULA_NAME from gateway" \
+            --body "Generated by $GITHUB_REPOSITORY release $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT."
 
-      - name: Upload Homebrew dry-run manifests
+      - name: Upload Homebrew manifests
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gateway-homebrew-release-dry-run
+          name: gateway-homebrew-release
           if-no-files-found: ignore
           path: |
-            gateway/target/common/**
+            gateway/target/common/brew/**
