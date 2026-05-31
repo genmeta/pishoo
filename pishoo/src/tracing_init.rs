@@ -2,6 +2,8 @@ use std::{fmt, io::IsTerminal};
 
 use tracing::Subscriber;
 use tracing_subscriber::{
+    EnvFilter,
+    filter::LevelFilter,
     fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
     registry::LookupSpan,
 };
@@ -28,6 +30,19 @@ where
     }
 }
 
+fn env_filter() -> EnvFilter {
+    env_filter_from_rust_log(std::env::var("RUST_LOG").ok())
+}
+
+fn env_filter_from_rust_log(rust_log: Option<String>) -> EnvFilter {
+    match rust_log {
+        Some(spec) if !spec.trim().is_empty() => EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .parse_lossy(spec),
+        _ => EnvFilter::new("info,remoc::chmux=warn"),
+    }
+}
+
 /// Initialize the tracing subscriber with a process-identifying prefix.
 ///
 /// Every log line will start with `prefix` (e.g. `pishoo/1234`,
@@ -37,9 +52,7 @@ where
 /// Returns a [`tracing_appender::non_blocking::WorkerGuard`] that **must** be
 /// held alive for the lifetime of the process to ensure log flushing.
 pub fn init_tracing(prefix: &str) -> tracing_appender::non_blocking::WorkerGuard {
-    use tracing_subscriber::{
-        EnvFilter, filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt,
-    };
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (stderr, guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::registry()
@@ -53,11 +66,40 @@ pub fn init_tracing(prefix: &str) -> tracing_appender::non_blocking::WorkerGuard
                     inner: tracing_subscriber::fmt::format(),
                 }),
         )
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
+        .with(env_filter())
         .init();
     guard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_env_filter_silences_remoc_chmux_below_warn() {
+        let filter = env_filter_from_rust_log(None);
+        let spec = filter.to_string();
+
+        assert!(spec.contains("info"));
+        assert!(spec.contains("remoc::chmux=warn"));
+    }
+
+    #[test]
+    fn empty_rust_log_uses_default_env_filter() {
+        let filter = env_filter_from_rust_log(Some("  ".to_owned()));
+        let spec = filter.to_string();
+
+        assert!(spec.contains("info"));
+        assert!(spec.contains("remoc::chmux=warn"));
+    }
+
+    #[test]
+    fn non_empty_rust_log_overrides_default_env_filter() {
+        let filter = env_filter_from_rust_log(Some("debug,remoc::chmux=trace".to_owned()));
+        let spec = filter.to_string();
+
+        assert!(spec.contains("debug"));
+        assert!(spec.contains("remoc::chmux=trace"));
+        assert!(!spec.contains("remoc::chmux=warn"));
+    }
 }

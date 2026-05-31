@@ -6,7 +6,9 @@ use gateway::{
     control_plane::ListenRequest,
     parse::{
         document::ConfigNode,
-        types::{AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames},
+        types::{
+            AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames,
+        },
     },
     reverse::router::RouterState,
 };
