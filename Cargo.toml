@@ -135,3 +135,6 @@ dssh = { path = "../dssh" }
 # local h3x Network API. Remove with the provider patches above.
 [patch."https://github.com/genmeta/h3x.git"]
 h3x = { path = "../h3x" }
+
+[patch."https://github.com/genmeta/dquic.git"]
+dquic = { path = "../dquic/dquic" }

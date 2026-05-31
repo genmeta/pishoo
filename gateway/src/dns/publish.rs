@@ -8,16 +8,13 @@ use ddns::{
 use dhttp::identity::Identity;
 use dhttp_identity::identity::{LocalAuthority, SignError};
 use futures::future::BoxFuture;
-use h3x::{
-    dquic::{
-        Network,
-        net::EndpointAddr,
-        prelude::{BindUri, Connection, IO, QuicClient},
-        qinterface::{BindInterface, component::location::Locations},
-        qresolve::Publish as DnsPublisher,
-        qtraversal::nat::client::{NatType, StunClientsComponent},
-    },
-    endpoint::H3Endpoint,
+use h3x::dquic::{
+    Network,
+    net::EndpointAddr,
+    prelude::{BindUri, IO},
+    qinterface::{BindInterface, component::location::Locations},
+    qresolve::Publish as DnsPublisher,
+    qtraversal::nat::client::{NatType, StunClientsComponent},
 };
 use rustls::{
     SignatureScheme,
@@ -39,7 +36,6 @@ use crate::{
 };
 
 pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
-type DnsH3Client = H3Endpoint<Arc<QuicClient>, Connection>;
 
 #[derive(Clone)]
 pub struct PublishConfig {
@@ -142,7 +138,7 @@ pub async fn publish_host_endpoints(
     }
 }
 
-fn build_publisher(
+async fn build_publisher(
     resolver: &DnsResolver,
     config: &ServerIdentity,
 ) -> Arc<dyn DnsPublisher + Send + Sync> {
@@ -152,15 +148,15 @@ fn build_publisher(
         "creating h3 dns publisher"
     );
     Arc::new(
-        H3Publisher::new(
+        H3Publisher::from_endpoint(
             resolver.base_url.to_string(),
-            resolver.create_h3_client(config),
+            resolver.create_h3_endpoint(Some(config)).await,
         )
         .expect("h3 dns server base_url has been checked"),
     )
 }
 
-pub fn build_publish_configs(
+pub async fn build_publish_configs(
     servers: &[Arc<ConfigNode>],
 ) -> Result<HashMap<String, PublishConfig>> {
     let mut configs = HashMap::new();
@@ -188,7 +184,7 @@ pub fn build_publish_configs(
                 vec![]
             } else {
                 tracing::info!(server_name = %domain, server_id = identity.server_id, "configuring dns publisher");
-                vec![build_publisher(&resolver, &identity)]
+                vec![build_publisher(&resolver, &identity).await]
             };
 
             configs.insert(
@@ -361,7 +357,7 @@ async fn publish_resolvers(
 ///
 /// Used by `register_listener` to set up per-server DNS publishing without
 /// reading any files from disk.
-pub fn build_publish_config_from_identity(
+pub async fn build_publish_config_from_identity(
     identity: &Identity,
     dns_resolver_url: Option<&str>,
 ) -> PublishConfig {
@@ -378,10 +374,12 @@ pub fn build_publish_config_from_identity(
             tracing::warn!(server_name = %server_name, "domain excluded from publishing");
             vec![]
         } else {
-            let client = create_h3_client_from_identity(&resolver, identity);
             let publisher: Arc<dyn DnsPublisher + Send + Sync> = Arc::new(
-                H3Publisher::new(resolver.base_url.to_string(), client)
-                    .expect("dns resolver base_url already validated"),
+                H3Publisher::from_endpoint(
+                    resolver.base_url.to_string(),
+                    resolver.create_h3_endpoint_from_identity(identity).await,
+                )
+                .expect("dns resolver base_url already validated"),
             );
             info!(server_name = %server_name, "configuring dns publisher from identity");
             vec![publisher]
@@ -487,17 +485,6 @@ pub async fn publish_server(
     publish_resolvers(server_name, config, ifaces.iter().map(|(u, i)| (u, i))).await;
 }
 
-fn create_h3_client_from_identity(_resolver: &DnsResolver, identity: &Identity) -> DnsH3Client {
-    let root_store = crate::common::root_cert();
-    let quic = QuicClient::builder()
-        .with_root_certificates(root_store)
-        .with_name(identity.name().as_full().to_owned())
-        .with_cert(identity.certs().to_vec(), identity.key().clone_key())
-        .with_alpns(vec!["h3"])
-        .build();
-    H3Endpoint::new(Arc::new(quic))
-}
-
 fn compute_server_id(name: &str) -> u8 {
     if let Some(base) = name.strip_suffix(".genmeta.net") {
         let parts: Vec<&str> = base.split('.').collect();
@@ -556,4 +543,22 @@ fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, Sign
         .whatever_context::<_, Whatever>("no supported signature scheme found for key")?;
 
     Ok((key, scheme))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn h3_publishers_use_dhttp_endpoint_construction() {
+        let source = include_str!("publish.rs");
+        let quic_client_builder = ["Quic", "Client::builder()"].concat();
+        let root_certificates = ["with_root_", "certificates"].concat();
+        let alpns = ["with_", "alpns"].concat();
+        let direct_h3_publisher = ["H3", "Publisher::new"].concat();
+
+        assert!(source.contains("create_h3_endpoint"));
+        assert!(!source.contains(&quic_client_builder));
+        assert!(!source.contains(&root_certificates));
+        assert!(!source.contains(&alpns));
+        assert!(!source.contains(&direct_h3_publisher));
+    }
 }

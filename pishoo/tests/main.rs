@@ -1,10 +1,65 @@
 #[test]
-fn main_uses_shared_root_cert_store() {
+fn main_does_not_build_custom_server_quic_config() {
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("pishoo::tls::root_cert_store()"),
-        "main must use the shared root cert entry"
+        !main_source.contains("default_server_quic_config()"),
+        "main should let dhttp Endpoint construction own server defaults"
     );
+    assert!(
+        !main_source.contains("server_qcfg"),
+        "main should not thread server config through RootState"
+    );
+    assert!(
+        !main_source.contains("pishoo::tls::root_cert_store()"),
+        "main must use the DHTTP_ROOT_CA from dhttp defaults"
+    );
+    assert!(
+        !main_source.contains("WebPkiClientVerifier"),
+        "main must not locally rebuild the DHTTP client certificate verifier"
+    );
+    assert!(
+        !main_source.contains("alpns: vec![b\"h3\".to_vec()]"),
+        "main must not hard-code DHTTP ALPN instead of inheriting dhttp defaults"
+    );
+}
+
+#[test]
+fn root_state_does_not_store_server_quic_config() {
+    let state_source = include_str!("../src/hypervisor/state.rs");
+    assert!(
+        !state_source.contains("server_qcfg"),
+        "RootState should not store fixed DHTTP server defaults"
+    );
+    assert!(
+        !state_source.contains("ServerQuicConfig"),
+        "RootState should not depend on low-level server QUIC config"
+    );
+}
+
+#[test]
+fn endpoint_factory_uses_dhttp_endpoint_for_dns_resolver() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let quic_endpoint_builder = ["Quic", "Endpoint::builder()"].concat();
+    let default_client_config = ["default_", "client_quic_config()"].concat();
+    let default_server_config = ["default_", "server_quic_config()"].concat();
+
+    assert!(source.contains("Endpoint::builder()"));
+    assert!(source.contains(".dns(DnsScheme::System)"));
+    assert!(!source.contains(&quic_endpoint_builder));
+    assert!(!source.contains(&default_client_config));
+    assert!(!source.contains(&default_server_config));
+}
+
+#[test]
+fn pishoo_does_not_define_custom_root_ca_bootstrap() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let build_script = manifest_dir.join("build.rs");
+    let tls_source = std::fs::read_to_string(manifest_dir.join("src/tls.rs"))
+        .expect("pishoo tls source should be readable");
+
+    assert!(!build_script.exists());
+    assert!(!tls_source.contains("root_cert_store"));
+    assert!(!tls_source.contains("OUT_DIR"));
 }
 
 #[test]

@@ -19,10 +19,7 @@ use std::{
 };
 
 use dhttp::{ddns::publisher::CreatePublisherError, endpoint::Endpoint, name::DhttpName};
-use h3x::{
-    dquic::{Network, server::ServerQuicConfig},
-    quic::Listen as _,
-};
+use h3x::{dquic::Network, quic::Listen as _};
 use nix::{
     sys::wait::WaitStatus,
     unistd::{Pid, Uid},
@@ -66,9 +63,7 @@ pub enum AcquireListenerError {
         source: dhttp::endpoint::InvalidEndpointIdentityError,
     },
     #[snafu(display("failed to create dns publisher for registered endpoint"))]
-    CreatePublisher {
-        source: CreatePublisherError,
-    },
+    CreatePublisher { source: CreatePublisherError },
     #[snafu(display("listener owner is not available"))]
     OwnerUnavailable,
 }
@@ -216,16 +211,11 @@ pub(super) struct Inner {
 /// Root-side ownership registry (thread-safe, interior mutability).
 ///
 /// Tracks `server_name → owner`, `pid → owned_servers`, and `uid → pid`
-/// mappings. Owns the shared [`Network`] + default [`ServerQuicConfig`]
-/// used for every server registration, and coordinates all server
-/// registration / cleanup.
+/// mappings. Owns the shared [`Network`] used for every server registration,
+/// and coordinates all server registration / cleanup.
 pub struct RootState {
     /// Shared QUIC network with installed SNI dispatcher.
     pub network: Arc<Network>,
-    /// Server-side QUIC/TLS configuration shared across every registered
-    /// SNI. A single instance is kept here and cloned (cheap — inner `Arc`s)
-    /// for every DHTTP endpoint built by the root.
-    pub server_qcfg: ServerQuicConfig,
     /// Listener entries (behind RwLock for concurrent reads).
     listeners: RwLock<listener_registry::ListenerRegistry<ListenerResource>>,
     /// Process/user bookkeeping (behind Mutex).
@@ -274,12 +264,10 @@ impl ListenerResource {
 }
 
 impl RootState {
-    /// Create a new root state with the given shared [`Network`] and
-    /// default [`ServerQuicConfig`].
-    pub fn new(network: Arc<Network>, server_qcfg: ServerQuicConfig) -> Self {
+    /// Create a new root state with the given shared [`Network`].
+    pub fn new(network: Arc<Network>) -> Self {
         Self {
             network,
-            server_qcfg,
             listeners: RwLock::new(listener_registry::ListenerRegistry::new()),
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),

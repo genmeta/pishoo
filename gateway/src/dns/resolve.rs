@@ -1,13 +1,8 @@
 use std::sync::Arc;
 
-use ddns::resolvers::{Resolvers, h3::H3Resolver};
-use h3x::{
-    dquic::{
-        prelude::{Connection, QuicClient},
-        qresolve::{Resolve as GmdnsResolver, SystemResolver},
-    },
-    endpoint::H3Endpoint,
-};
+use ddns::resolvers::Resolvers;
+use dhttp::{ddns::resolvers::DnsScheme, endpoint::Endpoint, identity::Identity};
+use h3x::dquic::qresolve::Resolve as GmdnsResolver;
 use http::Uri;
 
 use super::H3_DNS_SERVER;
@@ -18,7 +13,7 @@ use crate::parse::{
     },
 };
 
-type DnsH3Client = H3Endpoint<Arc<QuicClient>, Connection>;
+type DnsH3Endpoint = Arc<dhttp::h3x::dquic::H3Endpoint>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsResolver {
@@ -42,40 +37,55 @@ impl DnsResolver {
             .unwrap_or_else(Self::default_h3)
     }
 
-    pub fn build_query_resolver(
+    pub async fn build_query_resolver(
         &self,
         config: Option<&ServerIdentity>,
     ) -> Arc<dyn GmdnsResolver + Send + Sync> {
-        let client = if let Some(config) = config {
-            self.create_h3_client(config)
-        } else {
-            self.create_h3_client_no_auth()
-        };
-
+        let endpoint = self.create_h3_endpoint(config).await;
         Arc::new(
-            H3Resolver::new(self.base_url.to_string(), client)
-                .expect("h3 dns server base_url has been checked"),
+            Resolvers::builder()
+                .h3_with_base_url(self.base_url.to_string(), endpoint)
+                .expect("h3 dns server base_url has been checked")
+                .build(),
         )
     }
 
-    pub(crate) fn create_h3_client_no_auth(&self) -> DnsH3Client {
-        let root_store = crate::common::root_cert();
-        let quic = QuicClient::builder()
-            .with_root_certificates(root_store)
-            .without_cert()
-            .with_alpns(vec!["h3"])
-            .build();
-        H3Endpoint::new(Arc::new(quic))
+    pub(crate) async fn create_h3_endpoint(
+        &self,
+        config: Option<&ServerIdentity>,
+    ) -> DnsH3Endpoint {
+        let identity = config.and_then(Self::load_identity);
+        self.create_h3_endpoint_from_optional_identity(identity)
+            .await
     }
 
-    pub(crate) fn create_h3_client(&self, config: &ServerIdentity) -> DnsH3Client {
-        let root_store = crate::common::root_cert();
+    pub(crate) async fn create_h3_endpoint_from_identity(
+        &self,
+        identity: &Identity,
+    ) -> DnsH3Endpoint {
+        self.create_h3_endpoint_from_optional_identity(Some(identity.clone()))
+            .await
+    }
 
+    async fn create_h3_endpoint_from_optional_identity(
+        &self,
+        identity: Option<Identity>,
+    ) -> DnsH3Endpoint {
+        Endpoint::builder()
+            .maybe_identity(identity.map(Arc::new))
+            .dns(DnsScheme::System)
+            .build()
+            .await
+            .expect("dns h3 client endpoint identity should be valid")
+            .as_h3()
+    }
+
+    fn load_identity(config: &ServerIdentity) -> Option<Identity> {
         let (cert_path, key_path, name) =
             (&config.cert_path, &config.key_path, &config.server_name);
         let (Ok(cert_data), Ok(key_data)) = (std::fs::read(cert_path), std::fs::read(key_path))
         else {
-            return self.create_h3_client_no_auth();
+            return None;
         };
 
         use std::io::Cursor;
@@ -90,27 +100,24 @@ impl DnsResolver {
             .expect("failed to parse private key")
             .expect("no private key found");
 
-        let quic = QuicClient::builder()
-            .with_root_certificates(root_store)
-            .with_name(name.as_full().to_owned())
-            .with_cert(cert_chain, private_key)
-            .with_alpns(vec!["h3"])
-            .build();
-        H3Endpoint::new(Arc::new(quic))
+        Some(Identity::new(name.clone().into(), cert_chain, private_key))
     }
 }
 
-pub fn build_query_resolvers(node: &ConfigNode, server_name_key: &str) -> Resolvers {
+pub async fn build_query_resolvers(node: &ConfigNode, server_name_key: &str) -> Resolvers {
     let resolver = DnsResolver::from_node_or_default(node);
     let identity = optional_server_identity(node, server_name_key);
+    let endpoint = resolver.create_h3_endpoint(identity.as_ref()).await;
 
-    Resolvers::default()
-        .with(resolver.build_query_resolver(identity.as_ref()))
-        .with(Arc::new(SystemResolver))
+    Resolvers::builder()
+        .h3_with_base_url(resolver.base_url.to_string(), endpoint)
+        .expect("h3 dns server base_url has been checked")
+        .system()
+        .build()
 }
 
-pub fn build_query_resolver_chain(servers: &[Arc<ConfigNode>]) -> Resolvers {
-    let mut resolvers = Resolvers::default();
+pub async fn build_query_resolver_chain(servers: &[Arc<ConfigNode>]) -> Resolvers {
+    let mut builder = Resolvers::builder();
     let mut seen = std::collections::HashSet::new();
 
     for server in servers {
@@ -125,16 +132,23 @@ pub fn build_query_resolver_chain(servers: &[Arc<ConfigNode>]) -> Resolvers {
             if seen.insert(resolver_key) {
                 let identity = server_identity(server, domain.clone())
                     .expect("missing ssl_certificate or ssl_certificate_key");
-                resolvers = resolvers.with(resolver.build_query_resolver(Some(&identity)));
+                let endpoint = resolver.create_h3_endpoint(Some(&identity)).await;
+                builder = builder
+                    .h3_with_base_url(resolver.base_url.to_string(), endpoint)
+                    .expect("h3 dns server base_url has been checked");
             }
         }
     }
 
     if seen.is_empty() {
-        resolvers = resolvers.with(DnsResolver::default_h3().build_query_resolver(None));
+        let resolver = DnsResolver::default_h3();
+        let endpoint = resolver.create_h3_endpoint(None).await;
+        builder = builder
+            .h3_with_base_url(resolver.base_url.to_string(), endpoint)
+            .expect("h3 dns server base_url has been checked");
     }
 
-    resolvers.with(Arc::new(SystemResolver))
+    builder.system().build()
 }
 
 #[cfg(test)]
@@ -175,5 +189,27 @@ mod tests {
         let resolver = DnsResolver::from_node_or_default(&node);
 
         assert_eq!(resolver, DnsResolver::default_h3());
+    }
+
+    #[test]
+    fn query_resolver_chain_uses_resolvers_builder() {
+        let source = include_str!("resolve.rs");
+        let h3_resolver_import = ["h3::", "H3Resolver"].concat();
+        let direct_h3_resolver = ["Arc::new(\n            ", "H3Resolver::new"].concat();
+        let quic_client_builder = ["Quic", "Client::builder()"].concat();
+        let root_certificates = ["with_root_", "certificates"].concat();
+        let alpns = ["with_", "alpns"].concat();
+        let local_builder_wrapper = ["add_h3_", "query_resolver"].concat();
+
+        assert!(source.contains("Resolvers::builder()"));
+        assert!(source.contains(".h3_with_base_url("));
+        assert!(source.contains(".system()"));
+        assert!(!source.contains(&local_builder_wrapper));
+        assert!(!source.contains("Resolvers::default()\n        .with"));
+        assert!(!source.contains(&h3_resolver_import));
+        assert!(!source.contains(&direct_h3_resolver));
+        assert!(!source.contains(&quic_client_builder));
+        assert!(!source.contains(&root_certificates));
+        assert!(!source.contains(&alpns));
     }
 }

@@ -4,10 +4,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use gateway::error::Whatever;
-use h3x::dquic::{Network, param::handy::server_parameters, server::ServerQuicConfig};
+use h3x::dquic::Network;
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
-use rustls::server::WebPkiClientVerifier;
 use snafu::{FromString, ResultExt};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
@@ -91,32 +90,14 @@ async fn main() -> Result<(), Whatever> {
 
     // --- Multi-process supervisor setup ---
 
-    // Build the shared Network + default ServerQuicConfig that every
-    // registered SNI will reuse. Workers register by calling back through
-    // IPC (request_listen) — no servers are added up-front.
-    let roots = pishoo::tls::root_cert_store();
-    let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
-        .allow_unauthenticated()
-        .build()
-        .expect("failed to build tls client cert verifier");
-
-    let server_qcfg = ServerQuicConfig {
-        parameters: server_parameters(),
-        alpns: vec![b"h3".to_vec()],
-        backlog: 1024,
-        client_cert_verifier: tls_client_cert_verifier,
-        ..Default::default()
-    };
-
+    // Build the shared Network used by every registered SNI. Workers register
+    // by calling back through IPC (request_listen) — no servers are added up-front.
     let network = Network::builder()
         .stun_server(Arc::<str>::from(gateway::dns::DEFAULT_STUN_SERVER))
         .build();
 
     // Create RootState (interior mutability — no external Mutex needed)
-    let state = Arc::new(pishoo::hypervisor::state::RootState::new(
-        network,
-        server_qcfg,
-    ));
+    let state = Arc::new(pishoo::hypervisor::state::RootState::new(network));
 
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;

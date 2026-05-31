@@ -223,7 +223,6 @@ impl RootState {
         let endpoint = endpoint_factory::build_registered_endpoint(
             identity,
             self.network.clone(),
-            self.server_qcfg.clone(),
             bind_patterns,
             resolver,
         )

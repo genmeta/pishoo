@@ -117,7 +117,7 @@ fn build_client_config(location: &ConfigNode) -> Result<Arc<ClientConfig>> {
 
 /// 构建根证书池：默认使用系统/项目内置根证书，并按需追加自定义上游 CA。
 fn build_root_store(trusted_ca: Option<&Path>) -> Result<RootCertStore> {
-    let mut root_store = crate::common::root_cert().as_ref().clone();
+    let mut root_store = dhttp::trust::dhttp_root_cert_store().as_ref().clone();
 
     if let Some(ca_path) = trusted_ca {
         let trusted_certs = load_cert_chain(ca_path, "upstream trusted ca certificate")?;

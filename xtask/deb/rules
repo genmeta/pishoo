@@ -22,7 +22,6 @@ override_dh_auto_build:
 ifdef TRIPLE
 	cd /workspace && \
 	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
-	$(if $(ROOT_CA),export ROOT_CA=$(ROOT_CA) &&) \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
 	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
 	cargo zigbuild $(CARGO_PROFILE_ARGS) --target $(ZIG_TARGET) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
