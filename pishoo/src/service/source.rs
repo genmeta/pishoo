@@ -6,11 +6,11 @@ use gateway::{
     control_plane::ListenRequest,
     parse::{
         document::ConfigNode,
-        types::{ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames},
+        types::{AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames},
     },
     reverse::router::RouterState,
 };
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 
 use super::snapshot::ServerService;
 use crate::config::load_identity_servers;
@@ -559,7 +559,34 @@ impl WorkerServerSource {
             request_fingerprint,
         };
 
-        let server_node = target_node.unwrap_or_else(|| {
+        let service_generation = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Worker access control: load rules from identity server.conf if
+        // access_rules is configured. Falls back to empty rules otherwise.
+        let access_rules = if let Some(uri) = target_node
+            .as_ref()
+            .and_then(|node| node.get::<AccessRulesUri>("access_rules").ok().flatten())
+        {
+            let uri_str = uri.0.to_string();
+            match crate::policy::load_policy_bundle(Some(&uri_str)).await {
+                Ok(bundle) => bundle.location_rules,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %Report::from_error(&error),
+                        uri = %uri_str,
+                        "failed to load access rules from identity config"
+                    );
+                    ctx.access_rules.clone()
+                }
+            }
+        } else {
+            ctx.access_rules.clone()
+        };
+
+        let server_node = target_node.clone().unwrap_or_else(|| {
             let registry = gateway::parse::default_registry();
             let doc = gateway::parse::load_config_text(
                 "",
@@ -573,14 +600,9 @@ impl WorkerServerSource {
             doc.root
         });
 
-        let service_generation = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
         let service = Arc::new(ServerService {
             h3_settings: ctx.h3_settings.clone(),
-            access_rules: ctx.access_rules.clone(),
+            access_rules,
             router_state: ctx.router_state.clone(),
             server_node,
             access_log_dir: Some(self.identity_profile.logs_dir()),
