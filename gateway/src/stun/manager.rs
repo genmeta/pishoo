@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use ddns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
+use ddns::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
 use h3x::dquic::{
     Network,
     net::Scheme,

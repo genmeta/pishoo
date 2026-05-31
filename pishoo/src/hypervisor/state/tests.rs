@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use dhttp::{ddns::PublishOptions, identity::Identity, name::DhttpName};
+use dhttp::{ddns::publisher::PublishOptions, identity::Identity, name::DhttpName};
 use gateway::{
     control_plane::ListenRequest,
     parse::types::{IfaceRange, IpFamilies, Listens},

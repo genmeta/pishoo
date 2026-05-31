@@ -37,9 +37,9 @@ where
     P::Listener: h3x::quic::Listen + Send + 'static,
     <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn start(
@@ -215,9 +215,9 @@ where
     P::Listener: h3x::quic::Listen + Send + 'static,
     <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn new(plane: Arc<P>) -> Self {
@@ -316,9 +316,9 @@ where
     P::Listener: h3x::quic::Listen + Send + 'static,
     <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAgent>::LocalAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAgent>::RemoteAgent:
+    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn new(

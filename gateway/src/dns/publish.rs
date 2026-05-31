@@ -1,13 +1,12 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use ddns::{
-    MdnsPacket,
-    mdns::Mdns,
-    parser::record::endpoint::EndpointAddr as DnsEndpointAddr,
-    resolvers::{H3Publisher, MdnsResolver},
+    core::{MdnsPacket, parser::record::endpoint::EndpointAddr as DnsEndpointAddr},
+    mdns::{resolvers::mdns::MdnsResolver, service::Mdns},
+    resolvers::h3::H3Publisher,
 };
 use dhttp::identity::Identity;
-use dhttp_identity::identity::{LocalAgent, SignError};
+use dhttp_identity::identity::{LocalAuthority, SignError};
 use futures::future::BoxFuture;
 use h3x::{
     dquic::{
@@ -55,7 +54,7 @@ impl PublishConfig {
         ep.set_sequence(self.server_id as u64);
         if let Some((key, scheme)) = &self.signing_key
             && let Err(e) = ep
-                .sign_with_agent(&SigningKeyAgent {
+                .sign_with_authority(&SigningKeyAuthority {
                     key: key.as_ref(),
                     scheme: *scheme,
                 })
@@ -67,12 +66,12 @@ impl PublishConfig {
 }
 
 #[derive(Debug)]
-struct SigningKeyAgent<'a> {
+struct SigningKeyAuthority<'a> {
     key: &'a dyn SigningKey,
     scheme: SignatureScheme,
 }
 
-impl LocalAgent for SigningKeyAgent<'_> {
+impl LocalAuthority for SigningKeyAuthority<'_> {
     fn name(&self) -> &str {
         ""
     }

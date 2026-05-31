@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dhttp::name::DhttpName;
+use dhttp::{ddns::publisher::PublishOptions, name::DhttpName};
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use gateway::{
     control_plane::ListenRequest,
@@ -78,7 +78,7 @@ pub struct LocalServerSource {
     pub identity: dhttp::identity::Identity,
     pub bind: Vec<Listens>,
     pub dns_resolver_url: Option<http::Uri>,
-    pub publish_options: dhttp::ddns::PublishOptions,
+    pub publish_options: PublishOptions,
     pub server_node: Arc<ConfigNode>,
 }
 
@@ -163,7 +163,7 @@ impl LocalServerSource {
                 .context(build_local_sources_error::ConfigQuerySnafu)?
                 .map(|resolver| resolver.0.clone());
 
-            let publish_options = dhttp::ddns::PublishOptions {
+            let publish_options = PublishOptions {
                 server_id: server
                     .get::<gateway::parse::types::ServerIdConfig>("server_id")
                     .context(build_local_sources_error::ConfigQuerySnafu)?
@@ -308,7 +308,7 @@ impl FakeServerSource {
     }
 
     fn fake_listen_request(name: &DhttpName<'static>) -> ListenRequest {
-        use dhttp::{ddns::PublishOptions, identity::Identity};
+        use dhttp::identity::Identity;
 
         let fqdn = name.as_full().to_owned();
         let key_pair = rcgen::KeyPair::generate().expect("rcgen key generation");
@@ -473,8 +473,6 @@ impl WorkerServerSource {
         &self,
         ctx: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
-        use dhttp::ddns::PublishOptions;
-
         use crate::worker::config::BuildConfigError;
 
         let identity = self

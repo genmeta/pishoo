@@ -2,7 +2,7 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp::{ddns::PublishOptions, identity::Identity, name::Name};
+use dhttp::{ddns::publisher::PublishOptions, identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
 use h3x::quic;

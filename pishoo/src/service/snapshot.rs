@@ -36,8 +36,8 @@ impl ServerService {
         L: quic::Listen + Send + 'static,
         L::Error: Send,
         L::Connection: Send + 'static,
-        <L::Connection as quic::WithLocalAgent>::LocalAgent: Send + Sync,
-        <L::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
+        <L::Connection as quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
+        <L::Connection as quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
     {
         let locations = self.server_node.children_optional("location").to_vec();
 
@@ -92,7 +92,7 @@ impl ServerService {
 
         async move {
             tokio::select! {
-                result = endpoint.serve(service) => {
+                result = endpoint.listen(service) => {
                     match result {
                         Ok(()) => {
                             tracing::warn!(%server_name, "server stopped");
@@ -122,8 +122,8 @@ where
     L: quic::Listen + Send + 'static,
     L::Error: Send,
     L::Connection: Send + 'static,
-    <L::Connection as quic::WithLocalAgent>::LocalAgent: Send + Sync,
-    <L::Connection as quic::WithRemoteAgent>::RemoteAgent: Send + Sync,
+    <L::Connection as quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
+    <L::Connection as quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
 {
     fn drive(
         self: Arc<Self>,

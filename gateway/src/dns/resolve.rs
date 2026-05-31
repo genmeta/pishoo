@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ddns::resolvers::{H3Resolver, Resolvers};
+use ddns::resolvers::{Resolvers, h3::H3Resolver};
 use h3x::{
     dquic::{
         prelude::{Connection, QuicClient},

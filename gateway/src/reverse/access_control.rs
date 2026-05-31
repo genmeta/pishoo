@@ -32,11 +32,11 @@ pub async fn access_control(
         .extensions()
         .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
     {
-        Some(conn) => match conn.remote_agent().await {
-            Ok(Some(agent)) => Some(agent.name().to_owned()),
+        Some(conn) => match conn.remote_authority().await {
+            Ok(Some(authority)) => Some(authority.name().to_owned()),
             Ok(None) => None,
             Err(error) => {
-                warn!(error = %error, "failed to fetch remote agent from connection");
+                warn!(error = %error, "failed to fetch remote authority from connection");
                 None
             }
         },

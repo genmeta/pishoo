@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use dhttp::{
-    ddns::{DHTTP_H3_DNS_SERVER, DnsScheme, Resolvers},
+    ddns::resolvers::{DHTTP_H3_DNS_SERVER, DnsScheme, Resolvers},
     dquic::{Network, QuicEndpoint, binds::BindPattern, connection::Connection as QuicConnection},
     endpoint::Endpoint,
     h3x::endpoint::H3Endpoint,

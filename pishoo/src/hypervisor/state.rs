@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use dhttp::{endpoint::Endpoint, name::DhttpName};
+use dhttp::{ddns::publisher::CreatePublisherError, endpoint::Endpoint, name::DhttpName};
 use h3x::{
     dquic::{Network, server::ServerQuicConfig},
     quic::Listen as _,
@@ -67,7 +67,7 @@ pub enum AcquireListenerError {
     },
     #[snafu(display("failed to create dns publisher for registered endpoint"))]
     CreatePublisher {
-        source: dhttp::ddns::CreatePublisherError,
+        source: CreatePublisherError,
     },
     #[snafu(display("listener owner is not available"))]
     OwnerUnavailable,
