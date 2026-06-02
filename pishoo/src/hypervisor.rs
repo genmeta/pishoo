@@ -10,6 +10,7 @@ pub mod local_service;
 pub mod log;
 pub mod process;
 pub mod reload;
+pub(crate) mod resource;
 pub mod shutdown;
 pub mod signal;
 pub mod state;

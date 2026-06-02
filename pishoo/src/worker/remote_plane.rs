@@ -152,7 +152,8 @@ impl gateway::control_plane::ProvideListener for RemoteControlPlane {
         // _old is consumed without explicit shutdown: root destroys its side
         // of the listener as part of the rebuild critical section, so calling
         // shutdown on the old IpcListener would race against a server that
-        // has already gone away.
+        // has already gone away. Root disarms the old handle's release guard
+        // before installing the replacement.
         let ipc_client = self.client.rebuild_listener(request).await?;
         Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
     }

@@ -1,18 +1,9 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use dhttp::name::DhttpName;
 
-use super::{completion::Completion, owner::Owner};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DestroyReason {
-    Release,
-    Rebuild,
-    Conflict,
-    OwnerDead,
-}
+use super::owner::Owner;
+use crate::hypervisor::resource::{AsyncReleaseGuard, Completion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConflictReason {
@@ -21,18 +12,14 @@ pub(super) enum ConflictReason {
 
 #[derive(Debug)]
 pub(super) enum ListenerSlot<R = ()> {
-    Creating {
+    Transition {
         owner: Owner,
         done: Completion,
     },
     Active {
         owner: Owner,
         resource: R,
-    },
-    Destroying {
-        owner: Owner,
-        reason: DestroyReason,
-        done: Completion,
+        guard: AsyncReleaseGuard,
     },
     Poisoned {
         reason: ConflictReason,
@@ -50,32 +37,36 @@ pub(super) enum AcquirePlan<R = ()> {
     DestroyConflict {
         owner: Owner,
         resource: R,
+        guard: AsyncReleaseGuard,
         done: Completion,
     },
 }
 
 #[derive(Debug)]
 pub(super) enum ReleasePlan<R = ()> {
-    Destroy { resource: R, done: Completion },
+    Destroy {
+        resource: R,
+        guard: AsyncReleaseGuard,
+        done: Completion,
+    },
     Wait(Completion),
     NotOwner,
     NotFound,
+    StaleHandle,
     Poisoned,
 }
 
 #[derive(Debug)]
 pub(super) enum RebuildPlan<R = ()> {
-    Destroy { resource: R, done: Completion },
+    Rebuild {
+        resource: R,
+        guard: AsyncReleaseGuard,
+        done: Completion,
+    },
     Wait(Completion),
     NotOwner,
     NotFound,
     Conflict,
-}
-
-#[derive(Debug)]
-pub(super) enum DestroyFinish {
-    Vacant,
-    Poisoned,
 }
 
 #[derive(Debug)]
@@ -90,14 +81,17 @@ impl<R> ListenerRegistry<R> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn entry(&self, name: &DhttpName<'static>) -> Option<&ListenerSlot<R>> {
         self.entries.get(name)
     }
 
+    #[cfg(test)]
     pub(super) fn contains(&self, name: &DhttpName<'static>) -> bool {
         self.entries.contains_key(name)
     }
 
+    #[cfg(test)]
     pub(super) fn is_active(&self, name: &DhttpName<'static>) -> bool {
         matches!(self.entries.get(name), Some(ListenerSlot::Active { .. }))
     }
@@ -112,20 +106,20 @@ impl<R> ListenerRegistry<R> {
                 let done = Completion::new();
                 self.entries.insert(
                     name,
-                    ListenerSlot::Creating {
+                    ListenerSlot::Transition {
                         owner,
                         done: done.clone(),
                     },
                 );
                 AcquirePlan::Build { done }
             }
-            Some(ListenerSlot::Creating {
+            Some(ListenerSlot::Transition {
                 owner: existing_owner,
                 done,
             }) => {
                 self.entries.insert(
                     name,
-                    ListenerSlot::Creating {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
                         done: done.clone(),
                     },
@@ -135,12 +129,14 @@ impl<R> ListenerRegistry<R> {
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
+                guard,
             }) if existing_owner == owner => {
                 self.entries.insert(
                     name,
                     ListenerSlot::Active {
                         owner: existing_owner,
                         resource,
+                        guard,
                     },
                 );
                 AcquirePlan::Duplicate
@@ -148,36 +144,22 @@ impl<R> ListenerRegistry<R> {
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
+                guard,
             }) => {
                 let done = Completion::new();
                 self.entries.insert(
                     name,
-                    ListenerSlot::Destroying {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
-                        reason: DestroyReason::Conflict,
                         done: done.clone(),
                     },
                 );
                 AcquirePlan::DestroyConflict {
                     owner: existing_owner,
                     resource,
+                    guard,
                     done,
                 }
-            }
-            Some(ListenerSlot::Destroying {
-                owner: existing_owner,
-                reason,
-                done,
-            }) => {
-                self.entries.insert(
-                    name,
-                    ListenerSlot::Destroying {
-                        owner: existing_owner,
-                        reason,
-                        done: done.clone(),
-                    },
-                );
-                AcquirePlan::Wait(done)
             }
             Some(ListenerSlot::Poisoned { reason }) => {
                 self.entries.insert(name, ListenerSlot::Poisoned { reason });
@@ -186,40 +168,47 @@ impl<R> ListenerRegistry<R> {
         }
     }
 
-    pub(super) fn commit_creating(
+    pub(super) fn commit_transition_active(
         &mut self,
         owner: Owner,
         name: DhttpName<'static>,
         done: &Completion,
         resource: R,
-    ) -> bool {
+        guard: AsyncReleaseGuard,
+    ) -> Result<(), R> {
         let matches_slot = matches!(
             self.entries.get(&name),
-            Some(ListenerSlot::Creating {
+            Some(ListenerSlot::Transition {
                 owner: existing_owner,
                 done: existing_done,
             }) if *existing_owner == owner && existing_done.ptr_eq(done)
         );
 
         if matches_slot {
-            self.entries
-                .insert(name, ListenerSlot::Active { owner, resource });
+            self.entries.insert(
+                name,
+                ListenerSlot::Active {
+                    owner,
+                    resource,
+                    guard,
+                },
+            );
             done.complete();
-            true
+            Ok(())
         } else {
-            false
+            Err(resource)
         }
     }
 
-    pub(super) fn abort_creating(
+    pub(super) fn finish_transition_vacant(
         &mut self,
         owner: Owner,
         name: &DhttpName<'static>,
         done: &Completion,
-    ) {
+    ) -> bool {
         let matches_slot = matches!(
             self.entries.get(name),
-            Some(ListenerSlot::Creating {
+            Some(ListenerSlot::Transition {
                 owner: existing_owner,
                 done: existing_done,
             }) if *existing_owner == owner && existing_done.ptr_eq(done)
@@ -228,6 +217,37 @@ impl<R> ListenerRegistry<R> {
         if matches_slot {
             self.entries.remove(name);
             done.complete();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn finish_transition_poisoned(
+        &mut self,
+        owner: Owner,
+        name: &DhttpName<'static>,
+        done: &Completion,
+    ) -> bool {
+        let matches_slot = matches!(
+            self.entries.get(name),
+            Some(ListenerSlot::Transition {
+                owner: existing_owner,
+                done: existing_done,
+            }) if *existing_owner == owner && existing_done.ptr_eq(done)
+        );
+
+        if matches_slot {
+            self.entries.insert(
+                name.clone(),
+                ListenerSlot::Poisoned {
+                    reason: ConflictReason::CrossOwnerAcquire,
+                },
+            );
+            done.complete();
+            true
+        } else {
+            false
         }
     }
 
@@ -235,17 +255,17 @@ impl<R> ListenerRegistry<R> {
         &mut self,
         owner: Owner,
         name: &DhttpName<'static>,
-        reason: DestroyReason,
+        expected_guard: Option<&AsyncReleaseGuard>,
     ) -> ReleasePlan<R> {
         match self.entries.remove(name) {
             None => ReleasePlan::NotFound,
-            Some(ListenerSlot::Creating {
+            Some(ListenerSlot::Transition {
                 owner: existing_owner,
                 done,
             }) => {
                 self.entries.insert(
                     name.clone(),
-                    ListenerSlot::Creating {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
                         done: done.clone(),
                     },
@@ -255,45 +275,53 @@ impl<R> ListenerRegistry<R> {
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
-            }) if existing_owner == owner => {
+                guard,
+            }) if existing_owner == owner
+                && expected_guard.is_none_or(|expected| guard.ptr_eq(expected)) =>
+            {
                 let done = Completion::new();
                 self.entries.insert(
                     name.clone(),
-                    ListenerSlot::Destroying {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
-                        reason,
                         done: done.clone(),
                     },
                 );
-                ReleasePlan::Destroy { resource, done }
+                ReleasePlan::Destroy {
+                    resource,
+                    guard,
+                    done,
+                }
             }
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
+                guard,
+            }) if existing_owner == owner => {
+                self.entries.insert(
+                    name.clone(),
+                    ListenerSlot::Active {
+                        owner: existing_owner,
+                        resource,
+                        guard,
+                    },
+                );
+                ReleasePlan::StaleHandle
+            }
+            Some(ListenerSlot::Active {
+                owner: existing_owner,
+                resource,
+                guard,
             }) => {
                 self.entries.insert(
                     name.clone(),
                     ListenerSlot::Active {
                         owner: existing_owner,
                         resource,
+                        guard,
                     },
                 );
                 ReleasePlan::NotOwner
-            }
-            Some(ListenerSlot::Destroying {
-                owner: existing_owner,
-                reason,
-                done,
-            }) => {
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Destroying {
-                        owner: existing_owner,
-                        reason,
-                        done: done.clone(),
-                    },
-                );
-                ReleasePlan::Wait(done)
             }
             Some(ListenerSlot::Poisoned { reason }) => {
                 self.entries
@@ -310,13 +338,13 @@ impl<R> ListenerRegistry<R> {
     ) -> RebuildPlan<R> {
         match self.entries.remove(name) {
             None => RebuildPlan::NotFound,
-            Some(ListenerSlot::Creating {
+            Some(ListenerSlot::Transition {
                 owner: existing_owner,
                 done,
             }) => {
                 self.entries.insert(
                     name.clone(),
-                    ListenerSlot::Creating {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
                         done: done.clone(),
                     },
@@ -326,45 +354,36 @@ impl<R> ListenerRegistry<R> {
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
+                guard,
             }) if existing_owner == owner => {
                 let done = Completion::new();
                 self.entries.insert(
                     name.clone(),
-                    ListenerSlot::Destroying {
+                    ListenerSlot::Transition {
                         owner: existing_owner,
-                        reason: DestroyReason::Rebuild,
                         done: done.clone(),
                     },
                 );
-                RebuildPlan::Destroy { resource, done }
+                RebuildPlan::Rebuild {
+                    resource,
+                    guard,
+                    done,
+                }
             }
             Some(ListenerSlot::Active {
                 owner: existing_owner,
                 resource,
+                guard,
             }) => {
                 self.entries.insert(
                     name.clone(),
                     ListenerSlot::Active {
                         owner: existing_owner,
                         resource,
+                        guard,
                     },
                 );
                 RebuildPlan::NotOwner
-            }
-            Some(ListenerSlot::Destroying {
-                owner: existing_owner,
-                reason,
-                done,
-            }) => {
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Destroying {
-                        owner: existing_owner,
-                        reason,
-                        done: done.clone(),
-                    },
-                );
-                RebuildPlan::Wait(done)
             }
             Some(ListenerSlot::Poisoned { reason }) => {
                 self.entries
@@ -372,70 +391,6 @@ impl<R> ListenerRegistry<R> {
                 RebuildPlan::Conflict
             }
         }
-    }
-
-    pub(super) fn begin_creating_after_destroy(
-        &mut self,
-        owner: Owner,
-        name: DhttpName<'static>,
-        done: &Completion,
-    ) -> Option<Completion> {
-        let matches_slot = matches!(
-            self.entries.get(&name),
-            Some(ListenerSlot::Destroying {
-                done: existing_done,
-                ..
-            }) if existing_done.ptr_eq(done)
-        );
-
-        if !matches_slot {
-            return None;
-        }
-
-        let creating_done = Completion::new();
-        self.entries.insert(
-            name,
-            ListenerSlot::Creating {
-                owner,
-                done: creating_done.clone(),
-            },
-        );
-        done.complete();
-        Some(creating_done)
-    }
-
-    pub(super) fn finish_destroying(
-        &mut self,
-        name: &DhttpName<'static>,
-        done: &Completion,
-        finish: DestroyFinish,
-    ) {
-        let matches_slot = matches!(
-            self.entries.get(name),
-            Some(ListenerSlot::Destroying {
-                done: existing_done,
-                ..
-            }) if existing_done.ptr_eq(done)
-        );
-
-        if !matches_slot {
-            return;
-        }
-
-        match finish {
-            DestroyFinish::Vacant => {
-                self.entries.remove(name);
-            }
-            DestroyFinish::Poisoned => {
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Poisoned {
-                        reason: ConflictReason::CrossOwnerAcquire,
-                    },
-                );
-            }
-        }
-        done.complete();
     }
 
     pub(super) fn clear_poisoned(&mut self) -> Vec<DhttpName<'static>> {
@@ -458,43 +413,19 @@ impl<R> ListenerRegistry<R> {
         self.entries
             .iter()
             .filter_map(|(name, slot)| match slot {
-                ListenerSlot::Creating {
+                ListenerSlot::Transition {
                     owner: existing_owner,
                     ..
                 }
                 | ListenerSlot::Active {
                     owner: existing_owner,
                     ..
-                }
-                | ListenerSlot::Destroying {
-                    owner: existing_owner,
-                    ..
                 } if *existing_owner == owner => Some(name.clone()),
-                ListenerSlot::Creating { .. }
+                ListenerSlot::Transition { .. }
                 | ListenerSlot::Active { .. }
-                | ListenerSlot::Destroying { .. }
                 | ListenerSlot::Poisoned { .. } => None,
             })
             .collect()
-    }
-
-    pub(super) fn abort_creating_owned(&mut self, owner: Owner) -> usize {
-        let creating = self
-            .entries
-            .iter()
-            .filter_map(|(name, slot)| {
-                matches!(slot, ListenerSlot::Creating { owner: existing_owner, .. } if *existing_owner == owner)
-                    .then_some(name.clone())
-            })
-            .collect::<Vec<_>>();
-
-        for name in &creating {
-            if let Some(ListenerSlot::Creating { done, .. }) = self.entries.remove(name) {
-                done.complete();
-            }
-        }
-
-        creating.len()
     }
 }
 
@@ -506,31 +437,30 @@ impl<R> Default for ListenerRegistry<R> {
 
 #[cfg(test)]
 impl ListenerRegistry<()> {
-    fn insert_active_for_test(&mut self, name: DhttpName<'static>, owner: Owner) {
+    fn insert_active_for_test(
+        &mut self,
+        name: DhttpName<'static>,
+        owner: Owner,
+        guard: AsyncReleaseGuard,
+    ) {
         self.entries.insert(
             name,
             ListenerSlot::Active {
                 owner,
                 resource: (),
+                guard,
             },
         );
     }
 
-    fn insert_destroying_for_test(
+    fn insert_transition_for_test(
         &mut self,
         name: DhttpName<'static>,
         owner: Owner,
-        reason: DestroyReason,
         done: Completion,
     ) {
-        self.entries.insert(
-            name,
-            ListenerSlot::Destroying {
-                owner,
-                reason,
-                done,
-            },
-        );
+        self.entries
+            .insert(name, ListenerSlot::Transition { owner, done });
     }
 
     fn insert_poisoned_for_test(&mut self, name: DhttpName<'static>) {
@@ -563,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn vacant_acquire_inserts_creating() {
+    fn vacant_acquire_inserts_transition() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
         let name = name("alpha.user.genmeta.net");
         let plan = registry.plan_acquire(worker(10), name.clone());
@@ -571,48 +501,59 @@ mod tests {
         assert!(matches!(plan, AcquirePlan::Build { .. }));
         assert!(matches!(
             registry.entry(&name),
-            Some(ListenerSlot::Creating { owner, .. }) if *owner == worker(10)
+            Some(ListenerSlot::Transition { owner, .. }) if *owner == worker(10)
         ));
     }
 
     #[test]
-    fn cross_owner_acquire_retires_to_destroying_before_poison() {
+    fn cross_owner_acquire_transitions_before_poison() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
         let name = name("alpha.user.genmeta.net");
-        registry.insert_active_for_test(name.clone(), worker(10));
+        registry.insert_active_for_test(name.clone(), worker(10), AsyncReleaseGuard::new());
 
         let plan = registry.plan_acquire(worker(20), name.clone());
 
         assert!(matches!(plan, AcquirePlan::DestroyConflict { .. }));
         assert!(matches!(
             registry.entry(&name),
-            Some(ListenerSlot::Destroying { owner, reason: DestroyReason::Conflict, .. })
-                if *owner == worker(10)
+            Some(ListenerSlot::Transition { owner, .. }) if *owner == worker(10)
         ));
     }
 
     #[tokio::test]
-    async fn destroying_waiter_retries_after_completion() {
+    async fn transition_waiter_retries_after_completion() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
         let name = name("alpha.user.genmeta.net");
         let done = Completion::new();
-        registry.insert_destroying_for_test(
-            name.clone(),
-            worker(10),
-            DestroyReason::Release,
-            done.clone(),
-        );
+        registry.insert_transition_for_test(name.clone(), worker(10), done.clone());
 
         let plan = registry.plan_acquire(worker(10), name.clone());
         let AcquirePlan::Wait(wait) = plan else {
             panic!("expected wait plan");
         };
 
-        registry.finish_destroying(&name, &done, DestroyFinish::Vacant);
+        registry.finish_transition_vacant(worker(10), &name, &done);
         wait.wait().await;
         assert!(matches!(
             registry.plan_acquire(worker(10), name),
             AcquirePlan::Build { .. }
+        ));
+    }
+
+    #[test]
+    fn stale_handle_release_does_not_remove_replacement() {
+        let mut registry: ListenerRegistry = ListenerRegistry::new();
+        let name = name("alpha.user.genmeta.net");
+        let old_guard = AsyncReleaseGuard::new();
+        let new_guard = AsyncReleaseGuard::new();
+        registry.insert_active_for_test(name.clone(), worker(10), new_guard.clone());
+
+        let plan = registry.plan_release(worker(10), &name, Some(&old_guard));
+
+        assert!(matches!(plan, ReleasePlan::StaleHandle));
+        assert!(matches!(
+            registry.entry(&name),
+            Some(ListenerSlot::Active { guard, .. }) if guard.ptr_eq(&new_guard)
         ));
     }
 
@@ -622,7 +563,7 @@ mod tests {
         let poisoned = name("poisoned.user.genmeta.net");
         let active = name("active.user.genmeta.net");
         registry.insert_poisoned_for_test(poisoned.clone());
-        registry.insert_active_for_test(active.clone(), worker(10));
+        registry.insert_active_for_test(active.clone(), worker(10), AsyncReleaseGuard::new());
 
         let cleared = registry.clear_poisoned();
 

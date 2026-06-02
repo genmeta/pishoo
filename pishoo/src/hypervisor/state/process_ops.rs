@@ -1,6 +1,6 @@
 //! Worker/process registry operations on [`RootState`].
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use nix::{
     sys::{signal::Signal, wait::WaitStatus},
@@ -34,11 +34,10 @@ impl RootState {
     }
 
     /// Cancel root-local background tasks and retire root-local listeners.
-    pub async fn cleanup_local_resources(&self) -> usize {
+    pub async fn cleanup_local_resources(self: &Arc<Self>) -> usize {
         let owner = Owner::Local;
         let local_listeners = {
-            let mut registry = self.listeners.write().await;
-            registry.abort_creating_owned(owner);
+            let registry = self.listeners.read().await;
             registry.owned_names(owner)
         };
         let cleaned = local_listeners.len();
@@ -66,7 +65,7 @@ impl RootState {
     /// If another worker already holds the same UID, the old one is cleaned
     /// up first (uid-replaced).
     pub async fn register_worker(
-        &self,
+        self: &Arc<Self>,
         pid: Pid,
         uid: Uid,
         username: String,
@@ -134,7 +133,7 @@ impl RootState {
     /// Acquires `inner` lock first to remove process bookkeeping, then
     /// releases listener resources through the listener registry.
     pub async fn cleanup_worker(
-        &self,
+        self: &Arc<Self>,
         pid: Pid,
         error: WorkerProcessError,
     ) -> Option<CleanupSummary> {
@@ -170,8 +169,7 @@ impl RootState {
 
         let owner = Owner::worker(record_uid, pid);
         let owned_listeners = {
-            let mut registry = self.listeners.write().await;
-            registry.abort_creating_owned(owner);
+            let registry = self.listeners.read().await;
             registry.owned_names(owner)
         };
 
@@ -210,10 +208,9 @@ impl RootState {
         Some(summary)
     }
 
-    pub async fn retire_owner(&self, owner: Owner) -> usize {
+    pub async fn retire_owner(self: &Arc<Self>, owner: Owner) -> usize {
         let owned_listeners = {
-            let mut registry = self.listeners.write().await;
-            registry.abort_creating_owned(owner);
+            let registry = self.listeners.read().await;
             registry.owned_names(owner)
         };
         let mut cleaned = 0usize;

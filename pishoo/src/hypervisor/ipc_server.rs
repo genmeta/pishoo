@@ -136,7 +136,8 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     AcquireListenerError::BuildResolver { .. }
                     | AcquireListenerError::BuildEndpoint { .. }
                     | AcquireListenerError::CreatePublisher { .. }
-                    | AcquireListenerError::OwnerUnavailable => ListenError::Internal {
+                    | AcquireListenerError::OwnerUnavailable
+                    | AcquireListenerError::TransitionStopped => ListenError::Internal {
                         message: format!("failed to prepare endpoint for `{server_name}`"),
                     },
                 }
@@ -180,6 +181,9 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 match error {
                     RebuildListenerError::NotOwner => RebuildListenError::NotOwner,
                     RebuildListenerError::ConflictedName => RebuildListenError::Conflict,
+                    RebuildListenerError::TransitionStopped => RebuildListenError::Internal {
+                        message: format!("failed to replace endpoint for `{server_name}`"),
+                    },
                     RebuildListenerError::Replacement { source } => match source {
                         AcquireListenerError::BuildBindPatterns { .. } => {
                             RebuildListenError::InvalidRequest { reason: report }
@@ -189,7 +193,8 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                         AcquireListenerError::BuildResolver { .. }
                         | AcquireListenerError::BuildEndpoint { .. }
                         | AcquireListenerError::CreatePublisher { .. }
-                        | AcquireListenerError::OwnerUnavailable => {
+                        | AcquireListenerError::OwnerUnavailable
+                        | AcquireListenerError::TransitionStopped => {
                             RebuildListenError::Replacement { reason: report }
                         }
                     },

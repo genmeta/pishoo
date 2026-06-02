@@ -149,7 +149,7 @@ fn root_state_exposes_explicit_listener_operations() {
 }
 
 #[test]
-fn registered_endpoint_drop_does_not_release_registry() {
+fn registered_endpoint_drop_releases_through_guarded_transition() {
     let source = include_str!("../src/listen.rs");
     let drop_impl = source
         .split("impl Drop for RegisteredEndpoint")
@@ -157,8 +157,9 @@ fn registered_endpoint_drop_does_not_release_registry() {
         .expect("RegisteredEndpoint should implement Drop");
 
     assert!(
-        !drop_impl.contains("release_listener") && !drop_impl.contains("release_server"),
-        "RegisteredEndpoint::Drop must not mutate the root listener registry"
+        drop_impl.contains("release_guard.take()")
+            && drop_impl.contains("release_listener_for_dropped_handle"),
+        "RegisteredEndpoint::Drop must schedule guarded async listener release"
     );
 }
 

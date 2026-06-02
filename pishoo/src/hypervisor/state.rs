@@ -7,7 +7,6 @@
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
 
-mod completion;
 mod listener_registry;
 pub(crate) mod owner;
 mod process_ops;
@@ -15,6 +14,7 @@ mod server_ops;
 
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
     sync::Arc,
 };
 
@@ -63,6 +63,8 @@ pub enum AcquireListenerError {
     CreatePublisher { source: CreatePublisherError },
     #[snafu(display("listener owner is not available"))]
     OwnerUnavailable,
+    #[snafu(display("listener transition stopped before result delivery"))]
+    TransitionStopped,
 }
 
 #[derive(Debug, Snafu)]
@@ -81,6 +83,8 @@ pub enum RebuildListenerError {
     ConflictedName,
     #[snafu(display("failed to acquire replacement listener"))]
     Replacement { source: AcquireListenerError },
+    #[snafu(display("listener transition stopped before result delivery"))]
+    TransitionStopped,
 }
 
 #[derive(Debug, Snafu)]
@@ -217,8 +221,13 @@ pub struct RootState {
     pub(super) inner: Mutex<Inner>,
     /// Structured task scope for root-local service resources.
     pub(super) local_tasks: TaskScope,
+    /// Root-owned async resource transitions that must finish even if the
+    /// requesting RPC/reload future is cancelled.
+    pub(super) resource_tasks: TaskScope,
     /// Notified when SIGCHLD arrives so the monitor loop wakes immediately.
     pub worker_notify: tokio::sync::Notify,
+    #[cfg(test)]
+    listener_test_hooks: ListenerTestHooks,
 }
 
 pub(super) struct ListenerResource {
@@ -272,10 +281,128 @@ impl RootState {
                 worker_failures: VecDeque::new(),
             }),
             local_tasks: TaskScope::new(),
+            resource_tasks: TaskScope::new(),
             worker_notify: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            listener_test_hooks: ListenerTestHooks::default(),
         }
+    }
+
+    pub(super) fn spawn_resource_transition<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.resource_tasks.spawn(|_| future);
+    }
+
+    pub async fn wait_resource_transitions(&self) {
+        self.resource_tasks.cancel_and_wait().await;
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct ListenerTestHooks {
+    next_destroy: std::sync::Mutex<Option<ListenerPause>>,
+    next_delivery: std::sync::Mutex<Option<ListenerPause>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ListenerPause {
+    inner: Arc<ListenerPauseInner>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ListenerPauseInner {
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    resumed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl ListenerPause {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(ListenerPauseInner {
+                started: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
+                resumed: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub(crate) async fn wait_started(&self) {
+        self.inner.started.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.inner
+            .resumed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.resume.notify_waiters();
+    }
+
+    pub(super) async fn pause(&self) {
+        self.inner.started.notify_waiters();
+        loop {
+            if self
+                .inner
+                .resumed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            let notified = self.inner.resume.notified();
+            if self
+                .inner
+                .resumed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+impl ListenerTestHooks {
+    fn set_next_destroy(&self) -> ListenerPause {
+        let pause = ListenerPause::new();
+        let mut next = self
+            .next_destroy
+            .lock()
+            .expect("listener destroy hook should not be poisoned");
+        *next = Some(pause.clone());
+        pause
+    }
+
+    fn take_next_destroy(&self) -> Option<ListenerPause> {
+        self.next_destroy
+            .lock()
+            .expect("listener destroy hook should not be poisoned")
+            .take()
+    }
+
+    fn set_next_delivery(&self) -> ListenerPause {
+        let pause = ListenerPause::new();
+        let mut next = self
+            .next_delivery
+            .lock()
+            .expect("listener delivery hook should not be poisoned");
+        *next = Some(pause.clone());
+        pause
+    }
+
+    fn take_next_delivery(&self) -> Option<ListenerPause> {
+        self.next_delivery
+            .lock()
+            .expect("listener delivery hook should not be poisoned")
+            .take()
+    }
+}

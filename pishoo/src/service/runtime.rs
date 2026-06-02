@@ -180,8 +180,7 @@ where
     }
 
     async fn stop_accept(&mut self) -> Option<P::Listener> {
-        let old = std::mem::replace(&mut self.accept, AcceptState::Transitioning);
-        old.into_listener().await.ok()
+        self.accept.take_listener().await.ok()
     }
 
     fn start_accept(&mut self, listener: P::Listener) {

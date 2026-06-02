@@ -29,6 +29,20 @@ async fn has_entry(state: &RootState, server_name: &str) -> bool {
     registry.contains(&server_name)
 }
 
+async fn wait_until_no_entry(state: &RootState, server_name: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if !has_entry(state, server_name).await {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "listener registry entry `{server_name}` should be removed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 fn dhttp_name(label: &str) -> DhttpName<'static> {
     DhttpName::try_from(format!("{label}.user.genmeta.net")).unwrap()
 }
@@ -287,7 +301,7 @@ async fn test_register_then_release() {
 }
 
 #[tokio::test]
-async fn test_registered_endpoint_drop_does_not_release_listener() {
+async fn test_registered_endpoint_drop_releases_listener() {
     let state = test_state();
     let owner = Owner::Local;
     let server_name = "drop-release.user.genmeta.net";
@@ -300,10 +314,84 @@ async fn test_registered_endpoint_drop_does_not_release_listener() {
 
     drop(listener);
 
-    tokio::task::yield_now().await;
+    wait_until_no_entry(&state, server_name).await;
+}
+
+#[tokio::test]
+async fn test_cancelled_release_listener_still_finishes_destroy() {
+    let state = test_state();
+    let owner = Owner::Local;
+    let server_name = "cancel-release.user.genmeta.net";
+    let server_name_owned = DhttpName::try_from(server_name.to_owned()).unwrap();
+
+    let _listener = state
+        .acquire_listener(owner, test_request("cancel-release"))
+        .await
+        .expect("acquire_listener should succeed");
+    assert!(is_active(&state, server_name).await);
+
+    let destroy_pause = state.pause_next_listener_destroy_for_test();
+    let release_state = state.clone();
+    let release_name = server_name_owned.clone();
+    let release = tokio::spawn(async move {
+        release_state
+            .release_listener(owner, &release_name)
+            .await
+            .expect("release should succeed");
+    });
+
+    destroy_pause.wait_started().await;
+    release.abort();
+    destroy_pause.resume();
+
+    wait_until_no_entry(&state, server_name).await;
+}
+
+#[tokio::test]
+async fn test_cancelled_acquire_listener_destroys_built_endpoint() {
+    let state = test_state();
+    let owner = Owner::Local;
+    let server_name = "cancel-acquire.user.genmeta.net";
+
+    let delivery_pause = state.pause_next_listener_delivery_for_test();
+    let acquire_state = state.clone();
+    let acquire = tokio::spawn(async move {
+        acquire_state
+            .acquire_listener(owner, test_request("cancel-acquire"))
+            .await
+            .expect("acquire should succeed");
+    });
+
+    delivery_pause.wait_started().await;
+    acquire.abort();
+    delivery_pause.resume();
+
+    wait_until_no_entry(&state, server_name).await;
+}
+
+#[tokio::test]
+async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_replacement() {
+    let state = test_state();
+    let owner = Owner::Local;
+    let server_name = "stale-rebuild.user.genmeta.net";
+
+    let old_listener = state
+        .acquire_listener(owner, test_request("stale-rebuild"))
+        .await
+        .expect("initial acquire should succeed");
+    assert!(is_active(&state, server_name).await);
+
+    let _replacement = state
+        .rebuild_listener(owner, test_request("stale-rebuild"))
+        .await
+        .expect("rebuild should succeed");
+
+    drop(old_listener);
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
-        has_entry(&state, server_name).await,
-        "dropping a registered endpoint must not release the registry entry"
+        is_active(&state, server_name).await,
+        "dropping the consumed old handle must not release the replacement"
     );
 
     state

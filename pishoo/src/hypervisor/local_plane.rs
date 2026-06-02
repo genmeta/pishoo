@@ -268,10 +268,9 @@ impl gateway::control_plane::ProvideListener for LocalControlPlane {
         _old: Self::Listener,
         request: ListenRequest,
     ) -> Result<Self::Listener, Self::RebuildError> {
-        // _old is consumed and dropped; its Drop only cancels the accept
-        // token, which is what we want because root destroyed the underlying
-        // resource as part of the rebuild critical section. Calling shutdown
-        // on it would attempt a redundant release.
+        // _old is consumed and dropped; root disarms its release guard when the
+        // rebuild transition starts, so the drop cannot release the
+        // replacement listener.
         self.state.rebuild_listener(Owner::Local, request).await
     }
 }

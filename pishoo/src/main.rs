@@ -178,6 +178,7 @@ async fn main() -> Result<(), Whatever> {
             )
             .await;
     }
+    state.wait_resource_transitions().await;
     _ = fs::remove_file(&pid_file).await;
     Ok(())
 }

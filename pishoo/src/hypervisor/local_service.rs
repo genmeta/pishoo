@@ -48,9 +48,9 @@ impl Drop for LocalServiceHandle {
     fn drop(&mut self) {
         // Explicit shutdown() remains the authoritative cleanup path because
         // listener shutdown is async. If the handle is dropped unexpectedly,
-        // AcceptState's AbortOnDropHandle prevents accept tasks from detaching;
-        // RootState::cleanup_local_resources() remains responsible for retiring
-        // any root-local listener resources.
+        // listener handles release through RootState's async resource
+        // transition path, and RootState::cleanup_local_resources() remains
+        // responsible for retiring any root-local resources still registered.
     }
 }
 
