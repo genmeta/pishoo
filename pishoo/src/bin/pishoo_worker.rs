@@ -45,8 +45,8 @@ async fn main() -> Result<(), Whatever> {
         MuxChannel::from_fd(mux_fd).whatever_context("failed to create MuxChannel from fd 3")?;
     let (sink, stream) = mux.split().whatever_context("failed to split MuxChannel")?;
 
-    // Keep FdRegistry for receiving FDs from root (e.g. session child FDs).
-    let fd_registry = stream.fd_registry();
+    // Keep the FD transfer plane for receiving FDs from root (e.g. session child FDs).
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
 
     // Establish remoc connection over MuxSink/MuxStream.
     let (conn, mut base_tx, mut base_rx): (
@@ -100,10 +100,10 @@ async fn main() -> Result<(), Whatever> {
     tracing::debug!("startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
-    // Pass FdRegistry so spawn_session can receive FDs from root via MuxChannel.
+    // Pass FdTransfer so worker-side requests can reserve receiver-chosen FD IDs.
     let plane = Arc::new(RemoteControlPlane::new(
         bootstrap.control_plane,
-        fd_registry,
+        fd_transfer,
     ));
 
     let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));

@@ -3,20 +3,18 @@
 //! Wraps a [`ControlPlaneClient`] (remoc RPC client) and implements
 //! [`gateway::control_plane::ControlPlane`]. The returned
 //! [`IpcListener`] / [`IpcConnector`] wrap the RPC clients received from
-//! root, combined with the worker-side [`FdRegistry`] for MuxChannel FD
+//! root, combined with the worker-side [`FdTransfer`] for MuxChannel FD
 //! reception.
 //!
 //! For SSH session spawning, the control plane itself implements
 //! [`SpawnSession`]: calls the remoc RPC, then receives the session
-//! child's MuxChannel FD via the root-side MuxChannel's FdRegistry.
+//! child's MuxChannel FD via a receiver-chosen FD transfer ID.
 
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use h3x::ipc::{
     quic::{IpcConnector, IpcListener},
-    transport::FdRegistry,
+    transport::FdTransfer,
 };
-#[cfg(feature = "sshd")]
-use h3x::varint::VarInt;
 use snafu::Snafu;
 
 // Import the RTC trait so that methods are visible on ControlPlaneClient.
@@ -30,15 +28,15 @@ type IpcCodec = remoc::codec::Default;
 /// ControlPlane implementation backed by remoc RPC to the root process.
 pub struct RemoteControlPlane {
     client: ControlPlaneClient,
-    /// FdRegistry from the worker-side MuxChannel for receiving FDs from root.
-    fd_registry: FdRegistry,
+    /// FD transfer plane from the worker-side MuxChannel.
+    fd_transfer: FdTransfer,
 }
 
 impl RemoteControlPlane {
-    pub fn new(client: ControlPlaneClient, fd_registry: FdRegistry) -> Self {
+    pub fn new(client: ControlPlaneClient, fd_transfer: FdTransfer) -> Self {
         Self {
             client,
-            fd_registry,
+            fd_transfer,
         }
     }
 }
@@ -52,17 +50,16 @@ pub enum RemoteSpawnSessionError {
     Rpc {
         source: crate::ipc::SpawnSessionError,
     },
-    #[snafu(display("invalid fd batch id {id} from root"))]
-    InvalidFdId {
-        id: u64,
-        source: h3x::varint::err::Overflow,
-    },
     #[snafu(display("failed to receive session fd from root"))]
     ReceiveFd {
         source: h3x::ipc::transport::WaitFdsError,
     },
-    #[snafu(display("expected 1 FD from root, got {actual}"))]
-    UnexpectedFdCount { actual: usize },
+    #[snafu(display("unexpected session fd batch size"))]
+    UnexpectedFdCount {
+        source: h3x::ipc::transport::TakeFdsError,
+    },
+    #[snafu(display("root responded with fd id {actual}, expected {expected}"))]
+    FdIdMismatch { expected: u64, actual: u64 },
 }
 
 #[cfg(feature = "sshd")]
@@ -76,26 +73,21 @@ impl gateway::control_plane::SpawnSession for RemoteControlPlane {
         use remote_spawn_session_error::*;
         use snafu::ResultExt;
 
-        // RPC to root: fork session process + queue session FD via MuxChannel.
-        // Returns the FD batch id for FdRegistry::wait_fds().
+        let receiver = self.fd_transfer.receive();
+        let fd_id = receiver.id();
+        let expected = u64::from(fd_id);
+
+        // RPC to root: fork session process + deliver the session FD using
+        // this receiver-chosen FD transfer ID.
         let client = self.client.clone();
-        let fd_id_raw = client
-            .spawn_session(username.to_owned())
+        let actual = client
+            .spawn_session(username.to_owned(), expected)
             .await
             .context(RpcSnafu)?;
+        snafu::ensure!(actual == expected, FdIdMismatchSnafu { expected, actual });
 
-        let fd_id = VarInt::try_from(fd_id_raw).context(InvalidFdIdSnafu { id: fd_id_raw })?;
-
-        // Root has queued the session FD — receive it from FdRegistry.
-        let fds = self
-            .fd_registry
-            .wait_fds(fd_id)
-            .await
-            .context(ReceiveFdSnafu)?;
-
-        snafu::ensure!(fds.len() == 1, UnexpectedFdCountSnafu { actual: fds.len() });
-
-        let mux_fd = fds.into_iter().next().expect("checked len == 1");
+        let received = receiver.await.context(ReceiveFdSnafu)?;
+        let mux_fd = received.into_one().context(UnexpectedFdCountSnafu)?;
 
         Ok(gateway::control_plane::SessionTransport { mux_fd })
     }
@@ -134,7 +126,7 @@ impl gateway::control_plane::ProvideListener for RemoteControlPlane {
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         let ipc_client = self.client.listener(request).await?;
-        Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
+        Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
     }
 
     async fn rebuild_listener(
@@ -147,7 +139,7 @@ impl gateway::control_plane::ProvideListener for RemoteControlPlane {
         // shutdown on the old IpcListener would race against a server that
         // has already gone away.
         let ipc_client = self.client.rebuild_listener(request).await?;
-        Ok(IpcListener::new(ipc_client, self.fd_registry.clone()))
+        Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
     }
 }
 
@@ -160,6 +152,6 @@ impl gateway::control_plane::ProvideConnector for RemoteControlPlane {
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
         let ipc_client = self.client.connector(request).await?;
-        Ok(IpcConnector::new(ipc_client, self.fd_registry.clone()))
+        Ok(IpcConnector::new(ipc_client, self.fd_transfer.clone()))
     }
 }

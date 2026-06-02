@@ -4,7 +4,7 @@ use axum::{Extension, extract::State, response::IntoResponse};
 use dssh::{
     auth::AuthCredential,
     conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
-    session::{AuthRequest, AuthenticateFn, SessionBootstrap},
+    session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
 use h3x::{qpack::field::Protocol, stream_id::StreamId};
 use http::{Request, StatusCode};
@@ -67,9 +67,9 @@ pub enum RunSshSessionError {
     },
     #[snafu(display("failed to create control stream socketpair"))]
     ControlSocketpair { source: std::io::Error },
-    #[snafu(display("failed to queue control stream FD"))]
-    QueueControlFd {
-        source: h3x::ipc::transport::QueueFdsError,
+    #[snafu(display("failed to deliver control stream FD"))]
+    DeliverControlFd {
+        source: h3x::ipc::transport::DeliverFdsError,
     },
     #[snafu(display("failed to convert control stream socket to tokio"))]
     ControlFromStd { source: std::io::Error },
@@ -247,8 +247,8 @@ where
         h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd).context(MuxChannelSnafu)?;
     let (sink, stream) = mux.split().context(SplitChannelSnafu)?;
 
-    // Capture FD sender before remoc consumes the sink.
-    let fd_sender = sink.fd_sender();
+    // Capture the FD transfer plane before remoc consumes the transport.
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
 
     let connect = remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
         remoc::Cfg::default(),
@@ -277,7 +277,7 @@ where
         credential: AuthCredential::Certificate,
     };
 
-    let start_session_fn = tokio::select! {
+    let authenticated: AuthenticatedSession = tokio::select! {
         () = token.cancelled() => return CancelledSnafu.fail(),
         result = &mut conn => {
             result.context(RemocConnectionSnafu)?;
@@ -295,9 +295,12 @@ where
     ctrl_cli
         .set_nonblocking(true)
         .context(ControlFromStdSnafu)?;
-    let ctrl_fd_id = fd_sender
-        .queue_fds(vec![ctrl_cli.into()].into())
-        .context(QueueControlFdSnafu)?;
+    let mut fds = h3x::ipc::transport::FdVec::new();
+    fds.push(ctrl_cli.into());
+    let delivery = fd_transfer
+        .delivery(authenticated.control_fd_id)
+        .deliver(fds);
+    tokio::pin!(delivery);
     let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
     let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
 
@@ -327,7 +330,7 @@ where
     );
 
     // Set up manage-stream RPC via IPC FD passing.
-    let adapter = IpcManageStreamAdapter::new(manage_stream, fd_sender);
+    let adapter = IpcManageStreamAdapter::new(manage_stream, fd_transfer.clone());
     let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
     let manage_shutdown = session_shutdown.clone();
     tasks.spawn(
@@ -342,12 +345,25 @@ where
 
     let bootstrap = SessionBootstrap {
         manage_stream: mc,
-        control_fd_id: ctrl_fd_id,
         conversation_id,
         peer_version,
     };
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
+    let session_call = authenticated.start_session.call(bootstrap);
+    tokio::pin!(session_call);
+
+    tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = &mut delivery => {
+            let _delivered = result.context(DeliverControlFdSnafu)?;
+        }
+        result = &mut session_call => return result.context(SessionFailedSnafu),
+    }
 
     let session_result = tokio::select! {
         () = token.cancelled() => CancelledSnafu.fail(),
@@ -355,7 +371,7 @@ where
             result.context(RemocConnectionSnafu)?;
             RemocClosedSnafu.fail()
         }
-        result = start_session_fn.call(bootstrap) => result.context(SessionFailedSnafu),
+        result = &mut session_call => result.context(SessionFailedSnafu),
     };
 
     // Session is done — tear down the remoc connection so the child sees

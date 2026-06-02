@@ -109,7 +109,7 @@ async fn start_worker_ipc(
     let (sink, stream) = mux
         .split()
         .context(worker_startup_error::MuxChannelSplitSnafu)?;
-    let fd_sender = sink.fd_sender();
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
     let (conn, mut base_tx, mut base_rx): (
         _,
         remoc::rch::base::Sender<WorkerBootstrap>,
@@ -145,7 +145,7 @@ async fn start_worker_ipc(
         return Err(WorkerStartupError::WorkerUnregistered);
     }
 
-    let rpc_impl = WorkerControlPlane::new(pid, state.clone(), fd_sender);
+    let rpc_impl = WorkerControlPlane::new(pid, state.clone(), fd_transfer);
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);
     let username_for_log = username.clone();
     let bootstrap = WorkerBootstrap {

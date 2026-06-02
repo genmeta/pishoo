@@ -17,7 +17,8 @@ use dssh::{
     auth::AuthCredential,
     conversation::Conversation,
     session::{
-        AuthError, AuthRequest, SessionBootstrap, SessionRunError, StartSessionFn, UserInfo,
+        AuthError, AuthRequest, AuthenticatedSession, SessionBootstrap, SessionRunError,
+        StartSessionFn, UserInfo,
         dispatcher::{SessionConfig, run_session},
         privilege::drop_privileges,
     },
@@ -49,8 +50,8 @@ async fn main() {
     let mux = MuxChannel::from_fd(mux_fd).expect("failed to create MuxChannel from fd 3");
     let (sink, stream) = mux.split().expect("failed to split MuxChannel");
 
-    // Capture FD registry before remoc consumes the stream.
-    let fd_registry = stream.fd_registry();
+    // Capture the FD transfer plane before remoc consumes the transport.
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
 
     // Establish remoc channel over MuxSink/MuxStream.
     let (conn, mut tx, _rx) =
@@ -64,121 +65,133 @@ async fn main() {
     let mut conn = Box::pin(conn.instrument(tracing::info_span!("remoc_conn")));
 
     // Create the outer RFnOnce: authentication.
-    let auth_fn = remoc::rfn::RFnOnce::new_1(|auth_request: AuthRequest| async move {
-        tracing::info!(username = %auth_request.username, credential = %auth_request.credential, "authentication starting");
+    let auth_fd_transfer = fd_transfer.clone();
+    let auth_fn = remoc::rfn::RFnOnce::new_1(move |auth_request: AuthRequest| {
+        let fd_transfer = auth_fd_transfer.clone();
+        async move {
+            tracing::info!(username = %auth_request.username, credential = %auth_request.credential, "authentication starting");
 
-        let user_info: UserInfo = match &auth_request.credential {
-            AuthCredential::Basic { .. } => {
-                return Err(AuthError::PamFailed {
-                    reason: "password authentication is no longer supported".to_owned(),
-                });
-            }
-            #[cfg(feature = "pam")]
-            AuthCredential::Certificate => {
-                // mTLS: skip password authentication, but still perform
-                // PAM acct_mgmt + open_session for system session creation.
-                dssh::session::pam::open_session("sshd", &auth_request.username)
-                    .await
-                    .map_err(|e| AuthError::PamFailed {
-                        reason: Report::from_error(e).to_string(),
-                    })?
-            }
-            #[cfg(not(feature = "pam"))]
-            AuthCredential::Certificate => {
-                // mTLS without PAM: look up user directly from /etc/passwd.
-                let user_info = dssh::session::lookup_user(&auth_request.username)
-                    .await
-                    .map_err(|e| AuthError::PamFailed {
-                        reason: Report::from_error(e).to_string(),
-                    })?;
-                // Without PAM, explicitly check /etc/nologin.
-                if let Err(msg) = dssh::session::check_nologin(user_info.uid) {
-                    return Err(AuthError::PamFailed { reason: msg });
+            let user_info: UserInfo = match &auth_request.credential {
+                AuthCredential::Basic { .. } => {
+                    return Err(AuthError::PamFailed {
+                        reason: "password authentication is no longer supported".to_owned(),
+                    });
                 }
-                user_info
-            }
-        };
-
-        tracing::info!(
-            uid = user_info.uid,
-            gid = user_info.gid,
-            "authentication succeeded"
-        );
-
-        let username = auth_request.username;
-
-        // Create the inner RFnOnce: drop privileges + run session.
-        let start_session_fn: StartSessionFn =
-            remoc::rfn::RFnOnce::new_1(move |bootstrap: SessionBootstrap| async move {
-                tracing::info!(%username, "starting session");
-
-                if nix::unistd::getuid().is_root() {
-                    drop_privileges(user_info.uid, user_info.gid, &username).map_err(|e| {
-                        SessionRunError::DropPrivileges {
+                #[cfg(feature = "pam")]
+                AuthCredential::Certificate => {
+                    // mTLS: skip password authentication, but still perform
+                    // PAM acct_mgmt + open_session for system session creation.
+                    dssh::session::pam::open_session("sshd", &auth_request.username)
+                        .await
+                        .map_err(|e| AuthError::PamFailed {
                             reason: Report::from_error(e).to_string(),
-                        }
-                    })?;
-                    tracing::info!(
-                        uid = user_info.uid,
-                        gid = user_info.gid,
-                        "privileges dropped"
-                    );
+                        })?
                 }
-
-                // Resolve control stream from FD registry.
-                let fds = fd_registry
-                    .wait_fds(bootstrap.control_fd_id)
-                    .await
-                    .map_err(|e| SessionRunError::ConversationBuild {
-                        reason: Report::from_error(e).to_string(),
-                    })?;
-                let ctrl_fd =
-                    fds.into_iter()
-                        .next()
-                        .ok_or_else(|| SessionRunError::ConversationBuild {
-                            reason: "expected 1 FD for control stream, got 0".into(),
+                #[cfg(not(feature = "pam"))]
+                AuthCredential::Certificate => {
+                    // mTLS without PAM: look up user directly from /etc/passwd.
+                    let user_info = dssh::session::lookup_user(&auth_request.username)
+                        .await
+                        .map_err(|e| AuthError::PamFailed {
+                            reason: Report::from_error(e).to_string(),
                         })?;
-                let ctrl_unix = {
-                    let ctrl_std = std::os::unix::net::UnixStream::from(ctrl_fd);
-                    ctrl_std.set_nonblocking(true).map_err(|e| {
-                        SessionRunError::ConversationBuild {
-                            reason: format!("failed to set control FD nonblocking: {e}"),
-                        }
-                    })?;
-                    tokio::net::UnixStream::from_std(ctrl_std).map_err(|e| {
-                        SessionRunError::ConversationBuild {
-                            reason: format!("failed to convert control FD to tokio stream: {e}"),
-                        }
-                    })?
-                };
-                let (control_reader, control_writer) = ctrl_unix.into_split();
+                    // Without PAM, explicitly check /etc/nologin.
+                    if let Err(msg) = dssh::session::check_nologin(user_info.uid) {
+                        return Err(AuthError::PamFailed { reason: msg });
+                    }
+                    user_info
+                }
+            };
 
-                // Create IPC manage stream handle.
-                let manage_stream = dssh::conversation::ipc::IpcManageStreamHandle::new(
-                    bootstrap.manage_stream,
-                    fd_registry,
-                );
+            tracing::info!(
+                uid = user_info.uid,
+                gid = user_info.gid,
+                "authentication succeeded"
+            );
 
-                let conversation = Arc::new(Conversation::new(
-                    bootstrap.conversation_id,
-                    bootstrap.peer_version,
-                    control_reader,
-                    control_writer,
-                    manage_stream,
-                ));
+            let username = auth_request.username;
+            let control_receiver = fd_transfer.receive();
+            let control_fd_id = control_receiver.id();
+            let session_fd_transfer = fd_transfer.clone();
 
-                let config = SessionConfig {
-                    user: user_info,
-                    ..Default::default()
-                };
+            // Create the inner RFnOnce: drop privileges + run session.
+            let start_session_fn: StartSessionFn =
+                remoc::rfn::RFnOnce::new_1(move |bootstrap: SessionBootstrap| async move {
+                    tracing::info!(%username, "starting session");
 
-                tracing::info!("session dispatcher starting");
-                run_session(conversation, config).await;
-                tracing::info!("session ended");
-                Ok(())
-            });
+                    if nix::unistd::getuid().is_root() {
+                        drop_privileges(user_info.uid, user_info.gid, &username).map_err(|e| {
+                            SessionRunError::DropPrivileges {
+                                reason: Report::from_error(e).to_string(),
+                            }
+                        })?;
+                        tracing::info!(
+                            uid = user_info.uid,
+                            gid = user_info.gid,
+                            "privileges dropped"
+                        );
+                    }
 
-        Ok(start_session_fn)
+                    // Resolve control stream from the receiver reserved during authentication.
+                    let received =
+                        control_receiver
+                            .await
+                            .map_err(|e| SessionRunError::ConversationBuild {
+                                reason: Report::from_error(e).to_string(),
+                            })?;
+                    let ctrl_fd =
+                        received
+                            .into_one()
+                            .map_err(|e| SessionRunError::ConversationBuild {
+                                reason: Report::from_error(e).to_string(),
+                            })?;
+                    let ctrl_unix = {
+                        let ctrl_std = std::os::unix::net::UnixStream::from(ctrl_fd);
+                        ctrl_std.set_nonblocking(true).map_err(|e| {
+                            SessionRunError::ConversationBuild {
+                                reason: format!("failed to set control FD nonblocking: {e}"),
+                            }
+                        })?;
+                        tokio::net::UnixStream::from_std(ctrl_std).map_err(|e| {
+                            SessionRunError::ConversationBuild {
+                                reason: format!(
+                                    "failed to convert control FD to tokio stream: {e}"
+                                ),
+                            }
+                        })?
+                    };
+                    let (control_reader, control_writer) = ctrl_unix.into_split();
+
+                    // Create IPC manage stream handle.
+                    let manage_stream = dssh::conversation::ipc::IpcManageStreamHandle::new(
+                        bootstrap.manage_stream,
+                        session_fd_transfer,
+                    );
+
+                    let conversation = Arc::new(Conversation::new(
+                        bootstrap.conversation_id,
+                        bootstrap.peer_version,
+                        control_reader,
+                        control_writer,
+                        manage_stream,
+                    ));
+
+                    let config = SessionConfig {
+                        user: user_info,
+                        ..Default::default()
+                    };
+
+                    tracing::info!("session dispatcher starting");
+                    run_session(conversation, config).await;
+                    tracing::info!("session ended");
+                    Ok(())
+                });
+
+            Ok(AuthenticatedSession {
+                start_session: start_session_fn,
+                control_fd_id,
+            })
+        }
     });
 
     tokio::select! {

@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use dhttp::name::DhttpName;
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
+#[cfg(feature = "sshd")]
+use h3x::ipc::transport::FdVec;
 use h3x::ipc::{
     quic::{
         ConnectAdapter, IpcConnectClient, IpcConnectServerShared, IpcListenServerSharedMut,
         ListenAdapter,
     },
-    transport::FdSender,
+    transport::FdTransfer,
 };
 use nix::unistd::Pid;
 #[cfg(feature = "sshd")]
@@ -45,16 +47,16 @@ use crate::{
 pub struct WorkerControlPlane {
     caller_pid: Pid,
     state: Arc<RootState>,
-    /// FdSender from the root-side MuxChannel, used to pass FDs to worker.
-    fd_sender: FdSender,
+    /// FD transfer plane from the root-side MuxChannel.
+    fd_transfer: FdTransfer,
 }
 
 impl WorkerControlPlane {
-    pub fn new(caller_pid: Pid, state: Arc<RootState>, fd_sender: FdSender) -> Self {
+    pub fn new(caller_pid: Pid, state: Arc<RootState>, fd_transfer: FdTransfer) -> Self {
         Self {
             caller_pid,
             state,
-            fd_sender,
+            fd_transfer,
         }
     }
 
@@ -64,7 +66,7 @@ impl WorkerControlPlane {
         server_name: String,
         adapter: crate::listen::RegisteredEndpoint,
     ) -> Result<h3x::ipc::quic::IpcListenClient, String> {
-        let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_sender.clone());
+        let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_transfer.clone());
         let (server, client) =
             IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
         let spawned = self
@@ -226,7 +228,8 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         });
 
         // Wrap the endpoint in ConnectAdapter for IPC capability forwarding.
-        let connect_adapter = ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_sender.clone());
+        let connect_adapter =
+            ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_transfer.clone());
         let (server, client) = IpcConnectServerShared::new(Arc::new(connect_adapter), 64);
         let spawned = self
             .state
@@ -256,14 +259,31 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         Ok(client)
     }
 
-    async fn spawn_session(&self, username: String) -> Result<u64, crate::ipc::SpawnSessionError> {
+    async fn spawn_session(
+        &self,
+        username: String,
+        fd_id_raw: u64,
+    ) -> Result<u64, crate::ipc::SpawnSessionError> {
         #[cfg(feature = "sshd")]
         {
             tracing::info!(
                 caller_pid = %self.caller_pid,
                 %username,
+                fd_id = fd_id_raw,
                 "spawn session request received"
             );
+
+            let fd_id = h3x::varint::VarInt::try_from(fd_id_raw).map_err(|error| {
+                crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: snafu::Report::from_error(&error).to_string(),
+                }
+            })?;
+            let delivery = self.fd_transfer.delivery(fd_id);
+            if delivery.is_cancelled() {
+                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: "session fd delivery cancelled before launch".to_owned(),
+                });
+            }
 
             // Fork the session process as root (no privilege drop).
             let transport =
@@ -273,19 +293,22 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     }
                 })?;
 
-            // Send the session child's MuxChannel FD to the worker via the
-            // root-side MuxChannel's FD sender. The worker will pick it up
-            // from FdRegistry using the returned VarInt id.
             let child_pid = transport.child_pid;
-            let fd_id = match self.fd_sender.queue_fds(vec![transport.mux_fd].into()) {
-                Ok(fd_id) => fd_id,
-                Err(error) => {
-                    terminate_session_child(child_pid).await;
-                    return Err(crate::ipc::SpawnSessionError::SpawnFailed {
-                        reason: snafu::Report::from_error(error).to_string(),
-                    });
-                }
-            };
+            if delivery.is_cancelled() {
+                terminate_session_child(child_pid).await;
+                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: "session fd delivery cancelled after launch".to_owned(),
+                });
+            }
+
+            let mut fds = FdVec::new();
+            fds.push(transport.mux_fd);
+            if let Err(error) = delivery.deliver(fds).await {
+                terminate_session_child(child_pid).await;
+                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
+                    reason: snafu::Report::from_error(&error).to_string(),
+                });
+            }
 
             // Reap the session child process to avoid zombies. The reaper is
             // scoped to the worker so worker cleanup can cancel it and then
@@ -310,13 +333,13 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 caller_pid = %self.caller_pid,
                 %username,
                 fd_id = %fd_id,
-                "session spawned, FD queued for worker"
+                "session spawned, FD delivered to worker"
             );
             Ok(u64::from(fd_id))
         }
         #[cfg(not(feature = "sshd"))]
         {
-            let _ = username;
+            let _ = (username, fd_id_raw);
             Err(crate::ipc::SpawnSessionError::NotSupported)
         }
     }

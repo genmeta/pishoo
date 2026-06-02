@@ -109,7 +109,7 @@ pub enum SpawnSessionError {
 /// Workers call these methods to request listeners and connectors from root.
 /// The returned [`IpcListenClient`] / [`IpcConnectClient`] are used by the
 /// worker to construct [`IpcListener`] / [`IpcConnector`] with the local
-/// [`FdRegistry`](h3x::ipc::transport::FdRegistry).
+/// [`FdTransfer`](h3x::ipc::transport::FdTransfer).
 #[remoc::rtc::remote]
 pub trait ControlPlane: Send + Sync {
     /// Request a QUIC listener for the given server configuration.
@@ -136,11 +136,9 @@ pub trait ControlPlane: Send + Sync {
 
     /// Request root to spawn an SSH session child process for the given user.
     ///
-    /// Root forks `pishoo-ssh-session` as root (for PAM), then queues the
-    /// child's MuxChannel FD to the worker via the root-side MuxChannel's
-    /// [`FdSender`](h3x::ipc::transport::FdSender). The returned `u64` is
-    /// the FD batch ID — the worker passes it to
-    /// [`FdRegistry::wait_fds`](h3x::ipc::transport::FdRegistry::wait_fds)
-    /// to receive the FD.
-    async fn spawn_session(&self, username: String) -> Result<u64, SpawnSessionError>;
+    /// Root forks `pishoo-ssh-session` as root (for PAM), then delivers the
+    /// child's MuxChannel FD to the worker through the worker-chosen `fd_id`.
+    /// The returned `u64` echoes `fd_id` after the FD delivery is acknowledged
+    /// by the worker.
+    async fn spawn_session(&self, username: String, fd_id: u64) -> Result<u64, SpawnSessionError>;
 }
