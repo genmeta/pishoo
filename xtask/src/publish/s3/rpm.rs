@@ -8,7 +8,7 @@ use std::{
 use aws_sdk_s3::Client;
 use bollard::{
     Docker,
-    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountTypeEnum},
+    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountType},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     },
@@ -367,7 +367,7 @@ impl RpmStageContainer {
                         mounts: Some(vec![Mount {
                             target: Some(RPM_REPOSITORY_TARGET.to_string()),
                             source: Some(path_to_mount_source(repository)?),
-                            typ: Some(MountTypeEnum::BIND),
+                            typ: Some(MountType::BIND),
                             ..Default::default()
                         }]),
                         ..Default::default()

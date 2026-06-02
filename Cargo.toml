@@ -4,7 +4,7 @@ members = ["gateway", "pishoo", "xtask"]
 
 [workspace.dependencies]
 # --- Core & Error Handling ---
-snafu = "0.8"
+snafu = "0.9"
 
 # --- Async Runtime & Utilities ---
 tokio = { version = "1", features = ["full"] }
@@ -68,7 +68,7 @@ ddns = { git = "https://github.com/genmeta/ddns.git", branch = "endpoint", featu
 ] }
 
 # --- Security & TLS ---
-getrandom = "0.3.1"
+getrandom = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

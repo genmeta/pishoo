@@ -8,7 +8,7 @@ use std::{
 use aws_sdk_s3::Client;
 use bollard::{
     Docker,
-    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountTypeEnum},
+    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountType},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     },
@@ -623,13 +623,13 @@ impl AptStageContainer {
             Mount {
                 target: Some(APT_REPOSITORY_TARGET.to_string()),
                 source: Some(path_to_mount_source(repository)?),
-                typ: Some(MountTypeEnum::BIND),
+                typ: Some(MountType::BIND),
                 ..Default::default()
             },
             Mount {
                 target: Some(APT_KEY_TARGET.to_string()),
                 source: Some(path_to_mount_source(&key_file)?),
-                typ: Some(MountTypeEnum::BIND),
+                typ: Some(MountType::BIND),
                 read_only: Some(true),
                 ..Default::default()
             },
@@ -638,7 +638,7 @@ impl AptStageContainer {
             mounts.push(Mount {
                 target: Some(APT_PASSPHRASE_TARGET.to_string()),
                 source: Some(path_to_mount_source(passphrase_file)?),
-                typ: Some(MountTypeEnum::BIND),
+                typ: Some(MountType::BIND),
                 read_only: Some(true),
                 ..Default::default()
             });

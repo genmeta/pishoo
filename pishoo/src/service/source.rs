@@ -636,7 +636,22 @@ pub(crate) fn compute_identity_fingerprint(identity: &dhttp::identity::Identity)
     key_digest.update(identity.key.secret_der());
     let key_digest = key_digest.finalize();
 
-    format!("{}@{:x}@{:x}", identity.name(), cert_digest, key_digest)
+    format!(
+        "{}@{}@{}",
+        identity.name(),
+        hex_lower(cert_digest.as_ref()),
+        hex_lower(key_digest.as_ref())
+    )
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 #[cfg(test)]

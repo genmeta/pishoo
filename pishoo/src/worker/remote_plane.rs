@@ -48,16 +48,16 @@ impl RemoteControlPlane {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum RemoteSpawnSessionError {
-    #[snafu(display("RPC to root failed"))]
+    #[snafu(display("rpc to root failed"))]
     Rpc {
         source: crate::ipc::SpawnSessionError,
     },
-    #[snafu(display("invalid FD batch id {id} from root"))]
+    #[snafu(display("invalid fd batch id {id} from root"))]
     InvalidFdId {
         id: u64,
         source: h3x::varint::err::Overflow,
     },
-    #[snafu(display("failed to receive session FD from root"))]
+    #[snafu(display("failed to receive session fd from root"))]
     ReceiveFd {
         source: h3x::ipc::transport::WaitFdsError,
     },

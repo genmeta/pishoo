@@ -64,7 +64,7 @@ tracing-appender = { workspace = true }
 pnet = "0.35.0"
 
 [target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
-getifs = "0.3"
+getifs = "0.6"
 
 
 [features]

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use bollard::{
     Docker,
-    models::{Mount, MountTypeEnum},
+    models::{Mount, MountType},
     query_parameters::{RemoveContainerOptionsBuilder, StartContainerOptions},
 };
 use futures_util::StreamExt;
@@ -74,7 +74,7 @@ pub(crate) fn dhttp_bootstrap_from_values(
         mounts.push(Mount {
             target: Some(DHTTP_BOOTSTRAP_ROOT_CA_TARGET.to_string()),
             source: Some(host_path.to_string_lossy().into_owned()),
-            typ: Some(MountTypeEnum::BIND),
+            typ: Some(MountType::BIND),
             read_only: Some(true),
             ..Default::default()
         });
@@ -220,7 +220,7 @@ pub(crate) async fn exec_in_container(
 /// This avoids re-downloading crates and allows private git dependencies
 /// to work without SSH credentials in the container.
 pub(crate) fn cargo_cache_mounts() -> Vec<Mount> {
-    use bollard::models::MountTypeEnum;
+    use bollard::models::MountType;
 
     let cargo_home = std::env::var("CARGO_HOME")
         .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
@@ -231,7 +231,7 @@ pub(crate) fn cargo_cache_mounts() -> Vec<Mount> {
             mounts.push(Mount {
                 target: Some(format!("{CARGO_HOME}/{subdir}")),
                 source: Some(host_path),
-                typ: Some(MountTypeEnum::BIND),
+                typ: Some(MountType::BIND),
                 ..Default::default()
             });
         }
@@ -275,7 +275,7 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
 mod tests {
     use std::collections::BTreeMap;
 
-    use bollard::models::MountTypeEnum;
+    use bollard::models::MountType;
 
     use super::*;
 
@@ -325,7 +325,7 @@ mod tests {
                     .expect("utf-8 path")
             )
         );
-        assert_eq!(mount.typ, Some(MountTypeEnum::BIND));
+        assert_eq!(mount.typ, Some(MountType::BIND));
         assert_eq!(mount.read_only, Some(true));
 
         assert!(

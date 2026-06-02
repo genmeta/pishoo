@@ -386,7 +386,7 @@ async fn sha256_stream(mut body: ByteStream, key: &str) -> Result<String, Whatev
     {
         hasher.update(&bytes);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::hex_lower(hasher.finalize().as_ref()))
 }
 
 async fn client(options: &S3Options) -> Result<Client, Whatever> {

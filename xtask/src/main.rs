@@ -12,6 +12,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use snafu::{OptionExt, ResultExt, Whatever};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Build & packaging tasks for pishoo")]
 struct Cli {
@@ -212,13 +222,24 @@ fn package_meta(name: &str) -> Result<PackageMeta, Whatever> {
 async fn sha256_file(path: &std::path::Path) -> Result<String, Whatever> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
         use sha2::Digest;
+
         let mut file = std::fs::File::open(&path)
             .whatever_context(format!("failed to open {}", path.display()))?;
         let mut hasher = sha2::Sha256::new();
-        std::io::copy(&mut file, &mut hasher)
-            .whatever_context(format!("failed to read {}", path.display()))?;
-        Ok(format!("{:x}", hasher.finalize()))
+        let mut buffer = [0; 8192];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .whatever_context(format!("failed to read {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hex_lower(hasher.finalize().as_ref()))
     })
     .await
     .whatever_context("sha256 task panicked")?
