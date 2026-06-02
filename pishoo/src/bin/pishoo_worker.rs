@@ -59,6 +59,7 @@ async fn main() -> Result<(), Whatever> {
     let worker_tasks = Arc::new(pishoo::hypervisor::task_scope::TaskScope::new());
     worker_tasks.spawn(|token| async move {
         tokio::select! {
+            biased;
             () = token.cancelled() => {}
             result = conn.in_current_span() => {
                 if let Err(error) = result {

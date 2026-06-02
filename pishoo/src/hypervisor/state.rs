@@ -14,22 +14,19 @@ mod process_ops;
 mod server_ops;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
 
-use dhttp::{ddns::publisher::CreatePublisherError, endpoint::Endpoint, name::DhttpName};
+use dhttp::{ddns::publisher::CreatePublisherError, endpoint::Endpoint};
 use h3x::{dquic::Network, quic::Listen as _};
 use nix::{
     sys::wait::WaitStatus,
     unistd::{Pid, Uid},
 };
 use snafu::{Report, Snafu};
-use tokio::{
-    sync::{Mutex, RwLock},
-    task::JoinHandle,
-};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::hypervisor::{
     endpoint_factory::BuildEndpointResolverError,
@@ -170,8 +167,6 @@ pub(super) struct WorkerProcessRecord {
     pub(super) uid: Uid,
     /// The username this worker runs as.
     pub(super) username: String,
-    /// Set of server_names owned by this worker.
-    pub(super) owned_servers: HashSet<DhttpName<'static>>,
     /// Structured task scope for root-side tasks owned by this worker.
     pub(super) tasks: TaskScope,
     /// Handle to the spawned worker process.
@@ -210,9 +205,9 @@ pub(super) struct Inner {
 
 /// Root-side ownership registry (thread-safe, interior mutability).
 ///
-/// Tracks `server_name → owner`, `pid → owned_servers`, and `uid → pid`
-/// mappings. Owns the shared [`Network`] used for every server registration,
-/// and coordinates all server registration / cleanup.
+/// Tracks `server_name → owner` and `uid → pid` mappings. Owns the shared
+/// [`Network`] used for every server registration, and coordinates all server
+/// registration / cleanup.
 pub struct RootState {
     /// Shared QUIC network with installed SNI dispatcher.
     pub network: Arc<Network>,
@@ -230,7 +225,7 @@ pub(super) struct ListenerResource {
     endpoint: Endpoint,
     shutdown_token: CancellationToken,
     publish_token: CancellationToken,
-    publish_task: Option<JoinHandle<()>>,
+    publish_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl ListenerResource {
@@ -238,7 +233,7 @@ impl ListenerResource {
         endpoint: Endpoint,
         shutdown_token: CancellationToken,
         publish_token: CancellationToken,
-        publish_task: Option<JoinHandle<()>>,
+        publish_task: Option<AbortOnDropHandle<()>>,
     ) -> Self {
         Self {
             endpoint,

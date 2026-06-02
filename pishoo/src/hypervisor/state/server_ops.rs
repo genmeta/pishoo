@@ -65,12 +65,11 @@ impl RootState {
                 AcquirePlan::Duplicate => return Err(AcquireListenerError::DuplicateListen),
                 AcquirePlan::Conflict => return Err(AcquireListenerError::ConflictedName),
                 AcquirePlan::DestroyConflict {
-                    owner: old_owner,
+                    owner: _old_owner,
                     resource,
                     done,
                 } => {
                     resource.destroy().await;
-                    self.remove_owned_listener(old_owner, &server_name).await;
                     let mut registry = self.listeners.write().await;
                     registry.finish_destroying(&server_name, &done, DestroyFinish::Poisoned);
                     return Err(AcquireListenerError::ConflictedName);
@@ -94,7 +93,6 @@ impl RootState {
             match plan {
                 ReleasePlan::Destroy { resource, done } => {
                     resource.destroy().await;
-                    self.remove_owned_listener(owner, server_name).await;
                     let mut registry = self.listeners.write().await;
                     registry.finish_destroying(server_name, &done, DestroyFinish::Vacant);
                     return Ok(());
@@ -123,7 +121,6 @@ impl RootState {
             match plan {
                 RebuildPlan::Destroy { resource, done } => {
                     resource.destroy().await;
-                    self.remove_owned_listener(owner, &server_name).await;
 
                     let creating_done = {
                         let mut registry = self.listeners.write().await;
@@ -245,9 +242,10 @@ impl RootState {
 
         let publish_token = CancellationToken::new();
         let publish_shutdown = publish_token.clone();
-        let publish_task = Some(release_scope.spawn(move |owner_token| {
+        let publish_task = Some(release_scope.spawn_handle(move |owner_token| {
             async move {
                 tokio::select! {
+                    biased;
                     () = owner_token.cancelled() => {}
                     () = publish_shutdown.cancelled() => {}
                     () = async { publisher.run().await } => {}
@@ -292,7 +290,6 @@ impl RootState {
             registry.commit_creating(owner, server_name.clone(), &done, resource)
         };
         if committed {
-            self.record_owned_listener(owner, server_name).await;
             Ok(registered)
         } else {
             registered.destroy_without_registry_release().await;
@@ -300,7 +297,7 @@ impl RootState {
         }
     }
 
-    async fn task_scope_for_owner(
+    pub(crate) async fn task_scope_for_owner(
         &self,
         owner: Owner,
     ) -> Option<crate::hypervisor::task_scope::TaskScope> {
@@ -311,26 +308,6 @@ impl RootState {
                 let process = inner.processes.get(&pid)?;
                 (process.uid == uid).then(|| process.tasks.clone())
             }
-        }
-    }
-
-    async fn record_owned_listener(&self, owner: Owner, server_name: DhttpName<'static>) {
-        let Owner::Worker { pid, .. } = owner else {
-            return;
-        };
-        let mut inner = self.inner.lock().await;
-        if let Some(process) = inner.processes.get_mut(&pid) {
-            process.owned_servers.insert(server_name);
-        }
-    }
-
-    async fn remove_owned_listener(&self, owner: Owner, server_name: &DhttpName<'static>) {
-        let Owner::Worker { pid, .. } = owner else {
-            return;
-        };
-        let mut inner = self.inner.lock().await;
-        if let Some(process) = inner.processes.get_mut(&pid) {
-            process.owned_servers.remove(server_name);
         }
     }
 }

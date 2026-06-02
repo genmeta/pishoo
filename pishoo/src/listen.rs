@@ -78,8 +78,9 @@ impl h3x::quic::Listen for RegisteredEndpoint {
 
     async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
         tokio::select! {
-            result = self.endpoint.accept() => Ok(result?),
+            biased;
             () = self.shutdown_token.cancelled() => Err(RegisteredEndpointError::Shutdown),
+            result = self.endpoint.accept() => Ok(result?),
         }
     }
 

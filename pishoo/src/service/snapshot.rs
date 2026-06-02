@@ -92,6 +92,11 @@ impl ServerService {
 
         async move {
             tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    // Intentionally not calling endpoint.shutdown() —
+                    // preserve the underlying QUIC listener bindings.
+                }
                 result = endpoint.listen(service) => {
                     match result {
                         Ok(()) => {
@@ -105,10 +110,6 @@ impl ServerService {
                             );
                         }
                     }
-                }
-                () = shutdown.cancelled() => {
-                    // Intentionally not calling endpoint.shutdown() —
-                    // preserve the underlying QUIC listener bindings.
                 }
             }
             endpoint.into_quic()

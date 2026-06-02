@@ -114,11 +114,9 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         // Track the session child under the local service scope so root
         // shutdown can cancel the reaper, terminate the child, and wait until
         // it is reaped.
-        self.state
-            .spawn_local_task(move |token| async move {
-                reap_local_session_child(child, token).await;
-            })
-            .await;
+        self.state.spawn_local_task(move |token| async move {
+            reap_local_session_child(child, token).await;
+        });
 
         // Drop the child end in the parent; the child has it via FD 3.
         drop(child_sock);
@@ -150,6 +148,7 @@ async fn reap_local_session_child(mut child: tokio::process::Child, token: Cance
         }
 
         tokio::select! {
+            biased;
             () = token.cancelled() => {
                 terminate_local_session_child(child).await;
                 return;

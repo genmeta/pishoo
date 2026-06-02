@@ -8,7 +8,6 @@ use std::sync::Arc;
 #[cfg(feature = "sshd")]
 use std::time::Duration;
 
-use dhttp::name::DhttpName;
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 #[cfg(feature = "sshd")]
 use h3x::ipc::transport::FdVec;
@@ -33,7 +32,7 @@ use remoc::prelude::{ServerShared, ServerSharedMut};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{endpoint_factory, state::RootState};
+use super::{endpoint_factory, state::RootState, task_scope::TaskScope};
 use crate::{
     hypervisor::state::{AcquireListenerError, RebuildListenerError},
     ipc::{ConnectError, ListenError, RebuildListenError},
@@ -60,43 +59,32 @@ impl WorkerControlPlane {
         }
     }
 
-    async fn wrap_listener(
+    fn wrap_listener(
         &self,
-        owner: super::state::owner::Owner,
+        task_scope: TaskScope,
         server_name: String,
         adapter: crate::listen::RegisteredEndpoint,
-    ) -> Result<h3x::ipc::quic::IpcListenClient, String> {
+    ) -> h3x::ipc::quic::IpcListenClient {
         let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_transfer.clone());
         let (server, client) =
             IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
-        let spawned = self
-            .state
-            .spawn_worker_task(self.caller_pid, |token| {
-                async move {
-                    tokio::select! {
-                        () = token.cancelled() => {}
-                        _ = server.serve(true) => {}
-                    }
+        task_scope.spawn(|token| {
+            async move {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {}
+                    _ = server.serve(true) => {}
                 }
-                .in_current_span()
-            })
-            .await;
-        if !spawned {
-            let dhttp_name = DhttpName::try_from(server_name.clone())
-                .expect("listen request identity must be a dhttp name");
-            let _ = self.state.release_listener(owner, &dhttp_name).await;
-            return Err(format!(
-                "worker {} exited before IPC listener was ready",
-                self.caller_pid
-            ));
-        }
+            }
+            .in_current_span()
+        });
 
         tracing::debug!(
             caller_pid = %self.caller_pid,
             %server_name,
             "listener request fulfilled (IPC)"
         );
-        Ok(client)
+        client
     }
 }
 
@@ -115,6 +103,13 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let owner = self
             .state
             .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| ListenError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
+        let task_scope = self
+            .state
+            .task_scope_for_owner(owner)
             .await
             .ok_or_else(|| ListenError::Internal {
                 message: format!("unknown caller pid {}", self.caller_pid),
@@ -147,9 +142,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 }
             })?;
 
-        self.wrap_listener(owner, server_name.clone(), adapter)
-            .await
-            .map_err(|message| ListenError::Internal { message })
+        Ok(self.wrap_listener(task_scope, server_name.clone(), adapter))
     }
 
     async fn rebuild_listener(
@@ -160,6 +153,13 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let owner = self
             .state
             .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| RebuildListenError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
+        let task_scope = self
+            .state
+            .task_scope_for_owner(owner)
             .await
             .ok_or_else(|| RebuildListenError::Internal {
                 message: format!("unknown caller pid {}", self.caller_pid),
@@ -196,18 +196,25 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 }
             })?;
 
-        self.wrap_listener(owner, server_name.clone(), adapter)
-            .await
-            .map_err(|message| RebuildListenError::Internal { message })
+        Ok(self.wrap_listener(task_scope, server_name.clone(), adapter))
     }
 
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError> {
         // Verify caller is a registered worker.
-        if !self.state.has_worker(self.caller_pid).await {
-            return Err(ConnectError::Internal {
+        let owner = self
+            .state
+            .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| ConnectError::Internal {
                 message: format!("unknown caller pid {}", self.caller_pid),
-            });
-        }
+            })?;
+        let task_scope = self
+            .state
+            .task_scope_for_owner(owner)
+            .await
+            .ok_or_else(|| ConnectError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
 
         // Build a DHTTP endpoint with the requested client identity (if any).
         let endpoint = endpoint_factory::build_connector_endpoint(
@@ -231,26 +238,16 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
         let connect_adapter =
             ConnectAdapter::<_, IpcCodec>::new(endpoint, self.fd_transfer.clone());
         let (server, client) = IpcConnectServerShared::new(Arc::new(connect_adapter), 64);
-        let spawned = self
-            .state
-            .spawn_worker_task(self.caller_pid, |token| {
-                async move {
-                    tokio::select! {
-                        () = token.cancelled() => {}
-                        _ = server.serve(true) => {}
-                    }
+        task_scope.spawn(|token| {
+            async move {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {}
+                    _ = server.serve(true) => {}
                 }
-                .in_current_span()
-            })
-            .await;
-        if !spawned {
-            return Err(ConnectError::Internal {
-                message: format!(
-                    "worker {} exited before IPC connector was ready",
-                    self.caller_pid
-                ),
-            });
-        }
+            }
+            .in_current_span()
+        });
 
         tracing::debug!(
             caller_pid = %self.caller_pid,
@@ -293,9 +290,9 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     }
                 })?;
 
-            let child_pid = transport.child_pid;
+            let child = SessionChildGuard::new(transport.child_pid);
             if delivery.is_cancelled() {
-                terminate_session_child(child_pid).await;
+                child.terminate().await;
                 return Err(crate::ipc::SpawnSessionError::SpawnFailed {
                     reason: "session fd delivery cancelled after launch".to_owned(),
                 });
@@ -304,7 +301,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             let mut fds = FdVec::new();
             fds.push(transport.mux_fd);
             if let Err(error) = delivery.deliver(fds).await {
-                terminate_session_child(child_pid).await;
+                child.terminate().await;
                 return Err(crate::ipc::SpawnSessionError::SpawnFailed {
                     reason: snafu::Report::from_error(&error).to_string(),
                 });
@@ -315,19 +312,21 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             // wait for the session child to be terminated and reaped.
             let state = self.state.clone();
             let caller_pid = self.caller_pid;
+            let child_pid = child.pid();
             let spawned_reaper = state
                 .spawn_worker_task(caller_pid, move |token| async move {
                     reap_session_child(child_pid, token).await;
                 })
                 .await;
             if !spawned_reaper {
-                terminate_session_child(child_pid).await;
+                child.terminate().await;
                 return Err(crate::ipc::SpawnSessionError::SpawnFailed {
                     reason: format!(
                         "worker {caller_pid} exited before session reaper was registered"
                     ),
                 });
             }
+            child.disarm();
 
             tracing::info!(
                 caller_pid = %self.caller_pid,
@@ -346,6 +345,53 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
 }
 
 #[cfg(feature = "sshd")]
+struct SessionChildGuard {
+    child_pid: Pid,
+    armed: bool,
+}
+
+#[cfg(feature = "sshd")]
+impl SessionChildGuard {
+    fn new(child_pid: Pid) -> Self {
+        Self {
+            child_pid,
+            armed: true,
+        }
+    }
+
+    fn pid(&self) -> Pid {
+        self.child_pid
+    }
+
+    fn disarm(mut self) -> Pid {
+        self.armed = false;
+        self.child_pid
+    }
+
+    async fn terminate(mut self) {
+        let child_pid = self.child_pid;
+        self.armed = false;
+        terminate_session_child(child_pid).await;
+    }
+}
+
+#[cfg(feature = "sshd")]
+impl Drop for SessionChildGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        tracing::warn!(
+            child_pid = %self.child_pid,
+            "session child ownership handoff cancelled before reaper registration"
+        );
+        send_session_signal(self.child_pid, Signal::SIGKILL);
+        let _ = poll_session_child(self.child_pid);
+    }
+}
+
+#[cfg(feature = "sshd")]
 async fn reap_session_child(child_pid: Pid, token: CancellationToken) {
     let poll_interval = Duration::from_millis(50);
 
@@ -355,6 +401,7 @@ async fn reap_session_child(child_pid: Pid, token: CancellationToken) {
         }
 
         tokio::select! {
+            biased;
             () = token.cancelled() => {
                 terminate_session_child(child_pid).await;
                 return;

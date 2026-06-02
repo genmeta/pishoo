@@ -25,7 +25,7 @@ impl RootState {
     }
 
     /// Spawn and track a root-side background task owned by the local service.
-    pub async fn spawn_local_task<F, Fut>(&self, task: F)
+    pub fn spawn_local_task<F, Fut>(&self, task: F)
     where
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -93,7 +93,6 @@ impl RootState {
             WorkerProcessRecord {
                 uid,
                 username: username.clone(),
-                owned_servers: HashSet::new(),
                 tasks: TaskScope::new(),
                 worker_handle,
             },
