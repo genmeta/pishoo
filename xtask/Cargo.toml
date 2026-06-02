@@ -6,7 +6,14 @@ publish = false
 
 [dependencies]
 aws-credential-types = "1"
-aws-sdk-s3 = "1"
+# Keep default `default-https-client` disabled. It pulls aws-lc, and aws-lc-sys
+# fails to assemble on i686-pc-windows-msvc under clang-cl during release
+# cross-builds. Enable only the rustls/ring-backed features used by S3 publish.
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "rustls",
+    "sigv4a",
+] }
 bollard = "0.19"
 cargo_metadata = "0.19"
 clap = { version = "4", features = ["derive", "env"] }
