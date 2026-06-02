@@ -14,10 +14,8 @@ snafu = { workspace = true }
 
 # --- Async Runtime & Utilities ---
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["io", "rt"] }
 futures = { workspace = true }
-async-trait = { workspace = true }
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }
@@ -27,7 +25,6 @@ tracing-subscriber = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 url = { workspace = true }
-http-body = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -38,29 +35,20 @@ dhttp-access = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = "2"
-getrandom = { workspace = true }
 
 # --- DNS resolver ---
 ddns = { workspace = true }
 h3x = { workspace = true, features = ["rpc"] }
 
 # --- Data Structures & Utilities ---
-dashmap = { workspace = true }
 peg = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 socket2 = { workspace = true }
-crossterm = { workspace = true }
-rpassword = { workspace = true }
-base64 = { workspace = true }
-derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
-x509-parser = { workspace = true }
 
 dssh = { workspace = true, optional = true }
 remoc = { workspace = true }
@@ -77,10 +65,6 @@ pnet = "0.35.0"
 
 [target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
 getifs = "0.3"
-
-
-[dev-dependencies]
-clap = { workspace = true }
 
 
 [features]
