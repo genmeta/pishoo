@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use ddns::{
     core::{MdnsPacket, parser::record::endpoint::EndpointAddr as DnsEndpointAddr},
     mdns::{resolvers::mdns::MdnsResolver, service::Mdns},
-    resolvers::H3Publisher,
+    resolvers::h3::H3Publisher,
 };
 use dhttp::identity::Identity;
 use dhttp_identity::identity::{LocalAuthority, SignError};
@@ -50,7 +50,7 @@ impl PublishConfig {
         ep.set_sequence(self.server_id as u64);
         if let Some((key, scheme)) = &self.signing_key
             && let Err(e) = ep
-                .sign_with_agent(&SigningKeyAuthority {
+                .sign_with_authority(&SigningKeyAuthority {
                     key: key.as_ref(),
                     scheme: *scheme,
                 })

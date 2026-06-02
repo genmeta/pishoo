@@ -55,7 +55,7 @@ async fn create_h3_dns_endpoint(
     bind_patterns: Arc<Vec<BindPattern>>,
 ) -> Result<Arc<dhttp::h3x::dquic::H3Endpoint>, dhttp::endpoint::InvalidEndpointIdentityError> {
     let endpoint = Endpoint::builder()
-        .network(network)
+        .network(network.into())
         .maybe_identity(identity)
         .bind(bind_patterns)
         .dns(DnsScheme::System)
@@ -71,7 +71,7 @@ pub async fn build_registered_endpoint(
     resolver: Resolvers,
 ) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
     Endpoint::builder()
-        .network(network)
+        .network(network.into())
         .identity(identity)
         .bind(bind_patterns)
         .resolver(Arc::new(resolver))
@@ -84,7 +84,7 @@ pub async fn build_connector_endpoint(
     identity: Option<Identity>,
 ) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
     Endpoint::builder()
-        .network(network)
+        .network(network.into())
         .maybe_identity(identity.map(Arc::new))
         .dns(DnsScheme::H3)
         .dns(DnsScheme::Mdns)

@@ -31,7 +31,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "local-time",
 ] }
 tracing-appender = "0.2"
-console-subscriber = "0.4"
+console-subscriber = "0.5"
 
 # --- Networking & HTTP ---
 bytes = "1"
@@ -88,7 +88,7 @@ derive_more = "2"
 dashmap = "6"
 pin-project-lite = "0.2"
 form_urlencoded = "1"
-socket2 = "0.5"
+socket2 = "0.6"
 x509-parser = "0.18"
 dhttp-home = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }
 dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "main" }

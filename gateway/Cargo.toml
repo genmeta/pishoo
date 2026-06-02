@@ -67,8 +67,8 @@ remoc = { workspace = true }
 dhttp = { workspace = true }
 dhttp-home = { workspace = true }
 dhttp-identity = { workspace = true }
-async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }
-chrono = "0.4.42"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+chrono = "0.4"
 tracing-appender = { workspace = true }
 
 # --- Platform Specific Dependencies ---
