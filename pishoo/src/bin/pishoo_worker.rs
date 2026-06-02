@@ -116,6 +116,9 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to create SIGQUIT listener")?;
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .whatever_context("failed to create SIGHUP listener")?;
+    let mut usr1_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            .whatever_context("failed to create SIGUSR1 listener")?;
 
     let router_state = gateway::reverse::router::RouterState {
         #[cfg(feature = "sshd")]
@@ -142,9 +145,12 @@ async fn main() -> Result<(), Whatever> {
                 break;
             }
             _ = hup_signal.recv() => {
-                tracing::info!("received reload signal");
+                tracing::info!(signal = "SIGHUP", "received reload signal");
                 runtime.reload().await;
-                tracing::info!("reload complete");
+                tracing::info!(signal = "SIGHUP", "reload complete");
+            }
+            _ = usr1_signal.recv() => {
+                tracing::info!(signal = "SIGUSR1", "received reopen signal");
             }
         }
     }
