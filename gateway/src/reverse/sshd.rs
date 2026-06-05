@@ -295,6 +295,9 @@ where
     ctrl_cli
         .set_nonblocking(true)
         .context(ControlFromStdSnafu)?;
+    let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
+    let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
+
     let mut fds = h3x::ipc::transport::FdVec::new();
     fds.push(ctrl_cli.into());
     let delivery = fd_transfer
@@ -311,9 +314,6 @@ where
             let _delivered = result.context(DeliverControlFdSnafu)?;
         }
     }
-
-    let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
-    let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
 
     let session_shutdown = token.child_token();
     let mut tasks = JoinSet::new();

@@ -17,7 +17,7 @@ use h3x::dquic::{
     qtraversal::nat::client::{NatType, StunClientsComponent},
 };
 use rustls::{
-    SignatureScheme,
+    SignatureAlgorithm, SignatureScheme,
     pki_types::{CertificateDer, PrivateKeyDer},
     sign::SigningKey,
 };
@@ -41,14 +41,14 @@ pub type Resolvers = Vec<Arc<dyn DnsPublisher + Send + Sync>>;
 pub struct PublishConfig {
     pub resolvers: Resolvers,
     pub server_id: u8,
-    pub signing_key: Option<(Arc<dyn SigningKey>, SignatureScheme)>,
+    pub signing_key: Option<Arc<dyn SigningKey>>,
 }
 
 impl PublishConfig {
     pub(crate) async fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
         ep.set_main(self.server_id == MAIN_SERVER_ID);
         ep.set_sequence(self.server_id as u64);
-        if let Some((key, _scheme)) = &self.signing_key
+        if let Some(key) = &self.signing_key
             && let Err(e) = ep
                 .sign_with_authority(&SigningKeyAuthority { key: key.as_ref() })
                 .await
@@ -477,27 +477,30 @@ fn compute_server_id(name: &str) -> u8 {
     0
 }
 
-fn signing_key_from_der(key: &PrivateKeyDer<'_>) -> Option<(Arc<dyn SigningKey>, SignatureScheme)> {
+fn signing_key_from_der(key: &PrivateKeyDer<'_>) -> Option<Arc<dyn SigningKey>> {
     let key = rustls::crypto::ring::sign::any_supported_type(key).ok()?;
-    let supported_schemes = [
-        SignatureScheme::ECDSA_NISTP256_SHA256,
-        SignatureScheme::ECDSA_NISTP384_SHA384,
-        SignatureScheme::ED25519,
-        SignatureScheme::RSA_PSS_SHA256,
-        SignatureScheme::RSA_PSS_SHA384,
-        SignatureScheme::RSA_PSS_SHA512,
-        SignatureScheme::RSA_PKCS1_SHA256,
-        SignatureScheme::RSA_PKCS1_SHA384,
-        SignatureScheme::RSA_PKCS1_SHA512,
-    ];
-    let scheme = supported_schemes
-        .iter()
-        .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
-        .copied()?;
-    Some((key, scheme))
+    supports_canonical_signing_scheme(key.as_ref()).then_some(key)
 }
 
-fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, SignatureScheme)> {
+fn canonical_signing_schemes(algorithm: SignatureAlgorithm) -> &'static [SignatureScheme] {
+    match algorithm {
+        SignatureAlgorithm::RSA => &[SignatureScheme::RSA_PSS_SHA512],
+        SignatureAlgorithm::ECDSA => &[
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+        ],
+        SignatureAlgorithm::ED25519 => &[SignatureScheme::ED25519],
+        _ => &[],
+    }
+}
+
+fn supports_canonical_signing_scheme(key: &dyn SigningKey) -> bool {
+    canonical_signing_schemes(key.algorithm())
+        .iter()
+        .any(|scheme| key.choose_scheme(&[*scheme]).is_some())
+}
+
+fn load_signing_key(path: &std::path::Path) -> Result<Arc<dyn SigningKey>> {
     use h3x::dquic::prelude::handy::ToPrivateKey;
 
     let key_bytes = std::fs::read(path)
@@ -506,25 +509,11 @@ fn load_signing_key(path: &std::path::Path) -> Result<(Arc<dyn SigningKey>, Sign
     let key = rustls::crypto::ring::sign::any_supported_type(&key_der)
         .whatever_context::<_, Whatever>("unsupported key type")?;
 
-    let supported_schemes = [
-        SignatureScheme::ECDSA_NISTP256_SHA256,
-        SignatureScheme::ECDSA_NISTP384_SHA384,
-        SignatureScheme::ED25519,
-        SignatureScheme::RSA_PSS_SHA256,
-        SignatureScheme::RSA_PSS_SHA384,
-        SignatureScheme::RSA_PSS_SHA512,
-        SignatureScheme::RSA_PKCS1_SHA256,
-        SignatureScheme::RSA_PKCS1_SHA384,
-        SignatureScheme::RSA_PKCS1_SHA512,
-    ];
-
-    let scheme = supported_schemes
-        .iter()
-        .find(|&&scheme| key.choose_scheme(&[scheme]).is_some())
-        .copied()
+    supports_canonical_signing_scheme(key.as_ref())
+        .then_some(())
         .whatever_context::<_, Whatever>("no supported signature scheme found for key")?;
 
-    Ok((key, scheme))
+    Ok(key)
 }
 
 #[cfg(test)]
