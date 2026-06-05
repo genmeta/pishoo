@@ -281,11 +281,6 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 }
             })?;
             let delivery = self.fd_transfer.delivery(fd_id);
-            if delivery.is_cancelled() {
-                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
-                    reason: "session fd delivery cancelled before launch".to_owned(),
-                });
-            }
 
             // Fork the session process as root (no privilege drop).
             let transport =
@@ -296,13 +291,6 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 })?;
 
             let child = SessionChildGuard::new(transport.child_pid);
-            if delivery.is_cancelled() {
-                child.terminate().await;
-                return Err(crate::ipc::SpawnSessionError::SpawnFailed {
-                    reason: "session fd delivery cancelled after launch".to_owned(),
-                });
-            }
-
             let mut fds = FdVec::new();
             fds.push(transport.mux_fd);
             if let Err(error) = delivery.deliver(fds).await {
@@ -337,7 +325,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 caller_pid = %self.caller_pid,
                 %username,
                 fd_id = %fd_id,
-                "session spawned, FD delivered to worker"
+                "session spawned, FD queued to worker"
             );
             Ok(u64::from(fd_id))
         }

@@ -301,6 +301,17 @@ where
         .delivery(authenticated.control_fd_id)
         .deliver(fds);
     tokio::pin!(delivery);
+    tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = &mut delivery => {
+            let _delivered = result.context(DeliverControlFdSnafu)?;
+        }
+    }
+
     let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
     let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
 
@@ -352,18 +363,6 @@ where
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
     let session_call = authenticated.start_session.call(bootstrap);
     tokio::pin!(session_call);
-
-    tokio::select! {
-        () = token.cancelled() => return CancelledSnafu.fail(),
-        result = &mut conn => {
-            result.context(RemocConnectionSnafu)?;
-            return RemocClosedSnafu.fail();
-        }
-        result = &mut delivery => {
-            let _delivered = result.context(DeliverControlFdSnafu)?;
-        }
-        result = &mut session_call => return result.context(SessionFailedSnafu),
-    }
 
     let session_result = tokio::select! {
         () = token.cancelled() => CancelledSnafu.fail(),

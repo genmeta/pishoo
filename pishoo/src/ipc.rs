@@ -138,7 +138,7 @@ pub trait ControlPlane: Send + Sync {
     ///
     /// Root forks `pishoo-ssh-session` as root (for PAM), then delivers the
     /// child's MuxChannel FD to the worker through the worker-chosen `fd_id`.
-    /// The returned `u64` echoes `fd_id` after the FD delivery is acknowledged
-    /// by the worker.
+    /// The returned `u64` echoes `fd_id` after the FD delivery is queued to
+    /// the local mux writer FIFO.
     async fn spawn_session(&self, username: String, fd_id: u64) -> Result<u64, SpawnSessionError>;
 }

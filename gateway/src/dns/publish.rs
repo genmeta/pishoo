@@ -48,12 +48,9 @@ impl PublishConfig {
     pub(crate) async fn sign_endpoint(&self, ep: &mut DnsEndpointAddr) {
         ep.set_main(self.server_id == MAIN_SERVER_ID);
         ep.set_sequence(self.server_id as u64);
-        if let Some((key, scheme)) = &self.signing_key
+        if let Some((key, _scheme)) = &self.signing_key
             && let Err(e) = ep
-                .sign_with_authority(&SigningKeyAuthority {
-                    key: key.as_ref(),
-                    scheme: *scheme,
-                })
+                .sign_with_authority(&SigningKeyAuthority { key: key.as_ref() })
                 .await
         {
             tracing::warn!(error = %Report::from_error(&e), "failed to sign endpoint");
@@ -64,7 +61,6 @@ impl PublishConfig {
 #[derive(Debug)]
 struct SigningKeyAuthority<'a> {
     key: &'a dyn SigningKey,
-    scheme: SignatureScheme,
 }
 
 impl LocalAuthority for SigningKeyAuthority<'_> {
@@ -76,22 +72,8 @@ impl LocalAuthority for SigningKeyAuthority<'_> {
         &[]
     }
 
-    fn sign_algorithm(&self) -> rustls::SignatureAlgorithm {
-        self.key.algorithm()
-    }
-
-    fn sign(
-        &self,
-        scheme: SignatureScheme,
-        data: &[u8],
-    ) -> BoxFuture<'_, Result<Vec<u8>, SignError>> {
-        if scheme != self.scheme {
-            return Box::pin(std::future::ready(Err(SignError::UnsupportedScheme {
-                scheme,
-            })));
-        }
-
-        let result = dhttp_identity::identity::sign_with_key(self.key, scheme, data);
+    fn sign(&self, data: &[u8]) -> BoxFuture<'_, Result<Vec<u8>, SignError>> {
+        let result = dhttp_identity::identity::sign_with_key(self.key, data);
         Box::pin(std::future::ready(result))
     }
 }
