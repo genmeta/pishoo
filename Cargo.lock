@@ -1700,7 +1700,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dquic"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -2631,7 +2631,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4047,7 +4047,7 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitflags",
  "bytes",
@@ -4068,7 +4068,7 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "qbase",
  "qevent",
@@ -4080,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "qdatagram"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "qbase",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "qevent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "qinterface"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "qmacro"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -4165,7 +4165,7 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "derive_more",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "qresolve"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "futures",
  "qbase",
@@ -4188,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bon",
  "bytes",
@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -5357,7 +5357,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5751,7 +5751,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6487,7 +6487,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
