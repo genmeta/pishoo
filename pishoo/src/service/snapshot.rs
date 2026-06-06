@@ -10,7 +10,7 @@ use gateway::reverse::{
 };
 use h3x::{
     connection::ConnectionBuilder, dhttp::settings::Settings, endpoint::H3Endpoint,
-    hyper::server::TowerService, quic,
+    hyper::TowerService, quic,
 };
 use snafu::Report;
 use tokio_util::sync::CancellationToken;

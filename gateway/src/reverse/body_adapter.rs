@@ -6,7 +6,7 @@ use std::{
 use axum::{body::Body, extract::Request, response::Response};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use h3x::message::stream::MessageStreamError;
+use h3x::dhttp::message::MessageStreamError;
 use http_body_util::combinators::UnsyncBoxBody;
 
 type H3Body = UnsyncBoxBody<Bytes, MessageStreamError>;
