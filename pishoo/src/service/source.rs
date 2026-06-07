@@ -70,6 +70,14 @@ pub struct PrepareContext {
     pub router_state: gateway::reverse::router::RouterState,
 }
 
+fn h3_settings() -> Arc<h3x::dhttp::settings::Settings> {
+    let settings = h3x::dhttp::settings::Settings::default();
+    #[cfg(feature = "sshd")]
+    let settings =
+        settings.with_all(h3x::dhttp::webtransport::settings::WebTransportSupport::default());
+    Arc::new(settings)
+}
+
 pub struct WorkerServerSource {
     pub name: DhttpName<'static>,
     pub identity_profile: IdentityProfile,
@@ -448,7 +456,7 @@ impl PrepareContext {
             .context(build_prepare_context_error::PolicySnafu)?;
 
         Ok(Self {
-            h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
+            h3_settings: h3_settings(),
             access_rules: policy_bundle.location_rules,
             router_state,
         })
@@ -463,7 +471,7 @@ impl PrepareContext {
             .context(build_prepare_context_error::PolicySnafu)?;
 
         Ok(Self {
-            h3_settings: Arc::new(h3x::dhttp::settings::Settings::default()),
+            h3_settings: h3_settings(),
             access_rules: policy_bundle.location_rules,
             router_state,
         })
@@ -707,6 +715,16 @@ mod tests {
             #[cfg(feature = "sshd")]
             task_scope: std::sync::Arc::new(DummyScope),
         }
+    }
+
+    #[cfg(feature = "sshd")]
+    #[test]
+    fn h3_settings_advertise_webtransport_support_when_sshd_enabled() {
+        let settings = h3_settings();
+
+        assert!(settings.enable_connect_protocol());
+        assert!(settings.enable_webtransport());
+        assert!(settings.webtransport_flow_control_enabled());
     }
 
     #[tokio::test]

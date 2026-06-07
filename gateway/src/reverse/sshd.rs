@@ -8,7 +8,7 @@ use dssh::{
     auth::AuthCredential,
     session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
-use h3x::{qpack::field::Protocol, stream_id::StreamId};
+use h3x::{connection::ConnectionState, qpack::field::Protocol, quic, stream_id::StreamId};
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
@@ -126,6 +126,23 @@ pub async fn sshd_handle(
     if !is_webtransport_request(&req) {
         tracing::warn!("dssh request is not webtransport extended connect");
         return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let Some(connection) = req
+        .extensions()
+        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
+        .cloned()
+    else {
+        tracing::warn!("dssh request is missing h3 connection state");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    if let Err(error) = connection.peer_settings().await {
+        tracing::warn!(
+            error = %Report::from_error(&error),
+            "failed to wait for peer HTTP/3 settings before dssh webtransport accept"
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     let path = req.uri().path().to_owned();
