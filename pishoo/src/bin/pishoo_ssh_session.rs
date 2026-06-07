@@ -11,7 +11,10 @@
 //! 4. Parent calls it with `SessionBootstrap` → child drops privileges
 //!    and runs the session dispatcher
 
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 use dssh::{
     auth::AuthCredential,
@@ -25,7 +28,66 @@ use dssh::{
 };
 use h3x::ipc::transport::MuxChannel;
 use snafu::Report;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+
+#[derive(Debug)]
+struct SessionIpcLifecycle {
+    token: CancellationToken,
+    error: Mutex<Option<h3x::quic::ConnectionError>>,
+}
+
+impl SessionIpcLifecycle {
+    fn new(token: CancellationToken) -> Self {
+        Self {
+            token,
+            error: Mutex::new(None),
+        }
+    }
+
+    fn closed_error(&self) -> h3x::quic::ConnectionError {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        guard
+            .get_or_insert_with(|| h3x::quic::ConnectionError::Application {
+                source: h3x::quic::ApplicationError {
+                    code: h3x::error::Code::H3_REQUEST_CANCELLED,
+                    reason: Cow::Borrowed("ssh session ipc closed"),
+                },
+            })
+            .clone()
+    }
+}
+
+impl h3x::quic::Lifecycle for SessionIpcLifecycle {
+    fn close(&self, code: h3x::error::Code, reason: Cow<'static, str>) {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        if guard.is_none() {
+            *guard = Some(h3x::quic::ConnectionError::Application {
+                source: h3x::quic::ApplicationError { code, reason },
+            });
+        }
+        self.token.cancel();
+    }
+
+    fn check(&self) -> Result<(), h3x::quic::ConnectionError> {
+        if self.token.is_cancelled() {
+            Err(self.closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn closed(&self) -> h3x::quic::ConnectionError {
+        self.token.cancelled().await;
+        self.closed_error()
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -110,8 +172,6 @@ async fn main() {
             );
 
             let username = auth_request.username;
-            let control_receiver = fd_transfer.receive();
-            let control_fd_id = control_receiver.id();
             let session_fd_transfer = fd_transfer.clone();
 
             // Create the inner RFnOnce: drop privileges + run session.
@@ -132,49 +192,23 @@ async fn main() {
                         );
                     }
 
-                    // Resolve control stream from the receiver reserved during authentication.
-                    let received =
-                        control_receiver
-                            .await
-                            .map_err(|e| SessionRunError::ConversationBuild {
-                                reason: Report::from_error(e).to_string(),
-                            })?;
-                    let ctrl_fd =
-                        received
-                            .into_one()
-                            .map_err(|e| SessionRunError::ConversationBuild {
-                                reason: Report::from_error(e).to_string(),
-                            })?;
-                    let ctrl_unix = {
-                        let ctrl_std = std::os::unix::net::UnixStream::from(ctrl_fd);
-                        ctrl_std.set_nonblocking(true).map_err(|e| {
-                            SessionRunError::ConversationBuild {
-                                reason: format!("failed to set control FD nonblocking: {e}"),
-                            }
-                        })?;
-                        tokio::net::UnixStream::from_std(ctrl_std).map_err(|e| {
-                            SessionRunError::ConversationBuild {
-                                reason: format!(
-                                    "failed to convert control FD to tokio stream: {e}"
-                                ),
-                            }
-                        })?
-                    };
-                    let (control_reader, control_writer) = ctrl_unix.into_split();
-
-                    // Create IPC manage stream handle.
-                    let manage_stream = dssh::conversation::ipc::IpcManageStreamHandle::new(
-                        bootstrap.manage_stream,
+                    let session_token = CancellationToken::new();
+                    let lifecycle: Arc<dyn h3x::quic::DynLifecycle> =
+                        Arc::new(SessionIpcLifecycle::new(session_token.clone()));
+                    let session = h3x::ipc::webtransport::IpcWebTransportSessionHandle::new(
+                        bootstrap.webtransport_session.session_id,
+                        bootstrap.webtransport_session.session,
                         session_fd_transfer,
+                        lifecycle,
                     );
 
-                    let conversation = Arc::new(Conversation::new(
-                        bootstrap.conversation_id,
-                        bootstrap.peer_version,
-                        control_reader,
-                        control_writer,
-                        manage_stream,
-                    ));
+                    let conversation = Arc::new(
+                        Conversation::accept(session, bootstrap.peer_version)
+                            .await
+                            .map_err(|e| SessionRunError::ConversationBuild {
+                                reason: Report::from_error(&e).to_string(),
+                            })?,
+                    );
 
                     let config = SessionConfig {
                         user: user_info,
@@ -182,14 +216,18 @@ async fn main() {
                     };
 
                     tracing::info!("session dispatcher starting");
-                    run_session(conversation, config).await;
-                    tracing::info!("session ended");
+                    let outcome = run_session(conversation, config).await.map_err(|e| {
+                        SessionRunError::Session {
+                            reason: Report::from_error(&e).to_string(),
+                        }
+                    })?;
+                    session_token.cancel();
+                    tracing::info!(?outcome, "session ended");
                     Ok(())
                 });
 
             Ok(AuthenticatedSession {
                 start_session: start_session_fn,
-                control_fd_id,
             })
         }
     });

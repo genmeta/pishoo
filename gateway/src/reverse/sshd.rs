@@ -1,19 +1,18 @@
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Extension, extract::State, response::IntoResponse};
 use dssh::{
     auth::AuthCredential,
-    conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
     session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
 use h3x::{qpack::field::Protocol, stream_id::StreamId};
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    task::JoinSet,
-};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -65,14 +64,6 @@ pub enum RunSshSessionError {
     SessionFailed {
         source: dssh::session::SessionRunError,
     },
-    #[snafu(display("failed to create control stream socketpair"))]
-    ControlSocketpair { source: std::io::Error },
-    #[snafu(display("failed to deliver control stream FD"))]
-    DeliverControlFd {
-        source: h3x::ipc::transport::DeliverFdsError,
-    },
-    #[snafu(display("failed to convert control stream socket to tokio"))]
-    ControlFromStd { source: std::io::Error },
 }
 
 fn is_webtransport_request<B>(request: &Request<B>) -> bool {
@@ -157,32 +148,12 @@ pub async fn sshd_handle(
     let task_token = task_scope.token();
     task_scope.spawn(Box::pin(
         async move {
-            let manager = dssh::webtransport::WebTransportStreamManager::new(accepted.session);
-            let (control_reader, control_writer) = match tokio::select! {
-                () = task_token.cancelled() => {
-                    tracing::debug!("ssh session cancelled before control stream was accepted");
-                    return;
-                }
-                result = manager.accept_control() => result,
-            } {
-                Ok(streams) => streams,
-                Err(error) => {
-                    tracing::error!(
-                        error = %Report::from_error(&error),
-                        "failed to accept dssh webtransport control stream"
-                    );
-                    return;
-                }
-            };
-
             if let Err(error) = run_ssh_session(
                 &username,
                 conversation_id,
                 AcceptedSshSession {
                     peer_version: accepted.peer_version,
-                    manage_stream: manager,
-                    control_reader,
-                    control_writer,
+                    session: accepted.session,
                 },
                 session_spawner.as_ref(),
                 task_token,
@@ -205,35 +176,81 @@ pub async fn sshd_handle(
     response.into_response()
 }
 
-struct AcceptedSshSession<M, R, W> {
+struct AcceptedSshSession {
     peer_version: String,
-    manage_stream: M,
-    control_reader: R,
-    control_writer: W,
+    session: h3x::webtransport::WebTransportSession,
 }
 
-async fn run_ssh_session<M, R, W>(
+#[derive(Debug)]
+struct SessionIpcLifecycle {
+    token: CancellationToken,
+    error: Mutex<Option<h3x::quic::ConnectionError>>,
+}
+
+impl SessionIpcLifecycle {
+    fn new(token: CancellationToken) -> Self {
+        Self {
+            token,
+            error: Mutex::new(None),
+        }
+    }
+
+    fn closed_error(&self) -> h3x::quic::ConnectionError {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        guard
+            .get_or_insert_with(|| h3x::quic::ConnectionError::Application {
+                source: h3x::quic::ApplicationError {
+                    code: h3x::error::Code::H3_REQUEST_CANCELLED,
+                    reason: Cow::Borrowed("ssh session ipc closed"),
+                },
+            })
+            .clone()
+    }
+}
+
+impl h3x::quic::Lifecycle for SessionIpcLifecycle {
+    fn close(&self, code: h3x::error::Code, reason: Cow<'static, str>) {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        if guard.is_none() {
+            *guard = Some(h3x::quic::ConnectionError::Application {
+                source: h3x::quic::ApplicationError { code, reason },
+            });
+        }
+        self.token.cancel();
+    }
+
+    fn check(&self) -> Result<(), h3x::quic::ConnectionError> {
+        if self.token.is_cancelled() {
+            Err(self.closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn closed(&self) -> h3x::quic::ConnectionError {
+        self.token.cancelled().await;
+        self.closed_error()
+    }
+}
+
+async fn run_ssh_session(
     username: &str,
     conversation_id: StreamId,
-    accepted: AcceptedSshSession<M, R, W>,
+    accepted: AcceptedSshSession,
     spawner: &dyn DynSpawnSession,
     token: CancellationToken,
-) -> Result<(), RunSshSessionError>
-where
-    M: dssh::conversation::ManageSessionStream + 'static,
-    M::StreamReader: AsyncRead + Unpin + Send + 'static,
-    M::StreamWriter: AsyncWrite + Unpin + Send + 'static,
-    M::Error: Send + Sync + 'static,
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
-{
+) -> Result<(), RunSshSessionError> {
     use run_ssh_session_error::*;
 
     let AcceptedSshSession {
         peer_version,
-        manage_stream,
-        control_reader,
-        control_writer,
+        session,
     } = accepted;
 
     // Spawn the session child process via the control plane.
@@ -286,77 +303,37 @@ where
         result = auth_fn.call(auth_request) => result.context(AuthRejectedSnafu)?,
     };
 
-    // Set up control stream via Unix socketpair + FD passing.
-    let (ctrl_srv, ctrl_cli) =
-        std::os::unix::net::UnixStream::pair().context(ControlSocketpairSnafu)?;
-    ctrl_srv
-        .set_nonblocking(true)
-        .context(ControlFromStdSnafu)?;
-    ctrl_cli
-        .set_nonblocking(true)
-        .context(ControlFromStdSnafu)?;
-    let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
-    let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
-
-    let mut fds = h3x::ipc::transport::FdVec::new();
-    fds.push(ctrl_cli.into());
-    let delivery = fd_transfer
-        .delivery(authenticated.control_fd_id)
-        .deliver(fds);
-    tokio::pin!(delivery);
-    tokio::select! {
-        () = token.cancelled() => return CancelledSnafu.fail(),
-        result = &mut conn => {
-            result.context(RemocConnectionSnafu)?;
-            return RemocClosedSnafu.fail();
-        }
-        result = &mut delivery => {
-            let _delivered = result.context(DeliverControlFdSnafu)?;
-        }
-    }
-
     let session_shutdown = token.child_token();
+    let lifecycle: Arc<dyn h3x::quic::DynLifecycle> =
+        Arc::new(SessionIpcLifecycle::new(session_shutdown.clone()));
+    let session = Arc::new(session);
+    let session_id = h3x::webtransport::Session::id(session.as_ref());
+
+    let adapter = h3x::ipc::webtransport::WebTransportSessionAdapter::new(
+        Arc::clone(&session),
+        fd_transfer.clone(),
+        Arc::clone(&lifecycle),
+    );
+    let (webtransport_server, webtransport_client) =
+        h3x::ipc::webtransport::IpcWebTransportSessionServerShared::new(Arc::new(adapter), 8);
+
     let mut tasks = JoinSet::new();
-
-    // Bridge DSSH control stream ↔ control stream socketpair.
-    let bridge_shutdown = session_shutdown.clone();
+    let webtransport_shutdown = session_shutdown.clone();
     tasks.spawn(
         async move {
             tokio::select! {
-                () = bridge_shutdown.cancelled() => {}
-                _ = dssh::conversation::ipc::bridge_reader_to_unix(control_reader, ctrl_write) => {}
-            }
-        }
-        .in_current_span(),
-    );
-    let bridge_shutdown = session_shutdown.clone();
-    tasks.spawn(
-        async move {
-            tokio::select! {
-                () = bridge_shutdown.cancelled() => {}
-                _ = dssh::conversation::ipc::bridge_unix_to_writer(ctrl_read, control_writer) => {}
-            }
-        }
-        .in_current_span(),
-    );
-
-    // Set up manage-stream RPC via IPC FD passing.
-    let adapter = IpcManageStreamAdapter::new(manage_stream, fd_transfer.clone());
-    let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
-    let manage_shutdown = session_shutdown.clone();
-    tasks.spawn(
-        async move {
-            tokio::select! {
-                () = manage_shutdown.cancelled() => {}
-                _ = ms.serve(true) => {}
+                () = webtransport_shutdown.cancelled() => {}
+                _ = webtransport_server.serve(true) => {}
             }
         }
         .in_current_span(),
     );
 
     let bootstrap = SessionBootstrap {
-        manage_stream: mc,
-        conversation_id,
+        webtransport_session: h3x::ipc::webtransport::WebTransportSessionBootstrap {
+            session_id,
+            session: webtransport_client,
+        },
         peer_version,
     };
 
