@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn vacant_acquire_inserts_transition() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
-        let name = name("alpha.user.genmeta.net");
+        let name = name("alpha.user.dhttp.net");
         let plan = registry.plan_acquire(worker(10), name.clone());
 
         assert!(matches!(plan, AcquirePlan::Build { .. }));
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn cross_owner_acquire_transitions_before_poison() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
-        let name = name("alpha.user.genmeta.net");
+        let name = name("alpha.user.dhttp.net");
         registry.insert_active_for_test(name.clone(), worker(10), AsyncReleaseGuard::new());
 
         let plan = registry.plan_acquire(worker(20), name.clone());
@@ -523,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn transition_waiter_retries_after_completion() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
-        let name = name("alpha.user.genmeta.net");
+        let name = name("alpha.user.dhttp.net");
         let done = Completion::new();
         registry.insert_transition_for_test(name.clone(), worker(10), done.clone());
 
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn stale_handle_release_does_not_remove_replacement() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
-        let name = name("alpha.user.genmeta.net");
+        let name = name("alpha.user.dhttp.net");
         let old_guard = AsyncReleaseGuard::new();
         let new_guard = AsyncReleaseGuard::new();
         registry.insert_active_for_test(name.clone(), worker(10), new_guard.clone());
@@ -560,8 +560,8 @@ mod tests {
     #[test]
     fn poison_clear_removes_only_poisoned_slots() {
         let mut registry: ListenerRegistry = ListenerRegistry::new();
-        let poisoned = name("poisoned.user.genmeta.net");
-        let active = name("active.user.genmeta.net");
+        let poisoned = name("poisoned.user.dhttp.net");
+        let active = name("active.user.dhttp.net");
         registry.insert_poisoned_for_test(poisoned.clone());
         registry.insert_active_for_test(active.clone(), worker(10), AsyncReleaseGuard::new());
 

@@ -14,7 +14,7 @@ use crate::package::manifest::{ArtifactKind, PackageArtifact, PackageManifest};
 const PACKAGE_NAME: &str = "pishoo";
 const FORMULA_NAME: &str = "pishoo.rb";
 const DESCRIPTION: &str = "modern, secure, QUIC-powered web/proxy engine";
-const HOMEPAGE: &str = "https://pishoo.genmeta.net";
+const HOMEPAGE: &str = "https://www.dhttp.net";
 const LICENSE: &str = "Proprietary";
 const INSTALL_CONTENT: &str = r##"  def install
     bin.install "pishoo"

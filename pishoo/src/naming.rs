@@ -43,7 +43,7 @@ mod tests {
             DhttpName::try_from("borber.pilot").unwrap()
         );
         assert_eq!(
-            canonicalize_genmeta_name("borber.pilot.genmeta.net")
+            canonicalize_genmeta_name("borber.pilot.dhttp.net")
                 .expect("full name should stay full"),
             DhttpName::try_from("borber.pilot").unwrap()
         );

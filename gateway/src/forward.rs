@@ -354,29 +354,29 @@ mod tests {
     fn canonicalize_forward_host_expands_partial_and_tilde() {
         assert_eq!(
             canonicalize_forward_host("borber.pilot").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(
             canonicalize_forward_host("borber.pilot~").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(
             canonicalize_forward_host("BORBER.PILOT~").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(
-            canonicalize_forward_host("Borber.Pilot.GenMeta.Net").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            canonicalize_forward_host("Borber.Pilot.Dhttp.Net").as_deref(),
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(canonicalize_forward_host("127.0.0.1"), None);
-        assert_eq!(canonicalize_forward_host("borber.pilot.genmeta.net"), None);
+        assert_eq!(canonicalize_forward_host("borber.pilot.dhttp.net"), None);
     }
 
     #[test]
     fn rewrite_request_uri_host_replaces_absolute_uri_host() {
         assert_eq!(
-            rewrite_request_uri_host("http://borber.pilot/path?q=1", "borber.pilot.genmeta.net"),
-            "http://borber.pilot.genmeta.net/path?q=1"
+            rewrite_request_uri_host("http://borber.pilot/path?q=1", "borber.pilot.dhttp.net"),
+            "http://borber.pilot.dhttp.net/path?q=1"
         );
     }
 }

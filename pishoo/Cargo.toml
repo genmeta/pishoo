@@ -3,7 +3,7 @@
 [package]
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
-homepage = "https://pishoo.genmeta.net"
+homepage = "https://www.dhttp.net"
 version = "0.5.0"
 edition = "2024"
 

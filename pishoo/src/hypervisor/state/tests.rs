@@ -44,7 +44,7 @@ async fn wait_until_no_entry(state: &RootState, server_name: &str) {
 }
 
 fn dhttp_name(label: &str) -> DhttpName<'static> {
-    DhttpName::try_from(format!("{label}.user.genmeta.net")).unwrap()
+    DhttpName::try_from(format!("{label}.user.dhttp.net")).unwrap()
 }
 
 // -----------------------------------------------------------------------
@@ -62,9 +62,9 @@ fn test_state() -> Arc<RootState> {
     Arc::new(RootState::new(network))
 }
 
-/// Generate a self-signed Identity for `{label}.user.genmeta.net`.
+/// Generate a self-signed Identity for `{label}.user.dhttp.net`.
 fn test_identity(label: &str) -> Identity {
-    let fqdn = format!("{label}.user.genmeta.net");
+    let fqdn = format!("{label}.user.dhttp.net");
     let key_pair = rcgen::KeyPair::generate().unwrap();
     let mut params = rcgen::CertificateParams::new(vec![fqdn.clone()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -284,7 +284,7 @@ async fn test_worker_pids_after_cleanup() {
 async fn test_register_then_release() {
     let state = test_state();
     let owner = Owner::Local;
-    let server_name = "reg-release.user.genmeta.net";
+    let server_name = "reg-release.user.dhttp.net";
 
     let _listener = state
         .acquire_listener(owner, test_request("reg-release"))
@@ -304,7 +304,7 @@ async fn test_register_then_release() {
 async fn test_registered_endpoint_drop_releases_listener() {
     let state = test_state();
     let owner = Owner::Local;
-    let server_name = "drop-release.user.genmeta.net";
+    let server_name = "drop-release.user.dhttp.net";
 
     let listener = state
         .acquire_listener(owner, test_request("drop-release"))
@@ -321,7 +321,7 @@ async fn test_registered_endpoint_drop_releases_listener() {
 async fn test_cancelled_release_listener_still_finishes_destroy() {
     let state = test_state();
     let owner = Owner::Local;
-    let server_name = "cancel-release.user.genmeta.net";
+    let server_name = "cancel-release.user.dhttp.net";
     let server_name_owned = DhttpName::try_from(server_name.to_owned()).unwrap();
 
     let _listener = state
@@ -351,7 +351,7 @@ async fn test_cancelled_release_listener_still_finishes_destroy() {
 async fn test_cancelled_acquire_listener_destroys_built_endpoint() {
     let state = test_state();
     let owner = Owner::Local;
-    let server_name = "cancel-acquire.user.genmeta.net";
+    let server_name = "cancel-acquire.user.dhttp.net";
 
     let delivery_pause = state.pause_next_listener_delivery_for_test();
     let acquire_state = state.clone();
@@ -373,7 +373,7 @@ async fn test_cancelled_acquire_listener_destroys_built_endpoint() {
 async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_replacement() {
     let state = test_state();
     let owner = Owner::Local;
-    let server_name = "stale-rebuild.user.genmeta.net";
+    let server_name = "stale-rebuild.user.dhttp.net";
 
     let old_listener = state
         .acquire_listener(owner, test_request("stale-rebuild"))
@@ -403,7 +403,7 @@ async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_repl
 #[tokio::test]
 async fn test_cleanup_local_resources_retires_local_servers() {
     let state = test_state();
-    let server_name = "cleanup-local.user.genmeta.net";
+    let server_name = "cleanup-local.user.dhttp.net";
     let listener = state
         .acquire_listener(Owner::Local, test_request("cleanup-local"))
         .await
@@ -440,7 +440,7 @@ async fn test_acquire_listener_rejects_external_listen_without_registry_entry() 
         err,
         AcquireListenerError::BuildBindPatterns { .. }
     ));
-    assert!(!has_entry(&state, "external-listen.user.genmeta.net").await);
+    assert!(!has_entry(&state, "external-listen.user.dhttp.net").await);
 }
 
 #[tokio::test]
@@ -489,7 +489,7 @@ async fn test_register_cross_owner_conflict() {
     assert!(matches!(err, AcquireListenerError::ConflictedName));
 
     // Original server's conn_sender should be None (poisoned).
-    assert!(!is_active(&state, "cross-conflict.user.genmeta.net").await);
+    assert!(!is_active(&state, "cross-conflict.user.dhttp.net").await);
 }
 
 #[tokio::test]
@@ -560,7 +560,7 @@ async fn test_scrub_then_reregister() {
         .acquire_listener(Owner::Local, test_request("scrub-re"))
         .await
         .expect("re-register after scrub should succeed");
-    assert!(is_active(&state, "scrub-re.user.genmeta.net").await);
+    assert!(is_active(&state, "scrub-re.user.dhttp.net").await);
 }
 
 #[tokio::test]
@@ -591,7 +591,7 @@ async fn test_release_wrong_owner() {
         .expect_err("wrong-owner release should be typed");
 
     // Server should still be active.
-    assert!(is_active(&state, "wrong-owner.user.genmeta.net").await);
+    assert!(is_active(&state, "wrong-owner.user.dhttp.net").await);
 }
 
 #[tokio::test]
@@ -619,7 +619,7 @@ async fn test_cleanup_worker_releases_servers() {
         .acquire_listener(owner, test_request("cleanup-srv"))
         .await
         .expect("register should succeed");
-    assert!(is_active(&state, "cleanup-srv.user.genmeta.net").await);
+    assert!(is_active(&state, "cleanup-srv.user.dhttp.net").await);
 
     // Cleanup the worker — its server should also be gone.
     let summary = state
@@ -633,7 +633,7 @@ async fn test_cleanup_worker_releases_servers() {
         .expect("cleanup should find the worker");
     assert_eq!(summary.servers_cleaned, 1);
 
-    assert!(!is_active(&state, "cleanup-srv.user.genmeta.net").await);
+    assert!(!is_active(&state, "cleanup-srv.user.dhttp.net").await);
     assert!(!state.has_worker(pid).await);
 }
 

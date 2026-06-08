@@ -1,9 +1,9 @@
 Source: pishoo
 Section: httpd
 Priority: optional
-Maintainer: Genmeta Tech Limited <support@genmeta.net>
+Maintainer: Genmeta Tech Limited <developer@genmeta.net>
 Build-Depends: debhelper-compat (= 13)
-Homepage: https://pishoo.genmeta.net
+Homepage: https://www.dhttp.net
 
 Package: pishoo-common
 Architecture: all

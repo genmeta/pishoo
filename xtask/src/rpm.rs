@@ -52,7 +52,7 @@ const IMAGE_TAG_PREFIX: &str = "pishoo-rpm-v1";
 
 const RPM_LICENSE: &str = "Proprietary";
 const RPM_VENDOR: &str = "Genmeta Tech Limited";
-const RPM_URL: &str = "https://pishoo.genmeta.net";
+const RPM_URL: &str = "https://www.dhttp.net";
 
 const COMMON_FILES_DIR: &str = "xtask/deb/common";
 const SYSTEMD_UNIT_SRC: &str = "xtask/deb/pishoo-common.pishoo.service";
@@ -615,7 +615,7 @@ getent group pishoo >/dev/null || groupadd --system pishoo
 %systemd_postun_with_restart pishoo.service
 
 %changelog
-* %(date '+%a %b %d %Y') {RPM_VENDOR} <support@genmeta.net> - {version}-1
+* %(date '+%a %b %d %Y') {RPM_VENDOR} <developer@genmeta.net> - {version}-1
 - release {version}
 "#
     )

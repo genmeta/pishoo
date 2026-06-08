@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn fingerprint_incorporates_cert_and_key() {
-        let name = DhttpName::try_from("test.genmeta.net".to_owned()).unwrap();
+        let name = DhttpName::try_from("test.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
         let req2 = FakeServerSource::fake_listen_request(&name);
 
@@ -678,7 +678,7 @@ mod tests {
         let fp2 = compute_identity_fingerprint(&req2.identity);
 
         assert_ne!(fp1, fp2, "Fingerprints must differ when cert/key differ");
-        assert!(fp1.starts_with("test.genmeta.net@"));
+        assert!(fp1.starts_with("test.dhttp.net@"));
     }
 
     #[cfg(feature = "sshd")]
@@ -729,7 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_server_source_prepare_produces_listener_spec_with_cert_fingerprint() {
-        let name = DhttpName::try_from("test.genmeta.net".to_owned()).unwrap();
+        let name = DhttpName::try_from("test.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
 
         let config = gateway::parse::parse_config_str_for_test("server { listen 127.0.0.1:443; server_name localhost; ssl_certificate a; ssl_certificate_key b; }").unwrap();
@@ -756,7 +756,7 @@ mod tests {
 
         let identity_debug = &prepared.listener_spec.request_fingerprint.identity_debug;
         assert!(
-            identity_debug.starts_with("test.genmeta.net@"),
+            identity_debug.starts_with("test.dhttp.net@"),
             "fingerprint should contain name and separator: {}",
             identity_debug
         );
@@ -765,7 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_server_source_prepare_two_rotated_certs_produce_distinct_fingerprints() {
-        let name = DhttpName::try_from("rotated.genmeta.net".to_owned()).unwrap();
+        let name = DhttpName::try_from("rotated.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
         let req2 = FakeServerSource::fake_listen_request(&name);
 
