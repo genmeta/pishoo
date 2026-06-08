@@ -3,8 +3,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use dhttp::network::DhttpNetwork;
 use gateway::error::Whatever;
-use h3x::dquic::Network;
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
 use snafu::{FromString, ResultExt};
@@ -92,9 +92,7 @@ async fn main() -> Result<(), Whatever> {
 
     // Build the shared Network used by every registered SNI. Workers register
     // by calling back through IPC (request_listen) — no servers are added up-front.
-    let network = Network::builder()
-        .stun_server(Arc::<str>::from(gateway::dns::DEFAULT_STUN_SERVER))
-        .build();
+    let network = DhttpNetwork::builder().build().network().clone();
 
     // Create RootState (interior mutability — no external Mutex needed)
     let state = Arc::new(pishoo::hypervisor::state::RootState::new(network));

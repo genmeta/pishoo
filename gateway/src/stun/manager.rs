@@ -5,12 +5,12 @@ use std::{
     time::Duration,
 };
 
-use ddns::core::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
+use ddns::publisher::Publisher;
 use h3x::dquic::{
     Network,
     net::Scheme,
     prelude::{BindUri, IO},
-    qbase::net::Family,
+    qbase::net::{Family, addr::EndpointAddr},
     qinterface::{
         BindInterface, WeakInterface,
         component::location::Locations,
@@ -25,6 +25,7 @@ use h3x::dquic::{
         route::ReceiveAndDeliverPacket,
     },
 };
+use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, warn};
@@ -33,14 +34,13 @@ use super::{
     STUN_DOMAIN, STUN_PUBLISH_INTERVAL, STUN_RECONCILE_INTERVAL,
     config::{StunBindConfig, StunNodeConfig},
 };
-use crate::dns::{PublishConfig, publish_host_endpoints};
 
 /// 管理本节点对外暴露的 STUN server。
 ///
 /// 1. **Configured pairs**：来自 `stun_server { ... }`，独立绑定主/辅 socket
 /// 2. **Dynamic pairs**：来自 QUIC listener，仅在该 listener 已被判定为 `FullCone` 时寄生启动
 ///
-/// 管理器同时负责收集"可作为完整 STUN agent 使用"的地址并交给 DNS 模块发布。
+/// 管理器同时负责收集"可作为完整 STUN agent 使用"的地址并交给 ddns publisher 发布。
 pub struct StunServerManager {
     _task: AbortOnDropHandle<()>,
 }
@@ -83,11 +83,7 @@ impl DynamicStunHandle {
 }
 
 impl StunServerManager {
-    pub fn spawn(
-        network: Arc<Network>,
-        publish_config: PublishConfig,
-        config: StunNodeConfig,
-    ) -> Self {
+    pub fn spawn(network: Arc<Network>, publisher: Publisher, config: StunNodeConfig) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut configured_handles: HashMap<SocketAddr, ConfiguredStunHandle> = HashMap::new();
             let mut dynamic_handles: HashMap<BindUri, DynamicStunHandle> = HashMap::new();
@@ -108,7 +104,7 @@ impl StunServerManager {
                 &network,
                 &configured_handles,
                 &dynamic_handles,
-                &publish_config,
+                &publisher,
                 &config,
             )
             .await;
@@ -124,14 +120,14 @@ impl StunServerManager {
                     _ = observer.recv() => {
                         time::sleep(Duration::from_millis(50)).await;
                         reconcile!();
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publisher, &config).await;
                     }
                     _ = timer.tick() => {
                         reconcile!();
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publisher, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publisher, &config).await;
                     }
                 }
             }
@@ -517,14 +513,14 @@ fn compute_change_address(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Publish（仅负责收集 STUN agent 地址；真正的 DNS 发布委托给 dns 模块）
+// Publish（仅负责收集 STUN agent 地址；真正的 DNS 发布委托给 ddns publisher）
 // ──────────────────────────────────────────────────────────────────────────────
 
 async fn publish_stun_endpoints(
     network: &Arc<Network>,
     configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
     dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
-    publish_config: &PublishConfig,
+    publisher: &Publisher,
     config: &StunNodeConfig,
 ) {
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
@@ -566,13 +562,16 @@ async fn publish_stun_endpoints(
         outer_addrs.extend(fullcone_outers);
     }
 
-    let endpoints: Vec<DnsEndpointAddr> = outer_addrs
+    let endpoints: Vec<EndpointAddr> = outer_addrs
         .iter()
-        .map(|addr| match addr {
-            SocketAddr::V4(a) => DnsEndpointAddr::direct_v4(*a),
-            SocketAddr::V6(a) => DnsEndpointAddr::direct_v6(*a),
-        })
+        .copied()
+        .map(EndpointAddr::direct)
         .collect();
 
-    publish_host_endpoints(STUN_DOMAIN, endpoints, publish_config).await;
+    if let Err(error) = publisher.publish_once_for(STUN_DOMAIN, &endpoints).await {
+        tracing::warn!(
+            error = %Report::from_error(&error),
+            "failed to publish stun endpoints"
+        );
+    }
 }

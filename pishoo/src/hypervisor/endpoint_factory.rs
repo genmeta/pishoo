@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use dhttp::{
-    ddns::resolvers::{DHTTP_H3_DNS_SERVER, DnsScheme, Resolvers},
+    ddns::resolvers::{DnsScheme, Resolvers},
     dquic::{Network, binds::BindPattern},
     endpoint::Endpoint,
     identity::Identity,
@@ -35,16 +35,16 @@ pub async fn build_resolver(
     let h3 = create_h3_dns_endpoint(Some(identity), network.clone(), bind_patterns.clone())
         .await
         .context(build_endpoint_resolver_error::BuildEndpointSnafu)?;
-    let base_url = dns_resolver_url
-        .map(|url| url.to_string())
-        .unwrap_or_else(|| DHTTP_H3_DNS_SERVER.to_owned());
 
     let builder = Resolvers::builder()
         .mdns(network, bind_patterns)
         .await
-        .system()
-        .h3_with_base_url(base_url, h3)
-        .context(build_endpoint_resolver_error::H3ResolverSnafu)?;
+        .system();
+    let builder = match dns_resolver_url {
+        Some(url) => builder.h3_with_base_url(url.to_string(), h3),
+        None => builder.h3(h3),
+    }
+    .context(build_endpoint_resolver_error::H3ResolverSnafu)?;
 
     Ok(builder.build())
 }

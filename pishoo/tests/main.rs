@@ -45,6 +45,10 @@ fn endpoint_factory_uses_dhttp_endpoint_for_dns_resolver() {
 
     assert!(source.contains("Endpoint::builder()"));
     assert!(source.contains(".dns(DnsScheme::System)"));
+    assert!(
+        !source.contains("DHTTP_H3_DNS_SERVER"),
+        "endpoint factory should use ddns resolver defaults instead of reading DHTTP DNS constants"
+    );
     assert!(!source.contains(&quic_endpoint_builder));
     assert!(!source.contains(&default_client_config));
     assert!(!source.contains(&default_server_config));
@@ -63,6 +67,15 @@ fn pishoo_does_not_define_custom_root_ca_bootstrap() {
 }
 
 #[test]
+fn pishoo_does_not_read_gateway_dns_bootstrap_constants() {
+    let main_source = include_str!("../src/main.rs");
+
+    assert!(!main_source.contains("gateway::dns"));
+    assert!(!main_source.contains("DEFAULT_STUN_SERVER"));
+    assert!(main_source.contains("DhttpNetwork::builder()"));
+}
+
+#[test]
 fn acquire_listener_uses_dhttp_dns_publisher() {
     let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
@@ -77,6 +90,11 @@ fn acquire_listener_uses_dhttp_dns_publisher() {
     assert!(
         !server_ops_source.contains("spawn_server_publish_task("),
         "acquire_listener must not use the legacy BindUri-based DNS publisher"
+    );
+    let gateway_lib_source = include_str!("../../gateway/src/lib.rs");
+    assert!(
+        !gateway_lib_source.contains("pub mod dns;"),
+        "gateway must not re-export the legacy dns module"
     );
 }
 
