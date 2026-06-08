@@ -39,5 +39,5 @@ cargo run -p gateway --example forward config/forward.conf
 ### 测试请求
 
 ```sh
-curl -x http://127.0.0.1:5379 http://test2.genmeta.net/static/TODO.md
+curl -x http://127.0.0.1:5379 http://test2.dhttp.net/static/TODO.md
 ```
