@@ -5,7 +5,8 @@ use std::{
     time::Duration,
 };
 
-use ddns::publisher::Publisher;
+use ddns::publisher::{EndpointPublisher, PublishAddresses};
+use dhttp_identity::name::Name;
 use h3x::dquic::{
     Network,
     net::Scheme,
@@ -83,7 +84,11 @@ impl DynamicStunHandle {
 }
 
 impl StunServerManager {
-    pub fn spawn(network: Arc<Network>, publisher: Publisher, config: StunNodeConfig) -> Self {
+    pub fn spawn(
+        network: Arc<Network>,
+        publisher: EndpointPublisher,
+        config: StunNodeConfig,
+    ) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut configured_handles: HashMap<SocketAddr, ConfiguredStunHandle> = HashMap::new();
             let mut dynamic_handles: HashMap<BindUri, DynamicStunHandle> = HashMap::new();
@@ -520,7 +525,7 @@ async fn publish_stun_endpoints(
     network: &Arc<Network>,
     configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
     dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
-    publisher: &Publisher,
+    publisher: &EndpointPublisher,
     config: &StunNodeConfig,
 ) {
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
@@ -562,13 +567,11 @@ async fn publish_stun_endpoints(
         outer_addrs.extend(fullcone_outers);
     }
 
-    let endpoints: Vec<EndpointAddr> = outer_addrs
-        .iter()
-        .copied()
-        .map(EndpointAddr::direct)
-        .collect();
+    let endpoints = outer_addrs.iter().copied().map(EndpointAddr::direct);
+    let addresses = PublishAddresses::new().wide_area(endpoints);
+    let name = Name::try_from(STUN_DOMAIN).expect("STUN_DOMAIN must be a valid DNS owner name");
 
-    if let Err(error) = publisher.publish_once_for(STUN_DOMAIN, &endpoints).await {
+    if let Err(error) = publisher.publish_once(&name, &addresses).await {
         tracing::warn!(
             error = %Report::from_error(&error),
             "failed to publish stun endpoints"

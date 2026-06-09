@@ -613,8 +613,8 @@ impl RootState {
         .await
         .context(acquire_listener_error::BuildEndpointSnafu)?;
         let shutdown_token = CancellationToken::new();
-        let publisher = match endpoint.publisher_with_options(request.publish_options) {
-            Ok(publisher) => publisher,
+        let publisher_loop = match endpoint.publisher_loop_with_options(request.publish_options) {
+            Ok(publisher_loop) => publisher_loop,
             Err(source) => {
                 if let Err(error) = endpoint.shutdown().await {
                     tracing::warn!(
@@ -635,7 +635,7 @@ impl RootState {
                     biased;
                     () = owner_token.cancelled() => {}
                     () = publish_shutdown.cancelled() => {}
-                    () = async { publisher.run().await } => {}
+                    () = async { publisher_loop.run().await } => {}
                 }
             }
             .in_current_span()
