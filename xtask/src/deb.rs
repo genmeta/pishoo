@@ -12,9 +12,10 @@ use tracing::{Instrument, info, info_span};
 use crate::{
     BuildProfile, DebTarget, Feature,
     container::{
-        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts, check_docker,
-        dhttp_bootstrap_from_env, exec_in_container, force_remove_container, host_uid_gid,
-        remove_container_if_exists, resolve_siblings, start_container,
+        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts,
+        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
+        force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
+        resolve_siblings, start_container,
     },
     package_version, target_dir,
 };
@@ -465,6 +466,7 @@ async fn build_one(
 
     let bootstrap = dhttp_bootstrap_from_env()?;
     mounts.extend(bootstrap.mounts);
+    let cargo_config = cargo_config_from_siblings(siblings);
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
@@ -532,6 +534,7 @@ async fn build_one(
         gnu,
         profile,
         &bootstrap.exports,
+        cargo_config.as_deref(),
         &worker_env,
         &ssh_session_env,
         &cargo_features_env,
@@ -559,6 +562,7 @@ async fn build_one_inner(
     gnu: &str,
     profile: BuildProfile,
     dhttp_bootstrap_exports: &str,
+    cargo_config: Option<&str>,
     worker_env: &str,
     ssh_session_env: &str,
     cargo_features_env: &str,
@@ -575,6 +579,7 @@ async fn build_one_inner(
         None,
     )
     .await?;
+    install_cargo_config(docker, container_id, cargo_config).await?;
 
     // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary).
     // -a{arch} sets the host architecture for cross-compilation.

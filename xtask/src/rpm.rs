@@ -28,9 +28,10 @@ use tracing::{Instrument, info, info_span};
 use crate::{
     Feature, RpmTarget,
     container::{
-        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts, check_docker,
-        dhttp_bootstrap_from_env, exec_in_container, force_remove_container, host_uid_gid,
-        remove_container_if_exists, resolve_siblings, start_container,
+        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts,
+        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
+        force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
+        resolve_siblings, start_container,
     },
     deb::PISHOO_LIBEXEC_DIR,
     package_meta, target_dir,
@@ -302,6 +303,7 @@ async fn build_one(
 
     let bootstrap = dhttp_bootstrap_from_env()?;
     mounts.extend(bootstrap.mounts);
+    let cargo_config = cargo_config_from_siblings(siblings);
 
     let container_name = format!("pishoo-xtask-rpm-{triple}");
     remove_container_if_exists(docker, &container_name).await;
@@ -343,6 +345,7 @@ async fn build_one(
         has_sshd,
         has_pam,
         &bootstrap.exports,
+        cargo_config.as_deref(),
     )
     .await;
     force_remove_container(docker, &container_id).await;
@@ -384,9 +387,12 @@ async fn build_one_inner(
     has_sshd: bool,
     has_pam: bool,
     dhttp_bootstrap_exports: &str,
+    cargo_config: Option<&str>,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
     info!(triple, "build container started");
+
+    install_cargo_config(docker, container_id, cargo_config).await?;
 
     let user = host_uid_gid()?;
     let spec = render_spec(version, description, has_sshd, has_pam);

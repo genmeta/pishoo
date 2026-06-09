@@ -216,6 +216,28 @@ pub(crate) async fn exec_in_container(
     Ok(())
 }
 
+pub(crate) async fn install_cargo_config(
+    docker: &Docker,
+    container_id: &str,
+    config: Option<&str>,
+) -> Result<(), Whatever> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+
+    let script = format!(
+        r#"set -e
+mkdir -p {CARGO_HOME}
+cat > {CARGO_HOME}/config.toml <<'GENMETA_XTASK_CARGO_CONFIG'
+{config}GENMETA_XTASK_CARGO_CONFIG
+"#
+    );
+    exec_in_container(docker, container_id, &["bash", "-c", &script], None)
+        .await
+        .whatever_context("failed to install cargo config")?;
+    Ok(())
+}
+
 /// Bind mounts for the host cargo git/registry cache.
 /// This avoids re-downloading crates and allows private git dependencies
 /// to work without SSH credentials in the container.
@@ -269,6 +291,86 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
         out.push(Sibling { host, basename });
     }
     Ok(out)
+}
+
+pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String> {
+    let mut config = String::new();
+
+    if has_sibling(siblings, "dhttp") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/dhttp.git",
+            &[
+                ("dhttp", "/dhttp/dhttp"),
+                ("dhttp-access", "/dhttp/access"),
+                ("dhttp-home", "/dhttp/home"),
+                ("dhttp-identity", "/dhttp/identity"),
+            ],
+        );
+    }
+
+    if has_sibling(siblings, "ddns") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/ddns.git",
+            &[("ddns", "/ddns")],
+        );
+    }
+
+    if has_sibling(siblings, "h3x") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/h3x.git",
+            &[("h3x", "/h3x")],
+        );
+    }
+
+    if has_sibling(siblings, "dssh") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/dssh.git",
+            &[("dssh", "/dssh")],
+        );
+    }
+
+    if has_sibling(siblings, "dquic") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/dquic.git",
+            &[("dquic", "/dquic/dquic")],
+        );
+    }
+
+    if has_sibling(siblings, "rankey") {
+        push_patch_section(
+            &mut config,
+            "https://github.com/genmeta/rankey.git",
+            &[("rankey", "/rankey")],
+        );
+    }
+
+    if config.is_empty() {
+        None
+    } else {
+        Some(config)
+    }
+}
+
+fn has_sibling(siblings: &[Sibling], basename: &str) -> bool {
+    siblings.iter().any(|sibling| sibling.basename == basename)
+}
+
+fn push_patch_section(config: &mut String, source: &str, packages: &[(&str, &str)]) {
+    config.push_str("[patch.\"");
+    config.push_str(source);
+    config.push_str("\"]\n");
+    for (package, path) in packages {
+        config.push_str(package);
+        config.push_str(" = { path = \"");
+        config.push_str(path);
+        config.push_str("\" }\n");
+    }
+    config.push('\n');
 }
 
 #[cfg(test)]
@@ -390,5 +492,43 @@ mod tests {
             "export DHTTP_STUN_SERVER='nat'\\''genmeta.net:20004'\n"
         );
         assert!(bootstrap.mounts.is_empty());
+    }
+
+    #[test]
+    fn cargo_config_from_siblings_patches_genmeta_git_sources() {
+        let siblings = vec![
+            Sibling {
+                host: "/host/reimu/dhttp".into(),
+                basename: "dhttp".to_string(),
+            },
+            Sibling {
+                host: "/host/reimu/dquic".into(),
+                basename: "dquic".to_string(),
+            },
+            Sibling {
+                host: "/host/reimu/rankey".into(),
+                basename: "rankey".to_string(),
+            },
+        ];
+
+        let config = cargo_config_from_siblings(&siblings).expect("config should be rendered");
+        assert!(config.contains("[patch.\"https://github.com/genmeta/dhttp.git\"]"));
+        assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
+        assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
+        assert!(config.contains("[patch.\"https://github.com/genmeta/dquic.git\"]"));
+        assert!(config.contains("dquic = { path = \"/dquic/dquic\" }"));
+        assert!(config.contains("[patch.\"https://github.com/genmeta/rankey.git\"]"));
+        assert!(config.contains("rankey = { path = \"/rankey\" }"));
+        assert!(!config.contains("ddns ="));
+    }
+
+    #[test]
+    fn cargo_config_from_siblings_returns_none_without_supported_siblings() {
+        let siblings = vec![Sibling {
+            host: "/host/reimu/other".into(),
+            basename: "other".to_string(),
+        }];
+
+        assert!(cargo_config_from_siblings(&siblings).is_none());
     }
 }
