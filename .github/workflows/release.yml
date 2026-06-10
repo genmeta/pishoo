@@ -1,47 +1,13 @@
 name: Release
 
 on:
+  pull_request:
+  workflow_dispatch:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      bucket:
-        description: S3/R2 bucket name.
-        required: true
-        default: download
-      apt_suite:
-        description: APT suite to render and sign.
-        required: true
-        default: stable
-      apt_prefix:
-        description: Remote prefix for pishoo APT repository objects.
-        required: true
-        default: apt/pishoo
-      rpm_prefix:
-        description: Remote prefix for pishoo RPM repository objects.
-        required: true
-        default: rpm/pishoo
-      brew_prefix:
-        description: Remote prefix for pishoo Homebrew archives and formula.
-        required: true
-        default: brew/pishoo
-      brew_public_base_url:
-        description: Public base URL corresponding to brew_prefix.
-        required: true
-        default: https://download.genmeta.net/brew/pishoo
-      linux_targets:
-        description: Space-separated Linux Rust targets for deb/rpm package build.
-        required: true
-        default: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
-      homebrew_tap_repository:
-        description: GitHub repository that owns the Homebrew tap.
-        required: true
-        default: genmeta/homebrew-genmeta
-      homebrew_tap_base_branch:
-        description: Base branch for Homebrew tap pull requests.
-        required: true
-        default: main
 
 permissions:
   contents: read
@@ -52,10 +18,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  DHTTP_STUN_SERVER: nat.genmeta.net:20004
-  DHTTP_H3_DNS_SERVER: https://dns.genmeta.net:4433
-  DHTTP_HTTP_DNS_SERVER: https://dns.genmeta.net
-  DHTTP_MDNS_SERVICE: _genmeta.local
+  XTASK_RELEASE_S3_ENDPOINT_URL: ${{ vars.XTASK_RELEASE_S3_ENDPOINT_URL }}
+  DHTTP_STUN_SERVER: ${{ vars.DHTTP_STUN_SERVER }}
+  DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}
+  DHTTP_HTTP_DNS_SERVER: ${{ vars.DHTTP_HTTP_DNS_SERVER }}
+  DHTTP_MDNS_SERVICE: ${{ vars.DHTTP_MDNS_SERVICE }}
+  DHTTP_CERT_SERVER_URL: ${{ vars.DHTTP_CERT_SERVER_URL }}
 
 jobs:
   linux-deb:
@@ -64,11 +32,10 @@ jobs:
     timeout-minutes: 240
     env:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
-      APT_SUITE: ${{ inputs.apt_suite || 'stable' }}
-      APT_PREFIX: ${{ inputs.apt_prefix || 'apt/pishoo' }}
-      LINUX_TARGETS: ${{ inputs.linux_targets || 'x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu' }}
-      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
+      RELEASE_BUCKET: download
+      APT_SUITE: stable
+      APT_PREFIX: apt/pishoo
+      LINUX_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
     defaults:
       run:
         shell: bash
@@ -80,37 +47,6 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Checkout dhttp
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dhttp
-          ref: main
-          path: dhttp
-          persist-credentials: false
-
-      - name: Checkout ddns
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/ddns
-          ref: endpoint
-          path: ddns
-          persist-credentials: false
-
-      - name: Checkout h3x
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/h3x
-          ref: endpoint
-          path: h3x
-          persist-credentials: false
-
-      - name: Checkout dssh
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dssh
-          ref: endpoint
-          path: dssh
-          persist-credentials: false
 
       - name: Install Rust
         run: |
@@ -123,7 +59,7 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-linux-deb-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          key: gateway-linux-deb-cargo-${{ hashFiles('gateway/Cargo.lock') }}
           restore-keys: |
             gateway-linux-deb-cargo-
 
@@ -133,23 +69,42 @@ jobs:
           sudo apt-get install --assume-yes --no-install-recommends gpg
           docker info
 
-      - name: Check release secrets and derive APT fingerprint
+      - name: Validate release configuration and derive APT fingerprint
         id: apt_key
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
           XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
+          XTASK_RELEASE_APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
         run: |
-          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
-          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
-          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
-          : "${XTASK_RELEASE_APT_SIGNING_KEY:?missing XTASK_RELEASE_APT_SIGNING_KEY}"
+          set -euo pipefail
+          missing=0
+          required=(
+            XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_STUN_SERVER
+            DHTTP_H3_DNS_SERVER
+            DHTTP_HTTP_DNS_SERVER
+            DHTTP_MDNS_SERVICE
+            DHTTP_CERT_SERVER_URL
+            XTASK_RELEASE_S3_ACCESS_KEY_ID
+            XTASK_RELEASE_S3_SECRET_ACCESS_KEY
+            XTASK_RELEASE_APT_SIGNING_KEY
+            XTASK_RELEASE_APT_SIGNING_PASSPHRASE
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "missing required release configuration: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit "$missing"
+          fi
 
           key_file="$RUNNER_TEMP/apt-signing-key.asc"
           install -m 700 -d "$(dirname "$key_file")"
           printf '%s' "$XTASK_RELEASE_APT_SIGNING_KEY" > "$key_file"
-          fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" \
+          fingerprint="$(gpg --batch --import-options show-only --with-colons --import "$key_file" \
             | awk -F: '$1 == "fpr" { print toupper($10); exit }')"
           rm -f "$key_file"
           if [ -z "$fingerprint" ]; then
@@ -164,30 +119,33 @@ jobs:
           for target in ${LINUX_TARGETS}; do
             deb_args+=(--target "$target")
           done
+          if [ "${#deb_args[@]}" -eq 0 ]; then
+            echo "linux_targets must not be empty" >&2
+            exit 1
+          fi
 
           cargo xtask package --overwrite-manifest \
-            deb "${deb_args[@]}" --features sshd,pam \
-              --sibling ../dhttp \
-              --sibling ../ddns \
-              --sibling ../h3x \
-              --sibling ../dssh
+            deb "${deb_args[@]}" --features sshd,pam
 
       - name: Publish S3 for deb artifacts
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
           XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
-          APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
+          XTASK_RELEASE_APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
           APT_SIGNING_FINGERPRINT: ${{ steps.apt_key.outputs.fingerprint }}
         run: |
-          if [ -n "${APT_SIGNING_PASSPHRASE:-}" ]; then
-            export XTASK_RELEASE_APT_SIGNING_PASSPHRASE="$APT_SIGNING_PASSPHRASE"
-          else
-            unset XTASK_RELEASE_APT_SIGNING_PASSPHRASE
+          set -euo pipefail
+          export XTASK_RELEASE_APT_SIGNING_PASSPHRASE
+          mode=dry-run
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            mode=publish
           fi
-
-          cargo xtask publish s3 $DRY_RUN_FLAG \
+          publish_args=()
+          if [[ "$mode" == "dry-run" ]]; then
+            publish_args+=(--dry-run)
+          fi
+          cargo xtask publish s3 "${publish_args[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT"
@@ -207,10 +165,9 @@ jobs:
     timeout-minutes: 240
     env:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
-      RPM_PREFIX: ${{ inputs.rpm_prefix || 'rpm/pishoo' }}
-      LINUX_TARGETS: ${{ inputs.linux_targets || 'x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu' }}
-      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
+      RELEASE_BUCKET: download
+      RPM_PREFIX: rpm/pishoo
+      LINUX_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
     defaults:
       run:
         shell: bash
@@ -222,37 +179,6 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Checkout dhttp
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dhttp
-          ref: main
-          path: dhttp
-          persist-credentials: false
-
-      - name: Checkout ddns
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/ddns
-          ref: endpoint
-          path: ddns
-          persist-credentials: false
-
-      - name: Checkout h3x
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/h3x
-          ref: endpoint
-          path: h3x
-          persist-credentials: false
-
-      - name: Checkout dssh
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dssh
-          ref: endpoint
-          path: dssh
-          persist-credentials: false
 
       - name: Install Rust
         run: |
@@ -265,7 +191,7 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-linux-rpm-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          key: gateway-linux-rpm-cargo-${{ hashFiles('gateway/Cargo.lock') }}
           restore-keys: |
             gateway-linux-rpm-cargo-
 
@@ -275,15 +201,30 @@ jobs:
           sudo apt-get install --assume-yes --no-install-recommends rpm
           docker info
 
-      - name: Check release secrets
+      - name: Validate release configuration
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
         run: |
-          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
-          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
-          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
+          set -euo pipefail
+          missing=0
+          required=(
+            XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_STUN_SERVER
+            DHTTP_H3_DNS_SERVER
+            DHTTP_HTTP_DNS_SERVER
+            DHTTP_MDNS_SERVICE
+            DHTTP_CERT_SERVER_URL
+            XTASK_RELEASE_S3_ACCESS_KEY_ID
+            XTASK_RELEASE_S3_SECRET_ACCESS_KEY
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "missing required release configuration: $name" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - name: Package rpm artifacts
         run: |
@@ -291,21 +232,29 @@ jobs:
           for target in ${LINUX_TARGETS}; do
             rpm_args+=(--target "$target")
           done
+          if [ "${#rpm_args[@]}" -eq 0 ]; then
+            echo "linux_targets must not be empty" >&2
+            exit 1
+          fi
 
           cargo xtask package --overwrite-manifest \
-            rpm "${rpm_args[@]}" --features sshd,pam \
-              --sibling ../dhttp \
-              --sibling ../ddns \
-              --sibling ../h3x \
-              --sibling ../dssh
+            rpm "${rpm_args[@]}" --features sshd,pam
 
       - name: Publish S3 for rpm artifacts
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
         run: |
-          cargo xtask publish s3 $DRY_RUN_FLAG \
+          set -euo pipefail
+          mode=dry-run
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            mode=publish
+          fi
+          publish_args=()
+          if [[ "$mode" == "dry-run" ]]; then
+            publish_args+=(--dry-run)
+          fi
+          cargo xtask publish s3 "${publish_args[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             rpm --prefix "$RPM_PREFIX"
@@ -319,18 +268,17 @@ jobs:
           path: |
             gateway/target/common/rpm/**
 
-  macos:
+  homebrew:
     name: Homebrew package and S3 publish
     runs-on: macos-15
     timeout-minutes: 120
     env:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: ${{ inputs.bucket || 'download' }}
-      BREW_PREFIX: ${{ inputs.brew_prefix || 'brew/pishoo' }}
-      BREW_PUBLIC_BASE_URL: ${{ inputs.brew_public_base_url || 'https://download.genmeta.net/brew/pishoo' }}
-      HOMEBREW_TAP_REPOSITORY: ${{ inputs.homebrew_tap_repository || 'genmeta/homebrew-genmeta' }}
-      HOMEBREW_TAP_BASE_BRANCH: ${{ inputs.homebrew_tap_base_branch || 'main' }}
-      DRY_RUN_FLAG: ${{ github.event_name == 'workflow_dispatch' && '--dry-run' || '' }}
+      RELEASE_BUCKET: download
+      BREW_PREFIX: brew/pishoo
+      BREW_PUBLIC_BASE_URL: https://download.genmeta.net/brew/pishoo
+      HOMEBREW_TAP_REPOSITORY: genmeta/homebrew-genmeta
+      HOMEBREW_TAP_BASE_BRANCH: main
     defaults:
       run:
         shell: bash
@@ -342,40 +290,35 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Checkout dhttp
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dhttp
-          ref: main
-          path: dhttp
-          persist-credentials: false
-
-      - name: Checkout ddns
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/ddns
-          ref: endpoint
-          path: ddns
-          persist-credentials: false
-
-      - name: Checkout h3x
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/h3x
-          ref: endpoint
-          path: h3x
-          persist-credentials: false
-
-      - name: Checkout dssh
-        uses: actions/checkout@v6
-        with:
-          repository: genmeta/dssh
-          ref: endpoint
-          path: dssh
-          persist-credentials: false
+      - name: Validate release configuration
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+          required=(
+            XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_STUN_SERVER
+            DHTTP_H3_DNS_SERVER
+            DHTTP_HTTP_DNS_SERVER
+            DHTTP_MDNS_SERVICE
+            DHTTP_CERT_SERVER_URL
+            XTASK_RELEASE_S3_ACCESS_KEY_ID
+            XTASK_RELEASE_S3_SECRET_ACCESS_KEY
+            HOMEBREW_TAP_GITHUB_TOKEN
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "missing required release configuration: $name" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - name: Checkout Homebrew tap
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         uses: actions/checkout@v6
         with:
           repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
@@ -395,23 +338,9 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-macos-cargo-${{ hashFiles('gateway/Cargo.lock', 'dhttp/Cargo.lock', 'ddns/Cargo.lock', 'h3x/Cargo.lock', 'dssh/Cargo.lock') }}
+          key: gateway-macos-cargo-${{ hashFiles('gateway/Cargo.lock') }}
           restore-keys: |
             gateway-macos-cargo-
-
-      - name: Check release secrets
-        env:
-          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
-          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-        run: |
-          : "${XTASK_RELEASE_S3_ACCESS_KEY_ID:?missing XTASK_RELEASE_S3_ACCESS_KEY_ID}"
-          : "${XTASK_RELEASE_S3_SECRET_ACCESS_KEY:?missing XTASK_RELEASE_S3_SECRET_ACCESS_KEY}"
-          : "${XTASK_RELEASE_S3_ENDPOINT_URL:?missing XTASK_RELEASE_S3_ENDPOINT_URL}"
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            : "${HOMEBREW_TAP_GITHUB_TOKEN:?missing HOMEBREW_TAP_GITHUB_TOKEN}"
-          fi
 
       - name: Package Homebrew artifacts
         run: |
@@ -425,15 +354,23 @@ jobs:
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
-          XTASK_RELEASE_S3_ENDPOINT_URL: https://291f3a932ece99211a59654f23bf6634.r2.cloudflarestorage.com
         run: |
-          cargo xtask publish s3 $DRY_RUN_FLAG \
+          set -euo pipefail
+          mode=dry-run
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            mode=publish
+          fi
+          publish_args=()
+          if [[ "$mode" == "dry-run" ]]; then
+            publish_args+=(--dry-run)
+          fi
+          cargo xtask publish s3 "${publish_args[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             brew --prefix "$BREW_PREFIX" --public-base-url "$BREW_PUBLIC_BASE_URL"
 
       - name: Create Homebrew tap pull request
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           FORMULA_NAME: pishoo.rb
