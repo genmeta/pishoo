@@ -18,10 +18,15 @@ CARGO_PROFILE_ARGS ?= --release
 
 # --- pishoo binary build (arch-any only) ---
 
+# TODO: Remove this cargo-zigbuild workaround after rustc/Zig agree on the
+# Cortex-A53 843419 mitigation linker argument.
 override_dh_auto_build:
 ifdef TRIPLE
 	cd /workspace && \
 	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
+	if [ "$(TRIPLE)" = "aarch64-unknown-linux-gnu" ]; then \
+		export RUSTFLAGS="$$RUSTFLAGS -Clinker-flavor=gnu-lld-cc"; \
+	fi && \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
 	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
 	cargo zigbuild $(CARGO_PROFILE_ARGS) --target $(ZIG_TARGET) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))

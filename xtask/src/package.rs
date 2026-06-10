@@ -108,3 +108,23 @@ pub async fn run(options: PackageOptions) -> Result<(), Whatever> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PackageFormat, parse_package_format};
+    use crate::RpmTarget;
+
+    #[test]
+    fn rpm_package_accepts_common_target() {
+        let format = parse_package_format(
+            "rpm",
+            ["--target", "common", "--target", "x86_64-unknown-linux-gnu"],
+        )
+        .expect("rpm package format should parse");
+
+        let PackageFormat::Rpm { targets, .. } = format else {
+            panic!("expected rpm package format");
+        };
+        assert_eq!(targets, [RpmTarget::Common, RpmTarget::X86_64]);
+    }
+}

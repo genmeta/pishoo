@@ -1,11 +1,12 @@
 //! RPM (.rpm) packaging for pishoo via a Fedora 40 Docker container and
 //! cargo-zigbuild.
 //!
-//! Produces two rpm packages per target triple:
+//! Produces one rpm package per requested target:
 //! * `pishoo-{version}-1.{rpm_arch}.rpm` — the arch-dependent package:
 //!   `/usr/bin/pishoo`, `/usr/libexec/pishoo/pishoo-worker`, optional
 //!   `/usr/libexec/pishoo/pishoo-ssh-session`.
-//! * `pishoo-common-{version}-1.noarch.rpm` — the arch-independent package:
+//! * `pishoo-common-{version}-1.noarch.rpm` — the arch-independent `common`
+//!   target package:
 //!   `/etc/pishoo/*`, the systemd unit, and the `pishoo` system group.
 //!
 //! The spec is generated in Rust (no template file). Pishoo is built by
@@ -93,6 +94,18 @@ pub async fn run(
 
     let mut tasks = tokio::task::JoinSet::new();
     for &target in targets {
+        if matches!(target, RpmTarget::Common) {
+            let docker = docker.clone();
+            let meta_version = meta.version.clone();
+            let target_dir = target_dir.clone();
+            info!("queued common rpm package build");
+            tasks.spawn(
+                async move { run_common(&docker, &meta_version, &target_dir).await }
+                    .instrument(info_span!("rpm", triple = "common")),
+            );
+            continue;
+        }
+
         let docker = docker.clone();
         let meta_version = meta.version.clone();
         let meta_description = meta.description.clone();
@@ -131,6 +144,139 @@ pub async fn run(
             .then_with(|| left.path.cmp(&right.path))
     });
     Ok(artifacts)
+}
+
+async fn run_common(
+    docker: &Docker,
+    version: &str,
+    target_dir: &std::path::Path,
+) -> Result<Vec<RpmArtifact>, Whatever> {
+    info!("starting common rpm package build");
+    let out_dir = target_dir.join("common").join("rpm");
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .whatever_context(format!("failed to create {}", out_dir.display()))?;
+
+    let workspace_dir =
+        std::env::current_dir().whatever_context("failed to get current directory")?;
+
+    let mut pull_stream = docker.create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image(BASE_IMAGE)
+                .build(),
+        ),
+        None,
+        None,
+    );
+    while let Some(result) = pull_stream.next().await {
+        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
+    }
+
+    let container_name = format!("{CARGO_NAME}-xtask-rpm-common");
+    remove_container_if_exists(docker, &container_name).await;
+    let container = docker
+        .create_container(
+            Some(
+                CreateContainerOptionsBuilder::default()
+                    .name(&container_name)
+                    .build(),
+            ),
+            ContainerCreateBody {
+                image: Some(BASE_IMAGE.to_string()),
+                cmd: Some(vec!["sleep".into(), "infinity".into()]),
+                host_config: Some(HostConfig {
+                    mounts: Some(vec![Mount {
+                        target: Some("/workspace".into()),
+                        source: Some(workspace_dir.to_string_lossy().into_owned()),
+                        typ: Some(MountType::BIND),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .whatever_context("failed to create common rpm container")?;
+    let container_id = container.id.clone();
+
+    let result = run_common_inner(docker, &container_id, version).await;
+    force_remove_container(docker, &container_id).await;
+    result?;
+
+    let mut artifacts = Vec::new();
+    let mut entries = tokio::fs::read_dir(&out_dir)
+        .await
+        .whatever_context(format!("failed to read {}", out_dir.display()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .whatever_context(format!("failed to read entry in {}", out_dir.display()))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("rpm") {
+            artifacts.push(RpmArtifact {
+                target: "common".to_string(),
+                path,
+                features: Vec::new(),
+            });
+        }
+    }
+    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+    info!("finished common rpm package build");
+    Ok(artifacts)
+}
+
+async fn run_common_inner(
+    docker: &Docker,
+    container_id: &str,
+    version: &str,
+) -> Result<(), Whatever> {
+    start_container(docker, container_id).await?;
+
+    let setup_script = r#"set -e
+dnf install -y --setopt=install_weak_deps=False \
+    rpm-build rpmdevtools systemd-rpm-macros \
+    ca-certificates util-linux
+"#;
+    exec_in_container(docker, container_id, &["bash", "-c", setup_script], None).await?;
+
+    let user = host_uid_gid()?;
+    let spec = render_common_spec(version);
+    let spec_escaped = shell_escape(&spec);
+    let build_script = format!(
+        r#"set -e
+TOPDIR=/workspace/target/common/rpm
+rm -rf "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
+mkdir -p "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
+
+SPEC="$TOPDIR/SPECS/{COMMON_PACKAGE_NAME}.spec"
+printf '%s' {spec_escaped} > "$SPEC"
+
+install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/pishoo.conf \
+    "$TOPDIR/SOURCES/pishoo.conf"
+install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/mime.types \
+    "$TOPDIR/SOURCES/mime.types"
+install -D -m 0644 /workspace/{SYSTEMD_UNIT_SRC} \
+    "$TOPDIR/SOURCES/pishoo.service"
+
+rpmbuild -bb \
+    --define "_topdir $TOPDIR" \
+    --define "_binary_payload w19.xzdio" \
+    "$SPEC"
+
+find "$TOPDIR/RPMS" -name '*.rpm' -exec mv {{}} "$TOPDIR/" \;
+"#
+    );
+    exec_in_container(
+        docker,
+        container_id,
+        &["bash", "-c", &build_script],
+        Some(&user),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever> {
@@ -395,7 +541,7 @@ async fn build_one_inner(
     install_cargo_config(docker, container_id, cargo_config).await?;
 
     let user = host_uid_gid()?;
-    let spec = render_spec(version, description, has_sshd, has_pam);
+    let spec = render_binary_spec(version, description, has_sshd, has_pam);
     let spec_escaped = shell_escape(&spec);
 
     let feature_flag = if features.is_empty() {
@@ -440,6 +586,11 @@ export CARGO_HOME={CARGO_HOME}
 {dhttp_bootstrap_exports}{worker_env}{ssh_session_env}
 # Use per-arch sysroot for PAM + glibc when cross-compiling.
 export RUSTFLAGS="${{RUSTFLAGS:-}} -L /opt/sysroots/{arch}/usr/{libdir}"
+# TODO: Remove this aarch64 cargo-zigbuild workaround after rustc/Zig/cargo-zigbuild
+# agree on the Cortex-A53 843419 mitigation linker argument.
+if [ "{triple}" = "aarch64-unknown-linux-gnu" ]; then
+    export RUSTFLAGS="$RUSTFLAGS -Clinker-flavor=gnu-lld-cc"
+fi
 
 cd /workspace
 cargo zigbuild --release --target {triple}.{ZIG_GLIBC_VERSION} -p pishoo{feature_flag}
@@ -455,12 +606,6 @@ printf '%s' {spec_escaped} > "$SPEC"
 install -D -m 0755 "$TARGET_RELEASE/pishoo"         "$TOPDIR/SOURCES/pishoo"
 install -D -m 0755 "$TARGET_RELEASE/pishoo-worker"  "$TOPDIR/SOURCES/pishoo-worker"
 {ssh_install}
-install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/pishoo.conf \
-    "$TOPDIR/SOURCES/pishoo.conf"
-install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/mime.types \
-    "$TOPDIR/SOURCES/mime.types"
-install -D -m 0644 /workspace/{SYSTEMD_UNIT_SRC} \
-    "$TOPDIR/SOURCES/pishoo.service"
 
 rpmbuild -bb \
     --target={arch} \
@@ -497,13 +642,13 @@ fn shell_escape(s: &str) -> String {
     out
 }
 
-/// Render the pishoo spec with a `pishoo-common` noarch subpackage.
+/// Render the architecture-dependent pishoo spec.
 ///
-/// The spec deliberately sets `AutoReqProv: no` on both packages and declares
-/// runtime requirements by hand: rpm's dependency generator would otherwise
-/// pin libc symbol versions from the zig-bundled glibc shim, which do not
-/// match the target distro's glibc.
-fn render_spec(version: &str, description: &str, has_sshd: bool, has_pam: bool) -> String {
+/// The spec deliberately sets `AutoReqProv: no` and declares runtime
+/// requirements by hand: rpm's dependency generator would otherwise pin libc
+/// symbol versions from the zig-bundled glibc shim, which do not match the
+/// target distro's glibc.
+fn render_binary_spec(version: &str, description: &str, has_sshd: bool, has_pam: bool) -> String {
     let desc = if description.is_empty() {
         "Pishoo QUIC-powered, peer-to-peer web/proxy engine."
     } else {
@@ -540,26 +685,7 @@ fn render_spec(version: &str, description: &str, has_sshd: bool, has_pam: bool) 
             "install -D -m 0755 %{{SOURCE{source_idx}}} %{{buildroot}}{PISHOO_LIBEXEC_DIR}/pishoo-ssh-session\n"
         ));
         file_lines.push_str(&format!("{PISHOO_LIBEXEC_DIR}/pishoo-ssh-session\n"));
-        source_idx += 1;
     }
-
-    // common subpackage sources
-    let common_conf_src = source_idx;
-    source_lines.push_str(&format!("Source{source_idx}:        pishoo.conf\n"));
-    source_idx += 1;
-    let common_mime_src = source_idx;
-    source_lines.push_str(&format!("Source{source_idx}:        mime.types\n"));
-    source_idx += 1;
-    let common_unit_src = source_idx;
-    source_lines.push_str(&format!("Source{source_idx}:        pishoo.service\n"));
-    // source_idx no longer used after this point
-
-    let common_install = format!(
-        r#"install -D -m 0644 %{{SOURCE{common_conf_src}}} %{{buildroot}}/etc/pishoo/pishoo.conf
-install -D -m 0644 %{{SOURCE{common_mime_src}}} %{{buildroot}}/etc/pishoo/mime.types
-install -D -m 0644 %{{SOURCE{common_unit_src}}} %{{buildroot}}%{{_unitdir}}/pishoo.service
-"#
-    );
 
     let pam_req = if has_pam { "Requires:       pam\n" } else { "" };
 
@@ -574,21 +700,9 @@ Vendor:         {RPM_VENDOR}
 {source_lines}AutoReqProv:    no
 Requires:       {COMMON_PACKAGE_NAME} = %{{version}}-%{{release}}
 Requires:       glibc
-Requires:       systemd
-{pam_req}BuildRequires:  systemd-rpm-macros
-
+{pam_req}
 %description
 {desc}
-
-%package common
-Summary:        Common files for pishoo
-License:        {RPM_LICENSE}
-BuildArch:      noarch
-AutoReqProv:    no
-Requires(pre):  shadow-utils
-
-%description common
-Common configuration files and the systemd unit for the pishoo proxy engine.
 
 %prep
 # nothing to do: binaries are pre-built by cargo-zigbuild
@@ -598,17 +712,57 @@ Common configuration files and the systemd unit for the pishoo proxy engine.
 
 %install
 rm -rf %{{buildroot}}
-{install_lines}{common_install}
-
+{install_lines}
 %files
 {file_lines}
-%files common
+%changelog
+* %(date '+%a %b %d %Y') {RPM_VENDOR} <developer@genmeta.net> - {version}-1
+- release {version}
+"#
+    )
+}
+
+/// Render the architecture-independent pishoo-common spec.
+fn render_common_spec(version: &str) -> String {
+    format!(
+        r#"Name:           {COMMON_PACKAGE_NAME}
+Version:        {version}
+Release:        1%{{?dist}}
+Summary:        Common files for pishoo
+License:        {RPM_LICENSE}
+URL:            {RPM_URL}
+Vendor:         {RPM_VENDOR}
+Source0:        pishoo.conf
+Source1:        mime.types
+Source2:        pishoo.service
+BuildArch:      noarch
+AutoReqProv:    no
+Requires(pre):  shadow-utils
+Requires:       systemd
+BuildRequires:  systemd-rpm-macros
+
+%description
+Common configuration files and the systemd unit for the pishoo proxy engine.
+
+%prep
+# nothing to do: common files are staged into SOURCES
+
+%build
+# nothing to do: common files are staged into SOURCES
+
+%install
+rm -rf %{{buildroot}}
+install -D -m 0644 %{{SOURCE0}} %{{buildroot}}/etc/pishoo/pishoo.conf
+install -D -m 0644 %{{SOURCE1}} %{{buildroot}}/etc/pishoo/mime.types
+install -D -m 0644 %{{SOURCE2}} %{{buildroot}}%{{_unitdir}}/pishoo.service
+
+%files
 %dir /etc/pishoo
 %config(noreplace) /etc/pishoo/pishoo.conf
 /etc/pishoo/mime.types
 %{{_unitdir}}/pishoo.service
 
-%pre common
+%pre
 getent group pishoo >/dev/null || groupadd --system pishoo
 
 %post
@@ -625,4 +779,41 @@ getent group pishoo >/dev/null || groupadd --system pishoo
 - release {version}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_binary_spec, render_common_spec};
+
+    #[test]
+    fn binary_spec_requires_common_but_does_not_define_common_subpackage() {
+        let spec = render_binary_spec("0.5.2", "test description", true, true);
+
+        assert!(spec.contains("Name:           pishoo\n"));
+        assert!(spec.contains("Requires:       pishoo-common = %{version}-%{release}\n"));
+        assert!(spec.contains("/usr/bin/pishoo\n"));
+        assert!(spec.contains("/usr/libexec/pishoo/pishoo-worker\n"));
+        assert!(spec.contains("/usr/libexec/pishoo/pishoo-ssh-session\n"));
+        assert!(spec.contains("Requires:       pam\n"));
+        assert!(!spec.contains("%package common"));
+        assert!(!spec.contains("BuildArch:      noarch"));
+        assert!(!spec.contains("/etc/pishoo/pishoo.conf"));
+        assert!(!spec.contains("%{_unitdir}/pishoo.service"));
+    }
+
+    #[test]
+    fn common_spec_defines_noarch_common_package_only() {
+        let spec = render_common_spec("0.5.2");
+
+        assert!(spec.contains("Name:           pishoo-common\n"));
+        assert!(spec.contains("BuildArch:      noarch\n"));
+        assert!(spec.contains("Requires(pre):  shadow-utils\n"));
+        assert!(spec.contains("/etc/pishoo/pishoo.conf\n"));
+        assert!(spec.contains("/etc/pishoo/mime.types\n"));
+        assert!(spec.contains("%{_unitdir}/pishoo.service\n"));
+        assert!(!spec.contains("Requires:       pishoo-common = %{version}-%{release}"));
+        assert!(!spec.contains("/usr/bin/pishoo\n"));
+        assert!(!spec.contains("pishoo-worker"));
+        assert!(!spec.contains("pishoo-ssh-session"));
+    }
 }

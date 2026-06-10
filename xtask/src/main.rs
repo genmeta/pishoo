@@ -92,8 +92,11 @@ impl DebTarget {
 }
 
 /// Supported target triples for .rpm builds.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RpmTarget {
+    /// Arch-independent pishoo-common config package
+    #[value(name = "common")]
+    Common,
     /// x86_64-unknown-linux-gnu -> x86_64
     #[value(name = "x86_64-unknown-linux-gnu")]
     X86_64,
@@ -111,6 +114,7 @@ pub enum RpmTarget {
 impl RpmTarget {
     pub fn triple(self) -> &'static str {
         match self {
+            Self::Common => "common",
             Self::X86_64 => "x86_64-unknown-linux-gnu",
             Self::Aarch64 => "aarch64-unknown-linux-gnu",
             Self::Armv7 => "armv7-unknown-linux-gnueabihf",
