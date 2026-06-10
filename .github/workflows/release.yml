@@ -167,7 +167,8 @@ jobs:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
       RELEASE_BUCKET: download
       RPM_PREFIX: rpm/pishoo
-      LINUX_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
+      # Fedora 40 RPM repositories no longer provide armhfp/armv7hl metadata.
+      RPM_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu i686-unknown-linux-gnu
     defaults:
       run:
         shell: bash
@@ -229,7 +230,7 @@ jobs:
       - name: Package rpm artifacts
         run: |
           rpm_args=(--target common)
-          for target in ${LINUX_TARGETS}; do
+          for target in ${RPM_TARGETS}; do
             rpm_args+=(--target "$target")
           done
           if [ "${#rpm_args[@]}" -eq 0 ]; then
