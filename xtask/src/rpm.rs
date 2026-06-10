@@ -60,6 +60,30 @@ const COMMON_FILES_DIR: &str = "xtask/deb/common";
 const SYSTEMD_UNIT_SRC: &str = "xtask/deb/pishoo-common.pishoo.service";
 const AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND: &str =
     "-Z unstable-options -Clinker-flavor=gnu-lld-cc";
+const AARCH64_ZIGBUILD_WORKAROUND_SCRIPT_PREFIX: &str = r#"# TODO: Remove this aarch64 cargo-zigbuild workaround after rustc/Zig/cargo-zigbuild
+# agree on the Cortex-A53 843419 mitigation linker argument.
+cat > /tmp/pishoo-aarch64-zig <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "cc" ] || [ "${1:-}" = "c++" ]; then
+    zig_subcommand="$1"
+    shift
+    filtered_args=()
+    for arg in "$@"; do
+        case "$arg" in
+            -Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419)
+                continue
+                ;;
+        esac
+        filtered_args+=("$arg")
+    done
+    exec /usr/local/zig/zig "$zig_subcommand" "${filtered_args[@]}"
+fi
+exec /usr/local/zig/zig "$@"
+EOF
+chmod +x /tmp/pishoo-aarch64-zig
+export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig
+"#;
 
 fn rpm_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
@@ -68,6 +92,16 @@ fn rpm_arch(triple: &str) -> Result<&'static str, Whatever> {
         "armv7-unknown-linux-gnueabihf" => Ok("armv7hl"),
         "i686-unknown-linux-gnu" => Ok("i686"),
         _ => snafu::whatever!("unsupported rpm target triple: {triple}"),
+    }
+}
+
+fn aarch64_zigbuild_workaround_script(triple: &str) -> String {
+    if triple == "aarch64-unknown-linux-gnu" {
+        format!(
+            "{AARCH64_ZIGBUILD_WORKAROUND_SCRIPT_PREFIX}export RUSTFLAGS=\"$RUSTFLAGS {AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND}\"\n"
+        )
+    } else {
+        String::new()
     }
 }
 
@@ -593,6 +627,7 @@ async fn build_one_inner(
     } else {
         String::new()
     };
+    let aarch64_zigbuild_workaround = aarch64_zigbuild_workaround_script(triple);
 
     let ssh_install = if has_sshd {
         r#"install -D -m 0755 "$TARGET_RELEASE/pishoo-ssh-session" \
@@ -612,11 +647,7 @@ export CARGO_HOME={CARGO_HOME}
 {dhttp_bootstrap_exports}{worker_env}{ssh_session_env}
 # Use per-arch sysroot for PAM + glibc when cross-compiling.
 export RUSTFLAGS="${{RUSTFLAGS:-}} -L /opt/sysroots/{arch}/usr/{libdir}"
-# TODO: Remove this aarch64 cargo-zigbuild workaround after rustc/Zig/cargo-zigbuild
-# agree on the Cortex-A53 843419 mitigation linker argument.
-if [ "{triple}" = "aarch64-unknown-linux-gnu" ]; then
-    export RUSTFLAGS="$RUSTFLAGS {AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND}"
-fi
+{aarch64_zigbuild_workaround}
 
 cd /workspace
 cargo zigbuild --release --target {triple}.{ZIG_GLIBC_VERSION} -p pishoo{feature_flag}
@@ -810,14 +841,23 @@ getent group pishoo >/dev/null || groupadd --system pishoo
 #[cfg(test)]
 mod tests {
     use super::{
-        AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND, render_binary_spec, render_common_spec,
-        sysroot_setup_script,
+        AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND, aarch64_zigbuild_workaround_script,
+        render_binary_spec, render_common_spec, sysroot_setup_script,
     };
 
     #[test]
     fn aarch64_linker_workaround_enables_unstable_flavor_option() {
         assert!(AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND.contains("-Z unstable-options"));
         assert!(AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND.contains("-Clinker-flavor=gnu-lld-cc"));
+    }
+
+    #[test]
+    fn aarch64_zigbuild_workaround_filters_unsupported_cortex_linker_arg() {
+        let script = aarch64_zigbuild_workaround_script("aarch64-unknown-linux-gnu");
+
+        assert!(script.contains("CARGO_ZIGBUILD_ZIG_PATH"));
+        assert!(script.contains("-Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419"));
+        assert!(script.contains("/usr/local/zig/zig"));
     }
 
     #[test]

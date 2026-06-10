@@ -531,4 +531,13 @@ mod tests {
 
         assert!(cargo_config_from_siblings(&siblings).is_none());
     }
+
+    #[test]
+    fn deb_rules_filter_unsupported_aarch64_zig_linker_arg() {
+        let rules = include_str!("../deb/rules");
+
+        assert!(rules.contains("CARGO_ZIGBUILD_ZIG_PATH"));
+        assert!(rules.contains("-Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419"));
+        assert!(rules.contains("-Clinker-flavor=gnu-lld-cc"));
+    }
 }

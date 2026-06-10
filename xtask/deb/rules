@@ -25,6 +25,27 @@ ifdef TRIPLE
 	cd /workspace && \
 	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
 	if [ "$(TRIPLE)" = "aarch64-unknown-linux-gnu" ]; then \
+		{ \
+			printf '%s\n' '#!/usr/bin/env bash'; \
+			printf '%s\n' 'set -euo pipefail'; \
+			printf '%s\n' 'if [ "$${1:-}" = "cc" ] || [ "$${1:-}" = "c++" ]; then'; \
+			printf '%s\n' '    zig_subcommand="$$1"'; \
+			printf '%s\n' '    shift'; \
+			printf '%s\n' '    filtered_args=()'; \
+			printf '%s\n' '    for arg in "$$@"; do'; \
+			printf '%s\n' '        case "$$arg" in'; \
+			printf '%s\n' '            -Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419)'; \
+			printf '%s\n' '                continue'; \
+			printf '%s\n' '                ;;'; \
+			printf '%s\n' '        esac'; \
+			printf '%s\n' '        filtered_args+=("$$arg")'; \
+			printf '%s\n' '    done'; \
+			printf '%s\n' '    exec /usr/local/zig/zig "$$zig_subcommand" "$${filtered_args[@]}"'; \
+			printf '%s\n' 'fi'; \
+			printf '%s\n' 'exec /usr/local/zig/zig "$$@"'; \
+		} > /tmp/pishoo-aarch64-zig; \
+		chmod +x /tmp/pishoo-aarch64-zig; \
+		export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig; \
 		export RUSTFLAGS="$$RUSTFLAGS -Z unstable-options -Clinker-flavor=gnu-lld-cc"; \
 	fi && \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
