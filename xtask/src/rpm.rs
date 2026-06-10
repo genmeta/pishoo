@@ -12,8 +12,8 @@
 //! The spec is generated in Rust (no template file). Pishoo is built by
 //! `cargo zigbuild` before `rpmbuild`; `%install` just copies pre-built
 //! binaries staged into `SOURCES/`. Cross-arch PAM is provided by a
-//! `dnf download --forcearch=<arch>`-extracted sysroot under
-//! `/opt/sysroots/<arch>/`, referenced via `RUSTFLAGS=-L ...`.
+//! `dnf download`-extracted sysroot under `/opt/sysroots/<arch>/`, referenced
+//! via `RUSTFLAGS=-L ...`.
 
 use bollard::{
     Docker,
@@ -58,6 +58,8 @@ const RPM_URL: &str = "https://www.dhttp.net";
 
 const COMMON_FILES_DIR: &str = "xtask/deb/common";
 const SYSTEMD_UNIT_SRC: &str = "xtask/deb/pishoo-common.pishoo.service";
+const AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND: &str =
+    "-Z unstable-options -Clinker-flavor=gnu-lld-cc";
 
 fn rpm_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
@@ -356,22 +358,10 @@ async fn ensure_image_inner(
     start_container(docker, container_id).await?;
 
     // Install rpmbuild stack, Rust nightly, Zig, cargo-zigbuild, and pull a
-    // per-arch PAM/glibc sysroot via `dnf download --forcearch` + rpm2cpio.
+    // per-arch PAM/glibc sysroot via `dnf download` + rpm2cpio.
     // The devel packages carry linker symlinks while the runtime packages carry
     // the symlink targets; both are required for zig/lld to resolve `-lpam`.
-    let sysroot_setup = format!(
-        r#"mkdir -p /opt/sysroots/{rpm_arch}
-cd /tmp
-for pkg in pam-devel pam-libs glibc-devel glibc; do
-    dnf download --forcearch={rpm_arch} --downloaddir=/tmp/rpms "$pkg"
-done
-cd /opt/sysroots/{rpm_arch}
-for rpm in /tmp/rpms/*.{rpm_arch}.rpm /tmp/rpms/*.noarch.rpm; do
-    [ -f "$rpm" ] || continue
-    rpm2cpio "$rpm" | cpio -idmv 2>/dev/null
-done
-rm -rf /tmp/rpms"#
-    );
+    let sysroot_setup = sysroot_setup_script(rpm_arch);
 
     let setup_script = format!(
         r#"set -e
@@ -406,6 +396,42 @@ chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME} /opt/sysroots
     );
     exec_in_container(docker, container_id, &["bash", "-c", &setup_script], None).await?;
     Ok(())
+}
+
+fn sysroot_setup_script(rpm_arch: &str) -> String {
+    if rpm_arch == "i686" {
+        return format!(
+            r#"mkdir -p /opt/sysroots/{rpm_arch}
+rm -rf /tmp/rpms
+mkdir -p /tmp/rpms
+cd /tmp
+for pkg in pam-devel pam-libs glibc-devel glibc; do
+    dnf download --downloaddir=/tmp/rpms "$pkg.{rpm_arch}"
+done
+cd /opt/sysroots/{rpm_arch}
+for rpm in /tmp/rpms/*.{rpm_arch}.rpm /tmp/rpms/*.noarch.rpm; do
+    [ -f "$rpm" ] || continue
+    rpm2cpio "$rpm" | cpio -idmv 2>/dev/null
+done
+rm -rf /tmp/rpms"#
+        );
+    }
+
+    format!(
+        r#"mkdir -p /opt/sysroots/{rpm_arch}
+rm -rf /tmp/rpms
+mkdir -p /tmp/rpms
+cd /tmp
+for pkg in pam-devel pam-libs glibc-devel glibc; do
+    dnf download --forcearch={rpm_arch} --downloaddir=/tmp/rpms "$pkg"
+done
+cd /opt/sysroots/{rpm_arch}
+for rpm in /tmp/rpms/*.{rpm_arch}.rpm /tmp/rpms/*.noarch.rpm; do
+    [ -f "$rpm" ] || continue
+    rpm2cpio "$rpm" | cpio -idmv 2>/dev/null
+done
+rm -rf /tmp/rpms"#
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -589,7 +615,7 @@ export RUSTFLAGS="${{RUSTFLAGS:-}} -L /opt/sysroots/{arch}/usr/{libdir}"
 # TODO: Remove this aarch64 cargo-zigbuild workaround after rustc/Zig/cargo-zigbuild
 # agree on the Cortex-A53 843419 mitigation linker argument.
 if [ "{triple}" = "aarch64-unknown-linux-gnu" ]; then
-    export RUSTFLAGS="$RUSTFLAGS -Clinker-flavor=gnu-lld-cc"
+    export RUSTFLAGS="$RUSTFLAGS {AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND}"
 fi
 
 cd /workspace
@@ -783,7 +809,23 @@ getent group pishoo >/dev/null || groupadd --system pishoo
 
 #[cfg(test)]
 mod tests {
-    use super::{render_binary_spec, render_common_spec};
+    use super::{
+        AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND, render_binary_spec, render_common_spec,
+        sysroot_setup_script,
+    };
+
+    #[test]
+    fn aarch64_linker_workaround_enables_unstable_flavor_option() {
+        assert!(AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND.contains("-Z unstable-options"));
+        assert!(AARCH64_ZIGBUILD_RUSTFLAGS_WORKAROUND.contains("-Clinker-flavor=gnu-lld-cc"));
+    }
+
+    #[test]
+    fn i686_sysroot_does_not_force_fedora_i386_basearch() {
+        let script = sysroot_setup_script("i686");
+
+        assert!(!script.contains("--forcearch=i686"));
+    }
 
     #[test]
     fn binary_spec_requires_common_but_does_not_define_common_subpackage() {
