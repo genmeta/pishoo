@@ -9,7 +9,7 @@ use crate::parse::{
     source::SourceSpan,
     types::{
         ClientNameConfig, IfaceRange, IpFamilies, ListenConfig, Listens, ResolverConfig,
-        ServerIdConfig, ServerName, ServerNames, SocketAddrs,
+        ServerName, ServerNames, SocketAddrs,
     },
 };
 
@@ -66,49 +66,6 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for Resolve
                 kind: kind.to_owned(),
             }),
         }
-    }
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum ServerIdConfigError {
-    #[snafu(display("invalid server_id directive argument count"))]
-    InvalidArgumentCount {
-        span: SourceSpan,
-        expected: &'static str,
-        actual: usize,
-    },
-    #[snafu(display("invalid server_id directive value"))]
-    Port {
-        span: SourceSpan,
-        source: std::num::ParseIntError,
-    },
-}
-
-impl DirectiveValue for ServerIdConfig {
-    type Error = ServerIdConfigError;
-
-    fn span(input: &DirectiveInput<'_>) -> SourceSpan {
-        first_arg_span(input)
-    }
-}
-
-impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for ServerIdConfig {
-    type Error = ServerIdConfigError;
-
-    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
-        let Some(arg) = only_arg(input.directive) else {
-            return Err(ServerIdConfigError::InvalidArgumentCount {
-                span: input.directive.span,
-                expected: "1",
-                actual: input.directive.args.len(),
-            });
-        };
-        let id = arg
-            .value
-            .parse::<u8>()
-            .context(server_id_config_error::PortSnafu { span: arg.span })?;
-        Ok(Self(id))
     }
 }
 

@@ -117,8 +117,8 @@ where
     ) -> ReloadServerOutcome {
         // Future refinement: split hard listener identity from soft updateable fields.
         // The first implementation rebuilds on any ListenRequest fingerprint change,
-        // but TLS material, DNS publish options, or resolver metadata may later become
-        // updateable without rebuilding the underlying listener.
+        // but TLS material or resolver metadata may later become updateable without
+        // rebuilding the underlying listener.
         if prepared.listener_spec == self.listener_spec {
             let Some(listener) = self.stop_accept().await else {
                 tracing::error!(

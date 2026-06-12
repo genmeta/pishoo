@@ -84,8 +84,12 @@ fn acquire_listener_uses_dhttp_dns_publisher() {
     );
     let server_ops_source = include_str!("../src/hypervisor/state/server_ops.rs");
     assert!(
-        server_ops_source.contains("publisher_loop_with_options"),
-        "pishoo should construct endpoint DNS publisher loops through dhttp endpoint API"
+        server_ops_source.contains("EndpointRecordSigner::new"),
+        "pishoo should bridge registered endpoint DNS publishing through ddns signer primitives"
+    );
+    assert!(
+        !server_ops_source.contains("publisher_loop_with_options"),
+        "pishoo must not use deleted endpoint publisher-loop compatibility APIs"
     );
     assert!(
         !server_ops_source.contains("spawn_server_publish_task("),

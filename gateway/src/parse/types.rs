@@ -17,15 +17,6 @@ pub struct ServerIdentity {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub server_name: DhttpName<'static>,
-    pub server_id: u8,
-}
-
-pub fn server_id_or_default(node: &crate::parse::document::ConfigNode) -> u8 {
-    node.get::<ServerIdConfig>("server_id")
-        .ok()
-        .flatten()
-        .map(|id| id.0)
-        .unwrap_or(0)
 }
 
 pub fn server_identity(
@@ -41,7 +32,6 @@ pub fn server_identity(
         cert_path: cert_path.0.clone(),
         key_path: key_path.0.clone(),
         server_name,
-        server_id: server_id_or_default(node),
     })
 }
 
@@ -88,9 +78,6 @@ pub struct ServerNames(pub Vec<ServerName>);
 
 #[derive(Debug, Clone)]
 pub struct ClientNameConfig(pub DhttpName<'static>);
-
-#[derive(Debug, Clone)]
-pub struct ServerIdConfig(pub u8);
 
 #[derive(Debug, Clone)]
 pub struct HeaderRule {

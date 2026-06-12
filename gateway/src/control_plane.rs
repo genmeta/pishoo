@@ -2,7 +2,7 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp::{ddns::publisher::PublishOptions, identity::Identity, name::Name};
+use dhttp::{identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
 use h3x::quic;
@@ -43,8 +43,6 @@ pub struct ListenRequest {
     /// Optional DNS resolver URL for publishing this server's endpoints.
     /// When `None`, the default H3 DNS server is used.
     pub dns_resolver_url: Option<Uri>,
-    /// Optional metadata applied to published endpoint DNS records.
-    pub publish_options: PublishOptions,
 }
 
 /// Capability to create QUIC listeners.
@@ -213,35 +211,12 @@ impl IdentityHelper {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct PublishOptionsHelper {
-    server_id: Option<u8>,
-}
-
-impl From<PublishOptions> for PublishOptionsHelper {
-    fn from(options: PublishOptions) -> Self {
-        Self {
-            server_id: options.server_id,
-        }
-    }
-}
-
-impl From<PublishOptionsHelper> for PublishOptions {
-    fn from(helper: PublishOptionsHelper) -> Self {
-        Self {
-            server_id: helper.server_id,
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct ListenRequestHelper {
     identity: IdentityHelper,
     bind: Vec<Listens>,
     #[serde(default)]
     dns_resolver_url: Option<String>,
-    #[serde(default)]
-    publish_options: PublishOptionsHelper,
 }
 
 impl Serialize for ListenRequest {
@@ -250,7 +225,6 @@ impl Serialize for ListenRequest {
             identity: IdentityHelper::from_identity(&self.identity),
             bind: self.bind.clone(),
             dns_resolver_url: self.dns_resolver_url.as_ref().map(ToString::to_string),
-            publish_options: self.publish_options.into(),
         }
         .serialize(serializer)
     }
@@ -266,7 +240,6 @@ impl<'de> Deserialize<'de> for ListenRequest {
                 .dns_resolver_url
                 .map(|uri| uri.parse().map_err(serde::de::Error::custom))
                 .transpose()?,
-            publish_options: helper.publish_options.into(),
         })
     }
 }

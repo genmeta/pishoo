@@ -22,6 +22,28 @@ use crate::{
     listen::RegisteredEndpoint,
 };
 
+fn endpoint_publication_loop(
+    endpoint: &dhttp::endpoint::Endpoint,
+) -> Result<
+    dhttp::ddns::publisher::EndpointPublisherLoop,
+    dhttp::ddns::publisher::CreatePublisherError,
+> {
+    let identity = endpoint
+        .identity()
+        .ok_or(dhttp::ddns::publisher::CreatePublisherError::AnonymousEndpoint)?;
+    let name = identity.name().to_owned();
+    let authority: Arc<dyn dhttp::identity::LocalAuthority + Send + Sync> = identity;
+    let signer = dhttp::ddns::publisher::EndpointRecordSigner::new(authority);
+    let publisher = dhttp::ddns::publisher::Publisher::new(signer, endpoint.resolver());
+    let source = dhttp::ddns::publisher::EndpointBindingAddresses::new(
+        endpoint.network().network().clone(),
+        endpoint.bind_patterns(),
+    );
+    Ok(dhttp::ddns::publisher::EndpointPublicationLoop::new(
+        name, publisher, source,
+    ))
+}
+
 struct BuiltListener {
     resource: ListenerResource,
     registered: RegisteredEndpoint,
@@ -613,7 +635,7 @@ impl RootState {
         .await
         .context(acquire_listener_error::BuildEndpointSnafu)?;
         let shutdown_token = CancellationToken::new();
-        let publisher_loop = match endpoint.publisher_loop_with_options(request.publish_options) {
+        let publisher_loop = match endpoint_publication_loop(&endpoint) {
             Ok(publisher_loop) => publisher_loop,
             Err(source) => {
                 if let Err(error) = endpoint.shutdown().await {

@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use dhttp::{ddns::publisher::PublishOptions, name::DhttpName};
+use dhttp::name::DhttpName;
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use gateway::{
     control_plane::ListenRequest,
     parse::{
         document::ConfigNode,
-        types::{
-            AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerIdConfig, ServerNames,
-        },
+        types::{AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerNames},
     },
     reverse::router::RouterState,
 };
@@ -23,7 +21,6 @@ pub struct ListenRequestFingerprint {
     pub bind_debug: String,
     pub identity_debug: String,
     pub dns_resolver_debug: Option<String>,
-    pub publish_server_id: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +85,6 @@ pub struct LocalServerSource {
     pub identity: dhttp::identity::Identity,
     pub bind: Vec<Listens>,
     pub dns_resolver_url: Option<http::Uri>,
-    pub publish_options: PublishOptions,
     pub server_node: Arc<ConfigNode>,
 }
 
@@ -173,13 +169,6 @@ impl LocalServerSource {
                 .context(build_local_sources_error::ConfigQuerySnafu)?
                 .map(|resolver| resolver.0.clone());
 
-            let publish_options = PublishOptions {
-                server_id: server
-                    .get::<gateway::parse::types::ServerIdConfig>("server_id")
-                    .context(build_local_sources_error::ConfigQuerySnafu)?
-                    .map(|id| id.0),
-            };
-
             for configured_name in &server_names.0 {
                 let server_name = configured_name.name.clone();
                 if !seen_server_names.insert(server_name.clone()) {
@@ -198,7 +187,6 @@ impl LocalServerSource {
                     ),
                     bind: listens.clone(),
                     dns_resolver_url: dns_resolver_url.clone(),
-                    publish_options,
                     server_node: server.clone(),
                 }));
             }
@@ -219,7 +207,6 @@ impl LocalServerSource {
             identity: self.identity.clone(),
             bind: self.bind.clone(),
             dns_resolver_url: self.dns_resolver_url.clone(),
-            publish_options: self.publish_options,
         };
 
         let request_fingerprint = ListenRequestFingerprint {
@@ -227,7 +214,6 @@ impl LocalServerSource {
             bind_debug: format!("{:?}", self.bind),
             identity_debug: compute_identity_fingerprint(&self.identity),
             dns_resolver_debug: self.dns_resolver_url.as_ref().map(|u| u.to_string()),
-            publish_server_id: self.publish_options.server_id,
         };
 
         let listener_spec = ListenerSpec {
@@ -317,6 +303,30 @@ impl FakeServerSource {
         }
     }
 
+    fn dhttp_subject_key_identifier_der() -> Vec<u8> {
+        use dhttp::certificate::{
+            CertificateChainKey, CertificateChainKind, CertificateSequence,
+            DhttpSubjectKeyIdentifier, OwnerHash,
+        };
+
+        let owner_hash =
+            OwnerHash::try_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap();
+        let value = DhttpSubjectKeyIdentifier::new(
+            CertificateChainKey::new(CertificateSequence::from(0), CertificateChainKind::Primary),
+            owner_hash,
+        )
+        .to_string();
+
+        let bytes = value.as_bytes();
+        assert!(bytes.len() < 128, "test dhttp ski must use short-form DER");
+        let mut der = Vec::with_capacity(bytes.len() + 2);
+        der.push(0x04);
+        der.push(bytes.len() as u8);
+        der.extend_from_slice(bytes);
+        der
+    }
+
     fn fake_listen_request(name: &DhttpName<'static>) -> ListenRequest {
         use dhttp::identity::Identity;
 
@@ -327,6 +337,12 @@ impl FakeServerSource {
         params
             .distinguished_name
             .push(rcgen::DnType::CommonName, &fqdn);
+        params
+            .custom_extensions
+            .push(rcgen::CustomExtension::from_oid_content(
+                &[2, 5, 29, 14],
+                Self::dhttp_subject_key_identifier_der(),
+            ));
         let cert = params.self_signed(&key_pair).expect("rcgen self-sign");
         let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
         let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
@@ -336,7 +352,6 @@ impl FakeServerSource {
             identity,
             bind: vec![],
             dns_resolver_url: None,
-            publish_options: PublishOptions::default(),
         }
     }
 }
@@ -374,7 +389,6 @@ impl ListenerSpec {
                 bind_debug: format!("bind:{label}"),
                 identity_debug: format!("identity:{label}"),
                 dns_resolver_debug: None,
-                publish_server_id: None,
             },
         }
     }
@@ -541,20 +555,10 @@ impl WorkerServerSource {
             .and_then(|node| node.get::<ResolverConfig>("dns").ok().flatten())
             .map(|resolver| resolver.0.clone());
 
-        let publish_server_id = target_node
-            .as_ref()
-            .and_then(|node| node.get::<ServerIdConfig>("server_id").ok().flatten())
-            .map(|id| id.0);
-
-        let publish_options = PublishOptions {
-            server_id: publish_server_id,
-        };
-
         let listen_request = ListenRequest {
             identity: identity.clone(),
             bind: target_binds.clone(),
             dns_resolver_url: dns_resolver_url.clone(),
-            publish_options,
         };
 
         let request_fingerprint = ListenRequestFingerprint {
@@ -562,7 +566,6 @@ impl WorkerServerSource {
             bind_debug: format!("{:?}", target_binds),
             identity_debug: crate::service::source::compute_identity_fingerprint(&identity),
             dns_resolver_debug: dns_resolver_url.map(|u| u.to_string()),
-            publish_server_id,
         };
 
         let listener_spec = ListenerSpec {
@@ -740,7 +743,6 @@ mod tests {
             identity: req1.identity.clone(),
             bind: req1.bind.clone(),
             dns_resolver_url: req1.dns_resolver_url.clone(),
-            publish_options: req1.publish_options,
             server_node,
         };
 
@@ -777,7 +779,6 @@ mod tests {
             identity: req1.identity.clone(),
             bind: req1.bind.clone(),
             dns_resolver_url: req1.dns_resolver_url.clone(),
-            publish_options: req1.publish_options,
             server_node: server_node.clone(),
         };
 
@@ -786,7 +787,6 @@ mod tests {
             identity: req2.identity.clone(),
             bind: req2.bind.clone(),
             dns_resolver_url: req2.dns_resolver_url.clone(),
-            publish_options: req2.publish_options,
             server_node: server_node.clone(),
         };
 

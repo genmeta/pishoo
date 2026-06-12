@@ -9,7 +9,7 @@ use crate::parse::{
     source::SourceSpan,
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, ListenConfig,
-        MimeTypes, PathConfig, ResolverConfig, ServerIdConfig, ServerName, ServerNames, StringList,
+        MimeTypes, PathConfig, ResolverConfig, ServerName, ServerNames, StringList,
     },
     value::TypedValue,
 };
@@ -38,7 +38,6 @@ pub fn register(registry: &mut ConfigRegistry) {
     registry.register_directive(context::PISHOO, server_block(context::PISHOO));
     register_server_leaf::<ListenConfig>(registry, "listen", MergePolicy::Append);
     register_server_leaf::<ServerNames>(registry, "server_name", MergePolicy::RejectDuplicate);
-    register_server_leaf::<ServerIdConfig>(registry, "server_id", MergePolicy::RejectDuplicate);
     register_server_leaf::<ResolverConfig>(registry, "dns", MergePolicy::RejectDuplicate);
     register_server_leaf::<BoolConfig>(registry, "gzip", MergePolicy::RejectDuplicate);
     register_server_leaf::<BoolConfig>(registry, "gzip_vary", MergePolicy::RejectDuplicate);
@@ -152,90 +151,33 @@ mod tests {
     use crate::parse::{
         tests::{
             assert_error_chain_display_single_line, build_server_conf, cleanup_temp_files,
-            create_temp_file, first_pishoo, first_server, parse_doc,
+            create_temp_file, first_server, parse_doc,
         },
         types::{
             AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, ListenConfig, MimeTypes,
-            PathConfig, ResolverConfig, ServerIdConfig, ServerNames,
+            PathConfig, ResolverConfig, ServerNames,
         },
     };
 
     #[test]
-    fn parse_server_with_server_id() {
-        let cert = create_temp_file("server_id_cert");
-        let key = create_temp_file("server_id_key");
+    fn parse_server_rejects_legacy_server_id_directive() {
+        let cert = create_temp_file("legacy_server_id_cert");
+        let key = create_temp_file("legacy_server_id_key");
         let conf = format!(
             "pishoo {{ server {{ listen all 5378; server_name example.com; server_id 1; ssl_certificate {}; ssl_certificate_key {}; }} }}",
             cert.display(),
             key.display()
         );
 
-        let document = parse_doc(&conf);
-        let server = first_server(&document);
+        let error = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("legacy server_id directive must be rejected");
 
-        let names = server
-            .require::<ServerNames>("server_name")
-            .expect("server_name should exist");
-        assert_eq!(names.0[0].name.as_partial(), "example.com");
-        let id = server
-            .require::<ServerIdConfig>("server_id")
-            .expect("server_id should exist");
-        assert_eq!(id.0, 1);
-
-        cleanup_temp_files(&[&cert, &key]);
-    }
-
-    #[test]
-    fn parse_multiple_servers_with_different_ids() {
-        let cert1 = create_temp_file("server1_cert");
-        let key1 = create_temp_file("server1_key");
-        let cert2 = create_temp_file("server2_cert");
-        let key2 = create_temp_file("server2_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name main.example.com; server_id 0; ssl_certificate {}; ssl_certificate_key {}; }} server {{ listen all 5379; server_name backup.example.com; server_id 1; ssl_certificate {}; ssl_certificate_key {}; }} }}",
-            cert1.display(),
-            key1.display(),
-            cert2.display(),
-            key2.display()
-        );
-
-        let document = parse_doc(&conf);
-        let pishoo = first_pishoo(&document);
-        let servers = pishoo.children("server").expect("servers should exist");
-
-        assert_eq!(servers.len(), 2);
-        assert_eq!(
-            servers[0].require::<ServerIdConfig>("server_id").unwrap().0,
-            0
-        );
-        assert_eq!(
-            servers[1].require::<ServerIdConfig>("server_id").unwrap().0,
-            1
-        );
-
-        cleanup_temp_files(&[&cert1, &key1, &cert2, &key2]);
-    }
-
-    #[test]
-    fn parse_server_without_server_id() {
-        let cert = create_temp_file("no_server_id_cert");
-        let key = create_temp_file("no_server_id_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; }} }}",
-            cert.display(),
-            key.display()
-        );
-
-        let document = parse_doc(&conf);
-        let server = first_server(&document);
-
+        let report = snafu::Report::from_error(&error).to_string();
         assert!(
-            server
-                .get::<ServerIdConfig>("server_id")
-                .expect("typed query should succeed")
-                .is_none()
+            report.contains("server_id"),
+            "error report should name the rejected directive: {report}"
         );
-
+        assert_error_chain_display_single_line(&error);
         cleanup_temp_files(&[&cert, &key]);
     }
 

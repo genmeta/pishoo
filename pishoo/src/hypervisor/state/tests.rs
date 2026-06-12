@@ -6,7 +6,14 @@ use std::{
     },
 };
 
-use dhttp::{ddns::publisher::PublishOptions, identity::Identity, name::DhttpName};
+use dhttp::{
+    certificate::{
+        CertificateChainKey, CertificateChainKind, CertificateSequence, DhttpSubjectKeyIdentifier,
+        OwnerHash,
+    },
+    identity::Identity,
+    name::DhttpName,
+};
 use gateway::{
     control_plane::ListenRequest,
     parse::types::{IfaceRange, IpFamilies, Listens},
@@ -47,6 +54,25 @@ fn dhttp_name(label: &str) -> DhttpName<'static> {
     DhttpName::try_from(format!("{label}.user.dhttp.net")).unwrap()
 }
 
+fn dhttp_subject_key_identifier_der() -> Vec<u8> {
+    let owner_hash =
+        OwnerHash::try_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
+    let value = DhttpSubjectKeyIdentifier::new(
+        CertificateChainKey::new(CertificateSequence::from(0), CertificateChainKind::Primary),
+        owner_hash,
+    )
+    .to_string();
+
+    let bytes = value.as_bytes();
+    assert!(bytes.len() < 128, "test dhttp ski must use short-form DER");
+    let mut der = Vec::with_capacity(bytes.len() + 2);
+    der.push(0x04);
+    der.push(bytes.len() as u8);
+    der.extend_from_slice(bytes);
+    der
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -71,6 +97,12 @@ fn test_identity(label: &str) -> Identity {
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, &fqdn);
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            &[2, 5, 29, 14],
+            dhttp_subject_key_identifier_der(),
+        ));
     let cert = params.self_signed(&key_pair).unwrap();
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der()).unwrap();
@@ -83,7 +115,6 @@ fn test_request(label: &str) -> ListenRequest {
         identity: test_identity(label),
         bind: vec![],
         dns_resolver_url: None,
-        publish_options: PublishOptions::default(),
     }
 }
 
