@@ -60,8 +60,39 @@ pub struct PathConfig(pub std::path::PathBuf);
 #[derive(Debug, Clone)]
 pub struct AccessRulesUri(pub url::Url);
 
-#[derive(Debug, Clone)]
-pub struct ProxyPass(pub http::Uri);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyPass {
+    pub raw: String,
+    pub uri: http::Uri,
+    pub proxy_host: String,
+    pub explicit_path_and_query: Option<String>,
+}
+
+impl ProxyPass {
+    pub fn has_explicit_uri(&self) -> bool {
+        self.explicit_path_and_query.is_some()
+    }
+
+    pub fn explicit_path_and_query(&self) -> Option<&str> {
+        self.explicit_path_and_query.as_deref()
+    }
+
+    pub fn scheme_str(&self) -> &str {
+        self.uri
+            .scheme_str()
+            .expect("proxy_pass uri is validated during parsing")
+    }
+
+    pub fn host(&self) -> &str {
+        self.uri
+            .host()
+            .expect("proxy_pass uri is validated during parsing")
+    }
+
+    pub fn port_u16(&self) -> Option<u16> {
+        self.uri.port_u16()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ResolverConfig(pub http::Uri);

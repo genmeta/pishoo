@@ -6,6 +6,7 @@ pub(crate) mod gzip;
 pub mod location;
 pub mod log;
 mod proxy;
+mod request_uri;
 pub mod router;
 #[cfg(feature = "sshd")]
 pub mod sshd;

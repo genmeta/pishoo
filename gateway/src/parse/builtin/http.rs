@@ -180,24 +180,48 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for ProxyPa
                 actual: input.directive.args.len(),
             });
         };
-        let uri = arg
-            .value
-            .parse::<Uri>()
-            .context(proxy_pass_error::UriSnafu { span: arg.span })?;
-        let scheme = uri
-            .scheme_str()
-            .context(proxy_pass_error::MissingSchemeSnafu { span: arg.span })?;
-        ensure!(
-            matches!(scheme, "http" | "https"),
-            proxy_pass_error::UnsupportedSchemeSnafu {
-                span: arg.span,
-                scheme: scheme.to_owned()
-            }
-        );
-        uri.host()
-            .context(proxy_pass_error::MissingHostSnafu { span: arg.span })?;
-        Ok(Self(uri))
+        build_proxy_pass(&arg.value, arg.span)
     }
+}
+
+fn build_proxy_pass(raw: &str, span: SourceSpan) -> Result<ProxyPass, ProxyPassError> {
+    let uri = raw
+        .parse::<Uri>()
+        .context(proxy_pass_error::UriSnafu { span })?;
+    let scheme = uri
+        .scheme_str()
+        .context(proxy_pass_error::MissingSchemeSnafu { span })?;
+    ensure!(
+        matches!(scheme, "http" | "https"),
+        proxy_pass_error::UnsupportedSchemeSnafu {
+            span,
+            scheme: scheme.to_owned(),
+        }
+    );
+
+    let authority = uri
+        .authority()
+        .context(proxy_pass_error::MissingHostSnafu { span })?;
+    let proxy_host = authority.as_str().to_owned();
+
+    let explicit_path_and_query = split_proxy_pass_suffix(raw)
+        .map(str::to_owned)
+        .filter(|suffix| !suffix.is_empty());
+
+    Ok(ProxyPass {
+        raw: raw.to_owned(),
+        uri,
+        proxy_host,
+        explicit_path_and_query,
+    })
+}
+
+fn split_proxy_pass_suffix(raw: &str) -> Option<&str> {
+    let scheme_end = raw.find("://")? + 3;
+    let suffix_start = raw[scheme_end..]
+        .find(['/', '?'])
+        .map(|index| scheme_end + index)?;
+    raw.get(suffix_start..)
 }
 
 #[derive(Debug, Snafu)]
@@ -387,6 +411,81 @@ mod tests {
     }
 
     #[test]
+    fn parse_proxy_pass_preserves_no_explicit_uri() {
+        let cert = create_temp_file("proxy_pass_no_uri_cert");
+        let key = create_temp_file("proxy_pass_no_uri_key");
+        let conf = build_server_conf(
+            &cert,
+            &key,
+            "location /api { proxy_pass http://backend.example.com; }",
+        );
+
+        let location = first_server(&parse_doc(&conf))
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+        let proxy_pass = location
+            .require::<ProxyPass>("proxy_pass")
+            .expect("proxy_pass");
+
+        assert_eq!(proxy_pass.proxy_host, "backend.example.com");
+        assert!(!proxy_pass.has_explicit_uri());
+        assert_eq!(proxy_pass.explicit_path_and_query(), None);
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_proxy_pass_preserves_explicit_root_uri() {
+        let cert = create_temp_file("proxy_pass_root_uri_cert");
+        let key = create_temp_file("proxy_pass_root_uri_key");
+        let conf = build_server_conf(
+            &cert,
+            &key,
+            "location /api { proxy_pass http://backend.example.com/; }",
+        );
+
+        let location = first_server(&parse_doc(&conf))
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+        let proxy_pass = location
+            .require::<ProxyPass>("proxy_pass")
+            .expect("proxy_pass");
+
+        assert!(proxy_pass.has_explicit_uri());
+        assert_eq!(proxy_pass.explicit_path_and_query(), Some("/"));
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_proxy_pass_preserves_explicit_nested_uri_and_port() {
+        let cert = create_temp_file("proxy_pass_nested_uri_cert");
+        let key = create_temp_file("proxy_pass_nested_uri_key");
+        let conf = build_server_conf(
+            &cert,
+            &key,
+            "location /api { proxy_pass https://backend.example.com:8443/base/?v=1; }",
+        );
+
+        let location = first_server(&parse_doc(&conf))
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+        let proxy_pass = location
+            .require::<ProxyPass>("proxy_pass")
+            .expect("proxy_pass");
+
+        assert_eq!(proxy_pass.proxy_host, "backend.example.com:8443");
+        assert!(proxy_pass.has_explicit_uri());
+        assert_eq!(proxy_pass.explicit_path_and_query(), Some("/base/?v=1"));
+        assert_eq!(proxy_pass.uri.port_u16(), Some(8443));
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
     fn parse_proxy_pass_accepts_http_and_https() {
         let cert = create_temp_file("proxy_pass_http_cert");
         let key = create_temp_file("proxy_pass_http_key");
@@ -403,9 +502,8 @@ mod tests {
             location
                 .require::<ProxyPass>("proxy_pass")
                 .expect("proxy_pass should be parsed")
-                .0
                 .scheme_str(),
-            Some("http")
+            "http"
         );
 
         let conf_https = build_server_conf(
@@ -421,9 +519,8 @@ mod tests {
             location_https
                 .require::<ProxyPass>("proxy_pass")
                 .expect("proxy_pass should be parsed")
-                .0
                 .scheme_str(),
-            Some("https")
+            "https"
         );
 
         cleanup_temp_files(&[&cert, &key]);

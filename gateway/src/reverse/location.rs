@@ -38,16 +38,14 @@ impl LocationMatch {
 }
 
 /// Match a request path against all configured location blocks, following
-/// nginx's priority and longest-match semantics.
-///
-/// Priority order: Exact (4) > Prefix (3) > Regex/CRegex (2) > NormalPrefix (1) > Common (0).
-/// Within the same priority level, the longest match wins.
-///
-/// Returns `None` if no location matches.
+/// nginx's location selection order.
 pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<LocationMatch> {
     tracing::debug!("all locations {:#?}, path: {:?}", locations, path);
 
-    let mut best: Option<(&Arc<ConfigNode>, String, usize)> = None; // (node, matched_str, priority)
+    let mut exact: Option<LocationMatch> = None;
+    let mut longest_prefix: Option<LocationMatch> = None;
+    let mut longest_prefix_is_caret = false;
+    let mut regex_locations = Vec::new();
 
     for location in locations {
         let pattern = location
@@ -56,35 +54,66 @@ pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<Locat
             .flatten()
             .expect("location node should contain a pattern payload");
 
-        let priority = pattern.priority();
-
-        // Skip if this pattern's priority is lower than what we already have
-        if let Some((_, _, best_priority)) = &best
-            && priority < *best_priority
-        {
-            continue;
-        }
-
-        if let Ok(Some(matched)) = pattern.try_match(path) {
-            let dominated = best.as_ref().is_none_or(|(_, best_matched, best_p)| {
-                priority > *best_p || (priority == *best_p && matched.len() >= best_matched.len())
-            });
-
-            if dominated {
-                best = Some((location, matched.to_owned(), priority));
+        match pattern.as_ref() {
+            Pattern::Exact(expected) if path == expected => {
+                exact = Some(build_location_match(location, expected.clone(), path));
+                break;
             }
+            Pattern::Prefix(prefix) if path.starts_with(prefix) => {
+                let candidate = build_location_match(location, prefix.clone(), path);
+                if longest_prefix
+                    .as_ref()
+                    .is_none_or(|current| candidate.matched.len() > current.matched.len())
+                {
+                    longest_prefix = Some(candidate);
+                    longest_prefix_is_caret = true;
+                }
+            }
+            Pattern::NormalPrefix(prefix) if path.starts_with(prefix) => {
+                let candidate = build_location_match(location, prefix.clone(), path);
+                if longest_prefix
+                    .as_ref()
+                    .is_none_or(|current| candidate.matched.len() > current.matched.len())
+                {
+                    longest_prefix = Some(candidate);
+                    longest_prefix_is_caret = false;
+                }
+            }
+            Pattern::Regex(_) | Pattern::CRegex(_) => regex_locations.push(Arc::clone(location)),
+            Pattern::Common if longest_prefix.is_none() => {
+                longest_prefix = Some(build_location_match(location, "/".to_string(), path));
+                longest_prefix_is_caret = false;
+            }
+            _ => {}
         }
     }
 
-    let (location, matched, _) = best?;
+    if let Some(exact) = exact {
+        return Some(exact);
+    }
+    if longest_prefix_is_caret {
+        return longest_prefix;
+    }
+    for location in regex_locations {
+        let pattern = location
+            .payload::<Pattern>()
+            .ok()
+            .flatten()
+            .expect("location node should contain a pattern payload");
+        if let Ok(Some(matched)) = pattern.try_match(path) {
+            return Some(build_location_match(&location, matched.to_owned(), path));
+        }
+    }
+    longest_prefix
+}
 
+fn build_location_match(location: &Arc<ConfigNode>, matched: String, path: &str) -> LocationMatch {
     let remaining = compute_remaining(location, path, &matched);
-
-    Some(LocationMatch {
+    LocationMatch {
         location: Arc::clone(location),
         matched,
         remaining,
-    })
+    }
 }
 
 /// Compute the remaining path suffix after the matched portion.
@@ -191,5 +220,42 @@ mod tests {
         let m = match_location(&locations, "/api/v1/users").unwrap();
         assert_eq!(m.matched, "/api/v1");
         assert_eq!(m.remaining, "/users");
+    }
+
+    #[test]
+    fn test_regex_first_match_beats_normal_prefix_when_no_caret_prefix_exists() {
+        let locations = vec![
+            make_location(Pattern::NormalPrefix("/app/".to_string())),
+            make_location(Pattern::Regex(regex::Regex::new(r"\.php$").unwrap())),
+            make_location(Pattern::Regex(regex::Regex::new(r"app/.+").unwrap())),
+        ];
+
+        let m = match_location(&locations, "/app/index.php").unwrap();
+        assert!(matches!(m.pattern(), Pattern::Regex(_)));
+        assert_eq!(m.matched, ".php");
+    }
+
+    #[test]
+    fn test_caret_prefix_blocks_regex() {
+        let locations = vec![
+            make_location(Pattern::Prefix("/app/".to_string())),
+            make_location(Pattern::Regex(regex::Regex::new(r"\.php$").unwrap())),
+        ];
+
+        let m = match_location(&locations, "/app/index.php").unwrap();
+        assert!(matches!(m.pattern(), Pattern::Prefix(_)));
+        assert_eq!(m.matched, "/app/");
+    }
+
+    #[test]
+    fn test_root_location_is_prefix_fallback() {
+        let locations = vec![
+            make_location(Pattern::Common),
+            make_location(Pattern::NormalPrefix("/api/".to_string())),
+        ];
+
+        let m = match_location(&locations, "/plain").unwrap();
+        assert!(matches!(m.pattern(), Pattern::Common));
+        assert_eq!(m.matched, "/");
     }
 }

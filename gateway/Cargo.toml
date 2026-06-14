@@ -48,6 +48,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 socket2 = { workspace = true }
 form_urlencoded = { workspace = true }
+percent-encoding = { workspace = true }
 
 dssh = { workspace = true, optional = true }
 remoc = { workspace = true }

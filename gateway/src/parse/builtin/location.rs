@@ -23,6 +23,8 @@ pub enum FinalizeLocationError {
         "proxy_ssl_certificate and proxy_ssl_certificate_key must be configured together"
     ))]
     ProxyTlsPair { span: SourceSpan },
+    #[snafu(display("proxy_pass cannot include a uri part inside regex location"))]
+    ProxyPassUriInRegexLocation { span: SourceSpan },
 }
 
 impl DirectiveValue for Pattern {
@@ -109,10 +111,21 @@ fn finalize_location(
     node: &mut ConfigNode,
     _options: &BuildOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pattern = node
+        .payload::<Pattern>()?
+        .expect("location node should contain a pattern payload");
+    let proxy_pass = node.get::<ProxyPass>("proxy_pass")?;
     let has_cert = node.get::<PathConfig>("proxy_ssl_certificate")?.is_some();
     let has_key = node
         .get::<PathConfig>("proxy_ssl_certificate_key")?
         .is_some();
+    ensure!(
+        !matches!(pattern.as_ref(), Pattern::Regex(_) | Pattern::CRegex(_))
+            || proxy_pass
+                .as_ref()
+                .is_none_or(|proxy_pass| !proxy_pass.has_explicit_uri()),
+        finalize_location_error::ProxyPassUriInRegexLocationSnafu { span: node.span }
+    );
     ensure!(
         has_cert == has_key,
         finalize_location_error::ProxyTlsPairSnafu { span: node.span }
@@ -136,7 +149,7 @@ mod tests {
             build_proxy_conf, build_server_conf, cleanup_temp_files, create_temp_file,
             first_server, parse_doc,
         },
-        types::{BoolConfig, DefaultType, HeaderRules, PathConfig, StringList},
+        types::{BoolConfig, DefaultType, HeaderRules, PathConfig, ProxyPass, StringList},
     };
 
     #[test]
@@ -388,6 +401,46 @@ mod tests {
         );
 
         cleanup_temp_files(&[&cert, &key, &client_cert, &client_key, &trusted]);
+    }
+
+    #[test]
+    fn parse_regex_location_rejects_proxy_pass_with_explicit_uri() {
+        let cert = create_temp_file("regex_proxy_uri_cert");
+        let key = create_temp_file("regex_proxy_uri_key");
+        let conf = build_server_conf(
+            &cert,
+            &key,
+            r"location ~ \.php$ { proxy_pass http://backend.example.com/base/; }",
+        );
+
+        let failure = crate::parse::parse_config_str_for_test(&conf)
+            .expect_err("regex location proxy_pass with uri should fail");
+        let report = snafu::Report::from_error(&failure.error).to_string();
+        assert!(report.contains("proxy_pass cannot include a uri part inside regex location"));
+
+        cleanup_temp_files(&[&cert, &key]);
+    }
+
+    #[test]
+    fn parse_regex_location_allows_proxy_pass_without_explicit_uri() {
+        let cert = create_temp_file("regex_proxy_no_uri_cert");
+        let key = create_temp_file("regex_proxy_no_uri_key");
+        let conf = build_server_conf(
+            &cert,
+            &key,
+            r"location ~ \.php$ { proxy_pass http://backend.example.com; }",
+        );
+
+        let location = first_server(&parse_doc(&conf))
+            .children("location")
+            .expect("location exists")[0]
+            .clone();
+        let proxy_pass = location
+            .require::<ProxyPass>("proxy_pass")
+            .expect("proxy_pass should be typed");
+        assert!(!proxy_pass.has_explicit_uri());
+
+        cleanup_temp_files(&[&cert, &key]);
     }
 
     #[test]

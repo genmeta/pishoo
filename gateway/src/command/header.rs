@@ -16,7 +16,7 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<ConfigNode>, req: Request<T>) -> Re
         .get::<ProxyPass>("proxy_pass")
         .ok()
         .flatten()
-        .and_then(|proxy_pass| proxy_pass.0.host().map(str::to_owned));
+        .map(|proxy_pass| proxy_pass.proxy_host.clone());
     if let Some(host) = proxy_host {
         parts.headers.insert(
             header::HOST,
@@ -110,5 +110,41 @@ fn infer_content_type<'a>(
     match mime_types.get(&ext) {
         Some(content_type) => Some(content_type),
         None => default_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::{
+        document::ConfigNode,
+        registry::context,
+        source::{SourceId, SourceSpan},
+        value::TypedValue,
+    };
+
+    #[test]
+    fn proxy_set_header_defaults_host_to_proxy_host_with_port() {
+        let span = SourceSpan::new(SourceId(0), 0, 0);
+        let mut node = ConfigNode::new(context::LOCATION, None, span);
+        node.insert_slot(
+            "proxy_pass",
+            TypedValue::new(
+                ProxyPass {
+                    raw: "http://backend.example.com:8080/base/".to_string(),
+                    uri: "http://backend.example.com:8080/base/".parse().unwrap(),
+                    proxy_host: "backend.example.com:8080".to_string(),
+                    explicit_path_and_query: Some("/base/".to_string()),
+                },
+                span,
+            ),
+        );
+
+        let req = http::Request::builder().uri("/echo").body(()).unwrap();
+        let req = proxy_set_header(&Arc::new(node), req);
+        assert_eq!(
+            req.headers()[http::header::HOST],
+            "backend.example.com:8080"
+        );
     }
 }
