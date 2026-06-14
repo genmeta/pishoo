@@ -4,7 +4,9 @@ mod deb;
 mod grouped;
 mod package;
 mod publish;
+mod release_contract;
 mod rpm;
+mod version_cmp;
 
 use std::{ffi::OsString, io::IsTerminal, path::PathBuf, process::Stdio};
 

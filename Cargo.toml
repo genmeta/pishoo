@@ -47,7 +47,7 @@ tower-service = "0.3"
 dhttp-access = { git = "https://github.com/genmeta/dhttp.git", branch = "main", version = "0.1.0", default-features = false }
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.2.0" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "endpoint", version = "0.3.0" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -62,7 +62,7 @@ remoc = { version = "0.18", default-features = false, features = [
 dssh = { git = "https://github.com/genmeta/dssh.git", branch = "endpoint", version = "0.2.0" }
 
 # --- DNS (mDNS/HTTP resolver) ---
-ddns = { git = "https://github.com/genmeta/ddns.git", branch = "endpoint", version = "0.2.0", features = [
+ddns = { git = "https://github.com/genmeta/ddns.git", branch = "endpoint", version = "0.3.0", features = [
     "h3x-resolver",
     "mdns-resolver",
 ] }

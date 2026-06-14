@@ -35,7 +35,9 @@ use crate::{
         resolve_siblings, start_container,
     },
     deb::PISHOO_LIBEXEC_DIR,
-    package_meta, target_dir,
+    package_meta,
+    release_contract::load_release_contract,
+    target_dir,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +107,17 @@ fn aarch64_zigbuild_workaround_script(triple: &str) -> String {
     }
 }
 
+fn split_rpm_package_version(package_version: &str) -> Result<(&str, &str), Whatever> {
+    let Some((version, release)) = package_version.rsplit_once('-') else {
+        snafu::whatever!("rpm package version must include a release suffix");
+    };
+    snafu::ensure_whatever!(
+        !version.is_empty() && !release.is_empty(),
+        "rpm package version must include a version and release"
+    );
+    Ok((version, release))
+}
+
 /// System lib dir inside the per-arch sysroot. Fedora places libpam/glibc
 /// under `/usr/lib64` on 64-bit arches and `/usr/lib` on 32-bit.
 fn sysroot_libdir(rpm_arch: &str) -> &'static str {
@@ -126,17 +139,18 @@ pub async fn run(
 
     let siblings = resolve_siblings(siblings)?;
     let meta = package_meta(CARGO_NAME)?;
+    let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let target_dir = target_dir()?;
 
     let mut tasks = tokio::task::JoinSet::new();
     for &target in targets {
         if matches!(target, RpmTarget::Common) {
             let docker = docker.clone();
-            let meta_version = meta.version.clone();
+            let common_package_version = contract.common_version.clone();
             let target_dir = target_dir.clone();
             info!("queued common rpm package build");
             tasks.spawn(
-                async move { run_common(&docker, &meta_version, &target_dir).await }
+                async move { run_common(&docker, &common_package_version, &target_dir).await }
                     .instrument(info_span!("rpm", triple = "common")),
             );
             continue;
@@ -144,6 +158,7 @@ pub async fn run(
 
         let docker = docker.clone();
         let meta_version = meta.version.clone();
+        let required_common_version = contract.required_common_version.clone();
         let meta_description = meta.description.clone();
         let target_dir = target_dir.clone();
         let siblings = siblings.clone();
@@ -157,6 +172,7 @@ pub async fn run(
                     &docker,
                     triple,
                     &meta_version,
+                    &required_common_version,
                     &meta_description,
                     &target_dir,
                     &features,
@@ -267,7 +283,7 @@ async fn run_common(
 async fn run_common_inner(
     docker: &Docker,
     container_id: &str,
-    version: &str,
+    package_version: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
 
@@ -279,7 +295,9 @@ dnf install -y --setopt=install_weak_deps=False \
     exec_in_container(docker, container_id, &["bash", "-c", setup_script], None).await?;
 
     let user = host_uid_gid()?;
-    let spec = render_common_spec(version);
+    let (version, release) = split_rpm_package_version(package_version)
+        .whatever_context("failed to split common rpm package version")?;
+    let spec = render_common_spec(version, release);
     let spec_escaped = shell_escape(&spec);
     let build_script = format!(
         r#"set -e
@@ -473,6 +491,7 @@ async fn build_one(
     docker: &Docker,
     triple: &str,
     version: &str,
+    required_common_version: &str,
     description: &str,
     target_dir: &std::path::Path,
     features: &[Feature],
@@ -544,6 +563,7 @@ async fn build_one(
         &container_id,
         triple,
         version,
+        required_common_version,
         description,
         arch,
         libdir,
@@ -586,6 +606,7 @@ async fn build_one_inner(
     container_id: &str,
     triple: &str,
     version: &str,
+    required_common_version: &str,
     description: &str,
     arch: &str,
     libdir: &str,
@@ -601,7 +622,13 @@ async fn build_one_inner(
     install_cargo_config(docker, container_id, cargo_config).await?;
 
     let user = host_uid_gid()?;
-    let spec = render_binary_spec(version, description, has_sshd, has_pam);
+    let spec = render_binary_spec(
+        version,
+        required_common_version,
+        description,
+        has_sshd,
+        has_pam,
+    );
     let spec_escaped = shell_escape(&spec);
 
     let feature_flag = if features.is_empty() {
@@ -705,7 +732,13 @@ fn shell_escape(s: &str) -> String {
 /// requirements by hand: rpm's dependency generator would otherwise pin libc
 /// symbol versions from the zig-bundled glibc shim, which do not match the
 /// target distro's glibc.
-fn render_binary_spec(version: &str, description: &str, has_sshd: bool, has_pam: bool) -> String {
+fn render_binary_spec(
+    version: &str,
+    required_common_version: &str,
+    description: &str,
+    has_sshd: bool,
+    has_pam: bool,
+) -> String {
     let desc = if description.is_empty() {
         "Pishoo QUIC-powered, peer-to-peer web/proxy engine."
     } else {
@@ -755,7 +788,8 @@ License:        {RPM_LICENSE}
 URL:            {RPM_URL}
 Vendor:         {RPM_VENDOR}
 {source_lines}AutoReqProv:    no
-Requires:       {COMMON_PACKAGE_NAME} = %{{version}}-%{{release}}
+Requires:       {COMMON_PACKAGE_NAME} >= {required_common_version}
+Requires:       {COMMON_PACKAGE_NAME} <= %{{version}}-%{{release}}
 Requires:       glibc
 {pam_req}
 %description
@@ -780,11 +814,11 @@ rm -rf %{{buildroot}}
 }
 
 /// Render the architecture-independent pishoo-common spec.
-fn render_common_spec(version: &str) -> String {
+fn render_common_spec(version: &str, release: &str) -> String {
     format!(
         r#"Name:           {COMMON_PACKAGE_NAME}
 Version:        {version}
-Release:        1%{{?dist}}
+Release:        {release}%{{?dist}}
 Summary:        Common files for pishoo
 License:        {RPM_LICENSE}
 URL:            {RPM_URL}
@@ -832,7 +866,7 @@ getent group pishoo >/dev/null || groupadd --system pishoo
 %systemd_postun_with_restart pishoo.service
 
 %changelog
-* %(date '+%a %b %d %Y') {RPM_VENDOR} <developer@genmeta.net> - {version}-1
+* %(date '+%a %b %d %Y') {RPM_VENDOR} <developer@genmeta.net> - {version}-{release}
 - release {version}
 "#
     )
@@ -869,10 +903,11 @@ mod tests {
 
     #[test]
     fn binary_spec_requires_common_but_does_not_define_common_subpackage() {
-        let spec = render_binary_spec("0.5.2", "test description", true, true);
+        let spec = render_binary_spec("0.5.2", "0.5.1-1", "test description", true, true);
 
         assert!(spec.contains("Name:           pishoo\n"));
-        assert!(spec.contains("Requires:       pishoo-common = %{version}-%{release}\n"));
+        assert!(spec.contains("Requires:       pishoo-common >= 0.5.1-1\n"));
+        assert!(spec.contains("Requires:       pishoo-common <= %{version}-%{release}\n"));
         assert!(spec.contains("/usr/bin/pishoo\n"));
         assert!(spec.contains("/usr/libexec/pishoo/pishoo-worker\n"));
         assert!(spec.contains("/usr/libexec/pishoo/pishoo-ssh-session\n"));
@@ -885,15 +920,17 @@ mod tests {
 
     #[test]
     fn common_spec_defines_noarch_common_package_only() {
-        let spec = render_common_spec("0.5.2");
+        let spec = render_common_spec("0.5.2", "3");
 
         assert!(spec.contains("Name:           pishoo-common\n"));
+        assert!(spec.contains("Version:        0.5.2\n"));
+        assert!(spec.contains("Release:        3%{?dist}\n"));
         assert!(spec.contains("BuildArch:      noarch\n"));
         assert!(spec.contains("Requires(pre):  shadow-utils\n"));
         assert!(spec.contains("/etc/pishoo/pishoo.conf\n"));
         assert!(spec.contains("/etc/pishoo/mime.types\n"));
         assert!(spec.contains("%{_unitdir}/pishoo.service\n"));
-        assert!(!spec.contains("Requires:       pishoo-common = %{version}-%{release}"));
+        assert!(!spec.contains("Requires:       pishoo-common <= %{version}-%{release}"));
         assert!(!spec.contains("/usr/bin/pishoo\n"));
         assert!(!spec.contains("pishoo-worker"));
         assert!(!spec.contains("pishoo-ssh-session"));

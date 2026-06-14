@@ -19,7 +19,7 @@ Description: modern, secure, QUIC-powered web/proxy engine - common files
 
 Package: pishoo
 Architecture: any
-Depends: pishoo-common (>= ${source:Version}), ${shlibs:Depends}, ${misc:Depends}
+Depends: {{PISHOO_COMMON_DEPENDS}}, ${shlibs:Depends}, ${misc:Depends}
 Description: modern, secure, QUIC-powered web/proxy engine
  Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for
  HTTP/3 and end-to-end encrypted communication. Built for privacy and security

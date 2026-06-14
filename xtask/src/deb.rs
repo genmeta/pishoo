@@ -17,7 +17,9 @@ use crate::{
         force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
         resolve_siblings, start_container,
     },
-    package_version, target_dir,
+    package_version,
+    release_contract::load_release_contract,
+    target_dir,
 };
 
 const CARGO_NAME: &str = "pishoo";
@@ -35,6 +37,8 @@ const BUILD_ATTEMPTS: usize = 2;
 
 /// Relative path from workspace root to the debian packaging source files.
 const DEBIAN_PKG_DIR: &str = "xtask/deb";
+const DEBIAN_CONTROL_TEMPLATE: &str = include_str!("../deb/control");
+const PISHOO_COMMON_DEPENDS_PLACEHOLDER: &str = "{{PISHOO_COMMON_DEPENDS}}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebArtifact {
@@ -42,6 +46,26 @@ pub struct DebArtifact {
     pub path: std::path::PathBuf,
     pub features: Vec<String>,
     pub profile: BuildProfile,
+}
+
+#[derive(Clone, Copy)]
+struct BinaryBuildContext<'a> {
+    target_dir: &'a std::path::Path,
+    profile: BuildProfile,
+    features: &'a [Feature],
+    siblings: &'a [Sibling],
+    binary_control: &'a str,
+}
+
+fn binary_package_version(version: &str) -> String {
+    format!("{version}-1")
+}
+
+fn render_binary_control(required_common_version: &str, binary_package_version: &str) -> String {
+    let common_depends = format!(
+        "pishoo-common (>= {required_common_version}), pishoo-common (<= {binary_package_version})"
+    );
+    DEBIAN_CONTROL_TEMPLATE.replace(PISHOO_COMMON_DEPENDS_PLACEHOLDER, &common_depends)
 }
 
 fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
@@ -213,7 +237,11 @@ chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME}
 }
 
 /// Build the arch-independent pishoo-common config package.
-async fn run_common(docker: &Docker, version: &str) -> Result<DebArtifact, Whatever> {
+async fn run_common(
+    docker: &Docker,
+    common_package_version: &str,
+    binary_control: &str,
+) -> Result<DebArtifact, Whatever> {
     info!("starting common deb package build");
     let target_dir = target_dir()?;
     let out_dir = target_dir.join("common").join("deb");
@@ -256,11 +284,17 @@ async fn run_common(docker: &Docker, version: &str) -> Result<DebArtifact, Whate
     let container_id = container.id.clone();
 
     // Always remove the common container before returning, success or not.
-    let result = run_common_inner(docker, &container_id, version).await;
+    let result = run_common_inner(
+        docker,
+        &container_id,
+        common_package_version,
+        binary_control,
+    )
+    .await;
     force_remove_container(docker, &container_id).await;
     result?;
 
-    let deb_name = format!("pishoo-common_{version}-1_all.deb");
+    let deb_name = format!("pishoo-common_{common_package_version}_all.deb");
     info!(deb_name, "produced");
     info!("finished common deb package build");
     Ok(DebArtifact {
@@ -274,7 +308,8 @@ async fn run_common(docker: &Docker, version: &str) -> Result<DebArtifact, Whate
 async fn run_common_inner(
     docker: &Docker,
     container_id: &str,
-    version: &str,
+    common_package_version: &str,
+    binary_control: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
 
@@ -290,12 +325,14 @@ apt-get install --assume-yes -qq debhelper fakeroot
     // Products (.deb etc.) land in target/common/deb/ (one level above src/).
     // Runs as host uid:gid so files in target/ are owned by the host user.
     let user = host_uid_gid()?;
+    let control_escaped = shell_escape(binary_control);
     let build_script = format!(
         r#"set -e
 SRC=/workspace/target/common/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
-printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
+printf '%s' {control_escaped} > "$SRC/debian/control"
+printf '{CARGO_NAME} ({common_package_version}) unstable; urgency=low\n\n  * release {common_package_version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"
 cd "$SRC"
 dpkg-buildpackage -A -uc -us -d
@@ -331,7 +368,11 @@ pub async fn run(
     // and path errors surface before we spin up containers.
     let siblings = resolve_siblings(siblings)?;
 
+    let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let version = package_version(CARGO_NAME)?;
+    let binary_package_version = binary_package_version(&version);
+    let binary_control =
+        render_binary_control(&contract.required_common_version, &binary_package_version);
     let target_dir = target_dir()?;
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -339,10 +380,11 @@ pub async fn run(
     for &target in targets {
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
-            let version = version.clone();
+            let common_package_version = contract.common_version.clone();
+            let binary_control = binary_control.clone();
             info!("queued common deb package build");
             tasks.spawn(
-                async move { run_common(&docker, &version).await }
+                async move { run_common(&docker, &common_package_version, &binary_control).await }
                     .instrument(info_span!("deb", triple = "common")),
             );
             continue;
@@ -353,6 +395,7 @@ pub async fn run(
         info!(triple, "queued deb target build");
         let span = info_span!("deb", triple);
         let version = version.clone();
+        let binary_control = binary_control.clone();
         let target_dir = target_dir.clone();
         let features = features.to_vec();
         let siblings = siblings.clone();
@@ -362,10 +405,13 @@ pub async fn run(
                     &docker,
                     triple,
                     &version,
-                    &target_dir,
-                    profile,
-                    &features,
-                    &siblings,
+                    BinaryBuildContext {
+                        target_dir: &target_dir,
+                        profile,
+                        features: &features,
+                        siblings: &siblings,
+                        binary_control: &binary_control,
+                    },
                 )
                 .await
             }
@@ -388,17 +434,10 @@ async fn build_one_with_retry(
     docker: &Docker,
     triple: &str,
     version: &str,
-    target_dir: &std::path::Path,
-    profile: BuildProfile,
-    features: &[Feature],
-    siblings: &[Sibling],
+    context: BinaryBuildContext<'_>,
 ) -> Result<DebArtifact, Whatever> {
     for attempt in 1..=BUILD_ATTEMPTS {
-        match build_one(
-            docker, triple, version, target_dir, profile, features, siblings,
-        )
-        .await
-        {
+        match build_one(docker, triple, version, context).await {
             Ok(artifact) => return Ok(artifact),
             Err(error) if attempt < BUILD_ATTEMPTS => {
                 let report = Report::from_error(&error);
@@ -420,12 +459,10 @@ async fn build_one(
     docker: &Docker,
     triple: &str,
     version: &str,
-    target_dir: &std::path::Path,
-    profile: BuildProfile,
-    features: &[Feature],
-    siblings: &[Sibling],
+    context: BinaryBuildContext<'_>,
 ) -> Result<DebArtifact, Whatever> {
-    let has_sshd = features
+    let has_sshd = context
+        .features
         .iter()
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
     let arch = deb_arch(triple)?;
@@ -434,8 +471,12 @@ async fn build_one(
     let image = ensure_image(docker, triple).await?;
 
     let deb_name = format!("{CARGO_NAME}_{version}-1_{arch}.deb");
-    let profile_dir = profile.target_dir_name();
-    let out_dir = target_dir.join(triple).join(profile_dir).join("deb");
+    let profile_dir = context.profile.target_dir_name();
+    let out_dir = context
+        .target_dir
+        .join(triple)
+        .join(profile_dir)
+        .join("deb");
     tokio::fs::create_dir_all(&out_dir)
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
@@ -453,7 +494,7 @@ async fn build_one(
     // User-requested sibling crates, bind-mounted at /{basename} so that
     // `path = "../{basename}"` references in Cargo.toml resolve inside the
     // container.
-    for sibling in siblings {
+    for sibling in context.siblings {
         mounts.push(Mount {
             target: Some(format!("/{}", sibling.basename)),
             source: Some(sibling.host.to_string_lossy().into_owned()),
@@ -466,7 +507,7 @@ async fn build_one(
 
     let bootstrap = dhttp_bootstrap_from_env()?;
     mounts.extend(bootstrap.mounts);
-    let cargo_config = cargo_config_from_siblings(siblings);
+    let cargo_config = cargo_config_from_siblings(context.siblings);
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
@@ -494,7 +535,8 @@ async fn build_one(
 
     // Build cargo features string
     let cargo_features = {
-        let names: Vec<&str> = features
+        let names: Vec<&str> = context
+            .features
             .iter()
             .map(|f| match f {
                 Feature::Sshd => "sshd",
@@ -532,12 +574,13 @@ async fn build_one(
         version,
         arch,
         gnu,
-        profile,
+        context.profile,
         &bootstrap.exports,
         cargo_config.as_deref(),
         &worker_env,
         &ssh_session_env,
         &cargo_features_env,
+        context.binary_control,
     )
     .await;
     force_remove_container(docker, &container_id).await;
@@ -547,8 +590,8 @@ async fn build_one(
     Ok(DebArtifact {
         target: triple.to_string(),
         path: out_dir.join(deb_name),
-        features: crate::brew::feature_names(features),
-        profile,
+        features: crate::brew::feature_names(context.features),
+        profile: context.profile,
     })
 }
 
@@ -566,6 +609,7 @@ async fn build_one_inner(
     worker_env: &str,
     ssh_session_env: &str,
     cargo_features_env: &str,
+    binary_control: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
     info!(triple, "build container started");
@@ -589,6 +633,7 @@ async fn build_one_inner(
     let user = host_uid_gid()?;
     let profile_dir = profile.target_dir_name();
     let cargo_profile_args = profile.cargo_profile_args().join(" ");
+    let control_escaped = shell_escape(binary_control);
     let build_script = format!(
         r#"set -e
 export HOME=/tmp
@@ -604,6 +649,7 @@ export DEB_HOST_MULTIARCH={gnu}
 SRC=/workspace/target/{triple}/{profile_dir}/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+printf '%s' {control_escaped} > "$SRC/debian/control"
 printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"
 cd "$SRC"
@@ -622,4 +668,32 @@ dpkg-buildpackage -B -uc -us -d -a{arch}
     info!(triple, "dpkg-buildpackage finished inside container");
 
     Ok(())
+}
+
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_binary_control;
+
+    #[test]
+    fn binary_control_uses_common_dependency_range() {
+        let control = render_binary_control("0.5.1-1", "0.5.2-1");
+
+        assert!(control.contains(
+            "Depends: pishoo-common (>= 0.5.1-1), pishoo-common (<= 0.5.2-1), ${shlibs:Depends}, ${misc:Depends}\n"
+        ));
+    }
 }

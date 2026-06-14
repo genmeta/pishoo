@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -26,6 +26,7 @@ use crate::{
         remove_container_if_exists, start_container,
     },
     package::manifest::{ArtifactKind, PackageArtifact},
+    version_cmp::compare_deb_versions,
 };
 
 const APT_ARCHES: &[&str] = &["amd64", "arm64", "armhf", "i386"];
@@ -115,10 +116,12 @@ pub async fn run(
 ) -> Result<(), Whatever> {
     let loaded = super::load_manifest(ArtifactKind::Deb).await?;
     let local_payloads = local_payloads(&loaded.target_dir, &loaded.manifest.artifacts)?;
-    let mut uploads =
-        plan_payload_uploads(client, &options.bucket, &local_payloads, &target.prefix).await?;
     let remote_entries =
         remote_package_entries(client, &options.bucket, &target.prefix, &target.suite).await?;
+    let local_payloads = publishable_local_payloads(local_payloads, &remote_entries)
+        .whatever_context("failed to select publishable deb payloads")?;
+    let mut uploads =
+        plan_payload_uploads(client, &options.bucket, &local_payloads, &target.prefix).await?;
     let local_keys = local_payload_keys(&local_payloads);
     let retained_remote = retained_remote_entries(remote_entries, &local_keys);
     uploads.sort_by(|left, right| {
@@ -222,6 +225,43 @@ fn local_payloads(
             })
         })
         .collect()
+}
+
+fn publishable_local_payloads(
+    payloads: Vec<DebPayload>,
+    remote_entries: &[RemotePackageEntry],
+) -> Result<Vec<DebPayload>, crate::version_cmp::CompareVersionError> {
+    let mut latest_remote = BTreeMap::<(String, String), String>::new();
+    for entry in remote_entries {
+        let key = (
+            entry.entry.package.clone(),
+            entry.entry.architecture.clone(),
+        );
+        match latest_remote.get(&key) {
+            None => {
+                latest_remote.insert(key, entry.entry.version.clone());
+            }
+            Some(current) => {
+                if compare_deb_versions(&entry.entry.version, current)?.is_gt() {
+                    latest_remote.insert(key, entry.entry.version.clone());
+                }
+            }
+        }
+    }
+
+    let mut selected = Vec::new();
+    for payload in payloads {
+        let key = (payload.package.clone(), payload.architecture.clone());
+        let should_publish = match latest_remote.get(&key) {
+            None => true,
+            Some(remote_version) => compare_deb_versions(&payload.version, remote_version)?.is_gt(),
+        };
+        if should_publish {
+            selected.push(payload);
+        }
+    }
+
+    Ok(selected)
 }
 
 fn local_payload_keys(payloads: &[DebPayload]) -> BTreeSet<(String, String)> {
@@ -760,7 +800,8 @@ mod tests {
 
     use super::{
         AptContainerOptions, DebPayload, PackageEntry, RemotePackageEntry, apt_upload_order,
-        deb_payload_key, local_payload_keys, retained_remote_entries, sign_suite_release_script,
+        deb_payload_key, local_payload_keys, publishable_local_payloads, retained_remote_entries,
+        sign_suite_release_script,
     };
 
     #[test]
@@ -793,6 +834,40 @@ mod tests {
                 && entry.entry.version == "0.5.1-1"
                 && entry.entry.architecture == "all"
         }));
+    }
+
+    #[test]
+    fn publishable_deb_payloads_skip_equal_and_older_versions() {
+        let remote = vec![
+            remote_package_entry("pishoo", "0.5.2-1", "amd64"),
+            remote_package_entry("pishoo-common", "0.5.2-1", "all"),
+        ];
+        let local = vec![
+            local_payload("pishoo", "0.5.2-1", "amd64"),
+            local_payload("pishoo-common", "0.5.1-1", "all"),
+        ];
+
+        let publishable =
+            publishable_local_payloads(local, &remote).expect("payload filtering should succeed");
+
+        assert!(publishable.is_empty());
+    }
+
+    #[test]
+    fn publishable_deb_payloads_compare_against_latest_remote_version() {
+        let remote = vec![
+            remote_package_entry("pishoo", "0.5.1-1", "amd64"),
+            remote_package_entry("pishoo", "0.5.2-1", "amd64"),
+        ];
+        let local = vec![local_payload("pishoo", "0.5.2-2", "amd64")];
+
+        let publishable =
+            publishable_local_payloads(local, &remote).expect("payload filtering should succeed");
+
+        assert_eq!(publishable.len(), 1);
+        assert_eq!(publishable[0].package, "pishoo");
+        assert_eq!(publishable[0].version, "0.5.2-2");
+        assert_eq!(publishable[0].architecture, "amd64");
     }
 
     #[test]
