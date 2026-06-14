@@ -2,10 +2,9 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp::{identity::Identity, name::Name};
+use dhttp::{h3x::quic, identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
-use h3x::quic;
 use http::Uri;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
@@ -110,7 +109,7 @@ pub trait ProvideConnector: Send + Sync {
 /// Transport handle for communicating with a spawned SSH session process.
 ///
 /// Contains the MuxChannel socketpair FD of the child process. The
-/// consumer converts it into a [`h3x::ipc::transport::MuxChannel`] and
+/// consumer converts it into a [`dhttp::h3x::ipc::transport::MuxChannel`] and
 /// establishes a remoc connection over the resulting sink/stream pair.
 #[cfg(feature = "sshd")]
 pub struct SessionTransport {

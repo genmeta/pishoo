@@ -2,7 +2,7 @@
 
 use std::{os::fd::OwnedFd, sync::Arc};
 
-use h3x::ipc::transport::MuxChannel;
+use dhttp::h3x::ipc::transport::MuxChannel;
 use remoc::prelude::ServerShared;
 use snafu::{ResultExt, Snafu};
 use tracing::Instrument;

@@ -207,7 +207,7 @@ fn empty_parser(
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuildOptions<'a> {
-    pub identity_profile: Option<&'a dhttp_home::identity::IdentityProfile>,
+    pub identity_profile: Option<&'a dhttp::home::identity::IdentityProfile>,
 }
 
 impl ConfigRegistry {

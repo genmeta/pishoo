@@ -61,12 +61,6 @@ remoc = { version = "0.18", default-features = false, features = [
 # --- SSH3 ---
 dssh = { git = "https://github.com/genmeta/dssh.git", branch = "endpoint", version = "0.2.0" }
 
-# --- DNS (mDNS/HTTP resolver) ---
-ddns = { git = "https://github.com/genmeta/ddns.git", branch = "endpoint", version = "0.3.0", features = [
-    "h3x-resolver",
-    "mdns-resolver",
-] }
-
 # --- Security & TLS ---
 getrandom = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -90,8 +84,6 @@ pin-project-lite = "0.2"
 form_urlencoded = "1"
 socket2 = "0.6"
 x509-parser = "0.18"
-dhttp-home = { git = "https://github.com/genmeta/dhttp.git", branch = "main", version = "0.1.0" }
-dhttp-identity = { git = "https://github.com/genmeta/dhttp.git", branch = "main", version = "0.1.0" }
 dhttp = { git = "https://github.com/genmeta/dhttp.git", branch = "main", version = "0.1.0" }
 
 # --- System Interaction ---

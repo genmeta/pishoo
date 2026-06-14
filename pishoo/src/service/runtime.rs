@@ -34,12 +34,12 @@ pub enum ReloadServerOutcome {
 impl<P> ServerRuntime<P>
 where
     P: ProvideListener + Send + Sync + 'static,
-    P::Listener: h3x::quic::Listen + Send + 'static,
-    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
-    <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
+    P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn start(
@@ -167,7 +167,7 @@ where
     pub async fn remove(mut self) {
         let recovered = self.stop_accept().await;
         if let Some(listener) = recovered {
-            let _ = h3x::quic::Listen::shutdown(&listener)
+            let _ = dhttp::h3x::quic::Listen::shutdown(&listener)
                 .await
                 .inspect_err(|error| {
                     tracing::error!(
@@ -211,12 +211,12 @@ where
 impl<P> RuntimeRegistry<P>
 where
     P: ProvideListener + Send + Sync + 'static,
-    P::Listener: h3x::quic::Listen + Send + 'static,
-    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
-    <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
+    P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn new(plane: Arc<P>) -> Self {
@@ -305,24 +305,24 @@ where
     P: ControlPlane + ProvideListener,
 {
     registry: RuntimeRegistry<P>,
-    dhttp_config: dhttp_home::DhttpHome,
+    dhttp_config: dhttp::home::DhttpHome,
     router_state: gateway::reverse::router::RouterState,
 }
 
 impl<P> WorkerRuntime<P>
 where
     P: ControlPlane + ProvideListener + Send + Sync + 'static,
-    P::Listener: h3x::quic::Listen + Send + 'static,
-    <P::Listener as h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
-    <P::Listener as h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithLocalAuthority>::LocalAuthority:
+    P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
+    <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
         Send + Sync,
-    <<P::Listener as h3x::quic::Listen>::Connection as h3x::quic::WithRemoteAuthority>::RemoteAuthority:
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
         Send + Sync,
 {
     pub fn new(
         plane: Arc<P>,
-        dhttp_config: dhttp_home::DhttpHome,
+        dhttp_config: dhttp::home::DhttpHome,
         router_state: gateway::reverse::router::RouterState,
     ) -> Self {
         Self {
@@ -390,8 +390,8 @@ mod tests {
     #[snafu(display("fake listener never errors in these tests"))]
     struct FakeListenerError;
 
-    impl h3x::quic::Listen for FakeListener {
-        type Connection = h3x::dquic::prelude::Connection;
+    impl dhttp::h3x::quic::Listen for FakeListener {
+        type Connection = dhttp::h3x::dquic::prelude::Connection;
         type Error = FakeListenerError;
 
         async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
@@ -511,8 +511,8 @@ mod tests {
     #[tokio::test]
     async fn remove_completes_even_when_release_fails() {
         struct FailingListener {}
-        impl h3x::quic::Listen for FailingListener {
-            type Connection = h3x::dquic::prelude::Connection;
+        impl dhttp::h3x::quic::Listen for FailingListener {
+            type Connection = dhttp::h3x::dquic::prelude::Connection;
             type Error = FakeListenerError;
             async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
                 std::future::pending().await

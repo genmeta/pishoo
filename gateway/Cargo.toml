@@ -38,8 +38,7 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = "2"
 
-# --- DNS resolver ---
-ddns = { workspace = true }
+# --- DNS resolver / protocol features ---
 h3x = { workspace = true, features = ["rpc"] }
 
 # --- Data Structures & Utilities ---
@@ -53,8 +52,6 @@ form_urlencoded = { workspace = true }
 dssh = { workspace = true, optional = true }
 remoc = { workspace = true }
 dhttp = { workspace = true }
-dhttp-home = { workspace = true }
-dhttp-identity = { workspace = true }
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 chrono = "0.4"
 tracing-appender = { workspace = true }

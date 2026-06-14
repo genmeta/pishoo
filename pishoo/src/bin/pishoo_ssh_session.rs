@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use dhttp::h3x::ipc::transport::MuxChannel;
 use dssh::{
     auth::AuthCredential,
     conversation::Conversation,
@@ -26,7 +27,6 @@ use dssh::{
         privilege::drop_privileges,
     },
 };
-use h3x::ipc::transport::MuxChannel;
 use snafu::Report;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -34,7 +34,7 @@ use tracing::Instrument;
 #[derive(Debug)]
 struct SessionIpcLifecycle {
     token: CancellationToken,
-    error: Mutex<Option<h3x::quic::ConnectionError>>,
+    error: Mutex<Option<dhttp::h3x::quic::ConnectionError>>,
 }
 
 impl SessionIpcLifecycle {
@@ -45,15 +45,15 @@ impl SessionIpcLifecycle {
         }
     }
 
-    fn closed_error(&self) -> h3x::quic::ConnectionError {
+    fn closed_error(&self) -> dhttp::h3x::quic::ConnectionError {
         let mut guard = self
             .error
             .lock()
             .expect("session ipc lifecycle lock poisoned");
         guard
-            .get_or_insert_with(|| h3x::quic::ConnectionError::Application {
-                source: h3x::quic::ApplicationError {
-                    code: h3x::error::Code::H3_REQUEST_CANCELLED,
+            .get_or_insert_with(|| dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError {
+                    code: dhttp::h3x::error::Code::H3_REQUEST_CANCELLED,
                     reason: Cow::Borrowed("ssh session ipc closed"),
                 },
             })
@@ -61,21 +61,21 @@ impl SessionIpcLifecycle {
     }
 }
 
-impl h3x::quic::Lifecycle for SessionIpcLifecycle {
-    fn close(&self, code: h3x::error::Code, reason: Cow<'static, str>) {
+impl dhttp::h3x::quic::Lifecycle for SessionIpcLifecycle {
+    fn close(&self, code: dhttp::h3x::error::Code, reason: Cow<'static, str>) {
         let mut guard = self
             .error
             .lock()
             .expect("session ipc lifecycle lock poisoned");
         if guard.is_none() {
-            *guard = Some(h3x::quic::ConnectionError::Application {
-                source: h3x::quic::ApplicationError { code, reason },
+            *guard = Some(dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError { code, reason },
             });
         }
         self.token.cancel();
     }
 
-    fn check(&self) -> Result<(), h3x::quic::ConnectionError> {
+    fn check(&self) -> Result<(), dhttp::h3x::quic::ConnectionError> {
         if self.token.is_cancelled() {
             Err(self.closed_error())
         } else {
@@ -83,7 +83,7 @@ impl h3x::quic::Lifecycle for SessionIpcLifecycle {
         }
     }
 
-    async fn closed(&self) -> h3x::quic::ConnectionError {
+    async fn closed(&self) -> dhttp::h3x::quic::ConnectionError {
         self.token.cancelled().await;
         self.closed_error()
     }
@@ -193,9 +193,9 @@ async fn main() {
                     }
 
                     let session_token = CancellationToken::new();
-                    let lifecycle: Arc<dyn h3x::quic::DynLifecycle> =
+                    let lifecycle: Arc<dyn dhttp::h3x::quic::DynLifecycle> =
                         Arc::new(SessionIpcLifecycle::new(session_token.clone()));
-                    let session = h3x::ipc::webtransport::IpcWebTransportSessionHandle::new(
+                    let session = dhttp::h3x::ipc::webtransport::IpcWebTransportSessionHandle::new(
                         bootstrap.webtransport_session.session_id,
                         bootstrap.webtransport_session.session,
                         session_fd_transfer,

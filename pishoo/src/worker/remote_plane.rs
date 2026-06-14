@@ -13,11 +13,11 @@
 #[cfg(feature = "sshd")]
 use std::future::IntoFuture;
 
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
-use h3x::ipc::{
+use dhttp::h3x::ipc::{
     quic::{IpcConnector, IpcListener},
     transport::FdTransfer,
 };
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use snafu::Snafu;
 
 // Import the RTC trait so that methods are visible on ControlPlaneClient.
@@ -55,11 +55,11 @@ pub enum RemoteSpawnSessionError {
     },
     #[snafu(display("failed to receive session fd from root"))]
     ReceiveFd {
-        source: h3x::ipc::transport::WaitFdsError,
+        source: dhttp::h3x::ipc::transport::WaitFdsError,
     },
     #[snafu(display("unexpected session fd batch size"))]
     UnexpectedFdCount {
-        source: h3x::ipc::transport::TakeFdsError,
+        source: dhttp::h3x::ipc::transport::TakeFdsError,
     },
     #[snafu(display("root responded with fd id {actual}, expected {expected}"))]
     FdIdMismatch { expected: u64, actual: u64 },
@@ -176,8 +176,8 @@ impl gateway::control_plane::ProvideConnector for RemoteControlPlane {
 mod tests {
     use std::{os::fd::OwnedFd, sync::Arc, time::Duration};
 
+    use dhttp::h3x::ipc::transport::{FdTransfer, FdVec, MuxChannel};
     use gateway::control_plane::{ConnectorRequest, ListenRequest, SpawnSession};
-    use h3x::ipc::transport::{FdTransfer, FdVec, MuxChannel};
     use remoc::prelude::ServerShared;
     use tokio_util::task::AbortOnDropHandle;
     use tracing::Instrument;
@@ -196,7 +196,7 @@ mod tests {
         async fn listener(
             &self,
             _request: ListenRequest,
-        ) -> Result<h3x::ipc::quic::IpcListenClient, ListenError> {
+        ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, ListenError> {
             Err(ListenError::Internal {
                 message: "not used by this test".to_owned(),
             })
@@ -205,7 +205,7 @@ mod tests {
         async fn rebuild_listener(
             &self,
             _request: ListenRequest,
-        ) -> Result<h3x::ipc::quic::IpcListenClient, RebuildListenError> {
+        ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, RebuildListenError> {
             Err(RebuildListenError::Internal {
                 message: "not used by this test".to_owned(),
             })
@@ -214,7 +214,7 @@ mod tests {
         async fn connector(
             &self,
             _request: ConnectorRequest,
-        ) -> Result<h3x::ipc::quic::IpcConnectClient, ConnectError> {
+        ) -> Result<dhttp::h3x::ipc::quic::IpcConnectClient, ConnectError> {
             Err(ConnectError::Internal {
                 message: "not used by this test".to_owned(),
             })
@@ -225,7 +225,7 @@ mod tests {
             _username: String,
             fd_id_raw: u64,
         ) -> Result<u64, SpawnSessionError> {
-            let fd_id = h3x::varint::VarInt::try_from(fd_id_raw).map_err(|error| {
+            let fd_id = dhttp::h3x::varint::VarInt::try_from(fd_id_raw).map_err(|error| {
                 SpawnSessionError::SpawnFailed {
                     reason: snafu::Report::from_error(&error).to_string(),
                 }

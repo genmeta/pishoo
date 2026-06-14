@@ -2,7 +2,7 @@
 //!
 //! The root process owns the shared DHTTP network. Each registered server gets
 //! a [`dhttp::endpoint::Endpoint`] built from its identity and bind patterns;
-//! workers receive this wrapper through IPC as an [`h3x::quic::Listen`]
+//! workers receive this wrapper through IPC as an [`dhttp::h3x::quic::Listen`]
 //! capability. Shutdown and drop both release through the root-owned async
 //! resource transition path.
 
@@ -23,7 +23,9 @@ pub enum RegisteredEndpointError {
     #[snafu(display("registered endpoint shut down"))]
     Shutdown,
     #[snafu(transparent)]
-    Accept { source: h3x::dquic::AcceptError },
+    Accept {
+        source: dhttp::h3x::dquic::AcceptError,
+    },
     #[snafu(display("failed to release registered listener"))]
     Release { source: ReleaseListenerError },
 }
@@ -62,8 +64,8 @@ impl RegisteredEndpoint {
     }
 }
 
-impl h3x::quic::Listen for RegisteredEndpoint {
-    type Connection = h3x::dquic::prelude::Connection;
+impl dhttp::h3x::quic::Listen for RegisteredEndpoint {
+    type Connection = dhttp::h3x::dquic::prelude::Connection;
     type Error = RegisteredEndpointError;
 
     async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {

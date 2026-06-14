@@ -82,7 +82,7 @@ fn test_state() -> Arc<RootState> {
     // Ensure the rustls CryptoProvider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let network = h3x::dquic::Network::builder()
+    let network = dhttp::h3x::dquic::Network::builder()
         .stun_server(Arc::<str>::from(""))
         .build();
     Arc::new(RootState::new(network))

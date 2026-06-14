@@ -5,26 +5,28 @@ use std::{
     time::Duration,
 };
 
-use ddns::publisher::{EndpointPublisher, PublishAddresses};
-use dhttp_identity::name::Name;
-use h3x::dquic::{
-    Network,
-    net::Scheme,
-    prelude::{BindUri, IO},
-    qbase::net::{Family, addr::EndpointAddr},
-    qinterface::{
-        BindInterface, WeakInterface,
-        component::location::Locations,
-        io::{ProductIO, handy::DEFAULT_IO_FACTORY},
-    },
-    qtraversal::{
-        nat::{
-            client::{NatType, StunClientsComponent},
-            router::{StunRouter, StunRouterComponent},
-            server::{StunServer, StunServerConfig},
+use dhttp::{
+    ddns::publisher::{EndpointPublisher, PublishAddresses},
+    h3x::dquic::{
+        Network,
+        net::Scheme,
+        prelude::{BindUri, IO},
+        qbase::net::{Family, addr::EndpointAddr},
+        qinterface::{
+            BindInterface, WeakInterface,
+            component::location::Locations,
+            io::{ProductIO, handy::DEFAULT_IO_FACTORY},
         },
-        route::ReceiveAndDeliverPacket,
+        qtraversal::{
+            nat::{
+                client::{NatType, StunClientsComponent},
+                router::{StunRouter, StunRouterComponent},
+                server::{StunServer, StunServerConfig},
+            },
+            route::ReceiveAndDeliverPacket,
+        },
     },
+    name::Name,
 };
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
@@ -452,7 +454,7 @@ fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<Bi
 /// 注意：这只是"选下一跳"的策略，不保证 `CHANGE_IP|CHANGE_PORT` 一定同时改变 IP 和端口；
 /// 真正返回哪个地址取决于被选中节点自身的 `change_address` / `change_port` 配置。
 fn compute_change_address(
-    iface: &h3x::dquic::qinterface::Interface,
+    iface: &dhttp::h3x::dquic::qinterface::Interface,
     is_ipv4: bool,
 ) -> Option<SocketAddr> {
     let own_outer_ips: HashSet<IpAddr> = iface

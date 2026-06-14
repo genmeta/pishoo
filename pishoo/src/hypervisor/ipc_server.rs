@@ -8,16 +8,16 @@ use std::sync::Arc;
 #[cfg(feature = "sshd")]
 use std::time::Duration;
 
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
 #[cfg(feature = "sshd")]
-use h3x::ipc::transport::FdVec;
-use h3x::ipc::{
+use dhttp::h3x::ipc::transport::FdVec;
+use dhttp::h3x::ipc::{
     quic::{
         ConnectAdapter, IpcConnectClient, IpcConnectServerShared, IpcListenServerSharedMut,
         ListenAdapter,
     },
     transport::FdTransfer,
 };
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use nix::unistd::Pid;
 #[cfg(feature = "sshd")]
 use nix::{
@@ -64,7 +64,7 @@ impl WorkerControlPlane {
         task_scope: TaskScope,
         server_name: String,
         adapter: crate::listen::RegisteredEndpoint,
-    ) -> h3x::ipc::quic::IpcListenClient {
+    ) -> dhttp::h3x::ipc::quic::IpcListenClient {
         let listen_adapter = ListenAdapter::<_, IpcCodec>::new(adapter, self.fd_transfer.clone());
         let (server, client) =
             IpcListenServerSharedMut::new(Arc::new(tokio::sync::RwLock::new(listen_adapter)), 64);
@@ -98,7 +98,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
     async fn listener(
         &self,
         request: ListenRequest,
-    ) -> Result<h3x::ipc::quic::IpcListenClient, ListenError> {
+    ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, ListenError> {
         let server_name = request.identity.name().as_full().to_owned();
         let owner = self
             .state
@@ -149,7 +149,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
     async fn rebuild_listener(
         &self,
         request: ListenRequest,
-    ) -> Result<h3x::ipc::quic::IpcListenClient, RebuildListenError> {
+    ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, RebuildListenError> {
         let server_name = request.identity.name().as_full().to_owned();
         let owner = self
             .state
@@ -275,7 +275,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                 "spawn session request received"
             );
 
-            let fd_id = h3x::varint::VarInt::try_from(fd_id_raw).map_err(|error| {
+            let fd_id = dhttp::h3x::varint::VarInt::try_from(fd_id_raw).map_err(|error| {
                 crate::ipc::SpawnSessionError::SpawnFailed {
                     reason: snafu::Report::from_error(&error).to_string(),
                 }

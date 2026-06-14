@@ -6,7 +6,7 @@ pub mod parse;
 pub mod reverse;
 pub mod stun;
 
-pub use h3x::dquic::prelude::EndpointAddr;
+pub use dhttp::h3x::dquic::prelude::EndpointAddr;
 
 #[cfg(test)]
 mod tests {

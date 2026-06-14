@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dhttp_home::identity::IdentityProfile;
+use dhttp::home::identity::IdentityProfile;
 use gateway::parse::{document::ConfigNode, error::ConfigLoadFailure};
 
 pub async fn load_identity_servers(

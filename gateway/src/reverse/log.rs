@@ -1,6 +1,6 @@
 use std::{io::Write, path::PathBuf, sync::Arc};
 
-use dhttp_home::identity::IdentityProfile;
+use dhttp::home::identity::IdentityProfile;
 use tracing_appender::{
     non_blocking::{NonBlocking, WorkerGuard},
     rolling::{RollingFileAppender, Rotation},

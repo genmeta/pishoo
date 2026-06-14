@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
+use dhttp::h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
-use h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -109,14 +109,14 @@ pub enum SpawnSessionError {
 /// Workers call these methods to request listeners and connectors from root.
 /// The returned [`IpcListenClient`] / [`IpcConnectClient`] are used by the
 /// worker to construct [`IpcListener`] / [`IpcConnector`] with the local
-/// [`FdTransfer`](h3x::ipc::transport::FdTransfer).
+/// [`FdTransfer`](dhttp::h3x::ipc::transport::FdTransfer).
 #[remoc::rtc::remote]
 pub trait ControlPlane: Send + Sync {
     /// Request a QUIC listener for the given server configuration.
     ///
     /// Root creates the listener, wraps it in an IPC `ListenAdapter`, and
     /// returns an [`IpcListenClient`] that the worker constructs an
-    /// [`IpcListener`](h3x::ipc::capability::listener::IpcListener) from.
+    /// [`IpcListener`](dhttp::h3x::ipc::capability::listener::IpcListener) from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
 
     /// Atomically replace a previously acquired listener with one matching the
@@ -131,7 +131,7 @@ pub trait ControlPlane: Send + Sync {
     ///
     /// Root creates the connector, wraps it in an IPC `ConnectAdapter`, and
     /// returns an [`IpcConnectClient`] that the worker constructs an
-    /// [`IpcConnector`](h3x::ipc::capability::connector::IpcConnector) from.
+    /// [`IpcConnector`](dhttp::h3x::ipc::capability::connector::IpcConnector) from.
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError>;
 
     /// Request root to spawn an SSH session child process for the given user.

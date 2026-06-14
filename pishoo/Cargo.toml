@@ -24,10 +24,8 @@ required-features = ["sshd"]
 # --- Workspace Member ---
 gateway = { workspace = true }
 dhttp = { workspace = true }
-dhttp-home = { workspace = true }
-
-# --- QUIC & HTTP/3 ---
 h3x = { workspace = true, features = ["ipc"] }
+dhttp-access = { workspace = true, features = ["orm"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 
@@ -52,9 +50,6 @@ tower = { workspace = true }
 
 # --- CLI Parsing ---
 clap = { workspace = true }
-
-# --- Firewall ---
-dhttp-access = { workspace = true, features = ["orm"] }
 
 # --- SSH3 ---
 dssh = { workspace = true, optional = true }

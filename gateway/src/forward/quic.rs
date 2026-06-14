@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use dhttp::endpoint::Endpoint;
-use h3x::{connection::Connection, quic};
+use dhttp::{
+    endpoint::Endpoint,
+    h3x::{connection::Connection, quic},
+};
 use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};

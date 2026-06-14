@@ -2,7 +2,7 @@
 //!
 //! Tracks which worker process owns which server names, provides conflict
 //! detection, and manages the lifecycle of per-server DHTTP endpoints built
-//! on the shared [`Network`](h3x::dquic::Network).
+//! on the shared [`Network`](dhttp::h3x::dquic::Network).
 //!
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
@@ -18,8 +18,11 @@ use std::{
     sync::Arc,
 };
 
-use dhttp::{ddns::publisher::CreatePublisherError, endpoint::Endpoint};
-use h3x::{dquic::Network, quic::Listen as _};
+use dhttp::{
+    ddns::publisher::CreatePublisherError,
+    endpoint::Endpoint,
+    h3x::{dquic::Network, quic::Listen as _},
+};
 use nix::{
     sys::wait::WaitStatus,
     unistd::{Pid, Uid},
@@ -96,13 +99,13 @@ pub enum WorkerStartupError {
     MuxChannelFromFd { source: std::io::Error },
     #[snafu(display("failed to split worker mux channel"))]
     MuxChannelSplit {
-        source: h3x::ipc::transport::SplitError,
+        source: dhttp::h3x::ipc::transport::SplitError,
     },
     #[snafu(display("failed to establish worker remoc transport"))]
     ConnectTransport {
         source: remoc::ConnectError<
-            h3x::ipc::transport::MuxSinkError,
-            h3x::ipc::transport::MuxStreamError,
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
         >,
     },
     #[snafu(display("failed to send worker bootstrap"))]

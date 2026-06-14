@@ -1,7 +1,6 @@
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
-use dhttp::name::DhttpName;
-use h3x::dquic::binds::BindPattern;
+use dhttp::{h3x::dquic::binds::BindPattern, name::DhttpName};
 use snafu::{Snafu, whatever};
 
 use super::Result;

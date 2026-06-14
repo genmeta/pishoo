@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use dhttp_home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
+use dhttp::home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{

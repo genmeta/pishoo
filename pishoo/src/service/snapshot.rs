@@ -1,16 +1,16 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use axum::middleware::from_fn_with_state;
+use dhttp::h3x::{
+    connection::ConnectionBuilder, dhttp::settings::Settings, endpoint::H3Endpoint,
+    hyper::TowerService, quic,
+};
 use gateway::reverse::{
     access_control::{AccessControlState, access_control},
     access_log::{AccessLogState, access_log},
     body_adapter::BodyAdapterLayer,
     log::AccessLogWriter,
     router::NginxRouter,
-};
-use h3x::{
-    connection::ConnectionBuilder, dhttp::settings::Settings, endpoint::H3Endpoint,
-    hyper::TowerService, quic,
 };
 use snafu::Report;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dhttp_access::db::base::matcher::LocationRulesMatcher>,
+    pub access_rules: Arc<dhttp::access::db::base::matcher::LocationRulesMatcher>,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_node: Arc<gateway::parse::document::ConfigNode>,
     pub access_log_dir: Option<PathBuf>,
@@ -80,7 +80,7 @@ impl ServerService {
 
         let builder = ConnectionBuilder::new(self.h3_settings.clone());
         #[cfg(feature = "sshd")]
-        let builder = builder.protocol(h3x::webtransport::WebTransportProtocolFactory);
+        let builder = builder.protocol(dhttp::h3x::webtransport::WebTransportProtocolFactory);
 
         let mut endpoint = H3Endpoint::builder()
             .quic(listener)
@@ -141,7 +141,7 @@ impl ServerService {
         Self {
             h3_settings: Arc::new(Settings::default()),
             access_rules: Arc::new(
-                dhttp_access::db::base::matcher::LocationRulesMatcher::default(),
+                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
             ),
             router_state: {
                 #[cfg(feature = "sshd")]

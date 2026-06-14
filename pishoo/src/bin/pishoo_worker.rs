@@ -10,9 +10,8 @@
 
 use std::sync::Arc;
 
-use dhttp_home::DhttpHome;
+use dhttp::{h3x::ipc::transport::MuxChannel, home::DhttpHome};
 use gateway::error::Whatever;
-use h3x::ipc::transport::MuxChannel;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     worker::remote_plane::RemoteControlPlane,

@@ -35,7 +35,7 @@ use crate::{
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
-/// [`RegisteredEndpoint`] that implements [`h3x::quic::Listen`].
+/// [`RegisteredEndpoint`] that implements [`dhttp::h3x::quic::Listen`].
 pub struct LocalControlPlane {
     state: Arc<super::state::RootState>,
 }

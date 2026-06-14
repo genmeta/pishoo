@@ -4,7 +4,7 @@
 //! [`WorkerServerSource`](crate::service::source::WorkerServerSource) values.
 //! Runtime preparation happens in [`crate::service::source`].
 
-use dhttp_home::DhttpHome;
+use dhttp::home::DhttpHome;
 use futures::StreamExt;
 use gateway::error::Whatever;
 use snafu::Snafu;

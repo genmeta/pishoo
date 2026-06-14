@@ -4,11 +4,11 @@ use std::{
 };
 
 use axum::{Extension, extract::State, response::IntoResponse};
+use dhttp::h3x::{connection::ConnectionState, qpack::field::Protocol, quic, stream_id::StreamId};
 use dssh::{
     auth::AuthCredential,
     session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
-use h3x::{connection::ConnectionState, qpack::field::Protocol, quic, stream_id::StreamId};
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
@@ -36,20 +36,20 @@ pub enum RunSshSessionError {
     MuxChannel { source: std::io::Error },
     #[snafu(display("failed to split MuxChannel"))]
     SplitChannel {
-        source: h3x::ipc::transport::SplitError,
+        source: dhttp::h3x::ipc::transport::SplitError,
     },
     #[snafu(display("failed to establish remoc channel with child"))]
     RemocConnect {
         source: remoc::ConnectError<
-            h3x::ipc::transport::MuxSinkError,
-            h3x::ipc::transport::MuxStreamError,
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
         >,
     },
     #[snafu(display("remoc channel with child terminated"))]
     RemocConnection {
         source: remoc::chmux::ChMuxError<
-            h3x::ipc::transport::MuxSinkError,
-            h3x::ipc::transport::MuxStreamError,
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
         >,
     },
     #[snafu(display("remoc channel with child closed"))]
@@ -70,7 +70,7 @@ fn is_webtransport_request<B>(request: &Request<B>) -> bool {
     request
         .extensions()
         .get::<Protocol>()
-        .is_some_and(|protocol| protocol.as_str() == h3x::webtransport::WEBTRANSPORT_H3)
+        .is_some_and(|protocol| protocol.as_str() == dhttp::h3x::webtransport::WEBTRANSPORT_H3)
 }
 
 fn accept_server_session_error_status(
@@ -80,7 +80,7 @@ fn accept_server_session_error_status(
         dssh::webtransport::AcceptServerSessionError::UnexpectedPath { .. }
         | dssh::webtransport::AcceptServerSessionError::PeerVersion { .. }
         | dssh::webtransport::AcceptServerSessionError::Accept {
-            source: h3x::hyper::extended_connect::AcceptError::NotConnect { .. },
+            source: dhttp::h3x::hyper::extended_connect::AcceptError::NotConnect { .. },
         } => StatusCode::BAD_REQUEST,
         dssh::webtransport::AcceptServerSessionError::Accept { .. }
         | dssh::webtransport::AcceptServerSessionError::RegisterSession { .. } => {
@@ -195,13 +195,13 @@ pub async fn sshd_handle(
 
 struct AcceptedSshSession {
     peer_version: String,
-    session: h3x::webtransport::WebTransportSession,
+    session: dhttp::h3x::webtransport::WebTransportSession,
 }
 
 #[derive(Debug)]
 struct SessionIpcLifecycle {
     token: CancellationToken,
-    error: Mutex<Option<h3x::quic::ConnectionError>>,
+    error: Mutex<Option<dhttp::h3x::quic::ConnectionError>>,
 }
 
 impl SessionIpcLifecycle {
@@ -212,15 +212,15 @@ impl SessionIpcLifecycle {
         }
     }
 
-    fn closed_error(&self) -> h3x::quic::ConnectionError {
+    fn closed_error(&self) -> dhttp::h3x::quic::ConnectionError {
         let mut guard = self
             .error
             .lock()
             .expect("session ipc lifecycle lock poisoned");
         guard
-            .get_or_insert_with(|| h3x::quic::ConnectionError::Application {
-                source: h3x::quic::ApplicationError {
-                    code: h3x::error::Code::H3_REQUEST_CANCELLED,
+            .get_or_insert_with(|| dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError {
+                    code: dhttp::h3x::error::Code::H3_REQUEST_CANCELLED,
                     reason: Cow::Borrowed("ssh session ipc closed"),
                 },
             })
@@ -228,21 +228,21 @@ impl SessionIpcLifecycle {
     }
 }
 
-impl h3x::quic::Lifecycle for SessionIpcLifecycle {
-    fn close(&self, code: h3x::error::Code, reason: Cow<'static, str>) {
+impl dhttp::h3x::quic::Lifecycle for SessionIpcLifecycle {
+    fn close(&self, code: dhttp::h3x::error::Code, reason: Cow<'static, str>) {
         let mut guard = self
             .error
             .lock()
             .expect("session ipc lifecycle lock poisoned");
         if guard.is_none() {
-            *guard = Some(h3x::quic::ConnectionError::Application {
-                source: h3x::quic::ApplicationError { code, reason },
+            *guard = Some(dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError { code, reason },
             });
         }
         self.token.cancel();
     }
 
-    fn check(&self) -> Result<(), h3x::quic::ConnectionError> {
+    fn check(&self) -> Result<(), dhttp::h3x::quic::ConnectionError> {
         if self.token.is_cancelled() {
             Err(self.closed_error())
         } else {
@@ -250,7 +250,7 @@ impl h3x::quic::Lifecycle for SessionIpcLifecycle {
         }
     }
 
-    async fn closed(&self) -> h3x::quic::ConnectionError {
+    async fn closed(&self) -> dhttp::h3x::quic::ConnectionError {
         self.token.cancelled().await;
         self.closed_error()
     }
@@ -277,8 +277,8 @@ async fn run_ssh_session(
     };
 
     // Establish remoc channel over MuxChannel with the session child.
-    let mux =
-        h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd).context(MuxChannelSnafu)?;
+    let mux = dhttp::h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd)
+        .context(MuxChannelSnafu)?;
     let (sink, stream) = mux.split().context(SplitChannelSnafu)?;
 
     // Capture the FD transfer plane before remoc consumes the transport.
@@ -321,18 +321,21 @@ async fn run_ssh_session(
     };
 
     let session_shutdown = token.child_token();
-    let lifecycle: Arc<dyn h3x::quic::DynLifecycle> =
+    let lifecycle: Arc<dyn dhttp::h3x::quic::DynLifecycle> =
         Arc::new(SessionIpcLifecycle::new(session_shutdown.clone()));
     let session = Arc::new(session);
-    let session_id = h3x::webtransport::Session::id(session.as_ref());
+    let session_id = dhttp::h3x::webtransport::Session::id(session.as_ref());
 
-    let adapter = h3x::ipc::webtransport::WebTransportSessionAdapter::new(
+    let adapter = dhttp::h3x::ipc::webtransport::WebTransportSessionAdapter::new(
         Arc::clone(&session),
         fd_transfer.clone(),
         Arc::clone(&lifecycle),
     );
     let (webtransport_server, webtransport_client) =
-        h3x::ipc::webtransport::IpcWebTransportSessionServerShared::new(Arc::new(adapter), 8);
+        dhttp::h3x::ipc::webtransport::IpcWebTransportSessionServerShared::new(
+            Arc::new(adapter),
+            8,
+        );
 
     let mut tasks = JoinSet::new();
     let webtransport_shutdown = session_shutdown.clone();
@@ -347,7 +350,7 @@ async fn run_ssh_session(
     );
 
     let bootstrap = SessionBootstrap {
-        webtransport_session: h3x::ipc::webtransport::WebTransportSessionBootstrap {
+        webtransport_session: dhttp::h3x::ipc::webtransport::WebTransportSessionBootstrap {
             session_id,
             session: webtransport_client,
         },
@@ -392,7 +395,7 @@ async fn run_ssh_session(
 
 #[cfg(test)]
 mod tests {
-    use h3x::qpack::field::Protocol;
+    use dhttp::h3x::qpack::field::Protocol;
 
     use super::*;
 
@@ -401,7 +404,7 @@ mod tests {
         let mut request = Request::builder().body(()).expect("request should build");
         request
             .extensions_mut()
-            .insert(Protocol::new(h3x::webtransport::WEBTRANSPORT_H3));
+            .insert(Protocol::new(dhttp::h3x::webtransport::WEBTRANSPORT_H3));
 
         assert!(is_webtransport_request(&request));
     }

@@ -2,9 +2,8 @@
 
 use std::sync::Arc;
 
-use dhttp::name::DhttpName;
+use dhttp::{h3x::quic::Listen as _, name::DhttpName};
 use gateway::control_plane::ListenRequest;
-use h3x::quic::Listen as _;
 use snafu::{IntoError, ResultExt};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -57,7 +56,7 @@ struct AcquireListenerTransition {
     owner: Owner,
     server_name: DhttpName<'static>,
     request: ListenRequest,
-    bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+    bind_patterns: Arc<Vec<dhttp::h3x::dquic::binds::BindPattern>>,
     done: crate::hypervisor::resource::Completion,
     tx: AcquireListenerSender,
 }
@@ -66,7 +65,7 @@ struct RebuildListenerTransition {
     owner: Owner,
     server_name: DhttpName<'static>,
     request: ListenRequest,
-    bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+    bind_patterns: Arc<Vec<dhttp::h3x::dquic::binds::BindPattern>>,
     old_resource: ListenerResource,
     done: crate::hypervisor::resource::Completion,
     tx: RebuildListenerSender,
@@ -570,7 +569,7 @@ impl RootState {
         server_name: DhttpName<'static>,
         registered: RegisteredEndpoint,
     ) {
-        if let Err(error) = h3x::quic::Listen::shutdown(&registered).await {
+        if let Err(error) = dhttp::h3x::quic::Listen::shutdown(&registered).await {
             tracing::warn!(
                 %server_name,
                 error = %snafu::Report::from_error(&error),
@@ -610,7 +609,7 @@ impl RootState {
         owner: Owner,
         server_name: &DhttpName<'static>,
         request: &ListenRequest,
-        bind_patterns: Arc<Vec<h3x::dquic::binds::BindPattern>>,
+        bind_patterns: Arc<Vec<dhttp::h3x::dquic::binds::BindPattern>>,
     ) -> Result<BuiltListener, AcquireListenerError> {
         let release_scope = self
             .task_scope_for_owner(owner)

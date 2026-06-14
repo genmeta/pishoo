@@ -5,8 +5,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use dhttp_access::matcher::{LocationRulesMatcher, MatchRuleFailed};
-use h3x::{connection::ConnectionState, quic};
+use dhttp::{
+    access::matcher::{LocationRulesMatcher, MatchRuleFailed},
+    h3x::{connection::ConnectionState, quic},
+};
 use http::StatusCode;
 use tracing::{info, warn};
 
@@ -43,7 +45,7 @@ pub async fn access_control(
         None => None,
     };
     let http_request =
-        dhttp_access::expr::atomics::HttpRequest::new(client_name.as_deref(), &request);
+        dhttp::access::expr::atomics::HttpRequest::new(client_name.as_deref(), &request);
 
     let action = match state
         .access_rules
@@ -57,14 +59,14 @@ pub async fn access_control(
                     path = %request.uri().path(),
                     "no ruleset matched, allowing self only"
                 );
-                dhttp_access::action::RequestAction::Allow
+                dhttp::access::action::RequestAction::Allow
             } else {
                 warn!(
                     path = %request.uri().path(),
                     client = client_name.as_deref(),
                     "no ruleset matched, denying non-self client"
                 );
-                dhttp_access::action::RequestAction::Deny
+                dhttp::access::action::RequestAction::Deny
             }
         }
         Err(MatchRuleFailed::MatchRuleInSet) => {
@@ -73,11 +75,11 @@ pub async fn access_control(
                 path = %request.uri().path(),
                 "ruleset matched but no rule matched, denying all"
             );
-            dhttp_access::action::RequestAction::Deny
+            dhttp::access::action::RequestAction::Deny
         }
     };
 
-    if action == dhttp_access::action::RequestAction::Deny {
+    if action == dhttp::access::action::RequestAction::Deny {
         info!(
             client_name = client_name.as_deref(),
             uri = %request.uri(),

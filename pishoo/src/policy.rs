@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dhttp_access::db::{
+use dhttp::access::db::{
     base::matcher::LocationRulesMatcher,
     service::{error::ListAllRulesError, location_service::LocationService},
 };

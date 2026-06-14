@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use dhttp::name::DhttpName;
-use dhttp_home::{DhttpHome, identity::IdentityProfile};
+use dhttp::{
+    home::{DhttpHome, identity::IdentityProfile},
+    name::DhttpName,
+};
 use gateway::{
     control_plane::ListenRequest,
     parse::{
@@ -62,16 +64,16 @@ pub enum ServerSource {
 }
 
 pub struct PrepareContext {
-    pub h3_settings: Arc<h3x::dhttp::settings::Settings>,
-    pub access_rules: Arc<dhttp_access::db::base::matcher::LocationRulesMatcher>,
+    pub h3_settings: Arc<dhttp::h3x::dhttp::settings::Settings>,
+    pub access_rules: Arc<dhttp::access::db::base::matcher::LocationRulesMatcher>,
     pub router_state: gateway::reverse::router::RouterState,
 }
 
-fn h3_settings() -> Arc<h3x::dhttp::settings::Settings> {
-    let settings = h3x::dhttp::settings::Settings::default();
+fn h3_settings() -> Arc<dhttp::h3x::dhttp::settings::Settings> {
+    let settings = dhttp::h3x::dhttp::settings::Settings::default();
     #[cfg(feature = "sshd")]
-    let settings =
-        settings.with_all(h3x::dhttp::webtransport::settings::WebTransportSupport::default());
+    let settings = settings
+        .with_all(dhttp::h3x::dhttp::webtransport::settings::WebTransportSupport::default());
     Arc::new(settings)
 }
 
@@ -747,9 +749,9 @@ mod tests {
         };
 
         let ctx = PrepareContext {
-            h3_settings: std::sync::Arc::new(h3x::dhttp::settings::Settings::default()),
+            h3_settings: std::sync::Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
             access_rules: std::sync::Arc::new(
-                dhttp_access::db::base::matcher::LocationRulesMatcher::default(),
+                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
             ),
             router_state: dummy_router_state(),
         };
@@ -791,9 +793,9 @@ mod tests {
         };
 
         let ctx = PrepareContext {
-            h3_settings: std::sync::Arc::new(h3x::dhttp::settings::Settings::default()),
+            h3_settings: std::sync::Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
             access_rules: std::sync::Arc::new(
-                dhttp_access::db::base::matcher::LocationRulesMatcher::default(),
+                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
             ),
             router_state: dummy_router_state(),
         };
