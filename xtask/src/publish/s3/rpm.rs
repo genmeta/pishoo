@@ -14,7 +14,7 @@ use bollard::{
     },
 };
 use futures_util::StreamExt;
-use snafu::{OptionExt, ResultExt, Snafu, Whatever};
+use snafu::{OptionExt, ResultExt, Whatever};
 use tempfile::TempDir;
 use tracing::info;
 use walkdir::WalkDir;
@@ -31,24 +31,6 @@ use crate::{
 const RPM_STAGE_BASE_IMAGE: &str = "fedora:40";
 const RPM_STAGE_IMAGE: &str = "xtask-rpm-publish:fedora40-v1";
 const RPM_REPOSITORY_TARGET: &str = "/rpm-repository";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpmEntry {
-    pub package: String,
-    pub version: String,
-    pub architecture: String,
-    pub metadata: String,
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum MergeRpmEntriesError {
-    #[snafu(display("duplicate local rpm entry for {package} {architecture}"))]
-    DuplicateLocal {
-        package: String,
-        architecture: String,
-    },
-}
 
 #[derive(Debug, Clone)]
 struct RpmPayload {
@@ -71,35 +53,6 @@ struct RemoteRpmPayload {
 struct RpmStageContainer {
     docker: Docker,
     container_id: String,
-}
-
-pub fn merge_rpm_entries(
-    remote: Vec<RpmEntry>,
-    local: Vec<RpmEntry>,
-) -> Result<Vec<RpmEntry>, MergeRpmEntriesError> {
-    let mut local_keys = BTreeSet::new();
-    for entry in &local {
-        let key = (entry.package.clone(), entry.architecture.clone());
-        snafu::ensure!(
-            local_keys.insert(key),
-            merge_rpm_entries_error::DuplicateLocalSnafu {
-                package: entry.package.clone(),
-                architecture: entry.architecture.clone()
-            }
-        );
-    }
-    let mut merged = remote
-        .into_iter()
-        .filter(|entry| !local_keys.contains(&(entry.package.clone(), entry.architecture.clone())))
-        .collect::<Vec<_>>();
-    merged.extend(local);
-    merged.sort_by(|left, right| {
-        left.package
-            .cmp(&right.package)
-            .then_with(|| left.architecture.cmp(&right.architecture))
-            .then_with(|| left.version.cmp(&right.version))
-    });
-    Ok(merged)
 }
 
 pub fn rpm_upload_order(key: &str) -> u8 {
@@ -133,16 +86,8 @@ pub async fn run(
     let mut uploads =
         plan_payload_uploads(client, &options.bucket, &local_payloads, &target.prefix).await?;
     let remote_payloads = remote_rpm_payloads(client, &options.bucket, &target.prefix).await?;
-    let local_keys = local_payloads
-        .iter()
-        .map(|payload| (payload.package.clone(), payload.architecture.clone()))
-        .collect::<BTreeSet<_>>();
-    let retained_remote = remote_payloads
-        .into_iter()
-        .filter(|payload| {
-            !local_keys.contains(&(payload.package.clone(), payload.architecture.clone()))
-        })
-        .collect::<Vec<_>>();
+    let local_keys = local_payload_keys(&local_payloads);
+    let retained_remote = retained_remote_payloads(remote_payloads, &local_keys);
     uploads.sort_by(|left, right| {
         rpm_upload_order(&left.key)
             .cmp(&rpm_upload_order(&right.key))
@@ -230,6 +175,25 @@ fn local_payloads(
                     .whatever_context("rpm package artifact is missing archive name")?,
                 source: super::artifact_path(target_dir, artifact),
             })
+        })
+        .collect()
+}
+
+fn local_payload_keys(payloads: &[RpmPayload]) -> BTreeSet<(String, String)> {
+    payloads
+        .iter()
+        .map(|payload| (payload.package.clone(), payload.architecture.clone()))
+        .collect()
+}
+
+fn retained_remote_payloads(
+    remote_payloads: Vec<RemoteRpmPayload>,
+    local_keys: &BTreeSet<(String, String)>,
+) -> Vec<RemoteRpmPayload> {
+    remote_payloads
+        .into_iter()
+        .filter(|payload| {
+            !local_keys.contains(&(payload.package.clone(), payload.architecture.clone()))
         })
         .collect()
 }
@@ -490,60 +454,41 @@ fn path_to_mount_source(path: &Path) -> Result<String, Whatever> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RpmEntry, merge_rpm_entries, rpm_upload_order};
+    use std::path::PathBuf;
+
+    use super::{
+        RemoteRpmPayload, RpmPayload, local_payload_keys, retained_remote_payloads,
+        rpm_upload_order,
+    };
 
     #[test]
     fn manifest_arch_replaces_remote_same_arch_and_preserves_others() {
         let remote = vec![
-            RpmEntry {
-                package: "pishoo".to_string(),
-                version: "0.5.1-1".to_string(),
-                architecture: "x86_64".to_string(),
-                metadata: "name=pishoo version=0.5.1-1 arch=x86_64".to_string(),
-            },
-            RpmEntry {
-                package: "pishoo".to_string(),
-                version: "0.5.1-1".to_string(),
-                architecture: "aarch64".to_string(),
-                metadata: "name=pishoo version=0.5.1-1 arch=aarch64".to_string(),
-            },
-            RpmEntry {
-                package: "pishoo-common".to_string(),
-                version: "0.5.1-1".to_string(),
-                architecture: "noarch".to_string(),
-                metadata: "name=pishoo-common version=0.5.1-1 arch=noarch".to_string(),
-            },
+            remote_payload("pishoo", "0.5.1", "x86_64"),
+            remote_payload("pishoo", "0.5.1", "aarch64"),
+            remote_payload("pishoo-common", "0.5.1", "noarch"),
         ];
         let local = vec![
-            RpmEntry {
-                package: "pishoo".to_string(),
-                version: "0.5.2-1".to_string(),
-                architecture: "x86_64".to_string(),
-                metadata: "name=pishoo version=0.5.2-1 arch=x86_64".to_string(),
-            },
-            RpmEntry {
-                package: "pishoo-common".to_string(),
-                version: "0.5.2-1".to_string(),
-                architecture: "noarch".to_string(),
-                metadata: "name=pishoo-common version=0.5.2-1 arch=noarch".to_string(),
-            },
+            local_payload("pishoo", "0.5.2", "x86_64"),
+            local_payload("pishoo-common", "0.5.2", "noarch"),
         ];
 
-        let merged = merge_rpm_entries(remote, local).expect("merge should pass");
+        let local_keys = local_payload_keys(&local);
+        let retained_remote = retained_remote_payloads(remote, &local_keys);
 
         assert!(
-            merged
+            retained_remote
                 .iter()
-                .any(|entry| entry.version == "0.5.2-1" && entry.architecture == "x86_64")
+                .any(|entry| entry.version == "0.5.1" && entry.architecture == "aarch64")
         );
         assert!(
-            merged
+            !retained_remote
                 .iter()
-                .any(|entry| entry.version == "0.5.1-1" && entry.architecture == "aarch64")
+                .any(|entry| entry.version == "0.5.1" && entry.architecture == "x86_64")
         );
-        assert!(merged.iter().any(|entry| {
+        assert!(!retained_remote.iter().any(|entry| {
             entry.package == "pishoo-common"
-                && entry.version == "0.5.2-1"
+                && entry.version == "0.5.1"
                 && entry.architecture == "noarch"
         }));
     }
@@ -567,5 +512,26 @@ mod tests {
         let key =
             super::rpm_payload_key("rpm/pishoo", "pishoo", "0.5.2", "pishoo-0.5.2-1.x86_64.rpm");
         assert_eq!(key, "rpm/pishoo/pishoo/0.5.2/pishoo-0.5.2-1.x86_64.rpm");
+    }
+
+    fn local_payload(package: &str, version: &str, architecture: &str) -> RpmPayload {
+        RpmPayload {
+            package: package.to_string(),
+            version: version.to_string(),
+            architecture: architecture.to_string(),
+            filename: format!("{package}-{version}-1.{architecture}.rpm"),
+            source: PathBuf::from(format!("/tmp/{package}-{version}-1.{architecture}.rpm")),
+        }
+    }
+
+    fn remote_payload(package: &str, version: &str, architecture: &str) -> RemoteRpmPayload {
+        let filename = format!("{package}-{version}-1.{architecture}.rpm");
+        RemoteRpmPayload {
+            package: package.to_string(),
+            version: version.to_string(),
+            architecture: architecture.to_string(),
+            filename: filename.clone(),
+            key: format!("rpm/pishoo/{package}/{version}/{filename}"),
+        }
     }
 }
