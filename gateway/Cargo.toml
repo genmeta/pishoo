@@ -31,7 +31,6 @@ hyper-util = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-service = { workspace = true }
-dhttp-access = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---
 rustls = { workspace = true }

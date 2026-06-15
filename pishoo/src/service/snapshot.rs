@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dhttp::access::db::base::matcher::LocationRulesMatcher>,
+    pub access_rules: Arc<dhttp::access::matcher::LocationRulesMatcher>,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_node: Arc<gateway::parse::document::ConfigNode>,
     pub access_log_dir: Option<PathBuf>,
@@ -140,9 +140,7 @@ impl ServerService {
     pub(crate) fn fake() -> Self {
         Self {
             h3_settings: Arc::new(Settings::default()),
-            access_rules: Arc::new(
-                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
-            ),
+            access_rules: Arc::new(dhttp::access::matcher::LocationRulesMatcher::default()),
             router_state: {
                 #[cfg(feature = "sshd")]
                 struct DummySpawner;

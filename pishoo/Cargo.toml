@@ -25,13 +25,13 @@ required-features = ["sshd"]
 gateway = { workspace = true }
 dhttp = { workspace = true }
 h3x = { workspace = true, features = ["ipc"] }
-dhttp-access = { workspace = true, features = ["orm"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 
 # --- Serialization & IPC ---
 remoc = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # --- Error Handling ---
 snafu = { workspace = true }

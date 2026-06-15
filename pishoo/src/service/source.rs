@@ -65,7 +65,7 @@ pub enum ServerSource {
 
 pub struct PrepareContext {
     pub h3_settings: Arc<dhttp::h3x::dhttp::settings::Settings>,
-    pub access_rules: Arc<dhttp::access::db::base::matcher::LocationRulesMatcher>,
+    pub access_rules: Arc<dhttp::access::matcher::LocationRulesMatcher>,
     pub router_state: gateway::reverse::router::RouterState,
 }
 
@@ -751,7 +751,7 @@ mod tests {
         let ctx = PrepareContext {
             h3_settings: std::sync::Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
             access_rules: std::sync::Arc::new(
-                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
+                dhttp::access::matcher::LocationRulesMatcher::default(),
             ),
             router_state: dummy_router_state(),
         };
@@ -795,7 +795,7 @@ mod tests {
         let ctx = PrepareContext {
             h3_settings: std::sync::Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
             access_rules: std::sync::Arc::new(
-                dhttp::access::db::base::matcher::LocationRulesMatcher::default(),
+                dhttp::access::matcher::LocationRulesMatcher::default(),
             ),
             router_state: dummy_router_state(),
         };
