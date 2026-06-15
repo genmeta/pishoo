@@ -50,7 +50,7 @@ socket2 = { workspace = true }
 form_urlencoded = { workspace = true }
 percent-encoding = { workspace = true }
 
-dssh = { workspace = true, optional = true }
+dshell = { workspace = true, optional = true }
 remoc = { workspace = true }
 dhttp = { workspace = true }
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
@@ -67,12 +67,12 @@ getifs = "0.6"
 
 [features]
 sshd = [
-    "dep:dssh",
-    "dssh/server",
+    "dep:dshell",
+    "dshell/server",
     "remoc/rfn",
     "h3x/ipc",
     "h3x/webtransport",
 ]
-pam = ["sshd", "dssh/pam"]
+pam = ["sshd", "dshell/pam"]
 stun_traversal = []
 qlog = []

@@ -51,8 +51,8 @@ tower = { workspace = true }
 # --- CLI Parsing ---
 clap = { workspace = true }
 
-# --- SSH3 ---
-dssh = { workspace = true, optional = true }
+# --- DShell ---
+dshell = { workspace = true, optional = true }
 
 # --- Database & ORM ---
 sea-orm = { workspace = true }
@@ -73,13 +73,13 @@ sha2 = "0.11"
 default = ["sqlx-sqlite"]
 sshd = [
     "gateway/sshd",
-    "dep:dssh",
-    "dssh/server",
+    "dep:dshell",
+    "dshell/server",
     "h3x/webtransport",
     "nix/socket",
     "nix/uio",
 ]
-pam = ["sshd", "dssh/pam", "gateway/pam"]
+pam = ["sshd", "dshell/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]

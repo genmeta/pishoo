@@ -1,6 +1,6 @@
-//! pishoo-ssh-session: privilege-separated SSH3 session child process.
+//! pishoo-ssh-session: privilege-separated DShell session child process.
 //!
-//! Spawned by the gateway (pishoo) for each SSH3 connection.
+//! Spawned by the gateway (pishoo) for each DShell connection.
 //! Communicates with the parent via a remoc channel over a MuxChannel
 //! socketpair on FD 3.
 //!
@@ -17,7 +17,7 @@ use std::{
 };
 
 use dhttp::h3x::ipc::transport::MuxChannel;
-use dssh::{
+use dshell::{
     auth::AuthCredential,
     conversation::Conversation,
     session::{
@@ -117,7 +117,7 @@ async fn main() {
 
     // Establish remoc channel over MuxSink/MuxStream.
     let (conn, mut tx, _rx) =
-        remoc::Connect::framed::<_, _, dssh::session::AuthenticateFn, (), remoc::codec::Default>(
+        remoc::Connect::framed::<_, _, dshell::session::AuthenticateFn, (), remoc::codec::Default>(
             remoc::Cfg::default(),
             sink,
             stream,
@@ -143,7 +143,7 @@ async fn main() {
                 AuthCredential::Certificate => {
                     // mTLS: skip password authentication, but still perform
                     // PAM acct_mgmt + open_session for system session creation.
-                    dssh::session::pam::open_session("sshd", &auth_request.username)
+                    dshell::session::pam::open_session("sshd", &auth_request.username)
                         .await
                         .map_err(|e| AuthError::PamFailed {
                             reason: Report::from_error(e).to_string(),
@@ -152,13 +152,13 @@ async fn main() {
                 #[cfg(not(feature = "pam"))]
                 AuthCredential::Certificate => {
                     // mTLS without PAM: look up user directly from /etc/passwd.
-                    let user_info = dssh::session::lookup_user(&auth_request.username)
+                    let user_info = dshell::session::lookup_user(&auth_request.username)
                         .await
                         .map_err(|e| AuthError::PamFailed {
                             reason: Report::from_error(e).to_string(),
                         })?;
                     // Without PAM, explicitly check /etc/nologin.
-                    if let Err(msg) = dssh::session::check_nologin(user_info.uid) {
+                    if let Err(msg) = dshell::session::check_nologin(user_info.uid) {
                         return Err(AuthError::PamFailed { reason: msg });
                     }
                     user_info

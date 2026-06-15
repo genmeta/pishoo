@@ -168,7 +168,7 @@ impl<T: SpawnSession> DynSpawnSession for T {
 ///   accessing the root state in-process.
 ///
 /// When the `sshd` feature is enabled, implementors must also provide
-/// [`SpawnSession`] so that SSH3 handlers can spawn session child
+/// [`SpawnSession`] so that DShell handlers can spawn session child
 /// processes through the control plane.
 #[cfg(feature = "sshd")]
 pub trait ControlPlane: ProvideListener + ProvideConnector + SpawnSession {}

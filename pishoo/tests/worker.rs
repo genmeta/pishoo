@@ -90,7 +90,7 @@ fn sshd_service_registers_webtransport_protocol_layer() {
     );
     assert!(
         !service_source.contains("Ssh3ProtocolFactory"),
-        "sshd services must not keep the legacy SSH3 stream protocol routing"
+        "sshd services must not keep the legacy DShell stream protocol routing"
     );
 }
 

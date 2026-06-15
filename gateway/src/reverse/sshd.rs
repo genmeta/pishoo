@@ -5,7 +5,7 @@ use std::{
 
 use axum::{Extension, extract::State, response::IntoResponse};
 use dhttp::h3x::{connection::ConnectionState, qpack::field::Protocol, quic, stream_id::StreamId};
-use dssh::{
+use dshell::{
     auth::AuthCredential,
     session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
@@ -59,10 +59,10 @@ pub enum RunSshSessionError {
     #[snafu(display("child did not send AuthenticateFn"))]
     NoAuthFn,
     #[snafu(display("authentication rejected by child"))]
-    AuthRejected { source: dssh::session::AuthError },
+    AuthRejected { source: dshell::session::AuthError },
     #[snafu(display("child session failed"))]
     SessionFailed {
-        source: dssh::session::SessionRunError,
+        source: dshell::session::SessionRunError,
     },
 }
 
@@ -74,22 +74,22 @@ fn is_webtransport_request<B>(request: &Request<B>) -> bool {
 }
 
 fn accept_server_session_error_status(
-    error: &dssh::webtransport::AcceptServerSessionError,
+    error: &dshell::webtransport::AcceptServerSessionError,
 ) -> StatusCode {
     match error {
-        dssh::webtransport::AcceptServerSessionError::UnexpectedPath { .. }
-        | dssh::webtransport::AcceptServerSessionError::PeerVersion { .. }
-        | dssh::webtransport::AcceptServerSessionError::Accept {
+        dshell::webtransport::AcceptServerSessionError::UnexpectedPath { .. }
+        | dshell::webtransport::AcceptServerSessionError::PeerVersion { .. }
+        | dshell::webtransport::AcceptServerSessionError::Accept {
             source: dhttp::h3x::hyper::extended_connect::AcceptError::NotConnect { .. },
         } => StatusCode::BAD_REQUEST,
-        dssh::webtransport::AcceptServerSessionError::Accept { .. }
-        | dssh::webtransport::AcceptServerSessionError::RegisterSession { .. } => {
+        dshell::webtransport::AcceptServerSessionError::Accept { .. }
+        | dshell::webtransport::AcceptServerSessionError::RegisterSession { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
 
-/// Axum-style handler for DSSH WebTransport CONNECT sessions.
+/// Axum-style handler for DShell WebTransport CONNECT sessions.
 ///
 /// Extracts the username from `LocationMatch.remaining` (e.g. for `/ssh/yiyue`,
 /// remaining is `"yiyue"`). Spawns the SSH session in a background task and
@@ -124,7 +124,7 @@ pub async fn sshd_handle(
     let username = username.to_owned();
 
     if !is_webtransport_request(&req) {
-        tracing::warn!("dssh request is not webtransport extended connect");
+        tracing::warn!("dshell request is not webtransport extended connect");
         return StatusCode::BAD_REQUEST.into_response();
     }
 
@@ -133,26 +133,26 @@ pub async fn sshd_handle(
         .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
         .cloned()
     else {
-        tracing::warn!("dssh request is missing h3 connection state");
+        tracing::warn!("dshell request is missing h3 connection state");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     if let Err(error) = connection.peer_settings().await {
         tracing::warn!(
             error = %Report::from_error(&error),
-            "failed to wait for peer HTTP/3 settings before dssh webtransport accept"
+            "failed to wait for peer HTTP/3 settings before dshell webtransport accept"
         );
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     let path = req.uri().path().to_owned();
-    let accepted = match dssh::webtransport::accept_server_session(req, &path).await {
+    let accepted = match dshell::webtransport::accept_server_session(req, &path).await {
         Ok(accepted) => accepted,
         Err(error) => {
             let status = accept_server_session_error_status(&error);
             tracing::warn!(
                 error = %Report::from_error(&error),
-                "failed to accept dssh webtransport session"
+                "failed to accept dshell webtransport session"
             );
             return status.into_response();
         }
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_connect_request_is_not_dssh_transport() {
+    fn plain_connect_request_is_not_dshell_transport() {
         let request = Request::builder().body(()).expect("request should build");
 
         assert!(!is_webtransport_request(&request));

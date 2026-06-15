@@ -329,7 +329,7 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/dssh.git",
-            &[("dssh", "/dssh")],
+            &[("dshell", "/dssh")],
         );
     }
 
