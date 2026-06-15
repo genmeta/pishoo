@@ -313,7 +313,7 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/ddns.git",
-            &[("ddns", "/ddns")],
+            &[("dyns", "/ddns")],
         );
     }
 
@@ -502,6 +502,10 @@ mod tests {
                 basename: "dhttp".to_string(),
             },
             Sibling {
+                host: "/host/reimu/ddns".into(),
+                basename: "ddns".to_string(),
+            },
+            Sibling {
                 host: "/host/reimu/dquic".into(),
                 basename: "dquic".to_string(),
             },
@@ -515,6 +519,8 @@ mod tests {
         assert!(config.contains("[patch.\"https://github.com/genmeta/dhttp.git\"]"));
         assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
         assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
+        assert!(config.contains("[patch.\"https://github.com/genmeta/ddns.git\"]"));
+        assert!(config.contains("dyns = { path = \"/ddns\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/dquic.git\"]"));
         assert!(config.contains("dquic = { path = \"/dquic/dquic\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/rankey.git\"]"));
