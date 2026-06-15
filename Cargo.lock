@@ -1418,12 +1418,13 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 [[package]]
 name = "ddns"
 version = "0.3.0"
+source = "git+https://github.com/genmeta/ddns.git?branch=endpoint#ed23d98da6bb72e0047d44e1a0c90d1ca05caabe"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
  "bytes",
  "dashmap",
- "dhttp-identity",
+ "dhttp-identity 0.1.0 (git+https://github.com/genmeta/dhttp.git?branch=main)",
  "dquic",
  "flume 0.12.0",
  "futures",
@@ -1550,13 +1551,14 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/dhttp.git?branch=publish#f4ca208af08511511aa2b81dfb835342648ac960"
 dependencies = [
  "bon",
  "bytes",
  "ddns",
  "dhttp-access",
  "dhttp-home",
- "dhttp-identity",
+ "dhttp-identity 0.1.0 (git+https://github.com/genmeta/dhttp.git?branch=publish)",
  "futures",
  "h3x",
  "http 1.4.2",
@@ -1571,11 +1573,12 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/dhttp.git?branch=publish#f4ca208af08511511aa2b81dfb835342648ac960"
 dependencies = [
  "chrono",
  "derive_more",
  "dhttp-home",
- "dhttp-identity",
+ "dhttp-identity 0.1.0 (git+https://github.com/genmeta/dhttp.git?branch=publish)",
  "globset",
  "http 1.4.2",
  "peg",
@@ -1591,8 +1594,9 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/dhttp.git?branch=publish#f4ca208af08511511aa2b81dfb835342648ac960"
 dependencies = [
- "dhttp-identity",
+ "dhttp-identity 0.1.0 (git+https://github.com/genmeta/dhttp.git?branch=publish)",
  "dirs",
  "futures",
  "rustls 0.23.40",
@@ -1606,6 +1610,22 @@ dependencies = [
 [[package]]
 name = "dhttp-identity"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/dhttp.git?branch=main#b8f8abed208727f6c577de3541d5c827c6f3d981"
+dependencies = [
+ "bytes",
+ "futures",
+ "http 1.4.2",
+ "ring",
+ "rustls 0.23.40",
+ "serde",
+ "snafu",
+ "x509-parser",
+]
+
+[[package]]
+name = "dhttp-identity"
+version = "0.1.0"
+source = "git+https://github.com/genmeta/dhttp.git?branch=publish#f4ca208af08511511aa2b81dfb835342648ac960"
 dependencies = [
  "bytes",
  "futures",
@@ -1714,6 +1734,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "dquic"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -1729,7 +1750,8 @@ dependencies = [
 
 [[package]]
 name = "dssh"
-version = "0.2.0"
+version = "0.3.0"
+source = "git+https://github.com/genmeta/dssh.git?branch=endpoint#1bf39c76932145e3d3899f544d1806ecc29cbb87"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2078,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-compression",
  "axum",
@@ -2273,13 +2295,14 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.3.0"
+source = "git+https://github.com/genmeta/h3x.git?branch=endpoint#a825de1093abdbd626bac25f9791c45887ef8411"
 dependencies = [
  "arc-swap",
  "async-channel",
  "bon",
  "bytes",
  "dashmap",
- "dhttp-identity",
+ "dhttp-identity 0.1.0 (git+https://github.com/genmeta/dhttp.git?branch=main)",
  "dquic",
  "either",
  "futures",
@@ -3741,7 +3764,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pishoo"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "clap",
@@ -4080,6 +4103,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bitflags",
  "bytes",
@@ -4101,6 +4125,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "qbase",
  "qevent",
@@ -4113,6 +4138,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4139,6 +4165,7 @@ dependencies = [
 [[package]]
 name = "qdatagram"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "qbase",
@@ -4149,6 +4176,7 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -4166,6 +4194,7 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4188,6 +4217,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -4198,6 +4228,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "derive_more",
@@ -4212,6 +4243,7 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "futures",
  "qbase",
@@ -4221,6 +4253,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bon",
  "bytes",
@@ -4243,6 +4276,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?branch=feat%2Fv0.5.1#4f418fae59a0e4d6ab7e8c245abc502254808f07"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -7106,7 +7140,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "rankey"
-version = "0.2.1"
