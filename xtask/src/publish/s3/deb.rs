@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -120,33 +120,7 @@ pub async fn run(
         remote_package_entries(client, &options.bucket, &target.prefix, &target.suite).await?;
     let local_payloads = publishable_local_payloads(local_payloads, &remote_entries)
         .whatever_context("failed to select publishable deb payloads")?;
-    let mut uploads =
-        plan_payload_uploads(client, &options.bucket, &local_payloads, &target.prefix).await?;
-    let local_keys = local_payload_keys(&local_payloads);
-    let retained_remote = retained_remote_entries(remote_entries, &local_keys);
-    uploads.sort_by(|left, right| {
-        apt_upload_order(&left.key)
-            .cmp(&apt_upload_order(&right.key))
-            .then_with(|| left.key.cmp(&right.key))
-    });
-
-    if options.dry_run {
-        for upload in &uploads {
-            info!(
-                key = %upload.key,
-                path = %upload.path.display(),
-                suite = %target.suite,
-                fingerprint = %target.fingerprint,
-                "would upload deb repository artifact"
-            );
-        }
-        info!(
-            retained_remote_count = retained_remote.len(),
-            "would retain remote deb package artifacts"
-        );
-        return Ok(());
-    }
-
+    let retained_remote = retained_remote_entries(remote_entries);
     let publish_options = AptPublishOptions {
         suite: target.suite.clone(),
         fingerprint: target.fingerprint.clone(),
@@ -163,14 +137,36 @@ pub async fn run(
     )
     .await?;
     generate_repository_metadata(repository.path(), &publish_options).await?;
-    let mut uploads = repository_uploads(repository.path(), &target.prefix)?;
+    let uploads = repository_uploads(repository.path(), &target.prefix)?;
+    let mut uploads = super::plan_repository_uploads(client, &options.bucket, uploads).await?;
     uploads.sort_by(|left, right| {
         apt_upload_order(&left.key)
             .cmp(&apt_upload_order(&right.key))
             .then_with(|| left.key.cmp(&right.key))
     });
+
+    if options.dry_run {
+        for upload in &uploads {
+            info!(
+                key = %upload.key,
+                path = %upload.path.display(),
+                suite = %target.suite,
+                fingerprint = %target.fingerprint,
+                "would upload deb repository artifact"
+            );
+        }
+        return Ok(());
+    }
+
     for upload in uploads {
-        super::upload_file(client, &options.bucket, &upload.path, &upload.key).await?;
+        super::upload_file(
+            client,
+            &options.bucket,
+            &upload.path,
+            &upload.key,
+            upload.condition,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -186,12 +182,16 @@ async fn plan_payload_uploads(
         let actual_sha256 = crate::sha256_file(&payload.source).await?;
         let key = deb_payload_key(prefix.as_str(), &payload.package, &payload.filename);
         let remote = super::remote_artifact_state(client, bucket, &key).await?;
-        super::plan::verify_immutable_collision(&key, &actual_sha256, remote)
-            .whatever_context("remote deb artifact collision")?;
+        let Some(condition) = super::plan::plan_immutable_upload(&key, &actual_sha256, remote)
+            .whatever_context("remote deb artifact collision")?
+        else {
+            continue;
+        };
         uploads.push(PlannedUpload {
             path: payload.source.clone(),
             key,
             entry: false,
+            condition: Some(condition),
         });
     }
     Ok(uploads)
@@ -264,26 +264,8 @@ fn publishable_local_payloads(
     Ok(selected)
 }
 
-fn local_payload_keys(payloads: &[DebPayload]) -> BTreeSet<(String, String)> {
-    payloads
-        .iter()
-        .map(|payload| (payload.package.clone(), payload.architecture.clone()))
-        .collect()
-}
-
-fn retained_remote_entries(
-    remote_entries: Vec<RemotePackageEntry>,
-    local_keys: &BTreeSet<(String, String)>,
-) -> Vec<RemotePackageEntry> {
+fn retained_remote_entries(remote_entries: Vec<RemotePackageEntry>) -> Vec<RemotePackageEntry> {
     remote_entries
-        .into_iter()
-        .filter(|entry| {
-            !local_keys.contains(&(
-                entry.entry.package.clone(),
-                entry.entry.architecture.clone(),
-            ))
-        })
-        .collect()
 }
 
 async fn remote_package_entries(
@@ -431,14 +413,21 @@ async fn scan_packages(
     tools: &AptStageContainer,
 ) -> Result<(), Whatever> {
     let script = format!(
-        "dpkg-scanpackages --arch {} pool /dev/null > {}",
-        shell_quote(arch),
+        "{} > {}",
+        scan_packages_script(arch, packages),
         shell_quote_path(packages)
     );
     tools
         .run_in_repository(&script)
         .await
         .whatever_context(format!("failed to generate {}", packages.display()))
+}
+
+fn scan_packages_script(arch: &str, _packages: &Path) -> String {
+    format!(
+        "dpkg-scanpackages --multiversion --arch {} pool /dev/null",
+        shell_quote(arch)
+    )
 }
 
 async fn gzip_file(
@@ -568,6 +557,7 @@ fn repository_uploads(
             path: entry.path().to_path_buf(),
             key: prefix.join(&relative),
             entry: !relative.ends_with(".deb"),
+            condition: None,
         });
     }
     Ok(uploads)
@@ -796,28 +786,22 @@ fn path_to_mount_source(path: &Path) -> Result<String, Whatever> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         AptContainerOptions, DebPayload, PackageEntry, RemotePackageEntry, apt_upload_order,
-        deb_payload_key, local_payload_keys, publishable_local_payloads, retained_remote_entries,
+        deb_payload_key, publishable_local_payloads, retained_remote_entries, scan_packages_script,
         sign_suite_release_script,
     };
 
     #[test]
-    fn manifest_arch_replaces_remote_same_arch_and_preserves_others() {
+    fn manifest_arch_keeps_remote_history_for_same_arch() {
         let remote = vec![
             remote_package_entry("pishoo", "0.5.1-1", "amd64"),
             remote_package_entry("pishoo", "0.5.1-1", "arm64"),
             remote_package_entry("pishoo-common", "0.5.1-1", "all"),
         ];
-        let local = vec![
-            local_payload("pishoo", "0.5.2-1", "amd64"),
-            local_payload("pishoo-common", "0.5.2-1", "all"),
-        ];
-
-        let local_keys = local_payload_keys(&local);
-        let retained_remote = retained_remote_entries(remote, &local_keys);
+        let retained_remote = retained_remote_entries(remote);
 
         assert!(
             retained_remote.iter().any(
@@ -825,15 +809,25 @@ mod tests {
             )
         );
         assert!(
-            !retained_remote.iter().any(
+            retained_remote.iter().any(
                 |entry| entry.entry.version == "0.5.1-1" && entry.entry.architecture == "amd64"
             )
         );
-        assert!(!retained_remote.iter().any(|entry| {
+        assert!(retained_remote.iter().any(|entry| {
             entry.entry.package == "pishoo-common"
                 && entry.entry.version == "0.5.1-1"
                 && entry.entry.architecture == "all"
         }));
+    }
+
+    #[test]
+    fn scan_packages_script_keeps_multiple_versions() {
+        let script = scan_packages_script(
+            "amd64",
+            Path::new("dists/stable/main/binary-amd64/Packages"),
+        );
+
+        assert!(script.contains("dpkg-scanpackages --multiversion --arch 'amd64'"));
     }
 
     #[test]

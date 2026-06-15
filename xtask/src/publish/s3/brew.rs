@@ -127,6 +127,7 @@ pub async fn run(
         path: formula_path.clone(),
         key: target.prefix.join(FORMULA_NAME),
         entry: true,
+        condition: None,
     });
     uploads.sort_by(|left, right| {
         left.entry
@@ -150,7 +151,14 @@ pub async fn run(
     }
 
     for upload in uploads {
-        super::upload_file(client, &options.bucket, &upload.path, &upload.key).await?;
+        super::upload_file(
+            client,
+            &options.bucket,
+            &upload.path,
+            &upload.key,
+            upload.condition,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -175,12 +183,21 @@ async fn plan_payload_uploads(
         );
         let key = prefix.join(archive_name);
         let remote = super::remote_artifact_state(client, bucket, &key).await?;
-        super::plan::verify_immutable_collision(&key, &actual_sha256, remote)
-            .whatever_context("remote brew artifact collision")?;
+        let Some(condition) = super::plan::plan_immutable_upload(&key, &actual_sha256, remote)
+            .whatever_context("remote brew artifact collision")?
+        else {
+            info!(
+                key,
+                path = %path.display(),
+                "remote immutable brew artifact already has matching sha256"
+            );
+            continue;
+        };
         uploads.push(PlannedUpload {
             path,
             key,
             entry: false,
+            condition: Some(condition),
         });
     }
     Ok(uploads)

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -83,10 +83,12 @@ pub async fn run(
     let remote_payloads = remote_rpm_payloads(client, &options.bucket, &target.prefix).await?;
     let local_payloads = publishable_local_payloads(local_payloads, &remote_payloads)
         .whatever_context("failed to select publishable rpm payloads")?;
-    let mut uploads =
-        plan_payload_uploads(client, &options.bucket, &local_payloads, &target.prefix).await?;
-    let local_keys = local_payload_keys(&local_payloads);
-    let retained_remote = retained_remote_payloads(remote_payloads, &local_keys);
+    let retained_remote = retained_remote_payloads(remote_payloads);
+    let repository =
+        build_repository(client, &options.bucket, local_payloads, retained_remote).await?;
+    generate_repository_metadata(repository.path()).await?;
+    let uploads = repository_uploads(repository.path(), &target.prefix)?;
+    let mut uploads = super::plan_repository_uploads(client, &options.bucket, uploads).await?;
     uploads.sort_by(|left, right| {
         rpm_upload_order(&left.key)
             .cmp(&rpm_upload_order(&right.key))
@@ -101,24 +103,18 @@ pub async fn run(
                 "would upload rpm repository artifact"
             );
         }
-        info!(
-            retained_remote_count = retained_remote.len(),
-            "would retain remote rpm package artifacts"
-        );
         return Ok(());
     }
 
-    let repository =
-        build_repository(client, &options.bucket, local_payloads, retained_remote).await?;
-    generate_repository_metadata(repository.path()).await?;
-    let mut uploads = repository_uploads(repository.path(), &target.prefix)?;
-    uploads.sort_by(|left, right| {
-        rpm_upload_order(&left.key)
-            .cmp(&rpm_upload_order(&right.key))
-            .then_with(|| left.key.cmp(&right.key))
-    });
     for upload in uploads {
-        super::upload_file(client, &options.bucket, &upload.path, &upload.key).await?;
+        super::upload_file(
+            client,
+            &options.bucket,
+            &upload.path,
+            &upload.key,
+            upload.condition,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -139,12 +135,16 @@ async fn plan_payload_uploads(
             &payload.filename,
         );
         let remote = super::remote_artifact_state(client, bucket, &key).await?;
-        super::plan::verify_immutable_collision(&key, &actual_sha256, remote)
-            .whatever_context("remote rpm artifact collision")?;
+        let Some(condition) = super::plan::plan_immutable_upload(&key, &actual_sha256, remote)
+            .whatever_context("remote rpm artifact collision")?
+        else {
+            continue;
+        };
         uploads.push(PlannedUpload {
             path: payload.source.clone(),
             key,
             entry: false,
+            condition: Some(condition),
         });
     }
     Ok(uploads)
@@ -214,23 +214,8 @@ fn publishable_local_payloads(
     Ok(selected)
 }
 
-fn local_payload_keys(payloads: &[RpmPayload]) -> BTreeSet<(String, String)> {
-    payloads
-        .iter()
-        .map(|payload| (payload.package.clone(), payload.architecture.clone()))
-        .collect()
-}
-
-fn retained_remote_payloads(
-    remote_payloads: Vec<RemoteRpmPayload>,
-    local_keys: &BTreeSet<(String, String)>,
-) -> Vec<RemoteRpmPayload> {
+fn retained_remote_payloads(remote_payloads: Vec<RemoteRpmPayload>) -> Vec<RemoteRpmPayload> {
     remote_payloads
-        .into_iter()
-        .filter(|payload| {
-            !local_keys.contains(&(payload.package.clone(), payload.architecture.clone()))
-        })
-        .collect()
 }
 
 async fn remote_rpm_payloads(
@@ -339,6 +324,7 @@ fn repository_uploads(
             path: entry.path().to_path_buf(),
             key: prefix.join(&relative),
             entry: !relative.ends_with(".rpm"),
+            condition: None,
         });
     }
     Ok(uploads)
@@ -492,25 +478,20 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RemoteRpmPayload, RpmPayload, local_payload_keys, local_payloads,
-        publishable_local_payloads, retained_remote_payloads, rpm_upload_order,
+        RemoteRpmPayload, RpmPayload, local_payloads, publishable_local_payloads,
+        retained_remote_payloads, rpm_upload_order,
     };
     use crate::package::manifest::PackageArtifact;
 
     #[test]
-    fn manifest_arch_replaces_remote_same_arch_and_preserves_others() {
+    fn manifest_arch_keeps_remote_history_for_same_arch() {
         let remote = vec![
             remote_payload("pishoo", "0.5.1", "x86_64"),
             remote_payload("pishoo", "0.5.1", "aarch64"),
             remote_payload("pishoo-common", "0.5.1", "noarch"),
         ];
-        let local = vec![
-            local_payload("pishoo", "0.5.2", "x86_64"),
-            local_payload("pishoo-common", "0.5.2", "noarch"),
-        ];
 
-        let local_keys = local_payload_keys(&local);
-        let retained_remote = retained_remote_payloads(remote, &local_keys);
+        let retained_remote = retained_remote_payloads(remote);
 
         assert!(
             retained_remote
@@ -518,11 +499,11 @@ mod tests {
                 .any(|entry| entry.version == "0.5.1" && entry.architecture == "aarch64")
         );
         assert!(
-            !retained_remote
+            retained_remote
                 .iter()
                 .any(|entry| entry.version == "0.5.1" && entry.architecture == "x86_64")
         );
-        assert!(!retained_remote.iter().any(|entry| {
+        assert!(retained_remote.iter().any(|entry| {
             entry.package == "pishoo-common"
                 && entry.version == "0.5.1"
                 && entry.architecture == "noarch"

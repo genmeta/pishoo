@@ -5,7 +5,10 @@ use std::{
 
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
-    Client, config::Region, error::SdkError, operation::get_object::GetObjectError,
+    Client,
+    config::Region,
+    error::SdkError,
+    operation::{get_object::GetObjectError, put_object::PutObjectError},
     primitives::ByteStream,
 };
 use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
@@ -246,21 +249,60 @@ pub(crate) async fn upload_file(
     bucket: &str,
     path: &Path,
     key: &str,
+    condition: Option<plan::UploadCondition>,
 ) -> Result<(), Whatever> {
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(
-            ByteStream::from_path(path)
-                .await
-                .whatever_context("failed to read upload body")?,
-        )
-        .send()
+    let body = ByteStream::from_path(path)
         .await
-        .whatever_context(format!("failed to upload {key}"))?;
+        .whatever_context("failed to read upload body")?;
+    let mut request = client.put_object().bucket(bucket).key(key).body(body);
+    if condition == Some(plan::UploadCondition::IfMissing) {
+        request = request.if_none_match("*");
+    }
+    match request.send().await {
+        Ok(_) => {}
+        Err(error) if is_precondition_failed_error(&error) => {
+            snafu::whatever!("remote immutable artifact {key} already exists during upload");
+        }
+        Err(error) => {
+            snafu::whatever!("failed to upload {key}: {error}");
+        }
+    }
     info!(key, path = %path.display(), "uploaded package artifact");
     Ok(())
+}
+
+pub(crate) async fn plan_repository_uploads(
+    client: &Client,
+    bucket: &str,
+    uploads: Vec<plan::PlannedUpload>,
+) -> Result<Vec<plan::PlannedUpload>, Whatever> {
+    let mut planned = Vec::new();
+    for mut upload in uploads {
+        if upload.entry {
+            upload.condition = None;
+            planned.push(upload);
+            continue;
+        }
+
+        let actual_sha256 = crate::sha256_file(&upload.path).await?;
+        let remote = remote_artifact_state(client, bucket, &upload.key).await?;
+        match plan::plan_immutable_upload(&upload.key, &actual_sha256, remote)
+            .whatever_context("remote package artifact collision")?
+        {
+            Some(condition) => {
+                upload.condition = Some(condition);
+                planned.push(upload);
+            }
+            None => {
+                info!(
+                    key = %upload.key,
+                    path = %upload.path.display(),
+                    "remote immutable package artifact already has matching sha256"
+                );
+            }
+        }
+    }
+    Ok(planned)
 }
 
 pub(crate) async fn get_object_bytes(
@@ -352,6 +394,14 @@ fn is_missing_object_error(error: &SdkError<GetObjectError, impl std::fmt::Debug
     if let Some(service) = error.as_service_error() {
         let metadata = service.meta();
         return classify_missing_object(metadata.code(), metadata.message(), None);
+    }
+    false
+}
+
+fn is_precondition_failed_error(error: &SdkError<PutObjectError, impl std::fmt::Debug>) -> bool {
+    if let Some(service) = error.as_service_error() {
+        let metadata = service.meta();
+        return matches!(metadata.code(), Some("PreconditionFailed"));
     }
     false
 }

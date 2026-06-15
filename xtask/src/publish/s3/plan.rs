@@ -10,11 +10,17 @@ pub enum RemoteArtifactState {
     Present { sha256: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadCondition {
+    IfMissing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedUpload {
     pub path: PathBuf,
     pub key: String,
     pub entry: bool,
+    pub condition: Option<UploadCondition>,
 }
 
 #[derive(Debug, Snafu)]
@@ -34,9 +40,17 @@ pub fn verify_immutable_collision(
     actual_sha256: &str,
     remote: RemoteArtifactState,
 ) -> Result<(), ImmutableCollisionError> {
+    plan_immutable_upload(artifact_path, actual_sha256, remote).map(|_| ())
+}
+
+pub fn plan_immutable_upload(
+    artifact_path: &str,
+    actual_sha256: &str,
+    remote: RemoteArtifactState,
+) -> Result<Option<UploadCondition>, ImmutableCollisionError> {
     match remote {
-        RemoteArtifactState::Missing => Ok(()),
-        RemoteArtifactState::Present { sha256 } if sha256 == actual_sha256 => Ok(()),
+        RemoteArtifactState::Missing => Ok(Some(UploadCondition::IfMissing)),
+        RemoteArtifactState::Present { sha256 } if sha256 == actual_sha256 => Ok(None),
         RemoteArtifactState::Present { sha256 } => Err(ImmutableCollisionError::DifferentHash {
             artifact_path: artifact_path.to_string(),
             sha256,
@@ -46,29 +60,34 @@ pub fn verify_immutable_collision(
 
 #[cfg(test)]
 mod tests {
-    use super::{RemoteArtifactState, verify_immutable_collision};
+    use super::{RemoteArtifactState, UploadCondition, plan_immutable_upload};
 
     #[test]
-    fn immutable_collision_missing_passes() {
-        verify_immutable_collision("brew/file.tar.gz", "abc", RemoteArtifactState::Missing)
-            .expect("missing remote should pass");
+    fn immutable_missing_remote_uploads_only_when_absent() {
+        let condition =
+            plan_immutable_upload("brew/file.tar.gz", "abc", RemoteArtifactState::Missing)
+                .expect("missing remote should be publishable");
+
+        assert_eq!(condition, Some(UploadCondition::IfMissing));
     }
 
     #[test]
-    fn immutable_collision_same_hash_passes() {
-        verify_immutable_collision(
+    fn immutable_same_hash_remote_is_skipped() {
+        let condition = plan_immutable_upload(
             "brew/file.tar.gz",
             "abc",
             RemoteArtifactState::Present {
                 sha256: "abc".to_string(),
             },
         )
-        .expect("same hash should pass");
+        .expect("same hash should be accepted");
+
+        assert_eq!(condition, None);
     }
 
     #[test]
     fn immutable_collision_different_hash_fails() {
-        let error = verify_immutable_collision(
+        let error = plan_immutable_upload(
             "brew/file.tar.gz",
             "abc",
             RemoteArtifactState::Present {
