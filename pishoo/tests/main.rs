@@ -103,6 +103,29 @@ fn acquire_listener_uses_dhttp_dns_publisher() {
 }
 
 #[test]
+fn registered_endpoint_uses_dhttp_dns_schemes_for_publishers() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let start = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
+    let registered_endpoint_source = &source[start..end];
+
+    assert!(
+        registered_endpoint_source.contains(".dns(DnsScheme::H3)")
+            && registered_endpoint_source.contains(".dns(DnsScheme::Mdns)")
+            && registered_endpoint_source.contains(".dns(DnsScheme::System)"),
+        "registered endpoint should let dhttp build DNS resolvers and publishers"
+    );
+    assert!(
+        !registered_endpoint_source.contains(".resolver("),
+        "custom resolver injection drops dhttp-owned DNS publishers"
+    );
+}
+
+#[test]
 fn main_force_kills_lingering_workers_during_shutdown() {
     let shutdown_source = include_str!("../src/hypervisor/shutdown.rs");
     assert!(

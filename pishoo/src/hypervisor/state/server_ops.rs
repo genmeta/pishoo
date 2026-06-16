@@ -606,22 +606,32 @@ impl RootState {
             .ok_or(AcquireListenerError::OwnerUnavailable)?;
 
         let identity = Arc::new(request.identity.clone());
-        let resolver = endpoint_factory::build_resolver(
-            identity.clone(),
-            self.network.clone(),
-            bind_patterns.clone(),
-            request.dns_resolver_url.clone(),
-        )
-        .await
-        .context(acquire_listener_error::BuildResolverSnafu)?;
-        let endpoint = endpoint_factory::build_registered_endpoint(
-            identity,
-            self.network.clone(),
-            bind_patterns,
-            resolver,
-        )
-        .await
-        .context(acquire_listener_error::BuildEndpointSnafu)?;
+        let endpoint = if request.dns_resolver_url.is_some() {
+            let resolver = endpoint_factory::build_resolver(
+                identity.clone(),
+                self.network.clone(),
+                bind_patterns.clone(),
+                request.dns_resolver_url.clone(),
+            )
+            .await
+            .context(acquire_listener_error::BuildResolverSnafu)?;
+            endpoint_factory::build_registered_endpoint_with_resolver(
+                identity,
+                self.network.clone(),
+                bind_patterns,
+                resolver,
+            )
+            .await
+            .context(acquire_listener_error::BuildEndpointSnafu)?
+        } else {
+            endpoint_factory::build_registered_endpoint(
+                identity,
+                self.network.clone(),
+                bind_patterns,
+            )
+            .await
+            .context(acquire_listener_error::BuildEndpointSnafu)?
+        };
         let shutdown_token = CancellationToken::new();
         let publisher_loop = match endpoint_publication_loop(&endpoint) {
             Ok(publisher_loop) => publisher_loop,

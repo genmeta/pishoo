@@ -64,7 +64,7 @@ async fn create_h3_dns_endpoint(
     endpoint.map(|endpoint| endpoint.as_h3())
 }
 
-pub async fn build_registered_endpoint(
+pub async fn build_registered_endpoint_with_resolver(
     identity: Arc<Identity>,
     network: Arc<Network>,
     bind_patterns: Arc<Vec<BindPattern>>,
@@ -75,6 +75,22 @@ pub async fn build_registered_endpoint(
         .identity(identity)
         .bind(bind_patterns)
         .resolver(Arc::new(resolver))
+        .build()
+        .await
+}
+
+pub async fn build_registered_endpoint(
+    identity: Arc<Identity>,
+    network: Arc<Network>,
+    bind_patterns: Arc<Vec<BindPattern>>,
+) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
+    Endpoint::builder()
+        .network(network.into())
+        .identity(identity)
+        .bind(bind_patterns)
+        .dns(DnsScheme::H3)
+        .dns(DnsScheme::Mdns)
+        .dns(DnsScheme::System)
         .build()
         .await
 }
