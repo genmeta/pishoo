@@ -24,23 +24,12 @@ use crate::{
 fn endpoint_publication_loop(
     endpoint: &dhttp::endpoint::Endpoint,
 ) -> Result<
-    dhttp::ddns::publisher::EndpointPublisherLoop,
-    dhttp::ddns::publisher::CreatePublisherError,
+    dhttp::ddns::publishers::EndpointPublicationLoop<
+        dhttp::ddns::publishers::EndpointBindingAddresses,
+    >,
+    dhttp::endpoint::CreateEndpointPublicationLoopError,
 > {
-    let identity = endpoint
-        .identity()
-        .ok_or(dhttp::ddns::publisher::CreatePublisherError::AnonymousEndpoint)?;
-    let name = identity.name().to_owned();
-    let authority: Arc<dyn dhttp::identity::LocalAuthority + Send + Sync> = identity;
-    let signer = dhttp::ddns::publisher::EndpointRecordSigner::new(authority);
-    let publisher = dhttp::ddns::publisher::Publisher::new(signer, endpoint.resolver());
-    let source = dhttp::ddns::publisher::EndpointBindingAddresses::new(
-        endpoint.network().network().clone(),
-        endpoint.bind_patterns(),
-    );
-    Ok(dhttp::ddns::publisher::EndpointPublicationLoop::new(
-        name, publisher, source,
-    ))
+    endpoint.dns_publication_loop()
 }
 
 struct BuiltListener {
