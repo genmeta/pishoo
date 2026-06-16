@@ -126,6 +126,28 @@ fn registered_endpoint_uses_dhttp_dns_schemes_for_publishers() {
 }
 
 #[test]
+fn registered_endpoint_with_custom_resolver_keeps_dhttp_dns_publishers() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let start = source
+        .find("pub async fn build_registered_endpoint_with_resolver(\n")
+        .expect("custom resolver registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("plain registered endpoint builder should follow custom resolver builder");
+    let registered_endpoint_source = &source[start..end];
+
+    assert!(
+        registered_endpoint_source.contains(".resolver(Arc::new(resolver))"),
+        "custom resolver path should still use the caller-provided resolver"
+    );
+    assert!(
+        registered_endpoint_source.contains(".dns(DnsScheme::H3)")
+            && registered_endpoint_source.contains(".dns(DnsScheme::Mdns)"),
+        "custom resolver injection disables defaults, so registered endpoints must add DNS schemes that own H3 and mDNS publishers"
+    );
+}
+
+#[test]
 fn main_force_kills_lingering_workers_during_shutdown() {
     let shutdown_source = include_str!("../src/hypervisor/shutdown.rs");
     assert!(

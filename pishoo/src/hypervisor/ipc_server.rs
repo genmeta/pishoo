@@ -136,6 +136,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     AcquireListenerError::BuildResolver { .. }
                     | AcquireListenerError::BuildEndpoint { .. }
                     | AcquireListenerError::CreatePublisher { .. }
+                    | AcquireListenerError::MissingPublisher
                     | AcquireListenerError::OwnerUnavailable
                     | AcquireListenerError::TransitionStopped => ListenError::Internal {
                         message: format!("failed to prepare endpoint for `{server_name}`"),
@@ -193,6 +194,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                         AcquireListenerError::BuildResolver { .. }
                         | AcquireListenerError::BuildEndpoint { .. }
                         | AcquireListenerError::CreatePublisher { .. }
+                        | AcquireListenerError::MissingPublisher
                         | AcquireListenerError::OwnerUnavailable
                         | AcquireListenerError::TransitionStopped => {
                             RebuildListenError::Replacement { reason: report }

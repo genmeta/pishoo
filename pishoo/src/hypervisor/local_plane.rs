@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(feature = "sshd")]
 use std::time::Duration;
 
-use dhttp::endpoint::Endpoint;
+use dhttp::endpoint::{BuildEndpointError, Endpoint};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 #[cfg(feature = "sshd")]
 use nix::{
@@ -61,9 +61,7 @@ pub enum LocalSpawnSessionError {
 #[snafu(module)]
 pub enum LocalConnectorError {
     #[snafu(display("failed to build connector endpoint"))]
-    BuildEndpoint {
-        source: dhttp::endpoint::InvalidEndpointIdentityError,
-    },
+    BuildEndpoint { source: BuildEndpointError },
 }
 
 #[cfg(feature = "sshd")]

@@ -24,8 +24,10 @@ use crate::{
 fn endpoint_publication_loop(
     endpoint: &dhttp::endpoint::Endpoint,
 ) -> Result<
-    dhttp::ddns::publishers::EndpointPublicationLoop<
-        dhttp::ddns::publishers::EndpointBindingAddresses,
+    Option<
+        dhttp::ddns::publishers::EndpointPublicationLoop<
+            dhttp::ddns::publishers::EndpointBindingAddresses,
+        >,
     >,
     dhttp::endpoint::CreateEndpointPublicationLoopError,
 > {
@@ -634,7 +636,17 @@ impl RootState {
         };
         let shutdown_token = CancellationToken::new();
         let publisher_loop = match endpoint_publication_loop(&endpoint) {
-            Ok(publisher_loop) => publisher_loop,
+            Ok(Some(publisher_loop)) => publisher_loop,
+            Ok(None) => {
+                if let Err(error) = endpoint.shutdown().await {
+                    tracing::warn!(
+                        %server_name,
+                        error = %snafu::Report::from_error(&error),
+                        "failed to shut down endpoint after publisher setup failed"
+                    );
+                }
+                return Err(AcquireListenerError::MissingPublisher);
+            }
             Err(source) => {
                 if let Err(error) = endpoint.shutdown().await {
                     tracing::warn!(

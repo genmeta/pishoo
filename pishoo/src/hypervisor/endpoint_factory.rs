@@ -9,7 +9,7 @@ use std::sync::Arc;
 use dhttp::{
     ddns::resolvers::{DnsScheme, Resolvers},
     dquic::{Network, binds::BindPattern},
-    endpoint::Endpoint,
+    endpoint::{BuildEndpointError, Endpoint},
     identity::Identity,
 };
 use http::Uri;
@@ -19,9 +19,7 @@ use snafu::{ResultExt, Snafu};
 #[snafu(module)]
 pub enum BuildEndpointResolverError {
     #[snafu(display("failed to build h3 resolver endpoint"))]
-    BuildEndpoint {
-        source: dhttp::endpoint::InvalidEndpointIdentityError,
-    },
+    BuildEndpoint { source: BuildEndpointError },
     #[snafu(display("failed to attach h3 resolver"))]
     H3Resolver { source: std::io::Error },
 }
@@ -53,7 +51,7 @@ async fn create_h3_dns_endpoint(
     identity: Option<Arc<Identity>>,
     network: Arc<Network>,
     bind_patterns: Arc<Vec<BindPattern>>,
-) -> Result<Arc<dhttp::h3x::dquic::H3Endpoint>, dhttp::endpoint::InvalidEndpointIdentityError> {
+) -> Result<Arc<dhttp::h3x::dquic::H3Endpoint>, BuildEndpointError> {
     let endpoint = Endpoint::builder()
         .network(network.into())
         .maybe_identity(identity)
@@ -69,12 +67,14 @@ pub async fn build_registered_endpoint_with_resolver(
     network: Arc<Network>,
     bind_patterns: Arc<Vec<BindPattern>>,
     resolver: Resolvers,
-) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
+) -> Result<Endpoint, BuildEndpointError> {
     Endpoint::builder()
         .network(network.into())
         .identity(identity)
         .bind(bind_patterns)
         .resolver(Arc::new(resolver))
+        .dns(DnsScheme::H3)
+        .dns(DnsScheme::Mdns)
         .build()
         .await
 }
@@ -83,7 +83,7 @@ pub async fn build_registered_endpoint(
     identity: Arc<Identity>,
     network: Arc<Network>,
     bind_patterns: Arc<Vec<BindPattern>>,
-) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
+) -> Result<Endpoint, BuildEndpointError> {
     Endpoint::builder()
         .network(network.into())
         .identity(identity)
@@ -98,7 +98,7 @@ pub async fn build_registered_endpoint(
 pub async fn build_connector_endpoint(
     network: Arc<Network>,
     identity: Option<Identity>,
-) -> Result<Endpoint, dhttp::endpoint::InvalidEndpointIdentityError> {
+) -> Result<Endpoint, BuildEndpointError> {
     Endpoint::builder()
         .network(network.into())
         .maybe_identity(identity.map(Arc::new))

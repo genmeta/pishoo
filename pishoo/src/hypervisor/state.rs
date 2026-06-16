@@ -19,7 +19,7 @@ use std::{
 };
 
 use dhttp::{
-    endpoint::{CreateEndpointPublicationLoopError, Endpoint},
+    endpoint::{BuildEndpointError, CreateEndpointPublicationLoopError, Endpoint},
     h3x::{dquic::Network, quic::Listen as _},
 };
 use nix::{
@@ -58,13 +58,13 @@ pub enum AcquireListenerError {
     #[snafu(display("failed to build dns resolver for registered endpoint"))]
     BuildResolver { source: BuildEndpointResolverError },
     #[snafu(display("failed to build registered endpoint"))]
-    BuildEndpoint {
-        source: dhttp::endpoint::InvalidEndpointIdentityError,
-    },
+    BuildEndpoint { source: BuildEndpointError },
     #[snafu(display("failed to create dns publication loop for registered endpoint"))]
     CreatePublisher {
         source: CreateEndpointPublicationLoopError,
     },
+    #[snafu(display("registered endpoint has no dns publishers"))]
+    MissingPublisher,
     #[snafu(display("listener owner is not available"))]
     OwnerUnavailable,
     #[snafu(display("listener transition stopped before result delivery"))]

@@ -92,7 +92,7 @@ async fn main() -> Result<(), Whatever> {
 
     // Build the shared Network used by every registered SNI. Workers register
     // by calling back through IPC (request_listen) — no servers are added up-front.
-    let network = DhttpNetwork::builder().build().network().clone();
+    let network = DhttpNetwork::builder().build().await.network().clone();
 
     // Create RootState (interior mutability — no external Mutex needed)
     let state = Arc::new(pishoo::hypervisor::state::RootState::new(network));
