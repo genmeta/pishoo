@@ -59,7 +59,10 @@ fn dhttp_subject_key_identifier_der() -> Vec<u8> {
         OwnerHash::try_from("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .unwrap();
     let value = DhttpSubjectKeyIdentifier::new(
-        CertificateChainKey::new(CertificateSequence::from(0), CertificateChainKind::Primary),
+        CertificateChainKey::new(
+            CertificateSequence::from(0u8),
+            CertificateChainKind::Primary,
+        ),
         owner_hash,
     )
     .to_string();
