@@ -133,8 +133,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     AcquireListenerError::BuildBindPatterns { .. } => {
                         ListenError::InvalidRequest { reason: report }
                     }
-                    AcquireListenerError::BuildResolver { .. }
-                    | AcquireListenerError::BuildEndpoint { .. }
+                    AcquireListenerError::BuildEndpoint { .. }
                     | AcquireListenerError::CreatePublisher { .. }
                     | AcquireListenerError::MissingPublisher
                     | AcquireListenerError::OwnerUnavailable
@@ -191,8 +190,7 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                         }
                         AcquireListenerError::DuplicateListen
                         | AcquireListenerError::ConflictedName => RebuildListenError::Conflict,
-                        AcquireListenerError::BuildResolver { .. }
-                        | AcquireListenerError::BuildEndpoint { .. }
+                        AcquireListenerError::BuildEndpoint { .. }
                         | AcquireListenerError::CreatePublisher { .. }
                         | AcquireListenerError::MissingPublisher
                         | AcquireListenerError::OwnerUnavailable

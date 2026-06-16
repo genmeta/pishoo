@@ -12,15 +12,17 @@ pub(crate) mod owner;
 mod process_ops;
 mod server_ops;
 
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
-    sync::Arc,
 };
 
 use dhttp::{
-    endpoint::{BuildEndpointError, CreateEndpointPublicationLoopError, Endpoint},
-    h3x::{dquic::Network, quic::Listen as _},
+    endpoint::{CreateEndpointPublicationLoopError, Endpoint},
+    h3x::quic::Listen as _,
+    network::DhttpNetwork,
 };
 use nix::{
     sys::wait::WaitStatus,
@@ -31,7 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::hypervisor::{
-    endpoint_factory::BuildEndpointResolverError,
+    endpoint_factory::BuildRegisteredEndpointError,
     task_scope::TaskScope,
     worker_handle::{WorkerHandle, WorkerHandleError},
 };
@@ -55,10 +57,10 @@ pub enum AcquireListenerError {
     BuildBindPatterns {
         source: gateway::parse::types::ListenBindPatternError,
     },
-    #[snafu(display("failed to build dns resolver for registered endpoint"))]
-    BuildResolver { source: BuildEndpointResolverError },
     #[snafu(display("failed to build registered endpoint"))]
-    BuildEndpoint { source: BuildEndpointError },
+    BuildEndpoint {
+        source: BuildRegisteredEndpointError,
+    },
     #[snafu(display("failed to create dns publication loop for registered endpoint"))]
     CreatePublisher {
         source: CreateEndpointPublicationLoopError,
@@ -214,11 +216,11 @@ pub(super) struct Inner {
 /// Root-side ownership registry (thread-safe, interior mutability).
 ///
 /// Tracks `server_name → owner` and `uid → pid` mappings. Owns the shared
-/// [`Network`] used for every server registration, and coordinates all server
-/// registration / cleanup.
+/// [`DhttpNetwork`] used for every server registration, and coordinates all
+/// server registration / cleanup.
 pub struct RootState {
-    /// Shared QUIC network with installed SNI dispatcher.
-    pub network: Arc<Network>,
+    /// Shared DHTTP network with installed SNI dispatcher and DNS keepalives.
+    pub network: DhttpNetwork,
     /// Listener entries (behind RwLock for concurrent reads).
     listeners: RwLock<listener_registry::ListenerRegistry<ListenerResource>>,
     /// Process/user bookkeeping (behind Mutex).
@@ -272,8 +274,8 @@ impl ListenerResource {
 }
 
 impl RootState {
-    /// Create a new root state with the given shared [`Network`].
-    pub fn new(network: Arc<Network>) -> Self {
+    /// Create a new root state with the given shared [`DhttpNetwork`].
+    pub fn new(network: DhttpNetwork) -> Self {
         Self {
             network,
             listeners: RwLock::new(listener_registry::ListenerRegistry::new()),

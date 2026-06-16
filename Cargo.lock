@@ -1517,9 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0416f3592b25c3655a6acd02b4588a959241d3b0250e374afb8515f707fce5c3"
+version = "0.2.0"
 dependencies = [
  "bon",
  "bytes",
@@ -1540,9 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp-access"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e02c4c0baad928761eeeddd17c36f2ac9e18ab52f8b4a71f2c5751b2f3cde514"
+version = "0.2.0"
 dependencies = [
  "derive_more",
  "dhttp-identity",
@@ -1556,9 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp-home"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ff587e43dd13e739c48d670302d8fdb53d6a679fe078007637cbe27161125bd"
+version = "0.2.0"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1573,9 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp-identity"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "408a1d3a9e073862b9d8ad97ecfdf3b78a22ee0e338d7f2e959edc5de503f4e6"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1701,9 +1693,8 @@ dependencies = [
 
 [[package]]
 name = "dshell"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23178b3664796029df033e15139b41df9899fb296aaed640090b9ba745ee4bb9"
+version = "0.4.0"
+source = "git+https://github.com/genmeta/dssh.git?branch=dev%2Fv0.4.0#48d952b650d6abbeea0be64860ef81b88514b888"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1731,9 +1722,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dyns"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5eb83f58c5a3ef6259620d311e29bcc4ee3ae72cde4f60a6eb8e4a305189984"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -2279,9 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "h3x"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2cfecf65797354bc13654ee320ce85127a49404bf5095ac3d533cf27643a041"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -5426,7 +5413,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6556,7 +6543,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7137,39 +7124,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "dhttp"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dhttp-access"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dhttp-home"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dhttp-identity"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dshell"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "dyns"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "rankey"
-version = "0.2.1"
-
-[[patch.unused]]
-name = "h3x"
-version = "0.3.1"
-
-[[patch.unused]]
-name = "dquic"
-version = "0.5.1"

@@ -37,21 +37,51 @@ fn root_state_does_not_store_server_quic_config() {
 }
 
 #[test]
-fn endpoint_factory_uses_dhttp_endpoint_for_dns_resolver() {
+fn root_state_keeps_dhttp_network_wrapper() {
+    let main_source = include_str!("../src/main.rs");
+    let state_source = include_str!("../src/hypervisor/state.rs");
+
+    assert!(
+        !main_source.contains("DhttpNetwork::builder().build().network().clone()"),
+        "main must keep the DhttpNetwork wrapper alive instead of dropping resolver keepalive state"
+    );
+    assert!(
+        state_source.contains("pub network: DhttpNetwork"),
+        "RootState should store DhttpNetwork, not only the raw dquic Network"
+    );
+    assert!(
+        !state_source.contains("pub network: Arc<Network>"),
+        "RootState must not erase DhttpNetwork into Arc<Network>"
+    );
+}
+
+#[test]
+fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
     let source = include_str!("../src/hypervisor/endpoint_factory.rs");
-    let quic_endpoint_builder = ["Quic", "Endpoint::builder()"].concat();
+    let start = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
+    let registered_endpoint_source = &source[start..end];
     let default_client_config = ["default_", "client_quic_config()"].concat();
     let default_server_config = ["default_", "server_quic_config()"].concat();
 
-    assert!(source.contains("Endpoint::builder()"));
-    assert!(source.contains(".dns(DnsScheme::System)"));
+    assert!(registered_endpoint_source.contains("DhttpDnsPlan::new()"));
+    assert!(registered_endpoint_source.contains("quic_endpoint_builder_with_dns"));
+    assert!(registered_endpoint_source.contains("H3Endpoint::new(quic)"));
+    assert!(registered_endpoint_source.contains("Endpoint::from_parts"));
     assert!(
         !source.contains("DHTTP_H3_DNS_SERVER"),
         "endpoint factory should use ddns resolver defaults instead of reading DHTTP DNS constants"
     );
-    assert!(!source.contains(&quic_endpoint_builder));
-    assert!(!source.contains(&default_client_config));
-    assert!(!source.contains(&default_server_config));
+    assert!(
+        !registered_endpoint_source.contains("\n    Endpoint::builder()"),
+        "root-owned endpoints should use Endpoint::from_parts around explicitly built H3 endpoints"
+    );
+    assert!(!registered_endpoint_source.contains(&default_client_config));
+    assert!(!registered_endpoint_source.contains(&default_server_config));
 }
 
 #[test]
@@ -114,36 +144,40 @@ fn registered_endpoint_uses_dhttp_dns_schemes_for_publishers() {
     let registered_endpoint_source = &source[start..end];
 
     assert!(
-        registered_endpoint_source.contains(".dns(DnsScheme::H3)")
-            && registered_endpoint_source.contains(".dns(DnsScheme::Mdns)")
-            && registered_endpoint_source.contains(".dns(DnsScheme::System)"),
-        "registered endpoint should let dhttp build DNS resolvers and publishers"
+        registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::H3)")
+            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::Mdns)")
+            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::System)"),
+        "registered endpoint should pass the H3/mDNS/System DNS plan to dhttp"
     );
     assert!(
-        !registered_endpoint_source.contains(".resolver("),
-        "custom resolver injection drops dhttp-owned DNS publishers"
+        !registered_endpoint_source.contains(".resolver(Arc::new"),
+        "registered endpoint construction must not inject a custom resolver into dhttp Endpoint"
     );
 }
 
 #[test]
-fn registered_endpoint_with_custom_resolver_keeps_dhttp_dns_publishers() {
+fn registered_endpoint_with_resolver_uri_sets_h3_dns_server() {
     let source = include_str!("../src/hypervisor/endpoint_factory.rs");
     let start = source
-        .find("pub async fn build_registered_endpoint_with_resolver(\n")
-        .expect("custom resolver registered endpoint builder should exist");
-    let end = source
         .find("pub async fn build_registered_endpoint(\n")
-        .expect("plain registered endpoint builder should follow custom resolver builder");
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
     let registered_endpoint_source = &source[start..end];
 
     assert!(
-        registered_endpoint_source.contains(".resolver(Arc::new(resolver))"),
-        "custom resolver path should still use the caller-provided resolver"
+        registered_endpoint_source.contains("h3_dns_server: Option<Uri>"),
+        "resolver config should be interpreted as an optional H3 DNS server URI"
     );
     assert!(
-        registered_endpoint_source.contains(".dns(DnsScheme::H3)")
-            && registered_endpoint_source.contains(".dns(DnsScheme::Mdns)"),
-        "custom resolver injection disables defaults, so registered endpoints must add DNS schemes that own H3 and mDNS publishers"
+        registered_endpoint_source.contains(".h3_dns_server(h3_dns_server.to_string().into())"),
+        "resolver URI should be passed to quic_endpoint_builder_with_dns as the H3 DNS base URI"
+    );
+    assert!(
+        !source.contains("build_registered_endpoint_with_resolver")
+            && !source.contains("build_resolver("),
+        "resolver config must not build and inject a custom resolver"
     );
 }
 

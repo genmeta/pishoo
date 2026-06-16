@@ -7,100 +7,82 @@
 use std::sync::Arc;
 
 use dhttp::{
-    ddns::resolvers::{DnsScheme, Resolvers},
-    dquic::{Network, binds::BindPattern},
-    endpoint::{BuildEndpointError, Endpoint},
+    ddns::{
+        BuildQuicEndpointWithDnsError, DhttpDnsPlan, quic_endpoint_builder_with_dns,
+        resolvers::DnsScheme,
+    },
+    dquic::{QuicEndpoint, binds::BindPattern},
+    endpoint::{BuildEndpointError, Endpoint, InvalidEndpointPartsError},
+    h3x::endpoint::H3Endpoint,
     identity::Identity,
+    network::DhttpNetwork,
 };
 use http::Uri;
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum BuildEndpointResolverError {
-    #[snafu(display("failed to build h3 resolver endpoint"))]
-    BuildEndpoint { source: BuildEndpointError },
-    #[snafu(display("failed to attach h3 resolver"))]
-    H3Resolver { source: std::io::Error },
-}
-
-pub async fn build_resolver(
-    identity: Arc<Identity>,
-    network: Arc<Network>,
-    bind_patterns: Arc<Vec<BindPattern>>,
-    dns_resolver_url: Option<Uri>,
-) -> Result<Resolvers, BuildEndpointResolverError> {
-    let h3 = create_h3_dns_endpoint(Some(identity), network.clone(), bind_patterns.clone())
-        .await
-        .context(build_endpoint_resolver_error::BuildEndpointSnafu)?;
-
-    let builder = Resolvers::builder()
-        .mdns(network, bind_patterns)
-        .await
-        .system();
-    let builder = match dns_resolver_url {
-        Some(url) => builder.h3_with_base_url(url.to_string(), h3),
-        None => builder.h3(h3),
-    }
-    .context(build_endpoint_resolver_error::H3ResolverSnafu)?;
-
-    Ok(builder.build())
-}
-
-async fn create_h3_dns_endpoint(
-    identity: Option<Arc<Identity>>,
-    network: Arc<Network>,
-    bind_patterns: Arc<Vec<BindPattern>>,
-) -> Result<Arc<dhttp::h3x::dquic::H3Endpoint>, BuildEndpointError> {
-    let endpoint = Endpoint::builder()
-        .network(network.into())
-        .maybe_identity(identity)
-        .bind(bind_patterns)
-        .dns(DnsScheme::System)
-        .build()
-        .await;
-    endpoint.map(|endpoint| endpoint.as_h3())
-}
-
-pub async fn build_registered_endpoint_with_resolver(
-    identity: Arc<Identity>,
-    network: Arc<Network>,
-    bind_patterns: Arc<Vec<BindPattern>>,
-    resolver: Resolvers,
-) -> Result<Endpoint, BuildEndpointError> {
-    Endpoint::builder()
-        .network(network.into())
-        .identity(identity)
-        .bind(bind_patterns)
-        .resolver(Arc::new(resolver))
-        .dns(DnsScheme::H3)
-        .dns(DnsScheme::Mdns)
-        .build()
-        .await
+pub enum BuildRegisteredEndpointError {
+    #[snafu(display("failed to build endpoint dns"))]
+    EndpointDns {
+        source: BuildQuicEndpointWithDnsError,
+    },
+    #[snafu(display("invalid endpoint parts"))]
+    InvalidParts { source: InvalidEndpointPartsError },
 }
 
 pub async fn build_registered_endpoint(
     identity: Arc<Identity>,
-    network: Arc<Network>,
+    network: DhttpNetwork,
     bind_patterns: Arc<Vec<BindPattern>>,
-) -> Result<Endpoint, BuildEndpointError> {
-    Endpoint::builder()
-        .network(network.into())
-        .identity(identity)
-        .bind(bind_patterns)
-        .dns(DnsScheme::H3)
-        .dns(DnsScheme::Mdns)
-        .dns(DnsScheme::System)
-        .build()
-        .await
+    h3_dns_server: Option<Uri>,
+) -> Result<Endpoint, BuildRegisteredEndpointError> {
+    let mut dns_plan = DhttpDnsPlan::new();
+    dns_plan.push_dns(DnsScheme::H3);
+    dns_plan.push_dns(DnsScheme::Mdns);
+    dns_plan.push_dns(DnsScheme::System);
+
+    let raw_network = network.network().clone();
+    let builder = quic_endpoint_builder_with_dns(
+        |resolver| {
+            let raw_network = raw_network.clone();
+            let identity = identity.clone();
+            let bind_patterns = bind_patterns.clone();
+            async move {
+                QuicEndpoint::builder()
+                    .network(raw_network)
+                    .identity(identity)
+                    .resolver(resolver)
+                    .bind(bind_patterns)
+                    .build()
+                    .await
+            }
+        },
+        &dns_plan,
+    );
+
+    let (quic, publishers) = match h3_dns_server {
+        Some(h3_dns_server) => {
+            builder
+                .h3_dns_server(h3_dns_server.to_string().into())
+                .build()
+                .await
+        }
+        None => builder.build().await,
+    }
+    .context(build_registered_endpoint_error::EndpointDnsSnafu)?;
+    let h3 = Arc::new(H3Endpoint::new(quic));
+
+    Endpoint::from_parts(h3, publishers, network)
+        .context(build_registered_endpoint_error::InvalidPartsSnafu)
 }
 
 pub async fn build_connector_endpoint(
-    network: Arc<Network>,
+    network: DhttpNetwork,
     identity: Option<Identity>,
 ) -> Result<Endpoint, BuildEndpointError> {
     Endpoint::builder()
-        .network(network.into())
+        .network(network)
         .maybe_identity(identity.map(Arc::new))
         .dns(DnsScheme::H3)
         .dns(DnsScheme::Mdns)

@@ -88,7 +88,7 @@ fn test_state() -> Arc<RootState> {
     let network = dhttp::h3x::dquic::Network::builder()
         .stun_server(Arc::<str>::from(""))
         .build();
-    Arc::new(RootState::new(network))
+    Arc::new(RootState::new(dhttp::network::DhttpNetwork::from(network)))
 }
 
 /// Generate a self-signed Identity for `{label}.user.dhttp.net`.
