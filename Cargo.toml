@@ -47,7 +47,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "dev/v0.4.0", version = "0.4.0" }
+h3x = { version = "0.4.0" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -59,7 +59,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- DShell ---
-dshell = { git = "https://github.com/genmeta/dssh.git", branch = "dev/v0.4.0", version = "0.4.0" }
+dshell = { version = "0.4.0" }
 
 # --- Security & TLS ---
 getrandom = "0.4"
@@ -88,7 +88,7 @@ form_urlencoded = "1"
 percent-encoding = "2"
 socket2 = "0.6"
 x509-parser = "0.18"
-dhttp = { git = "https://github.com/genmeta/dhttp.git", branch = "dev/v0.2.0", version = "0.2.0" }
+dhttp = { version = "0.2.0" }
 
 # --- System Interaction ---
 libc = "0.2"

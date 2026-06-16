@@ -1518,6 +1518,8 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff511421b0de59123d2f7dac10743709adf48a991620d4782f1f71f4d8e20966"
 dependencies = [
  "bon",
  "bytes",
@@ -1539,6 +1541,8 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73da9a414cc0264c4511c4a9ba31f275d9d4ae861ace65ec96206e3ac4b38ad1"
 dependencies = [
  "derive_more",
  "dhttp-identity",
@@ -1553,6 +1557,8 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecafb614c068796adf0c96af474356d26edec72e0f0ed8d6b7e96489df1e485f"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1568,6 +1574,8 @@ dependencies = [
 [[package]]
 name = "dhttp-identity"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9006fe9bffd56d64fbe4260182039f104a84d612acdd30ec19a16583bb4ff671"
 dependencies = [
  "bytes",
  "futures",
@@ -1694,7 +1702,8 @@ dependencies = [
 [[package]]
 name = "dshell"
 version = "0.4.0"
-source = "git+https://github.com/genmeta/dssh.git?branch=dev%2Fv0.4.0#48d952b650d6abbeea0be64860ef81b88514b888"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "210e6b448354575feab2fa1f5245a7702c651004a57a0888d4607edc9b7c1bdd"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1723,6 +1732,8 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3c560fa266a789403c88224d3d3ca0a2a50fdce255db43765484ec6c5ba953d"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -2269,6 +2280,8 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbadb89a6ea8f80675b01720854d756e867f35a0e45b438d932ee1e9194ce07a"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -2638,7 +2651,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5413,7 +5426,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6543,7 +6556,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
