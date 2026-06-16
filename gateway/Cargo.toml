@@ -2,6 +2,7 @@
 name = "gateway"
 version = "0.6.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [[example]]
 name = "forward"

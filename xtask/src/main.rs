@@ -267,6 +267,11 @@ mod tests {
 
     use super::{BuildProfile, Cli, Command};
 
+    const RELEASE_WORKFLOW: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../.github/workflows/release.yml"
+    ));
+
     fn subcommand_names(command: &clap::Command) -> Vec<&str> {
         command
             .get_subcommands()
@@ -378,6 +383,44 @@ mod tests {
                 .expect_err("old release command should be rejected");
             assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
         }
+    }
+
+    #[test]
+    fn release_workflow_publish_commands_are_tag_mode_safe() {
+        assert!(!RELEASE_WORKFLOW.contains("publish_args=()"));
+        assert!(!RELEASE_WORKFLOW.contains("\"${publish_args[@]}\""));
+        assert_eq!(
+            RELEASE_WORKFLOW
+                .matches("publish_cmd=(cargo xtask publish s3)")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn public_package_manifests_declare_apache_2_license() {
+        let workspace_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask manifest should be under workspace");
+        for manifest in ["gateway/Cargo.toml", "pishoo/Cargo.toml"] {
+            let manifest_path = workspace_dir.join(manifest);
+            let contents = std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", manifest_path.display()));
+            assert!(
+                contents.contains("license = \"Apache-2.0\""),
+                "{manifest} should declare Apache-2.0"
+            );
+        }
+    }
+
+    #[test]
+    fn debian_package_metadata_declares_apache_2_license() {
+        let copyright_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("deb")
+            .join("copyright");
+        let contents = std::fs::read_to_string(&copyright_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", copyright_path.display()));
+        assert!(contents.contains("License: Apache-2.0"));
     }
 }
 
