@@ -295,69 +295,92 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
 
 pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String> {
     let mut config = String::new();
+    let mut registry_patches = Vec::new();
 
     if has_sibling(siblings, "dhttp") {
+        let packages = [
+            ("dhttp", "/dhttp/dhttp"),
+            ("dhttp-access", "/dhttp/access"),
+            ("dhttp-home", "/dhttp/home"),
+            ("dhttp-identity", "/dhttp/identity"),
+        ];
+        registry_patches.extend(packages);
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/dhttp.git",
-            &[
-                ("dhttp", "/dhttp/dhttp"),
-                ("dhttp-access", "/dhttp/access"),
-                ("dhttp-home", "/dhttp/home"),
-                ("dhttp-identity", "/dhttp/identity"),
-            ],
+            &packages,
         );
     }
 
     if has_sibling(siblings, "ddns") {
+        let packages = [("dyns", "/ddns")];
+        registry_patches.extend(packages);
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/ddns.git",
-            &[("dyns", "/ddns")],
+            &packages,
         );
     }
 
     if has_sibling(siblings, "h3x") {
-        push_patch_section(
-            &mut config,
-            "https://github.com/genmeta/h3x.git",
-            &[("h3x", "/h3x")],
-        );
+        let packages = [("h3x", "/h3x")];
+        registry_patches.extend(packages);
+        push_patch_section(&mut config, "https://github.com/genmeta/h3x.git", &packages);
     }
 
     if has_sibling(siblings, "dssh") {
+        let packages = [("dshell", "/dssh")];
+        registry_patches.extend(packages);
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/dssh.git",
-            &[("dshell", "/dssh")],
+            &packages,
         );
     }
 
     if has_sibling(siblings, "dquic") {
+        let packages = [("dquic", "/dquic/dquic")];
+        registry_patches.extend(packages);
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/dquic.git",
-            &[("dquic", "/dquic/dquic")],
+            &packages,
         );
     }
 
     if has_sibling(siblings, "rankey") {
+        let packages = [("rankey", "/rankey")];
+        registry_patches.extend(packages);
         push_patch_section(
             &mut config,
             "https://github.com/genmeta/rankey.git",
-            &[("rankey", "/rankey")],
+            &packages,
         );
     }
 
-    if config.is_empty() {
+    if registry_patches.is_empty() {
         None
     } else {
-        Some(config)
+        let mut registry_config = String::new();
+        push_registry_patch_section(&mut registry_config, &registry_patches);
+        registry_config.push_str(&config);
+        Some(registry_config)
     }
 }
 
 fn has_sibling(siblings: &[Sibling], basename: &str) -> bool {
     siblings.iter().any(|sibling| sibling.basename == basename)
+}
+
+fn push_registry_patch_section(config: &mut String, packages: &[(&str, &str)]) {
+    config.push_str("[patch.crates-io]\n");
+    for (package, path) in packages {
+        config.push_str(package);
+        config.push_str(" = { path = \"");
+        config.push_str(path);
+        config.push_str("\" }\n");
+    }
+    config.push('\n');
 }
 
 fn push_patch_section(config: &mut String, source: &str, packages: &[(&str, &str)]) {
@@ -495,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_config_from_siblings_patches_genmeta_git_sources() {
+    fn cargo_config_from_siblings_patches_genmeta_git_and_registry_sources() {
         let siblings = vec![
             Sibling {
                 host: "/host/reimu/dhttp".into(),
@@ -516,6 +539,12 @@ mod tests {
         ];
 
         let config = cargo_config_from_siblings(&siblings).expect("config should be rendered");
+        assert!(config.contains("[patch.crates-io]"));
+        assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
+        assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
+        assert!(config.contains("dyns = { path = \"/ddns\" }"));
+        assert!(config.contains("dquic = { path = \"/dquic/dquic\" }"));
+        assert!(config.contains("rankey = { path = \"/rankey\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/dhttp.git\"]"));
         assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
         assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
