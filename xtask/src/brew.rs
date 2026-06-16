@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use flate2::{Compression, write::GzEncoder};
+use serde::Serialize;
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
@@ -8,15 +9,14 @@ use crate::{BrewTarget, Feature, package_meta, run_cmd, run_cmd_quiet, sha256_fi
 
 const CARGO_NAME: &str = "pishoo";
 
-/// Download URL prefix for Homebrew archives.
-const BREW_DL_URL: &str = "https://download.genmeta.net/homebrew";
+const BREW_FEATURES_FILE: &str = "pishoo-brew-features.toml";
 
-fn brew_on_block(triple: &str) -> Result<&'static str, Whatever> {
-    match triple {
-        "aarch64-apple-darwin" => Ok("on_arm"),
-        "x86_64-apple-darwin" => Ok("on_intel"),
-        _ => snafu::whatever!("unsupported brew target triple: {triple}"),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrewArchive {
+    pub target: String,
+    pub archive_name: String,
+    pub path: PathBuf,
+    pub features: Vec<String>,
 }
 
 async fn check_cargo() -> Result<(), Whatever> {
@@ -38,60 +38,16 @@ fn create_tar_gz(staging: &Path, output: &Path) -> Result<(), Whatever> {
     Ok(())
 }
 
-struct ArchiveInfo {
-    triple: String,
-    archive_name: String,
-    sha256: String,
+#[derive(Debug, Clone, Copy, Serialize)]
+struct BrewFeatures {
+    sshd: bool,
+    pam: bool,
 }
 
-fn generate_formula(
-    name: &str,
-    description: &str,
-    version: &str,
-    homepage: &str,
-    license: &str,
-    archives: &[ArchiveInfo],
-    content: &str,
-) -> Result<String, Whatever> {
-    let class_name = {
-        let mut chars = name.chars();
-        match chars.next() {
-            Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        }
-    };
-    let desc = description.replace('"', "\\\"");
-
-    let mut lines = vec![
-        format!("class {class_name} < Formula"),
-        format!("  desc \"{desc}\""),
-        format!("  version \"{version}\""),
-        format!("  homepage \"{homepage}\""),
-    ];
-    if !license.is_empty() {
-        lines.push(format!("  license \"{license}\""));
-    }
-    lines.push(String::new());
-
-    for info in archives {
-        let block = brew_on_block(&info.triple)?;
-        lines.extend([
-            format!("  {block} do"),
-            format!("    url \"{BREW_DL_URL}/{}\"", info.archive_name),
-            format!("    sha256 \"{}\"", info.sha256),
-            "  end".to_string(),
-            String::new(),
-        ]);
-    }
-
-    lines.push(content.trim_end().to_string());
-    lines.push("end".to_string());
-    lines.push(String::new());
-
-    Ok(lines.join("\n"))
-}
-
-pub async fn run(targets: &[BrewTarget], features: &[Feature]) -> Result<(), Whatever> {
+pub async fn run(
+    targets: &[BrewTarget],
+    features: &[Feature],
+) -> Result<Vec<BrewArchive>, Whatever> {
     info!(target_count = targets.len(), "starting brew dist build");
     let meta = package_meta(CARGO_NAME)?;
     let target_dir = target_dir()?;
@@ -112,51 +68,15 @@ pub async fn run(targets: &[BrewTarget], features: &[Feature]) -> Result<(), Wha
         );
     }
 
-    let mut archives = Vec::new();
     info!("waiting for brew target builds to finish");
+    let mut archives = Vec::new();
     while let Some(result) = tasks.join_next().await {
         archives.push(result.whatever_context("brew build task panicked")??);
     }
-
-    // Generate aggregated formula.
-    // Strip pishoo-ssh-session from the template when sshd is not enabled.
-    let has_sshd = features
-        .iter()
-        .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
-    let content_path = workspace.join("pishoo/homebrew_content.rb");
-    let mut content = tokio::fs::read_to_string(&content_path)
-        .await
-        .whatever_context(format!("failed to read {}", content_path.display()))?;
-    if !has_sshd {
-        content = content
-            .lines()
-            .filter(|line| !line.contains("pishoo-ssh-session"))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-
-    let formula = generate_formula(
-        CARGO_NAME,
-        &meta.description,
-        &meta.version,
-        &meta.homepage,
-        &meta.license,
-        &archives,
-        &content,
-    )?;
-
-    let formula_dir = target_dir.join("common").join("brew");
-    tokio::fs::create_dir_all(&formula_dir)
-        .await
-        .whatever_context(format!("failed to create {}", formula_dir.display()))?;
-    let formula_path = formula_dir.join(format!("{CARGO_NAME}.rb"));
-    tokio::fs::write(&formula_path, &formula)
-        .await
-        .whatever_context(format!("failed to write {}", formula_path.display()))?;
-    info!(path = %formula_path.display(), "produced formula");
+    archives.sort_by(|left, right| left.target.cmp(&right.target));
     info!("finished brew dist build");
 
-    Ok(())
+    Ok(archives)
 }
 
 async fn build_one(
@@ -165,10 +85,14 @@ async fn build_one(
     target_dir: &Path,
     workspace: &Path,
     features: &[Feature],
-) -> Result<ArchiveInfo, Whatever> {
+) -> Result<BrewArchive, Whatever> {
     let has_sshd = features
         .iter()
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
+    let feature_sidecar = BrewFeatures {
+        sshd: has_sshd,
+        pam: features.iter().any(|f| matches!(f, Feature::Pam)),
+    };
 
     info!(triple, "checking cargo availability");
     check_cargo().await?;
@@ -271,11 +195,33 @@ async fn build_one(
 
     // Hash
     let sha = sha256_file(&archive_path).await?;
+    write_feature_sidecar(&brew_dir, feature_sidecar).await?;
 
-    info!(path = %archive_path.display(), "produced archive");
-    Ok(ArchiveInfo {
-        triple: triple.to_string(),
+    info!(path = %archive_path.display(), sha256 = %sha, "produced archive");
+    Ok(BrewArchive {
+        target: triple.to_string(),
         archive_name,
-        sha256: sha,
+        path: archive_path,
+        features: feature_names(features),
     })
+}
+
+pub(crate) fn feature_names(features: &[Feature]) -> Vec<String> {
+    features
+        .iter()
+        .map(|feature| match feature {
+            Feature::Sshd => "sshd",
+            Feature::Pam => "pam",
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn write_feature_sidecar(directory: &Path, features: BrewFeatures) -> Result<(), Whatever> {
+    let path = directory.join(BREW_FEATURES_FILE);
+    let content =
+        toml::to_string(&features).whatever_context("failed to serialize brew feature sidecar")?;
+    tokio::fs::write(&path, content)
+        .await
+        .whatever_context(format!("failed to write {}", path.display()))
 }

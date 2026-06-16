@@ -17,7 +17,7 @@ use tracing::debug;
 
 use crate::{
     error::Whatever,
-    parse::{Node, Value},
+    parse::{document::ConfigNode, types::PathConfig},
 };
 
 type Result<T, E = Whatever> = std::result::Result<T, E>;
@@ -31,18 +31,18 @@ struct UpstreamTlsSettings {
 
 impl UpstreamTlsSettings {
     /// 从 location 配置节点中提取上游 TLS 所需的证书路径。
-    fn from_location(location: &Node) -> Self {
+    fn from_location(location: &ConfigNode) -> Self {
         Self {
-            client_cert: path_from_value(location.get("proxy_ssl_certificate")),
-            client_key: path_from_value(location.get("proxy_ssl_certificate_key")),
-            trusted_ca: path_from_value(location.get("proxy_ssl_trusted_certificate")),
+            client_cert: path_from_config(location, "proxy_ssl_certificate"),
+            client_key: path_from_config(location, "proxy_ssl_certificate_key"),
+            trusted_ca: path_from_config(location, "proxy_ssl_trusted_certificate"),
         }
     }
 }
 
 /// 连接 HTTPS 上游，并在 TCP 连接之上完成 TLS 握手。
 pub(super) async fn connect_https(
-    location: &Node,
+    location: &ConfigNode,
     proxy_pass: &Uri,
 ) -> Result<TlsStream<TcpStream>> {
     // 先从 proxy_pass 中解析服务端主机名和端口，作为 TCP 连接与 SNI 的输入。
@@ -74,7 +74,7 @@ pub(super) async fn connect_https(
 }
 
 /// 构建上游 TLS 客户端配置，支持自定义 CA 和可选的双向 TLS 客户端证书。
-fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
+fn build_client_config(location: &ConfigNode) -> Result<Arc<ClientConfig>> {
     let settings = UpstreamTlsSettings::from_location(location);
 
     // 客户端证书和私钥必须成对出现，否则无法完成双向 TLS 配置。
@@ -117,7 +117,7 @@ fn build_client_config(location: &Node) -> Result<Arc<ClientConfig>> {
 
 /// 构建根证书池：默认使用系统/项目内置根证书，并按需追加自定义上游 CA。
 fn build_root_store(trusted_ca: Option<&Path>) -> Result<RootCertStore> {
-    let mut root_store = crate::common::root_cert().as_ref().clone();
+    let mut root_store = dhttp::trust::dhttp_root_cert_store().as_ref().clone();
 
     if let Some(ca_path) = trusted_ca {
         let trusted_certs = load_cert_chain(ca_path, "upstream trusted ca certificate")?;
@@ -185,20 +185,24 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     Ok(private_key)
 }
 
-/// 仅当配置值本身就是路径类型时，才提取出对应的文件路径。
-fn path_from_value(value: Option<&Value>) -> Option<PathBuf> {
-    match value {
-        Some(Value::Path(path)) => Some(path.clone()),
-        _ => None,
-    }
+fn path_from_config(location: &ConfigNode, name: &str) -> Option<PathBuf> {
+    location
+        .get::<PathConfig>(name)
+        .ok()
+        .flatten()
+        .map(|path| path.0.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf, sync::Once};
+    use std::{path::PathBuf, sync::Once};
 
     use super::*;
-    use crate::parse::Value;
+    use crate::parse::{
+        registry::context,
+        source::{SourceId, SourceSpan},
+        value::TypedValue,
+    };
 
     static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
 
@@ -216,8 +220,13 @@ mod tests {
             .join(relative)
     }
 
-    fn test_location(values: HashMap<String, Value>) -> Node {
-        Node::new(Value::ValueMap(values))
+    fn test_location(values: &[(&'static str, PathBuf)]) -> ConfigNode {
+        let span = SourceSpan::new(SourceId(0), 0, 0);
+        let mut location = ConfigNode::new(context::LOCATION, None, span);
+        for (name, path) in values {
+            location.insert_slot(name, TypedValue::new(PathConfig(path.clone()), span));
+        }
+        location
     }
 
     #[test]
@@ -244,13 +253,7 @@ mod tests {
         ensure_crypto_provider();
 
         let trusted_ca = fixture_path("keychain/root.crt");
-        let mut values = HashMap::new();
-        values.insert(
-            "proxy_ssl_trusted_certificate".to_string(),
-            Value::Path(trusted_ca),
-        );
-
-        let location = test_location(values);
+        let location = test_location(&[("proxy_ssl_trusted_certificate", trusted_ca)]);
         let client_config = build_client_config(&location).expect("client config should build");
 
         assert!(client_config.enable_sni);
@@ -263,21 +266,11 @@ mod tests {
         let trusted_ca = fixture_path("keychain/root.crt");
         let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
         let client_key = fixture_path("keychain/test.genmeta.net/test.genmeta.net.key");
-        let mut values = HashMap::new();
-        values.insert(
-            "proxy_ssl_trusted_certificate".to_string(),
-            Value::Path(trusted_ca),
-        );
-        values.insert(
-            "proxy_ssl_certificate".to_string(),
-            Value::Path(client_cert),
-        );
-        values.insert(
-            "proxy_ssl_certificate_key".to_string(),
-            Value::Path(client_key),
-        );
-
-        let location = test_location(values);
+        let location = test_location(&[
+            ("proxy_ssl_trusted_certificate", trusted_ca),
+            ("proxy_ssl_certificate", client_cert),
+            ("proxy_ssl_certificate_key", client_key),
+        ]);
         let client_config = build_client_config(&location).expect("client config should build");
 
         assert!(client_config.enable_sni);
@@ -286,13 +279,7 @@ mod tests {
     #[test]
     fn test_build_client_config_rejects_incomplete_identity() {
         let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
-        let mut values = HashMap::new();
-        values.insert(
-            "proxy_ssl_certificate".to_string(),
-            Value::Path(client_cert),
-        );
-
-        let location = test_location(values);
+        let location = test_location(&[("proxy_ssl_certificate", client_cert)]);
         let error = build_client_config(&location).expect_err("incomplete identity should fail");
 
         assert!(error.to_string().contains("must be configured together"));

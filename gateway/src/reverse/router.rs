@@ -6,10 +6,25 @@ use std::{
 
 use axum::{body::Body, handler::Handler, response::IntoResponse};
 use futures::future::BoxFuture;
-use http::StatusCode;
+use http::{StatusCode, header};
+#[cfg(feature = "sshd")]
+use tokio_util::sync::CancellationToken;
 
 use super::location::match_location;
-use crate::parse::Node;
+#[cfg(feature = "sshd")]
+use crate::parse::types::SshLoginMethods;
+use crate::parse::{
+    document::ConfigNode,
+    pattern::Pattern,
+    types::{PathConfig, ProxyPass},
+};
+
+#[cfg(feature = "sshd")]
+pub trait DynTaskScope: Send + Sync {
+    fn token(&self) -> CancellationToken;
+
+    fn spawn(&self, task: BoxFuture<'static, ()>);
+}
 
 /// Shared state for all reverse-proxy handlers.
 ///
@@ -20,6 +35,8 @@ use crate::parse::Node;
 pub struct RouterState {
     #[cfg(feature = "sshd")]
     pub session_spawner: std::sync::Arc<dyn crate::control_plane::DynSpawnSession>,
+    #[cfg(feature = "sshd")]
+    pub task_scope: Arc<dyn DynTaskScope>,
 }
 
 /// Nginx-style location router implementing `tower::Service`.
@@ -30,12 +47,12 @@ pub struct RouterState {
 /// handler (proxy, file, or sshd).
 #[derive(Clone)]
 pub struct NginxRouter {
-    locations: Vec<Arc<Node>>,
+    locations: Vec<Arc<ConfigNode>>,
     state: RouterState,
 }
 
 impl NginxRouter {
-    pub fn new(locations: Vec<Arc<Node>>, state: RouterState) -> Self {
+    pub fn new(locations: Vec<Arc<ConfigNode>>, state: RouterState) -> Self {
         Self { locations, state }
     }
 }
@@ -54,9 +71,23 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
         let state = self.state.clone();
 
         Box::pin(async move {
-            let path = request.uri().path().to_string();
+            let normalized = super::request_uri::normalize_request_uri(request.uri())
+                .expect("request uri should always normalize");
+            let public_origin = super::request_uri::request_public_origin(&request);
 
-            let loc_match = match match_location(&locations, &path) {
+            if !has_exact_match(&locations, &normalized.path)
+                && let Some(target) = find_proxy_prefix_slash_redirect(
+                    &locations,
+                    &normalized,
+                    public_origin.as_deref(),
+                )
+            {
+                return Ok(
+                    (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]).into_response(),
+                );
+            }
+
+            let loc_match = match match_location(&locations, &normalized.path) {
                 Some(m) => m,
                 None => return Ok(StatusCode::NOT_FOUND.into_response()),
             };
@@ -66,13 +97,25 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
 
             let location = &loc_match.location;
 
-            let response = if location.get("proxy_pass").is_some() {
+            let response = if location
+                .get::<ProxyPass>("proxy_pass")
+                .ok()
+                .flatten()
+                .is_some()
+            {
                 Handler::call(super::proxy::proxy_handle, request, state).await
-            } else if location.get("root").is_some() || location.get("alias").is_some() {
+            } else if location.get::<PathConfig>("root").ok().flatten().is_some()
+                || location.get::<PathConfig>("alias").ok().flatten().is_some()
+            {
                 Handler::call(super::file::file_handle, request, state).await
             } else {
                 #[cfg(feature = "sshd")]
-                if location.get("ssh_login").is_some() {
+                if location
+                    .get::<SshLoginMethods>("ssh_login")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
                     return Ok(Handler::call(super::sshd::sshd_handle, request, state).await);
                 }
                 StatusCode::NOT_FOUND.into_response()
@@ -81,4 +124,55 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
             Ok(response)
         })
     }
+}
+
+fn has_exact_match(locations: &[Arc<ConfigNode>], path: &str) -> bool {
+    locations.iter().any(|location| {
+        location.payload::<Pattern>().ok().flatten().is_some_and(
+            |pattern| matches!(pattern.as_ref(), Pattern::Exact(expected) if expected == path),
+        )
+    })
+}
+
+fn find_proxy_prefix_slash_redirect(
+    locations: &[Arc<ConfigNode>],
+    normalized: &super::request_uri::NormalizedRequestUri,
+    public_origin: Option<&str>,
+) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+
+    for location in locations {
+        let has_proxy = location
+            .get::<ProxyPass>("proxy_pass")
+            .ok()
+            .flatten()
+            .is_some();
+        if !has_proxy {
+            continue;
+        }
+
+        let Some(pattern) = location.payload::<Pattern>().ok().flatten() else {
+            continue;
+        };
+
+        let prefix = match pattern.as_ref() {
+            Pattern::Prefix(prefix) | Pattern::NormalPrefix(prefix) => prefix,
+            _ => continue,
+        };
+
+        let Some(target) =
+            super::request_uri::build_prefix_slash_redirect(prefix, normalized, public_origin)
+        else {
+            continue;
+        };
+
+        if best
+            .as_ref()
+            .is_none_or(|(current_len, _)| prefix.len() > *current_len)
+        {
+            best = Some((prefix.len(), target));
+        }
+    }
+
+    best.map(|(_, target)| target)
 }

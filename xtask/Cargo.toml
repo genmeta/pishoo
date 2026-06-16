@@ -5,15 +5,31 @@ edition = "2024"
 publish = false
 
 [dependencies]
-bollard = "0.19"
-cargo_metadata = "0.19"
-clap = { version = "4", features = ["derive"] }
+aws-credential-types = "1"
+# Keep default `default-https-client` disabled. It pulls aws-lc, and aws-lc-sys
+# fails to assemble on i686-pc-windows-msvc under clang-cl during release
+# cross-builds. Enable only the rustls/ring-backed features used by S3 publish.
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "rustls",
+    "sigv4a",
+] }
+bollard = "0.21"
+cargo_metadata = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+debversion = "0.5.2"
 flate2 = "1"
+inquire = "0.9"
 futures-util = "0.3"
-sha2 = "0.10"
+rpm-version = "0.5.0"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
 snafu = "0.9"
 tar = "0.4"
+tempfile = "3"
+toml = "1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
+walkdir = "2"

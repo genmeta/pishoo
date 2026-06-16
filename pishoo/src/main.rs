@@ -3,19 +3,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use dhttp::network::DhttpNetwork;
 use gateway::error::Whatever;
-use h3x::{
-    dquic::prelude::handy::server_parameters,
-    endpoint::{
-        Network,
-        config::{ServerOnlyConfig, ServerQuicConfig},
-    },
-};
 use nix::sys::signal::Signal;
 use pishoo::hypervisor::signal;
-use rustls::server::WebPkiClientVerifier;
-use snafu::ResultExt;
+use snafu::{FromString, ResultExt};
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -45,16 +39,29 @@ async fn main() -> Result<(), Whatever> {
 
     let config_file = args.config_file;
 
-    let config = fs::read(&config_file).await.whatever_context(format!(
-        "failed to read configuration file at `{}`",
-        config_file.display()
-    ))?;
-    let config = gateway::parse::parse(&config, config_file.parent()).whatever_context(format!(
-        "failed to parse configuration file at `{}`",
-        config_file.display()
-    ))?;
+    let registry = gateway::parse::default_registry();
+    let config = match gateway::parse::load_config_file(
+        &config_file,
+        &registry,
+        gateway::parse::registry::BuildOptions::default(),
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(failure) => {
+            tracing::error!(
+                error = %snafu::Report::from_error(&failure.error),
+                diagnostic = %failure.diagnostic(),
+                "failed to load configuration"
+            );
+            return Err(Whatever::with_source(
+                Box::new(failure),
+                "failed to load configuration".to_owned(),
+            ));
+        }
+    };
 
-    let entry_config = pishoo::config::parse_entry_config(&config)
+    let entry_config = pishoo::config::parse_entry_config(&config.root)
         .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {
@@ -77,55 +84,34 @@ async fn main() -> Result<(), Whatever> {
             .whatever_context("failed to resolve configured worker users")?;
 
     tracing::info!(
-        pid_file = %current_entry_config.pid_file,
+        pid_file = %current_entry_config.pid_file.display(),
         "pishoo starting"
     );
 
     // --- Multi-process supervisor setup ---
 
-    // Build the shared Network + default ServerQuicConfig that every
-    // registered SNI will reuse. Workers register by calling back through
-    // IPC (request_listen) — no servers are added up-front.
-    let roots = pishoo::tls::root_cert_store();
-    let tls_client_cert_verifier = WebPkiClientVerifier::builder(roots)
-        .allow_unauthenticated()
+    // Build the shared Network used by every registered SNI. Workers register
+    // by calling back through IPC (request_listen) — no servers are added up-front.
+    let network = DhttpNetwork::builder()
         .build()
-        .expect("failed to build tls client cert verifier");
-
-    let server_only = ServerOnlyConfig {
-        parameters: server_parameters(),
-        alpns: vec![b"h3".to_vec()],
-        backlog: 1024,
-        client_cert_verifier: tls_client_cert_verifier,
-        ..Default::default()
-    };
-    let server_qcfg = ServerQuicConfig {
-        own: Arc::new(server_only),
-        ..Default::default()
-    };
-
-    let network = Network::builder()
-        .stun_server(Arc::<str>::from(gateway::dns::DEFAULT_STUN_SERVER))
-        .stun_resolver(Arc::new(gateway::dns::build_query_resolver_chain(&[])))
-        .build();
+        .await
+        .whatever_context("failed to build dhttp network")?;
 
     // Create RootState (interior mutability — no external Mutex needed)
-    let state = Arc::new(pishoo::hypervisor::state::RootState::new(
-        network,
-        server_qcfg,
-    ));
+    let state = Arc::new(pishoo::hypervisor::state::RootState::new(network));
 
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut local_service_handle = pishoo::hypervisor::local_service::spawn_local_service(
-        &state,
-        &current_entry_config,
-        std::collections::HashMap::new(),
-    )
-    .await?;
+    let mut local_service_handle =
+        pishoo::hypervisor::local_service::spawn_local_service(&state, &current_entry_config)
+            .await
+            .whatever_context("failed to spawn local service")?;
     drop(current_entry_config);
 
+    state
+        .set_desired_workers(current_worker_targets.clone())
+        .await;
     pishoo::hypervisor::process::spawn_configured_workers(&state, current_worker_targets.clone())
         .await;
 
@@ -133,13 +119,12 @@ async fn main() -> Result<(), Whatever> {
     // arriving during reload are never lost.
     let mut signals = signal::RootSignalHandler::new()?;
 
-    // Per-server accept tasks are spawned inside `register_listener`; no
+    // Per-server accept tasks are spawned through listener acquisition; no
     // central accept loop is needed here.
 
-    let monitor_handle = pishoo::hypervisor::process::spawn_monitor_loop(state.clone());
-
-    // Watch for network interface changes and reconcile bind URIs
-    let network_watch_handle = pishoo::hypervisor::network::spawn_network_watch_loop(state.clone());
+    let monitor_shutdown = CancellationToken::new();
+    let monitor_handle =
+        pishoo::hypervisor::process::spawn_monitor_loop(state.clone(), monitor_shutdown.clone());
 
     tracing::info!("pishoo ready");
 
@@ -180,16 +165,21 @@ async fn main() -> Result<(), Whatever> {
         }
     }
 
-    monitor_handle.abort();
+    monitor_shutdown.cancel();
     let _ = monitor_handle.await;
-    network_watch_handle.abort();
-    let _ = network_watch_handle.await;
     if let Some(handle) = local_service_handle.take() {
         handle.shutdown().await;
     }
+    state.cleanup_local_resources().await;
     for pid in state.worker_pids().await {
-        state.cleanup_worker_with_reason(pid, "root_shutdown").await;
+        state
+            .cleanup_worker(
+                pid,
+                pishoo::hypervisor::state::WorkerProcessError::RootShutdown,
+            )
+            .await;
     }
+    state.wait_resource_transitions().await;
     _ = fs::remove_file(&pid_file).await;
     Ok(())
 }

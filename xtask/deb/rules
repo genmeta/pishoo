@@ -10,32 +10,59 @@
 # before dpkg-buildpackage runs. All paths use /workspace (the bind mount root).
 
 export DH_VERBOSE = 1
+BUILD_PROFILE ?= release
+CARGO_PROFILE_ARGS ?= --release
 
 %:
 	dh $@
 
 # --- pishoo binary build (arch-any only) ---
 
+# TODO: Remove this cargo-zigbuild workaround after rustc/Zig agree on the
+# Cortex-A53 843419 mitigation linker argument.
 override_dh_auto_build:
 ifdef TRIPLE
 	cd /workspace && \
 	export RUSTFLAGS="$${RUSTFLAGS:-} -L /usr/lib/$(DEB_HOST_MULTIARCH)" && \
-	$(if $(ROOT_CA),export ROOT_CA=$(ROOT_CA) &&) \
+	if [ "$(TRIPLE)" = "aarch64-unknown-linux-gnu" ]; then \
+		{ \
+			printf '%s\n' '#!/usr/bin/env bash'; \
+			printf '%s\n' 'set -euo pipefail'; \
+			printf '%s\n' 'if [ "$${1:-}" = "cc" ] || [ "$${1:-}" = "c++" ]; then'; \
+			printf '%s\n' '    zig_subcommand="$$1"'; \
+			printf '%s\n' '    shift'; \
+			printf '%s\n' '    filtered_args=()'; \
+			printf '%s\n' '    for arg in "$$@"; do'; \
+			printf '%s\n' '        case "$$arg" in'; \
+			printf '%s\n' '            -Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419)'; \
+			printf '%s\n' '                continue'; \
+			printf '%s\n' '                ;;'; \
+			printf '%s\n' '        esac'; \
+			printf '%s\n' '        filtered_args+=("$$arg")'; \
+			printf '%s\n' '    done'; \
+			printf '%s\n' '    exec /usr/local/zig/zig "$$zig_subcommand" "$${filtered_args[@]}"'; \
+			printf '%s\n' 'fi'; \
+			printf '%s\n' 'exec /usr/local/zig/zig "$$@"'; \
+		} > /tmp/pishoo-aarch64-zig; \
+		chmod +x /tmp/pishoo-aarch64-zig; \
+		export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig; \
+		export RUSTFLAGS="$$RUSTFLAGS -Z unstable-options -Clinker-flavor=gnu-lld-cc"; \
+	fi && \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
 	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
-	cargo zigbuild --release --target $(ZIG_TARGET) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
+	cargo zigbuild $(CARGO_PROFILE_ARGS) --target $(ZIG_TARGET) -p pishoo$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
 endif
 
 override_dh_auto_install:
 ifdef TRIPLE
 	mkdir -p debian/pishoo/usr/bin
-	cp /workspace/target/$(TRIPLE)/release/pishoo debian/pishoo/usr/bin/
+	cp /workspace/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo debian/pishoo/usr/bin/
 	chmod 755 debian/pishoo/usr/bin/pishoo
 	mkdir -p debian/pishoo/usr/libexec/pishoo
-	cp /workspace/target/$(TRIPLE)/release/pishoo-worker debian/pishoo/usr/libexec/pishoo/
+	cp /workspace/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-worker debian/pishoo/usr/libexec/pishoo/
 	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-worker
 ifdef PISHOO_SSH_SESSION_BIN
-	cp /workspace/target/$(TRIPLE)/release/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
+	cp /workspace/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
 	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-ssh-session
 endif
 endif

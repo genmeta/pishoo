@@ -1,18 +1,183 @@
 #[test]
-fn main_uses_shared_root_cert_store() {
+fn main_does_not_build_custom_server_quic_config() {
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("pishoo::tls::root_cert_store()"),
-        "main must use the shared root cert entry"
+        !main_source.contains("default_server_quic_config()"),
+        "main should let dhttp Endpoint construction own server defaults"
+    );
+    assert!(
+        !main_source.contains("server_qcfg"),
+        "main should not thread server config through RootState"
+    );
+    assert!(
+        !main_source.contains("pishoo::tls::root_cert_store()"),
+        "main must use the DHTTP_ROOT_CA from dhttp defaults"
+    );
+    assert!(
+        !main_source.contains("WebPkiClientVerifier"),
+        "main must not locally rebuild the DHTTP client certificate verifier"
+    );
+    assert!(
+        !main_source.contains("alpns: vec![b\"h3\".to_vec()]"),
+        "main must not hard-code DHTTP ALPN instead of inheriting dhttp defaults"
     );
 }
 
 #[test]
-fn main_uses_reactive_per_server_dns_publish() {
+fn root_state_does_not_store_server_quic_config() {
+    let state_source = include_str!("../src/hypervisor/state.rs");
+    assert!(
+        !state_source.contains("server_qcfg"),
+        "RootState should not store fixed DHTTP server defaults"
+    );
+    assert!(
+        !state_source.contains("ServerQuicConfig"),
+        "RootState should not depend on low-level server QUIC config"
+    );
+}
+
+#[test]
+fn root_state_keeps_dhttp_network_wrapper() {
+    let main_source = include_str!("../src/main.rs");
+    let state_source = include_str!("../src/hypervisor/state.rs");
+
+    assert!(
+        !main_source.contains("DhttpNetwork::builder().build().network().clone()"),
+        "main must keep the DhttpNetwork wrapper alive instead of dropping resolver keepalive state"
+    );
+    assert!(
+        state_source.contains("pub network: DhttpNetwork"),
+        "RootState should store DhttpNetwork, not only the raw dquic Network"
+    );
+    assert!(
+        !state_source.contains("pub network: Arc<Network>"),
+        "RootState must not erase DhttpNetwork into Arc<Network>"
+    );
+}
+
+#[test]
+fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let start = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
+    let registered_endpoint_source = &source[start..end];
+    let default_client_config = ["default_", "client_quic_config()"].concat();
+    let default_server_config = ["default_", "server_quic_config()"].concat();
+
+    assert!(registered_endpoint_source.contains("DhttpDnsPlan::new()"));
+    assert!(registered_endpoint_source.contains("quic_endpoint_builder_with_dns"));
+    assert!(registered_endpoint_source.contains("H3Endpoint::new(quic)"));
+    assert!(registered_endpoint_source.contains("Endpoint::from_parts"));
+    assert!(
+        !source.contains("DHTTP_H3_DNS_SERVER"),
+        "endpoint factory should use ddns resolver defaults instead of reading DHTTP DNS constants"
+    );
+    assert!(
+        !registered_endpoint_source.contains("\n    Endpoint::builder()"),
+        "root-owned endpoints should use Endpoint::from_parts around explicitly built H3 endpoints"
+    );
+    assert!(!registered_endpoint_source.contains(&default_client_config));
+    assert!(!registered_endpoint_source.contains(&default_server_config));
+}
+
+#[test]
+fn pishoo_does_not_define_custom_root_ca_bootstrap() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let build_script = manifest_dir.join("build.rs");
+    let tls_source = std::fs::read_to_string(manifest_dir.join("src/tls.rs"))
+        .expect("pishoo tls source should be readable");
+
+    assert!(!build_script.exists());
+    assert!(!tls_source.contains("root_cert_store"));
+    assert!(!tls_source.contains("OUT_DIR"));
+}
+
+#[test]
+fn pishoo_does_not_read_gateway_dns_bootstrap_constants() {
+    let main_source = include_str!("../src/main.rs");
+
+    assert!(!main_source.contains("gateway::dns"));
+    assert!(!main_source.contains("DEFAULT_STUN_SERVER"));
+    assert!(main_source.contains("DhttpNetwork::builder()"));
+}
+
+#[test]
+fn acquire_listener_uses_dhttp_dns_publisher() {
     let state_source = include_str!("../src/hypervisor/state.rs");
     assert!(
         state_source.contains("publish_task"),
-        "register_listener must spawn per-server DNS publish tasks via ServerEntry"
+        "ListenerResource keeps a publish_task slot for the DnsPublisher migration"
+    );
+    let server_ops_source = include_str!("../src/hypervisor/state/server_ops.rs");
+    assert!(
+        server_ops_source.contains("endpoint.dns_publication_loop()"),
+        "server_ops should delegate DNS publication loop construction to dhttp endpoint"
+    );
+    assert!(
+        !server_ops_source.contains("publisher_loop_with_options"),
+        "pishoo must not use deleted endpoint publisher-loop compatibility APIs"
+    );
+    assert!(
+        !server_ops_source.contains("spawn_server_publish_task("),
+        "acquire_listener must not use the legacy BindUri-based DNS publisher"
+    );
+    let gateway_lib_source = include_str!("../../gateway/src/lib.rs");
+    assert!(
+        !gateway_lib_source.contains("pub mod dns;"),
+        "gateway must not re-export the legacy dns module"
+    );
+}
+
+#[test]
+fn registered_endpoint_uses_dhttp_dns_schemes_for_publishers() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let start = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
+    let registered_endpoint_source = &source[start..end];
+
+    assert!(
+        registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::H3)")
+            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::Mdns)")
+            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::System)"),
+        "registered endpoint should pass the H3/mDNS/System DNS plan to dhttp"
+    );
+    assert!(
+        !registered_endpoint_source.contains(".resolver(Arc::new"),
+        "registered endpoint construction must not inject a custom resolver into dhttp Endpoint"
+    );
+}
+
+#[test]
+fn registered_endpoint_with_resolver_uri_sets_h3_dns_server() {
+    let source = include_str!("../src/hypervisor/endpoint_factory.rs");
+    let start = source
+        .find("pub async fn build_registered_endpoint(\n")
+        .expect("registered endpoint builder should exist");
+    let end = source
+        .find("pub async fn build_connector_endpoint")
+        .expect("connector endpoint builder should follow registered endpoint builder");
+    let registered_endpoint_source = &source[start..end];
+
+    assert!(
+        registered_endpoint_source.contains("h3_dns_server: Option<Uri>"),
+        "resolver config should be interpreted as an optional H3 DNS server URI"
+    );
+    assert!(
+        registered_endpoint_source.contains(".h3_dns_server(h3_dns_server.to_string().into())"),
+        "resolver URI should be passed to quic_endpoint_builder_with_dns as the H3 DNS base URI"
+    );
+    assert!(
+        !source.contains("build_registered_endpoint_with_resolver")
+            && !source.contains("build_resolver("),
+        "resolver config must not build and inject a custom resolver"
     );
 }
 
@@ -20,14 +185,43 @@ fn main_uses_reactive_per_server_dns_publish() {
 fn main_force_kills_lingering_workers_during_shutdown() {
     let shutdown_source = include_str!("../src/hypervisor/shutdown.rs");
     assert!(
-        shutdown_source.contains("state.force_kill_workers(\"shutdown_timeout\")"),
+        shutdown_source.contains("WorkerProcessError::ShutdownTimeout")
+            && shutdown_source.contains("state.force_kill_workers(&shutdown_timeout)"),
         "root shutdown must SIGKILL lingering workers after graceful timeout"
     );
     let main_source = include_str!("../src/main.rs");
     assert!(
-        main_source.contains("let _ = monitor_handle.await;")
-            && main_source.contains("let _ = network_watch_handle.await;"),
+        main_source.contains("let _ = monitor_handle.await;"),
         "root shutdown must await aborted background tasks"
+    );
+}
+
+#[test]
+fn worker_startup_is_scoped_and_timeout_bound() {
+    let spawn_source = include_str!("../src/hypervisor/process/spawn.rs");
+    assert!(
+        spawn_source.contains("WORKER_STARTUP_TIMEOUT")
+            && spawn_source.contains("std::time::Duration::from_secs(30)"),
+        "worker startup handshake must have a 30 second timeout"
+    );
+    assert!(
+        spawn_source.contains(".spawn_worker_task(pid")
+            && spawn_source.contains("start_worker_ipc("),
+        "worker startup/remoc setup must run inside the worker task scope"
+    );
+    assert!(
+        spawn_source.contains("Ok(SpawnedWorker { pid })"),
+        "spawn_worker should return after scheduling startup instead of waiting for worker hello"
+    );
+}
+
+#[test]
+fn ipc_disconnect_uses_typed_worker_failure() {
+    let spawn_source = include_str!("../src/hypervisor/process/spawn.rs");
+    assert!(
+        spawn_source.contains("WorkerProcessError::IpcDisconnected")
+            && spawn_source.contains("state.fail_worker(pid, error).await"),
+        "root/worker IPC disconnect must enter the typed worker failure path"
     );
 }
 
@@ -38,4 +232,70 @@ fn main_reload_uses_worker_diff() {
         orchestrate_source.contains("compute_worker_diff"),
         "reload should use diff-based worker management instead of whole-set replacement"
     );
+    assert!(
+        orchestrate_source.contains("missing_unchanged_workers"),
+        "reload should respawn desired workers that are unchanged in config but not running"
+    );
+}
+
+#[test]
+fn root_state_exposes_explicit_listener_operations() {
+    let source = include_str!("../src/hypervisor/state/server_ops.rs");
+
+    assert!(source.contains("pub async fn acquire_listener"));
+    assert!(source.contains("pub async fn release_listener"));
+    assert!(source.contains("pub async fn rebuild_listener"));
+    assert!(source.contains("pub async fn clear_listener_poison"));
+    assert!(!source.contains("pub async fn release_server"));
+}
+
+#[test]
+fn registered_endpoint_drop_releases_through_guarded_transition() {
+    let source = include_str!("../src/listen.rs");
+    let drop_impl = source
+        .split("impl Drop for RegisteredEndpoint")
+        .nth(1)
+        .expect("RegisteredEndpoint should implement Drop");
+
+    assert!(
+        drop_impl.contains("release_guard.take()")
+            && drop_impl.contains("release_listener_for_dropped_handle"),
+        "RegisteredEndpoint::Drop must schedule guarded async listener release"
+    );
+}
+
+#[test]
+fn monitor_does_not_restart_failed_workers() {
+    let source = include_str!("../src/hypervisor/process/monitor.rs");
+
+    assert!(!source.contains("spawn_worker(&worker_bin"));
+    assert!(!source.contains("failed to restart worker"));
+}
+
+#[test]
+fn reload_retries_failed_workers() {
+    let source = include_str!("../src/hypervisor/reload/orchestrate.rs");
+
+    assert!(
+        source.contains("failed_desired_workers"),
+        "root reload must include failed desired workers in the spawn set"
+    );
+}
+
+#[test]
+fn local_service_uses_worker_runtime_path() {
+    let source = include_str!("../src/hypervisor/local_service.rs");
+    assert!(source.contains("RuntimeRegistry::new("));
+    assert!(!source.contains("setup_service("));
+    assert!(!source.contains("run_service("));
+}
+
+#[test]
+fn service_module_no_longer_exposes_batch_lifecycle() {
+    let source = include_str!("../src/service.rs");
+    assert!(!source.contains("pub async fn setup_service"));
+    assert!(!source.contains("pub async fn run_service"));
+    assert!(!source.contains("pub async fn collect_reusable_listeners"));
+    assert!(!source.contains("pub struct PreparedServer"));
+    assert!(!source.contains("pub struct ServiceConfig"));
 }

@@ -17,7 +17,7 @@ pub enum CustomError {
 
     #[snafu(display("http3 stream i/o error"))]
     Stream {
-        source: h3x::message::stream::MessageStreamError,
+        source: dhttp::h3x::dhttp::message::MessageStreamError,
     },
 
     #[snafu(transparent)]
@@ -42,10 +42,8 @@ impl snafu::FromString for CustomError {
 #[derive(Debug, Snafu)]
 #[snafu(whatever)]
 #[snafu(display("{message}"))]
-#[snafu(provide(opt, ref, chain, AnyError => source.as_deref()))]
 pub struct Whatever {
     #[snafu(source(from(BoxError, Some)))]
-    #[snafu(provide(false))]
     source: Option<BoxError>,
     message: String,
     backtrace: snafu::Backtrace,

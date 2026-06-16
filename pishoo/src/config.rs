@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use gateway::parse::{Node, Value};
-use snafu::{OptionExt, Snafu};
+use gateway::parse::{document::ConfigNode, error::ConfigQueryError, types::PathConfig};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 mod discovery;
 pub mod entry;
@@ -27,8 +27,11 @@ pub enum ConfigError {
     #[snafu(display("invalid workers directive: expected string list"))]
     InvalidWorkers,
 
-    #[snafu(display("invalid pid directive: expected string"))]
+    #[snafu(display("invalid pid directive: expected path"))]
     InvalidPid,
+
+    #[snafu(display("failed to read typed configuration value"))]
+    ConfigQuery { source: ConfigQueryError },
 
     #[snafu(display("invalid groups directive: expected string list"))]
     InvalidGroups,
@@ -60,18 +63,17 @@ pub enum ConfigError {
 
 pub const PID_FILE_DEFAULT: &str = "/var/run/pishoo.pid";
 
-fn first_pishoo_node(root: &Arc<Node>) -> Result<Arc<Node>, ConfigError> {
-    if let Some(Value::Nodes(nodes)) = root.get("pishoo") {
-        nodes.first().cloned().context(MissingPishooSnafu)
-    } else {
-        MissingPishooSnafu.fail()
-    }
+fn first_pishoo_node(root: &Arc<ConfigNode>) -> Result<Arc<ConfigNode>, ConfigError> {
+    root.children("pishoo")
+        .ok()
+        .and_then(|nodes| nodes.first().cloned())
+        .context(MissingPishooSnafu)
 }
 
-fn parse_pid_file(pishoo: &Arc<Node>) -> Result<String, ConfigError> {
-    match pishoo.get("pid") {
-        Some(Value::String(pid_file)) => Ok(pid_file.clone()),
-        Some(_) => InvalidPidSnafu.fail(),
-        None => Ok(PID_FILE_DEFAULT.to_string()),
-    }
+fn parse_pid_file(pishoo: &Arc<ConfigNode>) -> Result<PathBuf, ConfigError> {
+    Ok(pishoo
+        .get::<PathConfig>("pid")
+        .context(ConfigQuerySnafu)?
+        .map(|pid_file| pid_file.0.clone())
+        .unwrap_or_else(|| PathBuf::from(PID_FILE_DEFAULT)))
 }

@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 
 [[example]]
@@ -14,10 +14,8 @@ snafu = { workspace = true }
 
 # --- Async Runtime & Utilities ---
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["io", "rt"] }
 futures = { workspace = true }
-async-trait = { workspace = true }
 
 # --- Logging & Tracing ---
 tracing = { workspace = true }
@@ -26,45 +24,36 @@ tracing-subscriber = { workspace = true }
 # --- Networking & HTTP ---
 bytes = { workspace = true }
 http = { workspace = true }
-http-body = { workspace = true }
+url = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-service = { workspace = true }
-firewall-base = { workspace = true, features = ["http"] }
 
 # --- Security & TLS ---
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = "2"
-getrandom = { workspace = true }
 
-# --- DNS resolver ---
-gmdns = { workspace = true }
+# --- DNS resolver / protocol features ---
 h3x = { workspace = true, features = ["rpc"] }
 
 # --- Data Structures & Utilities ---
-dashmap = { workspace = true }
-misc-conf = { workspace = true }
+peg = { workspace = true }
+glob = { workspace = true }
 regex = { workspace = true }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 socket2 = { workspace = true }
-crossterm = { workspace = true }
-rpassword = { workspace = true }
-base64 = { workspace = true }
-derive_more = { workspace = true, features = ["from"] }
 form_urlencoded = { workspace = true }
-x509-parser = { workspace = true }
+percent-encoding = { workspace = true }
 
-genmeta-ssh = { workspace = true, optional = true }
+dshell = { workspace = true, optional = true }
 remoc = { workspace = true }
-dhttp-home = { workspace = true }
-async-compression = { version = "0.4.36", features = ["tokio", "gzip"] }
-chrono = "0.4.42"
+dhttp = { workspace = true }
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+chrono = "0.4"
 tracing-appender = { workspace = true }
 
 # --- Platform Specific Dependencies ---
@@ -72,15 +61,17 @@ tracing-appender = { workspace = true }
 pnet = "0.35.0"
 
 [target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
-getifs = "0.3"
-
-
-[dev-dependencies]
-clap = { workspace = true }
+getifs = "0.6"
 
 
 [features]
-sshd = ["dep:genmeta-ssh", "genmeta-ssh/server", "remoc/rfn", "h3x/ipc"]
-pam = ["sshd", "genmeta-ssh/pam"]
+sshd = [
+    "dep:dshell",
+    "dshell/server",
+    "remoc/rfn",
+    "h3x/ipc",
+    "h3x/webtransport",
+]
+pam = ["sshd", "dshell/pam"]
 stun_traversal = []
 qlog = []

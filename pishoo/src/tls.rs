@@ -1,6 +1,3 @@
-use std::sync::{Arc, Once, OnceLock};
-
-use h3x::dquic::prelude::handy::ToCertificate;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use snafu::Snafu;
 
@@ -21,28 +18,6 @@ pub enum TlsMaterialError {
     InvalidPrivateKeyPem { source: std::io::Error },
     #[snafu(display("private key pem contains no key"))]
     EmptyPrivateKey,
-}
-
-fn install_crypto_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
-pub fn root_cert_store() -> Arc<rustls::RootCertStore> {
-    static ROOT_CERT_STORE: OnceLock<Arc<rustls::RootCertStore>> = OnceLock::new();
-
-    install_crypto_provider();
-
-    ROOT_CERT_STORE
-        .get_or_init(|| {
-            let mut store = rustls::RootCertStore::empty();
-            let root_cert = include_bytes!(concat!(env!("OUT_DIR"), "/root.crt"));
-            store.add_parsable_certificates(root_cert.to_certificate());
-            Arc::new(store)
-        })
-        .clone()
 }
 
 pub fn validate_tls_material(
@@ -82,15 +57,6 @@ pub fn validate_tls_material(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn root_cert_store_loads_certificates() {
-        let store = root_cert_store();
-        assert!(
-            !store.is_empty(),
-            "shared root cert store must load certificates"
-        );
-    }
 
     #[test]
     fn validate_tls_material_rejects_empty_payloads() {

@@ -1,27 +1,41 @@
 //! LocalControlPlane: in-process ControlPlane for root-local services.
 //!
-//! This allows root-local servers to use the same `run_service()` code
-//! as workers, but without any IPC — operations go directly to RootState.
+//! This allows root-local services to use the same runtime path as workers, but
+//! without any IPC — operations go directly to RootState.
 
 #[cfg(feature = "sshd")]
 use std::os::fd::AsRawFd;
 #[cfg(feature = "sshd")]
 use std::process::Stdio;
 use std::sync::Arc;
+#[cfg(feature = "sshd")]
+use std::time::Duration;
 
-use gateway::control_plane::{ConnectorRequest, ListenRequest, StringError};
-use snafu::Snafu;
+use dhttp::endpoint::{BuildEndpointError, Endpoint};
+use gateway::control_plane::{ConnectorRequest, ListenRequest};
+#[cfg(feature = "sshd")]
+use nix::{
+    errno::Errno,
+    sys::signal::{Signal, kill},
+    unistd::Pid,
+};
+use snafu::{ResultExt, Snafu};
+#[cfg(feature = "sshd")]
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    hypervisor::state::{RegisterError, ServiceOwner},
-    listen::PerServerListener,
+    hypervisor::{
+        endpoint_factory,
+        state::{AcquireListenerError, RebuildListenerError, owner::Owner},
+    },
+    listen::RegisteredEndpoint,
 };
 
 /// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
-/// [`PerServerListener`] that implements [`h3x::quic::Listen`].
+/// [`RegisteredEndpoint`] that implements [`dhttp::h3x::quic::Listen`].
 pub struct LocalControlPlane {
     state: Arc<super::state::RootState>,
 }
@@ -30,14 +44,6 @@ impl LocalControlPlane {
     pub fn new(state: Arc<super::state::RootState>) -> Self {
         Self { state }
     }
-}
-
-/// Error from a local connect request.
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum LocalConnectError {
-    #[snafu(display("failed to build quic client"))]
-    BuildClient { source: StringError },
 }
 
 /// Error from a local session spawn.
@@ -49,6 +55,13 @@ pub enum LocalSpawnSessionError {
     CreateSocketpair { source: std::io::Error },
     #[snafu(display("failed to spawn session process"))]
     Spawn { source: std::io::Error },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum LocalConnectorError {
+    #[snafu(display("failed to build connector endpoint"))]
+    BuildEndpoint { source: BuildEndpointError },
 }
 
 #[cfg(feature = "sshd")]
@@ -80,14 +93,8 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
         // all FDs >= 4 (same as launcher.rs session_child_exec).
         unsafe {
             cmd.pre_exec(move || {
-                use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
-
-                if child_raw_fd != 3 {
-                    let old_fd = BorrowedFd::borrow_raw(child_raw_fd);
-                    let mut fd3 = OwnedFd::from_raw_fd(3);
-                    nix::unistd::dup2(old_fd, &mut fd3)?;
-                    std::mem::forget(fd3);
-                }
+                let old_fd = std::os::fd::BorrowedFd::borrow_raw(child_raw_fd);
+                crate::hypervisor::launcher::install_child_ipc_fd(old_fd)?;
                 // Close FDs from 4 upwards.
                 let max_fd = nix::unistd::sysconf(nix::unistd::SysconfVar::OPEN_MAX)
                     .ok()
@@ -100,17 +107,13 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
             });
         }
 
-        let mut child = cmd.spawn().context(SpawnSnafu)?;
+        let child = cmd.spawn().context(SpawnSnafu)?;
 
-        // Reap the child asynchronously so it does not become a zombie when
-        // the session ends. The session lifecycle is controlled by the remoc
-        // connection teardown — once the parent drops the socketpair, the
-        // child sees EOF and exits.
-        tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => tracing::debug!(?status, "ssh-session child exited"),
-                Err(e) => tracing::warn!(error = %e, "failed to wait on ssh-session child"),
-            }
+        // Track the session child under the local service scope so root
+        // shutdown can cancel the reaper, terminate the child, and wait until
+        // it is reaped.
+        self.state.spawn_local_task(move |token| async move {
+            reap_local_session_child(child, token).await;
         });
 
         // Drop the child end in the parent; the child has it via FD 3.
@@ -122,34 +125,200 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
     }
 }
 
+#[cfg(feature = "sshd")]
+async fn reap_local_session_child(mut child: tokio::process::Child, token: CancellationToken) {
+    let poll_interval = Duration::from_millis(50);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::debug!(?status, "ssh-session child exited");
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %snafu::Report::from_error(&error),
+                    "failed to poll ssh-session child"
+                );
+                return;
+            }
+        }
+
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                terminate_local_session_child(child).await;
+                return;
+            }
+            () = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+async fn terminate_local_session_child(mut child: tokio::process::Child) {
+    const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to poll ssh-session child"
+            );
+            return;
+        }
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+            return;
+        }
+        Err(_) => {}
+    }
+
+    if let Some(raw_pid) = child.id() {
+        send_local_session_signal(Pid::from_raw(raw_pid as i32), Signal::SIGTERM);
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+            return;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+            return;
+        }
+        Err(_) => {}
+    }
+
+    tracing::warn!("ssh-session child did not exit after SIGTERM");
+    if let Err(error) = child.start_kill() {
+        tracing::warn!(
+            error = %snafu::Report::from_error(&error),
+            "failed to kill ssh-session child"
+        );
+        return;
+    }
+
+    match tokio::time::timeout(TERMINATE_GRACE, child.wait()).await {
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "ssh-session child exited");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "failed to wait on ssh-session child"
+            );
+        }
+        Err(_) => {
+            tracing::warn!("ssh-session child did not reap after SIGKILL");
+        }
+    }
+}
+
+#[cfg(feature = "sshd")]
+fn send_local_session_signal(child_pid: Pid, signal: Signal) {
+    match kill(child_pid, signal) {
+        Ok(()) => {
+            tracing::debug!(child_pid = %child_pid, ?signal, "sent signal to ssh-session child");
+        }
+        Err(Errno::ESRCH) => {}
+        Err(error) => {
+            tracing::warn!(
+                child_pid = %child_pid,
+                ?signal,
+                error = %snafu::Report::from_error(&error),
+                "failed to signal ssh-session child"
+            );
+        }
+    }
+}
+
 impl gateway::control_plane::ProvideListener for LocalControlPlane {
-    type Listener = PerServerListener;
-    type ListenError = RegisterError;
+    type Listener = RegisteredEndpoint;
+    type ListenError = AcquireListenerError;
+    type RebuildError = RebuildListenerError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
-        self.state
-            .register_listener(ServiceOwner::Local, request)
-            .await
+        self.state.acquire_listener(Owner::Local, request).await
+    }
+
+    async fn rebuild_listener(
+        &self,
+        _old: Self::Listener,
+        request: ListenRequest,
+    ) -> Result<Self::Listener, Self::RebuildError> {
+        // _old is consumed and dropped; root disarms its release guard when the
+        // rebuild transition starts, so the drop cannot release the
+        // replacement listener.
+        self.state.rebuild_listener(Owner::Local, request).await
     }
 }
 
 impl gateway::control_plane::ProvideConnector for LocalControlPlane {
-    type Connector = Arc<h3x::dquic::prelude::QuicClient>;
-    type ConnectError = LocalConnectError;
+    type Connector = Arc<Endpoint>;
+    type ConnectError = LocalConnectorError;
 
     async fn connector(
         &self,
         request: ConnectorRequest,
     ) -> Result<Self::Connector, Self::ConnectError> {
-        let root_store = crate::tls::root_cert_store();
-        let builder = h3x::dquic::prelude::QuicClient::builder().with_root_certificates(root_store);
-        let quic_client = match request.identity {
-            Some(identity) => builder
-                .with_cert(identity.certs().to_vec(), identity.key().clone_key())
-                .with_alpns(vec!["h3"])
-                .build(),
-            None => builder.without_cert().with_alpns(vec!["h3"]).build(),
-        };
-        Ok(Arc::new(quic_client))
+        let endpoint = endpoint_factory::build_connector_endpoint(
+            self.state.network.clone(),
+            request.identity,
+        )
+        .await
+        .context(local_connector_error::BuildEndpointSnafu)?;
+        Ok(Arc::new(endpoint))
+    }
+}
+
+#[cfg(all(test, feature = "sshd"))]
+mod tests {
+    use nix::{
+        errno::Errno,
+        sys::wait::{WaitPidFlag, waitpid},
+        unistd::Pid,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::reap_local_session_child;
+
+    #[tokio::test]
+    async fn local_session_reaper_terminates_and_reaps_child_on_cancel() {
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = Pid::from_raw(child.id().expect("child should have pid") as i32);
+
+        let token = CancellationToken::new();
+        let task = tokio::spawn(reap_local_session_child(child, token.clone()));
+
+        token.cancel();
+        task.await.expect("reaper task should finish");
+
+        assert!(matches!(
+            waitpid(pid, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        ));
     }
 }

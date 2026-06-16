@@ -1,22 +1,25 @@
 use bollard::{
     Docker,
-    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountTypeEnum},
+    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountType},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     },
 };
 use futures_util::StreamExt;
-use snafu::{ResultExt, Whatever};
+use snafu::{Report, ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
 use crate::{
-    DebTarget, Feature,
+    BuildProfile, DebTarget, Feature,
     container::{
-        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts, check_docker,
-        exec_in_container, force_remove_container, host_uid_gid, remove_container_if_exists,
+        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts,
+        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
+        force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
         resolve_siblings, start_container,
     },
-    package_version, target_dir,
+    package_version,
+    release_contract::load_release_contract,
+    target_dir,
 };
 
 const CARGO_NAME: &str = "pishoo";
@@ -30,9 +33,40 @@ const BASE_IMAGE: &str = "debian:bookworm";
 
 /// Image tag prefix for pishoo deb builds.
 const IMAGE_TAG_PREFIX: &str = "pishoo-deb-v2";
+const BUILD_ATTEMPTS: usize = 2;
 
 /// Relative path from workspace root to the debian packaging source files.
 const DEBIAN_PKG_DIR: &str = "xtask/deb";
+const DEBIAN_CONTROL_TEMPLATE: &str = include_str!("../deb/control");
+const PISHOO_COMMON_DEPENDS_PLACEHOLDER: &str = "{{PISHOO_COMMON_DEPENDS}}";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebArtifact {
+    pub target: String,
+    pub path: std::path::PathBuf,
+    pub features: Vec<String>,
+    pub profile: BuildProfile,
+}
+
+#[derive(Clone, Copy)]
+struct BinaryBuildContext<'a> {
+    target_dir: &'a std::path::Path,
+    profile: BuildProfile,
+    features: &'a [Feature],
+    siblings: &'a [Sibling],
+    binary_control: &'a str,
+}
+
+fn binary_package_version(version: &str) -> String {
+    format!("{version}-1")
+}
+
+fn render_binary_control(required_common_version: &str, binary_package_version: &str) -> String {
+    let common_depends = format!(
+        "pishoo-common (>= {required_common_version}), pishoo-common (<= {binary_package_version})"
+    );
+    DEBIAN_CONTROL_TEMPLATE.replace(PISHOO_COMMON_DEPENDS_PLACEHOLDER, &common_depends)
+}
 
 fn deb_arch(triple: &str) -> Result<&'static str, Whatever> {
     match triple {
@@ -57,6 +91,34 @@ fn gnu_arch(triple: &str) -> Result<&'static str, Whatever> {
 
 // (shared docker/container helpers live in crate::container)
 
+/// Ensure the Debian base image is available locally.
+///
+/// Docker's pull API contacts the registry even when the tag already exists
+/// locally. Packaging should only depend on the registry when the local image is
+/// missing; otherwise a transient registry timeout can fail an otherwise
+/// reproducible local build.
+async fn ensure_base_image(docker: &Docker) -> Result<(), Whatever> {
+    if docker.inspect_image(BASE_IMAGE).await.is_ok() {
+        info!(image = BASE_IMAGE, "base image already exists");
+        return Ok(());
+    }
+
+    let mut pull_stream = docker.create_image(
+        Some(
+            CreateImageOptionsBuilder::default()
+                .from_image(BASE_IMAGE)
+                .build(),
+        ),
+        None,
+        None,
+    );
+    while let Some(result) = pull_stream.next().await {
+        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
+    }
+
+    Ok(())
+}
+
 /// Ensure the build image exists for the given target triple.
 /// Installs cross-compilation toolchain, libc-dev, and libpam0g-dev.
 async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever> {
@@ -70,19 +132,7 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
 
     info!(tag, "building image");
 
-    // Ensure base image exists
-    let mut pull_stream = docker.create_image(
-        Some(
-            CreateImageOptionsBuilder::default()
-                .from_image(BASE_IMAGE)
-                .build(),
-        ),
-        None,
-        None,
-    );
-    while let Some(result) = pull_stream.next().await {
-        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
-    }
+    ensure_base_image(docker).await?;
 
     // Create temp container from base
     let container_name = format!("{CARGO_NAME}-xtask-setup-{triple}");
@@ -187,7 +237,11 @@ chmod -R a+rX {CARGO_HOME} {RUSTUP_HOME}
 }
 
 /// Build the arch-independent pishoo-common config package.
-async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
+async fn run_common(
+    docker: &Docker,
+    common_package_version: &str,
+    binary_control: &str,
+) -> Result<DebArtifact, Whatever> {
     info!("starting common deb package build");
     let target_dir = target_dir()?;
     let out_dir = target_dir.join("common").join("deb");
@@ -198,19 +252,8 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
     let workspace_dir =
         std::env::current_dir().whatever_context("failed to get current directory")?;
 
-    // Ensure base image exists (pishoo-common only needs debhelper + dpkg-deb)
-    let mut pull_stream = docker.create_image(
-        Some(
-            CreateImageOptionsBuilder::default()
-                .from_image(BASE_IMAGE)
-                .build(),
-        ),
-        None,
-        None,
-    );
-    while let Some(result) = pull_stream.next().await {
-        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
-    }
+    // pishoo-common only needs debhelper + dpkg-deb in the base image.
+    ensure_base_image(docker).await?;
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-common");
     remove_container_if_exists(docker, &container_name).await;
@@ -228,7 +271,7 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
                     mounts: Some(vec![Mount {
                         target: Some("/workspace".into()),
                         source: Some(workspace_dir.to_string_lossy().into_owned()),
-                        typ: Some(MountTypeEnum::BIND),
+                        typ: Some(MountType::BIND),
                         ..Default::default()
                     }]),
                     ..Default::default()
@@ -241,20 +284,32 @@ async fn run_common(docker: &Docker, version: &str) -> Result<(), Whatever> {
     let container_id = container.id.clone();
 
     // Always remove the common container before returning, success or not.
-    let result = run_common_inner(docker, &container_id, version).await;
+    let result = run_common_inner(
+        docker,
+        &container_id,
+        common_package_version,
+        binary_control,
+    )
+    .await;
     force_remove_container(docker, &container_id).await;
     result?;
 
-    let deb_name = format!("pishoo-common_{version}-1_all.deb");
+    let deb_name = format!("pishoo-common_{common_package_version}_all.deb");
     info!(deb_name, "produced");
     info!("finished common deb package build");
-    Ok(())
+    Ok(DebArtifact {
+        target: "common".to_string(),
+        path: out_dir.join(deb_name),
+        features: Vec::new(),
+        profile: BuildProfile::Release,
+    })
 }
 
 async fn run_common_inner(
     docker: &Docker,
     container_id: &str,
-    version: &str,
+    common_package_version: &str,
+    binary_control: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
 
@@ -270,12 +325,14 @@ apt-get install --assume-yes -qq debhelper fakeroot
     // Products (.deb etc.) land in target/common/deb/ (one level above src/).
     // Runs as host uid:gid so files in target/ are owned by the host user.
     let user = host_uid_gid()?;
+    let control_escaped = shell_escape(binary_control);
     let build_script = format!(
         r#"set -e
 SRC=/workspace/target/common/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
-printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <support@genmeta.net>  %s\n' \
+printf '%s' {control_escaped} > "$SRC/debian/control"
+printf '{CARGO_NAME} ({common_package_version}) unstable; urgency=low\n\n  * release {common_package_version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"
 cd "$SRC"
 dpkg-buildpackage -A -uc -us -d
@@ -294,10 +351,15 @@ dpkg-buildpackage -A -uc -us -d
 
 pub async fn run(
     targets: &[DebTarget],
+    profile: BuildProfile,
     features: &[Feature],
     siblings: &[std::path::PathBuf],
-) -> Result<(), Whatever> {
-    info!(target_count = targets.len(), "starting deb dist build");
+) -> Result<Vec<DebArtifact>, Whatever> {
+    info!(
+        target_count = targets.len(),
+        profile = profile.target_dir_name(),
+        "starting deb dist build"
+    );
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
@@ -306,7 +368,11 @@ pub async fn run(
     // and path errors surface before we spin up containers.
     let siblings = resolve_siblings(siblings)?;
 
+    let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let version = package_version(CARGO_NAME)?;
+    let binary_package_version = binary_package_version(&version);
+    let binary_control =
+        render_binary_control(&contract.required_common_version, &binary_package_version);
     let target_dir = target_dir()?;
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -314,10 +380,11 @@ pub async fn run(
     for &target in targets {
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
-            let version = version.clone();
+            let common_package_version = contract.common_version.clone();
+            let binary_control = binary_control.clone();
             info!("queued common deb package build");
             tasks.spawn(
-                async move { run_common(&docker, &version).await }
+                async move { run_common(&docker, &common_package_version, &binary_control).await }
                     .instrument(info_span!("deb", triple = "common")),
             );
             continue;
@@ -328,35 +395,74 @@ pub async fn run(
         info!(triple, "queued deb target build");
         let span = info_span!("deb", triple);
         let version = version.clone();
+        let binary_control = binary_control.clone();
         let target_dir = target_dir.clone();
         let features = features.to_vec();
         let siblings = siblings.clone();
         tasks.spawn(
             async move {
-                build_one(&docker, triple, &version, &target_dir, &features, &siblings).await
+                build_one_with_retry(
+                    &docker,
+                    triple,
+                    &version,
+                    BinaryBuildContext {
+                        target_dir: &target_dir,
+                        profile,
+                        features: &features,
+                        siblings: &siblings,
+                        binary_control: &binary_control,
+                    },
+                )
+                .await
             }
             .instrument(span),
         );
     }
 
+    let mut artifacts = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        result.whatever_context("deb build task panicked")??;
+        artifacts.push(result.whatever_context("deb build task panicked")??);
     }
+    artifacts.sort_by(|left, right| left.target.cmp(&right.target));
 
     info!("finished deb dist build");
 
-    Ok(())
+    Ok(artifacts)
+}
+
+async fn build_one_with_retry(
+    docker: &Docker,
+    triple: &str,
+    version: &str,
+    context: BinaryBuildContext<'_>,
+) -> Result<DebArtifact, Whatever> {
+    for attempt in 1..=BUILD_ATTEMPTS {
+        match build_one(docker, triple, version, context).await {
+            Ok(artifact) => return Ok(artifact),
+            Err(error) if attempt < BUILD_ATTEMPTS => {
+                let report = Report::from_error(&error);
+                tracing::warn!(
+                    %triple,
+                    attempt,
+                    error = %report,
+                    "deb target build failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("build attempts loop must return")
 }
 
 async fn build_one(
     docker: &Docker,
     triple: &str,
     version: &str,
-    target_dir: &std::path::Path,
-    features: &[Feature],
-    siblings: &[Sibling],
-) -> Result<(), Whatever> {
-    let has_sshd = features
+    context: BinaryBuildContext<'_>,
+) -> Result<DebArtifact, Whatever> {
+    let has_sshd = context
+        .features
         .iter()
         .any(|f| matches!(f, Feature::Sshd | Feature::Pam));
     let arch = deb_arch(triple)?;
@@ -365,7 +471,12 @@ async fn build_one(
     let image = ensure_image(docker, triple).await?;
 
     let deb_name = format!("{CARGO_NAME}_{version}-1_{arch}.deb");
-    let out_dir = target_dir.join(triple).join("release").join("deb");
+    let profile_dir = context.profile.target_dir_name();
+    let out_dir = context
+        .target_dir
+        .join(triple)
+        .join(profile_dir)
+        .join("deb");
     tokio::fs::create_dir_all(&out_dir)
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
@@ -376,40 +487,27 @@ async fn build_one(
     let mut mounts = vec![Mount {
         target: Some("/workspace".into()),
         source: Some(workspace_dir.to_string_lossy().into_owned()),
-        typ: Some(MountTypeEnum::BIND),
+        typ: Some(MountType::BIND),
         ..Default::default()
     }];
 
     // User-requested sibling crates, bind-mounted at /{basename} so that
     // `path = "../{basename}"` references in Cargo.toml resolve inside the
     // container.
-    for sibling in siblings {
+    for sibling in context.siblings {
         mounts.push(Mount {
             target: Some(format!("/{}", sibling.basename)),
             source: Some(sibling.host.to_string_lossy().into_owned()),
-            typ: Some(MountTypeEnum::BIND),
+            typ: Some(MountType::BIND),
             ..Default::default()
         });
     }
 
     mounts.extend(cargo_cache_mounts());
 
-    // Forward ROOT_CA into the container if set on the host.
-    let root_ca_env = if let Ok(host_path) = std::env::var("ROOT_CA") {
-        let host_path = std::path::Path::new(&host_path)
-            .canonicalize()
-            .whatever_context(format!("ROOT_CA path not found: {host_path}"))?;
-        mounts.push(Mount {
-            target: Some("/root-ca/root.crt".into()),
-            source: Some(host_path.to_string_lossy().into_owned()),
-            typ: Some(MountTypeEnum::BIND),
-            read_only: Some(true),
-            ..Default::default()
-        });
-        "export ROOT_CA=/root-ca/root.crt && "
-    } else {
-        ""
-    };
+    let bootstrap = dhttp_bootstrap_from_env()?;
+    mounts.extend(bootstrap.mounts);
+    let cargo_config = cargo_config_from_siblings(context.siblings);
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
@@ -437,7 +535,8 @@ async fn build_one(
 
     // Build cargo features string
     let cargo_features = {
-        let names: Vec<&str> = features
+        let names: Vec<&str> = context
+            .features
             .iter()
             .map(|f| match f {
                 Feature::Sshd => "sshd",
@@ -475,17 +574,25 @@ async fn build_one(
         version,
         arch,
         gnu,
-        root_ca_env,
+        context.profile,
+        &bootstrap.exports,
+        cargo_config.as_deref(),
         &worker_env,
         &ssh_session_env,
         &cargo_features_env,
+        context.binary_control,
     )
     .await;
     force_remove_container(docker, &container_id).await;
     result?;
 
     info!(deb_name, "produced");
-    Ok(())
+    Ok(DebArtifact {
+        target: triple.to_string(),
+        path: out_dir.join(deb_name),
+        features: crate::brew::feature_names(context.features),
+        profile: context.profile,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -496,10 +603,13 @@ async fn build_one_inner(
     version: &str,
     arch: &str,
     gnu: &str,
-    root_ca_env: &str,
+    profile: BuildProfile,
+    dhttp_bootstrap_exports: &str,
+    cargo_config: Option<&str>,
     worker_env: &str,
     ssh_session_env: &str,
     cargo_features_env: &str,
+    binary_control: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
     info!(triple, "build container started");
@@ -513,13 +623,17 @@ async fn build_one_inner(
         None,
     )
     .await?;
+    install_cargo_config(docker, container_id, cargo_config).await?;
 
     // dpkg-buildpackage -B builds only Architecture: any packages (pishoo binary).
     // -a{arch} sets the host architecture for cross-compilation.
-    // Prepare debian source tree under target/{triple}/release/deb/src/ so that
+    // Prepare debian source tree under target/{triple}/{profile}/deb/src/ so that
     // all temp files and products stay inside target/ (bind-mounted, gitignored).
     // Runs as host uid:gid so files in target/ are owned by the host user.
     let user = host_uid_gid()?;
+    let profile_dir = profile.target_dir_name();
+    let cargo_profile_args = profile.cargo_profile_args().join(" ");
+    let control_escaped = shell_escape(binary_control);
     let build_script = format!(
         r#"set -e
 export HOME=/tmp
@@ -528,12 +642,15 @@ export RUSTUP_HOME={RUSTUP_HOME}
 export CARGO_HOME={CARGO_HOME}
 export TRIPLE={triple}
 export ZIG_TARGET={triple}.{ZIG_GLIBC_VERSION}
+export BUILD_PROFILE={profile_dir}
+export CARGO_PROFILE_ARGS="{cargo_profile_args}"
 export DEB_HOST_MULTIARCH={gnu}
-{root_ca_env}{worker_env}{ssh_session_env}{cargo_features_env}
-SRC=/workspace/target/{triple}/release/deb/src
+{dhttp_bootstrap_exports}{worker_env}{ssh_session_env}{cargo_features_env}
+SRC=/workspace/target/{triple}/{profile_dir}/deb/src
 mkdir -p "$SRC/debian"
 cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
-printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <support@genmeta.net>  %s\n' \
+printf '%s' {control_escaped} > "$SRC/debian/control"
+printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"
 cd "$SRC"
 dpkg-buildpackage -B -uc -us -d -a{arch}
@@ -551,4 +668,32 @@ dpkg-buildpackage -B -uc -us -d -a{arch}
     info!(triple, "dpkg-buildpackage finished inside container");
 
     Ok(())
+}
+
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_binary_control;
+
+    #[test]
+    fn binary_control_uses_common_dependency_range() {
+        let control = render_binary_control("0.5.1-1", "0.5.2-1");
+
+        assert!(control.contains(
+            "Depends: pishoo-common (>= 0.5.1-1), pishoo-common (<= 0.5.2-1), ${shlibs:Depends}, ${misc:Depends}\n"
+        ));
+    }
 }

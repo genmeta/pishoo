@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.6.0] - 2026-06-15
+
+### Added
+
+- **DHTTP endpoint-backed listener and publisher flow**: gateway listeners are
+  routed through the endpoint facade and publish endpoint records through the
+  DHTTP DNS publisher path.
+- **WebTransport DShell service path**: pishoo SSH service now accepts DShell
+  sessions through WebTransport Extended CONNECT. The root process transfers
+  accepted WebTransport sessions over IPC, and workers build DShell
+  conversations on the worker side.
+- **Span-aware configuration parser**: the legacy directive parser has been
+  replaced by a typed parser with source spans, include tracing, structured
+  diagnostics, and directive-specific validation.
+- **Per-server worker runtime model**: pishoo workers prepare server services
+  into runtime snapshots, reload unchanged listeners in place, and retire stale
+  services through guarded runtime transitions.
+- **Listener resource registry**: root-owned listeners now have explicit
+  acquire/release/rebuild operations with stale-drop protection and conflict
+  handling across workers.
+- **Manifest-first release packaging**: `cargo xtask package` and
+  `cargo xtask publish s3` now stage and publish pishoo DEB, RPM, and Homebrew
+  artifacts from package manifests.
+- **pishoo-common release contract**: `xtask/release.toml` records the common
+  package version and the minimum common package version required by current
+  pishoo binaries.
+
+### Changed
+
+- Gateway source imports now consume the DHTTP stack through the `dhttp` facade
+  (`dhttp::h3x`, `dhttp::ddns`, `dhttp::access`, and identity/home re-exports).
+- Access-rule loading uses the DHTTP access-control re-export and constructs the
+  in-memory matcher from the configured SQLite store without a direct
+  `dhttp-access` package dependency.
+- SSH service wiring now uses `dshell` directly. The previous stream-oriented
+  SSH path has been replaced by the WebTransport conversation API.
+- `proxy_pass` URI rewriting is aligned with nginx-style prefix semantics.
+- `listen internal` is localhost-only by construction. External listen scopes
+  remain rejected with typed configuration errors.
+- Gateway no longer owns DNS certificate-chain-key configuration or DNS bootstrap constants.
+  DNS publication is bridged through DHTTP/DDNS endpoint publication APIs.
+- `pishoo-common` remains at `0.5.0-1`; the `pishoo` binary package advances to
+  `0.6.0-1` and declares its compatible common-package range.
+
+### Fixed
+
+- Reload and cancellation paths now keep listener creation, listener release,
+  worker cleanup, and endpoint teardown inside owned transition tasks.
+- Worker process lifecycle is UID-keyed and typed: IPC disconnects, startup
+  failures, and child exits flow through explicit worker process errors.
+- FD transfer now follows the receiver-chosen, remoc-cancellation-visible
+  contract used by the root/worker mux.
+- SIGHUP/SIGTERM/SIGINT/SIGQUIT/SIGUSR1 handling was aligned with the pishoo
+  signal contract.
+- AArch64 GNU package builds filter the unsupported Zig/Rust linker mitigation
+  flag, and RPM release CI omits the unsupported Fedora armv7/armhfp target.
+
+### Dependencies
+
+- Release manifests now target the DHTTP/DShell release-wave crates: `h3x`
+  v0.4.0, `dhttp` v0.2.0, and `dshell` v0.4.0.
+
+### Components
+
+- `gateway` v0.6.0
+- `pishoo` v0.6.0
+- `pishoo-common` v0.5.0-1
+
 ## [0.5.0] - 2026-04-20
 
 ### Added

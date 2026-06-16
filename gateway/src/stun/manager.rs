@@ -5,14 +5,15 @@ use std::{
     time::Duration,
 };
 
-use gmdns::parser::record::endpoint::EndpointAddr as DnsEndpointAddr;
-use h3x::{
-    dquic::{
-        prelude::{BindUri, BoundAddr, IO},
-        qbase::net::Family,
+use dhttp::{
+    ddns::publishers::{PublishAddresses, Publishers},
+    h3x::dquic::{
+        Network,
+        net::Scheme,
+        prelude::{BindUri, IO},
+        qbase::net::{Family, addr::EndpointAddr},
         qinterface::{
             BindInterface, WeakInterface,
-            bind_uri::BindUriScheme,
             component::location::Locations,
             io::{ProductIO, handy::DEFAULT_IO_FACTORY},
         },
@@ -25,8 +26,9 @@ use h3x::{
             route::ReceiveAndDeliverPacket,
         },
     },
-    endpoint::Network,
+    name::Name,
 };
+use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, warn};
@@ -35,14 +37,13 @@ use super::{
     STUN_DOMAIN, STUN_PUBLISH_INTERVAL, STUN_RECONCILE_INTERVAL,
     config::{StunBindConfig, StunNodeConfig},
 };
-use crate::dns::{PublishConfig, publish_host_endpoints};
 
 /// 管理本节点对外暴露的 STUN server。
 ///
 /// 1. **Configured pairs**：来自 `stun_server { ... }`，独立绑定主/辅 socket
 /// 2. **Dynamic pairs**：来自 QUIC listener，仅在该 listener 已被判定为 `FullCone` 时寄生启动
 ///
-/// 管理器同时负责收集"可作为完整 STUN agent 使用"的地址并交给 DNS 模块发布。
+/// 管理器同时负责收集"可作为完整 STUN agent 使用"的地址并交给 ddns publisher 发布。
 pub struct StunServerManager {
     _task: AbortOnDropHandle<()>,
 }
@@ -85,11 +86,7 @@ impl DynamicStunHandle {
 }
 
 impl StunServerManager {
-    pub fn spawn(
-        network: Arc<Network>,
-        publish_config: PublishConfig,
-        config: StunNodeConfig,
-    ) -> Self {
+    pub fn spawn(network: Arc<Network>, publishers: Publishers, config: StunNodeConfig) -> Self {
         let _task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut configured_handles: HashMap<SocketAddr, ConfiguredStunHandle> = HashMap::new();
             let mut dynamic_handles: HashMap<BindUri, DynamicStunHandle> = HashMap::new();
@@ -110,7 +107,7 @@ impl StunServerManager {
                 &network,
                 &configured_handles,
                 &dynamic_handles,
-                &publish_config,
+                &publishers,
                 &config,
             )
             .await;
@@ -126,14 +123,14 @@ impl StunServerManager {
                     _ = observer.recv() => {
                         time::sleep(Duration::from_millis(50)).await;
                         reconcile!();
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                     _ = timer.tick() => {
                         reconcile!();
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                     _ = publish_timer.tick() => {
-                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publish_config, &config).await;
+                        publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publishers, &config).await;
                     }
                 }
             }
@@ -181,7 +178,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     // 主 socket
     let main_iface: Arc<dyn IO> = Arc::from(factory.bind(bind_cfg.bind_address.into()));
     let main_port = match main_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!(bind = %bind_cfg.bind_address, "configured main iface has no internet bound addr");
             return None;
@@ -198,7 +195,7 @@ fn start_configured_stun_pair(bind_cfg: &StunBindConfig) -> Option<ConfiguredStu
     let aux_addr = SocketAddr::new(bind_cfg.bind_address.ip(), aux_port_cfg);
     let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_addr.into()));
     let aux_port = match aux_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!("configured aux iface has no internet bound addr");
             return None;
@@ -308,14 +305,15 @@ async fn reconcile_dynamic(
 }
 
 fn find_bind_iface(network: &Arc<Network>, bind_uri: &BindUri) -> Option<BindInterface> {
-    network.get_iface(bind_uri)
+    network.quic().get_iface(bind_uri)
 }
 
 /// 收集所有当前已被任一 STUN client 判定为 `FullCone` 的 listener。
 fn collect_fullcone_bind_uris(network: &Arc<Network>) -> HashSet<BindUri> {
     let mut result = HashSet::new();
-    for bind_uri in network.current_bind_uris() {
-        let Some(bind_iface) = network.get_iface(&bind_uri) else {
+    let quic = network.quic();
+    for bind_uri in quic.current_bind_uris() {
+        let Some(bind_iface) = quic.get_iface(&bind_uri) else {
             continue;
         };
         let is_fullcone = bind_iface
@@ -349,7 +347,7 @@ fn start_dynamic_stun_pair(
     let iface = bind_iface.borrow();
 
     let main_addr = match iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr,
+        Ok(addr) => addr,
         _ => {
             warn!(%bind_uri, "main iface has no internet bound addr");
             return None;
@@ -372,7 +370,7 @@ fn start_dynamic_stun_pair(
     let factory: Arc<dyn ProductIO> = Arc::new(DEFAULT_IO_FACTORY);
     let aux_iface: Arc<dyn IO> = Arc::from(factory.bind(aux_bind_uri));
     let aux_port = match aux_iface.bound_addr() {
-        Ok(BoundAddr::Internet(addr)) => addr.port(),
+        Ok(addr) => addr.port(),
         _ => {
             warn!("aux iface has no internet bound addr");
             return None;
@@ -429,11 +427,11 @@ fn is_ipv4_bind_uri(bind_uri: &BindUri) -> bool {
 fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<BindUri> {
     let port = fixed_port.unwrap_or(0);
     match bind_uri.scheme() {
-        BindUriScheme::Iface => {
+        Scheme::Iface => {
             let (family, device, _port) = bind_uri.as_iface_bind_uri()?;
             Some(format!("iface://{family}.{device}:{port}").into())
         }
-        BindUriScheme::Inet => {
+        Scheme::Inet => {
             let addr = bind_uri.as_inet_bind_uri()?;
             Some(SocketAddr::new(addr.ip(), port).into())
         }
@@ -452,7 +450,7 @@ fn derive_aux_bind_uri(bind_uri: &BindUri, fixed_port: Option<u16>) -> Option<Bi
 /// 注意：这只是"选下一跳"的策略，不保证 `CHANGE_IP|CHANGE_PORT` 一定同时改变 IP 和端口；
 /// 真正返回哪个地址取决于被选中节点自身的 `change_address` / `change_port` 配置。
 fn compute_change_address(
-    iface: &h3x::dquic::qinterface::Interface,
+    iface: &dhttp::h3x::dquic::qinterface::Interface,
     is_ipv4: bool,
 ) -> Option<SocketAddr> {
     let own_outer_ips: HashSet<IpAddr> = iface
@@ -518,14 +516,14 @@ fn compute_change_address(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Publish（仅负责收集 STUN agent 地址；真正的 DNS 发布委托给 dns 模块）
+// Publish（仅负责收集 STUN agent 地址；真正的 DNS 发布委托给 ddns publisher）
 // ──────────────────────────────────────────────────────────────────────────────
 
 async fn publish_stun_endpoints(
     network: &Arc<Network>,
     configured_handles: &HashMap<SocketAddr, ConfiguredStunHandle>,
     dynamic_handles: &HashMap<BindUri, DynamicStunHandle>,
-    publish_config: &PublishConfig,
+    publishers: &Publishers,
     config: &StunNodeConfig,
 ) {
     let mut outer_addrs: HashSet<SocketAddr> = HashSet::new();
@@ -567,13 +565,14 @@ async fn publish_stun_endpoints(
         outer_addrs.extend(fullcone_outers);
     }
 
-    let endpoints: Vec<DnsEndpointAddr> = outer_addrs
-        .iter()
-        .map(|addr| match addr {
-            SocketAddr::V4(a) => DnsEndpointAddr::direct_v4(*a),
-            SocketAddr::V6(a) => DnsEndpointAddr::direct_v6(*a),
-        })
-        .collect();
+    let endpoints = outer_addrs.iter().copied().map(EndpointAddr::direct);
+    let addresses = PublishAddresses::new().wide_area(endpoints);
+    let name = Name::try_from(STUN_DOMAIN).expect("STUN_DOMAIN must be a valid DNS owner name");
 
-    publish_host_endpoints(STUN_DOMAIN, endpoints, publish_config).await;
+    if let Err(error) = publishers.publish(&name, &addresses).await {
+        tracing::warn!(
+            error = %Report::from_error(&error),
+            "failed to publish stun endpoints"
+        );
+    }
 }

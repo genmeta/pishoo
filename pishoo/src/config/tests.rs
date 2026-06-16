@@ -1,9 +1,7 @@
-use std::{collections::HashMap, ffi::CString, path::PathBuf, sync::Arc};
-
-use gateway::parse::{Node, Value};
+use std::{ffi::CString, path::PathBuf};
 
 use crate::config::{
-    ConfigError, PID_FILE_DEFAULT,
+    PID_FILE_DEFAULT,
     entry::parse_entry_config,
     root::parse_root_config,
     worker_target::{
@@ -29,24 +27,17 @@ fn create_temp_tls_files() -> (PathBuf, PathBuf) {
 
 #[test]
 fn invalid_workers_type_is_rejected() {
-    let worker_node = Arc::new(Node::new(Value::ValueMap(HashMap::from([(
-        "workers".to_string(),
-        Value::Boolean(true),
-    )]))));
-    let root = Arc::new(Node::new(Value::ValueMap(HashMap::from([(
-        "pishoo".to_string(),
-        Value::Nodes(vec![worker_node]),
-    )]))));
-    let err = parse_root_config(&root).expect_err("workers must be a string list");
-    assert!(matches!(err, ConfigError::InvalidWorkers));
+    let failure = gateway::parse::parse_config_str_for_test("pishoo { workers { nested on; } }")
+        .expect_err("workers block should be rejected before config parse");
+    assert!(!failure.error.to_string().contains('\n'));
 }
 
 #[test]
 fn extracts_pid_and_workers() {
-    let conf = b"pishoo { pid /tmp/pishoo-test.pid; workers alice bob; }";
-    let parsed = gateway::parse::parse(conf, None).expect("parse config");
-    let root = parse_root_config(&parsed).expect("parse root config");
-    assert_eq!(root.pid_file, "/tmp/pishoo-test.pid");
+    let conf = "pishoo { pid /tmp/pishoo-test.pid; workers alice bob; }";
+    let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
+    let root = parse_root_config(&parsed.root).expect("parse root config");
+    assert_eq!(root.pid_file, PathBuf::from("/tmp/pishoo-test.pid"));
     assert_eq!(root.workers.len(), 2);
     assert_eq!(root.workers[0].username, "alice");
     assert_eq!(root.workers[1].username, "bob");
@@ -54,10 +45,10 @@ fn extracts_pid_and_workers() {
 
 #[test]
 fn parse_workers_from_root_config() {
-    let conf = b"pishoo { workers alice bob; }";
-    let parsed = gateway::parse::parse(conf, None).expect("parse config");
-    let root = parse_root_config(&parsed).expect("parse root config");
-    assert_eq!(root.pid_file, PID_FILE_DEFAULT);
+    let conf = "pishoo { workers alice bob; }";
+    let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
+    let root = parse_root_config(&parsed.root).expect("parse root config");
+    assert_eq!(root.pid_file, PathBuf::from(PID_FILE_DEFAULT));
     assert_eq!(root.workers.len(), 2);
     assert_eq!(root.workers[0].username, "alice");
     assert_eq!(root.workers[1].username, "bob");
@@ -82,9 +73,8 @@ fn parse_entry_config_servers_only() {
         cert.display(),
         key.display()
     );
-    let parsed = gateway::parse::parse(conf.as_bytes(), Some(std::path::Path::new(".")))
-        .expect("parse config");
-    let entry = parse_entry_config(&parsed).expect("parse entry config");
+    let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
+    let entry = parse_entry_config(&parsed.root).expect("parse entry config");
     assert!(entry.workers.is_empty());
     assert_eq!(entry.local_servers.len(), 1);
 }
@@ -97,9 +87,8 @@ fn parse_entry_config_workers_and_servers() {
         cert.display(),
         key.display()
     );
-    let parsed = gateway::parse::parse(conf.as_bytes(), Some(std::path::Path::new(".")))
-        .expect("parse config");
-    let entry = parse_entry_config(&parsed).expect("parse entry config");
+    let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
+    let entry = parse_entry_config(&parsed.root).expect("parse entry config");
     assert_eq!(entry.workers.len(), 1);
     assert_eq!(entry.local_servers.len(), 1);
 }

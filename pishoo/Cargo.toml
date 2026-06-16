@@ -3,8 +3,8 @@
 [package]
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
-homepage = "https://pishoo.genmeta.net"
-version = "0.5.0"
+homepage = "https://www.dhttp.net"
+version = "0.6.0"
 edition = "2024"
 
 [[bin]]
@@ -23,9 +23,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
-dhttp-home = { workspace = true }
-
-# --- QUIC & HTTP/3 ---
+dhttp = { workspace = true }
 h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
@@ -33,6 +31,7 @@ rustls-pemfile = "2"
 # --- Serialization & IPC ---
 remoc = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # --- Error Handling ---
 snafu = { workspace = true }
@@ -40,7 +39,7 @@ snafu = { workspace = true }
 # --- Async Runtime ---
 futures = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 
 # --- HTTP ---
 http = { workspace = true }
@@ -52,11 +51,8 @@ tower = { workspace = true }
 # --- CLI Parsing ---
 clap = { workspace = true }
 
-# --- Firewall ---
-firewall-db = { workspace = true }
-
-# --- SSH3 ---
-genmeta-ssh = { workspace = true, optional = true }
+# --- DShell ---
+dshell = { workspace = true, optional = true }
 
 # --- Database & ORM ---
 sea-orm = { workspace = true }
@@ -71,17 +67,19 @@ console-subscriber = { workspace = true, optional = true }
 # --- System / OS ---
 libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
+sha2 = "0.11"
 
 [features]
 default = ["sqlx-sqlite"]
 sshd = [
     "gateway/sshd",
-    "dep:genmeta-ssh",
-    "genmeta-ssh/server",
+    "dep:dshell",
+    "dshell/server",
+    "h3x/webtransport",
     "nix/socket",
     "nix/uio",
 ]
-pam = ["sshd", "genmeta-ssh/pam", "gateway/pam"]
+pam = ["sshd", "dshell/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]

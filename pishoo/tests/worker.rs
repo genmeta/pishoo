@@ -18,30 +18,19 @@ fn worker_requests_root_owned_connector() {
 }
 
 #[test]
-fn worker_uses_shared_tls_validator() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
-    assert!(
-        worker_source.contains("build_service_config("),
-        "worker TLS path must delegate to build_service_config which handles TLS validation"
-    );
-}
+fn local_connector_type_is_dhttp_endpoint() {
+    use gateway::control_plane::ProvideConnector;
 
-#[test]
-fn worker_reload_uses_single_helper_path() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
+    type Connector =
+        <pishoo::hypervisor::local_plane::LocalControlPlane as ProvideConnector>::Connector;
 
-    assert!(
-        worker_source.contains("build_service_config("),
-        "worker should build config through the shared builder"
-    );
-    assert!(
-        worker_source.contains("setup_service("),
-        "worker should set up through the unified setup_service entry point"
-    );
-    assert!(
-        worker_source.contains("service::run_service("),
-        "worker should run through the unified run_service entry point"
-    );
+    fn assert_same_type(
+        value: Option<Connector>,
+    ) -> Option<std::sync::Arc<dhttp::endpoint::Endpoint>> {
+        value
+    }
+
+    let _ = assert_same_type;
 }
 
 #[test]
@@ -63,11 +52,84 @@ fn worker_stops_server_runtimes_before_exit() {
 }
 
 #[test]
-fn worker_reload_rebuilds_all_listener_handles() {
-    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
+fn listener_rebuild_uses_control_plane_rebuild_call() {
+    let ipc_source = include_str!("../src/ipc.rs");
+    let remote_source = include_str!("../src/worker/remote_plane.rs");
+    let local_source = include_str!("../src/hypervisor/local_plane.rs");
+    let ipc_server_source = include_str!("../src/hypervisor/ipc_server.rs");
+
     assert!(
-        worker_source.contains("received reload signal")
-            && worker_source.contains("reload complete"),
-        "worker reload path should rebuild config and restart the service"
+        ipc_source.contains("async fn rebuild_listener"),
+        "ipc ControlPlane trait must expose async fn rebuild_listener"
     );
+    assert!(
+        ipc_source.contains("RebuildListenError"),
+        "ipc must define a dedicated RebuildListenError type"
+    );
+    assert!(
+        ipc_server_source.contains("rebuild_listener"),
+        "root WorkerControlPlane must implement rebuild_listener"
+    );
+    assert!(
+        remote_source.contains("rebuild_listener"),
+        "RemoteControlPlane must expose rebuild_listener consuming the old IpcListener"
+    );
+    assert!(
+        local_source.contains("rebuild_listener"),
+        "LocalControlPlane must expose rebuild_listener consuming the old RegisteredEndpoint"
+    );
+}
+
+#[test]
+fn sshd_service_registers_webtransport_protocol_layer() {
+    let service_source = include_str!("../src/service/snapshot.rs");
+
+    assert!(
+        service_source.contains("WebTransportProtocolFactory"),
+        "sshd services must register h3x WebTransport protocol routing"
+    );
+    assert!(
+        !service_source.contains("Ssh3ProtocolFactory"),
+        "sshd services must not keep the legacy DShell stream protocol routing"
+    );
+}
+
+#[test]
+fn accept_state_aborts_listener_task_on_drop() {
+    let service_source = include_str!("../src/service.rs");
+    let accept_source = include_str!("../src/service/accept.rs");
+
+    assert!(
+        service_source.contains("pub mod accept;"),
+        "service module must expose the accept submodule"
+    );
+    assert!(
+        accept_source.contains("pub enum AcceptState"),
+        "service::accept must define an AcceptState enum"
+    );
+    assert!(
+        accept_source.contains("task: AbortOnDropHandle<L>"),
+        "AcceptState::Running must abort its accept task if dropped before explicit shutdown"
+    );
+    assert!(
+        !accept_source.contains("listener: L,\n        service:")
+            && !accept_source.contains("listener: L,\n        task:"),
+        "AcceptState must not hold listener and task side by side; the listener \
+         must be owned by the spawned task"
+    );
+}
+
+#[test]
+fn worker_reload_uses_worker_runtime() {
+    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
+
+    assert!(
+        worker_source.contains("WorkerRuntime::new(")
+            && worker_source.contains("runtime.reload().await")
+            && worker_source.contains("runtime.shutdown().await"),
+        "worker must delegate reload/shutdown to WorkerRuntime"
+    );
+    assert!(!worker_source.contains("setup_service("));
+    assert!(!worker_source.contains("service::run_service("));
+    assert!(!worker_source.contains("collect_reusable_listeners("));
 }

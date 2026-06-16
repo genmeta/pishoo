@@ -1,6 +1,9 @@
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
-use crate::parse::{Node, Value};
+use crate::parse::{
+    document::ConfigNode,
+    types::{BoolConfig, SocketAddrs, StunBindConfigValue, StunChangePort},
+};
 
 /// 本节点的 STUN 运行时配置。
 ///
@@ -41,59 +44,48 @@ impl StunNodeConfig {
     /// 两种启用方式满足其一即可：
     /// - `stun on;`
     /// - 存在至少一个 `stun_server { ... }`
-    pub fn from_server_node(server: &Arc<Node>) -> Option<Self> {
+    pub fn from_server_node(server: &Arc<ConfigNode>) -> Option<Self> {
         let stun_enabled = server
-            .get("stun")
-            .and_then(|v| match v {
-                Value::Boolean(b) => Some(*b),
-                _ => None,
-            })
+            .get::<BoolConfig>("stun")
+            .ok()
+            .flatten()
+            .map(|value| value.0)
             .unwrap_or(false);
 
-        let binds: Vec<StunBindConfig> = match server.get("stun_server") {
-            Some(Value::Nodes(nodes)) => nodes
-                .iter()
-                .filter_map(|node| {
-                    let Value::ValueMap(map) = node.value() else {
-                        return None;
-                    };
-                    let bind_address = match map.get("bind")? {
-                        Value::Addr(addr) => *addr,
-                        _ => return None,
-                    };
-                    let outer_address = map.get("outer_addr").and_then(|v| match v {
-                        Value::Addr(addr) => Some(*addr),
-                        _ => None,
-                    });
-                    let change_address = map.get("change_addr").and_then(|v| match v {
-                        Value::Addr(addr) => Some(*addr),
-                        _ => None,
-                    });
-                    let change_port = map.get("change_port").and_then(|v| match v {
-                        Value::String(s) => s.parse::<u16>().ok(),
-                        _ => None,
-                    });
-                    Some(StunBindConfig {
-                        bind_address,
-                        outer_address,
-                        change_address,
-                        change_port,
+        let binds: Vec<StunBindConfig> = server
+            .children_optional("stun_server")
+            .iter()
+            .flat_map(|node| {
+                let outer_address = first_addr(node, "outer_addr");
+                let change_address = first_addr(node, "change_addr");
+                let change_port = node
+                    .get::<StunChangePort>("change_port")
+                    .ok()
+                    .flatten()
+                    .map(|port| port.0);
+
+                node.get_all::<StunBindConfigValue>("bind")
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .map(move |bind| StunBindConfig {
+                        bind_address: bind.bind,
+                        outer_address: bind.outer_addr.or(outer_address),
+                        change_address: bind.change_addr.or(change_address),
+                        change_port: bind.change_port.or(change_port),
                     })
-                })
-                .collect(),
-            _ => vec![],
-        };
+            })
+            .collect();
 
         if !stun_enabled && binds.is_empty() {
             return None;
         }
 
         let relay = server
-            .get("relay")
-            .and_then(|v| match v {
-                Value::Boolean(b) => Some(*b),
-                _ => None,
-            })
+            .get::<BoolConfig>("relay")
+            .ok()
+            .flatten()
+            .map(|value| value.0)
             .unwrap_or(false);
 
         Some(Self { relay, binds })
@@ -108,4 +100,11 @@ impl StunNodeConfig {
     pub fn configured_addrs(&self) -> HashSet<SocketAddr> {
         self.binds.iter().map(|b| b.bind_address).collect()
     }
+}
+
+fn first_addr(node: &ConfigNode, name: &str) -> Option<SocketAddr> {
+    node.get::<SocketAddrs>(name)
+        .ok()
+        .flatten()
+        .and_then(|addrs| addrs.0.first().copied())
 }

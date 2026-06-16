@@ -1,28 +1,24 @@
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Extension, extract::State, response::IntoResponse};
-use genmeta_ssh::{
+use dhttp::h3x::{connection::ConnectionState, qpack::field::Protocol, quic, stream_id::StreamId};
+use dshell::{
     auth::AuthCredential,
-    constants::SSH_VERSION,
-    conversation::ipc::{IpcManageSessionStreamServerShared, IpcManageStreamAdapter},
-    protocol::ConversationHandle,
-    session::{AuthRequest, AuthenticateFn, SessionBootstrap},
-};
-use h3x::{
-    connection::ConnectionState,
-    hyper::upgrade,
-    message::stream::{ReadStream, WriteStream},
-    quic,
-    stream_id::StreamId,
+    session::{AuthRequest, AuthenticateFn, AuthenticatedSession, SessionBootstrap},
 };
 use http::{Request, StatusCode};
 use remoc::prelude::ServerShared;
 use snafu::{OptionExt, Report, ResultExt, Snafu};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
     control_plane::DynSpawnSession,
-    parse::Value,
+    parse::types::StringList,
     reverse::{location::LocationMatch, router::RouterState},
 };
 
@@ -30,6 +26,8 @@ use crate::{
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum RunSshSessionError {
+    #[snafu(display("ssh session cancelled"))]
+    Cancelled,
     #[snafu(display("failed to spawn session child process"))]
     SpawnSession {
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -38,48 +36,70 @@ pub enum RunSshSessionError {
     MuxChannel { source: std::io::Error },
     #[snafu(display("failed to split MuxChannel"))]
     SplitChannel {
-        source: h3x::ipc::transport::SplitError,
+        source: dhttp::h3x::ipc::transport::SplitError,
     },
     #[snafu(display("failed to establish remoc channel with child"))]
     RemocConnect {
         source: remoc::ConnectError<
-            h3x::ipc::transport::MuxSinkError,
-            h3x::ipc::transport::MuxStreamError,
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
         >,
     },
+    #[snafu(display("remoc channel with child terminated"))]
+    RemocConnection {
+        source: remoc::chmux::ChMuxError<
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
+        >,
+    },
+    #[snafu(display("remoc channel with child closed"))]
+    RemocClosed,
     #[snafu(display("failed to receive AuthenticateFn from child"))]
     RecvAuthFn { source: remoc::rch::base::RecvError },
     #[snafu(display("child did not send AuthenticateFn"))]
     NoAuthFn,
     #[snafu(display("authentication rejected by child"))]
-    AuthRejected {
-        source: genmeta_ssh::session::AuthError,
-    },
+    AuthRejected { source: dshell::session::AuthError },
     #[snafu(display("child session failed"))]
     SessionFailed {
-        source: genmeta_ssh::session::SessionRunError,
+        source: dshell::session::SessionRunError,
     },
-    #[snafu(display("failed to create control stream socketpair"))]
-    ControlSocketpair { source: std::io::Error },
-    #[snafu(display("failed to queue control stream FD"))]
-    QueueControlFd {
-        source: h3x::ipc::transport::QueueFdsError,
-    },
-    #[snafu(display("failed to convert control stream socket to tokio"))]
-    ControlFromStd { source: std::io::Error },
 }
 
-/// Axum-style handler for SSH3 CONNECT sessions.
+fn is_webtransport_request<B>(request: &Request<B>) -> bool {
+    request
+        .extensions()
+        .get::<Protocol>()
+        .is_some_and(|protocol| protocol.as_str() == dhttp::h3x::webtransport::WEBTRANSPORT_H3)
+}
+
+fn accept_server_session_error_status(
+    error: &dshell::webtransport::AcceptServerSessionError,
+) -> StatusCode {
+    match error {
+        dshell::webtransport::AcceptServerSessionError::UnexpectedPath { .. }
+        | dshell::webtransport::AcceptServerSessionError::PeerVersion { .. }
+        | dshell::webtransport::AcceptServerSessionError::Accept {
+            source: dhttp::h3x::hyper::extended_connect::AcceptError::NotConnect { .. },
+        } => StatusCode::BAD_REQUEST,
+        dshell::webtransport::AcceptServerSessionError::Accept { .. }
+        | dshell::webtransport::AcceptServerSessionError::RegisterSession { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// Axum-style handler for DShell WebTransport CONNECT sessions.
 ///
 /// Extracts the username from `LocationMatch.remaining` (e.g. for `/ssh/yiyue`,
 /// remaining is `"yiyue"`). Spawns the SSH session in a background task and
-/// returns 200 OK with `ssh-version` header to complete the CONNECT upgrade.
+/// returns 200 OK with `ssh-version` header to complete the WebTransport
+/// Extended CONNECT handshake.
 pub async fn sshd_handle(
     Extension(loc): Extension<LocationMatch>,
-    Extension(connection): Extension<Arc<ConnectionState<dyn quic::DynConnection>>>,
     Extension(stream_id): Extension<StreamId>,
     State(state): State<RouterState>,
-    mut req: Request<axum::body::Body>,
+    req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
     let username = loc.remaining.trim_matches('/');
     if username.is_empty() {
@@ -89,13 +109,10 @@ pub async fn sshd_handle(
 
     let ssh_deny = loc
         .location
-        .get("ssh_deny")
-        .map(|v| {
-            let Value::StringVec(vec) = v else {
-                unreachable!()
-            };
-            vec.to_owned()
-        })
+        .get::<StringList>("ssh_deny")
+        .ok()
+        .flatten()
+        .map(|value| value.0.clone())
         .unwrap_or_default();
 
     if ssh_deny.iter().any(|d| d == username) {
@@ -103,202 +120,299 @@ pub async fn sshd_handle(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let peer_version = match req
-        .headers()
-        .get("ssh-version")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(v) if v == SSH_VERSION => v.to_owned(),
-        _ => {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-    };
-
     let conversation_id = stream_id;
     let username = username.to_owned();
 
-    // Register the conversation BEFORE returning 200 OK. This ensures the
-    // protocol layer can route incoming channel streams as soon as the client
-    // receives the response and opens new QUIC bidi streams.
-    let handle = match connection
-        .protocols()
-        .get::<genmeta_ssh::protocol::Ssh3Protocol>()
-    {
-        Some(proto) => match proto.register(conversation_id) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(error = %Report::from_error(&e), "failed to register SSH3 conversation");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        },
-        None => {
-            tracing::error!("ssh3 protocol not registered on connection");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    if !is_webtransport_request(&req) {
+        tracing::warn!("dshell request is not webtransport extended connect");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let Some(connection) = req
+        .extensions()
+        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
+        .cloned()
+    else {
+        tracing::warn!("dshell request is missing h3 connection state");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    if let Err(error) = connection.peer_settings().await {
+        tracing::warn!(
+            error = %Report::from_error(&error),
+            "failed to wait for peer HTTP/3 settings before dshell webtransport accept"
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let path = req.uri().path().to_owned();
+    let accepted = match dshell::webtransport::accept_server_session(req, &path).await {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            let status = accept_server_session_error_status(&error);
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "failed to accept dshell webtransport session"
+            );
+            return status.into_response();
         }
     };
 
     let span = tracing::info_span!("ssh-session", %conversation_id, user = %username);
-
-    // Spawn the SSH session in a background task. The CONNECT upgrade streams
-    // become available after this handler returns the 200 response.
-    tokio::spawn(
+    let response = accepted.response;
+    let session_spawner = state.session_spawner.clone();
+    let task_scope = state.task_scope.clone();
+    let task_token = task_scope.token();
+    task_scope.spawn(Box::pin(
         async move {
-            // Extract raw read/write streams via CONNECT upgrade.
-            let read_stream = match upgrade::take::<ReadStream>(&mut req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %Report::from_error(&e), "failed to take over read stream");
-                    return;
-                }
-            };
-            let write_stream = match upgrade::take::<WriteStream>(&mut req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %Report::from_error(&e), "failed to take over write stream");
-                    return;
-                }
-            };
-
-            if let Err(e) = run_ssh_session(
+            if let Err(error) = run_ssh_session(
                 &username,
                 conversation_id,
-                peer_version,
-                handle,
-                state.session_spawner.as_ref(),
-                read_stream,
-                write_stream,
+                AcceptedSshSession {
+                    peer_version: accepted.peer_version,
+                    session: accepted.session,
+                },
+                session_spawner.as_ref(),
+                task_token,
             )
             .await
             {
-                tracing::error!(error = %Report::from_error(&e), "ssh session failed");
+                match error {
+                    RunSshSessionError::Cancelled => {
+                        tracing::debug!("ssh session cancelled");
+                    }
+                    error => {
+                        tracing::error!(error = %Report::from_error(&error), "ssh session failed");
+                    }
+                }
             }
         }
         .instrument(span),
-    );
+    ));
 
-    // Return 200 OK with ssh-version header to accept the CONNECT.
-    http::Response::builder()
-        .status(StatusCode::OK)
-        .header("ssh-version", SSH_VERSION)
-        .body(axum::body::Body::empty())
-        .unwrap()
-        .into_response()
+    response.into_response()
+}
+
+struct AcceptedSshSession {
+    peer_version: String,
+    session: dhttp::h3x::webtransport::WebTransportSession,
+}
+
+#[derive(Debug)]
+struct SessionIpcLifecycle {
+    token: CancellationToken,
+    error: Mutex<Option<dhttp::h3x::quic::ConnectionError>>,
+}
+
+impl SessionIpcLifecycle {
+    fn new(token: CancellationToken) -> Self {
+        Self {
+            token,
+            error: Mutex::new(None),
+        }
+    }
+
+    fn closed_error(&self) -> dhttp::h3x::quic::ConnectionError {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        guard
+            .get_or_insert_with(|| dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError {
+                    code: dhttp::h3x::error::Code::H3_REQUEST_CANCELLED,
+                    reason: Cow::Borrowed("ssh session ipc closed"),
+                },
+            })
+            .clone()
+    }
+}
+
+impl dhttp::h3x::quic::Lifecycle for SessionIpcLifecycle {
+    fn close(&self, code: dhttp::h3x::error::Code, reason: Cow<'static, str>) {
+        let mut guard = self
+            .error
+            .lock()
+            .expect("session ipc lifecycle lock poisoned");
+        if guard.is_none() {
+            *guard = Some(dhttp::h3x::quic::ConnectionError::Application {
+                source: dhttp::h3x::quic::ApplicationError { code, reason },
+            });
+        }
+        self.token.cancel();
+    }
+
+    fn check(&self) -> Result<(), dhttp::h3x::quic::ConnectionError> {
+        if self.token.is_cancelled() {
+            Err(self.closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn closed(&self) -> dhttp::h3x::quic::ConnectionError {
+        self.token.cancelled().await;
+        self.closed_error()
+    }
 }
 
 async fn run_ssh_session(
     username: &str,
     conversation_id: StreamId,
-    peer_version: String,
-    handle: ConversationHandle,
+    accepted: AcceptedSshSession,
     spawner: &dyn DynSpawnSession,
-    recver: ReadStream,
-    sender: WriteStream,
+    token: CancellationToken,
 ) -> Result<(), RunSshSessionError> {
     use run_ssh_session_error::*;
 
+    let AcceptedSshSession {
+        peer_version,
+        session,
+    } = accepted;
+
     // Spawn the session child process via the control plane.
-    let transport = spawner
-        .spawn_session(username)
-        .await
-        .context(SpawnSessionSnafu)?;
+    let transport = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = spawner.spawn_session(username) => result.context(SpawnSessionSnafu)?,
+    };
 
     // Establish remoc channel over MuxChannel with the session child.
-    let mux =
-        h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd).context(MuxChannelSnafu)?;
+    let mux = dhttp::h3x::ipc::transport::MuxChannel::from_fd(transport.mux_fd)
+        .context(MuxChannelSnafu)?;
     let (sink, stream) = mux.split().context(SplitChannelSnafu)?;
 
-    // Capture FD sender before remoc consumes the sink.
-    let fd_sender = sink.fd_sender();
+    // Capture the FD transfer plane before remoc consumes the transport.
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
 
-    let (conn, _tx, mut rx) =
-        remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
-            remoc::Cfg::default(),
-            sink,
-            stream,
-        )
-        .await
-        .context(RemocConnectSnafu)?;
-    // Wrap in AbortOnDropHandle so an early return / panic tears down the
-    // remoc connection (and its sink/stream, i.e. the socketpair) instead of
-    // leaking a task that keeps the child process alive forever.
-    let conn_handle =
-        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
+    let connect = remoc::Connect::framed::<_, _, (), AuthenticateFn, remoc::codec::Default>(
+        remoc::Cfg::default(),
+        sink,
+        stream,
+    );
+    let (conn, tx, mut rx) = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = connect => result.context(RemocConnectSnafu)?,
+    };
+    let mut conn = Box::pin(conn.in_current_span());
 
-    let auth_fn: AuthenticateFn = rx
-        .recv()
-        .await
-        .context(RecvAuthFnSnafu)?
-        .context(NoAuthFnSnafu)?;
+    let auth_fn: AuthenticateFn = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = rx.recv() => result,
+    }
+    .context(RecvAuthFnSnafu)?
+    .context(NoAuthFnSnafu)?;
 
     let auth_request = AuthRequest {
         username: username.to_owned(),
         credential: AuthCredential::Certificate,
     };
 
-    let start_session_fn = auth_fn
-        .call(auth_request)
-        .await
-        .context(AuthRejectedSnafu)?;
+    let authenticated: AuthenticatedSession = tokio::select! {
+        () = token.cancelled() => return CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            return RemocClosedSnafu.fail();
+        }
+        result = auth_fn.call(auth_request) => result.context(AuthRejectedSnafu)?,
+    };
 
-    // Set up control stream via Unix socketpair + FD passing.
-    let (ctrl_srv, ctrl_cli) =
-        std::os::unix::net::UnixStream::pair().context(ControlSocketpairSnafu)?;
-    let ctrl_fd_id = fd_sender
-        .queue_fds(vec![ctrl_cli.into()].into())
-        .context(QueueControlFdSnafu)?;
-    let ctrl_srv = tokio::net::UnixStream::from_std(ctrl_srv).context(ControlFromStdSnafu)?;
-    let (ctrl_read, ctrl_write) = ctrl_srv.into_split();
+    let session_shutdown = token.child_token();
+    let lifecycle: Arc<dyn dhttp::h3x::quic::DynLifecycle> =
+        Arc::new(SessionIpcLifecycle::new(session_shutdown.clone()));
+    let session = Arc::new(session);
+    let session_id = dhttp::h3x::webtransport::Session::id(session.as_ref());
 
-    // Bridge QUIC CONNECT streams ↔ control stream socketpair.
-    tokio::spawn(
-        genmeta_ssh::conversation::ipc::bridge_message_reader_to_unix(
-            Box::pin(recver.into_bytes_stream()),
-            ctrl_write,
-        )
-        .in_current_span(),
+    let adapter = dhttp::h3x::ipc::webtransport::WebTransportSessionAdapter::new(
+        Arc::clone(&session),
+        fd_transfer.clone(),
+        Arc::clone(&lifecycle),
     );
-    tokio::spawn(
-        genmeta_ssh::conversation::ipc::bridge_unix_to_message_writer(
-            ctrl_read,
-            Box::pin(sender.into_bytes_sink()),
-        )
-        .in_current_span(),
-    );
+    let (webtransport_server, webtransport_client) =
+        dhttp::h3x::ipc::webtransport::IpcWebTransportSessionServerShared::new(
+            Arc::new(adapter),
+            8,
+        );
 
-    // Set up manage-stream RPC via IPC FD passing.
-    let adapter = IpcManageStreamAdapter::new(handle, fd_sender);
-    let (ms, mc) = IpcManageSessionStreamServerShared::new(Arc::new(adapter), 8);
-    tokio::spawn(
+    let mut tasks = JoinSet::new();
+    let webtransport_shutdown = session_shutdown.clone();
+    tasks.spawn(
         async move {
-            let _ = ms.serve(true).await;
+            tokio::select! {
+                () = webtransport_shutdown.cancelled() => {}
+                _ = webtransport_server.serve(true) => {}
+            }
         }
         .in_current_span(),
     );
 
     let bootstrap = SessionBootstrap {
-        manage_stream: mc,
-        control_fd_id: ctrl_fd_id,
-        conversation_id,
+        webtransport_session: dhttp::h3x::ipc::webtransport::WebTransportSessionBootstrap {
+            session_id,
+            session: webtransport_client,
+        },
         peer_version,
     };
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
+    let session_call = authenticated.start_session.call(bootstrap);
+    tokio::pin!(session_call);
 
-    let session_result = start_session_fn
-        .call(bootstrap)
-        .await
-        .context(SessionFailedSnafu);
+    let session_result = tokio::select! {
+        () = token.cancelled() => CancelledSnafu.fail(),
+        result = &mut conn => {
+            result.context(RemocConnectionSnafu)?;
+            RemocClosedSnafu.fail()
+        }
+        result = &mut session_call => result.context(SessionFailedSnafu),
+    };
 
     // Session is done — tear down the remoc connection so the child sees
     // transport EOF on the socketpair and exits cleanly. Without this the
-    // child's `conn_handle.await` would hang forever and the
+    // child's remoc connection future would hang forever and the
     // `pishoo-ssh-session` process would linger after the SSH session ends.
-    drop(_tx);
+    session_shutdown.cancel();
+    drop(tx);
     drop(rx);
-    conn_handle.abort();
-    let _ = conn_handle.await;
+    drop(conn);
+
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "ssh session helper task failed"
+            );
+        }
+    }
 
     session_result?;
     tracing::info!(%conversation_id, "session ended");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dhttp::h3x::qpack::field::Protocol;
+
+    use super::*;
+
+    #[test]
+    fn webtransport_connect_request_is_detected_by_protocol_extension() {
+        let mut request = Request::builder().body(()).expect("request should build");
+        request
+            .extensions_mut()
+            .insert(Protocol::new(dhttp::h3x::webtransport::WEBTRANSPORT_H3));
+
+        assert!(is_webtransport_request(&request));
+    }
+
+    #[test]
+    fn plain_connect_request_is_not_dshell_transport() {
+        let request = Request::builder().body(()).expect("request should build");
+
+        assert!(!is_webtransport_request(&request));
+    }
 }

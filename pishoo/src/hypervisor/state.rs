@@ -1,42 +1,51 @@
 //! Root-side ownership registry for server_name → local/worker mappings.
 //!
 //! Tracks which worker process owns which server names, provides conflict
-//! detection, and manages the lifecycle of per-server listen adapters routed
-//! from the shared [`Network`](h3x::endpoint::Network)'s SNI dispatcher.
+//! detection, and manages the lifecycle of per-server DHTTP endpoints built
+//! on the shared [`Network`](dhttp::h3x::dquic::Network).
 //!
 //! All mutating methods take `&self` and use interior mutability so that
 //! `RootState` can be shared via `Arc` without external synchronization.
 
+mod listener_registry;
+pub(crate) mod owner;
 mod process_ops;
 mod server_ops;
 
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    collections::{HashMap, VecDeque},
+    future::Future,
 };
 
-use h3x::{
-    dquic::{prelude::BindUri, qinterface::BindInterface},
-    endpoint::{config::ServerQuicConfig, network::Network},
+use dhttp::{
+    endpoint::{CreateEndpointPublicationLoopError, Endpoint},
+    h3x::quic::Listen as _,
+    network::DhttpNetwork,
 };
-use nix::unistd::{Pid, Uid};
-use snafu::Snafu;
-use tokio::{
-    sync::{Mutex, RwLock, mpsc},
-    task::JoinSet,
+use nix::{
+    sys::wait::WaitStatus,
+    unistd::{Pid, Uid},
 };
+use snafu::{Report, Snafu};
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use crate::hypervisor::worker_handle::WorkerHandle;
+use crate::hypervisor::{
+    endpoint_factory::BuildRegisteredEndpointError,
+    task_scope::TaskScope,
+    worker_handle::{WorkerHandle, WorkerHandleError},
+};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Error returned when `register_listener` fails.
+/// Error returned when `acquire_listener` fails.
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum RegisterError {
+pub enum AcquireListenerError {
     /// The name is already owned by the same owner — duplicate listen attempt.
     #[snafu(display("duplicate listen for the same owner"))]
     DuplicateListen,
@@ -44,65 +53,122 @@ pub enum RegisterError {
     /// The entry has been poisoned (set to `Conflicted`).
     #[snafu(display("server name conflicted (poisoned)"))]
     ConflictedName,
-    /// Failed to register the server's identity on the shared [`Network`].
-    #[snafu(display("failed to bind server `{server_name}` on network"))]
-    BindServer {
-        server_name: String,
-        source: h3x::endpoint::network::BindServerError,
+    #[snafu(display("failed to build listen bind patterns"))]
+    BuildBindPatterns {
+        source: gateway::parse::types::ListenBindPatternError,
     },
-}
-
-/// Identifies the owner of a server_name registration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceOwner {
-    /// Owned by the root-local service.
-    Local,
-    /// Owned by a specific worker process.
-    Worker(Pid),
-}
-
-/// Per-server ownership record stored in the root registry.
-pub enum ServerEntry {
-    /// A registration is in progress — the async bind is running. Acts as
-    /// a sentinel so concurrent callers see the name as occupied.
-    /// Transitions to `Active` on success, removed on failure.
-    Registering { owner: ServiceOwner },
-    /// Name is actively owned and serving.
-    Active {
-        owner: ServiceOwner,
-        /// Channel to route accepted connections into the worker/local
-        /// service's [`PerServerListener`]. Retained only for legacy API
-        /// compatibility; the real fanout is driven by `_accept_task`.
-        conn_tx: mpsc::Sender<Arc<h3x::dquic::prelude::Connection>>,
-        shutdown_token: CancellationToken,
-        /// Original listen specifications for network-change reconciliation.
-        listens: Vec<gateway::parse::Listens>,
-        /// Bind URIs currently bound on the shared [`Network`] on behalf of
-        /// this server. Each entry holds a live [`BindInterface`] to keep
-        /// the underlying socket alive; dropping the entry releases one
-        /// reference in [`InterfaceManager`], which closes the socket when
-        /// it is the last outstanding reference.
-        bound_ifaces: HashMap<BindUri, BindInterface>,
-        /// SNI registration handle on the shared [`Network`]. Owns the
-        /// fanout task that drains inbound connections into `conn_tx`;
-        /// dropping releases the SNI entry.
-        _accept_task: AbortOnDropHandle<()>,
-        /// Per-server DNS publish task, aborted when the entry is retired.
-        publish_task: Option<AbortOnDropHandle<()>>,
+    #[snafu(display("failed to build registered endpoint"))]
+    BuildEndpoint {
+        source: BuildRegisteredEndpointError,
     },
-    /// Name is poisoned due to a cross-owner conflict.
-    /// Only cleared by `scrub_conflicts()` during reload.
-    Conflicted,
+    #[snafu(display("failed to create dns publication loop for registered endpoint"))]
+    CreatePublisher {
+        source: CreateEndpointPublicationLoopError,
+    },
+    #[snafu(display("registered endpoint has no dns publishers"))]
+    MissingPublisher,
+    #[snafu(display("listener owner is not available"))]
+    OwnerUnavailable,
+    #[snafu(display("listener transition stopped before result delivery"))]
+    TransitionStopped,
 }
 
-impl ServerEntry {
-    /// Return the owner if this entry is `Registering` or `Active`.
-    pub(super) fn owner(&self) -> Option<ServiceOwner> {
-        match self {
-            Self::Registering { owner } | Self::Active { owner, .. } => Some(*owner),
-            Self::Conflicted => None,
-        }
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum ReleaseListenerError {
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RebuildListenerError {
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+    #[snafu(display("server name conflicted"))]
+    ConflictedName,
+    #[snafu(display("failed to acquire replacement listener"))]
+    Replacement { source: AcquireListenerError },
+    #[snafu(display("listener transition stopped before result delivery"))]
+    TransitionStopped,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum WorkerStartupError {
+    #[snafu(display("worker startup timed out"))]
+    Timeout,
+    #[snafu(display("failed to create mux channel from worker fd"))]
+    MuxChannelFromFd { source: std::io::Error },
+    #[snafu(display("failed to split worker mux channel"))]
+    MuxChannelSplit {
+        source: dhttp::h3x::ipc::transport::SplitError,
+    },
+    #[snafu(display("failed to establish worker remoc transport"))]
+    ConnectTransport {
+        source: remoc::ConnectError<
+            dhttp::h3x::ipc::transport::MuxSinkError,
+            dhttp::h3x::ipc::transport::MuxStreamError,
+        >,
+    },
+    #[snafu(display("failed to send worker bootstrap"))]
+    SendBootstrap {
+        source: remoc::rch::base::SendError<crate::ipc::WorkerBootstrap>,
+    },
+    #[snafu(display("failed to receive worker hello"))]
+    ReceiveHello { source: remoc::rch::base::RecvError },
+    #[snafu(display("worker closed channel without sending startup hello"))]
+    MissingHello,
+    #[snafu(display("worker was unregistered during startup"))]
+    WorkerUnregistered,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum WorkerProcessError {
+    #[snafu(display("worker startup failed"))]
+    Startup { source: WorkerStartupError },
+    #[snafu(display("worker ipc disconnected"))]
+    IpcDisconnected,
+    #[snafu(display("worker exited with status {status:?}"))]
+    ChildExited { status: WaitStatus },
+    #[snafu(display("failed to poll worker status"))]
+    PollStatus { source: WorkerHandleError },
+    #[snafu(display("worker replaced by another process for the same uid"))]
+    UidReplaced,
+    #[snafu(display("worker removed by configuration reload"))]
+    ReloadRemoved,
+    #[snafu(display("worker changed by configuration reload"))]
+    ReloadChanged,
+    #[snafu(display("worker shutdown timed out"))]
+    ShutdownTimeout,
+    #[snafu(display("worker force-killed during shutdown"))]
+    ForcedShutdown,
+    #[snafu(display("worker stopped during root shutdown"))]
+    RootShutdown,
+}
+
+impl WorkerProcessError {
+    pub fn is_restartable(&self) -> bool {
+        matches!(
+            self,
+            Self::Startup { .. }
+                | Self::IpcDisconnected
+                | Self::ChildExited { .. }
+                | Self::PollStatus { .. }
+        )
     }
+}
+
+#[derive(Debug)]
+pub struct WorkerFailure {
+    pub pid: Pid,
+    pub error: WorkerProcessError,
+}
+
+pub(super) struct FailedWorkerRecord {
+    pub(super) target: crate::config::ResolvedWorkerTarget,
+    pub(super) reason: String,
 }
 
 /// Per-worker-process tracking record.
@@ -111,8 +177,8 @@ pub(super) struct WorkerProcessRecord {
     pub(super) uid: Uid,
     /// The username this worker runs as.
     pub(super) username: String,
-    /// Set of server_names owned by this worker.
-    pub(super) owned_servers: HashSet<String>,
+    /// Structured task scope for root-side tasks owned by this worker.
+    pub(super) tasks: TaskScope,
     /// Handle to the spawned worker process.
     pub(super) worker_handle: WorkerHandle,
 }
@@ -135,8 +201,12 @@ pub(super) struct Inner {
     pub(super) processes: HashMap<Pid, WorkerProcessRecord>,
     /// uid → pid mapping (one worker per uid).
     pub(super) users: HashMap<Uid, Pid>,
-    /// Root-side background tasks grouped by worker pid.
-    pub(super) worker_tasks: HashMap<Pid, JoinSet<()>>,
+    /// uid → desired worker target from the current root configuration.
+    pub(super) desired_workers: HashMap<Uid, crate::config::ResolvedWorkerTarget>,
+    /// uid → failed worker target waiting for the next reload retry.
+    pub(super) failed_workers: HashMap<Uid, FailedWorkerRecord>,
+    /// Pending process-level failures reported by worker-scoped tasks.
+    pub(super) worker_failures: VecDeque<WorkerFailure>,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,96 +215,200 @@ pub(super) struct Inner {
 
 /// Root-side ownership registry (thread-safe, interior mutability).
 ///
-/// Tracks `server_name → owner`, `pid → owned_servers`, and `uid → pid`
-/// mappings. Owns the shared [`Network`] + default [`ServerQuicConfig`]
-/// used for every server registration, and coordinates all server
-/// registration / cleanup.
+/// Tracks `server_name → owner` and `uid → pid` mappings. Owns the shared
+/// [`DhttpNetwork`] used for every server registration, and coordinates all
+/// server registration / cleanup.
 pub struct RootState {
-    /// Shared QUIC network with installed SNI dispatcher.
-    pub network: Arc<Network>,
-    /// Server-side QUIC/TLS configuration shared across every registered
-    /// SNI. `Network::bind_server` rejects registrations whose config
-    /// does not match this one, so a single instance is kept here and
-    /// cloned (cheap — inner `Arc`s) for every `bind_server` call.
-    pub server_qcfg: ServerQuicConfig,
-    /// Server entries (behind RwLock for concurrent reads).
-    pub(super) servers: RwLock<ServerRegistry>,
+    /// Shared DHTTP network with installed SNI dispatcher and DNS keepalives.
+    pub network: DhttpNetwork,
+    /// Listener entries (behind RwLock for concurrent reads).
+    listeners: RwLock<listener_registry::ListenerRegistry<ListenerResource>>,
     /// Process/user bookkeeping (behind Mutex).
     pub(super) inner: Mutex<Inner>,
+    /// Structured task scope for root-local service resources.
+    pub(super) local_tasks: TaskScope,
+    /// Root-owned async resource transitions that must finish even if the
+    /// requesting RPC/reload future is cancelled.
+    pub(super) resource_tasks: TaskScope,
     /// Notified when SIGCHLD arrives so the monitor loop wakes immediately.
     pub worker_notify: tokio::sync::Notify,
+    #[cfg(test)]
+    listener_test_hooks: ListenerTestHooks,
 }
 
-/// Server-name registry: `server_name → ServerEntry` state machine.
-///
-/// Entry lifecycle: `(vacant) → Registering → Active → (removed)`.
-/// Conflict: any state → `Conflicted`, cleared by `scrub_conflicts`.
-pub(super) struct ServerRegistry {
-    pub(super) entries: HashMap<String, ServerEntry>,
+pub(super) struct ListenerResource {
+    endpoint: Endpoint,
+    shutdown_token: CancellationToken,
+    publish_token: CancellationToken,
+    publish_task: Option<AbortOnDropHandle<()>>,
 }
 
-impl ServerRegistry {
-    pub(super) fn new() -> Self {
+impl ListenerResource {
+    pub(super) fn new(
+        endpoint: Endpoint,
+        shutdown_token: CancellationToken,
+        publish_token: CancellationToken,
+        publish_task: Option<AbortOnDropHandle<()>>,
+    ) -> Self {
         Self {
-            entries: HashMap::new(),
+            endpoint,
+            shutdown_token,
+            publish_token,
+            publish_task,
         }
     }
 
-    /// Remove a server entry and return its accept task, if any.
-    ///
-    /// Callers **must** await the returned [`AbortOnDropHandle`] after
-    /// releasing any locks — dropping it triggers the abort but the
-    /// runtime drops the task's captured [`ServerBinding`] asynchronously,
-    /// so a subsequent `bind_server` call for the same SNI may otherwise
-    /// race against the old binding's `SniGuard::Drop` and fail with
-    /// `SniInUse`. Awaiting the handle blocks until the task's locals
-    /// (including the `ServerBinding`) have been dropped.
-    ///
-    /// For `Registering` sentinels there is no `ServerBinding` yet, so
-    /// removal of the map entry is sufficient and `None` is returned.
-    ///
-    /// Caller must already hold a write lock on this `ServerRegistry`.
-    pub(super) fn retire_entry(
-        &mut self,
-        server_name: &str,
-    ) -> Option<tokio_util::task::AbortOnDropHandle<()>> {
-        let entry = self.entries.remove(server_name)?;
-        match entry {
-            ServerEntry::Active {
-                shutdown_token,
-                _accept_task,
-                ..
-            } => {
-                shutdown_token.cancel();
-                // Abort the accept task eagerly so its captured
-                // `ServerBinding` is released; callers await the handle to
-                // observe the drop synchronously before the next
-                // `bind_server` for the same SNI.
-                _accept_task.abort();
-                Some(_accept_task)
-            }
-            ServerEntry::Registering { .. } | ServerEntry::Conflicted => None,
+    pub(super) async fn destroy(mut self) {
+        self.shutdown_token.cancel();
+        self.publish_token.cancel();
+        if let Some(task) = self.publish_task.take() {
+            let _ = task.await;
+        }
+        if let Err(error) = self.endpoint.shutdown().await {
+            tracing::warn!(
+                error = %Report::from_error(&error),
+                "failed to shut down listener resource"
+            );
         }
     }
 }
 
 impl RootState {
-    /// Create a new root state with the given shared [`Network`] and
-    /// default [`ServerQuicConfig`].
-    pub fn new(network: Arc<Network>, server_qcfg: ServerQuicConfig) -> Self {
+    /// Create a new root state with the given shared [`DhttpNetwork`].
+    pub fn new(network: DhttpNetwork) -> Self {
         Self {
             network,
-            server_qcfg,
-            servers: RwLock::new(ServerRegistry::new()),
+            listeners: RwLock::new(listener_registry::ListenerRegistry::new()),
             inner: Mutex::new(Inner {
                 processes: HashMap::new(),
                 users: HashMap::new(),
-                worker_tasks: HashMap::new(),
+                desired_workers: HashMap::new(),
+                failed_workers: HashMap::new(),
+                worker_failures: VecDeque::new(),
             }),
+            local_tasks: TaskScope::new(),
+            resource_tasks: TaskScope::new(),
             worker_notify: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            listener_test_hooks: ListenerTestHooks::default(),
         }
+    }
+
+    pub(super) fn spawn_resource_transition<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.resource_tasks.spawn(|_| future);
+    }
+
+    pub async fn wait_resource_transitions(&self) {
+        self.resource_tasks.cancel_and_wait().await;
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(super) struct ListenerTestHooks {
+    next_destroy: std::sync::Mutex<Option<ListenerPause>>,
+    next_delivery: std::sync::Mutex<Option<ListenerPause>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ListenerPause {
+    inner: Arc<ListenerPauseInner>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ListenerPauseInner {
+    started: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    resumed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl ListenerPause {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(ListenerPauseInner {
+                started: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
+                resumed: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub(crate) async fn wait_started(&self) {
+        self.inner.started.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.inner
+            .resumed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.resume.notify_waiters();
+    }
+
+    pub(super) async fn pause(&self) {
+        self.inner.started.notify_waiters();
+        loop {
+            if self
+                .inner
+                .resumed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            let notified = self.inner.resume.notified();
+            if self
+                .inner
+                .resumed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+impl ListenerTestHooks {
+    fn set_next_destroy(&self) -> ListenerPause {
+        let pause = ListenerPause::new();
+        let mut next = self
+            .next_destroy
+            .lock()
+            .expect("listener destroy hook should not be poisoned");
+        *next = Some(pause.clone());
+        pause
+    }
+
+    fn take_next_destroy(&self) -> Option<ListenerPause> {
+        self.next_destroy
+            .lock()
+            .expect("listener destroy hook should not be poisoned")
+            .take()
+    }
+
+    fn set_next_delivery(&self) -> ListenerPause {
+        let pause = ListenerPause::new();
+        let mut next = self
+            .next_delivery
+            .lock()
+            .expect("listener delivery hook should not be poisoned");
+        *next = Some(pause.clone());
+        pause
+    }
+
+    fn take_next_delivery(&self) -> Option<ListenerPause> {
+        self.next_delivery
+            .lock()
+            .expect("listener delivery hook should not be poisoned")
+            .take()
+    }
+}

@@ -2,15 +2,14 @@ use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
 
-use dhttp_home::identity::Name;
-pub use dhttp_home::identity::ssl::Identity;
+use dhttp::{h3x::quic, identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
 use futures::future::BoxFuture;
-use h3x::quic;
+use http::Uri;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 
-use crate::parse as gateway_parse;
+use crate::parse::types::Listens;
 
 /// A simple error type wrapping a string message.
 ///
@@ -34,15 +33,15 @@ impl std::error::Error for StringError {}
 // ---------------------------------------------------------------------------
 
 /// A request to create a QUIC listener for a specific server.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ListenRequest {
     /// The identity to use for the server's TLS configuration.
     pub identity: Identity,
     /// Listen specifications; resolved to bind URIs by the root process.
-    pub bind: Vec<gateway_parse::Listens>,
+    pub bind: Vec<Listens>,
     /// Optional DNS resolver URL for publishing this server's endpoints.
     /// When `None`, the default H3 DNS server is used.
-    pub dns_resolver_url: Option<String>,
+    pub dns_resolver_url: Option<Uri>,
 }
 
 /// Capability to create QUIC listeners.
@@ -51,6 +50,8 @@ pub trait ProvideListener: Send + Sync {
     type Listener: quic::Listen;
     /// Error type for [`listener()`](Self::listener) operations.
     type ListenError: std::error::Error + Send + Sync;
+    /// Error type for [`rebuild_listener()`](Self::rebuild_listener) operations.
+    type RebuildError: std::error::Error + Send + Sync;
 
     /// Request the control plane to create a QUIC listener for the given
     /// server configuration.
@@ -58,6 +59,17 @@ pub trait ProvideListener: Send + Sync {
         &self,
         request: ListenRequest,
     ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
+
+    /// Atomically replace a previously acquired listener with one matching the
+    /// new request. The previous listener is consumed; implementations are
+    /// responsible for any necessary teardown of the old listener as part of
+    /// the rebuild critical section so the server name is never observed
+    /// vacant.
+    fn rebuild_listener(
+        &self,
+        old: Self::Listener,
+        request: ListenRequest,
+    ) -> impl Future<Output = Result<Self::Listener, Self::RebuildError>> + Send + '_;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +109,7 @@ pub trait ProvideConnector: Send + Sync {
 /// Transport handle for communicating with a spawned SSH session process.
 ///
 /// Contains the MuxChannel socketpair FD of the child process. The
-/// consumer converts it into a [`h3x::ipc::transport::MuxChannel`] and
+/// consumer converts it into a [`dhttp::h3x::ipc::transport::MuxChannel`] and
 /// establishes a remoc connection over the resulting sink/stream pair.
 #[cfg(feature = "sshd")]
 pub struct SessionTransport {
@@ -156,7 +168,7 @@ impl<T: SpawnSession> DynSpawnSession for T {
 ///   accessing the root state in-process.
 ///
 /// When the `sshd` feature is enabled, implementors must also provide
-/// [`SpawnSession`] so that SSH3 handlers can spawn session child
+/// [`SpawnSession`] so that DShell handlers can spawn session child
 /// processes through the control plane.
 #[cfg(feature = "sshd")]
 pub trait ControlPlane: ProvideListener + ProvideConnector + SpawnSession {}
@@ -201,7 +213,7 @@ impl IdentityHelper {
 #[derive(Serialize, Deserialize)]
 struct ListenRequestHelper {
     identity: IdentityHelper,
-    bind: Vec<gateway_parse::Listens>,
+    bind: Vec<Listens>,
     #[serde(default)]
     dns_resolver_url: Option<String>,
 }
@@ -211,7 +223,7 @@ impl Serialize for ListenRequest {
         ListenRequestHelper {
             identity: IdentityHelper::from_identity(&self.identity),
             bind: self.bind.clone(),
-            dns_resolver_url: self.dns_resolver_url.clone(),
+            dns_resolver_url: self.dns_resolver_url.as_ref().map(ToString::to_string),
         }
         .serialize(serializer)
     }
@@ -223,7 +235,10 @@ impl<'de> Deserialize<'de> for ListenRequest {
         Ok(Self {
             identity: helper.identity.into_identity()?,
             bind: helper.bind,
-            dns_resolver_url: helper.dns_resolver_url,
+            dns_resolver_url: helper
+                .dns_resolver_url
+                .map(|uri| uri.parse().map_err(serde::de::Error::custom))
+                .transpose()?,
         })
     }
 }

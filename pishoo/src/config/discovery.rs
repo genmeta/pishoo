@@ -1,30 +1,21 @@
 use std::sync::Arc;
 
-use dhttp_home::identity::IdentityHome;
-use gateway::{
-    error::Whatever,
-    parse::{Node, Value},
-};
-use snafu::ResultExt;
-
-use crate::naming::canonicalize_server_nodes;
+use dhttp::home::identity::IdentityProfile;
+use gateway::parse::{document::ConfigNode, error::ConfigLoadFailure};
 
 pub async fn load_identity_servers(
-    identity_home: &IdentityHome,
-) -> Result<Vec<Arc<Node>>, Whatever> {
-    let conf_path = identity_home.server_conf_path();
-    let raw = tokio::fs::read(&conf_path).await.whatever_context(format!(
-        "failed to read identity config `{}`",
-        conf_path.display()
-    ))?;
-    let parsed =
-        gateway::parse::parse_server_config(&raw, identity_home).whatever_context(format!(
-            "failed to parse identity server config `{}`",
-            conf_path.display()
-        ))?;
-    let Some(Value::Nodes(server_nodes)) = parsed.get("server") else {
-        return Ok(Vec::new());
-    };
+    identity_profile: &IdentityProfile,
+) -> Result<Vec<Arc<ConfigNode>>, ConfigLoadFailure> {
+    let conf_path = identity_profile.server_conf_path();
+    let registry = gateway::parse::default_registry();
+    let parsed = gateway::parse::load_config_file(
+        &conf_path,
+        &registry,
+        gateway::parse::registry::BuildOptions {
+            identity_profile: Some(identity_profile),
+        },
+    )
+    .await?;
 
-    canonicalize_server_nodes(server_nodes)
+    Ok(parsed.root.children_optional("server").to_vec())
 }

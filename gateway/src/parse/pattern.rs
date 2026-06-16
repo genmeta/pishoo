@@ -80,6 +80,13 @@ pub fn parse_pattern(args: &[String]) -> Result<Pattern, ParsePatternError> {
     Ok(pattern)
 }
 
+pub fn parse_spanned_pattern(
+    args: &[crate::parse::ast::Spanned<String>],
+) -> Result<Pattern, ParsePatternError> {
+    let owned: Vec<String> = args.iter().map(|arg| arg.value.clone()).collect();
+    parse_pattern(&owned)
+}
+
 #[cfg(test)]
 mod tests {
     use regex::Regex;

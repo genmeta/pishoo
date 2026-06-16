@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use gateway::parse::{Node, Value};
+use gateway::parse::document::ConfigNode;
 
 use super::{
     ConfigError, first_pishoo_node, parse_pid_file,
@@ -9,19 +9,16 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct EntryConfig {
-    pub pid_file: String,
+    pub pid_file: PathBuf,
     pub workers: Vec<WorkerTarget>,
-    pub local_servers: Vec<Arc<Node>>,
+    pub local_servers: Vec<Arc<ConfigNode>>,
 }
 
-fn parse_local_servers(pishoo: &Arc<Node>) -> Vec<Arc<Node>> {
-    match pishoo.get("server") {
-        Some(Value::Nodes(nodes)) => nodes.clone(),
-        Some(_) | None => Vec::new(),
-    }
+fn parse_local_servers(pishoo: &Arc<ConfigNode>) -> Vec<Arc<ConfigNode>> {
+    pishoo.children_optional("server").to_vec()
 }
 
-pub fn parse_entry_config(root: &Arc<Node>) -> Result<EntryConfig, ConfigError> {
+pub fn parse_entry_config(root: &Arc<ConfigNode>) -> Result<EntryConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
     let local_servers = parse_local_servers(&pishoo);

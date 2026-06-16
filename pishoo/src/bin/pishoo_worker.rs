@@ -2,24 +2,21 @@
 //!
 //! Spawned by the root pishoo process with a MuxChannel socketpair on FD 3.
 //! Receives [`WorkerBootstrap`] from the root (containing a
-//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, builds a
-//! [`pishoo::service::ServiceConfig`], and calls [`run_service()`] — the same generic
-//! code path used by root-local services.
+//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, and drives
+//! [`pishoo::service::runtime::WorkerRuntime`] over the root-provided control
+//! plane.
 //!
 //! **FD 3 is reserved for MuxChannel transport** — all logging goes to stderr.
 
 use std::sync::Arc;
 
-use dhttp_home::DhttpHome;
+use dhttp::{h3x::ipc::transport::MuxChannel, home::DhttpHome};
 use gateway::error::Whatever;
-use h3x::ipc::transport::MuxChannel;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
-    service::{self, PreparedServer, setup_service},
-    worker::{config::build_service_config, remote_plane::RemoteControlPlane},
+    worker::remote_plane::RemoteControlPlane,
 };
 use snafu::{OptionExt, Report, ResultExt};
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 #[tokio::main]
@@ -47,8 +44,8 @@ async fn main() -> Result<(), Whatever> {
         MuxChannel::from_fd(mux_fd).whatever_context("failed to create MuxChannel from fd 3")?;
     let (sink, stream) = mux.split().whatever_context("failed to split MuxChannel")?;
 
-    // Keep FdRegistry for receiving FDs from root (e.g. session child FDs).
-    let fd_registry = stream.fd_registry();
+    // Keep the FD transfer plane for receiving FDs from root (e.g. session child FDs).
+    let fd_transfer = stream.fd_transfer(sink.fd_sender());
 
     // Establish remoc connection over MuxSink/MuxStream.
     let (conn, mut base_tx, mut base_rx): (
@@ -58,7 +55,21 @@ async fn main() -> Result<(), Whatever> {
     ) = remoc::Connect::framed(remoc::Cfg::default(), sink, stream)
         .await
         .whatever_context("failed to establish remoc transport")?;
-    let _conn_handle = AbortOnDropHandle::new(tokio::spawn(conn.in_current_span()));
+    let worker_tasks = Arc::new(pishoo::hypervisor::task_scope::TaskScope::new());
+    worker_tasks.spawn(|token| async move {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {}
+            result = conn.in_current_span() => {
+                if let Err(error) = result {
+                    tracing::debug!(
+                        error = %Report::from_error(&error),
+                        "root remoc connection ended"
+                    );
+                }
+            }
+        }
+    });
 
     // Receive bootstrap payload from root.
     let bootstrap = base_rx
@@ -89,17 +100,13 @@ async fn main() -> Result<(), Whatever> {
     tracing::debug!("startup hello sent");
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
-    // Pass FdRegistry so spawn_session can receive FDs from root via MuxChannel.
+    // Pass FdTransfer so worker-side requests can reserve receiver-chosen FD IDs.
     let plane = Arc::new(RemoteControlPlane::new(
         bootstrap.control_plane,
-        fd_registry,
+        fd_transfer,
     ));
 
     let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));
-
-    let mut config = build_service_config(&dhttp_home)
-        .await
-        .whatever_context("failed to build service config")?;
 
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create SIGTERM listener")?;
@@ -109,105 +116,48 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to create SIGQUIT listener")?;
     let mut hup_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .whatever_context("failed to create SIGHUP listener")?;
+    let mut usr1_signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            .whatever_context("failed to create SIGUSR1 listener")?;
 
-    let mut prepared: Vec<PreparedServer<_>> = Vec::new();
+    let router_state = gateway::reverse::router::RouterState {
+        #[cfg(feature = "sshd")]
+        session_spawner: plane.clone(),
+        #[cfg(feature = "sshd")]
+        task_scope: worker_tasks.clone(),
+    };
+    let mut runtime =
+        pishoo::service::runtime::WorkerRuntime::new(plane.clone(), dhttp_home, router_state);
+    runtime.start().await;
 
     loop {
-        // Collect reusable listeners from the previous cycle.
-        let existing_listeners =
-            service::collect_reusable_listeners(std::mem::take(&mut prepared), &config).await;
-
-        tracing::debug!(
-            servers = config.servers.len(),
-            "service config built, starting service"
-        );
-
-        prepared = match setup_service(&*plane, &config, existing_listeners).await {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::error!(
-                    error = %Report::from_error(&error),
-                    "failed to set up service"
-                );
+        tokio::select! {
+            _ = term_signal.recv() => {
+                tracing::info!(signal = "SIGTERM", "received shutdown signal");
                 break;
             }
-        };
-
-        let shutdown = CancellationToken::new();
-        let mut next_config = None;
-        let mut should_exit = false;
-
-        {
-            let router_state = gateway::reverse::router::RouterState {
-                #[cfg(feature = "sshd")]
-                session_spawner: plane.clone(),
-            };
-            let service = service::run_service(
-                &mut prepared,
-                &config.h3_settings,
-                &config.access_rules,
-                router_state,
-                shutdown.clone(),
-            );
-            tokio::pin!(service);
-
-            tokio::select! {
-                () = &mut service => {
-                    tracing::info!("service exited");
-                    should_exit = true;
-                }
-                _ = term_signal.recv() => {
-                    tracing::info!(signal = "SIGTERM", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = int_signal.recv() => {
-                    tracing::info!(signal = "SIGINT", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = quit_signal.recv() => {
-                    tracing::info!(signal = "SIGQUIT", "received shutdown signal");
-                    shutdown.cancel();
-                    service.await;
-                    should_exit = true;
-                }
-                _ = hup_signal.recv() => {
-                    tracing::info!("received reload signal");
-                    let rebuilt_config = match build_service_config(&dhttp_home).await {
-                        Ok(config) => config,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %Report::from_error(&error),
-                                "failed to rebuild service config, keeping current service"
-                            );
-                            // Cancel and recover listeners before continuing
-                            // so they are not leaked.
-                            shutdown.cancel();
-                            service.await;
-                            continue;
-                        }
-                    };
-
-                    shutdown.cancel();
-                    service.await;
-                    next_config = Some(rebuilt_config);
-                }
+            _ = int_signal.recv() => {
+                tracing::info!(signal = "SIGINT", "received shutdown signal");
+                break;
             }
-        }
-
-        if should_exit {
-            break;
-        }
-
-        if let Some(rebuilt_config) = next_config {
-            config = rebuilt_config;
-            tracing::info!(servers = config.servers.len(), "reload complete");
+            _ = quit_signal.recv() => {
+                tracing::info!(signal = "SIGQUIT", "received shutdown signal");
+                break;
+            }
+            _ = hup_signal.recv() => {
+                tracing::info!(signal = "SIGHUP", "received reload signal");
+                runtime.reload().await;
+                tracing::info!(signal = "SIGHUP", "reload complete");
+            }
+            _ = usr1_signal.recv() => {
+                tracing::info!(signal = "SIGUSR1", "received reopen signal");
+            }
         }
     }
 
+    runtime.shutdown().await;
+
     tracing::info!("exiting");
+    worker_tasks.cancel_and_wait().await;
     Ok(())
 }

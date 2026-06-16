@@ -1,7 +1,7 @@
-use std::process;
+use std::{path::Path, process};
 
 use gateway::error::Whatever;
-use snafu::{ResultExt, whatever};
+use snafu::ResultExt;
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -38,17 +38,20 @@ pub enum RootSignal {
     SigChld,
 }
 
-pub async fn send_signal(pid_file: &str, signal_type: SignalType) -> Result<(), Whatever> {
+pub async fn send_signal(pid_file: &Path, signal_type: SignalType) -> Result<(), Whatever> {
     use nix::{sys::signal::Signal, unistd::Pid};
     // 读取 PID 文件
     let pid_str = fs::read_to_string(pid_file)
         .await
-        .whatever_context(format!("failed to read pid file at `{pid_file}`",))?;
+        .whatever_context(format!(
+            "failed to read pid file at `{}`",
+            pid_file.display()
+        ))?;
 
     let pid = pid_str
         .trim()
         .parse::<i32>()
-        .whatever_context(format!("invalid pid in file `{pid_file}`"))?;
+        .whatever_context(format!("invalid pid in file `{}`", pid_file.display()))?;
 
     // 根据信号类型发送对应的系统信号
     let signal = match signal_type {
@@ -129,7 +132,7 @@ impl RootSignalHandler {
 }
 
 // 写入 PID 文件（仅 Unix）
-pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
+pub async fn init_pid_file(pid_file_path: &Path) -> Result<(), Whatever> {
     let pid = process::id().to_string();
     let mut pid_file = match fs::File::create_new(pid_file_path).await {
         Ok(pid_file) => pid_file,
@@ -137,29 +140,32 @@ pub async fn init_pid_file(pid_file_path: &str) -> Result<(), Whatever> {
             handle_existing_pid_file(pid_file_path, error).await?
         }
         Err(error) => {
-            return whatever!(
-                Err(error),
-                "failed to create new pid file at `{pid_file_path}`\n\
+            return Err(error).whatever_context(format!(
+                "failed to create new pid file at `{}`\n\
                     please either:\n\
                     - run as root user, or\n\
                     - change the `pid_file` directive in your config to a writable path",
-            );
+                pid_file_path.display(),
+            ));
         }
     };
 
     pid_file
         .write_all(pid.as_bytes())
         .await
-        .whatever_context(format!("failed to write pid to file `{pid_file_path}`"))?;
-    pid_file
-        .shutdown()
-        .await
-        .whatever_context(format!("failed to close pid file `{pid_file_path}`"))
+        .whatever_context(format!(
+            "failed to write pid to file `{}`",
+            pid_file_path.display()
+        ))?;
+    pid_file.shutdown().await.whatever_context(format!(
+        "failed to close pid file `{}`",
+        pid_file_path.display()
+    ))
 }
 
 // 处理已存在的 PID 文件
 async fn handle_existing_pid_file(
-    pid_file_path: &str,
+    pid_file_path: &Path,
     original_error: io::Error,
 ) -> Result<fs::File, Whatever> {
     use nix::unistd::Pid;
@@ -186,11 +192,11 @@ async fn handle_existing_pid_file(
     match nix::sys::signal::kill(Pid::from_raw(old_pid), None) {
         Ok(_) => {
             // 进程仍在运行
-            whatever!(
-                Err(original_error),
-                "pid file `{pid_file_path}` already exists and process {old_pid} is still running\n\
-- if you want to start multiple instances, please change the `pid_file` directive in your config to a different location"
-            )
+            Err(original_error).whatever_context(format!(
+                "pid file `{}` already exists and process {old_pid} is still running\n\
+- if you want to start multiple instances, please change the `pid_file` directive in your config to a different location",
+                pid_file_path.display()
+            ))
         }
         Err(_) => {
             // 进程不存在，删除旧的 PID 文件
@@ -203,14 +209,18 @@ async fn handle_existing_pid_file(
 }
 
 // 删除并重新创建 PID 文件
-async fn recreate_pid_file(pid_file_path: &str) -> Result<fs::File, Whatever> {
+async fn recreate_pid_file(pid_file_path: &Path) -> Result<fs::File, Whatever> {
     fs::remove_file(pid_file_path)
         .await
         .whatever_context(format!(
-            "failed to remove stale pid file at `{pid_file_path}`"
+            "failed to remove stale pid file at `{}`",
+            pid_file_path.display()
         ))?;
 
     fs::File::create(pid_file_path)
         .await
-        .whatever_context(format!("failed to create pid file at `{pid_file_path}`"))
+        .whatever_context(format!(
+            "failed to create pid file at `{}`",
+            pid_file_path.display()
+        ))
 }

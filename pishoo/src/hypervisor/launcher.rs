@@ -1,6 +1,6 @@
 use std::{
     ffi::{CStr, CString},
-    os::fd::OwnedFd,
+    os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
     path::Path,
 };
 
@@ -14,6 +14,8 @@ use nix::{
 use snafu::{ResultExt, Snafu};
 
 use crate::hypervisor::worker_handle::WorkerHandle;
+
+pub(crate) const CHILD_IPC_FD: RawFd = 3;
 
 pub struct LaunchedWorker {
     pub handle: WorkerHandle,
@@ -40,6 +42,29 @@ struct ChildExecSpec<'a> {
     /// Socketpair FD to dup2 to FD 3 (MuxChannel IPC).
     mux_fd: &'a OwnedFd,
     max_fd: i32,
+}
+
+pub(crate) fn install_child_ipc_fd<Fd: AsFd>(source: Fd) -> std::io::Result<()> {
+    let source_fd = source.as_fd().as_raw_fd();
+
+    if source_fd != CHILD_IPC_FD {
+        let rc = unsafe { libc::dup2(source_fd, CHILD_IPC_FD) };
+        if rc < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    let flags = unsafe { libc::fcntl(CHILD_IPC_FD, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let rc = unsafe { libc::fcntl(CHILD_IPC_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Snafu)]
@@ -155,15 +180,11 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         max_fd,
     } = spec;
 
-    // dup2 the MuxChannel socketpair FD to FD 3 (clears CLOEXEC).
-    // SAFETY: post-fork child, single-threaded. We wrap raw fd 3 in OwnedFd
-    // to satisfy nix's typed API, then forget it to prevent Drop from closing fd 3.
-    use std::os::fd::FromRawFd;
-    let mut fd3 = unsafe { OwnedFd::from_raw_fd(3) };
-    if nix::unistd::dup2(mux_fd, &mut fd3).is_err() {
+    // dup2 the MuxChannel socketpair FD to FD 3 and clear CLOEXEC so the
+    // exec'd worker can recover it as its bootstrap channel.
+    if install_child_ipc_fd(mux_fd).is_err() {
         child_fail(126);
     }
-    std::mem::forget(fd3);
 
     // Close all FDs from 4 onward (FD 0/1/2 = inherited stdio for logging,
     // FD 3 = MuxChannel).
@@ -254,14 +275,11 @@ fn session_child_exec(
     mux_fd: &OwnedFd,
     max_fd: i32,
 ) -> ! {
-    // SAFETY: post-fork child, single-threaded. We wrap raw fd 3 in OwnedFd
-    // to satisfy nix's typed API, then forget it to prevent Drop from closing fd 3.
-    use std::os::fd::FromRawFd;
-    let mut fd3 = unsafe { OwnedFd::from_raw_fd(3) };
-    if nix::unistd::dup2(mux_fd, &mut fd3).is_err() {
+    // dup2 the MuxChannel socketpair FD to FD 3 and clear CLOEXEC so the
+    // exec'd session child can recover it as its bootstrap channel.
+    if install_child_ipc_fd(mux_fd).is_err() {
         child_fail(126);
     }
-    std::mem::forget(fd3);
 
     let mut fd = 4;
     while fd < max_fd {
@@ -304,7 +322,7 @@ fn build_exec_env(username: &str, home: &Path) -> Result<Vec<CString>, BuildExec
 }
 
 fn child_fail(code: i32) -> ! {
-    std::process::exit(code);
+    unsafe { libc::_exit(code) }
 }
 
 /// Resolve the path of the `pishoo-ssh-session` binary.
@@ -453,6 +471,8 @@ fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+
     use super::*;
 
     #[test]
@@ -474,5 +494,78 @@ mod tests {
             normalized,
             vec![Gid::from_raw(501), Gid::from_raw(12), Gid::from_raw(79)]
         );
+    }
+
+    #[test]
+    fn install_child_ipc_fd_clears_cloexec_when_source_is_fd3() {
+        const PROBE_ENV: &str = "PISHOO_LAUNCHER_FD3_PROBE";
+
+        if std::env::var_os(PROBE_ENV).is_some() {
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("current test exe"))
+            .env(PROBE_ENV, "1")
+            .arg("--exact")
+            .arg("hypervisor::launcher::tests::install_child_ipc_fd_source_fd3_probe")
+            .arg("--nocapture")
+            .output()
+            .expect("spawn fd3 probe test");
+
+        assert!(
+            output.status.success(),
+            "fd3 probe failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn install_child_ipc_fd_source_fd3_probe() {
+        if std::env::var_os("PISHOO_LAUNCHER_FD3_PROBE").is_none() {
+            return;
+        }
+
+        let (source, _peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let raw_source = source.into_raw_fd();
+
+        let fd3 = unsafe {
+            if raw_source != CHILD_IPC_FD {
+                assert!(
+                    libc::dup2(raw_source, CHILD_IPC_FD) >= 0,
+                    "dup source fd to fd3 failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                assert!(
+                    libc::close(raw_source) == 0,
+                    "close source fd failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            OwnedFd::from_raw_fd(CHILD_IPC_FD)
+        };
+
+        let flags = unsafe { libc::fcntl(CHILD_IPC_FD, libc::F_GETFD) };
+        assert!(
+            flags >= 0,
+            "read fd3 flags failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            unsafe { libc::fcntl(CHILD_IPC_FD, libc::F_SETFD, flags | libc::FD_CLOEXEC) } >= 0,
+            "set fd3 cloexec failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        install_child_ipc_fd(&fd3).expect("install child ipc fd");
+
+        let flags = unsafe { libc::fcntl(CHILD_IPC_FD, libc::F_GETFD) };
+        assert!(
+            flags >= 0,
+            "read fd3 flags after install failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(flags & libc::FD_CLOEXEC, 0);
     }
 }

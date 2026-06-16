@@ -2,10 +2,9 @@
 resolver = "2"
 members = ["gateway", "pishoo", "xtask"]
 
-
 [workspace.dependencies]
 # --- Core & Error Handling ---
-snafu = "0.8"
+snafu = "0.9"
 
 # --- Async Runtime & Utilities ---
 tokio = { version = "1", features = ["full"] }
@@ -17,6 +16,7 @@ tokio-util = "0.7"
 # --- Serialization ---
 serde = { version = "1", features = ["derive"] }
 serde_cbor = "0.11"
+serde_json = "1"
 tokio-serde = "0.9"
 
 # --- Logging & Tracing ---
@@ -32,11 +32,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "local-time",
 ] }
 tracing-appender = "0.2"
-console-subscriber = "0.4"
+console-subscriber = "0.5"
 
 # --- Networking & HTTP ---
 bytes = "1"
 http = "1"
+url = "2"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
@@ -44,11 +45,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 axum = { version = "0.8", default-features = false }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
-firewall-base = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
-firewall-db = { git = "ssh://git@github.com/genmeta/firewall.git", rev = "85493bbc847cf3e95d54f5b0b7acbf5d3ca85b56" }
 
 # --- QUIC Implementation ---
-h3x = { git = "https://github.com/genmeta/h3x.git", branch = "main" }
+h3x = { version = "0.4.0" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [
@@ -59,24 +58,23 @@ remoc = { version = "0.18", default-features = false, features = [
     "default-codec-bincode",
 ] }
 
-# --- SSH3 ---
-genmeta-ssh = { git = "ssh://git@github.com/genmeta/genmeta-ssh.git", rev = "a32d6bec27dd3012f5914a9efb83d66cf11c172a" }
-
-# --- DNS (mDNS/HTTP resolver) ---
-gmdns = { git = "ssh://git@github.com/genmeta/gmdns.git", rev = "3722e28b6c8bb5370517736ec760035ecf980a4f", features = [
-    "h3x-resolver",
-] }
+# --- DShell ---
+dshell = { version = "0.4.0" }
 
 # --- Security & TLS ---
-getrandom = "0.3.1"
+getrandom = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
 
 # --- Utilities ---
 regex = "1"
 parking_lot = "0.12"
-misc-conf = "0.1"
+peg = "0.8"
+glob = "0.3"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["events", "event-stream"] }
 either = "1"
@@ -87,14 +85,14 @@ derive_more = "2"
 dashmap = "6"
 pin-project-lite = "0.2"
 form_urlencoded = "1"
-socket2 = "0.5"
+percent-encoding = "2"
+socket2 = "0.6"
 x509-parser = "0.18"
-dhttp-home = { git = "ssh://git@github.com/genmeta/dhttp-home.git", rev = "780ee2de466d64527fed636e7583bf11aef92f1e" }
+dhttp = { version = "0.2.0" }
 
 # --- System Interaction ---
 libc = "0.2"
 nix = "0.31"
-pam = "0.7"
 
 # --- Database ORM ---
 sea-orm = { version = "1", features = ["runtime-tokio-rustls"] }
@@ -112,9 +110,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
-
-# Pin all h3x references (gateway + transitive via gmdns/genmeta-ssh) to a
-# single revision. Using the ssh URL as the patch target differentiates it
-# from the https URL in direct deps, which is required by cargo.
-[patch."https://github.com/genmeta/h3x.git"]
-h3x = { git = "ssh://git@github.com/genmeta/h3x.git", rev = "6133d31651b31d4b03956946c370b776c203f4c3" }

@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
+use dhttp::h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
-use h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -55,6 +55,27 @@ pub enum ListenError {
     Call { source: remoc::rtc::CallError },
 }
 
+/// Error returned by [`ControlPlane::rebuild_listener`].
+///
+/// Rebuild atomically replaces an owned listener so the server name is never
+/// momentarily vacant during reload.
+#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
+#[snafu(module)]
+pub enum RebuildListenError {
+    #[snafu(display("listener is not owned by this worker"))]
+    NotOwner,
+    #[snafu(display("server name conflicts with an existing listener"))]
+    Conflict,
+    #[snafu(display("replacement listener failed after old listener was destroyed: {reason}"))]
+    Replacement { reason: String },
+    #[snafu(display("invalid rebuild request: {reason}"))]
+    InvalidRequest { reason: String },
+    #[snafu(display("internal error: {message}"))]
+    Internal { message: String },
+    #[snafu(transparent)]
+    Call { source: remoc::rtc::CallError },
+}
+
 /// Error returned by [`ControlPlane::connect`].
 #[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
@@ -88,30 +109,36 @@ pub enum SpawnSessionError {
 /// Workers call these methods to request listeners and connectors from root.
 /// The returned [`IpcListenClient`] / [`IpcConnectClient`] are used by the
 /// worker to construct [`IpcListener`] / [`IpcConnector`] with the local
-/// [`FdRegistry`](h3x::ipc::transport::FdRegistry).
+/// [`FdTransfer`](dhttp::h3x::ipc::transport::FdTransfer).
 #[remoc::rtc::remote]
 pub trait ControlPlane: Send + Sync {
     /// Request a QUIC listener for the given server configuration.
     ///
     /// Root creates the listener, wraps it in an IPC `ListenAdapter`, and
     /// returns an [`IpcListenClient`] that the worker constructs an
-    /// [`IpcListener`](h3x::ipc::capability::listener::IpcListener) from.
+    /// [`IpcListener`](dhttp::h3x::ipc::capability::listener::IpcListener) from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
+
+    /// Atomically replace a previously acquired listener with one matching the
+    /// new request. The previous listener is destroyed by root as part of the
+    /// same critical section, so the server name is never observed vacant.
+    async fn rebuild_listener(
+        &self,
+        request: ListenRequest,
+    ) -> Result<IpcListenClient, RebuildListenError>;
 
     /// Request an outbound QUIC connector.
     ///
     /// Root creates the connector, wraps it in an IPC `ConnectAdapter`, and
     /// returns an [`IpcConnectClient`] that the worker constructs an
-    /// [`IpcConnector`](h3x::ipc::capability::connector::IpcConnector) from.
+    /// [`IpcConnector`](dhttp::h3x::ipc::capability::connector::IpcConnector) from.
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError>;
 
     /// Request root to spawn an SSH session child process for the given user.
     ///
-    /// Root forks `pishoo-ssh-session` as root (for PAM), then queues the
-    /// child's MuxChannel FD to the worker via the root-side MuxChannel's
-    /// [`FdSender`](h3x::ipc::transport::FdSender). The returned `u64` is
-    /// the FD batch ID — the worker passes it to
-    /// [`FdRegistry::wait_fds`](h3x::ipc::transport::FdRegistry::wait_fds)
-    /// to receive the FD.
-    async fn spawn_session(&self, username: String) -> Result<u64, SpawnSessionError>;
+    /// Root forks `pishoo-ssh-session` as root (for PAM), then delivers the
+    /// child's MuxChannel FD to the worker through the worker-chosen `fd_id`.
+    /// The returned `u64` echoes `fd_id` after the FD delivery is queued to
+    /// the local mux writer FIFO.
+    async fn spawn_session(&self, username: String, fd_id: u64) -> Result<u64, SpawnSessionError>;
 }

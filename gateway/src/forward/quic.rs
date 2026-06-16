@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
-use h3x::{client::Client, connection::Connection, quic};
+use dhttp::{
+    endpoint::Endpoint,
+    h3x::{connection::Connection, quic},
+};
 use http::{Request, Response, uri::Authority};
 use http_body_util::BodyExt;
 use hyper::{server::conn::http1, service::service_fn};
 use snafu::{Report, ResultExt, Whatever};
 use tracing::{Instrument, error, info};
 
-use super::BoxResponse;
+use super::{BoxResponse, task_scope::ForwardTaskSpawner};
 use crate::{
     error::BoxError,
     forward::{build_empty_response, build_error_response, tunnel_upgrade, validate_host},
@@ -15,9 +18,10 @@ use crate::{
 
 /// 处理普通 HTTP 请求
 #[tracing::instrument(level = "info", skip_all, fields(odcid = tracing::field::Empty))]
-pub async fn proxy<C: quic::Connect>(
+pub async fn proxy(
     mut req: Request<hyper::body::Incoming>,
-    client: Arc<Client<C>>,
+    client: Arc<Endpoint>,
+    task_spawner: ForwardTaskSpawner,
 ) -> Result<BoxResponse, hyper::Error> {
     // 验证主机合法性
     let host = match validate_host(&mut req) {
@@ -43,7 +47,7 @@ pub async fn proxy<C: quic::Connect>(
         Ok(mut response) => {
             let response_upgrade = hyper::upgrade::on(&mut response);
             // Terminates when either end of the tunnel closes the connection.
-            tokio::spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
+            task_spawner.spawn(tunnel_upgrade(request_upgrade, response_upgrade).in_current_span());
             info!(?response, "request proxied successfully");
             Ok(response)
         }
@@ -55,19 +59,23 @@ pub async fn proxy<C: quic::Connect>(
 }
 
 /// 处理 CONNECT 隧道请求
-pub async fn connect_tunnel<C: quic::Connect + 'static>(
+pub async fn connect_tunnel(
     req: Request<hyper::body::Incoming>,
-    client: Arc<Client<C>>,
+    client: Arc<Endpoint>,
+    task_spawner: ForwardTaskSpawner,
 ) -> Result<BoxResponse, hyper::Error> {
-    tokio::spawn(
+    let tunnel_spawner = task_spawner.clone();
+    task_spawner.spawn(
         async move {
             // 升级连接并处理后续请求
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     info!("establishing tunnel to request uri");
+                    let service_spawner = tunnel_spawner.clone();
                     let service = service_fn(move |req| {
                         let client = client.clone();
-                        async move { proxy(req, client).await }
+                        let request_spawner = service_spawner.clone();
+                        async move { proxy(req, client, request_spawner).await }
                     });
                     if let Err(error) = http1::Builder::new()
                         .preserve_header_case(true)
@@ -108,10 +116,10 @@ async fn send<Conn: quic::Connection>(
 }
 
 /// 通过 h3x 连接池获取连接
-async fn connect<C: quic::Connect>(
-    client: &Client<C>,
+async fn connect(
+    client: &Endpoint,
     host: &str,
-) -> Result<Arc<Connection<C::Connection>>, Whatever> {
+) -> Result<Arc<Connection<<Endpoint as quic::Connect>::Connection>>, Whatever> {
     let authority: Authority = host
         .parse()
         .whatever_context(format!("invalid host: {host}"))?;

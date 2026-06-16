@@ -5,13 +5,15 @@ use std::{
 };
 
 use bytes::Bytes;
-use dhttp_home::identity::Name;
-use h3x::client::Client;
+use dhttp::{
+    endpoint::Endpoint,
+    name::{DhttpName, Name},
+};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use snafu::{Report, ResultExt, Snafu};
+use snafu::{OptionExt, Report, ResultExt, Snafu};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
@@ -23,12 +25,14 @@ use crate::{
     command,
     error::{BoxError, Result, Whatever},
     forward,
-    parse::{Node, Value},
+    parse::{document::ConfigNode, types::SocketAddrs},
 };
 
-pub(crate) mod h3_client; // TODO: remove once all callers are migrated
 mod normal;
 mod quic;
+mod task_scope;
+
+use task_scope::ForwardTaskScope;
 
 #[allow(dead_code)]
 pub static ALPN: &[u8] = b"h3";
@@ -67,21 +71,25 @@ fn configure_tcp_keepalive(stream: &TcpStream) {
 ///
 /// # Arguments
 /// * `node` - The configuration node
-/// * `client` - Pre-built H3 client for QUIC proxying
+/// * `client` - DHTTP endpoint used for outbound QUIC proxying
 ///
 /// # Returns
 /// * `Result<(SocketAddr, impl Future)>` - The address and server task
-pub async fn serve<C: h3x::quic::Connect + 'static>(
-    node: Arc<Node>,
-    client: Arc<Client<C>>,
+pub async fn serve(
+    node: Arc<ConfigNode>,
+    client: Arc<Endpoint>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
     tracing::info!("starting forward proxy server");
-    let Some(Value::Addr(addr)) = node.get("listen").cloned() else {
-        unreachable!()
-    };
+    let listen = node
+        .require::<SocketAddrs>("listen")
+        .whatever_context::<_, Whatever>("failed to read forward proxy listen directive")?;
+    let addr = *listen
+        .0
+        .first()
+        .whatever_context::<_, Whatever>("missing forward proxy listen address")?;
 
     let (listener, local_addr) = async {
         let listener = TcpListener::bind(addr).await?;
@@ -96,6 +104,8 @@ pub async fn serve<C: h3x::quic::Connect + 'static>(
     // 访问权限控制
     let acl = Arc::new(command::acl(&node));
     let semaphore = Arc::new(Semaphore::new(1024));
+    let task_scope = ForwardTaskScope::new();
+    let task_spawner = task_scope.spawner();
 
     let task = async move {
         loop {
@@ -106,15 +116,18 @@ pub async fn serve<C: h3x::quic::Connect + 'static>(
                     };
                     let acl = acl.clone();
                     let client = client.clone();
+                    let task_spawner = task_spawner.clone();
                     async {
                         let _permit = permit;
                         configure_tcp_keepalive(&stream);
                         let io = TokioIo::new(stream);
 
+                        let service_task_spawner = task_spawner.clone();
                         // 为每个连接创建服务处理器
                         let service = service_fn(move |mut req| {
                             let acl = acl.clone();
                             let client = client.clone();
+                            let request_task_spawner = service_task_spawner.clone();
                             let span =
                                 info_span!("forward_proxy", uri=%req.uri(), method=%req.method());
                             async move {
@@ -137,28 +150,32 @@ pub async fn serve<C: h3x::quic::Connect + 'static>(
                                 match acl.check(&host) {
                                     true if is_connect => {
                                         debug!(%host, "quic proxying connect request");
-                                        forward::quic::connect_tunnel(req, client).await
+                                        forward::quic::connect_tunnel(
+                                            req,
+                                            client,
+                                            request_task_spawner,
+                                        )
+                                        .await
                                     }
                                     true => {
                                         debug!(%host, "quic proxying request");
-                                        forward::quic::proxy(req, client).await
+                                        forward::quic::proxy(req, client, request_task_spawner)
+                                            .await
                                     }
                                     false if is_connect => {
                                         debug!(%host, "normal proxying connect request");
-                                        forward::normal::connect(req).await
+                                        forward::normal::connect(req, request_task_spawner).await
                                     }
                                     false => {
                                         debug!(%host, "normal proxying request");
-                                        forward::normal::proxy(req).await
+                                        forward::normal::proxy(req, request_task_spawner).await
                                     }
                                 }
                             }
                             .instrument(span)
                         });
 
-                        // Inherent termination: TCP keepalive detects dead peers (~90s),
-                        // header_read_timeout closes idle keep-alive connections (120s).
-                        tokio::task::spawn(
+                        task_spawner.spawn(
                             async move {
                                 let result = http1::Builder::new()
                                     .timer(hyper_util::rt::tokio::TokioTimer::new())
@@ -195,6 +212,7 @@ pub async fn serve<C: h3x::quic::Connect + 'static>(
                 }
             }
         }
+        task_scope.shutdown().await;
         Ok(())
     };
 
@@ -238,15 +256,15 @@ fn canonicalize_forward_host(host: &str) -> Option<String> {
         return None;
     }
 
-    if host.ends_with(Name::SUFFIX) {
-        return None;
+    if host.len() >= DhttpName::SUFFIX.len()
+        && host[host.len() - DhttpName::SUFFIX.len()..].eq_ignore_ascii_case(DhttpName::SUFFIX)
+    {
+        let name = Name::try_from(host).ok()?;
+        let name = DhttpName::try_from(name).ok()?;
+        return (host != name.as_full()).then(|| name.as_full().to_owned());
     }
 
-    if let Ok(Some(name)) = Name::try_expand_from(host) {
-        return Some(name.as_full().to_string());
-    }
-
-    Name::try_from_str_partial(host)
+    DhttpName::try_from(host)
         .ok()
         .map(|name| name.as_full().to_string())
 }
@@ -336,21 +354,29 @@ mod tests {
     fn canonicalize_forward_host_expands_partial_and_tilde() {
         assert_eq!(
             canonicalize_forward_host("borber.pilot").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(
             canonicalize_forward_host("borber.pilot~").as_deref(),
-            Some("borber.pilot.genmeta.net")
+            Some("borber.pilot.dhttp.net")
+        );
+        assert_eq!(
+            canonicalize_forward_host("BORBER.PILOT~").as_deref(),
+            Some("borber.pilot.dhttp.net")
+        );
+        assert_eq!(
+            canonicalize_forward_host("Borber.Pilot.Dhttp.Net").as_deref(),
+            Some("borber.pilot.dhttp.net")
         );
         assert_eq!(canonicalize_forward_host("127.0.0.1"), None);
-        assert_eq!(canonicalize_forward_host("borber.pilot.genmeta.net"), None);
+        assert_eq!(canonicalize_forward_host("borber.pilot.dhttp.net"), None);
     }
 
     #[test]
     fn rewrite_request_uri_host_replaces_absolute_uri_host() {
         assert_eq!(
-            rewrite_request_uri_host("http://borber.pilot/path?q=1", "borber.pilot.genmeta.net"),
-            "http://borber.pilot.genmeta.net/path?q=1"
+            rewrite_request_uri_host("http://borber.pilot/path?q=1", "borber.pilot.dhttp.net"),
+            "http://borber.pilot.dhttp.net/path?q=1"
         );
     }
 }

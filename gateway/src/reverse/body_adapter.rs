@@ -5,8 +5,8 @@ use std::{
 
 use axum::{body::Body, extract::Request, response::Response};
 use bytes::Bytes;
+use dhttp::h3x::dhttp::message::MessageStreamError;
 use futures::future::BoxFuture;
-use h3x::message::stream::MessageStreamError;
 use http_body_util::combinators::UnsyncBoxBody;
 
 type H3Body = UnsyncBoxBody<Bytes, MessageStreamError>;

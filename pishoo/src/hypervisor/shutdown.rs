@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use nix::sys::signal::Signal;
 
-use crate::hypervisor::state::RootState;
+use crate::hypervisor::state::{RootState, WorkerProcessError};
 
 /// Run the shutdown sequence after receiving a termination signal.
 ///
@@ -12,15 +12,14 @@ use crate::hypervisor::state::RootState;
 /// 2. Wait up to 2 seconds for workers to exit gracefully.
 /// 3. If workers remain, SIGKILL them and wait another 2 seconds.
 pub async fn run_shutdown(state: &Arc<RootState>, forwarded: Signal) {
+    state.clear_desired_workers().await;
     state.forward_unix_signal(forwarded).await;
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let exited = state.collect_exited_workers().await;
-        for pid in exited {
-            state
-                .cleanup_worker_with_reason(pid, "signal_terminate")
-                .await;
+        let failures = state.collect_worker_failures().await;
+        for failure in failures {
+            state.cleanup_worker(failure.pid, failure.error).await;
         }
         if state.worker_pids().await.is_empty() {
             break;
@@ -32,7 +31,8 @@ pub async fn run_shutdown(state: &Arc<RootState>, forwarded: Signal) {
     }
 
     if !state.worker_pids().await.is_empty() {
-        let force_killed = state.force_kill_workers("shutdown_timeout").await;
+        let shutdown_timeout = WorkerProcessError::ShutdownTimeout;
+        let force_killed = state.force_kill_workers(&shutdown_timeout).await;
         if !force_killed.is_empty() {
             tracing::warn!(
                 workers = force_killed.len(),
@@ -42,11 +42,9 @@ pub async fn run_shutdown(state: &Arc<RootState>, forwarded: Signal) {
             let force_kill_deadline =
                 tokio::time::Instant::now() + std::time::Duration::from_secs(2);
             loop {
-                let exited = state.collect_exited_workers().await;
-                for pid in exited {
-                    state
-                        .cleanup_worker_with_reason(pid, "forced_shutdown")
-                        .await;
+                let failures = state.collect_worker_failures().await;
+                for failure in failures {
+                    state.cleanup_worker(failure.pid, failure.error).await;
                 }
                 if state.worker_pids().await.is_empty() {
                     break;
@@ -59,6 +57,11 @@ pub async fn run_shutdown(state: &Arc<RootState>, forwarded: Signal) {
         }
     } else {
         tracing::info!("all workers exited gracefully");
+    }
+    for pid in state.worker_pids().await {
+        state
+            .cleanup_worker(pid, WorkerProcessError::ForcedShutdown)
+            .await;
     }
     tracing::info!("shutdown complete");
 }
