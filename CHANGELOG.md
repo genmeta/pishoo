@@ -39,7 +39,7 @@
 - `proxy_pass` URI rewriting is aligned with nginx-style prefix semantics.
 - `listen internal` is localhost-only by construction. External listen scopes
   remain rejected with typed configuration errors.
-- Gateway no longer owns DNS selector configuration or DNS bootstrap constants.
+- Gateway no longer owns DNS certificate-chain-key configuration or DNS bootstrap constants.
   DNS publication is bridged through DHTTP/DDNS endpoint publication APIs.
 - `pishoo-common` remains at `0.5.0-1`; the `pishoo` binary package advances to
   `0.6.0-1` and declares its compatible common-package range.
