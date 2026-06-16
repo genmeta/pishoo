@@ -57,6 +57,11 @@
 - AArch64 GNU package builds filter the unsupported Zig/Rust linker mitigation
   flag, and RPM release CI omits the unsupported Fedora armv7/armhfp target.
 
+### Dependencies
+
+- Release manifests now target the DHTTP/DShell release-wave crates: `h3x`
+  v0.4.0, `dhttp` v0.2.0, and `dshell` v0.4.0.
+
 ### Components
 
 - `gateway` v0.6.0
