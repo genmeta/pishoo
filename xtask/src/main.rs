@@ -398,6 +398,19 @@ mod tests {
     }
 
     #[test]
+    fn release_workflow_homebrew_tap_updates_root_formula() {
+        assert!(
+            RELEASE_WORKFLOW
+                .contains("BREW_PUBLIC_BASE_URL: https://download.dhttp.net/brew/pishoo")
+        );
+        assert!(!RELEASE_WORKFLOW.contains("download.genmeta.net"));
+        assert!(RELEASE_WORKFLOW.contains("formula_dest=\"$tap_dir/$FORMULA_NAME\""));
+        assert!(RELEASE_WORKFLOW.contains("git status --porcelain -- \"$FORMULA_NAME\""));
+        assert!(RELEASE_WORKFLOW.contains("git add \"$FORMULA_NAME\""));
+        assert!(!RELEASE_WORKFLOW.contains("Formula/$FORMULA_NAME"));
+    }
+
+    #[test]
     fn public_package_manifests_declare_apache_2_license() {
         let workspace_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
