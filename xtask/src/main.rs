@@ -398,6 +398,41 @@ mod tests {
     }
 
     #[test]
+    fn release_workflow_uploads_product_assets_to_github_release() {
+        assert!(RELEASE_WORKFLOW.contains("contents: write"));
+        assert!(RELEASE_WORKFLOW.contains("  github-release:"));
+        assert_eq!(RELEASE_WORKFLOW.matches("needs: github-release").count(), 3);
+        assert_eq!(
+            RELEASE_WORKFLOW
+                .matches("gh release upload \"$GITHUB_REF_NAME\"")
+                .count(),
+            3
+        );
+        assert_eq!(
+            RELEASE_WORKFLOW
+                .matches("gh release create \"$GITHUB_REF_NAME\"")
+                .count(),
+            1
+        );
+        assert!(RELEASE_WORKFLOW.contains("git for-each-ref \"$tag_ref\" --format='%(contents)'"));
+        assert!(RELEASE_WORKFLOW.contains("## Authentication and provenance"));
+        assert!(RELEASE_WORKFLOW.contains("--notes-file \"$notes_file\""));
+        assert!(!RELEASE_WORKFLOW.contains("--notes-from-tag               ||"));
+        assert!(
+            RELEASE_WORKFLOW
+                .contains("assets=(target/common/deb/*.deb target/*/release/deb/*.deb)")
+        );
+        assert!(
+            RELEASE_WORKFLOW
+                .contains("assets=(target/common/rpm/*.rpm target/*/release/rpm/*.rpm)")
+        );
+        assert!(
+            RELEASE_WORKFLOW
+                .contains("assets=(target/*/release/brew/*.tar.gz target/common/brew/*.rb)")
+        );
+    }
+
+    #[test]
     fn release_workflow_homebrew_tap_updates_root_formula() {
         assert!(
             RELEASE_WORKFLOW
