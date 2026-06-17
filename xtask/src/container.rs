@@ -427,10 +427,7 @@ mod tests {
             "DHTTP_HTTP_DNS_SERVER".to_string(),
             "https://dns.genmeta.net".to_string(),
         );
-        values.insert(
-            "DHTTP_MDNS_SERVICE".to_string(),
-            "_genmeta.local".to_string(),
-        );
+        values.insert("DHTTP_MDNS_SERVICE".to_string(), "_dhttp.local".to_string());
 
         let bootstrap = dhttp_bootstrap_from_values(values).expect("build bootstrap");
 
@@ -477,7 +474,7 @@ mod tests {
         assert!(
             bootstrap
                 .exports
-                .contains("export DHTTP_MDNS_SERVICE='_genmeta.local'\n")
+                .contains("export DHTTP_MDNS_SERVICE='_dhttp.local'\n")
         );
     }
 
