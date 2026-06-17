@@ -15,7 +15,7 @@ const PACKAGE_NAME: &str = "pishoo";
 const FORMULA_NAME: &str = "pishoo.rb";
 const DESCRIPTION: &str = "modern, secure, QUIC-powered web/proxy engine";
 const HOMEPAGE: &str = "https://www.dhttp.net";
-const LICENSE: &str = "Proprietary";
+const LICENSE: &str = "Apache-2.0";
 const INSTALL_CONTENT: &str = r##"  def install
     bin.install "pishoo"
     libexec.install "pishoo-worker"
@@ -275,6 +275,7 @@ mod tests {
         let formula = render_formula(&manifest, "https://download.example/brew/pishoo")
             .expect("formula should render");
 
+        assert!(formula.contains("license \"Apache-2.0\""));
         assert!(formula.contains(
             "url \"https://download.example/brew/pishoo/pishoo_0.5.2-aarch64-apple-darwin.tar.gz\""
         ));

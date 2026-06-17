@@ -54,7 +54,7 @@ const COMMON_PACKAGE_NAME: &str = "pishoo-common";
 const BASE_IMAGE: &str = "fedora:40";
 const IMAGE_TAG_PREFIX: &str = "pishoo-rpm-v1";
 
-const RPM_LICENSE: &str = "Proprietary";
+const RPM_LICENSE: &str = "Apache-2.0";
 const RPM_VENDOR: &str = "Genmeta Tech Limited";
 const RPM_URL: &str = "https://www.dhttp.net";
 
@@ -906,6 +906,7 @@ mod tests {
         let spec = render_binary_spec("0.5.2", "0.5.1-1", "test description", true, true);
 
         assert!(spec.contains("Name:           pishoo\n"));
+        assert!(spec.contains("License:        Apache-2.0\n"));
         assert!(spec.contains("Requires:       pishoo-common >= 0.5.1-1\n"));
         assert!(spec.contains("Requires:       pishoo-common <= %{version}-%{release}\n"));
         assert!(spec.contains("/usr/bin/pishoo\n"));
@@ -925,6 +926,7 @@ mod tests {
         assert!(spec.contains("Name:           pishoo-common\n"));
         assert!(spec.contains("Version:        0.5.2\n"));
         assert!(spec.contains("Release:        3%{?dist}\n"));
+        assert!(spec.contains("License:        Apache-2.0\n"));
         assert!(spec.contains("BuildArch:      noarch\n"));
         assert!(spec.contains("Requires(pre):  shadow-utils\n"));
         assert!(spec.contains("/etc/pishoo/pishoo.conf\n"));

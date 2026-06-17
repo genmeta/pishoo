@@ -141,11 +141,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             mode=publish
           fi
-          publish_args=()
+          publish_cmd=(cargo xtask publish s3)
           if [[ "$mode" == "dry-run" ]]; then
-            publish_args+=(--dry-run)
+            publish_cmd+=(--dry-run)
           fi
-          cargo xtask publish s3 "${publish_args[@]}" \
+          "${publish_cmd[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT"
@@ -251,11 +251,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             mode=publish
           fi
-          publish_args=()
+          publish_cmd=(cargo xtask publish s3)
           if [[ "$mode" == "dry-run" ]]; then
-            publish_args+=(--dry-run)
+            publish_cmd+=(--dry-run)
           fi
-          cargo xtask publish s3 "${publish_args[@]}" \
+          "${publish_cmd[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             rpm --prefix "$RPM_PREFIX"
@@ -361,11 +361,11 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             mode=publish
           fi
-          publish_args=()
+          publish_cmd=(cargo xtask publish s3)
           if [[ "$mode" == "dry-run" ]]; then
-            publish_args+=(--dry-run)
+            publish_cmd+=(--dry-run)
           fi
-          cargo xtask publish s3 "${publish_args[@]}" \
+          "${publish_cmd[@]}" \
             --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
             --bucket "$RELEASE_BUCKET" \
             brew --prefix "$BREW_PREFIX" --public-base-url "$BREW_PUBLIC_BASE_URL"
