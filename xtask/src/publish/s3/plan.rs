@@ -24,6 +24,31 @@ pub struct PlannedUpload {
     pub condition: Option<UploadCondition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedImmutablePayloadPlan {
+    metadata_sha256: String,
+    upload_condition: Option<UploadCondition>,
+    remote_sha256_matches_local: Option<bool>,
+}
+
+impl VersionedImmutablePayloadPlan {
+    pub fn metadata_sha256(&self) -> &str {
+        &self.metadata_sha256
+    }
+
+    pub fn upload_condition(&self) -> Option<UploadCondition> {
+        self.upload_condition.clone()
+    }
+
+    pub fn reuses_remote_payload(&self) -> bool {
+        self.remote_sha256_matches_local.is_some()
+    }
+
+    pub fn remote_sha256_matches_local(&self) -> bool {
+        self.remote_sha256_matches_local.unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum ImmutableCollisionError {
@@ -59,9 +84,34 @@ pub fn plan_immutable_upload(
     }
 }
 
+pub fn plan_versioned_immutable_payload(
+    _artifact_path: &str,
+    actual_sha256: &str,
+    remote: RemoteArtifactState,
+) -> VersionedImmutablePayloadPlan {
+    match remote {
+        RemoteArtifactState::Missing => VersionedImmutablePayloadPlan {
+            metadata_sha256: actual_sha256.to_string(),
+            upload_condition: Some(UploadCondition::IfMissing),
+            remote_sha256_matches_local: None,
+        },
+        RemoteArtifactState::Present { sha256 } => {
+            let matches_local = sha256 == actual_sha256;
+            VersionedImmutablePayloadPlan {
+                metadata_sha256: sha256,
+                upload_condition: None,
+                remote_sha256_matches_local: Some(matches_local),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RemoteArtifactState, UploadCondition, plan_immutable_upload};
+    use super::{
+        RemoteArtifactState, UploadCondition, plan_immutable_upload,
+        plan_versioned_immutable_payload,
+    };
 
     #[test]
     fn immutable_missing_remote_uploads_only_when_absent() {
@@ -100,5 +150,50 @@ mod tests {
             error.to_string(),
             "remote immutable artifact brew/file.tar.gz already exists with different sha256 def"
         );
+    }
+
+    #[test]
+    fn versioned_immutable_missing_remote_uploads_local_payload() {
+        let plan = plan_versioned_immutable_payload(
+            "brew/file.tar.gz",
+            "local-sha",
+            RemoteArtifactState::Missing,
+        );
+
+        assert_eq!(plan.metadata_sha256(), "local-sha");
+        assert_eq!(plan.upload_condition(), Some(UploadCondition::IfMissing));
+        assert!(!plan.reuses_remote_payload());
+    }
+
+    #[test]
+    fn versioned_immutable_matching_remote_reuses_remote_payload() {
+        let plan = plan_versioned_immutable_payload(
+            "brew/file.tar.gz",
+            "same-sha",
+            RemoteArtifactState::Present {
+                sha256: "same-sha".to_string(),
+            },
+        );
+
+        assert_eq!(plan.metadata_sha256(), "same-sha");
+        assert_eq!(plan.upload_condition(), None);
+        assert!(plan.reuses_remote_payload());
+        assert!(plan.remote_sha256_matches_local());
+    }
+
+    #[test]
+    fn versioned_immutable_different_remote_reuses_remote_sha_for_metadata() {
+        let plan = plan_versioned_immutable_payload(
+            "brew/file.tar.gz",
+            "new-local-sha",
+            RemoteArtifactState::Present {
+                sha256: "published-sha".to_string(),
+            },
+        );
+
+        assert_eq!(plan.metadata_sha256(), "published-sha");
+        assert_eq!(plan.upload_condition(), None);
+        assert!(plan.reuses_remote_payload());
+        assert!(!plan.remote_sha256_matches_local());
     }
 }
