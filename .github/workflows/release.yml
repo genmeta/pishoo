@@ -277,7 +277,7 @@ jobs:
       DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
       RELEASE_BUCKET: download
       BREW_PREFIX: brew/pishoo
-      BREW_PUBLIC_BASE_URL: https://download.genmeta.net/brew/pishoo
+      BREW_PUBLIC_BASE_URL: https://download.dhttp.net/brew/pishoo
       HOMEBREW_TAP_REPOSITORY: genmeta/homebrew-genmeta
       HOMEBREW_TAP_BASE_BRANCH: main
     defaults:
@@ -379,14 +379,13 @@ jobs:
           set -euo pipefail
           tap_dir="$GITHUB_WORKSPACE/homebrew-tap"
           formula_source="$PWD/target/common/brew/$FORMULA_NAME"
-          formula_dest="$tap_dir/Formula/$FORMULA_NAME"
+          formula_dest="$tap_dir/$FORMULA_NAME"
           test -f "$formula_source"
 
-          mkdir -p "$tap_dir/Formula"
           cp "$formula_source" "$formula_dest"
 
           cd "$tap_dir"
-          if git diff --quiet -- "Formula/$FORMULA_NAME"; then
+          if [[ -z "$(git status --porcelain -- "$FORMULA_NAME")" ]]; then
             echo "homebrew tap formula is unchanged"
             exit 0
           fi
@@ -395,7 +394,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add "Formula/$FORMULA_NAME"
+          git add "$FORMULA_NAME"
           git commit -m "brew: update $FORMULA_NAME"
           git push origin "$branch"
           gh pr create \
