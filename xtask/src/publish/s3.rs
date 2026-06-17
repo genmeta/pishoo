@@ -8,7 +8,9 @@ use aws_sdk_s3::{
     Client,
     config::Region,
     error::SdkError,
-    operation::{get_object::GetObjectError, put_object::PutObjectError},
+    operation::{
+        get_object::GetObjectError, head_object::HeadObjectError, put_object::PutObjectError,
+    },
     primitives::ByteStream,
 };
 use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
@@ -255,13 +257,19 @@ pub(crate) async fn upload_file(
         .await
         .whatever_context("failed to read upload body")?;
     let mut request = client.put_object().bucket(bucket).key(key).body(body);
-    if condition == Some(plan::UploadCondition::IfMissing) {
-        request = request.if_none_match("*");
+    match condition {
+        Some(plan::UploadCondition::IfMissing) => {
+            request = request.if_none_match("*");
+        }
+        Some(plan::UploadCondition::IfMatch(etag)) => {
+            request = request.if_match(etag);
+        }
+        None => {}
     }
     match request.send().await {
         Ok(_) => {}
         Err(error) if is_precondition_failed_error(&error) => {
-            snafu::whatever!("remote immutable artifact {key} already exists during upload");
+            snafu::whatever!("remote object {key} changed during conditional upload");
         }
         Err(error) => {
             snafu::whatever!("failed to upload {key}: {error}");
@@ -327,6 +335,26 @@ pub(crate) async fn get_object_bytes(
         bytes.extend_from_slice(&chunk);
     }
     Ok(Some(bytes))
+}
+
+pub(crate) async fn remote_upload_condition(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<plan::UploadCondition, Whatever> {
+    let output = match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(output) => output,
+        Err(error) if is_missing_head_object_error(&error) => {
+            return Ok(plan::UploadCondition::IfMissing);
+        }
+        Err(error) => {
+            snafu::whatever!("failed to inspect remote object {key}: {error}");
+        }
+    };
+    let etag = output
+        .e_tag()
+        .whatever_context(format!("remote object {key} is missing ETag"))?;
+    Ok(plan::UploadCondition::IfMatch(etag.to_string()))
 }
 
 pub(crate) async fn download_object(
@@ -398,10 +426,21 @@ fn is_missing_object_error(error: &SdkError<GetObjectError, impl std::fmt::Debug
     false
 }
 
+fn is_missing_head_object_error(error: &SdkError<HeadObjectError, impl std::fmt::Debug>) -> bool {
+    if let Some(service) = error.as_service_error() {
+        let metadata = service.meta();
+        return classify_missing_object(metadata.code(), metadata.message(), None);
+    }
+    false
+}
+
 fn is_precondition_failed_error(error: &SdkError<PutObjectError, impl std::fmt::Debug>) -> bool {
     if let Some(service) = error.as_service_error() {
         let metadata = service.meta();
-        return matches!(metadata.code(), Some("PreconditionFailed"));
+        return matches!(
+            metadata.code(),
+            Some("PreconditionFailed") | Some("ConditionalRequestConflict")
+        );
     }
     false
 }
@@ -470,5 +509,15 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
         assert!(error.to_string().contains("--public-base-url"));
+    }
+
+    #[test]
+    fn release_workflow_publishes_deb_to_unified_apt_repo() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+
+        assert!(workflow.contains("APT_PREFIX: ppa/genmeta"));
+        assert!(workflow.contains("APT_SUITE: genmeta"));
+        assert!(!workflow.contains("APT_PREFIX: apt/pishoo"));
+        assert!(!workflow.contains("APT_SUITE: stable"));
     }
 }

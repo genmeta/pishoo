@@ -19,7 +19,10 @@ use tempfile::TempDir;
 use tracing::info;
 use walkdir::WalkDir;
 
-use super::{DebPublishTarget, S3Options, plan::PlannedUpload};
+use super::{
+    DebPublishTarget, S3Options,
+    plan::{PlannedUpload, UploadCondition},
+};
 use crate::{
     container::{
         check_docker, exec_in_container, force_remove_container, host_uid_gid,
@@ -30,7 +33,7 @@ use crate::{
 };
 
 const APT_ARCHES: &[&str] = &["amd64", "arm64", "armhf", "i386"];
-const APT_COMPONENT: &str = "main";
+const APT_COMPONENTS: &[&str] = &["main", "contrib", "non-free"];
 const APT_STAGE_BASE_IMAGE: &str = "debian:bookworm";
 const APT_STAGE_IMAGE: &str = "xtask-apt-publish:bookworm-v1";
 const APT_REPOSITORY_TARGET: &str = "/apt-repository";
@@ -94,6 +97,9 @@ pub fn apt_upload_order(key: &str) -> u8 {
     if key.contains("/pool/") || key.starts_with("pool/") {
         return 0;
     }
+    if key.contains("/binary-") {
+        return 1;
+    }
     if key.ends_with("InRelease") {
         return 4;
     }
@@ -116,6 +122,9 @@ pub async fn run(
 ) -> Result<(), Whatever> {
     let loaded = super::load_manifest(ArtifactKind::Deb).await?;
     let local_payloads = local_payloads(&loaded.target_dir, &loaded.manifest.artifacts)?;
+    let entry_conditions =
+        remote_entry_upload_conditions(client, &options.bucket, &target.prefix, &target.suite)
+            .await?;
     let remote_entries =
         remote_package_entries(client, &options.bucket, &target.prefix, &target.suite).await?;
     let local_payloads = publishable_local_payloads(local_payloads, &remote_entries)
@@ -139,6 +148,7 @@ pub async fn run(
     generate_repository_metadata(repository.path(), &publish_options).await?;
     let uploads = repository_uploads(repository.path(), &target.prefix)?;
     let mut uploads = super::plan_repository_uploads(client, &options.bucket, uploads).await?;
+    apply_entry_upload_conditions(&mut uploads, &entry_conditions)?;
     uploads.sort_by(|left, right| {
         apt_upload_order(&left.key)
             .cmp(&apt_upload_order(&right.key))
@@ -275,16 +285,16 @@ async fn remote_package_entries(
     suite: &str,
 ) -> Result<Vec<RemotePackageEntry>, Whatever> {
     let mut entries = Vec::new();
-    for arch in APT_ARCHES {
-        let key = prefix.join(&format!(
-            "dists/{suite}/{APT_COMPONENT}/binary-{arch}/Packages"
-        ));
-        let Some(bytes) = super::get_object_bytes(client, bucket, &key).await? else {
-            continue;
-        };
-        let content = String::from_utf8(bytes)
-            .whatever_context(format!("remote Packages object {key} was not utf-8"))?;
-        entries.extend(parse_remote_packages(&content)?);
+    for component in APT_COMPONENTS {
+        for arch in APT_ARCHES {
+            let key = prefix.join(&format!("dists/{suite}/{component}/binary-{arch}/Packages"));
+            let Some(bytes) = super::get_object_bytes(client, bucket, &key).await? else {
+                continue;
+            };
+            let content = String::from_utf8(bytes)
+                .whatever_context(format!("remote Packages object {key} was not utf-8"))?;
+            entries.extend(parse_remote_packages(&content)?);
+        }
     }
     Ok(entries)
 }
@@ -379,18 +389,20 @@ async fn generate_repository_metadata(
 }
 
 async fn generate_binary_metadata(suite: &str, tools: &AptStageContainer) -> Result<(), Whatever> {
-    for arch in APT_ARCHES {
-        let paths = binary_metadata_paths(suite, APT_COMPONENT, arch);
-        let directory = paths
-            .packages
-            .parent()
-            .whatever_context("binary package path must have a parent")?;
-        tools
-            .run_in_repository(&format!("mkdir -p {}", shell_quote_path(directory)))
-            .await?;
-        scan_packages(arch, &paths.packages, tools).await?;
-        gzip_file(&paths.packages, &paths.packages_gz, tools).await?;
-        write_binary_release(&paths.release, suite, APT_COMPONENT, arch, tools).await?;
+    for component in APT_COMPONENTS {
+        for arch in APT_ARCHES {
+            let paths = binary_metadata_paths(suite, component, arch);
+            let directory = paths
+                .packages
+                .parent()
+                .whatever_context("binary package path must have a parent")?;
+            tools
+                .run_in_repository(&format!("mkdir -p {}", shell_quote_path(directory)))
+                .await?;
+            scan_packages(component, arch, &paths.packages, tools).await?;
+            gzip_file(&paths.packages, &paths.packages_gz, tools).await?;
+            write_binary_release(&paths.release, suite, component, arch, tools).await?;
+        }
     }
     Ok(())
 }
@@ -408,13 +420,14 @@ fn binary_metadata_paths(suite: &str, component: &str, arch: &str) -> BinaryMeta
 }
 
 async fn scan_packages(
+    component: &str,
     arch: &str,
     packages: &Path,
     tools: &AptStageContainer,
 ) -> Result<(), Whatever> {
     let script = format!(
         "{} > {}",
-        scan_packages_script(arch, packages),
+        scan_packages_script(component, arch, packages),
         shell_quote_path(packages)
     );
     tools
@@ -423,10 +436,12 @@ async fn scan_packages(
         .whatever_context(format!("failed to generate {}", packages.display()))
 }
 
-fn scan_packages_script(arch: &str, _packages: &Path) -> String {
+fn scan_packages_script(component: &str, arch: &str, _packages: &Path) -> String {
+    let pool = format!("pool/{component}");
     format!(
-        "dpkg-scanpackages --multiversion --arch {} pool /dev/null",
-        shell_quote(arch)
+        "mkdir -p {pool} && dpkg-scanpackages --multiversion --arch {arch} {pool} /dev/null",
+        pool = shell_quote(&pool),
+        arch = shell_quote(arch),
     )
 }
 
@@ -466,17 +481,39 @@ async fn write_binary_release(
 }
 
 async fn generate_suite_release(suite: &str, tools: &AptStageContainer) -> Result<(), Whatever> {
-    let relative = PathBuf::from("dists").join(suite).join("Release");
-    let suite_dir = PathBuf::from("dists").join(suite);
-    let script = format!(
-        "apt-ftparchive release {} > {}",
-        shell_quote_path(&suite_dir),
-        shell_quote_path(&relative)
-    );
+    let script = suite_release_script(suite);
     tools
         .run_in_repository(&script)
         .await
         .whatever_context("failed to generate apt suite Release")
+}
+
+fn suite_release_script(suite: &str) -> String {
+    let relative = PathBuf::from("dists").join(suite).join("Release");
+    let suite_dir = PathBuf::from("dists").join(suite);
+    let architectures = APT_ARCHES.join(" ");
+    let components = APT_COMPONENTS.join(" ");
+    let options = [
+        ("Origin", "genmeta"),
+        ("Label", "genmeta"),
+        ("Suite", "stable"),
+        ("Codename", suite),
+        ("Version", "2025"),
+        ("Architectures", &architectures),
+        ("Components", &components),
+        ("Description", "Genmeta Package Archives"),
+    ]
+    .into_iter()
+    .map(|(name, value)| shell_quote(&format!("APT::FTPArchive::Release::{name}={value}")))
+    .map(|argument| format!("-o {argument}"))
+    .collect::<Vec<_>>()
+    .join(" ");
+
+    format!(
+        "apt-ftparchive {options} release {} > {}",
+        shell_quote_path(&suite_dir),
+        shell_quote_path(&relative)
+    )
 }
 
 async fn sign_suite_release(
@@ -561,6 +598,55 @@ fn repository_uploads(
         });
     }
     Ok(uploads)
+}
+
+async fn remote_entry_upload_conditions(
+    client: &Client,
+    bucket: &str,
+    prefix: &super::key::RemotePrefix,
+    suite: &str,
+) -> Result<BTreeMap<String, UploadCondition>, Whatever> {
+    let mut conditions = BTreeMap::new();
+    for relative in entry_metadata_relative_paths(suite) {
+        let key = prefix.join(&relative);
+        let condition = super::remote_upload_condition(client, bucket, &key).await?;
+        conditions.insert(key, condition);
+    }
+    Ok(conditions)
+}
+
+fn entry_metadata_relative_paths(suite: &str) -> Vec<String> {
+    let mut paths = vec![
+        format!("dists/{suite}/Release"),
+        format!("dists/{suite}/Release.gpg"),
+        format!("dists/{suite}/InRelease"),
+    ];
+    for component in APT_COMPONENTS {
+        for arch in APT_ARCHES {
+            let base = format!("dists/{suite}/{component}/binary-{arch}");
+            paths.push(format!("{base}/Packages"));
+            paths.push(format!("{base}/Packages.gz"));
+            paths.push(format!("{base}/Release"));
+        }
+    }
+    paths
+}
+
+fn apply_entry_upload_conditions(
+    uploads: &mut [PlannedUpload],
+    conditions: &BTreeMap<String, UploadCondition>,
+) -> Result<(), Whatever> {
+    for upload in uploads.iter_mut().filter(|upload| upload.entry) {
+        let condition = conditions
+            .get(&upload.key)
+            .whatever_context(format!(
+                "apt metadata upload {} was not captured in remote baseline",
+                upload.key
+            ))?
+            .clone();
+        upload.condition = Some(condition);
+    }
+    Ok(())
 }
 
 fn pool_path(package: &str, filename: &str) -> PathBuf {
@@ -786,12 +872,17 @@ fn path_to_mount_source(path: &Path) -> Result<String, Whatever> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
     use super::{
-        AptContainerOptions, DebPayload, PackageEntry, RemotePackageEntry, apt_upload_order,
-        deb_payload_key, publishable_local_payloads, retained_remote_entries, scan_packages_script,
-        sign_suite_release_script,
+        super::plan::{PlannedUpload, UploadCondition},
+        AptContainerOptions, DebPayload, PackageEntry, RemotePackageEntry,
+        apply_entry_upload_conditions, apt_upload_order, deb_payload_key,
+        entry_metadata_relative_paths, publishable_local_payloads, retained_remote_entries,
+        scan_packages_script, sign_suite_release_script, suite_release_script,
     };
 
     #[test]
@@ -823,11 +914,59 @@ mod tests {
     #[test]
     fn scan_packages_script_keeps_multiple_versions() {
         let script = scan_packages_script(
+            "main",
             "amd64",
             Path::new("dists/stable/main/binary-amd64/Packages"),
         );
 
-        assert!(script.contains("dpkg-scanpackages --multiversion --arch 'amd64'"));
+        assert!(script.contains("dpkg-scanpackages --multiversion --arch 'amd64' 'pool/main'"));
+    }
+
+    #[test]
+    fn apt_metadata_covers_unified_genmeta_components() {
+        let paths = entry_metadata_relative_paths("genmeta");
+
+        assert!(paths.contains(&"dists/genmeta/Release".to_string()));
+        assert!(paths.contains(&"dists/genmeta/InRelease".to_string()));
+        assert!(paths.contains(&"dists/genmeta/Release.gpg".to_string()));
+        assert!(paths.contains(&"dists/genmeta/main/binary-amd64/Packages".to_string()));
+        assert!(paths.contains(&"dists/genmeta/contrib/binary-amd64/Packages".to_string()));
+        assert!(paths.contains(&"dists/genmeta/non-free/binary-amd64/Packages".to_string()));
+    }
+
+    #[test]
+    fn suite_release_script_describes_genmeta_archive() {
+        let script = suite_release_script("genmeta");
+
+        assert!(script.contains("APT::FTPArchive::Release::Origin=genmeta"));
+        assert!(script.contains("APT::FTPArchive::Release::Label=genmeta"));
+        assert!(script.contains("APT::FTPArchive::Release::Suite=stable"));
+        assert!(script.contains("APT::FTPArchive::Release::Codename=genmeta"));
+        assert!(script.contains("APT::FTPArchive::Release::Components=main contrib non-free"));
+        assert!(script.contains("APT::FTPArchive::Release::Architectures=amd64 arm64 armhf i386"));
+        assert!(script.contains("APT::FTPArchive::Release::Description=Genmeta Package Archives"));
+    }
+
+    #[test]
+    fn entry_upload_conditions_preserve_remote_baseline() {
+        let mut uploads = vec![PlannedUpload {
+            path: PathBuf::from("/tmp/Packages"),
+            key: "ppa/genmeta/dists/genmeta/main/binary-amd64/Packages".to_string(),
+            entry: true,
+            condition: None,
+        }];
+        let conditions = BTreeMap::from([(
+            "ppa/genmeta/dists/genmeta/main/binary-amd64/Packages".to_string(),
+            UploadCondition::IfMatch("\"old-etag\"".to_string()),
+        )]);
+
+        apply_entry_upload_conditions(&mut uploads, &conditions)
+            .expect("metadata condition should be applied");
+
+        assert_eq!(
+            uploads[0].condition,
+            Some(UploadCondition::IfMatch("\"old-etag\"".to_string()))
+        );
     }
 
     #[test]
@@ -875,6 +1014,31 @@ mod tests {
         assert_eq!(
             keys.last().map(String::as_str),
             Some("apt/dists/stable/InRelease")
+        );
+    }
+
+    #[test]
+    fn apt_upload_order_places_binary_metadata_before_suite_release() {
+        let mut keys = [
+            "ppa/genmeta/dists/genmeta/InRelease".to_string(),
+            "ppa/genmeta/dists/genmeta/Release.gpg".to_string(),
+            "ppa/genmeta/dists/genmeta/Release".to_string(),
+            "ppa/genmeta/dists/genmeta/main/binary-amd64/Packages".to_string(),
+        ];
+        keys.sort_by(|left, right| {
+            apt_upload_order(left)
+                .cmp(&apt_upload_order(right))
+                .then_with(|| left.cmp(right))
+        });
+
+        assert_eq!(
+            keys,
+            [
+                "ppa/genmeta/dists/genmeta/main/binary-amd64/Packages",
+                "ppa/genmeta/dists/genmeta/Release",
+                "ppa/genmeta/dists/genmeta/Release.gpg",
+                "ppa/genmeta/dists/genmeta/InRelease",
+            ]
         );
     }
 

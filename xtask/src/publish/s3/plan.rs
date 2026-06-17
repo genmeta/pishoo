@@ -10,9 +10,10 @@ pub enum RemoteArtifactState {
     Present { sha256: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadCondition {
     IfMissing,
+    IfMatch(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
