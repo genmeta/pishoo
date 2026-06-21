@@ -20,26 +20,30 @@ pub(crate) const RUSTUP_HOME: &str = "/opt/rustup";
 pub(crate) const ZIG_GLIBC_VERSION: &str = "2.28";
 
 pub(crate) const DHTTP_BOOTSTRAP_ROOT_CA_TARGET: &str = "/dhttp-bootstrap/root.crt";
+pub(crate) const SOURCES_ROOT: &str = "/sources";
 
 const DHTTP_ROOT_CA: &str = "DHTTP_ROOT_CA";
 const DHTTP_STUN_SERVER: &str = "DHTTP_STUN_SERVER";
 const DHTTP_H3_DNS_SERVER: &str = "DHTTP_H3_DNS_SERVER";
 const DHTTP_HTTP_DNS_SERVER: &str = "DHTTP_HTTP_DNS_SERVER";
 const DHTTP_MDNS_SERVICE: &str = "DHTTP_MDNS_SERVICE";
+const DHTTP_CERT_SERVER_URL: &str = "DHTTP_CERT_SERVER_URL";
 
-const DHTTP_BOOTSTRAP_VARS: [&str; 5] = [
+const DHTTP_BOOTSTRAP_VARS: [&str; 6] = [
     DHTTP_ROOT_CA,
     DHTTP_STUN_SERVER,
     DHTTP_H3_DNS_SERVER,
     DHTTP_HTTP_DNS_SERVER,
     DHTTP_MDNS_SERVICE,
+    DHTTP_CERT_SERVER_URL,
 ];
 
-const DHTTP_BOOTSTRAP_SCALAR_VARS: [&str; 4] = [
+const DHTTP_BOOTSTRAP_SCALAR_VARS: [&str; 5] = [
     DHTTP_STUN_SERVER,
     DHTTP_H3_DNS_SERVER,
     DHTTP_HTTP_DNS_SERVER,
     DHTTP_MDNS_SERVICE,
+    DHTTP_CERT_SERVER_URL,
 ];
 
 #[derive(Debug)]
@@ -261,15 +265,59 @@ pub(crate) fn cargo_cache_mounts() -> Vec<Mount> {
     mounts
 }
 
-/// Resolved sibling bind-mount: canonical host path + basename used as the
-/// container target path (`/{basename}`).
+/// Resolved source checkout bind-mount. The CLI still calls non-primary
+/// checkouts `--sibling`, but the container layout is source-centric: every
+/// checkout, including the primary repo, lives under `/sources/<name>`.
 #[derive(Clone)]
-pub(crate) struct Sibling {
+pub(crate) struct SourceCheckout {
     pub(crate) host: std::path::PathBuf,
-    pub(crate) basename: String,
+    pub(crate) name: String,
+    pub(crate) container: String,
 }
 
-pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibling>, Whatever> {
+#[derive(Clone)]
+pub(crate) struct ContainerSourceLayout {
+    pub(crate) primary: SourceCheckout,
+    pub(crate) overrides: Vec<SourceCheckout>,
+}
+
+impl ContainerSourceLayout {
+    pub(crate) fn all(&self) -> impl Iterator<Item = &SourceCheckout> {
+        std::iter::once(&self.primary).chain(self.overrides.iter())
+    }
+}
+
+pub(crate) fn source_layout(
+    primary_name: &str,
+    paths: &[std::path::PathBuf],
+) -> Result<ContainerSourceLayout, Whatever> {
+    let host = std::env::current_dir().whatever_context("failed to get current directory")?;
+    let primary = SourceCheckout {
+        host,
+        name: primary_name.to_string(),
+        container: format!("{SOURCES_ROOT}/{primary_name}"),
+    };
+    Ok(ContainerSourceLayout {
+        primary,
+        overrides: resolve_source_overrides(paths)?,
+    })
+}
+
+pub(crate) fn source_mounts(layout: &ContainerSourceLayout) -> Vec<Mount> {
+    layout
+        .all()
+        .map(|source| Mount {
+            target: Some(source.container.clone()),
+            source: Some(source.host.to_string_lossy().into_owned()),
+            typ: Some(MountType::BIND),
+            ..Default::default()
+        })
+        .collect()
+}
+
+pub(crate) fn resolve_source_overrides(
+    paths: &[std::path::PathBuf],
+) -> Result<Vec<SourceCheckout>, Whatever> {
     let mut out = Vec::with_capacity(paths.len());
     for raw in paths {
         let host = raw
@@ -278,7 +326,7 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
         if !host.is_dir() {
             snafu::whatever!("sibling path is not a directory: {}", host.display());
         }
-        let basename = host
+        let name = host
             .file_name()
             .and_then(|s| s.to_str())
             .map(str::to_string)
@@ -288,21 +336,26 @@ pub(crate) fn resolve_siblings(paths: &[std::path::PathBuf]) -> Result<Vec<Sibli
                     host.display()
                 ))
             })?;
-        out.push(Sibling { host, basename });
+        let container = format!("{SOURCES_ROOT}/{name}");
+        out.push(SourceCheckout {
+            host,
+            name,
+            container,
+        });
     }
     Ok(out)
 }
 
-pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String> {
+pub(crate) fn cargo_config_from_siblings(siblings: &[SourceCheckout]) -> Option<String> {
     let mut config = String::new();
     let mut registry_patches = Vec::new();
 
     if has_sibling(siblings, "dhttp") {
         let packages = [
-            ("dhttp", "/dhttp/dhttp"),
-            ("dhttp-access", "/dhttp/access"),
-            ("dhttp-home", "/dhttp/home"),
-            ("dhttp-identity", "/dhttp/identity"),
+            ("dhttp", "/sources/dhttp/dhttp"),
+            ("dhttp-access", "/sources/dhttp/access"),
+            ("dhttp-home", "/sources/dhttp/home"),
+            ("dhttp-identity", "/sources/dhttp/identity"),
         ];
         registry_patches.extend(packages);
         push_patch_section(
@@ -313,7 +366,7 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
     }
 
     if has_sibling(siblings, "ddns") {
-        let packages = [("dyns", "/ddns")];
+        let packages = [("dyns", "/sources/ddns")];
         registry_patches.extend(packages);
         push_patch_section(
             &mut config,
@@ -323,13 +376,13 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
     }
 
     if has_sibling(siblings, "h3x") {
-        let packages = [("h3x", "/h3x")];
+        let packages = [("h3x", "/sources/h3x")];
         registry_patches.extend(packages);
         push_patch_section(&mut config, "https://github.com/genmeta/h3x.git", &packages);
     }
 
     if has_sibling(siblings, "dssh") {
-        let packages = [("dshell", "/dssh")];
+        let packages = [("dshell", "/sources/dssh")];
         registry_patches.extend(packages);
         push_patch_section(
             &mut config,
@@ -339,7 +392,7 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
     }
 
     if has_sibling(siblings, "dquic") {
-        let packages = [("dquic", "/dquic/dquic")];
+        let packages = [("dquic", "/sources/dquic/dquic")];
         registry_patches.extend(packages);
         push_patch_section(
             &mut config,
@@ -349,7 +402,7 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
     }
 
     if has_sibling(siblings, "rankey") {
-        let packages = [("rankey", "/rankey")];
+        let packages = [("rankey", "/sources/rankey")];
         registry_patches.extend(packages);
         push_patch_section(
             &mut config,
@@ -368,8 +421,8 @@ pub(crate) fn cargo_config_from_siblings(siblings: &[Sibling]) -> Option<String>
     }
 }
 
-fn has_sibling(siblings: &[Sibling], basename: &str) -> bool {
-    siblings.iter().any(|sibling| sibling.basename == basename)
+fn has_sibling(siblings: &[SourceCheckout], name: &str) -> bool {
+    siblings.iter().any(|sibling| sibling.name == name)
 }
 
 fn push_registry_patch_section(config: &mut String, packages: &[(&str, &str)]) {
@@ -428,6 +481,10 @@ mod tests {
             "https://dns.genmeta.net".to_string(),
         );
         values.insert("DHTTP_MDNS_SERVICE".to_string(), "_dhttp.local".to_string());
+        values.insert(
+            "DHTTP_CERT_SERVER_URL".to_string(),
+            "https://license.test".to_string(),
+        );
 
         let bootstrap = dhttp_bootstrap_from_values(values).expect("build bootstrap");
 
@@ -476,6 +533,11 @@ mod tests {
                 .exports
                 .contains("export DHTTP_MDNS_SERVICE='_dhttp.local'\n")
         );
+        assert!(
+            bootstrap
+                .exports
+                .contains("export DHTTP_CERT_SERVER_URL='https://license.test'\n")
+        );
     }
 
     #[test]
@@ -517,51 +579,79 @@ mod tests {
     #[test]
     fn cargo_config_from_siblings_patches_genmeta_git_and_registry_sources() {
         let siblings = vec![
-            Sibling {
+            SourceCheckout {
                 host: "/host/reimu/dhttp".into(),
-                basename: "dhttp".to_string(),
+                name: "dhttp".to_string(),
+                container: "/sources/dhttp".to_string(),
             },
-            Sibling {
+            SourceCheckout {
                 host: "/host/reimu/ddns".into(),
-                basename: "ddns".to_string(),
+                name: "ddns".to_string(),
+                container: "/sources/ddns".to_string(),
             },
-            Sibling {
+            SourceCheckout {
                 host: "/host/reimu/dquic".into(),
-                basename: "dquic".to_string(),
+                name: "dquic".to_string(),
+                container: "/sources/dquic".to_string(),
             },
-            Sibling {
+            SourceCheckout {
                 host: "/host/reimu/rankey".into(),
-                basename: "rankey".to_string(),
+                name: "rankey".to_string(),
+                container: "/sources/rankey".to_string(),
             },
         ];
 
         let config = cargo_config_from_siblings(&siblings).expect("config should be rendered");
         assert!(config.contains("[patch.crates-io]"));
-        assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
-        assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
-        assert!(config.contains("dyns = { path = \"/ddns\" }"));
-        assert!(config.contains("dquic = { path = \"/dquic/dquic\" }"));
-        assert!(config.contains("rankey = { path = \"/rankey\" }"));
+        assert!(config.contains("dhttp = { path = \"/sources/dhttp/dhttp\" }"));
+        assert!(config.contains("dhttp-identity = { path = \"/sources/dhttp/identity\" }"));
+        assert!(config.contains("dyns = { path = \"/sources/ddns\" }"));
+        assert!(config.contains("dquic = { path = \"/sources/dquic/dquic\" }"));
+        assert!(config.contains("rankey = { path = \"/sources/rankey\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/dhttp.git\"]"));
-        assert!(config.contains("dhttp = { path = \"/dhttp/dhttp\" }"));
-        assert!(config.contains("dhttp-identity = { path = \"/dhttp/identity\" }"));
+        assert!(config.contains("dhttp = { path = \"/sources/dhttp/dhttp\" }"));
+        assert!(config.contains("dhttp-identity = { path = \"/sources/dhttp/identity\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/ddns.git\"]"));
-        assert!(config.contains("dyns = { path = \"/ddns\" }"));
+        assert!(config.contains("dyns = { path = \"/sources/ddns\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/dquic.git\"]"));
-        assert!(config.contains("dquic = { path = \"/dquic/dquic\" }"));
+        assert!(config.contains("dquic = { path = \"/sources/dquic/dquic\" }"));
         assert!(config.contains("[patch.\"https://github.com/genmeta/rankey.git\"]"));
-        assert!(config.contains("rankey = { path = \"/rankey\" }"));
+        assert!(config.contains("rankey = { path = \"/sources/rankey\" }"));
         assert!(!config.contains("ddns ="));
     }
 
     #[test]
     fn cargo_config_from_siblings_returns_none_without_supported_siblings() {
-        let siblings = vec![Sibling {
+        let siblings = vec![SourceCheckout {
             host: "/host/reimu/other".into(),
-            basename: "other".to_string(),
+            name: "other".to_string(),
+            container: "/sources/other".to_string(),
         }];
 
         assert!(cargo_config_from_siblings(&siblings).is_none());
+    }
+
+    #[test]
+    fn source_layout_mounts_primary_and_overrides_under_sources() {
+        let layout = ContainerSourceLayout {
+            primary: SourceCheckout {
+                host: "/host/reimu/gateway".into(),
+                name: "gateway".to_string(),
+                container: "/sources/gateway".to_string(),
+            },
+            overrides: vec![SourceCheckout {
+                host: "/host/reimu/dhttp".into(),
+                name: "dhttp".to_string(),
+                container: "/sources/dhttp".to_string(),
+            }],
+        };
+
+        let paths = layout
+            .all()
+            .map(|source| source.container.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, ["/sources/gateway", "/sources/dhttp"]);
     }
 
     #[test]

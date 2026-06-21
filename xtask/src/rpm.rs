@@ -17,7 +17,7 @@
 
 use bollard::{
     Docker,
-    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountType},
+    models::{ContainerConfig, ContainerCreateBody, HostConfig},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     },
@@ -29,10 +29,10 @@ use tracing::{Instrument, info, info_span};
 use crate::{
     Feature, RpmTarget,
     container::{
-        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts,
+        CARGO_HOME, ContainerSourceLayout, RUSTUP_HOME, ZIG_GLIBC_VERSION, cargo_cache_mounts,
         cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
         force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
-        resolve_siblings, start_container,
+        source_layout, source_mounts, start_container,
     },
     deb::PISHOO_LIBEXEC_DIR,
     package_meta,
@@ -137,7 +137,7 @@ pub async fn run(
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
 
-    let siblings = resolve_siblings(siblings)?;
+    let layout = source_layout("gateway", siblings)?;
     let meta = package_meta(CARGO_NAME)?;
     let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let target_dir = target_dir()?;
@@ -146,11 +146,12 @@ pub async fn run(
     for &target in targets {
         if matches!(target, RpmTarget::Common) {
             let docker = docker.clone();
-            let common_package_version = contract.common_version.clone();
+            let common_package_version = contract.package.common.version.clone();
             let target_dir = target_dir.clone();
+            let layout = layout.clone();
             info!("queued common rpm package build");
             tasks.spawn(
-                async move { run_common(&docker, &common_package_version, &target_dir).await }
+                async move { run_common(&docker, &common_package_version, &target_dir, &layout).await }
                     .instrument(info_span!("rpm", triple = "common")),
             );
             continue;
@@ -158,10 +159,10 @@ pub async fn run(
 
         let docker = docker.clone();
         let meta_version = meta.version.clone();
-        let required_common_version = contract.required_common_version.clone();
+        let required_common_version = contract.package.common.required_version.clone();
         let meta_description = meta.description.clone();
         let target_dir = target_dir.clone();
-        let siblings = siblings.clone();
+        let layout = layout.clone();
         let features = features.to_vec();
         let triple = target.triple();
         info!(triple, ?features, "queued rpm target build");
@@ -176,7 +177,7 @@ pub async fn run(
                     &meta_description,
                     &target_dir,
                     &features,
-                    &siblings,
+                    &layout,
                 )
                 .await
             }
@@ -202,15 +203,13 @@ async fn run_common(
     docker: &Docker,
     version: &str,
     target_dir: &std::path::Path,
+    layout: &ContainerSourceLayout,
 ) -> Result<Vec<RpmArtifact>, Whatever> {
     info!("starting common rpm package build");
     let out_dir = target_dir.join("common").join("rpm");
     tokio::fs::create_dir_all(&out_dir)
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
-
-    let workspace_dir =
-        std::env::current_dir().whatever_context("failed to get current directory")?;
 
     let mut pull_stream = docker.create_image(
         Some(
@@ -238,12 +237,7 @@ async fn run_common(
                 image: Some(BASE_IMAGE.to_string()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
                 host_config: Some(HostConfig {
-                    mounts: Some(vec![Mount {
-                        target: Some("/workspace".into()),
-                        source: Some(workspace_dir.to_string_lossy().into_owned()),
-                        typ: Some(MountType::BIND),
-                        ..Default::default()
-                    }]),
+                    mounts: Some(source_mounts(layout)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -253,7 +247,7 @@ async fn run_common(
         .whatever_context("failed to create common rpm container")?;
     let container_id = container.id.clone();
 
-    let result = run_common_inner(docker, &container_id, version).await;
+    let result = run_common_inner(docker, &container_id, version, &layout.primary.container).await;
     force_remove_container(docker, &container_id).await;
     result?;
 
@@ -284,6 +278,7 @@ async fn run_common_inner(
     docker: &Docker,
     container_id: &str,
     package_version: &str,
+    primary_source: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
 
@@ -301,18 +296,18 @@ dnf install -y --setopt=install_weak_deps=False \
     let spec_escaped = shell_escape(&spec);
     let build_script = format!(
         r#"set -e
-TOPDIR=/workspace/target/common/rpm
+TOPDIR={primary_source}/target/common/rpm
 rm -rf "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
 mkdir -p "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
 
 SPEC="$TOPDIR/SPECS/{COMMON_PACKAGE_NAME}.spec"
 printf '%s' {spec_escaped} > "$SPEC"
 
-install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/pishoo.conf \
+install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/pishoo/pishoo.conf \
     "$TOPDIR/SOURCES/pishoo.conf"
-install -D -m 0644 /workspace/{COMMON_FILES_DIR}/etc/pishoo/mime.types \
+install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/pishoo/mime.types \
     "$TOPDIR/SOURCES/mime.types"
-install -D -m 0644 /workspace/{SYSTEMD_UNIT_SRC} \
+install -D -m 0644 {primary_source}/{SYSTEMD_UNIT_SRC} \
     "$TOPDIR/SOURCES/pishoo.service"
 
 rpmbuild -bb \
@@ -495,7 +490,7 @@ async fn build_one(
     description: &str,
     target_dir: &std::path::Path,
     features: &[Feature],
-    siblings: &[Sibling],
+    layout: &ContainerSourceLayout,
 ) -> Result<Vec<RpmArtifact>, Whatever> {
     let arch = rpm_arch(triple)?;
     let libdir = sysroot_libdir(arch);
@@ -507,28 +502,12 @@ async fn build_one(
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
 
-    let workspace_dir =
-        std::env::current_dir().whatever_context("failed to get current directory")?;
-
-    let mut mounts = vec![Mount {
-        target: Some("/workspace".into()),
-        source: Some(workspace_dir.to_string_lossy().into_owned()),
-        typ: Some(MountType::BIND),
-        ..Default::default()
-    }];
-    for sibling in siblings {
-        mounts.push(Mount {
-            target: Some(format!("/{}", sibling.basename)),
-            source: Some(sibling.host.to_string_lossy().into_owned()),
-            typ: Some(MountType::BIND),
-            ..Default::default()
-        });
-    }
+    let mut mounts = source_mounts(layout);
     mounts.extend(cargo_cache_mounts());
 
     let bootstrap = dhttp_bootstrap_from_env()?;
     mounts.extend(bootstrap.mounts);
-    let cargo_config = cargo_config_from_siblings(siblings);
+    let cargo_config = cargo_config_from_siblings(&layout.overrides);
 
     let container_name = format!("pishoo-xtask-rpm-{triple}");
     remove_container_if_exists(docker, &container_name).await;
@@ -570,6 +549,7 @@ async fn build_one(
         features,
         has_sshd,
         has_pam,
+        &layout.primary.container,
         &bootstrap.exports,
         cargo_config.as_deref(),
     )
@@ -613,6 +593,7 @@ async fn build_one_inner(
     features: &[Feature],
     has_sshd: bool,
     has_pam: bool,
+    primary_source: &str,
     dhttp_bootstrap_exports: &str,
     cargo_config: Option<&str>,
 ) -> Result<(), Whatever> {
@@ -676,11 +657,11 @@ export CARGO_HOME={CARGO_HOME}
 export RUSTFLAGS="${{RUSTFLAGS:-}} -L /opt/sysroots/{arch}/usr/{libdir}"
 {aarch64_zigbuild_workaround}
 
-cd /workspace
+cd {primary_source}
 cargo zigbuild --release --target {triple}.{ZIG_GLIBC_VERSION} -p pishoo{feature_flag}
 
-TARGET_RELEASE=/workspace/target/{triple}/release
-TOPDIR=/workspace/target/{triple}/release/rpm
+TARGET_RELEASE={primary_source}/target/{triple}/release
+TOPDIR={primary_source}/target/{triple}/release/rpm
 rm -rf "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
 mkdir -p "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
 

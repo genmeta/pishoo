@@ -19,6 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   XTASK_RELEASE_S3_ENDPOINT_URL: ${{ vars.XTASK_RELEASE_S3_ENDPOINT_URL }}
+  DHTTP_ROOT_CA: ${{ vars.DHTTP_ROOT_CA }}
   DHTTP_STUN_SERVER: ${{ vars.DHTTP_STUN_SERVER }}
   DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}
   DHTTP_HTTP_DNS_SERVER: ${{ vars.DHTTP_HTTP_DNS_SERVER }}
@@ -89,10 +90,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
-      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: download
-      APT_SUITE: genmeta
-      APT_PREFIX: ppa/genmeta
       LINUX_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-unknown-linux-gnu
     defaults:
       run:
@@ -139,6 +136,7 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_ROOT_CA
             DHTTP_STUN_SERVER
             DHTTP_H3_DNS_SERVER
             DHTTP_HTTP_DNS_SERVER
@@ -191,7 +189,7 @@ jobs:
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
           XTASK_RELEASE_APT_SIGNING_KEY: ${{ secrets.XTASK_RELEASE_APT_SIGNING_KEY }}
           XTASK_RELEASE_APT_SIGNING_PASSPHRASE: ${{ secrets.XTASK_RELEASE_APT_SIGNING_PASSPHRASE }}
-          APT_SIGNING_FINGERPRINT: ${{ steps.apt_key.outputs.fingerprint }}
+          XTASK_RELEASE_APT_SIGNING_FINGERPRINT: ${{ steps.apt_key.outputs.fingerprint }}
         run: |
           set -euo pipefail
           export XTASK_RELEASE_APT_SIGNING_PASSPHRASE
@@ -203,10 +201,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" \
-            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
-            --bucket "$RELEASE_BUCKET" \
-            deb --prefix "$APT_PREFIX" --suite "$APT_SUITE" --fingerprint "$APT_SIGNING_FINGERPRINT"
+          "${publish_cmd[@]}" deb
 
       - name: Upload deb packages to GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -247,9 +242,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
-      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: download
-      RPM_PREFIX: rpm/pishoo
       # Fedora 40 RPM repositories no longer provide armhfp/armv7hl metadata.
       RPM_TARGETS: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu i686-unknown-linux-gnu
     defaults:
@@ -294,6 +286,7 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_ROOT_CA
             DHTTP_STUN_SERVER
             DHTTP_H3_DNS_SERVER
             DHTTP_HTTP_DNS_SERVER
@@ -338,10 +331,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" \
-            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
-            --bucket "$RELEASE_BUCKET" \
-            rpm --prefix "$RPM_PREFIX"
+          "${publish_cmd[@]}" rpm
 
       - name: Upload rpm packages to GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -381,13 +371,6 @@ jobs:
     name: Homebrew package and S3 publish
     runs-on: macos-15
     timeout-minutes: 120
-    env:
-      DHTTP_ROOT_CA: ${{ github.workspace }}/gateway/keychain/root.crt
-      RELEASE_BUCKET: download
-      BREW_PREFIX: brew/pishoo
-      BREW_PUBLIC_BASE_URL: https://download.dhttp.net/brew/pishoo
-      HOMEBREW_TAP_REPOSITORY: genmeta/homebrew-genmeta
-      HOMEBREW_TAP_BASE_BRANCH: main
     defaults:
       run:
         shell: bash
@@ -399,6 +382,20 @@ jobs:
           path: gateway
           persist-credentials: false
 
+      - name: Read Homebrew tap destination
+        id: homebrew_destination
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          from pathlib import Path
+
+          destination = tomllib.loads(Path("xtask/release.toml").read_text())
+          tap = destination["destination"]["brew"]["tap"]
+          print(f"repository={tap['repository']}")
+          print(f"base_branch={tap['base_branch']}")
+          PY
+
       - name: Validate release configuration
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
@@ -409,6 +406,7 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
+            DHTTP_ROOT_CA
             DHTTP_STUN_SERVER
             DHTTP_H3_DNS_SERVER
             DHTTP_HTTP_DNS_SERVER
@@ -430,8 +428,8 @@ jobs:
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         uses: actions/checkout@v6
         with:
-          repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
-          ref: ${{ env.HOMEBREW_TAP_BASE_BRANCH }}
+          repository: ${{ steps.homebrew_destination.outputs.repository }}
+          ref: ${{ steps.homebrew_destination.outputs.base_branch }}
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
@@ -473,15 +471,14 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" \
-            --endpoint-url "$XTASK_RELEASE_S3_ENDPOINT_URL" \
-            --bucket "$RELEASE_BUCKET" \
-            brew --prefix "$BREW_PREFIX" --public-base-url "$BREW_PUBLIC_BASE_URL"
+          "${publish_cmd[@]}" brew
 
       - name: Create Homebrew tap pull request
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_REPOSITORY: ${{ steps.homebrew_destination.outputs.repository }}
+          HOMEBREW_TAP_BASE_BRANCH: ${{ steps.homebrew_destination.outputs.base_branch }}
           FORMULA_NAME: pishoo.rb
         run: |
           set -euo pipefail

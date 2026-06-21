@@ -20,7 +20,7 @@ use tracing::info;
 use walkdir::WalkDir;
 
 use super::{
-    DebPublishTarget, S3Options,
+    DebPublishTarget, ResolvedS3Options,
     plan::{PlannedUpload, UploadCondition},
 };
 use crate::{
@@ -116,7 +116,7 @@ pub fn deb_payload_key(prefix: &str, package: &str, filename: &str) -> String {
 }
 
 pub async fn run(
-    options: &S3Options,
+    options: &ResolvedS3Options,
     client: &Client,
     target: DebPublishTarget,
 ) -> Result<(), Whatever> {

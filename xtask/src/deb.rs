@@ -1,6 +1,6 @@
 use bollard::{
     Docker,
-    models::{ContainerConfig, ContainerCreateBody, HostConfig, Mount, MountType},
+    models::{ContainerConfig, ContainerCreateBody, HostConfig},
     query_parameters::{
         CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     },
@@ -12,10 +12,10 @@ use tracing::{Instrument, info, info_span};
 use crate::{
     BuildProfile, DebTarget, Feature,
     container::{
-        CARGO_HOME, RUSTUP_HOME, Sibling, ZIG_GLIBC_VERSION, cargo_cache_mounts,
+        CARGO_HOME, ContainerSourceLayout, RUSTUP_HOME, ZIG_GLIBC_VERSION, cargo_cache_mounts,
         cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
         force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
-        resolve_siblings, start_container,
+        source_layout, source_mounts, start_container,
     },
     package_version,
     release_contract::load_release_contract,
@@ -53,7 +53,7 @@ struct BinaryBuildContext<'a> {
     target_dir: &'a std::path::Path,
     profile: BuildProfile,
     features: &'a [Feature],
-    siblings: &'a [Sibling],
+    layout: &'a ContainerSourceLayout,
     binary_control: &'a str,
 }
 
@@ -241,6 +241,7 @@ async fn run_common(
     docker: &Docker,
     common_package_version: &str,
     binary_control: &str,
+    layout: &ContainerSourceLayout,
 ) -> Result<DebArtifact, Whatever> {
     info!("starting common deb package build");
     let target_dir = target_dir()?;
@@ -248,9 +249,6 @@ async fn run_common(
     tokio::fs::create_dir_all(&out_dir)
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
-
-    let workspace_dir =
-        std::env::current_dir().whatever_context("failed to get current directory")?;
 
     // pishoo-common only needs debhelper + dpkg-deb in the base image.
     ensure_base_image(docker).await?;
@@ -268,12 +266,7 @@ async fn run_common(
                 image: Some(BASE_IMAGE.to_string()),
                 cmd: Some(vec!["sleep".into(), "infinity".into()]),
                 host_config: Some(HostConfig {
-                    mounts: Some(vec![Mount {
-                        target: Some("/workspace".into()),
-                        source: Some(workspace_dir.to_string_lossy().into_owned()),
-                        typ: Some(MountType::BIND),
-                        ..Default::default()
-                    }]),
+                    mounts: Some(source_mounts(layout)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -289,6 +282,7 @@ async fn run_common(
         &container_id,
         common_package_version,
         binary_control,
+        &layout.primary.container,
     )
     .await;
     force_remove_container(docker, &container_id).await;
@@ -310,6 +304,7 @@ async fn run_common_inner(
     container_id: &str,
     common_package_version: &str,
     binary_control: &str,
+    primary_source: &str,
 ) -> Result<(), Whatever> {
     start_container(docker, container_id).await?;
 
@@ -328,9 +323,9 @@ apt-get install --assume-yes -qq debhelper fakeroot
     let control_escaped = shell_escape(binary_control);
     let build_script = format!(
         r#"set -e
-SRC=/workspace/target/common/deb/src
+SRC={primary_source}/target/common/deb/src
 mkdir -p "$SRC/debian"
-cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+cp -r {primary_source}/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
 printf '%s' {control_escaped} > "$SRC/debian/control"
 printf '{CARGO_NAME} ({common_package_version}) unstable; urgency=low\n\n  * release {common_package_version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"
@@ -364,15 +359,17 @@ pub async fn run(
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
 
-    // Resolve sibling paths up front so every target build sees the same set
+    // Resolve source paths up front so every target build sees the same set
     // and path errors surface before we spin up containers.
-    let siblings = resolve_siblings(siblings)?;
+    let layout = source_layout("gateway", siblings)?;
 
     let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let version = package_version(CARGO_NAME)?;
     let binary_package_version = binary_package_version(&version);
-    let binary_control =
-        render_binary_control(&contract.required_common_version, &binary_package_version);
+    let binary_control = render_binary_control(
+        &contract.package.common.required_version,
+        &binary_package_version,
+    );
     let target_dir = target_dir()?;
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -380,12 +377,15 @@ pub async fn run(
     for &target in targets {
         if matches!(target, DebTarget::Common) {
             let docker = docker.clone();
-            let common_package_version = contract.common_version.clone();
+            let common_package_version = contract.package.common.version.clone();
             let binary_control = binary_control.clone();
+            let layout = layout.clone();
             info!("queued common deb package build");
             tasks.spawn(
-                async move { run_common(&docker, &common_package_version, &binary_control).await }
-                    .instrument(info_span!("deb", triple = "common")),
+                async move {
+                    run_common(&docker, &common_package_version, &binary_control, &layout).await
+                }
+                .instrument(info_span!("deb", triple = "common")),
             );
             continue;
         }
@@ -398,7 +398,7 @@ pub async fn run(
         let binary_control = binary_control.clone();
         let target_dir = target_dir.clone();
         let features = features.to_vec();
-        let siblings = siblings.clone();
+        let layout = layout.clone();
         tasks.spawn(
             async move {
                 build_one_with_retry(
@@ -409,7 +409,7 @@ pub async fn run(
                         target_dir: &target_dir,
                         profile,
                         features: &features,
-                        siblings: &siblings,
+                        layout: &layout,
                         binary_control: &binary_control,
                     },
                 )
@@ -481,33 +481,12 @@ async fn build_one(
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
 
-    let workspace_dir =
-        std::env::current_dir().whatever_context("failed to get current directory")?;
-
-    let mut mounts = vec![Mount {
-        target: Some("/workspace".into()),
-        source: Some(workspace_dir.to_string_lossy().into_owned()),
-        typ: Some(MountType::BIND),
-        ..Default::default()
-    }];
-
-    // User-requested sibling crates, bind-mounted at /{basename} so that
-    // `path = "../{basename}"` references in Cargo.toml resolve inside the
-    // container.
-    for sibling in context.siblings {
-        mounts.push(Mount {
-            target: Some(format!("/{}", sibling.basename)),
-            source: Some(sibling.host.to_string_lossy().into_owned()),
-            typ: Some(MountType::BIND),
-            ..Default::default()
-        });
-    }
-
+    let mut mounts = source_mounts(context.layout);
     mounts.extend(cargo_cache_mounts());
 
     let bootstrap = dhttp_bootstrap_from_env()?;
     mounts.extend(bootstrap.mounts);
-    let cargo_config = cargo_config_from_siblings(context.siblings);
+    let cargo_config = cargo_config_from_siblings(&context.layout.overrides);
 
     let container_name = format!("{CARGO_NAME}-xtask-deb-{triple}");
     info!(triple, container = %container_name, "creating build container");
@@ -575,6 +554,7 @@ async fn build_one(
         arch,
         gnu,
         context.profile,
+        &context.layout.primary.container,
         &bootstrap.exports,
         cargo_config.as_deref(),
         &worker_env,
@@ -604,6 +584,7 @@ async fn build_one_inner(
     arch: &str,
     gnu: &str,
     profile: BuildProfile,
+    primary_source: &str,
     dhttp_bootstrap_exports: &str,
     cargo_config: Option<&str>,
     worker_env: &str,
@@ -646,9 +627,9 @@ export BUILD_PROFILE={profile_dir}
 export CARGO_PROFILE_ARGS="{cargo_profile_args}"
 export DEB_HOST_MULTIARCH={gnu}
 {dhttp_bootstrap_exports}{worker_env}{ssh_session_env}{cargo_features_env}
-SRC=/workspace/target/{triple}/{profile_dir}/deb/src
+SRC={primary_source}/target/{triple}/{profile_dir}/deb/src
 mkdir -p "$SRC/debian"
-cp -r /workspace/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+cp -r {primary_source}/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
 printf '%s' {control_escaped} > "$SRC/debian/control"
 printf '{CARGO_NAME} ({version}-1) unstable; urgency=low\n\n  * release {version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
     "$(date -R)" > "$SRC/debian/changelog"

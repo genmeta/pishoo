@@ -1,2 +1,43 @@
-common_version = "0.5.0-1"
-required_common_version = "0.5.0-1"
+[cargo]
+manifest = "pishoo/Cargo.toml"
+
+[homebrew.template]
+path = "xtask/templates/pishoo.rb.in"
+
+[build.env]
+required = [
+  "DHTTP_ROOT_CA",
+  "DHTTP_STUN_SERVER",
+  "DHTTP_H3_DNS_SERVER",
+  "DHTTP_HTTP_DNS_SERVER",
+  "DHTTP_MDNS_SERVICE",
+  "DHTTP_CERT_SERVER_URL",
+]
+
+[destination.s3]
+bucket = "download"
+endpoint.env = "XTASK_RELEASE_S3_ENDPOINT_URL"
+access_key_id.env = "XTASK_RELEASE_S3_ACCESS_KEY_ID"
+secret_access_key.env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY"
+
+[destination.brew]
+prefix = "brew/pishoo"
+public_base_url = "https://download.dhttp.net/brew/pishoo"
+tap.repository = "genmeta/homebrew-genmeta"
+tap.base_branch = "main"
+tap.token.env = "HOMEBREW_TAP_GITHUB_TOKEN"
+
+[destination.deb]
+prefix = "ppa/genmeta"
+suite = "genmeta"
+signing.key.env = "XTASK_RELEASE_APT_SIGNING_KEY"
+signing.passphrase.env = "XTASK_RELEASE_APT_SIGNING_PASSPHRASE"
+fingerprint.env = "XTASK_RELEASE_APT_SIGNING_FINGERPRINT"
+
+[destination.rpm]
+prefix = "rpm/pishoo"
+
+[package.common]
+name = "pishoo-common"
+version = "0.5.0-1"
+required_version = "0.5.0-1"

@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use tracing::info;
 use walkdir::WalkDir;
 
-use super::{RpmPublishTarget, S3Options, plan::PlannedUpload};
+use super::{ResolvedS3Options, RpmPublishTarget, plan::PlannedUpload};
 use crate::{
     container::{
         check_docker, exec_in_container, force_remove_container, remove_container_if_exists,
@@ -74,7 +74,7 @@ pub fn rpm_payload_key(prefix: &str, package: &str, version: &str, filename: &st
 }
 
 pub async fn run(
-    options: &S3Options,
+    options: &ResolvedS3Options,
     client: &Client,
     target: RpmPublishTarget,
 ) -> Result<(), Whatever> {

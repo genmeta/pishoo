@@ -21,6 +21,7 @@ use tracing::info;
 use crate::{
     grouped,
     package::manifest::{ArtifactKind, PackageManifest, validate_manifest},
+    release_contract::{self, EnvRef, ReleaseContract},
 };
 
 pub mod brew;
@@ -31,24 +32,17 @@ pub mod rpm;
 
 #[derive(Debug, Clone, Args)]
 pub struct S3Options {
-    /// S3 endpoint URL
-    #[arg(long)]
-    pub endpoint_url: String,
-    /// S3 bucket name
-    #[arg(long)]
-    pub bucket: String,
-    /// AWS access key id
-    #[arg(long, env = "XTASK_RELEASE_S3_ACCESS_KEY_ID", hide_env_values = true)]
-    pub access_key_id: String,
-    /// AWS secret access key
-    #[arg(
-        long,
-        env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY",
-        hide_env_values = true
-    )]
-    pub secret_access_key: String,
     /// Print the publish plan without uploading
     #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedS3Options {
+    pub endpoint_url: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
     pub dry_run: bool,
 }
 
@@ -86,40 +80,57 @@ struct S3TargetCli {
 
 #[derive(Debug, Subcommand)]
 enum S3TargetFormat {
-    Brew {
-        #[arg(long)]
-        prefix: String,
-        #[arg(long = "public-base-url")]
-        public_base_url: String,
-    },
-    Deb {
-        #[arg(long)]
-        prefix: String,
-        #[arg(long)]
-        suite: String,
-        #[arg(long)]
-        fingerprint: String,
-    },
-    Rpm {
-        #[arg(long)]
-        prefix: String,
-    },
+    Brew,
+    Deb,
+    Rpm,
 }
 
 pub async fn run(options: S3Options, targets: Vec<OsString>) -> Result<(), Whatever> {
-    let targets = parse_s3_targets(&targets).unwrap_or_else(|error| error.exit());
-    let client = client(&options).await?;
+    let contract = release_contract::load_release_contract()
+        .whatever_context("failed to load release contract")?;
+    let resolved_options = resolve_s3_options(&options, &contract)?;
+    let targets = parse_s3_targets(&targets, &contract).unwrap_or_else(|error| error.exit());
+    let client = client(&resolved_options).await?;
     for target in targets {
         match target {
-            S3Target::Brew(target) => brew::run(&options, &client, target).await?,
-            S3Target::Deb(target) => deb::run(&options, &client, target).await?,
-            S3Target::Rpm(target) => rpm::run(&options, &client, target).await?,
+            S3Target::Brew(target) => brew::run(&resolved_options, &client, target).await?,
+            S3Target::Deb(target) => deb::run(&resolved_options, &client, target).await?,
+            S3Target::Rpm(target) => rpm::run(&resolved_options, &client, target).await?,
         }
     }
     Ok(())
 }
 
-fn parse_s3_targets(tokens: &[OsString]) -> Result<Vec<S3Target>, clap::Error> {
+fn resolve_s3_options(
+    options: &S3Options,
+    contract: &ReleaseContract,
+) -> Result<ResolvedS3Options, Whatever> {
+    Ok(ResolvedS3Options {
+        endpoint_url: read_env_ref(&contract.destination.s3.endpoint)?,
+        bucket: contract.destination.s3.bucket.clone(),
+        access_key_id: read_env_ref(&contract.destination.s3.access_key_id)?,
+        secret_access_key: read_env_ref(&contract.destination.s3.secret_access_key)?,
+        dry_run: options.dry_run,
+    })
+}
+
+pub(crate) fn read_env_ref(ref_name: &EnvRef) -> Result<String, Whatever> {
+    let value = std::env::var(&ref_name.env).whatever_context(format!(
+        "missing required release environment variable {}",
+        ref_name.env
+    ))?;
+    snafu::ensure_whatever!(
+        !value.is_empty(),
+        "release environment variable {} must not be empty",
+        ref_name.env
+    );
+    Ok(value)
+}
+
+fn parse_s3_targets(
+    tokens: &[OsString],
+    contract: &ReleaseContract,
+) -> Result<Vec<S3Target>, clap::Error> {
     let sections = match grouped::parse_grouped_targets(tokens, &["deb", "rpm", "brew"]) {
         Ok(sections) => sections,
         Err(error) => return Err(target_error(ErrorKind::ValueValidation, error)),
@@ -132,41 +143,75 @@ fn parse_s3_targets(tokens: &[OsString]) -> Result<Vec<S3Target>, clap::Error> {
     }
     sections
         .into_iter()
-        .map(|section| parse_s3_target(&section.name, section.args))
+        .map(|section| parse_s3_target(&section.name, section.args, contract))
         .collect()
 }
 
-fn parse_s3_target(section_name: &str, args: Vec<OsString>) -> Result<S3Target, clap::Error> {
+fn parse_s3_target(
+    section_name: &str,
+    args: Vec<OsString>,
+    contract: &ReleaseContract,
+) -> Result<S3Target, clap::Error> {
     let mut argv = vec!["xtask publish s3".into(), section_name.to_owned().into()];
     argv.extend(args);
     S3TargetCli::try_parse_from(argv)
-        .and_then(|cli| target_format_to_target(section_name, cli.target))
+        .and_then(|cli| target_format_to_target(section_name, cli.target, contract))
 }
 
 fn target_format_to_target(
     section_name: &str,
     target: S3TargetFormat,
+    contract: &ReleaseContract,
 ) -> Result<S3Target, clap::Error> {
     match target {
-        S3TargetFormat::Brew {
-            prefix,
-            public_base_url,
-        } => Ok(S3Target::Brew(BrewPublishTarget {
-            prefix: parse_prefix(section_name, &prefix)?,
-            public_base_url: parse_public_base_url(section_name, &public_base_url)?,
-        })),
-        S3TargetFormat::Deb {
-            prefix,
-            suite,
-            fingerprint,
-        } => Ok(S3Target::Deb(DebPublishTarget {
-            prefix: parse_prefix(section_name, &prefix)?,
-            suite,
-            fingerprint,
-        })),
-        S3TargetFormat::Rpm { prefix } => Ok(S3Target::Rpm(RpmPublishTarget {
-            prefix: parse_prefix(section_name, &prefix)?,
-        })),
+        S3TargetFormat::Brew => {
+            let brew = contract.destination.brew.as_ref().ok_or_else(|| {
+                target_error(
+                    ErrorKind::MissingRequiredArgument,
+                    "destination.brew is required",
+                )
+            })?;
+            Ok(S3Target::Brew(BrewPublishTarget {
+                prefix: parse_prefix(section_name, &brew.prefix)?,
+                public_base_url: parse_public_base_url(section_name, &brew.public_base_url)?,
+            }))
+        }
+        S3TargetFormat::Deb => {
+            let deb = contract.destination.deb.as_ref().ok_or_else(|| {
+                target_error(
+                    ErrorKind::MissingRequiredArgument,
+                    "destination.deb is required",
+                )
+            })?;
+            let fingerprint_ref = deb.fingerprint.as_ref().ok_or_else(|| {
+                target_error(
+                    ErrorKind::MissingRequiredArgument,
+                    "destination.deb.fingerprint.env is required",
+                )
+            })?;
+            let fingerprint = match read_env_ref(fingerprint_ref) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    return Err(target_error(ErrorKind::ValueValidation, error.to_string()));
+                }
+            };
+            Ok(S3Target::Deb(DebPublishTarget {
+                prefix: parse_prefix(section_name, &deb.prefix)?,
+                suite: deb.suite.clone(),
+                fingerprint,
+            }))
+        }
+        S3TargetFormat::Rpm => {
+            let rpm = contract.destination.rpm.as_ref().ok_or_else(|| {
+                target_error(
+                    ErrorKind::MissingRequiredArgument,
+                    "destination.rpm is required",
+                )
+            })?;
+            Ok(S3Target::Rpm(RpmPublishTarget {
+                prefix: parse_prefix(section_name, &rpm.prefix)?,
+            }))
+        }
     }
 }
 
@@ -478,7 +523,7 @@ async fn sha256_stream(mut body: ByteStream, key: &str) -> Result<String, Whatev
     Ok(crate::hex_lower(hasher.finalize().as_ref()))
 }
 
-async fn client(options: &S3Options) -> Result<Client, Whatever> {
+async fn client(options: &ResolvedS3Options) -> Result<Client, Whatever> {
     let credentials = Credentials::new(
         options.access_key_id.trim().to_string(),
         options.secret_access_key.trim().to_string(),
@@ -498,26 +543,36 @@ async fn client(options: &S3Options) -> Result<Client, Whatever> {
 
 #[cfg(test)]
 mod tests {
-    use clap::error::ErrorKind;
-
-    use super::parse_s3_targets;
+    use super::{ResolvedS3Options, S3Target, client, parse_s3_targets};
+    use crate::release_contract::load_release_contract;
 
     #[test]
-    fn brew_requires_public_base_url() {
-        let targets = ["brew", "--prefix", "brew/pishoo"].map(std::ffi::OsString::from);
-        let error = parse_s3_targets(&targets).expect_err("missing public url should fail");
+    fn parses_destination_contract_targets_without_per_target_options() {
+        let contract = load_release_contract().expect("contract should load");
+        let targets = ["rpm", "brew"].map(std::ffi::OsString::from);
+        let parsed = parse_s3_targets(&targets, &contract).expect("targets should parse");
 
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-        assert!(error.to_string().contains("--public-base-url"));
+        assert!(matches!(parsed[0], S3Target::Rpm(_)));
+        assert!(matches!(parsed[1], S3Target::Brew(_)));
+    }
+
+    #[tokio::test]
+    async fn s3_client_builds_from_resolved_options() {
+        let options = ResolvedS3Options {
+            endpoint_url: "https://example.invalid".to_string(),
+            bucket: "download".to_string(),
+            access_key_id: "access".to_string(),
+            secret_access_key: "secret".to_string(),
+            dry_run: false,
+        };
+
+        let _client = client(&options).await.expect("client should build");
     }
 
     #[test]
-    fn release_workflow_publishes_deb_to_unified_apt_repo() {
+    fn release_workflow_uses_xtask_destination_contract() {
         let workflow = include_str!("../../../.github/workflows/release.yml");
 
-        assert!(workflow.contains("APT_PREFIX: ppa/genmeta"));
-        assert!(workflow.contains("APT_SUITE: genmeta"));
-        assert!(!workflow.contains("APT_PREFIX: apt/pishoo"));
-        assert!(!workflow.contains("APT_SUITE: stable"));
+        assert!(!workflow.contains("download.genmeta.net"));
     }
 }

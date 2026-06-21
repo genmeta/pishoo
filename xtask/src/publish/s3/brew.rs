@@ -1,50 +1,23 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use aws_sdk_s3::Client;
-use snafu::{ResultExt, Snafu, Whatever};
+use snafu::{OptionExt, ResultExt, Snafu, Whatever};
 use tracing::{info, warn};
 
 use super::{
-    BrewPublishTarget, S3Options,
+    BrewPublishTarget, ResolvedS3Options,
     key::{PublicBaseUrl, PublicBaseUrlError},
     plan::PlannedUpload,
 };
-use crate::package::manifest::{ArtifactKind, PackageArtifact, PackageManifest};
+use crate::{
+    package::manifest::{ArtifactKind, PackageArtifact, PackageManifest},
+    release_contract::{self, ResolvedPackageMetadata},
+};
 
-const PACKAGE_NAME: &str = "pishoo";
 const FORMULA_NAME: &str = "pishoo.rb";
-const DESCRIPTION: &str = "modern, secure, QUIC-powered web/proxy engine";
-const HOMEPAGE: &str = "https://www.dhttp.net";
-const LICENSE: &str = "Apache-2.0";
-const INSTALL_CONTENT: &str = r##"  def install
-    bin.install "pishoo"
-    libexec.install "pishoo-worker"
-    libexec.install "pishoo-ssh-session"
-
-    (etc/"pishoo").mkpath
-    chmod 0755, etc/"pishoo"
-    etc.install "pishoo.conf" => "pishoo/pishoo.conf" unless File.exist? "#{etc}/pishoo/pishoo.conf"
-    etc.install "mime.types"  => "pishoo/mime.types"  unless File.exist? "#{etc}/pishoo/mime.types"
-  end
-
-  def caveats
-    <<~EOS
-      Configuration files are installed at:
-        #{etc}/pishoo/pishoo.conf
-    EOS
-  end
-
-  service do
-    run [opt_bin/"pishoo", "-c", etc/"pishoo/pishoo.conf"]
-    keep_alive true
-    log_path var/"log/pishoo.log"
-    error_log_path var/"log/pishoo.error.log"
-    working_dir HOMEBREW_PREFIX
-  end
-
-  test do
-    system "#{bin}/pishoo", "-V"
-  end"##;
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -59,11 +32,17 @@ pub enum RenderBrewError {
     FeatureMismatch,
     #[snafu(display("invalid public base url"))]
     PublicBaseUrl { source: PublicBaseUrlError },
+    #[snafu(display("failed to render brew template"))]
+    Template {
+        source: crate::template::RenderTemplateError,
+    },
 }
 
 pub fn render_formula(
     manifest: &PackageManifest,
     public_base_url: &str,
+    metadata: &ResolvedPackageMetadata,
+    template: &str,
 ) -> Result<String, RenderBrewError> {
     snafu::ensure!(
         manifest.kind == ArtifactKind::Brew,
@@ -71,39 +50,43 @@ pub fn render_formula(
     );
     let base =
         PublicBaseUrl::parse(public_base_url).context(render_brew_error::PublicBaseUrlSnafu)?;
-    let class_name = formula_class_name(PACKAGE_NAME);
-    let mut lines = vec![
-        format!("class {class_name} < Formula"),
-        format!("  desc \"{}\"", escape_formula_string(DESCRIPTION)),
-        format!("  version \"{}\"", escape_formula_string(&manifest.version)),
-        format!("  homepage \"{}\"", escape_formula_string(HOMEPAGE)),
-        format!("  license \"{}\"", escape_formula_string(LICENSE)),
-        String::new(),
-    ];
-
-    for artifact in &manifest.artifacts {
-        let archive_name = archive_name(artifact)?;
-        let block = brew_on_block(&artifact.target)?;
-        lines.extend([
-            format!("  {block} do"),
-            format!("    url \"{}\"", base.join(archive_name)),
-            format!("    sha256 \"{}\"", artifact.sha256),
-            "  end".to_string(),
-            String::new(),
-        ]);
-    }
-
     let features = common_features(&manifest.artifacts)?;
-    lines.push(formula_install_content(features_include_ssh_session(
-        &features,
-    )));
-    lines.push("end".to_string());
-    lines.push(String::new());
-    Ok(lines.join("\n"))
+    let variables = BTreeMap::from([
+        (
+            "homebrew.class".to_string(),
+            formula_class_name(&metadata.name),
+        ),
+        (
+            "homebrew.ssh_session_install".to_string(),
+            if features_include_ssh_session(&features) {
+                "    libexec.install \"pishoo-ssh-session\"".to_string()
+            } else {
+                String::new()
+            },
+        ),
+        ("homebrew.urls".to_string(), formula_urls(manifest, &base)?),
+        (
+            "package.description".to_string(),
+            crate::template::ruby_string(&metadata.description),
+        ),
+        (
+            "package.homepage".to_string(),
+            crate::template::ruby_string(&metadata.homepage),
+        ),
+        (
+            "package.license".to_string(),
+            crate::template::ruby_string(&metadata.license),
+        ),
+        (
+            "package.version".to_string(),
+            crate::template::ruby_string(&metadata.version),
+        ),
+    ]);
+    crate::template::render_template(template, &variables).context(render_brew_error::TemplateSnafu)
 }
 
 pub async fn run(
-    options: &S3Options,
+    options: &ResolvedS3Options,
     client: &Client,
     target: BrewPublishTarget,
 ) -> Result<(), Whatever> {
@@ -116,8 +99,14 @@ pub async fn run(
         &target.prefix,
     )
     .await?;
-    let formula = render_formula(&manifest, target.public_base_url.as_str())
-        .whatever_context("failed to render brew formula")?;
+    let (metadata, template) = metadata_and_template().await?;
+    let formula = render_formula(
+        &manifest,
+        target.public_base_url.as_str(),
+        &metadata,
+        &template,
+    )
+    .whatever_context("failed to render brew formula")?;
     let formula_path = loaded
         .target_dir
         .join("common")
@@ -161,6 +150,28 @@ pub async fn run(
         .await?;
     }
     Ok(())
+}
+
+async fn metadata_and_template() -> Result<(ResolvedPackageMetadata, String), Whatever> {
+    let contract = release_contract::load_release_contract()
+        .whatever_context("failed to load release contract")?;
+    let metadata = release_contract::resolve_package_metadata(&contract)
+        .whatever_context("failed to resolve package metadata")?;
+    let homebrew = contract
+        .homebrew
+        .as_ref()
+        .whatever_context("release contract is missing homebrew template")?;
+    let template_path = repo_root().join(&homebrew.template.path);
+    let template = tokio::fs::read_to_string(&template_path)
+        .await
+        .whatever_context(format!("failed to read {}", template_path.display()))?;
+    Ok((metadata, template))
+}
+
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest directory should have a parent")
 }
 
 async fn plan_payload_uploads(
@@ -212,6 +223,23 @@ async fn plan_payload_uploads(
     Ok((uploads, manifest))
 }
 
+fn formula_urls(
+    manifest: &PackageManifest,
+    base: &PublicBaseUrl,
+) -> Result<String, RenderBrewError> {
+    let mut blocks = Vec::new();
+    for artifact in &manifest.artifacts {
+        let archive_name = archive_name(artifact)?;
+        let block = brew_on_block(&artifact.target)?;
+        blocks.push(format!(
+            "  {block} do\n    url \"{}\"\n    sha256 \"{}\"\n  end",
+            base.join(archive_name),
+            artifact.sha256,
+        ));
+    }
+    Ok(blocks.join("\n\n"))
+}
+
 fn archive_name(artifact: &PackageArtifact) -> Result<&str, RenderBrewError> {
     artifact
         .archive_name
@@ -249,61 +277,45 @@ fn features_include_ssh_session(features: &BTreeSet<String>) -> bool {
     features.contains("sshd") || features.contains("pam")
 }
 
-fn formula_install_content(include_ssh_session: bool) -> String {
-    if include_ssh_session {
-        return INSTALL_CONTENT.trim_end().to_string();
-    }
-    INSTALL_CONTENT
-        .lines()
-        .filter(|line| !line.contains("pishoo-ssh-session"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn formula_class_name(name: &str) -> String {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
+    let mut output = String::new();
+    let mut uppercase_next = true;
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            uppercase_next = true;
+            continue;
+        }
+        if uppercase_next {
+            output.extend(c.to_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(c);
+        }
     }
-}
-
-fn escape_formula_string(value: &str) -> String {
-    value.replace('"', "\\\"")
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::render_formula;
-    use crate::package::manifest::{ArtifactKind, PackageArtifact, PackageManifest};
+    use crate::{
+        package::manifest::{ArtifactKind, PackageArtifact, PackageManifest},
+        release_contract::ResolvedPackageMetadata,
+    };
 
-    #[test]
-    fn formula_uses_public_base_url() {
-        let manifest = manifest_with_features(Vec::new());
-
-        let formula = render_formula(&manifest, "https://download.example/brew/pishoo")
-            .expect("formula should render");
-
-        assert!(formula.contains("license \"Apache-2.0\""));
-        assert!(formula.contains(
-            "url \"https://download.example/brew/pishoo/pishoo_0.5.2-aarch64-apple-darwin.tar.gz\""
-        ));
-        assert!(formula.contains("sha256 \"arm-sha\""));
-        assert!(formula.contains("pishoo-worker"));
-        assert!(!formula.contains("pishoo-ssh-session"));
+    fn metadata() -> ResolvedPackageMetadata {
+        ResolvedPackageMetadata {
+            name: "pishoo".to_string(),
+            version: "0.5.2".to_string(),
+            description: "modern, secure, QUIC-powered web/proxy engine".to_string(),
+            homepage: "https://www.dhttp.net".to_string(),
+            license: "Apache-2.0".to_string(),
+            repository: None,
+            authors: Vec::new(),
+        }
     }
 
-    #[test]
-    fn formula_includes_ssh_session_for_sshd_feature() {
-        let manifest = manifest_with_features(vec!["sshd".to_string(), "pam".to_string()]);
-
-        let formula = render_formula(&manifest, "https://download.example/brew/pishoo")
-            .expect("formula should render");
-
-        assert!(formula.contains("pishoo-ssh-session"));
-    }
-
-    fn manifest_with_features(features: Vec<String>) -> PackageManifest {
+    fn manifest(features: Vec<String>) -> PackageManifest {
         PackageManifest {
             schema_version: 1,
             kind: ArtifactKind::Brew,
@@ -326,5 +338,39 @@ mod tests {
                 profile: Some("release".to_string()),
             }],
         }
+    }
+
+    #[test]
+    fn formula_uses_public_base_url() {
+        let template = include_str!("../../../templates/pishoo.rb.in");
+
+        let formula = render_formula(
+            &manifest(Vec::new()),
+            "https://download.example/brew/pishoo",
+            &metadata(),
+            template,
+        )
+        .expect("formula should render");
+
+        assert!(formula.contains("license \"Apache-2.0\""));
+        assert!(formula.contains(
+            "url \"https://download.example/brew/pishoo/pishoo_0.5.2-aarch64-apple-darwin.tar.gz\""
+        ));
+        assert!(!formula.contains("pishoo-ssh-session"));
+    }
+
+    #[test]
+    fn formula_includes_ssh_session_for_sshd_feature() {
+        let template = include_str!("../../../templates/pishoo.rb.in");
+
+        let formula = render_formula(
+            &manifest(vec!["sshd".to_string()]),
+            "https://download.example/brew/pishoo",
+            &metadata(),
+            template,
+        )
+        .expect("formula should render");
+
+        assert!(formula.contains("libexec.install \"pishoo-ssh-session\""));
     }
 }
