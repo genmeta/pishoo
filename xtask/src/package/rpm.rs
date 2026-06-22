@@ -103,12 +103,13 @@ async fn read_rpm_metadata(path: &Path) -> Result<RpmMetadata, ReadRpmMetadataEr
 }
 
 pub async fn run(
+    contract: &crate::release_contract::ReleaseContract,
     targets: &[RpmTarget],
     features: &[Feature],
     siblings: &[PathBuf],
     overwrite_manifest: bool,
 ) -> Result<(), Whatever> {
-    let rpm_artifacts = crate::rpm::run(targets, features, siblings).await?;
+    let rpm_artifacts = crate::rpm::run(contract, targets, features, siblings).await?;
     let meta = crate::package_meta("pishoo")?;
     let target_dir = crate::target_dir()?;
     let manifest_path = target_dir.join("common").join("rpm").join("manifest.toml");

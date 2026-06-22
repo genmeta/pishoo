@@ -1,11 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use flate2::{Compression, write::GzEncoder};
 use serde::Serialize;
 use snafu::{ResultExt, Whatever};
 use tracing::{Instrument, info, info_span};
 
-use crate::{BrewTarget, Feature, package_meta, run_cmd, run_cmd_quiet, sha256_file, target_dir};
+use crate::{
+    BrewTarget, Feature, package_meta,
+    release_contract::{PackageKind, ReleaseContract, resolve_build_env_from_process},
+    run_cmd, run_cmd_quiet, sha256_file, target_dir,
+};
 
 const CARGO_NAME: &str = "pishoo";
 
@@ -45,6 +52,7 @@ struct BrewFeatures {
 }
 
 pub async fn run(
+    contract: &ReleaseContract,
     targets: &[BrewTarget],
     features: &[Feature],
 ) -> Result<Vec<BrewArchive>, Whatever> {
@@ -60,11 +68,23 @@ pub async fn run(
         let workspace = workspace.clone();
         let triple = target.triple();
         let features = features.to_vec();
+        let build_env = resolve_build_env_from_process(contract, PackageKind::Brew, Some(triple))
+            .whatever_context("failed to resolve build environment for brew target")?;
         info!(triple, "queued brew target build");
         let span = info_span!("brew", triple);
         tasks.spawn(
-            async move { build_one(triple, &version, &target_dir, &workspace, &features).await }
-                .instrument(span),
+            async move {
+                build_one(
+                    triple,
+                    &version,
+                    &target_dir,
+                    &workspace,
+                    &features,
+                    build_env,
+                )
+                .await
+            }
+            .instrument(span),
         );
     }
 
@@ -85,6 +105,7 @@ async fn build_one(
     target_dir: &Path,
     workspace: &Path,
     features: &[Feature],
+    build_env: BTreeMap<String, String>,
 ) -> Result<BrewArchive, Whatever> {
     let has_sshd = features
         .iter()
@@ -119,9 +140,13 @@ async fn build_one(
         args.push("--features");
         args.push(&cargo_features);
     }
-    run_cmd(tokio::process::Command::new("cargo").args(&args))
-        .await
-        .whatever_context(format!("cargo build failed for {triple}"))?;
+    run_cmd(
+        tokio::process::Command::new("cargo")
+            .envs(&build_env)
+            .args(&args),
+    )
+    .await
+    .whatever_context(format!("cargo build failed for {triple}"))?;
     info!(triple, "cargo build finished for brew target");
 
     // Stage

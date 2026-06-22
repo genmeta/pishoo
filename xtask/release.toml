@@ -4,15 +4,32 @@ manifest = "pishoo/Cargo.toml"
 [homebrew.template]
 path = "xtask/templates/pishoo.rb.in"
 
-[build.env]
-required = [
-  "DHTTP_ROOT_CA",
-  "DHTTP_STUN_SERVER",
-  "DHTTP_H3_DNS_SERVER",
-  "DHTTP_HTTP_DNS_SERVER",
-  "DHTTP_MDNS_SERVICE",
-  "DHTTP_CERT_SERVER_URL",
-]
+[build.env.DHTTP_ROOT_CA]
+env = "DHTTP_ROOT_CA"
+
+[build.env.DHTTP_STUN_SERVER]
+env = "DHTTP_STUN_SERVER"
+
+[build.env.DHTTP_H3_DNS_SERVER]
+env = "DHTTP_H3_DNS_SERVER"
+
+[build.env.DHTTP_HTTP_DNS_SERVER]
+env = "DHTTP_HTTP_DNS_SERVER"
+
+[build.env.DHTTP_MDNS_SERVICE]
+env = "DHTTP_MDNS_SERVICE"
+
+[build.env.DHTTP_CERT_SERVER_URL]
+env = "DHTTP_CERT_SERVER_URL"
+
+[build.env.DHTTP_GLOBAL_HOME]
+env = "DHTTP_GLOBAL_HOME"
+
+[homebrew.target.aarch64-apple-darwin.env.DHTTP_GLOBAL_HOME]
+value = "/opt/homebrew/etc/dhttp"
+
+[homebrew.target.x86_64-apple-darwin.env.DHTTP_GLOBAL_HOME]
+value = "/usr/local/etc/dhttp"
 
 [destination.s3]
 bucket = "download"

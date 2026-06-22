@@ -15,6 +15,8 @@
 //! `dnf download`-extracted sysroot under `/opt/sysroots/<arch>/`, referenced
 //! via `RUSTFLAGS=-L ...`.
 
+use std::collections::BTreeMap;
+
 use bollard::{
     Docker,
     models::{ContainerConfig, ContainerCreateBody, HostConfig},
@@ -30,13 +32,13 @@ use crate::{
     Feature, RpmTarget,
     container::{
         CARGO_HOME, ContainerSourceLayout, RUSTUP_HOME, ZIG_GLIBC_VERSION, cargo_cache_mounts,
-        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
+        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_values, exec_in_container,
         force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
         source_layout, source_mounts, start_container,
     },
     deb::PISHOO_LIBEXEC_DIR,
     package_meta,
-    release_contract::load_release_contract,
+    release_contract::{PackageKind, ReleaseContract, resolve_build_env_from_process},
     target_dir,
 };
 
@@ -128,6 +130,7 @@ fn sysroot_libdir(rpm_arch: &str) -> &'static str {
 }
 
 pub async fn run(
+    contract: &ReleaseContract,
     targets: &[RpmTarget],
     features: &[Feature],
     siblings: &[std::path::PathBuf],
@@ -139,8 +142,9 @@ pub async fn run(
 
     let layout = source_layout("gateway", siblings)?;
     let meta = package_meta(CARGO_NAME)?;
-    let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let target_dir = target_dir()?;
+    let build_env = resolve_build_env_from_process(contract, PackageKind::Rpm, None)
+        .whatever_context("failed to resolve build environment for rpm packaging")?;
 
     let mut tasks = tokio::task::JoinSet::new();
     for &target in targets {
@@ -164,6 +168,7 @@ pub async fn run(
         let target_dir = target_dir.clone();
         let layout = layout.clone();
         let features = features.to_vec();
+        let build_env = build_env.clone();
         let triple = target.triple();
         info!(triple, ?features, "queued rpm target build");
         let span = info_span!("rpm", triple);
@@ -178,6 +183,7 @@ pub async fn run(
                     &target_dir,
                     &features,
                     &layout,
+                    &build_env,
                 )
                 .await
             }
@@ -491,6 +497,7 @@ async fn build_one(
     target_dir: &std::path::Path,
     features: &[Feature],
     layout: &ContainerSourceLayout,
+    build_env: &BTreeMap<String, String>,
 ) -> Result<Vec<RpmArtifact>, Whatever> {
     let arch = rpm_arch(triple)?;
     let libdir = sysroot_libdir(arch);
@@ -505,7 +512,7 @@ async fn build_one(
     let mut mounts = source_mounts(layout);
     mounts.extend(cargo_cache_mounts());
 
-    let bootstrap = dhttp_bootstrap_from_env()?;
+    let bootstrap = dhttp_bootstrap_from_values(build_env.clone())?;
     mounts.extend(bootstrap.mounts);
     let cargo_config = cargo_config_from_siblings(&layout.overrides);
 
