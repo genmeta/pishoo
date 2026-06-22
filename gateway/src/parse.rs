@@ -10,6 +10,7 @@ pub mod document;
 pub mod error;
 pub mod grammar;
 pub mod include;
+pub mod normalize;
 pub mod pattern;
 pub mod registry;
 pub mod source;
@@ -66,8 +67,12 @@ fn load_config_text_inner(
     options: registry::BuildOptions<'_>,
 ) -> Result<document::ConfigDocument, error::ConfigLoadFailure> {
     let mut source_map = source::SourceMap::default();
-    let source_id =
-        source_map.add_source(source_path.map(Path::to_path_buf), Arc::from(text), None);
+    let source_id = source_map.add_source(
+        source_path.map(Path::to_path_buf),
+        Arc::from(text),
+        root.map(Path::to_path_buf),
+        None,
+    );
 
     let directives = match grammar::parse_source(text, source_id)
         .context(error::load_config_error::ParseFileSnafu { source_id })

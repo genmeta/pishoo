@@ -135,4 +135,37 @@ mod tests {
             "sqlite:///tmp/rules.db?mode=ro"
         );
     }
+
+    #[tokio::test]
+    async fn parse_relative_pid_uses_root_config_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "gateway-relative-pid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(dir.join("run")).expect("create run dir");
+        std::fs::write(dir.join("pishoo.conf"), "pishoo { pid ./run/pishoo.pid; }")
+            .expect("write config");
+
+        let registry = crate::parse::default_registry();
+        let parsed = crate::parse::load_config_file(
+            &dir.join("pishoo.conf"),
+            &registry,
+            crate::parse::registry::BuildOptions::default(),
+        )
+        .await
+        .expect("config should load");
+
+        let pishoo = crate::parse::tests::first_pishoo(&parsed);
+        assert_eq!(
+            pishoo
+                .require::<crate::parse::types::PathConfig>("pid")
+                .expect("pid should be typed")
+                .0,
+            dir.join("run/pishoo.pid")
+        );
+    }
 }

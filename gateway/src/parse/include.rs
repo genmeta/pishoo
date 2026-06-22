@@ -87,9 +87,11 @@ fn expand_include(
                 path: entry.clone(),
             })?;
         let text: Arc<str> = Arc::from(text);
+        let child_dir = entry.parent();
         let source_id = source_map.add_source(
             Some(entry.clone()),
             Arc::clone(&text),
+            child_dir.map(Path::to_path_buf),
             Some(IncludeTrace {
                 parent: directive.span.source_id,
                 directive_span: directive.span,
@@ -97,7 +99,6 @@ fn expand_include(
         );
         let parsed = grammar::parse_source(&text, source_id)
             .context(resolve_include_error::ParseSourceSnafu { source_id })?;
-        let child_dir = entry.parent();
         out.extend(expand_includes(parsed, source_map, child_dir)?);
     }
     Ok(())
@@ -134,7 +135,7 @@ mod tests {
 
         let root_text = "include child.conf;";
         let mut source_map = SourceMap::default();
-        let root = source_map.add_source(None, Arc::from(root_text), None);
+        let root = source_map.add_source(None, Arc::from(root_text), None, None);
         let directives = grammar::parse_source(root_text, root).expect("root should parse");
 
         let expanded = expand_includes(directives, &mut source_map, Some(&dir))
@@ -165,7 +166,7 @@ mod tests {
 
         let root_text = "include child.conf;";
         let mut source_map = SourceMap::default();
-        let root = source_map.add_source(None, Arc::from(root_text), None);
+        let root = source_map.add_source(None, Arc::from(root_text), None, None);
         let directives = grammar::parse_source(root_text, root).expect("root should parse");
 
         let expanded = expand_includes(directives, &mut source_map, Some(&dir))
@@ -200,7 +201,7 @@ mod tests {
 
         let root_text = "include child.conf;";
         let mut source_map = SourceMap::default();
-        let root = source_map.add_source(None, Arc::from(root_text), None);
+        let root = source_map.add_source(None, Arc::from(root_text), None, None);
         let directives = grammar::parse_source(root_text, root).expect("root should parse");
 
         let error = expand_includes(directives, &mut source_map, Some(&dir))
@@ -225,7 +226,7 @@ mod tests {
 
         let root_text = "include child.conf;";
         let mut source_map = SourceMap::default();
-        let root = source_map.add_source(None, Arc::from(root_text), None);
+        let root = source_map.add_source(None, Arc::from(root_text), None, None);
         let directives = grammar::parse_source(root_text, root).expect("root should parse");
 
         let error = expand_includes(directives, &mut source_map, Some(&dir))

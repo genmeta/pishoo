@@ -511,4 +511,84 @@ mod tests {
 
         cleanup_temp_files(&[&cert, &key]);
     }
+
+    #[tokio::test]
+    async fn parse_location_root_is_relative_to_source_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "gateway-relative-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("server.crt"), "dummy cert").expect("write cert");
+        std::fs::write(dir.join("server.key"), "dummy key").expect("write key");
+        std::fs::write(
+            dir.join("server.conf"),
+            "server {\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    location / { root .; }\n}\n",
+        )
+        .expect("write config");
+
+        let registry = crate::parse::default_registry();
+        let parsed = crate::parse::load_config_file(
+            &dir.join("server.conf"),
+            &registry,
+            crate::parse::registry::BuildOptions::default(),
+        )
+        .await
+        .expect("config should load");
+
+        let server = parsed.root.children("server").expect("server children")[0].clone();
+        let location = server.children("location").expect("location children")[0].clone();
+        assert_eq!(
+            location
+                .require::<crate::parse::types::PathConfig>("root")
+                .expect("root should be typed")
+                .0,
+            dir
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_included_location_root_is_relative_to_included_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "gateway-relative-include-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(dir.join("sites")).expect("create sites dir");
+        std::fs::write(dir.join("server.crt"), "dummy cert").expect("write cert");
+        std::fs::write(dir.join("server.key"), "dummy key").expect("write key");
+        std::fs::write(
+            dir.join("server.conf"),
+            "server {\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    include sites/static.conf;\n}\n",
+        )
+        .expect("write root config");
+        std::fs::write(dir.join("sites/static.conf"), "location / { root .; }\n")
+            .expect("write included config");
+
+        let registry = crate::parse::default_registry();
+        let parsed = crate::parse::load_config_file(
+            &dir.join("server.conf"),
+            &registry,
+            crate::parse::registry::BuildOptions::default(),
+        )
+        .await
+        .expect("config should load");
+
+        let server = parsed.root.children("server").expect("server children")[0].clone();
+        let location = server.children("location").expect("location children")[0].clone();
+        assert_eq!(
+            location
+                .require::<crate::parse::types::PathConfig>("root")
+                .expect("root should be typed")
+                .0,
+            dir.join("sites")
+        );
+    }
 }

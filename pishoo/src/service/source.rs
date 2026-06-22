@@ -740,7 +740,10 @@ mod tests {
         let name = DhttpName::try_from("test.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
 
-        let config = gateway::parse::parse_config_str_for_test("server { listen 127.0.0.1:443; server_name localhost; ssl_certificate a; ssl_certificate_key b; }").unwrap();
+        let config = gateway::parse::parse_config_str_for_test(
+            "server { listen 127.0.0.1:443; server_name localhost; ssl_certificate /tmp/a; ssl_certificate_key /tmp/b; }",
+        )
+        .unwrap();
         let server_node = config.root.children("server").unwrap()[0].clone();
 
         let source = LocalServerSource {
@@ -776,7 +779,10 @@ mod tests {
         let req1 = FakeServerSource::fake_listen_request(&name);
         let req2 = FakeServerSource::fake_listen_request(&name);
 
-        let config = gateway::parse::parse_config_str_for_test("server { listen 127.0.0.1:443; server_name localhost; ssl_certificate a; ssl_certificate_key b; }").unwrap();
+        let config = gateway::parse::parse_config_str_for_test(
+            "server { listen 127.0.0.1:443; server_name localhost; ssl_certificate /tmp/a; ssl_certificate_key /tmp/b; }",
+        )
+        .unwrap();
         let server_node = config.root.children("server").unwrap()[0].clone();
 
         let source1 = LocalServerSource {

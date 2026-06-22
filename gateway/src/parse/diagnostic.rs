@@ -104,7 +104,10 @@ fn find_span(error: &(dyn Error + 'static)) -> Option<SourceSpan> {
             crate::parse::error::BuildDocumentError::UnknownDirective { span, .. }
             | crate::parse::error::BuildDocumentError::InvalidContext { span, .. }
             | crate::parse::error::BuildDocumentError::InvalidDirectiveShape { span, .. }
-            | crate::parse::error::BuildDocumentError::DirectiveParse { span, .. } => Some(*span),
+            | crate::parse::error::BuildDocumentError::DirectiveParse { span, .. }
+            | crate::parse::error::BuildDocumentError::NormalizeDirectiveValue { span, .. } => {
+                Some(*span)
+            }
             crate::parse::error::BuildDocumentError::DuplicateDirective { duplicate, .. } => {
                 Some(*duplicate)
             }
@@ -151,7 +154,7 @@ mod tests {
     #[test]
     fn diagnostic_renders_source_line() {
         let mut sources = SourceMap::default();
-        let id = sources.add_source(None, Arc::from("pishoo {\n  bad;\n}\n"), None);
+        let id = sources.add_source(None, Arc::from("pishoo {\n  bad;\n}\n"), None, None);
         let error = BuildDocumentError::UnknownDirective {
             directive: "bad".to_owned(),
             span: SourceSpan::new(id, 11, 14),
@@ -165,7 +168,7 @@ mod tests {
     #[test]
     fn diagnostic_finds_span_through_load_error_chain() {
         let mut sources = SourceMap::default();
-        let id = sources.add_source(None, Arc::from("include extra.conf;\n"), None);
+        let id = sources.add_source(None, Arc::from("include extra.conf;\n"), None, None);
         let error = crate::parse::error::LoadConfigError::ResolveInclude {
             source: crate::parse::error::ResolveIncludeError::InvalidArgumentCount {
                 span: SourceSpan::new(id, 0, 7),
@@ -182,7 +185,7 @@ mod tests {
     #[test]
     fn diagnostic_renders_syntax_error_location() {
         let mut sources = SourceMap::default();
-        let id = sources.add_source(None, Arc::from("pishoo {\n"), None);
+        let id = sources.add_source(None, Arc::from("pishoo {\n"), None, None);
         let syntax =
             crate::parse::grammar::parse_source("pishoo {\n", id).expect_err("syntax should fail");
         let error = crate::parse::error::LoadConfigError::ParseFile {
@@ -199,10 +202,11 @@ mod tests {
     #[test]
     fn diagnostic_renders_included_source_syntax_error_location() {
         let mut sources = SourceMap::default();
-        let root = sources.add_source(None, Arc::from("include child.conf;\n"), None);
+        let root = sources.add_source(None, Arc::from("include child.conf;\n"), None, None);
         let child = sources.add_source(
             None,
             Arc::from("server {\n"),
+            None,
             Some(crate::parse::source::IncludeTrace {
                 parent: root,
                 directive_span: SourceSpan::new(root, 0, 19),

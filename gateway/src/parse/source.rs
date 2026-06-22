@@ -1,4 +1,8 @@
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub(crate) u32);
@@ -34,6 +38,7 @@ pub struct IncludeTrace {
 pub struct SourceFile {
     pub id: SourceId,
     pub path: Option<PathBuf>,
+    pub base_dir: Option<PathBuf>,
     pub text: Arc<str>,
     pub line_starts: Vec<usize>,
     pub included_from: Option<IncludeTrace>,
@@ -55,13 +60,17 @@ impl SourceMap {
         &mut self,
         path: Option<PathBuf>,
         text: Arc<str>,
+        base_dir: Option<PathBuf>,
         included_from: Option<IncludeTrace>,
     ) -> SourceId {
         let id = SourceId(self.sources.len() as u32);
         let line_starts = line_starts(&text);
+        let derived_base_dir =
+            base_dir.or_else(|| path.as_deref().and_then(Path::parent).map(PathBuf::from));
         self.sources.push(SourceFile {
             id,
             path,
+            base_dir: derived_base_dir,
             text,
             line_starts,
             included_from,
@@ -71,6 +80,10 @@ impl SourceMap {
 
     pub fn get(&self, id: SourceId) -> Option<&SourceFile> {
         self.sources.get(id.0 as usize)
+    }
+
+    pub fn base_dir_for_span(&self, span: SourceSpan) -> Option<&Path> {
+        self.get(span.source_id)?.base_dir.as_deref()
     }
 
     pub fn line_column(&self, span: SourceSpan) -> Option<LineColumn> {
@@ -122,7 +135,7 @@ mod tests {
     #[test]
     fn source_map_resolves_line_and_column() {
         let mut sources = SourceMap::default();
-        let id = sources.add_source(None, Arc::from("one\ntwo\nthree"), None);
+        let id = sources.add_source(None, Arc::from("one\ntwo\nthree"), None, None);
 
         assert_eq!(
             sources.line_column(SourceSpan::new(id, 4, 7)),

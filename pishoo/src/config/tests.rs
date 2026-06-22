@@ -69,7 +69,7 @@ fn resolve_existing_user_target() {
 fn parse_entry_config_servers_only() {
     let (cert, key) = create_temp_tls_files();
     let conf = format!(
-        "pishoo {{ server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root .; }} }} }}",
+        "pishoo {{ server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root /tmp; }} }} }}",
         cert.display(),
         key.display()
     );
@@ -79,11 +79,52 @@ fn parse_entry_config_servers_only() {
     assert_eq!(entry.local_servers.len(), 1);
 }
 
+#[tokio::test]
+async fn parse_entry_config_servers_only_from_file_config() {
+    let (cert, key) = create_temp_tls_files();
+    let dir = cert.parent().expect("temp dir").to_path_buf();
+    let conf_path = dir.join("pishoo.conf");
+    std::fs::write(
+        &conf_path,
+        format!(
+            "pishoo {{ server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root .; }} }} }}",
+            cert.display(),
+            key.display(),
+        ),
+    )
+    .expect("write config");
+
+    let registry = gateway::parse::default_registry();
+    let parsed = gateway::parse::load_config_file(
+        &conf_path,
+        &registry,
+        gateway::parse::registry::BuildOptions::default(),
+    )
+    .await
+    .expect("parse config");
+
+    let entry = parse_entry_config(&parsed.root).expect("parse entry config");
+    assert!(entry.workers.is_empty());
+    assert_eq!(entry.local_servers.len(), 1);
+
+    let location = entry.local_servers[0]
+        .children("location")
+        .expect("location children")[0]
+        .clone();
+    assert_eq!(
+        location
+            .require::<gateway::parse::types::PathConfig>("root")
+            .expect("root should be typed")
+            .0,
+        dir,
+    );
+}
+
 #[test]
 fn parse_entry_config_workers_and_servers() {
     let (cert, key) = create_temp_tls_files();
     let conf = format!(
-        "pishoo {{ workers alice; server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root .; }} }} }}",
+        "pishoo {{ workers alice; server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root /tmp; }} }} }}",
         cert.display(),
         key.display()
     );

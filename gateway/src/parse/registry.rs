@@ -6,6 +6,7 @@ use crate::parse::{
     ast::{AstBody, AstDirective},
     document::{ConfigDocument, ConfigNode},
     error::{BuildDocumentError, build_document_error},
+    normalize,
     source::{SourceMap, SourceSpan},
     value::{ConfigValue, TypedValue},
 };
@@ -84,6 +85,7 @@ pub trait DirectiveValue: ConfigValue + Sized {
 pub struct DirectiveInput<'a> {
     pub directive: &'a AstDirective,
     pub context: ContextKey,
+    pub source_map: &'a SourceMap,
 }
 
 pub enum ParsedDirective {
@@ -238,7 +240,13 @@ impl ConfigRegistry {
                 end: 0,
             });
         let mut root = ConfigNode::new(context::ROOT, None, span);
-        self.build_into(&mut root, context::ROOT, directives, &options)?;
+        self.build_into(
+            source_map.as_ref(),
+            &mut root,
+            context::ROOT,
+            directives,
+            &options,
+        )?;
         let root = Arc::new(root);
         put_parent_recursively(&root, None);
         Ok(ConfigDocument::new(source_map, root))
@@ -246,6 +254,7 @@ impl ConfigRegistry {
 
     fn build_into(
         &self,
+        source_map: &SourceMap,
         node: &mut ConfigNode,
         context: ContextKey,
         directives: Vec<AstDirective>,
@@ -264,6 +273,7 @@ impl ConfigRegistry {
             let parsed = (spec.parser)(&DirectiveInput {
                 directive: &directive,
                 context,
+                source_map,
             })
             .context(build_document_error::DirectiveParseSnafu {
                 directive: directive_name.clone(),
@@ -272,7 +282,7 @@ impl ConfigRegistry {
             match spec.shape {
                 DirectiveShape::Leaf | DirectiveShape::RawBlock => {
                     if let ParsedDirective::Slot(value) = parsed {
-                        insert_slot(node, spec, value)?;
+                        insert_slot(node, spec, value, source_map)?;
                     }
                 }
                 DirectiveShape::ContextBlock {
@@ -292,7 +302,7 @@ impl ConfigRegistry {
                     let AstBody::Block { children, .. } = directive.body else {
                         unreachable!("shape checked block before child build");
                     };
-                    self.build_into(&mut child, child_context, children, options)?;
+                    self.build_into(source_map, &mut child, child_context, children, options)?;
                     self.finalize(&mut child, child_context, options)?;
                     node.insert_child(spec.name, Arc::new(child));
                 }
@@ -338,7 +348,16 @@ fn insert_slot(
     node: &mut ConfigNode,
     spec: &DirectiveSpec,
     value: TypedValue,
+    source_map: &SourceMap,
 ) -> Result<(), BuildDocumentError> {
+    let span = value.span();
+    let value = normalize::normalize_slot_value(value, source_map).context(
+        build_document_error::NormalizeDirectiveValueSnafu {
+            directive: spec.name.to_owned(),
+            span,
+        },
+    )?;
+
     match spec.merge {
         MergePolicy::RejectDuplicate if !node.get_all_untyped(spec.name).is_empty() => {
             let first = node.get_all_untyped(spec.name)[0].span();

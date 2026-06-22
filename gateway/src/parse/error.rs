@@ -96,6 +96,13 @@ pub enum BuildDocumentError {
         duplicate: SourceSpan,
     },
 
+    #[snafu(display("failed to normalize directive `{directive}`"))]
+    NormalizeDirectiveValue {
+        directive: String,
+        span: SourceSpan,
+        source: crate::parse::normalize::NormalizeDirectiveValueError,
+    },
+
     #[snafu(display("missing required directive `{directive}`"))]
     MissingRequiredDirective {
         directive: &'static str,

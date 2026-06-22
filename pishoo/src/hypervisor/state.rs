@@ -113,7 +113,11 @@ pub enum WorkerStartupError {
     },
     #[snafu(display("failed to send worker bootstrap"))]
     SendBootstrap {
-        source: remoc::rch::base::SendError<crate::ipc::WorkerBootstrap>,
+        #[snafu(source(from(
+            remoc::rch::base::SendError<crate::ipc::WorkerBootstrap>,
+            Box::new
+        )))]
+        source: Box<remoc::rch::base::SendError<crate::ipc::WorkerBootstrap>>,
     },
     #[snafu(display("failed to receive worker hello"))]
     ReceiveHello { source: remoc::rch::base::RecvError },
