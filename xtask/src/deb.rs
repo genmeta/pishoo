@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bollard::{
     Docker,
     models::{ContainerConfig, ContainerCreateBody, HostConfig},
@@ -13,12 +15,12 @@ use crate::{
     BuildProfile, DebTarget, Feature,
     container::{
         CARGO_HOME, ContainerSourceLayout, RUSTUP_HOME, ZIG_GLIBC_VERSION, cargo_cache_mounts,
-        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_env, exec_in_container,
+        cargo_config_from_siblings, check_docker, dhttp_bootstrap_from_values, exec_in_container,
         force_remove_container, host_uid_gid, install_cargo_config, remove_container_if_exists,
         source_layout, source_mounts, start_container,
     },
     package_version,
-    release_contract::load_release_contract,
+    release_contract::{PackageKind, ReleaseContract, resolve_build_env_from_process},
     target_dir,
 };
 
@@ -55,6 +57,7 @@ struct BinaryBuildContext<'a> {
     features: &'a [Feature],
     layout: &'a ContainerSourceLayout,
     binary_control: &'a str,
+    build_env: &'a BTreeMap<String, String>,
 }
 
 fn binary_package_version(version: &str) -> String {
@@ -345,6 +348,7 @@ dpkg-buildpackage -A -uc -us -d
 }
 
 pub async fn run(
+    contract: &ReleaseContract,
     targets: &[DebTarget],
     profile: BuildProfile,
     features: &[Feature],
@@ -363,7 +367,6 @@ pub async fn run(
     // and path errors surface before we spin up containers.
     let layout = source_layout("gateway", siblings)?;
 
-    let contract = load_release_contract().whatever_context("failed to load release contract")?;
     let version = package_version(CARGO_NAME)?;
     let binary_package_version = binary_package_version(&version);
     let binary_control = render_binary_control(
@@ -371,6 +374,8 @@ pub async fn run(
         &binary_package_version,
     );
     let target_dir = target_dir()?;
+    let build_env = resolve_build_env_from_process(contract, PackageKind::Deb, None)
+        .whatever_context("failed to resolve build environment for deb packaging")?;
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -399,6 +404,7 @@ pub async fn run(
         let target_dir = target_dir.clone();
         let features = features.to_vec();
         let layout = layout.clone();
+        let build_env = build_env.clone();
         tasks.spawn(
             async move {
                 build_one_with_retry(
@@ -411,6 +417,7 @@ pub async fn run(
                         features: &features,
                         layout: &layout,
                         binary_control: &binary_control,
+                        build_env: &build_env,
                     },
                 )
                 .await
@@ -484,7 +491,7 @@ async fn build_one(
     let mut mounts = source_mounts(context.layout);
     mounts.extend(cargo_cache_mounts());
 
-    let bootstrap = dhttp_bootstrap_from_env()?;
+    let bootstrap = dhttp_bootstrap_from_values(context.build_env.clone())?;
     mounts.extend(bootstrap.mounts);
     let cargo_config = cargo_config_from_siblings(&context.layout.overrides);
 
