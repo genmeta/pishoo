@@ -16,6 +16,7 @@ use dhttp::{
     h3x::endpoint::H3Endpoint,
     identity::Identity,
     network::DhttpNetwork,
+    trust,
 };
 use http::Uri;
 use snafu::{ResultExt, Snafu};
@@ -53,6 +54,8 @@ pub async fn build_registered_endpoint(
                     .network(raw_network)
                     .identity(identity)
                     .resolver(resolver)
+                    .client(trust::default_client_quic_config())
+                    .server(trust::default_server_quic_config())
                     .bind(bind_patterns)
                     .build()
                     .await

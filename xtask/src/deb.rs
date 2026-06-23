@@ -323,19 +323,8 @@ apt-get install --assume-yes -qq debhelper fakeroot
     // Products (.deb etc.) land in target/common/deb/ (one level above src/).
     // Runs as host uid:gid so files in target/ are owned by the host user.
     let user = host_uid_gid()?;
-    let control_escaped = shell_escape(binary_control);
-    let build_script = format!(
-        r#"set -e
-SRC={primary_source}/target/common/deb/src
-mkdir -p "$SRC/debian"
-cp -r {primary_source}/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
-printf '%s' {control_escaped} > "$SRC/debian/control"
-printf '{CARGO_NAME} ({common_package_version}) unstable; urgency=low\n\n  * release {common_package_version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
-    "$(date -R)" > "$SRC/debian/changelog"
-cd "$SRC"
-dpkg-buildpackage -A -uc -us -d
-"#
-    );
+    let build_script =
+        render_common_build_script(common_package_version, binary_control, primary_source);
     exec_in_container(
         docker,
         container_id,
@@ -345,6 +334,27 @@ dpkg-buildpackage -A -uc -us -d
     .await?;
 
     Ok(())
+}
+
+fn render_common_build_script(
+    common_package_version: &str,
+    binary_control: &str,
+    primary_source: &str,
+) -> String {
+    let control_escaped = shell_escape(binary_control);
+    format!(
+        r#"set -e
+export SOURCE_ROOT={primary_source}
+SRC={primary_source}/target/common/deb/src
+mkdir -p "$SRC/debian"
+cp -r {primary_source}/{DEBIAN_PKG_DIR}/. "$SRC/debian/"
+printf '%s' {control_escaped} > "$SRC/debian/control"
+printf '{CARGO_NAME} ({common_package_version}) unstable; urgency=low\n\n  * release {common_package_version}\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
+    "$(date -R)" > "$SRC/debian/changelog"
+cd "$SRC"
+dpkg-buildpackage -A -uc -us -d
+"#
+    )
 }
 
 pub async fn run(
@@ -633,6 +643,7 @@ export ZIG_TARGET={triple}.{ZIG_GLIBC_VERSION}
 export BUILD_PROFILE={profile_dir}
 export CARGO_PROFILE_ARGS="{cargo_profile_args}"
 export DEB_HOST_MULTIARCH={gnu}
+export SOURCE_ROOT={primary_source}
 {dhttp_bootstrap_exports}{worker_env}{ssh_session_env}{cargo_features_env}
 SRC={primary_source}/target/{triple}/{profile_dir}/deb/src
 mkdir -p "$SRC/debian"
@@ -674,7 +685,7 @@ fn shell_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_binary_control;
+    use super::{render_binary_control, render_common_build_script};
 
     #[test]
     fn binary_control_uses_common_dependency_range() {
@@ -683,5 +694,15 @@ mod tests {
         assert!(control.contains(
             "Depends: pishoo-common (>= 0.5.1-1), pishoo-common (<= 0.5.2-1), ${shlibs:Depends}, ${misc:Depends}\n"
         ));
+    }
+
+    #[test]
+    fn common_build_script_exports_primary_source_root() {
+        let script =
+            render_common_build_script("0.5.2-1", "Package: pishoo-common\n", "/sources/gateway");
+
+        assert!(script.contains("export SOURCE_ROOT=/sources/gateway\n"));
+        assert!(script.contains("SRC=/sources/gateway/target/common/deb/src\n"));
+        assert!(!script.contains("/workspace/xtask/deb/common"));
     }
 }

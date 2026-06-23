@@ -80,8 +80,14 @@ fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
         !registered_endpoint_source.contains("\n    Endpoint::builder()"),
         "root-owned endpoints should use Endpoint::from_parts around explicitly built H3 endpoints"
     );
-    assert!(!registered_endpoint_source.contains(&default_client_config));
-    assert!(!registered_endpoint_source.contains(&default_server_config));
+    assert!(
+        registered_endpoint_source.contains(&default_client_config),
+        "raw registered endpoints must install the DHTTP client QUIC defaults so H3 DNS and endpoint-originated H3 connections advertise the h3 ALPN"
+    );
+    assert!(
+        registered_endpoint_source.contains(&default_server_config),
+        "raw registered endpoints must install the DHTTP server QUIC defaults so inbound H3 peers negotiate the h3 ALPN and DHTTP trust policy"
+    );
 }
 
 #[test]
