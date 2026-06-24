@@ -12,6 +12,7 @@ pub async fn load_identity_servers(
         &conf_path,
         &registry,
         gateway::parse::registry::BuildOptions {
+            dhttp_home: None,
             identity_profile: Some(identity_profile),
         },
     )

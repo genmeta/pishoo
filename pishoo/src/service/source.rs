@@ -611,6 +611,7 @@ impl WorkerServerSource {
                 None,
                 &registry,
                 gateway::parse::registry::BuildOptions {
+                    dhttp_home: None,
                     identity_profile: None,
                 },
             )

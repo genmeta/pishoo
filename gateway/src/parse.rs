@@ -40,11 +40,18 @@ pub fn parse_server_config_str_for_test(
     identity_profile: &IdentityProfile,
 ) -> Result<document::ConfigDocument, error::ConfigLoadFailure> {
     let registry = default_registry();
+    let home_path = identity_profile
+        .path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| identity_profile.path().to_path_buf());
+    let home = dhttp::home::DhttpHome::new(home_path);
     load_config_text(
         text,
         Some(identity_profile.path()),
         &registry,
         registry::BuildOptions {
+            dhttp_home: Some(&home),
             identity_profile: Some(identity_profile),
         },
     )

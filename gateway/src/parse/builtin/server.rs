@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-
-use dhttp::home::identity::ssl::{CERT_FILE_NAME, KEY_FILE_NAME};
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
@@ -23,10 +20,6 @@ pub enum FinalizeServerError {
     MissingCertificate { span: SourceSpan },
     #[snafu(display("missing ssl_certificate_key directive in server context"))]
     MissingCertificateKey { span: SourceSpan },
-    #[snafu(display("default ssl_certificate path does not exist"))]
-    MissingDefaultCertificate { span: SourceSpan, path: PathBuf },
-    #[snafu(display("default ssl_certificate_key path does not exist"))]
-    MissingDefaultCertificateKey { span: SourceSpan, path: PathBuf },
 }
 
 pub fn register(registry: &mut ConfigRegistry) {
@@ -98,52 +91,36 @@ fn finalize_server(
         !node.get_all::<ListenConfig>("listen")?.is_empty(),
         finalize_server_error::MissingListenSnafu { span: node.span }
     );
-    if let Some(identity_profile) = options.identity_profile {
-        if node.get::<ServerNames>("server_name")?.is_none() {
-            node.insert_slot(
-                "server_name",
-                TypedValue::new(
-                    ServerNames(vec![ServerName {
-                        name: identity_profile.name().to_owned(),
-                    }]),
-                    node.span,
-                ),
-            );
+    if let Some(identity_profile) = options.identity_profile
+        && node.get::<ServerNames>("server_name")?.is_none()
+    {
+        node.insert_slot(
+            "server_name",
+            TypedValue::new(
+                ServerNames(vec![ServerName {
+                    name: identity_profile.name().to_owned(),
+                }]),
+                node.span,
+            ),
+        );
+    }
+
+    let has_cert = node.get::<PathConfig>("ssl_certificate")?.is_some();
+    let has_key = node.get::<PathConfig>("ssl_certificate_key")?.is_some();
+    match (has_cert, has_key, options.has_dhttp_home_context()) {
+        (true, true, _) => Ok(()),
+        (false, false, true) => Ok(()),
+        (false, _, _) => {
+            node.get::<PathConfig>("ssl_certificate")?
+                .context(finalize_server_error::MissingCertificateSnafu { span: node.span })?;
+            Ok(())
         }
-        if node.get::<PathConfig>("ssl_certificate")?.is_none() {
-            let path = identity_profile.ssl_dir().join(CERT_FILE_NAME);
-            ensure!(
-                path.exists(),
-                finalize_server_error::MissingDefaultCertificateSnafu {
-                    span: node.span,
-                    path
-                }
-            );
-            node.insert_slot(
-                "ssl_certificate",
-                TypedValue::new(PathConfig(path), node.span),
-            );
-        }
-        if node.get::<PathConfig>("ssl_certificate_key")?.is_none() {
-            let path = identity_profile.ssl_dir().join(KEY_FILE_NAME);
-            ensure!(
-                path.exists(),
-                finalize_server_error::MissingDefaultCertificateKeySnafu {
-                    span: node.span,
-                    path
-                }
-            );
-            node.insert_slot(
-                "ssl_certificate_key",
-                TypedValue::new(PathConfig(path), node.span),
-            );
+        (_, false, _) => {
+            node.get::<PathConfig>("ssl_certificate_key")?
+                .context(finalize_server_error::MissingCertificateKeySnafu { span: node.span })?;
+            Ok(())
         }
     }
-    node.get::<PathConfig>("ssl_certificate")?
-        .context(finalize_server_error::MissingCertificateSnafu { span: node.span })?;
-    node.get::<PathConfig>("ssl_certificate_key")?
-        .context(finalize_server_error::MissingCertificateKeySnafu { span: node.span })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -221,6 +198,60 @@ mod tests {
         );
 
         cleanup_temp_files(&[&cert, &key]);
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("pishoo-{label}-{nanos}"))
+    }
+
+    fn first_root_server(
+        document: &crate::parse::document::ConfigDocument,
+    ) -> std::sync::Arc<crate::parse::document::ConfigNode> {
+        document.root.children("server").expect("server children")[0].clone()
+    }
+
+    #[test]
+    fn identity_profile_server_conf_can_omit_name_and_tls_with_home_context() {
+        let home_path = unique_test_dir("identity-profile-server-conf");
+        let home = dhttp::home::DhttpHome::new(home_path);
+        let name = dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned()).unwrap();
+        let profile = home.identity_profile(name.clone());
+        std::fs::create_dir_all(profile.ssl_dir()).expect("create ssl dir");
+
+        let document = crate::parse::load_config_text(
+            "server { listen all 443; location / { root .; } }",
+            Some(profile.path()),
+            &crate::parse::default_registry(),
+            crate::parse::registry::BuildOptions {
+                dhttp_home: Some(&home),
+                identity_profile: Some(&profile),
+            },
+        )
+        .expect("identity service config should parse");
+
+        let server = first_root_server(&document);
+        let names = server.require::<ServerNames>("server_name").unwrap();
+        assert_eq!(names.0[0].name, name);
+        assert!(server.get::<PathConfig>("ssl_certificate").unwrap().is_none());
+        assert!(server
+            .get::<PathConfig>("ssl_certificate_key")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn explicit_config_still_requires_tls_paths() {
+        let failure = crate::parse::parse_config_str_for_test(
+            "pishoo { server { listen all 443; server_name alice.dhttp.net; } }",
+        )
+        .expect_err("standalone config must reject missing tls paths");
+
+        let report = snafu::Report::from_error(&failure.error).to_string();
+        assert!(report.contains("missing ssl_certificate directive in server context"));
     }
 
     #[test]

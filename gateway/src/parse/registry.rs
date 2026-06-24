@@ -209,7 +209,14 @@ fn empty_parser(
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuildOptions<'a> {
+    pub dhttp_home: Option<&'a dhttp::home::DhttpHome>,
     pub identity_profile: Option<&'a dhttp::home::identity::IdentityProfile>,
+}
+
+impl BuildOptions<'_> {
+    pub fn has_dhttp_home_context(&self) -> bool {
+        self.dhttp_home.is_some() || self.identity_profile.is_some()
+    }
 }
 
 impl ConfigRegistry {
