@@ -373,4 +373,25 @@ mod tests {
 
         assert!(formula.contains("libexec.install \"pishoo-ssh-session\""));
     }
+
+    #[test]
+    fn formula_creates_or_explains_pishoo_group() {
+        let template = include_str!("../../../templates/pishoo.rb.in");
+
+        let formula = render_formula(
+            &manifest(Vec::new()),
+            "https://download.example/brew/pishoo",
+            &metadata(),
+            template,
+        )
+        .expect("formula should render");
+
+        assert!(formula.contains("def post_install\n"));
+        assert!(formula.contains("/usr/bin/dscl"));
+        assert!(formula.contains("/Groups/pishoo"));
+        assert!(formula.contains("Process.uid.zero?"));
+        assert!(formula.contains("/usr/sbin/dseditgroup"));
+        assert!(formula.contains("\"-o\", \"create\", \"pishoo\""));
+        assert!(formula.contains("sudo dseditgroup -o create pishoo"));
+    }
 }

@@ -685,7 +685,7 @@ fn shell_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_binary_control, render_common_build_script};
+    use super::{DEBIAN_PKG_DIR, render_binary_control, render_common_build_script};
 
     #[test]
     fn binary_control_uses_common_dependency_range() {
@@ -704,5 +704,14 @@ mod tests {
         assert!(script.contains("export SOURCE_ROOT=/sources/gateway\n"));
         assert!(script.contains("SRC=/sources/gateway/target/common/deb/src\n"));
         assert!(!script.contains("/workspace/xtask/deb/common"));
+    }
+
+    #[test]
+    fn common_postinst_guards_group_creation_with_getent() {
+        let postinst = include_str!("../deb/pishoo-common.postinst");
+
+        assert!(postinst.contains("getent group pishoo >/dev/null"));
+        assert!(postinst.contains("addgroup --system --quiet pishoo || true"));
+        assert_eq!(DEBIAN_PKG_DIR, "xtask/deb");
     }
 }

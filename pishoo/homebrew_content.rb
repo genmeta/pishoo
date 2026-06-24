@@ -9,10 +9,24 @@
     etc.install "mime.types"  => "pishoo/mime.types"  unless File.exist? "#{etc}/pishoo/mime.types"
   end
 
+  def post_install
+    return if system("/usr/bin/dscl", ".", "-read", "/Groups/pishoo", out: File::NULL, err: File::NULL)
+
+    if Process.uid.zero?
+      system "/usr/sbin/dseditgroup", "-o", "create", "pishoo"
+    else
+      opoo "pishoo group was not found; create it with: sudo dseditgroup -o create pishoo"
+    end
+  end
+
   def caveats
     <<~EOS
       Configuration files are installed at:
         #{etc}/pishoo/pishoo.conf
+
+      When workers/groups are not configured, pishoo loads services for users in the pishoo group.
+      If the pishoo group was not created automatically, run:
+        sudo dseditgroup -o create pishoo
     EOS
   end
 

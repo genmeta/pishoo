@@ -56,5 +56,5 @@ prefix = "rpm/pishoo"
 
 [package.common]
 name = "pishoo-common"
-version = "0.5.0-1"
-required_version = "0.5.0-1"
+version = "0.5.1-1"
+required_version = "0.5.1-1"

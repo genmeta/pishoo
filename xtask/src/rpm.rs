@@ -842,7 +842,7 @@ install -D -m 0644 %{{SOURCE2}} %{{buildroot}}%{{_unitdir}}/pishoo.service
 %{{_unitdir}}/pishoo.service
 
 %pre
-getent group pishoo >/dev/null || groupadd --system pishoo
+getent group pishoo >/dev/null || groupadd --system pishoo || :
 
 %post
 %systemd_post pishoo.service
@@ -920,6 +920,7 @@ mod tests {
         assert!(spec.contains("/etc/pishoo/pishoo.conf\n"));
         assert!(spec.contains("/etc/pishoo/mime.types\n"));
         assert!(spec.contains("%{_unitdir}/pishoo.service\n"));
+        assert!(spec.contains("getent group pishoo >/dev/null || groupadd --system pishoo || :\n"));
         assert!(!spec.contains("Requires:       pishoo-common <= %{version}-%{release}"));
         assert!(!spec.contains("/usr/bin/pishoo\n"));
         assert!(!spec.contains("pishoo-worker"));
