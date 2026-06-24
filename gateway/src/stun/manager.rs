@@ -14,7 +14,7 @@ use dhttp::{
         qbase::net::{Family, addr::EndpointAddr},
         qinterface::{
             BindInterface, WeakInterface,
-            component::location::Locations,
+            component::local_endpoint::InterfaceEndpointUpdate,
             io::{ProductIO, handy::DEFAULT_IO_FACTORY},
         },
         qtraversal::{
@@ -31,7 +31,7 @@ use dhttp::{
 use snafu::Report;
 use tokio::time::{self, MissedTickBehavior, interval};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, info, trace, warn};
 
 use super::{
     STUN_DOMAIN, STUN_PUBLISH_INTERVAL, STUN_RECONCILE_INTERVAL,
@@ -116,11 +116,25 @@ impl StunServerManager {
             timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut publish_timer = interval(STUN_PUBLISH_INTERVAL);
             publish_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            let mut observer = Locations::global().subscribe();
+            let mut subscriber = network.quic().local_endpoints().subscribe();
 
             loop {
                 tokio::select! {
-                    _ = observer.recv() => {
+                    update = subscriber.recv() => {
+                        let Some((bind_uri, update)) = update else {
+                            continue;
+                        };
+                        match update {
+                            InterfaceEndpointUpdate::Upsert { key, endpoint } => {
+                                trace!(%bind_uri, ?key, ?endpoint, "observed local endpoint");
+                            }
+                            InterfaceEndpointUpdate::Remove { key } => {
+                                trace!(%bind_uri, ?key, "local endpoint removed");
+                            }
+                            InterfaceEndpointUpdate::Close => {
+                                trace!(%bind_uri, "local endpoints closed");
+                            }
+                        }
                         time::sleep(Duration::from_millis(50)).await;
                         reconcile!();
                         publish_stun_endpoints(&network, &configured_handles, &dynamic_handles, &publishers, &config).await;
