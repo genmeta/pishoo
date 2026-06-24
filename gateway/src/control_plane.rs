@@ -164,8 +164,8 @@ impl<T: SpawnSession> DynSpawnSession for T {
 ///
 /// - **`RemoteControlPlane`**: used by worker processes, communicates with
 ///   root via remoc RPC.
-/// - **`LocalControlPlane`**: used by root-local services, directly
-///   accessing the root state in-process.
+/// - **`InProcessControlPlane`**: used by global services, directly accessing
+///   the root state in-process.
 ///
 /// When the `sshd` feature is enabled, implementors must also provide
 /// [`SpawnSession`] so that DShell handlers can spawn session child

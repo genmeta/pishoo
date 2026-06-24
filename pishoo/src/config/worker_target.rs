@@ -195,16 +195,14 @@ pub(super) fn resolve_all_workers_with_directory<D: AccountDirectory>(
     let explicit_workers = parse_configured_workers(pishoo)?;
     let groups = parse_groups(pishoo)?;
 
-    let group_members = if groups.is_empty()
-        && explicit_workers.is_empty()
-        && mode.default_groups_enabled()
-    {
-        resolve_default_group_members(directory)?
-    } else if !groups.is_empty() {
-        resolve_explicit_group_members(directory, &groups)?
-    } else {
-        Vec::new()
-    };
+    let group_members =
+        if groups.is_empty() && explicit_workers.is_empty() && mode.default_groups_enabled() {
+            resolve_default_group_members(directory)?
+        } else if !groups.is_empty() {
+            resolve_explicit_group_members(directory, &groups)?
+        } else {
+            Vec::new()
+        };
 
     // Deduplicate by username, preserving order (explicit workers first)
     let mut seen = std::collections::HashSet::new();

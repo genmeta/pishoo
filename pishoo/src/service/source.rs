@@ -851,13 +851,10 @@ mod tests {
         let pishoo = config.root.children("pishoo").unwrap()[0].clone();
         let server = pishoo.children("server").unwrap()[0].clone();
 
-        let (sources, _ctx) = PishooConfigServiceSource::load_all(
-            &[server],
-            Some(&home),
-            dummy_router_state(),
-        )
-        .await
-        .expect("load config service sources");
+        let (sources, _ctx) =
+            PishooConfigServiceSource::load_all(&[server], Some(&home), dummy_router_state())
+                .await
+                .expect("load config service sources");
 
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].name().as_full(), "config-home.dhttp.net");

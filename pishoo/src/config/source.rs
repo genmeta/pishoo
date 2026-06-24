@@ -7,7 +7,9 @@ use snafu::{ResultExt, Snafu};
 #[snafu(module)]
 pub enum ResolveConfigSourceError {
     #[snafu(display("failed to load global dhttp home"))]
-    GlobalHome { source: dhttp::home::LoadDhttpHomeError },
+    GlobalHome {
+        source: dhttp::home::LoadDhttpHomeError,
+    },
 }
 
 #[derive(Debug, Clone)]

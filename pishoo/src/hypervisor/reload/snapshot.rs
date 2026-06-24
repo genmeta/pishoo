@@ -43,8 +43,9 @@ pub async fn load_root_reload_snapshot(
     } else {
         crate::config::worker_target::WorkerDiscoveryMode::ExplicitConfig
     };
-    let entry_config = crate::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
-        .whatever_context("failed to parse pishoo entry configuration")?;
+    let entry_config =
+        crate::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
+            .whatever_context("failed to parse pishoo entry configuration")?;
     let worker_targets = crate::config::resolve_entry_worker_targets(&entry_config)
         .whatever_context("failed to resolve configured worker users during reload")?;
 

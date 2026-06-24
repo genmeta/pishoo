@@ -19,11 +19,17 @@ use crate::{
 #[snafu(module)]
 pub enum BuildGlobalSourcesError {
     #[snafu(display("failed to load identity services"))]
-    IdentityServices { source: crate::worker::config::BuildConfigError },
+    IdentityServices {
+        source: crate::worker::config::BuildConfigError,
+    },
     #[snafu(display("failed to load pishoo config services"))]
-    ConfigServices { source: crate::service::source::BuildConfigServiceSourcesError },
+    ConfigServices {
+        source: crate::service::source::BuildConfigServiceSourcesError,
+    },
     #[snafu(display("failed to prepare global service context"))]
-    PrepareContext { source: crate::service::source::BuildPrepareContextError },
+    PrepareContext {
+        source: crate::service::source::BuildPrepareContextError,
+    },
 }
 
 #[derive(Debug, Snafu)]
@@ -100,9 +106,12 @@ async fn build_global_sources(
         Some(ctx) => ctx,
         None => {
             let Some(home) = source.dhttp_home() else {
-                return Ok((sources, PrepareContext::load_config_service(None, router_state)
-                    .await
-                    .context(build_global_sources_error::PrepareContextSnafu)?));
+                return Ok((
+                    sources,
+                    PrepareContext::load_config_service(None, router_state)
+                        .await
+                        .context(build_global_sources_error::PrepareContextSnafu)?,
+                ));
             };
             PrepareContext::load_worker(home, router_state)
                 .await
@@ -176,7 +185,10 @@ pub async fn replace_global_service(
         return Ok(());
     }
 
-    if let Some(registry) = handle.as_mut().and_then(|existing| existing.registry.as_mut()) {
+    if let Some(registry) = handle
+        .as_mut()
+        .and_then(|existing| existing.registry.as_mut())
+    {
         registry.apply_sources(sources, &ctx).await;
         return Ok(());
     }

@@ -172,7 +172,10 @@ impl FakeAccountDirectory {
         self = self.with_group(name, gid, members);
         self.primary_users.insert(
             name.to_string(),
-            primary_users.iter().map(|user| (*user).to_string()).collect(),
+            primary_users
+                .iter()
+                .map(|user| (*user).to_string())
+                .collect(),
         );
         self
     }
@@ -191,7 +194,11 @@ impl AccountDirectory for FakeAccountDirectory {
         group_name: &str,
         _gid: Gid,
     ) -> Result<Vec<String>, crate::config::ConfigError> {
-        Ok(self.primary_users.get(group_name).cloned().unwrap_or_default())
+        Ok(self
+            .primary_users
+            .get(group_name)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 

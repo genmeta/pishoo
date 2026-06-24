@@ -309,9 +309,10 @@ fn service_module_no_longer_exposes_batch_lifecycle() {
 #[test]
 fn main_uses_config_source_instead_of_default_config_path() {
     let source = include_str!("../src/main.rs");
+    let deprecated_default_path = ["default_value = ", "\"/etc/", "pishoo/pishoo.conf\""].concat();
 
     assert!(source.contains("PishooConfigSource::resolve"));
-    assert!(!source.contains("default_value = \"/etc/pishoo/pishoo.conf\""));
+    assert!(!source.contains(&deprecated_default_path));
 }
 
 #[test]

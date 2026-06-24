@@ -236,11 +236,18 @@ mod tests {
         let server = first_root_server(&document);
         let names = server.require::<ServerNames>("server_name").unwrap();
         assert_eq!(names.0[0].name, name);
-        assert!(server.get::<PathConfig>("ssl_certificate").unwrap().is_none());
-        assert!(server
-            .get::<PathConfig>("ssl_certificate_key")
-            .unwrap()
-            .is_none());
+        assert!(
+            server
+                .get::<PathConfig>("ssl_certificate")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            server
+                .get::<PathConfig>("ssl_certificate_key")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

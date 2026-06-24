@@ -17,14 +17,14 @@ use crate::hypervisor::{task_scope::TaskScope, worker_handle::WorkerHandle};
 
 impl RootState {
     // -----------------------------------------------------------------------
-    // Root-local task/resource scope
+    // In-process task/resource scope
     // -----------------------------------------------------------------------
 
     pub fn local_task_scope(&self) -> TaskScope {
         self.local_tasks.clone()
     }
 
-    /// Spawn and track a root-side background task owned by the local service.
+    /// Spawn and track a root-side background task owned by an in-process service.
     pub fn spawn_local_task<F, Fut>(&self, task: F)
     where
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,

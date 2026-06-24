@@ -68,8 +68,9 @@ async fn main() -> Result<(), Whatever> {
     } else {
         pishoo::config::worker_target::WorkerDiscoveryMode::ExplicitConfig
     };
-    let entry_config = pishoo::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
-        .whatever_context("failed to parse pishoo entry configuration")?;
+    let entry_config =
+        pishoo::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
+            .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {
         tracing::info!(
@@ -110,14 +111,13 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut global_service_handle =
-        pishoo::hypervisor::global_service::spawn_global_service(
-            &state,
-            &config_source,
-            &current_entry_config,
-        )
-            .await
-            .whatever_context("failed to spawn global service")?;
+    let mut global_service_handle = pishoo::hypervisor::global_service::spawn_global_service(
+        &state,
+        &config_source,
+        &current_entry_config,
+    )
+    .await
+    .whatever_context("failed to spawn global service")?;
     drop(current_entry_config);
 
     state
