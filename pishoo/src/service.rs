@@ -1,4 +1,4 @@
-//! Shared service plumbing for worker and root-local services.
+//! Shared service plumbing for identity and pishoo config services.
 //!
 //! Submodules:
 //! - [`accept`]: per-server accept loop and listener swap.

@@ -22,7 +22,7 @@ fn local_connector_type_is_dhttp_endpoint() {
     use gateway::control_plane::ProvideConnector;
 
     type Connector =
-        <pishoo::hypervisor::local_plane::LocalControlPlane as ProvideConnector>::Connector;
+        <pishoo::hypervisor::in_process_plane::InProcessControlPlane as ProvideConnector>::Connector;
 
     fn assert_same_type(
         value: Option<Connector>,
@@ -55,7 +55,7 @@ fn worker_stops_server_runtimes_before_exit() {
 fn listener_rebuild_uses_control_plane_rebuild_call() {
     let ipc_source = include_str!("../src/ipc.rs");
     let remote_source = include_str!("../src/worker/remote_plane.rs");
-    let local_source = include_str!("../src/hypervisor/local_plane.rs");
+    let local_source = include_str!("../src/hypervisor/in_process_plane.rs");
     let ipc_server_source = include_str!("../src/hypervisor/ipc_server.rs");
 
     assert!(
@@ -76,7 +76,7 @@ fn listener_rebuild_uses_control_plane_rebuild_call() {
     );
     assert!(
         local_source.contains("rebuild_listener"),
-        "LocalControlPlane must expose rebuild_listener consuming the old RegisteredEndpoint"
+        "InProcessControlPlane must expose rebuild_listener consuming the old RegisteredEndpoint"
     );
 }
 

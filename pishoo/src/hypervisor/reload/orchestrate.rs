@@ -1,6 +1,6 @@
 //! Reload orchestration — SigHup handler logic.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use nix::sys::signal::Signal;
 use snafu::Report;
@@ -9,7 +9,7 @@ use tracing::Instrument;
 use crate::{
     config::ResolvedWorkerTarget,
     hypervisor::{
-        local_service::LocalServiceHandle,
+        global_service::GlobalServiceHandle,
         state::{RootState, WorkerProcessError},
     },
 };
@@ -17,45 +17,46 @@ use crate::{
 /// Run the full reload sequence:
 ///
 /// 1. Preflight: load and validate the new configuration.
-/// 2. Replace root-local servers.
+/// 2. Replace global services.
 /// 3. Compute worker diff (unchanged / added / removed / changed).
 /// 4. Kill removed + changed workers (parallel SIGTERM + grace).
 /// 5. Scrub conflicted server names.
 /// 6. Forward SIGHUP to unchanged workers.
 /// 7. Spawn added + changed workers.
 ///
-/// On preflight or local-service failure, the reload is aborted and the
+/// On preflight or global-service failure, the reload is aborted and the
 /// previous state is preserved.
 pub async fn run_reload(
     state: &Arc<RootState>,
-    config_file: &Path,
+    config_source: &crate::config::PishooConfigSource,
     current_worker_targets: &mut Vec<ResolvedWorkerTarget>,
-    local_service_handle: &mut Option<LocalServiceHandle>,
+    global_service_handle: &mut Option<GlobalServiceHandle>,
 ) {
     tracing::info!("received reload signal");
 
-    let next_snapshot = match super::load_root_reload_snapshot(config_file).await {
+    let next_snapshot = match super::load_root_reload_snapshot(config_source).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             tracing::warn!(
                 error = %Report::from_error(&error),
-                path = %config_file.display(),
+                path = %config_source.config_path().display(),
                 "reload preflight failed; keeping current root state"
             );
             return;
         }
     };
 
-    if let Err(error) = crate::hypervisor::local_service::replace_local_service(
+    if let Err(error) = crate::hypervisor::global_service::replace_global_service(
         state,
-        local_service_handle,
+        global_service_handle,
+        config_source,
         &next_snapshot.entry_config,
     )
     .await
     {
         tracing::warn!(
             error = %Report::from_error(&error),
-            "failed to reload root-local servers; keeping previous worker state"
+            "failed to reload global services; keeping previous worker state"
         );
         return;
     }

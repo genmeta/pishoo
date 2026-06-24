@@ -1,6 +1,6 @@
-//! LocalControlPlane: in-process ControlPlane for root-local services.
+//! InProcessControlPlane: in-process ControlPlane for global services.
 //!
-//! This allows root-local services to use the same runtime path as workers, but
+//! This allows global services to use the same runtime path as workers, but
 //! without any IPC — operations go directly to RootState.
 
 #[cfg(feature = "sshd")]
@@ -31,26 +31,26 @@ use crate::{
     listen::RegisteredEndpoint,
 };
 
-/// In-process [`gateway::control_plane::ControlPlane`] for root-local services.
+/// In-process [`gateway::control_plane::ControlPlane`] for global services.
 ///
 /// Uses the same [`RootState`](super::state::RootState) as remote workers
 /// but operates directly without RPC overhead. Returns a
 /// [`RegisteredEndpoint`] that implements [`dhttp::h3x::quic::Listen`].
-pub struct LocalControlPlane {
+pub struct InProcessControlPlane {
     state: Arc<super::state::RootState>,
 }
 
-impl LocalControlPlane {
+impl InProcessControlPlane {
     pub fn new(state: Arc<super::state::RootState>) -> Self {
         Self { state }
     }
 }
 
-/// Error from a local session spawn.
+/// Error from a in-process session spawn.
 #[cfg(feature = "sshd")]
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum LocalSpawnSessionError {
+pub enum InProcessSpawnSessionError {
     #[snafu(display("failed to create socketpair"))]
     CreateSocketpair { source: std::io::Error },
     #[snafu(display("failed to spawn session process"))]
@@ -59,20 +59,20 @@ pub enum LocalSpawnSessionError {
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum LocalConnectorError {
+pub enum InProcessConnectorError {
     #[snafu(display("failed to build connector endpoint"))]
     BuildEndpoint { source: BuildEndpointError },
 }
 
 #[cfg(feature = "sshd")]
-impl gateway::control_plane::SpawnSession for LocalControlPlane {
-    type Error = LocalSpawnSessionError;
+impl gateway::control_plane::SpawnSession for InProcessControlPlane {
+    type Error = InProcessSpawnSessionError;
 
     async fn spawn_session(
         &self,
         username: &str,
     ) -> Result<gateway::control_plane::SessionTransport, Self::Error> {
-        use local_spawn_session_error::*;
+        use in_process_spawn_session_error::*;
         use snafu::ResultExt;
 
         let session_binary = crate::hypervisor::launcher::session_binary_path();
@@ -109,7 +109,7 @@ impl gateway::control_plane::SpawnSession for LocalControlPlane {
 
         let child = cmd.spawn().context(SpawnSnafu)?;
 
-        // Track the session child under the local service scope so root
+        // Track the session child under the global service scope so root
         // shutdown can cancel the reaper, terminate the child, and wait until
         // it is reaped.
         self.state.spawn_local_task(move |token| async move {
@@ -252,7 +252,7 @@ fn send_local_session_signal(child_pid: Pid, signal: Signal) {
     }
 }
 
-impl gateway::control_plane::ProvideListener for LocalControlPlane {
+impl gateway::control_plane::ProvideListener for InProcessControlPlane {
     type Listener = RegisteredEndpoint;
     type ListenError = AcquireListenerError;
     type RebuildError = RebuildListenerError;
@@ -273,9 +273,9 @@ impl gateway::control_plane::ProvideListener for LocalControlPlane {
     }
 }
 
-impl gateway::control_plane::ProvideConnector for LocalControlPlane {
+impl gateway::control_plane::ProvideConnector for InProcessControlPlane {
     type Connector = Arc<Endpoint>;
-    type ConnectError = LocalConnectorError;
+    type ConnectError = InProcessConnectorError;
 
     async fn connector(
         &self,
@@ -286,7 +286,7 @@ impl gateway::control_plane::ProvideConnector for LocalControlPlane {
             request.identity,
         )
         .await
-        .context(local_connector_error::BuildEndpointSnafu)?;
+        .context(in_process_connector_error::BuildEndpointSnafu)?;
         Ok(Arc::new(endpoint))
     }
 }

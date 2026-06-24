@@ -289,8 +289,8 @@ fn reload_retries_failed_workers() {
 }
 
 #[test]
-fn local_service_uses_worker_runtime_path() {
-    let source = include_str!("../src/hypervisor/local_service.rs");
+fn global_service_uses_worker_runtime_path() {
+    let source = include_str!("../src/hypervisor/global_service.rs");
     assert!(source.contains("RuntimeRegistry::new("));
     assert!(!source.contains("setup_service("));
     assert!(!source.contains("run_service("));
@@ -304,4 +304,20 @@ fn service_module_no_longer_exposes_batch_lifecycle() {
     assert!(!source.contains("pub async fn collect_reusable_listeners"));
     assert!(!source.contains("pub struct PreparedServer"));
     assert!(!source.contains("pub struct ServiceConfig"));
+}
+
+#[test]
+fn main_uses_config_source_instead_of_default_config_path() {
+    let source = include_str!("../src/main.rs");
+
+    assert!(source.contains("PishooConfigSource::resolve"));
+    assert!(!source.contains("default_value = \"/etc/pishoo/pishoo.conf\""));
+}
+
+#[test]
+fn hypervisor_uses_global_service_module_name() {
+    let source = include_str!("../src/hypervisor.rs");
+
+    assert!(source.contains("pub mod global_service;"));
+    assert!(!source.contains("pub mod local_service;"));
 }

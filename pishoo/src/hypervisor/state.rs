@@ -229,7 +229,7 @@ pub struct RootState {
     listeners: RwLock<listener_registry::ListenerRegistry<ListenerResource>>,
     /// Process/user bookkeeping (behind Mutex).
     pub(super) inner: Mutex<Inner>,
-    /// Structured task scope for root-local service resources.
+    /// Structured task scope for in-process service resources.
     pub(super) local_tasks: TaskScope,
     /// Root-owned async resource transitions that must finish even if the
     /// requesting RPC/reload future is cancelled.

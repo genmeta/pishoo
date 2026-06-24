@@ -59,6 +59,13 @@ impl PishooConfigSource {
         }
     }
 
+    pub fn build_options(&self) -> gateway::parse::registry::BuildOptions<'_> {
+        gateway::parse::registry::BuildOptions {
+            dhttp_home: self.dhttp_home(),
+            identity_profile: None,
+        }
+    }
+
     pub fn default_worker_groups_enabled(&self) -> bool {
         matches!(self, Self::GlobalHome { .. })
     }

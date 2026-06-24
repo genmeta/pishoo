@@ -14,9 +14,9 @@ use tokio_util::sync::CancellationToken;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Set configuration file
-    #[arg(short, default_value = "/etc/pishoo/pishoo.conf")]
-    config_file: PathBuf,
+    /// Set standalone configuration file. When omitted, pishoo loads the global DHTTP home.
+    #[arg(short)]
+    config_file: Option<PathBuf>,
     /// Send signal to a master process (only on Linux/MacOS)
     #[arg(short, default_value = None)]
     signal: Option<signal::SignalType>,
@@ -37,13 +37,15 @@ async fn main() -> Result<(), Whatever> {
     #[cfg(feature = "console_subscriber")]
     console_subscriber::init();
 
-    let config_file = args.config_file;
+    let config_source = pishoo::config::PishooConfigSource::resolve(args.config_file)
+        .whatever_context("failed to resolve pishoo configuration source")?;
+    let config_file = config_source.config_path().to_path_buf();
 
     let registry = gateway::parse::default_registry();
     let config = match gateway::parse::load_config_file(
         &config_file,
         &registry,
-        gateway::parse::registry::BuildOptions::default(),
+        config_source.build_options(),
     )
     .await
     {
@@ -61,7 +63,12 @@ async fn main() -> Result<(), Whatever> {
         }
     };
 
-    let entry_config = pishoo::config::parse_entry_config(&config.root)
+    let worker_mode = if config_source.default_worker_groups_enabled() {
+        pishoo::config::worker_target::WorkerDiscoveryMode::DefaultGlobalHome
+    } else {
+        pishoo::config::worker_target::WorkerDiscoveryMode::ExplicitConfig
+    };
+    let entry_config = pishoo::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
         .whatever_context("failed to parse pishoo entry configuration")?;
 
     if args.test_config {
@@ -103,10 +110,14 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut local_service_handle =
-        pishoo::hypervisor::local_service::spawn_local_service(&state, &current_entry_config)
+    let mut global_service_handle =
+        pishoo::hypervisor::global_service::spawn_global_service(
+            &state,
+            &config_source,
+            &current_entry_config,
+        )
             .await
-            .whatever_context("failed to spawn local service")?;
+            .whatever_context("failed to spawn global service")?;
     drop(current_entry_config);
 
     state
@@ -148,9 +159,9 @@ async fn main() -> Result<(), Whatever> {
             signal::RootSignal::SigHup => {
                 pishoo::hypervisor::reload::run_reload(
                     &state,
-                    &config_file,
+                    &config_source,
                     &mut current_worker_targets,
-                    &mut local_service_handle,
+                    &mut global_service_handle,
                 )
                 .await;
             }
@@ -167,7 +178,7 @@ async fn main() -> Result<(), Whatever> {
 
     monitor_shutdown.cancel();
     let _ = monitor_handle.await;
-    if let Some(handle) = local_service_handle.take() {
+    if let Some(handle) = global_service_handle.take() {
         handle.shutdown().await;
     }
     state.cleanup_local_resources().await;

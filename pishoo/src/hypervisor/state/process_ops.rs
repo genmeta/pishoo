@@ -33,7 +33,7 @@ impl RootState {
         self.local_tasks.spawn(task);
     }
 
-    /// Cancel root-local background tasks and retire root-local listeners.
+    /// Cancel in-process background tasks and retire in-process listeners.
     pub async fn cleanup_local_resources(self: &Arc<Self>) -> usize {
         let owner = Owner::Local;
         let local_listeners = {

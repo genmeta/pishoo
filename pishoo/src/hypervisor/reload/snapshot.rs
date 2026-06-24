@@ -1,7 +1,5 @@
 //! Configuration reload helpers for the root process.
 
-use std::path::Path;
-
 use gateway::error::Whatever;
 use snafu::{FromString, ResultExt};
 
@@ -16,12 +14,14 @@ pub struct RootReloadSnapshot {
 /// Used during SIGHUP reload to preflight the new configuration before
 /// applying any changes. Returns the parsed entry config and resolved
 /// worker targets.
-pub async fn load_root_reload_snapshot(config_file: &Path) -> Result<RootReloadSnapshot, Whatever> {
+pub async fn load_root_reload_snapshot(
+    config_source: &crate::config::PishooConfigSource,
+) -> Result<RootReloadSnapshot, Whatever> {
     let registry = gateway::parse::default_registry();
     let config = match gateway::parse::load_config_file(
-        config_file,
+        config_source.config_path(),
         &registry,
-        gateway::parse::registry::BuildOptions::default(),
+        config_source.build_options(),
     )
     .await
     {
@@ -38,7 +38,12 @@ pub async fn load_root_reload_snapshot(config_file: &Path) -> Result<RootReloadS
             ));
         }
     };
-    let entry_config = crate::config::parse_entry_config(&config.root)
+    let worker_mode = if config_source.default_worker_groups_enabled() {
+        crate::config::worker_target::WorkerDiscoveryMode::DefaultGlobalHome
+    } else {
+        crate::config::worker_target::WorkerDiscoveryMode::ExplicitConfig
+    };
+    let entry_config = crate::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
         .whatever_context("failed to parse pishoo entry configuration")?;
     let worker_targets = crate::config::resolve_entry_worker_targets(&entry_config)
         .whatever_context("failed to resolve configured worker users during reload")?;
