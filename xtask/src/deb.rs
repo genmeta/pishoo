@@ -707,11 +707,11 @@ mod tests {
     }
 
     #[test]
-    fn common_postinst_guards_group_creation_with_getent() {
+    fn common_postinst_creates_group_and_dhttp_home() {
         let postinst = include_str!("../deb/pishoo-common.postinst");
 
-        assert!(postinst.contains("getent group pishoo >/dev/null"));
         assert!(postinst.contains("addgroup --system --quiet pishoo || true"));
+        assert!(postinst.contains("install -d -m 0755 /etc/dhttp"));
         assert_eq!(DEBIAN_PKG_DIR, "xtask/deb");
     }
 }

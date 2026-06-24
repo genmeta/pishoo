@@ -7,28 +7,30 @@ Pishoo is a privilege-separated, multi-process reverse proxy supervisor. The roo
 ### Architecture
 
 - **Root supervisor**: Starts/stops workers, maintains `uid -> worker` and `server_name -> owner worker` registries, forwards connections to owning workers, forwards system signals.
-- **Worker processes**: Each runs under a dedicated unprivileged user. Owns per-server identity configuration, router construction, TLS cert/key handling, and business proxy behavior. Identities are loaded from `~/.genmeta/<identity>/` directories.
+- **Worker processes**: Each runs under a dedicated unprivileged user. Owns user identity services, router construction, TLS cert/key handling, and business proxy behavior through the user's DHTTP home.
 
 ### Configuration
 
-Root config (`pishoo.conf`) is a supervisor-level configuration that specifies:
+Default `pishoo` startup loads the global DHTTP home:
 
-```
-pishoo {
-    pid /var/run/pishoo.pid;      # (optional) PID file path; defaults to /var/run/pishoo.pid
-    workers alice bob charlie;    # (optional) explicit worker usernames
-    groups pishoo;                # (optional) explicit worker groups
-}
+```text
+<global DHTTP home>/pishoo.conf
+<global DHTTP home>/<identity>/server.conf
 ```
 
-When neither `workers` nor `groups` is configured, pishoo loads workers from the `pishoo` system group by default. That default includes users listed as group members and users whose primary group is `pishoo`. If the default group does not exist, pishoo logs a warning and continues without default workers. Top-level root-local `server { ... }` blocks can coexist with default group workers.
+The main process owns global identity services and pishoo config services. Worker
+processes own user identity services for their Unix users. Both global and user
+identity services load identity profiles through the DHTTP home API.
 
-Per-server configuration lives in each worker's identity directory: `~/.genmeta/<identity>/pishoo.conf`, not in the root config.
+Use `pishoo -c <file>` only for a standalone config file. Explicit config mode
+does not infer a DHTTP home, does not load identity profile `server.conf` files,
+and does not enumerate the default `pishoo` group when `workers` and `groups` are
+absent.
 
 ### 启动反向代理
 
 ```sh
-cargo run -p pishoo -- -c config/pishoo.conf
+cargo run -p pishoo
 ```
 
 This starts the root supervisor, which then launches each configured worker process.

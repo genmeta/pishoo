@@ -2,9 +2,8 @@
 set -e
 case "$1" in
     configure)
-        if ! getent group pishoo >/dev/null; then
-            addgroup --system --quiet pishoo || true
-        fi
+        addgroup --system --quiet pishoo || true
+        install -d -m 0755 /etc/dhttp
         ;;
 esac
 #DEBHELPER#

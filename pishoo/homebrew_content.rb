@@ -3,10 +3,10 @@
     libexec.install "pishoo-worker"
     libexec.install "pishoo-ssh-session"
 
-    (etc/"pishoo").mkpath
-    chmod 0755, etc/"pishoo"
-    etc.install "pishoo.conf" => "pishoo/pishoo.conf" unless File.exist? "#{etc}/pishoo/pishoo.conf"
-    etc.install "mime.types"  => "pishoo/mime.types"  unless File.exist? "#{etc}/pishoo/mime.types"
+    (etc/"dhttp").mkpath
+    chmod 0755, etc/"dhttp"
+    etc.install "pishoo.conf" => "dhttp/pishoo.conf" unless File.exist? "#{etc}/dhttp/pishoo.conf"
+    etc.install "mime.types"  => "dhttp/mime.types"  unless File.exist? "#{etc}/dhttp/mime.types"
   end
 
   def post_install
@@ -22,16 +22,16 @@
   def caveats
     <<~EOS
       Configuration files are installed at:
-        #{etc}/pishoo/pishoo.conf
+        #{etc}/dhttp/pishoo.conf
 
-      When workers/groups are not configured, pishoo loads services for users in the pishoo group.
+      In default global-home mode, missing workers/groups makes pishoo load users in the pishoo group.
       If the pishoo group was not created automatically, run:
         sudo dseditgroup -o create pishoo
     EOS
   end
 
   service do
-    run [opt_bin/"pishoo", "-c", etc/"pishoo/pishoo.conf"]
+    run [opt_bin/"pishoo"]
     keep_alive true
     log_path var/"log/pishoo.log"
     error_log_path var/"log/pishoo.error.log"

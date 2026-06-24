@@ -7,7 +7,7 @@
 //!   `/usr/libexec/pishoo/pishoo-ssh-session`.
 //! * `pishoo-common-{version}-1.noarch.rpm` — the arch-independent `common`
 //!   target package:
-//!   `/etc/pishoo/*`, the systemd unit, and the `pishoo` system group.
+//!   `/etc/dhttp/*`, the systemd unit, and the `pishoo` system group.
 //!
 //! The spec is generated in Rust (no template file). Pishoo is built by
 //! `cargo zigbuild` before `rpmbuild`; `%install` just copies pre-built
@@ -309,9 +309,9 @@ mkdir -p "$TOPDIR"/{{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}}
 SPEC="$TOPDIR/SPECS/{COMMON_PACKAGE_NAME}.spec"
 printf '%s' {spec_escaped} > "$SPEC"
 
-install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/pishoo/pishoo.conf \
+install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/dhttp/pishoo.conf \
     "$TOPDIR/SOURCES/pishoo.conf"
-install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/pishoo/mime.types \
+install -D -m 0644 {primary_source}/{COMMON_FILES_DIR}/etc/dhttp/mime.types \
     "$TOPDIR/SOURCES/mime.types"
 install -D -m 0644 {primary_source}/{SYSTEMD_UNIT_SRC} \
     "$TOPDIR/SOURCES/pishoo.service"
@@ -831,14 +831,14 @@ Common configuration files and the systemd unit for the pishoo proxy engine.
 
 %install
 rm -rf %{{buildroot}}
-install -D -m 0644 %{{SOURCE0}} %{{buildroot}}/etc/pishoo/pishoo.conf
-install -D -m 0644 %{{SOURCE1}} %{{buildroot}}/etc/pishoo/mime.types
+install -D -m 0644 %{{SOURCE0}} %{{buildroot}}/etc/dhttp/pishoo.conf
+install -D -m 0644 %{{SOURCE1}} %{{buildroot}}/etc/dhttp/mime.types
 install -D -m 0644 %{{SOURCE2}} %{{buildroot}}%{{_unitdir}}/pishoo.service
 
 %files
-%dir /etc/pishoo
-%config(noreplace) /etc/pishoo/pishoo.conf
-/etc/pishoo/mime.types
+%dir /etc/dhttp
+%config(noreplace) /etc/dhttp/pishoo.conf
+/etc/dhttp/mime.types
 %{{_unitdir}}/pishoo.service
 
 %pre
@@ -903,7 +903,7 @@ mod tests {
         assert!(spec.contains("Requires:       pam\n"));
         assert!(!spec.contains("%package common"));
         assert!(!spec.contains("BuildArch:      noarch"));
-        assert!(!spec.contains("/etc/pishoo/pishoo.conf"));
+        assert!(!spec.contains("/etc/dhttp/pishoo.conf"));
         assert!(!spec.contains("%{_unitdir}/pishoo.service"));
     }
 
@@ -917,8 +917,8 @@ mod tests {
         assert!(spec.contains("License:        Apache-2.0\n"));
         assert!(spec.contains("BuildArch:      noarch\n"));
         assert!(spec.contains("Requires(pre):  shadow-utils\n"));
-        assert!(spec.contains("/etc/pishoo/pishoo.conf\n"));
-        assert!(spec.contains("/etc/pishoo/mime.types\n"));
+        assert!(spec.contains("/etc/dhttp/pishoo.conf\n"));
+        assert!(spec.contains("/etc/dhttp/mime.types\n"));
         assert!(spec.contains("%{_unitdir}/pishoo.service\n"));
         assert!(spec.contains("getent group pishoo >/dev/null || groupadd --system pishoo || :\n"));
         assert!(!spec.contains("Requires:       pishoo-common <= %{version}-%{release}"));

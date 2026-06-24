@@ -185,7 +185,7 @@ async fn build_one(
     }
 
     // Copy config files
-    let conf_src = workspace.join("xtask/deb/common/etc/pishoo");
+    let conf_src = workspace.join("xtask/deb/common/etc/dhttp");
     tokio::fs::copy(conf_src.join("pishoo.conf"), staging.join("pishoo.conf"))
         .await
         .whatever_context("failed to copy pishoo.conf")?;
