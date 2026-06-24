@@ -108,86 +108,69 @@ pub enum FakePrepareOutcome {
 
 impl PishooConfigServiceSource {
     pub async fn load_all(
-        local_servers: &[Arc<ConfigNode>],
+        config_servers: &[Arc<ConfigNode>],
+        home: Option<&DhttpHome>,
         router_state: RouterState,
-    ) -> Result<(Vec<ServerSource>, PrepareContext), BuildLocalSourcesError> {
-        let canonicalized = crate::naming::canonicalize_server_nodes(local_servers)
-            .context(build_local_sources_error::CanonicalizeSnafu)?;
+    ) -> Result<(Vec<ServerSource>, PrepareContext), BuildConfigServiceSourcesError> {
+        let canonicalized = crate::naming::canonicalize_server_nodes(config_servers)
+            .context(build_config_service_sources_error::CanonicalizeSnafu)?;
 
         let mut access_rules_uri: Option<String> = None;
         let mut sources = Vec::new();
         let mut seen_server_names = std::collections::HashSet::new();
 
         for server in &canonicalized {
-            let listens =
-                listen_values(server).context(build_local_sources_error::ConfigQuerySnafu)?;
+            let listens = listen_values(server)
+                .context(build_config_service_sources_error::ConfigQuerySnafu)?;
             if listens.is_empty() {
-                return build_local_sources_error::MissingListenSnafu.fail();
+                return build_config_service_sources_error::MissingListenSnafu.fail();
             }
 
             let server_names = server
                 .get::<gateway::parse::types::ServerNames>("server_name")
-                .context(build_local_sources_error::ConfigQuerySnafu)?
-                .context(build_local_sources_error::MissingDirectiveSnafu {
+                .context(build_config_service_sources_error::ConfigQuerySnafu)?
+                .context(build_config_service_sources_error::MissingDirectiveSnafu {
                     directive: "server_name",
                 })?;
 
-            let cert_path = server
+            let has_cert = server
                 .get::<gateway::parse::types::PathConfig>("ssl_certificate")
-                .context(build_local_sources_error::ConfigQuerySnafu)?
-                .context(build_local_sources_error::MissingDirectiveSnafu {
-                    directive: "ssl_certificate",
-                })?
-                .0
-                .clone();
-
-            let key_path = server
+                .context(build_config_service_sources_error::ConfigQuerySnafu)?
+                .is_some();
+            let has_key = server
                 .get::<gateway::parse::types::PathConfig>("ssl_certificate_key")
-                .context(build_local_sources_error::ConfigQuerySnafu)?
-                .context(build_local_sources_error::MissingDirectiveSnafu {
-                    directive: "ssl_certificate_key",
-                })?
-                .0
-                .clone();
+                .context(build_config_service_sources_error::ConfigQuerySnafu)?
+                .is_some();
+            if home.is_some() && !has_cert && !has_key && server_names.0.len() > 1 {
+                return build_config_service_sources_error::AmbiguousImplicitTlsSnafu.fail();
+            }
 
             if access_rules_uri.is_none()
                 && let Some(uri) = server
                     .get::<gateway::parse::types::AccessRulesUri>("access_rules")
-                    .context(build_local_sources_error::ConfigQuerySnafu)?
+                    .context(build_config_service_sources_error::ConfigQuerySnafu)?
             {
                 access_rules_uri = Some(uri.0.as_str().to_owned());
             }
 
-            let cert_pem = tokio::fs::read(&cert_path)
-                .await
-                .context(build_local_sources_error::ReadCertSnafu { path: &cert_path })?;
-            let key_pem = tokio::fs::read(&key_path)
-                .await
-                .context(build_local_sources_error::ReadKeySnafu { path: &key_path })?;
-            let (certs, key) = crate::tls::validate_tls_material(&cert_pem, &key_pem)
-                .context(build_local_sources_error::InvalidTlsSnafu)?;
-
             let dns_resolver_url = server
                 .get::<gateway::parse::types::ResolverConfig>("dns")
-                .context(build_local_sources_error::ConfigQuerySnafu)?
+                .context(build_config_service_sources_error::ConfigQuerySnafu)?
                 .map(|resolver| resolver.0.clone());
 
             for configured_name in &server_names.0 {
                 let server_name = configured_name.name.clone();
                 if !seen_server_names.insert(server_name.clone()) {
-                    return build_local_sources_error::DuplicateServerNameSnafu {
+                    return build_config_service_sources_error::DuplicateServerNameSnafu {
                         name: server_name.to_string(),
                     }
                     .fail();
                 }
 
+                let identity = load_identity_for_server(home, server, &server_name).await?;
                 sources.push(ServerSource::PishooConfig(PishooConfigServiceSource {
-                    name: server_name.clone(),
-                    identity: dhttp::identity::Identity::new(
-                        server_name.into(),
-                        certs.clone(),
-                        key.clone_key(),
-                    ),
+                    name: server_name,
+                    identity,
                     bind: listens.clone(),
                     dns_resolver_url: dns_resolver_url.clone(),
                     server_node: server.clone(),
@@ -195,9 +178,9 @@ impl PishooConfigServiceSource {
             }
         }
 
-        let ctx = PrepareContext::load_local(access_rules_uri.as_deref(), router_state)
+        let ctx = PrepareContext::load_config_service(access_rules_uri.as_deref(), router_state)
             .await
-            .context(build_local_sources_error::PrepareContextSnafu)?;
+            .context(build_config_service_sources_error::PrepareContextSnafu)?;
 
         Ok((sources, ctx))
     }
@@ -258,6 +241,69 @@ fn listen_values(
         .into_iter()
         .flat_map(|node| node.0.clone())
         .collect())
+}
+
+async fn load_identity_for_server(
+    home: Option<&DhttpHome>,
+    server: &ConfigNode,
+    server_name: &DhttpName<'static>,
+) -> Result<dhttp::identity::Identity, BuildConfigServiceSourcesError> {
+    let cert_path = server
+        .get::<gateway::parse::types::PathConfig>("ssl_certificate")
+        .context(build_config_service_sources_error::ConfigQuerySnafu)?;
+    let key_path = server
+        .get::<gateway::parse::types::PathConfig>("ssl_certificate_key")
+        .context(build_config_service_sources_error::ConfigQuerySnafu)?;
+
+    match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            load_identity_from_paths(server_name, &cert_path.0, &key_path.0).await
+        }
+        (None, None) => {
+            let home = home.context(build_config_service_sources_error::MissingDirectiveSnafu {
+                directive: "ssl_certificate",
+            })?;
+            let profile = home
+                .resolve_identity_profile(server_name.clone())
+                .await
+                .context(build_config_service_sources_error::ResolveIdentitySnafu {
+                    name: server_name.to_string(),
+                })?;
+            profile.load_identity().await.context(
+                build_config_service_sources_error::LoadIdentitySnafu {
+                    name: server_name.to_string(),
+                },
+            )
+        }
+        (None, Some(_)) => build_config_service_sources_error::MissingDirectiveSnafu {
+            directive: "ssl_certificate",
+        }
+        .fail(),
+        (Some(_), None) => build_config_service_sources_error::MissingDirectiveSnafu {
+            directive: "ssl_certificate_key",
+        }
+        .fail(),
+    }
+}
+
+async fn load_identity_from_paths(
+    server_name: &DhttpName<'static>,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<dhttp::identity::Identity, BuildConfigServiceSourcesError> {
+    let cert_pem = tokio::fs::read(cert_path)
+        .await
+        .context(build_config_service_sources_error::ReadCertSnafu { path: cert_path })?;
+    let key_pem = tokio::fs::read(key_path)
+        .await
+        .context(build_config_service_sources_error::ReadKeySnafu { path: key_path })?;
+    let (certs, key) = crate::tls::validate_tls_material(&cert_pem, &key_pem)
+        .context(build_config_service_sources_error::InvalidTlsSnafu)?;
+    Ok(dhttp::identity::Identity::new(
+        server_name.clone().into(),
+        certs,
+        key,
+    ))
 }
 
 impl ServerSource {
@@ -414,11 +460,11 @@ fn fake_name(name: &str) -> DhttpName<'static> {
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum BuildLocalSourcesError {
-    #[snafu(display("failed to canonicalize local server nodes"))]
+pub enum BuildConfigServiceSourcesError {
+    #[snafu(display("failed to canonicalize pishoo config server nodes"))]
     Canonicalize { source: gateway::error::Whatever },
 
-    #[snafu(display("local server missing `{directive}`"))]
+    #[snafu(display("pishoo config service missing `{directive}`"))]
     MissingDirective { directive: &'static str },
 
     #[snafu(display("failed to read typed configuration value"))]
@@ -443,16 +489,25 @@ pub enum BuildLocalSourcesError {
         source: crate::tls::TlsMaterialError,
     },
 
-    #[snafu(display("invalid server name `{name}`"))]
-    InvalidServerName {
+    #[snafu(display("failed to resolve identity `{name}` in dhttp home"))]
+    ResolveIdentity {
         name: String,
-        source: dhttp::name::InvalidDhttpName,
+        source: dhttp::home::identity::ssl::ResolveIdentityProfileError,
     },
 
-    #[snafu(display("duplicate local server_name `{name}` in entry config"))]
+    #[snafu(display("failed to load identity `{name}` from dhttp home"))]
+    LoadIdentity {
+        name: String,
+        source: dhttp::home::identity::ssl::LoadIdentityError,
+    },
+
+    #[snafu(display("implicit dhttp home TLS is ambiguous for multiple server_name values"))]
+    AmbiguousImplicitTls,
+
+    #[snafu(display("duplicate pishoo config server_name `{name}`"))]
     DuplicateServerName { name: String },
 
-    #[snafu(display("local server missing `listen`"))]
+    #[snafu(display("pishoo config service missing `listen`"))]
     MissingListen,
 
     #[snafu(display("failed to prepare context"))]
@@ -467,7 +522,7 @@ pub enum BuildPrepareContextError {
 }
 
 impl PrepareContext {
-    pub async fn load_local(
+    pub async fn load_config_service(
         access_rules_uri: Option<&str>,
         router_state: RouterState,
     ) -> Result<Self, BuildPrepareContextError> {
@@ -737,6 +792,86 @@ mod tests {
         });
 
         assert_eq!(source.name().as_full(), "identity-source.dhttp.net");
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("pishoo-{label}-{nanos}"))
+    }
+
+    fn identity_pem(name: &dhttp::name::DhttpName<'static>) -> (String, String) {
+        let fqdn = name.as_full().to_owned();
+        let key_pair = rcgen::KeyPair::generate().expect("rcgen key generation");
+        let mut params = rcgen::CertificateParams::new(vec![fqdn.clone()]).expect("rcgen params");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, &fqdn);
+        params
+            .custom_extensions
+            .push(rcgen::CustomExtension::from_oid_content(
+                &[2, 5, 29, 14],
+                FakeServerSource::dhttp_subject_key_identifier_der(),
+            ));
+        let cert = params.self_signed(&key_pair).expect("rcgen self-sign");
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
+    async fn write_identity(
+        profile: &dhttp::home::identity::IdentityProfile,
+        name: &dhttp::name::DhttpName<'static>,
+    ) {
+        let (cert_pem, key_pem) = identity_pem(name);
+        profile
+            .save_identity(cert_pem.as_bytes(), key_pem.as_bytes())
+            .await
+            .expect("save identity");
+    }
+
+    #[tokio::test]
+    async fn pishoo_config_service_loads_identity_from_home_when_tls_is_omitted() {
+        let home = dhttp::home::DhttpHome::new(unique_test_dir("config-service-home"));
+        let name = fake_name("config-home.dhttp.net");
+        let profile = home.identity_profile(name.clone());
+        write_identity(&profile, &name).await;
+
+        let config = gateway::parse::load_config_text(
+            "pishoo { server { listen all 443; server_name config-home.dhttp.net; } }",
+            Some(home.as_path()),
+            &gateway::parse::default_registry(),
+            gateway::parse::registry::BuildOptions {
+                dhttp_home: Some(&home),
+                identity_profile: None,
+            },
+        )
+        .expect("parse config with home context");
+        let pishoo = config.root.children("pishoo").unwrap()[0].clone();
+        let server = pishoo.children("server").unwrap()[0].clone();
+
+        let (sources, _ctx) = PishooConfigServiceSource::load_all(
+            &[server],
+            Some(&home),
+            dummy_router_state(),
+        )
+        .await
+        .expect("load config service sources");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name().as_full(), "config-home.dhttp.net");
+    }
+
+    #[tokio::test]
+    async fn explicit_config_service_rejects_omitted_tls() {
+        let config = gateway::parse::parse_config_str_for_test(
+            "pishoo { server { listen all 443; server_name explicit-missing.dhttp.net; } }",
+        )
+        .expect_err("explicit config parse should reject missing TLS");
+
+        let report = snafu::Report::from_error(&config.error).to_string();
+        assert!(report.contains("missing ssl_certificate directive"));
     }
 
     #[cfg(feature = "sshd")]

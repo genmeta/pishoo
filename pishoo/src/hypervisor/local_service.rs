@@ -17,7 +17,7 @@ use crate::{
 pub enum SpawnLocalServiceError {
     #[snafu(display("failed to load local server sources"))]
     Load {
-        source: crate::service::source::BuildLocalSourcesError,
+        source: crate::service::source::BuildConfigServiceSourcesError,
     },
 }
 
@@ -26,7 +26,7 @@ pub enum SpawnLocalServiceError {
 pub enum ReplaceLocalServiceError {
     #[snafu(display("failed to load local server sources"))]
     Load {
-        source: crate::service::source::BuildLocalSourcesError,
+        source: crate::service::source::BuildConfigServiceSourcesError,
     },
 }
 
@@ -74,7 +74,7 @@ pub async fn spawn_local_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, router_state)
+    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, None, router_state)
         .await
         .context(spawn_local_service_error::LoadSnafu)?;
 
@@ -115,7 +115,7 @@ pub async fn replace_local_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, router_state)
+    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, None, router_state)
         .await
         .context(replace_local_service_error::LoadSnafu)?;
 
