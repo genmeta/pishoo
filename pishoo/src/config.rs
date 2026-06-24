@@ -48,6 +48,12 @@ pub enum ConfigError {
     #[snafu(display("group `{group_name}` not found"))]
     GroupNotFound { group_name: String },
 
+    #[snafu(display("failed to enumerate users with primary group `{group_name}`"))]
+    PrimaryGroupUserResolve {
+        group_name: String,
+        source: nix::errno::Errno,
+    },
+
     #[snafu(display("failed to resolve user `{username}` via system passwd database"))]
     UserNotFound { username: String },
 

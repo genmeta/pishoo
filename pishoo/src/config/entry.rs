@@ -4,7 +4,9 @@ use gateway::parse::document::ConfigNode;
 
 use super::{
     ConfigError, first_pishoo_node, parse_pid_file,
-    worker_target::{WorkerTarget, resolve_all_workers},
+    worker_target::{
+        AccountDirectory, SystemAccountDirectory, WorkerTarget, resolve_all_workers_with_directory,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -19,10 +21,18 @@ fn parse_local_servers(pishoo: &Arc<ConfigNode>) -> Vec<Arc<ConfigNode>> {
 }
 
 pub fn parse_entry_config(root: &Arc<ConfigNode>) -> Result<EntryConfig, ConfigError> {
+    let directory = SystemAccountDirectory;
+    parse_entry_config_with_directory(root, &directory)
+}
+
+pub(super) fn parse_entry_config_with_directory<D: AccountDirectory>(
+    root: &Arc<ConfigNode>,
+    directory: &D,
+) -> Result<EntryConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
     let local_servers = parse_local_servers(&pishoo);
-    let workers = resolve_all_workers(&pishoo, !local_servers.is_empty())?;
+    let workers = resolve_all_workers_with_directory(&pishoo, directory)?;
 
     Ok(EntryConfig {
         pid_file,

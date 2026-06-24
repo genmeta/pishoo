@@ -25,7 +25,7 @@ pub fn parse_root_config(root: &std::sync::Arc<ConfigNode>) -> Result<RootConfig
         .map(|groups| groups.0.clone())
         .unwrap_or_default();
 
-    let workers = resolve_all_workers(&pishoo, false)?;
+    let workers = resolve_all_workers(&pishoo)?;
 
     Ok(RootConfig {
         pid_file,

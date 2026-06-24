@@ -5,7 +5,8 @@ use crate::config::{
     entry::parse_entry_config,
     root::parse_root_config,
     worker_target::{
-        Gid, ResolvedWorkerTarget, Uid, WorkerTarget, compute_worker_diff, resolve_worker_targets,
+        AccountDirectory, AccountGroup, Gid, ResolvedWorkerTarget, Uid, WorkerTarget,
+        compute_worker_diff, resolve_worker_targets,
     },
 };
 
@@ -74,7 +75,11 @@ fn parse_entry_config_servers_only() {
         key.display()
     );
     let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
-    let entry = parse_entry_config(&parsed.root).expect("parse entry config");
+    let entry = crate::config::entry::parse_entry_config_with_directory(
+        &parsed.root,
+        &FakeAccountDirectory::default(),
+    )
+    .expect("parse entry config");
     assert!(entry.workers.is_empty());
     assert_eq!(entry.local_servers.len(), 1);
 }
@@ -103,7 +108,11 @@ async fn parse_entry_config_servers_only_from_file_config() {
     .await
     .expect("parse config");
 
-    let entry = parse_entry_config(&parsed.root).expect("parse entry config");
+    let entry = crate::config::entry::parse_entry_config_with_directory(
+        &parsed.root,
+        &FakeAccountDirectory::default(),
+    )
+    .expect("parse entry config");
     assert!(entry.workers.is_empty());
     assert_eq!(entry.local_servers.len(), 1);
 
@@ -132,6 +141,61 @@ fn parse_entry_config_workers_and_servers() {
     let entry = parse_entry_config(&parsed.root).expect("parse entry config");
     assert_eq!(entry.workers.len(), 1);
     assert_eq!(entry.local_servers.len(), 1);
+}
+
+#[derive(Default)]
+struct FakeAccountDirectory {
+    groups: std::collections::HashMap<String, AccountGroup>,
+}
+
+impl FakeAccountDirectory {
+    fn with_group(mut self, name: &str, gid: libc::gid_t, members: &[&str]) -> Self {
+        self.groups.insert(
+            name.to_string(),
+            AccountGroup {
+                name: name.to_string(),
+                gid: Gid::from_raw(gid),
+                members: members.iter().map(|member| (*member).to_string()).collect(),
+            },
+        );
+        self
+    }
+}
+
+impl AccountDirectory for FakeAccountDirectory {
+    fn group_by_name(
+        &self,
+        group_name: &str,
+    ) -> Result<Option<AccountGroup>, crate::config::ConfigError> {
+        Ok(self.groups.get(group_name).cloned())
+    }
+
+    fn primary_group_usernames(
+        &self,
+        _group_name: &str,
+        _gid: Gid,
+    ) -> Result<Vec<String>, crate::config::ConfigError> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn parse_entry_config_uses_default_group_even_with_local_servers() {
+    let (cert, key) = create_temp_tls_files();
+    let conf = format!(
+        "pishoo {{ server {{ listen all 443; server_name demo~; ssl_certificate {}; ssl_certificate_key {}; location / {{ root /tmp; }} }} }}",
+        cert.display(),
+        key.display()
+    );
+    let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
+    let directory = FakeAccountDirectory::default().with_group("pishoo", 42, &["alice"]);
+
+    let entry = crate::config::entry::parse_entry_config_with_directory(&parsed.root, &directory)
+        .expect("parse entry config");
+
+    assert_eq!(entry.local_servers.len(), 1);
+    assert_eq!(entry.workers.len(), 1);
+    assert_eq!(entry.workers[0].username, "alice");
 }
 
 #[test]
