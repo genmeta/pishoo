@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.1] - 2026-06-24
+
+### Added
+
+- pishoo now loads workers from the `pishoo` system group by default when
+  `workers/groups` are omitted, including primary-group users.
+
+### Changed
+
+- pishoo DEB/RPM/Homebrew packaging now creates or explains the `pishoo` group
+  best-effort, and runtime startup warns instead of failing when the default
+  group is absent.
+
+### Components
+
+- `pishoo-common` v0.5.1-1
+
 ## [0.6.0] - 2026-06-15
 
 ### Added

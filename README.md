@@ -16,9 +16,12 @@ Root config (`pishoo.conf`) is a supervisor-level configuration that specifies:
 ```
 pishoo {
     pid /var/run/pishoo.pid;      # (optional) PID file path; defaults to /var/run/pishoo.pid
-    workers alice bob charlie;    # list of worker usernames to supervise
+    workers alice bob charlie;    # (optional) explicit worker usernames
+    groups pishoo;                # (optional) explicit worker groups
 }
 ```
+
+When neither `workers` nor `groups` is configured, pishoo loads workers from the `pishoo` system group by default. That default includes users listed as group members and users whose primary group is `pishoo`. If the default group does not exist, pishoo logs a warning and continues without default workers. Top-level root-local `server { ... }` blocks can coexist with default group workers.
 
 Per-server configuration lives in each worker's identity directory: `~/.genmeta/<identity>/pishoo.conf`, not in the root config.
 
