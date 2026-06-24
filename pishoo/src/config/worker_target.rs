@@ -16,6 +16,18 @@ pub struct WorkerTarget {
 
 const DEFAULT_GROUPS: &[&str] = &["pishoo"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerDiscoveryMode {
+    DefaultGlobalHome,
+    ExplicitConfig,
+}
+
+impl WorkerDiscoveryMode {
+    pub fn default_groups_enabled(self) -> bool {
+        matches!(self, Self::DefaultGlobalHome)
+    }
+}
+
 fn parse_worker_names(names: &[String]) -> Result<Vec<WorkerTarget>, ConfigError> {
     names
         .iter()
@@ -172,17 +184,21 @@ fn resolve_default_group_members<D: AccountDirectory>(
 
 pub(super) fn resolve_all_workers(pishoo: &ConfigNode) -> Result<Vec<WorkerTarget>, ConfigError> {
     let directory = SystemAccountDirectory;
-    resolve_all_workers_with_directory(pishoo, &directory)
+    resolve_all_workers_with_directory(pishoo, &directory, WorkerDiscoveryMode::ExplicitConfig)
 }
 
 pub(super) fn resolve_all_workers_with_directory<D: AccountDirectory>(
     pishoo: &ConfigNode,
     directory: &D,
+    mode: WorkerDiscoveryMode,
 ) -> Result<Vec<WorkerTarget>, ConfigError> {
     let explicit_workers = parse_configured_workers(pishoo)?;
     let groups = parse_groups(pishoo)?;
 
-    let group_members = if groups.is_empty() && explicit_workers.is_empty() {
+    let group_members = if groups.is_empty()
+        && explicit_workers.is_empty()
+        && mode.default_groups_enabled()
+    {
         resolve_default_group_members(directory)?
     } else if !groups.is_empty() {
         resolve_explicit_group_members(directory, &groups)?
@@ -354,8 +370,12 @@ mod tests {
         let pishoo = first_pishoo("pishoo { }");
         let directory = FakeAccountDirectory::default();
 
-        let workers = resolve_all_workers_with_directory(&pishoo, &directory)
-            .expect("missing default pishoo group should warn and continue");
+        let workers = resolve_all_workers_with_directory(
+            &pishoo,
+            &directory,
+            WorkerDiscoveryMode::DefaultGlobalHome,
+        )
+        .expect("missing default pishoo group should warn and continue");
 
         assert!(workers.is_empty());
     }
@@ -365,8 +385,12 @@ mod tests {
         let pishoo = first_pishoo("pishoo { groups pishoo; }");
         let directory = FakeAccountDirectory::default();
 
-        let error = resolve_all_workers_with_directory(&pishoo, &directory)
-            .expect_err("explicit missing group should fail");
+        let error = resolve_all_workers_with_directory(
+            &pishoo,
+            &directory,
+            WorkerDiscoveryMode::ExplicitConfig,
+        )
+        .expect_err("explicit missing group should fail");
 
         assert_eq!(error.to_string(), "group `pishoo` not found");
     }
@@ -378,8 +402,12 @@ mod tests {
             .with_group("pishoo", 42, &["alice"])
             .with_primary_users(42, &["bob", "carol"]);
 
-        let workers = resolve_all_workers_with_directory(&pishoo, &directory)
-            .expect("default group should resolve");
+        let workers = resolve_all_workers_with_directory(
+            &pishoo,
+            &directory,
+            WorkerDiscoveryMode::DefaultGlobalHome,
+        )
+        .expect("default group should resolve");
 
         let usernames = workers
             .iter()
@@ -395,8 +423,12 @@ mod tests {
             .with_group("pishoo", 42, &["alice", "bob"])
             .with_primary_users(42, &["bob", "carol"]);
 
-        let workers = resolve_all_workers_with_directory(&pishoo, &directory)
-            .expect("default group should resolve");
+        let workers = resolve_all_workers_with_directory(
+            &pishoo,
+            &directory,
+            WorkerDiscoveryMode::DefaultGlobalHome,
+        )
+        .expect("default group should resolve");
 
         let usernames = workers
             .iter()
@@ -410,8 +442,12 @@ mod tests {
         let pishoo = first_pishoo("pishoo { workers zoe alice; }");
         let directory = FakeAccountDirectory::default().with_group("pishoo", 42, &["bob"]);
 
-        let workers = resolve_all_workers_with_directory(&pishoo, &directory)
-            .expect("explicit workers should resolve without default group lookup");
+        let workers = resolve_all_workers_with_directory(
+            &pishoo,
+            &directory,
+            WorkerDiscoveryMode::ExplicitConfig,
+        )
+        .expect("explicit workers should resolve without default group lookup");
 
         let usernames = workers
             .iter()
