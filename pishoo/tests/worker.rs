@@ -133,3 +133,17 @@ fn worker_reload_uses_worker_runtime() {
     assert!(!worker_source.contains("service::run_service("));
     assert!(!worker_source.contains("collect_reusable_listeners("));
 }
+
+#[test]
+fn worker_uses_dhttp_home_api_for_user_home() {
+    let worker_source = include_str!("../src/bin/pishoo_worker.rs");
+
+    assert!(
+        worker_source.contains("DhttpHome::for_user_home_dir"),
+        "worker must construct user dhttp home through the dhttp home API"
+    );
+    assert!(
+        !worker_source.contains("join(\".dhttp\")"),
+        "worker must not hard-code the dhttp home directory layout"
+    );
+}

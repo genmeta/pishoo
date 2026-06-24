@@ -2,9 +2,9 @@
 //!
 //! Spawned by the root pishoo process with a MuxChannel socketpair on FD 3.
 //! Receives [`WorkerBootstrap`] from the root (containing a
-//! [`pishoo::ipc::ControlPlaneClient`]), scans `~/.dhttp` identities, and drives
-//! [`pishoo::service::runtime::WorkerRuntime`] over the root-provided control
-//! plane.
+//! [`pishoo::ipc::ControlPlaneClient`]), scans the user's DHTTP home identities,
+//! and drives [`pishoo::service::runtime::WorkerRuntime`] over the root-provided
+//! control plane.
 //!
 //! **FD 3 is reserved for MuxChannel transport** — all logging goes to stderr.
 
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Whatever> {
         fd_transfer,
     ));
 
-    let dhttp_home = DhttpHome::new(bootstrap.home.join(".dhttp"));
+    let dhttp_home = DhttpHome::for_user_home_dir(bootstrap.home.clone());
 
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create SIGTERM listener")?;
