@@ -882,7 +882,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_server_source_prepare_produces_listener_spec_with_cert_fingerprint() {
+    async fn pishoo_config_service_source_prepare_produces_listener_spec_with_cert_fingerprint() {
         let name = DhttpName::try_from("test.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
 
@@ -920,7 +920,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_server_source_prepare_two_rotated_certs_produce_distinct_fingerprints() {
+    async fn pishoo_config_service_source_prepare_two_rotated_certs_produce_distinct_fingerprints()
+    {
         let name = DhttpName::try_from("rotated.dhttp.net".to_owned()).unwrap();
         let req1 = FakeServerSource::fake_listen_request(&name);
         let req2 = FakeServerSource::fake_listen_request(&name);

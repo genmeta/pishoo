@@ -435,7 +435,7 @@ async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_repl
 }
 
 #[tokio::test]
-async fn test_cleanup_local_resources_retires_local_servers() {
+async fn test_cleanup_local_resources_retires_config_services() {
     let state = test_state();
     let server_name = "cleanup-local.user.dhttp.net";
     let listener = state

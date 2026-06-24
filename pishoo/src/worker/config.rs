@@ -64,6 +64,16 @@ pub async fn load_identity_service_sources(
             }
         };
 
+        let server_conf_path = identity_profile.server_conf_path();
+        if !server_conf_path.is_file() {
+            tracing::debug!(
+                %name,
+                path = %server_conf_path.display(),
+                "identity profile has no server.conf, skipping"
+            );
+            continue;
+        }
+
         sources.push(crate::service::source::IdentityServiceSource {
             name,
             home: dhttp_home.clone(),
@@ -72,4 +82,48 @@ pub async fn load_identity_service_sources(
     }
 
     Ok(sources)
+}
+
+#[cfg(test)]
+mod tests {
+    use dhttp::{home::DhttpHome, name::DhttpName};
+
+    use super::load_identity_service_sources;
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("pishoo-worker-config-{label}-{nanos}"))
+    }
+
+    #[tokio::test]
+    async fn identity_service_sources_skip_profiles_without_server_conf() {
+        let home = DhttpHome::new(unique_test_dir("server-conf-filter"));
+        let with_conf = DhttpName::try_from("with-conf.dhttp.net".to_owned()).unwrap();
+        let without_conf = DhttpName::try_from("without-conf.dhttp.net".to_owned()).unwrap();
+        let with_conf_profile = home.identity_profile(with_conf.clone());
+        let without_conf_profile = home.identity_profile(without_conf);
+
+        tokio::fs::create_dir_all(with_conf_profile.ssl_dir())
+            .await
+            .expect("create profile with server.conf");
+        tokio::fs::write(
+            with_conf_profile.server_conf_path(),
+            "server { listen all 443; }",
+        )
+        .await
+        .expect("write server.conf");
+        tokio::fs::create_dir_all(without_conf_profile.ssl_dir())
+            .await
+            .expect("create profile without server.conf");
+
+        let sources = load_identity_service_sources(&home)
+            .await
+            .expect("load identity service sources");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].name, with_conf);
+    }
 }

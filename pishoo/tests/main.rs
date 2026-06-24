@@ -322,3 +322,14 @@ fn hypervisor_uses_global_service_module_name() {
     assert!(source.contains("pub mod global_service;"));
     assert!(!source.contains("pub mod local_service;"));
 }
+
+#[test]
+fn entry_config_uses_pishoo_config_service_names() {
+    let entry_source = include_str!("../src/config/entry.rs");
+    let global_service_source = include_str!("../src/hypervisor/global_service.rs");
+
+    assert!(entry_source.contains("config_services"));
+    assert!(!entry_source.contains("local_servers"));
+    assert!(!entry_source.contains("parse_local_servers"));
+    assert!(!global_service_source.contains("local_servers"));
+}

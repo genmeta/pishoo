@@ -90,9 +90,9 @@ async fn build_global_sources(
         );
     }
 
-    if !entry_config.local_servers.is_empty() {
+    if !entry_config.config_services.is_empty() {
         let (config_sources, config_ctx) = PishooConfigServiceSource::load_all(
-            &entry_config.local_servers,
+            &entry_config.config_services,
             source.dhttp_home(),
             router_state.clone(),
         )

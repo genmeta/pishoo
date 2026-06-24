@@ -81,7 +81,7 @@ fn parse_entry_config_servers_only() {
     )
     .expect("parse entry config");
     assert!(entry.workers.is_empty());
-    assert_eq!(entry.local_servers.len(), 1);
+    assert_eq!(entry.config_services.len(), 1);
 }
 
 #[tokio::test]
@@ -114,9 +114,9 @@ async fn parse_entry_config_servers_only_from_file_config() {
     )
     .expect("parse entry config");
     assert!(entry.workers.is_empty());
-    assert_eq!(entry.local_servers.len(), 1);
+    assert_eq!(entry.config_services.len(), 1);
 
-    let location = entry.local_servers[0]
+    let location = entry.config_services[0]
         .children("location")
         .expect("location children")[0]
         .clone();
@@ -140,7 +140,7 @@ fn parse_entry_config_workers_and_servers() {
     let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
     let entry = parse_entry_config(&parsed.root).expect("parse entry config");
     assert_eq!(entry.workers.len(), 1);
-    assert_eq!(entry.local_servers.len(), 1);
+    assert_eq!(entry.config_services.len(), 1);
 }
 
 #[derive(Default)]
@@ -267,7 +267,7 @@ fn default_global_mode_uses_default_group_even_with_config_servers() {
     )
     .expect("parse entry config");
 
-    assert_eq!(entry.local_servers.len(), 1);
+    assert_eq!(entry.config_services.len(), 1);
     assert_eq!(entry.workers.len(), 1);
     assert_eq!(entry.workers[0].username, "alice");
 }

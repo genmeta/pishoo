@@ -14,10 +14,10 @@ use super::{
 pub struct EntryConfig {
     pub pid_file: PathBuf,
     pub workers: Vec<WorkerTarget>,
-    pub local_servers: Vec<Arc<ConfigNode>>,
+    pub config_services: Vec<Arc<ConfigNode>>,
 }
 
-fn parse_local_servers(pishoo: &Arc<ConfigNode>) -> Vec<Arc<ConfigNode>> {
+fn parse_config_services(pishoo: &Arc<ConfigNode>) -> Vec<Arc<ConfigNode>> {
     pishoo.children_optional("server").to_vec()
 }
 
@@ -48,12 +48,12 @@ pub(super) fn parse_entry_config_with_directory_and_mode<D: AccountDirectory>(
 ) -> Result<EntryConfig, ConfigError> {
     let pishoo = first_pishoo_node(root)?;
     let pid_file = parse_pid_file(&pishoo)?;
-    let local_servers = parse_local_servers(&pishoo);
+    let config_services = parse_config_services(&pishoo);
     let workers = resolve_all_workers_with_directory(&pishoo, directory, mode)?;
 
     Ok(EntryConfig {
         pid_file,
         workers,
-        local_servers,
+        config_services,
     })
 }
