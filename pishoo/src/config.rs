@@ -6,6 +6,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 mod discovery;
 pub mod entry;
 pub mod root;
+pub mod source;
 pub mod worker_target;
 
 #[cfg(test)]
@@ -14,6 +15,7 @@ mod tests;
 pub use discovery::load_identity_servers;
 pub use entry::{EntryConfig, parse_entry_config};
 pub use root::{RootConfig, parse_root_config};
+pub use source::{PishooConfigSource, ResolveConfigSourceError};
 pub use worker_target::{
     ResolvedWorkerTarget, WorkerDiff, WorkerTarget, compute_worker_diff,
     resolve_entry_worker_targets, resolve_worker_targets,
