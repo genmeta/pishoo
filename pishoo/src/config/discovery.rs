@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use dhttp::home::identity::IdentityProfile;
+use dhttp::home::{DhttpHome, identity::IdentityProfile};
 use gateway::parse::{document::ConfigNode, error::ConfigLoadFailure};
 
 pub async fn load_identity_servers(
+    home: &DhttpHome,
     identity_profile: &IdentityProfile,
 ) -> Result<Vec<Arc<ConfigNode>>, ConfigLoadFailure> {
     let conf_path = identity_profile.server_conf_path();
@@ -12,7 +13,7 @@ pub async fn load_identity_servers(
         &conf_path,
         &registry,
         gateway::parse::registry::BuildOptions {
-            dhttp_home: None,
+            dhttp_home: Some(home),
             identity_profile: Some(identity_profile),
         },
     )

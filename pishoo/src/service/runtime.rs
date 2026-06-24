@@ -338,12 +338,12 @@ where
 
     pub async fn reload(&mut self) {
         let sources =
-            match crate::worker::config::load_worker_server_sources(&self.dhttp_config).await {
+            match crate::worker::config::load_identity_service_sources(&self.dhttp_config).await {
                 Ok(sources) => sources,
                 Err(error) => {
                     tracing::warn!(
                         error = %snafu::Report::from_error(&error),
-                        "failed to load worker server sources"
+                        "failed to load identity service sources"
                     );
                     return;
                 }
@@ -366,7 +366,7 @@ where
         };
 
         let server_sources: Vec<ServerSource> =
-            sources.into_iter().map(ServerSource::Worker).collect();
+            sources.into_iter().map(ServerSource::IdentityService).collect();
         self.registry.apply_sources(server_sources, &ctx).await;
     }
 

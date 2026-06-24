@@ -47,8 +47,8 @@ pub struct PreparedServerUpdate {
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum PrepareServerUpdateError {
-    #[snafu(display("failed to build worker server config"))]
-    Worker {
+    #[snafu(display("failed to build identity service config"))]
+    IdentityService {
         source: crate::worker::config::BuildConfigError,
     },
     #[cfg(test)]
@@ -57,8 +57,8 @@ pub enum PrepareServerUpdateError {
 }
 
 pub enum ServerSource {
-    Worker(WorkerServerSource),
-    Local(LocalServerSource),
+    IdentityService(IdentityServiceSource),
+    PishooConfig(PishooConfigServiceSource),
     #[cfg(test)]
     Fake(FakeServerSource),
 }
@@ -77,12 +77,13 @@ fn h3_settings() -> Arc<dhttp::h3x::dhttp::settings::Settings> {
     Arc::new(settings)
 }
 
-pub struct WorkerServerSource {
+pub struct IdentityServiceSource {
     pub name: DhttpName<'static>,
+    pub home: DhttpHome,
     pub identity_profile: IdentityProfile,
 }
 
-pub struct LocalServerSource {
+pub struct PishooConfigServiceSource {
     pub name: DhttpName<'static>,
     pub identity: dhttp::identity::Identity,
     pub bind: Vec<Listens>,
@@ -105,7 +106,7 @@ pub enum FakePrepareOutcome {
     Failure,
 }
 
-impl LocalServerSource {
+impl PishooConfigServiceSource {
     pub async fn load_all(
         local_servers: &[Arc<ConfigNode>],
         router_state: RouterState,
@@ -180,7 +181,7 @@ impl LocalServerSource {
                     .fail();
                 }
 
-                sources.push(ServerSource::Local(LocalServerSource {
+                sources.push(ServerSource::PishooConfig(PishooConfigServiceSource {
                     name: server_name.clone(),
                     identity: dhttp::identity::Identity::new(
                         server_name.into(),
@@ -262,8 +263,8 @@ fn listen_values(
 impl ServerSource {
     pub fn name(&self) -> &DhttpName<'static> {
         match self {
-            Self::Worker(source) => &source.name,
-            Self::Local(source) => &source.name,
+            Self::IdentityService(source) => &source.name,
+            Self::PishooConfig(source) => &source.name,
             #[cfg(test)]
             Self::Fake(source) => &source.name,
         }
@@ -274,8 +275,8 @@ impl ServerSource {
         ctx: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
         match self {
-            Self::Worker(source) => source.prepare(ctx).await,
-            Self::Local(source) => source.prepare(ctx).await,
+            Self::IdentityService(source) => source.prepare(ctx).await,
+            Self::PishooConfig(source) => source.prepare(ctx).await,
             #[cfg(test)]
             Self::Fake(source) => source.prepare(),
         }
@@ -497,7 +498,7 @@ impl PrepareContext {
     }
 }
 
-impl WorkerServerSource {
+impl IdentityServiceSource {
     pub async fn prepare(
         &self,
         ctx: &PrepareContext,
@@ -509,14 +510,14 @@ impl WorkerServerSource {
             .load_identity()
             .await
             .whatever_context::<_, BuildConfigError>("failed to load TLS material")
-            .context(prepare_server_update_error::WorkerSnafu)?;
+            .context(prepare_server_update_error::IdentityServiceSnafu)?;
 
         let conf_path = self.identity_profile.server_conf_path();
         let identity_server_nodes = if conf_path.is_file() {
-            load_identity_servers(&self.identity_profile)
+            load_identity_servers(&self.home, &self.identity_profile)
                 .await
                 .whatever_context::<_, BuildConfigError>("failed to load identity config")
-                .context(prepare_server_update_error::WorkerSnafu)?
+                .context(prepare_server_update_error::IdentityServiceSnafu)?
         } else {
             Vec::new()
         };
@@ -535,7 +536,7 @@ impl WorkerServerSource {
                 let listens: Vec<Listens> = server_node
                     .get_all::<ListenConfig>("listen")
                     .whatever_context::<_, BuildConfigError>("failed to read listen")
-                    .context(prepare_server_update_error::WorkerSnafu)?
+                    .context(prepare_server_update_error::IdentityServiceSnafu)?
                     .into_iter()
                     .flat_map(|listen| listen.0.clone())
                     .collect();
@@ -552,7 +553,7 @@ impl WorkerServerSource {
                 "no listen specifications found for server {}",
                 self.name
             ));
-            return Err(PrepareServerUpdateError::Worker { source: error });
+            return Err(PrepareServerUpdateError::IdentityService { source: error });
         }
 
         let dns_resolver_url = target_node
@@ -726,6 +727,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn server_source_uses_identity_service_variant_name() {
+        let source = ServerSource::IdentityService(IdentityServiceSource {
+            name: fake_name("identity-source.dhttp.net"),
+            home: dhttp::home::DhttpHome::new(std::path::PathBuf::from("/tmp/home")),
+            identity_profile: dhttp::home::DhttpHome::new(std::path::PathBuf::from("/tmp/home"))
+                .identity_profile(fake_name("identity-source.dhttp.net")),
+        });
+
+        assert_eq!(source.name().as_full(), "identity-source.dhttp.net");
+    }
+
     #[cfg(feature = "sshd")]
     #[test]
     fn h3_settings_advertise_webtransport_support_when_sshd_enabled() {
@@ -747,7 +760,7 @@ mod tests {
         .unwrap();
         let server_node = config.root.children("server").unwrap()[0].clone();
 
-        let source = LocalServerSource {
+        let source = PishooConfigServiceSource {
             name: name.clone(),
             identity: req1.identity.clone(),
             bind: req1.bind.clone(),
@@ -786,7 +799,7 @@ mod tests {
         .unwrap();
         let server_node = config.root.children("server").unwrap()[0].clone();
 
-        let source1 = LocalServerSource {
+        let source1 = PishooConfigServiceSource {
             name: name.clone(),
             identity: req1.identity.clone(),
             bind: req1.bind.clone(),
@@ -794,7 +807,7 @@ mod tests {
             server_node: server_node.clone(),
         };
 
-        let source2 = LocalServerSource {
+        let source2 = PishooConfigServiceSource {
             name: name.clone(),
             identity: req2.identity.clone(),
             bind: req2.bind.clone(),

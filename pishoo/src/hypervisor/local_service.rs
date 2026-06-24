@@ -9,7 +9,7 @@ use snafu::{ResultExt, Snafu};
 
 use crate::{
     hypervisor::{local_plane::LocalControlPlane, state::RootState},
-    service::{runtime::RuntimeRegistry, source::LocalServerSource},
+    service::{runtime::RuntimeRegistry, source::PishooConfigServiceSource},
 };
 
 #[derive(Debug, Snafu)]
@@ -74,7 +74,7 @@ pub async fn spawn_local_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = LocalServerSource::load_all(&entry_config.local_servers, router_state)
+    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, router_state)
         .await
         .context(spawn_local_service_error::LoadSnafu)?;
 
@@ -115,7 +115,7 @@ pub async fn replace_local_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = LocalServerSource::load_all(&entry_config.local_servers, router_state)
+    let (sources, ctx) = PishooConfigServiceSource::load_all(&entry_config.local_servers, router_state)
         .await
         .context(replace_local_service_error::LoadSnafu)?;
 

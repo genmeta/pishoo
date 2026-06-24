@@ -1,7 +1,7 @@
 //! Worker-side configuration source loading.
 //!
 //! Workers scan the configured DHTTP home for identities and return
-//! [`WorkerServerSource`](crate::service::source::WorkerServerSource) values.
+//! [`IdentityServiceSource`](crate::service::source::IdentityServiceSource) values.
 //! Runtime preparation happens in [`crate::service::source`].
 
 use dhttp::home::DhttpHome;
@@ -33,9 +33,9 @@ impl snafu::FromString for BuildConfigError {
     }
 }
 
-pub async fn load_worker_server_sources(
+pub async fn load_identity_service_sources(
     dhttp_home: &DhttpHome,
-) -> Result<Vec<crate::service::source::WorkerServerSource>, BuildConfigError> {
+) -> Result<Vec<crate::service::source::IdentityServiceSource>, BuildConfigError> {
     let mut identity_names = Vec::new();
     let mut stream = std::pin::pin!(dhttp_home.identity_profile_names());
     while let Some(result) = stream.next().await {
@@ -64,8 +64,9 @@ pub async fn load_worker_server_sources(
             }
         };
 
-        sources.push(crate::service::source::WorkerServerSource {
+        sources.push(crate::service::source::IdentityServiceSource {
             name,
+            home: dhttp_home.clone(),
             identity_profile,
         });
     }
