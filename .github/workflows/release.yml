@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   XTASK_RELEASE_S3_ENDPOINT_URL: ${{ vars.XTASK_RELEASE_S3_ENDPOINT_URL }}
-  DHTTP_ROOT_CA_PEM: ${{ vars.DHTTP_ROOT_CA_PEM }}
+  DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}
   DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem
   DHTTP_STUN_SERVER: ${{ vars.DHTTP_STUN_SERVER }}
   DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}

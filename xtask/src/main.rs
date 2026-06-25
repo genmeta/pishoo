@@ -374,7 +374,7 @@ mod tests {
     fn release_workflow_publish_commands_are_tag_mode_safe() {
         assert!(!RELEASE_WORKFLOW.contains("publish_args=()"));
         assert!(!RELEASE_WORKFLOW.contains("\"${publish_args[@]}\""));
-        assert!(RELEASE_WORKFLOW.contains("DHTTP_ROOT_CA_PEM: ${{ vars.DHTTP_ROOT_CA_PEM }}"));
+        assert!(RELEASE_WORKFLOW.contains("DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}"));
         assert!(
             RELEASE_WORKFLOW
                 .contains("DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem")
