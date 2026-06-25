@@ -4,17 +4,26 @@
 
 ### Added
 
+- Release packaging now reads the pishoo package contract from
+  `xtask/release.toml`, including Homebrew templates and target-local build
+  environment overrides.
+- Gateway config parsing now resolves config-relative pishoo paths.
 - pishoo now loads workers from the `pishoo` system group by default when
   `workers/groups` are omitted, including primary-group users.
 
 ### Changed
 
+- pishoo registered endpoints now apply the DHTTP default endpoint behavior when
+  constructing root-owned listeners.
+- Packaging uses the normalized manifest-first S3/R2 release contract.
 - pishoo DEB/RPM/Homebrew packaging now creates or explains the `pishoo` group
   best-effort, and runtime startup warns instead of failing when the default
   group is absent.
 
 ### Components
 
+- `gateway` v0.6.1
+- `pishoo` v0.6.1
 - `pishoo-common` v0.5.1-1
 
 ## [0.6.0] - 2026-06-15
