@@ -443,6 +443,14 @@ mod tests {
         assert!(RELEASE_WORKFLOW.contains("formula_dest=\"$tap_dir/$FORMULA_NAME\""));
         assert!(RELEASE_WORKFLOW.contains("git status --porcelain -- \"$FORMULA_NAME\""));
         assert!(RELEASE_WORKFLOW.contains("git add \"$FORMULA_NAME\""));
+        assert!(RELEASE_WORKFLOW.contains("branch=\"publish/pishoo/${GITHUB_REF_NAME}\""));
+        assert!(
+            RELEASE_WORKFLOW.contains("commit_message=\"feat: release pishoo ${GITHUB_REF_NAME}\"")
+        );
+        assert!(RELEASE_WORKFLOW.contains("git push --force-with-lease origin \"$branch\""));
+        assert!(RELEASE_WORKFLOW.contains("--title \"publish pishoo ${GITHUB_REF_NAME}\""));
+        assert!(!RELEASE_WORKFLOW.contains("release/${GITHUB_REPOSITORY##*/}"));
+        assert!(!RELEASE_WORKFLOW.contains("brew: update $FORMULA_NAME"));
         assert!(!RELEASE_WORKFLOW.contains("Formula/$FORMULA_NAME"));
     }
 
