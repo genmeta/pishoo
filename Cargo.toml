@@ -88,7 +88,7 @@ form_urlencoded = "1"
 percent-encoding = "2"
 socket2 = "0.6"
 x509-parser = "0.18"
-dhttp = { version = "0.3.0" }
+dhttp = { version = "0.4.0" }
 
 # --- System Interaction ---
 libc = "0.2"

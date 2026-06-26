@@ -20,6 +20,11 @@
   best-effort, and runtime startup warns instead of failing when the default
   group is absent.
 
+### Dependencies
+
+- Release manifests now target `h3x` v0.5.0, `dhttp` v0.4.0,
+  `dshell` v0.5.0, and `dyns` v0.5.0.
+
 ### Components
 
 - `gateway` v0.6.1
