@@ -562,7 +562,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(target/*/release/brew/*.tar.gz target/common/brew/*.rb)
+          assets=(target/*/release/brew/*.tar.gz target/common/brew/pishoo-*.rb)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "no Homebrew release assets found" >&2
             exit 1

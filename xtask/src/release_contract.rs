@@ -450,8 +450,8 @@ access_key_id.env = "XTASK_RELEASE_S3_ACCESS_KEY_ID"
 secret_access_key.env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY"
 
 [destination.brew]
-prefix = "brew/pishoo"
-public_base_url = "https://download.dhttp.net/brew/pishoo"
+prefix = "homebrew"
+public_base_url = "https://download.dhttp.net/homebrew"
 tap.repository = "genmeta/homebrew-genmeta"
 tap.base_branch = "main"
 tap.token.env = "HOMEBREW_TAP_GITHUB_TOKEN"
@@ -482,7 +482,43 @@ required_version = "0.5.1-1"
         assert_eq!(contract.package.common.name, "pishoo-common");
         assert_eq!(contract.package.common.version, "0.5.2-1");
         assert_eq!(contract.package.common.required_version, "0.5.1-1");
-        assert_eq!(contract.destination.rpm.unwrap().prefix, "rpm/pishoo");
+        let brew = contract
+            .destination
+            .brew
+            .as_ref()
+            .expect("brew destination should parse");
+        assert_eq!(brew.prefix, "homebrew");
+        assert_eq!(brew.public_base_url, "https://download.dhttp.net/homebrew");
+        let deb = contract
+            .destination
+            .deb
+            .as_ref()
+            .expect("deb destination should parse");
+        assert_eq!(deb.prefix, "ppa/genmeta");
+        assert_eq!(deb.suite, "genmeta");
+        assert_eq!(
+            contract.destination.rpm.as_ref().unwrap().prefix,
+            "rpm/pishoo"
+        );
+    }
+
+    #[test]
+    fn committed_release_contract_uses_flat_product_layout() {
+        let contract = super::load_release_contract().expect("committed contract should load");
+        let brew = contract
+            .destination
+            .brew
+            .as_ref()
+            .expect("brew destination should exist");
+        assert_eq!(brew.prefix, "homebrew");
+        assert_eq!(brew.public_base_url, "https://download.dhttp.net/homebrew");
+        let deb = contract
+            .destination
+            .deb
+            .as_ref()
+            .expect("deb destination should exist");
+        assert_eq!(deb.prefix, "ppa/genmeta");
+        assert_eq!(deb.suite, "genmeta");
     }
 
     #[test]

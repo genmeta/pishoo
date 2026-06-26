@@ -430,8 +430,9 @@ mod tests {
         );
         assert!(
             RELEASE_WORKFLOW
-                .contains("assets=(target/*/release/brew/*.tar.gz target/common/brew/*.rb)")
+                .contains("assets=(target/*/release/brew/*.tar.gz target/common/brew/pishoo-*.rb)")
         );
+        assert!(!RELEASE_WORKFLOW.contains("target/common/brew/*.rb)"));
     }
 
     #[test]
