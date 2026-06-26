@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.1] - 2026-06-24
+## [0.7.0] - 2026-06-24
 
 ### Added
 
@@ -20,10 +20,15 @@
   best-effort, and runtime startup warns instead of failing when the default
   group is absent.
 
+### Dependencies
+
+- Release manifests now target `h3x` v0.5.0, `dhttp` v0.4.0,
+  `dshell` v0.5.0, and `dyns` v0.5.0.
+
 ### Components
 
-- `gateway` v0.6.1
-- `pishoo` v0.6.1
+- `gateway` v0.7.0
+- `pishoo` v0.7.0
 - `pishoo-common` v0.5.1-1
 
 ## [0.6.0] - 2026-06-15

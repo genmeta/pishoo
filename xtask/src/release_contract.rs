@@ -157,8 +157,8 @@ pub enum ReleaseContractError {
         source: cargo_metadata::Error,
         manifest: PathBuf,
     },
-    #[snafu(display("cargo metadata did not return a root package"))]
-    MissingRootPackage { manifest: PathBuf },
+    #[snafu(display("cargo metadata did not return package for manifest"))]
+    MissingPackageForManifest { manifest: PathBuf },
     #[snafu(display("cargo package is missing description"))]
     MissingDescription { manifest: PathBuf },
     #[snafu(display("cargo package is missing homepage"))]
@@ -262,12 +262,17 @@ pub fn resolve_package_metadata(
         .context(release_contract_error::CargoMetadataSnafu {
             manifest: manifest.clone(),
         })?;
-    let package =
-        metadata
-            .root_package()
-            .ok_or_else(|| ReleaseContractError::MissingRootPackage {
-                manifest: manifest.clone(),
-            })?;
+    let package = metadata
+        .root_package()
+        .or_else(|| {
+            metadata
+                .packages
+                .iter()
+                .find(|package| package.manifest_path.as_std_path() == manifest)
+        })
+        .ok_or_else(|| ReleaseContractError::MissingPackageForManifest {
+            manifest: manifest.clone(),
+        })?;
     Ok(ResolvedPackageMetadata {
         name: package.name.to_string(),
         version: package.version.to_string(),
@@ -399,7 +404,10 @@ fn build_env_is_optional(name: &str) -> bool {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{PackageKind, ReleaseContract, parse_release_contract, resolve_build_env_values};
+    use super::{
+        PackageKind, ReleaseContract, parse_release_contract, resolve_build_env_values,
+        resolve_package_metadata,
+    };
 
     const CONTRACT: &str = r#"
 [cargo]
@@ -475,6 +483,15 @@ required_version = "0.5.1-1"
         assert_eq!(contract.package.common.version, "0.5.2-1");
         assert_eq!(contract.package.common.required_version, "0.5.1-1");
         assert_eq!(contract.destination.rpm.unwrap().prefix, "rpm/pishoo");
+    }
+
+    #[test]
+    fn resolves_metadata_for_workspace_member_manifest() {
+        let contract = parse_release_contract(CONTRACT).expect("contract should parse");
+        let metadata =
+            resolve_package_metadata(&contract).expect("workspace member metadata should resolve");
+
+        assert_eq!(metadata.name, "pishoo");
     }
 
     #[test]

@@ -26,7 +26,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use snafu::{ResultExt, Whatever};
-use tracing::{Instrument, info, info_span};
+use tracing::{Instrument, info, info_span, warn};
 
 use crate::{
     Feature, RpmTarget,
@@ -139,6 +139,7 @@ pub async fn run(
     let docker = Docker::connect_with_local_defaults()
         .whatever_context("failed to connect to Docker/Podman")?;
     check_docker(&docker).await?;
+    pull_base_image(&docker).await?;
 
     let layout = source_layout("gateway", siblings)?;
     let meta = package_meta(CARGO_NAME)?;
@@ -216,19 +217,6 @@ async fn run_common(
     tokio::fs::create_dir_all(&out_dir)
         .await
         .whatever_context(format!("failed to create {}", out_dir.display()))?;
-
-    let mut pull_stream = docker.create_image(
-        Some(
-            CreateImageOptionsBuilder::default()
-                .from_image(BASE_IMAGE)
-                .build(),
-        ),
-        None,
-        None,
-    );
-    while let Some(result) = pull_stream.next().await {
-        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
-    }
 
     let container_name = format!("{CARGO_NAME}-xtask-rpm-common");
     remove_container_if_exists(docker, &container_name).await;
@@ -334,6 +322,40 @@ find "$TOPDIR/RPMS" -name '*.rpm' -exec mv {{}} "$TOPDIR/" \;
     Ok(())
 }
 
+async fn pull_base_image(docker: &Docker) -> Result<(), Whatever> {
+    for attempt in 1..=3 {
+        info!(image = BASE_IMAGE, attempt, "pulling rpm base image");
+        let mut pull_stream = docker.create_image(
+            Some(
+                CreateImageOptionsBuilder::default()
+                    .from_image(BASE_IMAGE)
+                    .build(),
+            ),
+            None,
+            None,
+        );
+        let mut pull_result = Ok(());
+        while let Some(result) = pull_stream.next().await {
+            if let Err(source) = result {
+                pull_result = Err(source);
+                break;
+            }
+        }
+        match pull_result {
+            Ok(()) => return Ok(()),
+            Err(source) if attempt < 3 => {
+                warn!(image = BASE_IMAGE, attempt, error = %source, "rpm base image pull failed");
+                tokio::time::sleep(std::time::Duration::from_secs(attempt)).await;
+            }
+            Err(source) => {
+                return Err(source)
+                    .whatever_context(format!("failed to pull base image {BASE_IMAGE}"));
+            }
+        }
+    }
+    unreachable!("rpm base image pull loop should return");
+}
+
 async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever> {
     let arch = rpm_arch(triple)?;
     let tag = format!("xtask-{triple}:{IMAGE_TAG_PREFIX}");
@@ -342,19 +364,6 @@ async fn ensure_image(docker: &Docker, triple: &str) -> Result<String, Whatever>
         return Ok(tag);
     }
     info!(tag, "building image");
-
-    let mut pull_stream = docker.create_image(
-        Some(
-            CreateImageOptionsBuilder::default()
-                .from_image(BASE_IMAGE)
-                .build(),
-        ),
-        None,
-        None,
-    );
-    while let Some(result) = pull_stream.next().await {
-        result.whatever_context(format!("failed to pull base image {BASE_IMAGE}"))?;
-    }
 
     let container_name = format!("pishoo-xtask-rpm-setup-{triple}");
     remove_container_if_exists(docker, &container_name).await;
@@ -887,6 +896,16 @@ mod tests {
         let script = sysroot_setup_script("i686");
 
         assert!(!script.contains("--forcearch=i686"));
+    }
+
+    #[test]
+    fn sysroot_downloads_pam_linker_and_runtime_packages() {
+        let script = sysroot_setup_script("x86_64");
+
+        assert!(script.contains("pam-devel"));
+        assert!(script.contains("pam-libs"));
+        assert!(script.contains("glibc-devel"));
+        assert!(script.contains("glibc"));
     }
 
     #[test]
