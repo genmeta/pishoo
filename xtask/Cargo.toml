@@ -21,7 +21,9 @@ debversion = "0.5.2"
 flate2 = "1"
 inquire = "0.9"
 futures-util = "0.3"
+genmeta-xtask-release = { path = "../../genmeta-xtask-release", version = "0.1.0" }
 rpm-version = "0.5.0"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 snafu = "0.9"

@@ -4,10 +4,11 @@ use std::{
 };
 
 use cargo_metadata::MetadataCommand;
+use genmeta_xtask_release::{
+    contract as shared_contract, package::PackageVersion, requires, system::PackageSystem,
+};
 use serde::Deserialize;
 use snafu::{ResultExt, Snafu};
-
-use crate::version_cmp::{CompareVersionError, compare_deb_versions};
 
 const RELEASE_CONTRACT_PATH: &str = "xtask/release.toml";
 
@@ -65,6 +66,8 @@ pub struct BuildContract {
 pub struct BuildEnvBinding {
     pub env: Option<String>,
     pub value: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -147,10 +150,52 @@ pub enum ReleaseContractError {
         source: std::io::Error,
         path: PathBuf,
     },
-    #[snafu(display("failed to parse release contract"))]
+    #[snafu(display("failed to parse shared release contract"))]
     Parse {
         source: toml::de::Error,
         path: PathBuf,
+    },
+    #[snafu(display("invalid shared release contract"))]
+    SharedInvalid {
+        source: shared_contract::ValidateContractError,
+        path: PathBuf,
+    },
+    #[snafu(display("shared release contract must define product package with manifest"))]
+    SharedMissingProduct { path: PathBuf },
+    #[snafu(display("shared release contract product package must define deb branch"))]
+    SharedMissingProductDeb { path: PathBuf },
+    #[snafu(display(
+        "shared release contract product package deb branch must require common package"
+    ))]
+    SharedMissingCommonDependency { path: PathBuf },
+    #[snafu(display("shared release contract common package must define source version"))]
+    SharedMissingCommonVersion { path: PathBuf },
+    #[snafu(display("shared release contract common package must define deb branch"))]
+    SharedMissingCommonDeb { path: PathBuf },
+    #[snafu(display("failed to parse shared common package source version {version}"))]
+    SharedCommonSourceVersion {
+        source: semver::Error,
+        path: PathBuf,
+        version: String,
+    },
+    #[snafu(display("failed to resolve shared common package version"))]
+    SharedCommonPackageVersion {
+        source: genmeta_xtask_release::package::PackageVersionError,
+        path: PathBuf,
+    },
+    #[snafu(display("failed to resolve shared package requirements"))]
+    SharedRequirements {
+        source: requires::ResolveRequiresError,
+        path: PathBuf,
+    },
+    #[snafu(display(
+        "shared release contract product package deb branch dependency missing minimum version"
+    ))]
+    SharedMissingCommonMinimum { path: PathBuf },
+    #[snafu(display("shared release contract {system} branch missing template"))]
+    SharedMissingTemplate {
+        path: PathBuf,
+        system: PackageSystem,
     },
     #[snafu(display("failed to read cargo metadata"))]
     CargoMetadata {
@@ -165,15 +210,6 @@ pub enum ReleaseContractError {
     MissingHomepage { manifest: PathBuf },
     #[snafu(display("cargo package is missing license"))]
     MissingLicense { manifest: PathBuf },
-    #[snafu(display("failed to compare release contract versions"))]
-    Compare { source: CompareVersionError },
-    #[snafu(display(
-        "required common version {required_common_version} exceeds common version {common_version}"
-    ))]
-    RequiredExceedsCommon {
-        common_version: String,
-        required_common_version: String,
-    },
     #[snafu(display("build env binding {name} must set exactly one of env or value"))]
     InvalidBuildEnvBinding { name: String },
     #[snafu(display("missing required build environment variable {name}"))]
@@ -217,34 +253,196 @@ fn parse_release_contract_at(
     path: &Path,
     input: &str,
 ) -> Result<ReleaseContract, ReleaseContractError> {
-    let contract = toml::from_str(input).context(release_contract_error::ParseSnafu {
-        path: path.to_path_buf(),
-    })?;
-    validate_release_contract(&contract)?;
-    Ok(contract)
+    let contract = toml::from_str::<shared_contract::ReleaseContract>(input).context(
+        release_contract_error::ParseSnafu {
+            path: path.to_path_buf(),
+        },
+    )?;
+    contract
+        .validate()
+        .context(release_contract_error::SharedInvalidSnafu {
+            path: path.to_path_buf(),
+        })?;
+    release_contract_from_shared(path, contract)
 }
 
-fn validate_release_contract(contract: &ReleaseContract) -> Result<(), ReleaseContractError> {
-    if compare_deb_versions(
-        &contract.package.common.required_version,
-        &contract.package.common.version,
-    )
-    .context(release_contract_error::CompareSnafu)?
-    .is_gt()
-    {
-        return Err(ReleaseContractError::RequiredExceedsCommon {
-            common_version: contract.package.common.version.clone(),
-            required_common_version: contract.package.common.required_version.clone(),
-        });
-    }
-
-    validate_build_env_bindings(&contract.build.env)?;
-    if let Some(homebrew) = &contract.homebrew {
-        for target in homebrew.target.values() {
-            validate_build_env_bindings(&target.env)?;
+fn release_contract_from_shared(
+    path: &Path,
+    contract: shared_contract::ReleaseContract,
+) -> Result<ReleaseContract, ReleaseContractError> {
+    let (product_id, product) = contract
+        .package
+        .iter()
+        .find(|(_, package)| package.manifest.is_some())
+        .ok_or_else(|| ReleaseContractError::SharedMissingProduct {
+            path: path.to_path_buf(),
+        })?;
+    let product_deb =
+        product
+            .deb
+            .as_ref()
+            .ok_or_else(|| ReleaseContractError::SharedMissingProductDeb {
+                path: path.to_path_buf(),
+            })?;
+    let (common_id, _) = product_deb.requires.iter().next().ok_or_else(|| {
+        ReleaseContractError::SharedMissingCommonDependency {
+            path: path.to_path_buf(),
         }
+    })?;
+    let common = contract.package.get(common_id).ok_or_else(|| {
+        ReleaseContractError::SharedMissingCommonDependency {
+            path: path.to_path_buf(),
+        }
+    })?;
+    let common_version = common.version.as_deref().ok_or_else(|| {
+        ReleaseContractError::SharedMissingCommonVersion {
+            path: path.to_path_buf(),
+        }
+    })?;
+    let common_deb =
+        common
+            .deb
+            .as_ref()
+            .ok_or_else(|| ReleaseContractError::SharedMissingCommonDeb {
+                path: path.to_path_buf(),
+            })?;
+    let source_version = semver::Version::parse(common_version).context(
+        release_contract_error::SharedCommonSourceVersionSnafu {
+            path: path.to_path_buf(),
+            version: common_version.to_string(),
+        },
+    )?;
+    let common_package_version = PackageVersion::deb(source_version, common_deb.revision.clone())
+        .context(release_contract_error::SharedCommonPackageVersionSnafu {
+            path: path.to_path_buf(),
+        })?
+        .as_string();
+    let required_common_version = requires::resolve_requires_for(
+        &contract,
+        &repo_root(),
+        product_id.as_str(),
+        PackageSystem::Deb,
+    )
+    .context(release_contract_error::SharedRequirementsSnafu {
+        path: path.to_path_buf(),
+    })?
+    .remove(common_id.as_str())
+    .and_then(|bounds| bounds.minimum)
+    .ok_or_else(|| ReleaseContractError::SharedMissingCommonMinimum {
+        path: path.to_path_buf(),
+    })?;
+    let manifest =
+        product
+            .manifest
+            .clone()
+            .ok_or_else(|| ReleaseContractError::SharedMissingProduct {
+                path: path.to_path_buf(),
+            })?;
+    let homebrew = product
+        .brew
+        .as_ref()
+        .map(|branch| shared_homebrew_contract(path, branch))
+        .transpose()?;
+    Ok(ReleaseContract {
+        cargo: CargoSource { manifest },
+        package: PackageContract {
+            common: CommonPackageContract {
+                name: common_id.as_str().to_string(),
+                version: common_package_version.clone(),
+                required_version: required_common_version,
+            },
+        },
+        homebrew,
+        build: BuildContract {
+            env: shared_build_env(&product.build.env),
+        },
+        destination: shared_destination_contract(contract.destination),
+    })
+}
+
+fn shared_homebrew_contract(
+    path: &Path,
+    branch: &shared_contract::BrewBranch,
+) -> Result<HomebrewContract, ReleaseContractError> {
+    let manifest_template = branch.manifest_template.clone().ok_or_else(|| {
+        ReleaseContractError::SharedMissingTemplate {
+            path: path.to_path_buf(),
+            system: PackageSystem::Brew,
+        }
+    })?;
+    Ok(HomebrewContract {
+        template: TemplateContract {
+            path: manifest_template,
+        },
+        target: branch
+            .target
+            .iter()
+            .map(|(target, contract)| {
+                (
+                    target.clone(),
+                    HomebrewTargetContract {
+                        env: shared_build_env(&contract.env),
+                    },
+                )
+            })
+            .collect(),
+    })
+}
+
+fn shared_build_env(
+    env: &BTreeMap<String, shared_contract::EnvBinding>,
+) -> BTreeMap<String, BuildEnvBinding> {
+    env.iter()
+        .map(|(name, binding)| {
+            (
+                name.clone(),
+                BuildEnvBinding {
+                    env: binding.env.clone(),
+                    value: binding.value.clone(),
+                    optional: binding.optional,
+                },
+            )
+        })
+        .collect()
+}
+
+fn shared_destination_contract(
+    destination: shared_contract::DestinationContract,
+) -> DestinationContract {
+    let s3 = destination.s3;
+    DestinationContract {
+        s3: S3Destination {
+            bucket: s3.bucket,
+            endpoint: shared_env_ref(s3.endpoint),
+            access_key_id: shared_env_ref(s3.access_key_id),
+            secret_access_key: shared_env_ref(s3.secret_access_key),
+        },
+        brew: s3.brew.map(|branch| BrewDestination {
+            prefix: branch.prefix,
+            public_base_url: branch.public_base_url,
+            tap: TapDestination {
+                repository: branch.tap.repository,
+                base_branch: branch.tap.base_branch,
+                token: shared_env_ref(branch.tap.token),
+            },
+        }),
+        deb: s3.deb.map(|branch| DebDestination {
+            prefix: branch.prefix,
+            suite: branch.suite,
+            signing: DebSigning {
+                key: shared_env_ref(branch.signing.key),
+                passphrase: shared_env_ref(branch.signing.passphrase),
+            },
+            fingerprint: branch.fingerprint.map(shared_env_ref),
+        }),
+        rpm: s3.rpm.map(|branch| RpmDestination {
+            prefix: branch.prefix,
+        }),
     }
-    Ok(())
+}
+
+fn shared_env_ref(ref_: shared_contract::EnvRef) -> EnvRef {
+    EnvRef { env: ref_.env }
 }
 
 pub fn resolve_package_metadata(
@@ -329,15 +527,6 @@ pub fn resolve_build_env_values(
     Ok(resolved)
 }
 
-fn validate_build_env_bindings(
-    bindings: &BTreeMap<String, BuildEnvBinding>,
-) -> Result<(), ReleaseContractError> {
-    for (name, binding) in bindings {
-        validate_build_env_binding(name, binding)?;
-    }
-    Ok(())
-}
-
 fn validate_build_env_binding(
     name: &str,
     binding: &BuildEnvBinding,
@@ -358,7 +547,7 @@ fn resolve_build_env_binding_value(
     validate_build_env_binding(name, binding)?;
 
     if let Some(env_name) = &binding.env {
-        return resolve_env_ref(name, env_name, values);
+        return resolve_env_ref(name, env_name, binding.optional, values);
     }
 
     let value = binding
@@ -374,12 +563,13 @@ fn resolve_build_env_binding_value(
 }
 
 fn resolve_env_ref(
-    logical_name: &str,
+    _logical_name: &str,
     env_name: &str,
+    optional: bool,
     values: &BTreeMap<String, String>,
 ) -> Result<Option<String>, ReleaseContractError> {
     let Some(value) = values.get(env_name) else {
-        if build_env_is_optional(logical_name) {
+        if optional {
             return Ok(None);
         }
         return Err(ReleaseContractError::MissingBuildEnv {
@@ -396,10 +586,6 @@ fn resolve_env_ref(
     Ok(Some(value.clone()))
 }
 
-fn build_env_is_optional(name: &str) -> bool {
-    matches!(name, "DHTTP_GLOBAL_HOME")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -410,38 +596,76 @@ mod tests {
     };
 
     const CONTRACT: &str = r#"
-[cargo]
+[package.pishoo]
 manifest = "pishoo/Cargo.toml"
 
-[homebrew.template]
-path = "xtask/templates/pishoo.rb.in"
-
-[build.env.DHTTP_ROOT_CA]
+[package.pishoo.build.env.DHTTP_ROOT_CA]
 env = "DHTTP_ROOT_CA"
+container_path = "/dhttp-bootstrap/root.crt"
 
-[build.env.DHTTP_STUN_SERVER]
+[package.pishoo.build.env.DHTTP_STUN_SERVER]
 env = "DHTTP_STUN_SERVER"
 
-[build.env.DHTTP_H3_DNS_SERVER]
+[package.pishoo.build.env.DHTTP_H3_DNS_SERVER]
 env = "DHTTP_H3_DNS_SERVER"
 
-[build.env.DHTTP_HTTP_DNS_SERVER]
+[package.pishoo.build.env.DHTTP_HTTP_DNS_SERVER]
 env = "DHTTP_HTTP_DNS_SERVER"
 
-[build.env.DHTTP_MDNS_SERVICE]
+[package.pishoo.build.env.DHTTP_MDNS_SERVICE]
 env = "DHTTP_MDNS_SERVICE"
 
-[build.env.DHTTP_CERT_SERVER_URL]
+[package.pishoo.build.env.DHTTP_CERT_SERVER_URL]
 env = "DHTTP_CERT_SERVER_URL"
 
-[build.env.DHTTP_GLOBAL_HOME]
+[package.pishoo.build.env.DHTTP_GLOBAL_HOME]
 env = "DHTTP_GLOBAL_HOME"
+optional = true
 
-[homebrew.target.aarch64-apple-darwin.env.DHTTP_GLOBAL_HOME]
+[package.pishoo.deb]
+revision = "1"
+architecture = "target"
+dockerfile = "xtask/release/deb/Dockerfile"
+
+[package.pishoo.deb.requires.pishoo-common.version]
+">=" = { from = "dependency" }
+"<=" = { from = "self" }
+
+[package.pishoo.rpm]
+release = "1"
+architecture = "target"
+dockerfile = "xtask/release/rpm/Dockerfile"
+
+[package.pishoo.rpm.requires.pishoo-common.version]
+">=" = { from = "dependency" }
+"<=" = { from = "self" }
+
+[package.pishoo.brew]
+script = "xtask/release/brew/pishoo.sh"
+manifest_template = "xtask/templates/pishoo.rb.in"
+
+[package.pishoo.brew.target.aarch64-apple-darwin.env.DHTTP_GLOBAL_HOME]
 value = "/opt/homebrew/etc/dhttp"
 
-[homebrew.target.x86_64-apple-darwin.env.DHTTP_GLOBAL_HOME]
+[package.pishoo.brew.target.x86_64-apple-darwin.env.DHTTP_GLOBAL_HOME]
 value = "/usr/local/etc/dhttp"
+
+[package.pishoo-common]
+version = "0.5.1"
+description = "Common files for pishoo"
+license = "Apache-2.0"
+homepage = "https://dhttp.net"
+repository = "https://github.com/genmeta/gateway"
+
+[package.pishoo-common.deb]
+revision = "1"
+architecture = "all"
+dockerfile = "xtask/release/deb/Dockerfile"
+
+[package.pishoo-common.rpm]
+release = "1"
+architecture = "noarch"
+dockerfile = "xtask/release/rpm/Dockerfile"
 
 [destination.s3]
 bucket = "download"
@@ -449,28 +673,23 @@ endpoint.env = "XTASK_RELEASE_S3_ENDPOINT_URL"
 access_key_id.env = "XTASK_RELEASE_S3_ACCESS_KEY_ID"
 secret_access_key.env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY"
 
-[destination.brew]
+[destination.s3.brew]
 prefix = "homebrew"
 public_base_url = "https://download.dhttp.net/homebrew"
 tap.repository = "genmeta/homebrew-genmeta"
 tap.base_branch = "main"
 tap.token.env = "HOMEBREW_TAP_GITHUB_TOKEN"
 
-[destination.deb]
+[destination.s3.deb]
 prefix = "ppa/genmeta"
 suite = "genmeta"
 signing.key.env = "XTASK_RELEASE_APT_SIGNING_KEY"
 signing.passphrase.env = "XTASK_RELEASE_APT_SIGNING_PASSPHRASE"
+fingerprint.env = "XTASK_RELEASE_APT_SIGNING_FINGERPRINT"
 
-[destination.rpm]
+[destination.s3.rpm]
 prefix = "rpm/pishoo"
-
-[package.common]
-name = "pishoo-common"
-version = "0.5.2-1"
-required_version = "0.5.1-1"
 "#;
-
     #[test]
     fn parses_release_contract() {
         let contract = parse_release_contract(CONTRACT).expect("contract should parse");
@@ -480,7 +699,7 @@ required_version = "0.5.1-1"
             std::path::Path::new("pishoo/Cargo.toml")
         );
         assert_eq!(contract.package.common.name, "pishoo-common");
-        assert_eq!(contract.package.common.version, "0.5.2-1");
+        assert_eq!(contract.package.common.version, "0.5.1-1");
         assert_eq!(contract.package.common.required_version, "0.5.1-1");
         let brew = contract
             .destination
@@ -531,33 +750,6 @@ required_version = "0.5.1-1"
     }
 
     #[test]
-    fn rejects_required_version_above_common_version() {
-        let error = parse_release_contract(
-            r#"
-[cargo]
-manifest = "pishoo/Cargo.toml"
-
-[build.env.DHTTP_ROOT_CA]
-env = "DHTTP_ROOT_CA"
-
-[destination.s3]
-bucket = "download"
-endpoint.env = "XTASK_RELEASE_S3_ENDPOINT_URL"
-access_key_id.env = "XTASK_RELEASE_S3_ACCESS_KEY_ID"
-secret_access_key.env = "XTASK_RELEASE_S3_SECRET_ACCESS_KEY"
-
-[package.common]
-name = "pishoo-common"
-version = "0.5.1-1"
-required_version = "0.5.2-1"
-"#,
-        )
-        .expect_err("required version above published common version should fail");
-
-        assert!(error.to_string().contains("required common version"));
-    }
-
-    #[test]
     fn rejects_old_top_level_common_contract() {
         let error = parse_release_contract(
             "common_version = \"0.5.2-1\"\nrequired_common_version = \"0.5.1-1\"\n",
@@ -567,7 +759,7 @@ required_version = "0.5.2-1"
         assert!(
             error
                 .to_string()
-                .contains("failed to parse release contract")
+                .contains("failed to parse shared release contract")
         );
     }
 
