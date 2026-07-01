@@ -2195,6 +2195,7 @@ dependencies = [
 [[package]]
 name = "genmeta-xtask-release"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/genmeta-xtask-release.git#6c7a255754e41d7a7212d1628c05e4154ef1c33f"
 dependencies = [
  "cargo_metadata 0.21.0",
  "semver",
