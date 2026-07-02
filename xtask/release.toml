@@ -94,4 +94,3 @@ fingerprint.env = "XTASK_RELEASE_APT_SIGNING_FINGERPRINT"
 
 [destination.s3.rpm]
 prefix = "rpm/pishoo"
-
