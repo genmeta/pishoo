@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.8.0-beta.1] - 2026-07-02
+
 ### Fixed
 
 - macOS worker discovery now uses the existing `_www` group and checks group
@@ -15,6 +17,18 @@
 
 - Homebrew installation no longer tries to create the `pishoo` group. Operators
   who want default worker discovery on macOS can add users to `_www` manually.
+- Prepared pishoo for the DHTTP beta dependency line.
+
+### Dependencies
+
+- Release manifests now target `h3x` v0.6.0-beta.1, `dhttp`
+  v0.5.0-beta.1, `dshell` v0.6.0-beta.1, and `dyns` v0.6.0-beta.1.
+
+### Components
+
+- `gateway` v0.8.0-beta.1
+- `pishoo` v0.8.0-beta.1
+- `pishoo-common` v0.5.1-1
 
 ## [0.7.0] - 2026-06-24
 
