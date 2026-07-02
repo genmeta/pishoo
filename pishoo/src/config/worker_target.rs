@@ -123,6 +123,29 @@ impl AccountDirectory for SystemAccountDirectory {
             .map(|user| user.name)
             .collect())
     }
+
+    #[cfg(target_os = "macos")]
+    fn group_member_usernames(
+        &self,
+        group_name: &str,
+    ) -> Result<Option<Vec<String>>, ConfigError> {
+        let Some(group) = self.group_by_name(group_name)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(
+            enumerate_passwd_users(&group.name)?
+                .into_iter()
+                .filter_map(|user| {
+                    match macos_membership::user_is_member_of_group(user.uid, group.gid) {
+                        Ok(true) => Some(Ok(user.name)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .collect::<Result<Vec<_>, ConfigError>>()?,
+        ))
+    }
 }
 
 struct PasswdIterationGuard;
@@ -154,6 +177,60 @@ fn enumerate_passwd_users(group_name: &str) -> Result<Vec<ResolvedWorkerTarget>,
         }
 
         users.push(ResolvedWorkerTarget::from(unsafe { &*passwd }));
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_membership {
+    use nix::errno::Errno;
+    use nix::unistd::{Gid, Uid};
+    use snafu::ResultExt;
+
+    use crate::config::{
+        ConfigError, MacosGroupUuidSnafu, MacosMembershipCheckSnafu, MacosUserUuidSnafu,
+    };
+
+    type MembershipUuid = [libc::c_uchar; 16];
+
+    unsafe extern "C" {
+        fn mbr_uid_to_uuid(id: libc::uid_t, uu: *mut libc::c_uchar) -> libc::c_int;
+        fn mbr_gid_to_uuid(id: libc::gid_t, uu: *mut libc::c_uchar) -> libc::c_int;
+        fn mbr_check_membership(
+            user: *const libc::c_uchar,
+            group: *const libc::c_uchar,
+            ismember: *mut libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    fn user_uuid(uid: Uid) -> Result<MembershipUuid, ConfigError> {
+        let mut uuid: MembershipUuid = [0; 16];
+        let rc = unsafe { mbr_uid_to_uuid(uid.as_raw(), uuid.as_mut_ptr()) };
+        Errno::result(rc)
+            .map(|_| uuid)
+            .context(MacosUserUuidSnafu { uid: uid.as_raw() })
+    }
+
+    fn group_uuid(gid: Gid) -> Result<MembershipUuid, ConfigError> {
+        let mut uuid: MembershipUuid = [0; 16];
+        let rc = unsafe { mbr_gid_to_uuid(gid.as_raw(), uuid.as_mut_ptr()) };
+        Errno::result(rc)
+            .map(|_| uuid)
+            .context(MacosGroupUuidSnafu { gid: gid.as_raw() })
+    }
+
+    pub(super) fn user_is_member_of_group(uid: Uid, gid: Gid) -> Result<bool, ConfigError> {
+        let user_uuid = user_uuid(uid)?;
+        let group_uuid = group_uuid(gid)?;
+        let mut is_member: libc::c_int = 0;
+        let rc = unsafe {
+            mbr_check_membership(user_uuid.as_ptr(), group_uuid.as_ptr(), &mut is_member)
+        };
+        Errno::result(rc)
+            .map(|_| is_member != 0)
+            .context(MacosMembershipCheckSnafu {
+                uid: uid.as_raw(),
+                gid: gid.as_raw(),
+            })
     }
 }
 

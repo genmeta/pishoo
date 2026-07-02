@@ -56,6 +56,19 @@ pub enum ConfigError {
         source: nix::errno::Errno,
     },
 
+    #[snafu(display("failed to resolve macOS membership uuid for uid {uid}"))]
+    MacosUserUuid { uid: u32, source: nix::errno::Errno },
+
+    #[snafu(display("failed to resolve macOS membership uuid for gid {gid}"))]
+    MacosGroupUuid { gid: u32, source: nix::errno::Errno },
+
+    #[snafu(display("failed to check macOS group membership for uid {uid} in gid {gid}"))]
+    MacosMembershipCheck {
+        uid: u32,
+        gid: u32,
+        source: nix::errno::Errno,
+    },
+
     #[snafu(display("failed to resolve user `{username}` via system passwd database"))]
     UserNotFound { username: String },
 
