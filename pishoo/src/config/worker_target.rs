@@ -14,6 +14,10 @@ pub struct WorkerTarget {
     pub username: String,
 }
 
+#[cfg(target_os = "macos")]
+const DEFAULT_GROUPS: &[&str] = &["_www"];
+
+#[cfg(not(target_os = "macos"))]
 const DEFAULT_GROUPS: &[&str] = &["pishoo"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +75,26 @@ pub(super) struct AccountGroup {
 pub(super) trait AccountDirectory {
     fn group_by_name(&self, group_name: &str) -> Result<Option<AccountGroup>, ConfigError>;
 
-    fn primary_group_usernames(
+    fn group_member_usernames(
         &self,
         group_name: &str,
-        gid: Gid,
-    ) -> Result<Vec<String>, ConfigError>;
+    ) -> Result<Option<Vec<String>>, ConfigError> {
+        let Some(group) = self.group_by_name(group_name)? else {
+            return Ok(None);
+        };
+
+        let mut names = group.members;
+        names.extend(self.primary_group_usernames(&group.name, group.gid)?);
+        Ok(Some(names))
+    }
+
+    fn primary_group_usernames(
+        &self,
+        _group_name: &str,
+        _gid: Gid,
+    ) -> Result<Vec<String>, ConfigError> {
+        Ok(Vec::new())
+    }
 }
 
 pub(super) struct SystemAccountDirectory;
@@ -142,12 +161,10 @@ fn resolve_group_members_with_directory<D: AccountDirectory>(
     directory: &D,
     group_name: &str,
 ) -> Result<Option<Vec<WorkerTarget>>, ConfigError> {
-    let Some(group) = directory.group_by_name(group_name)? else {
+    let Some(names) = directory.group_member_usernames(group_name)? else {
         return Ok(None);
     };
 
-    let mut names = group.members;
-    names.extend(directory.primary_group_usernames(&group.name, group.gid)?);
     Ok(Some(parse_worker_names(&names)?))
 }
 
@@ -175,7 +192,8 @@ fn resolve_default_group_members<D: AccountDirectory>(
         match resolve_group_members_with_directory(directory, group_name)? {
             Some(members) => targets.extend(members),
             None => tracing::warn!(
-                "default pishoo worker group not found; continuing without default workers"
+                group = group_name,
+                "default worker group not found; continuing without default workers"
             ),
         }
     }

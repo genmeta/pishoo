@@ -146,36 +146,27 @@ fn parse_entry_config_workers_and_servers() {
 #[derive(Default)]
 struct FakeAccountDirectory {
     groups: std::collections::HashMap<String, AccountGroup>,
-    primary_users: std::collections::HashMap<String, Vec<String>>,
+    group_members: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl FakeAccountDirectory {
-    fn with_group(mut self, name: &str, gid: libc::gid_t, members: &[&str]) -> Self {
+    fn with_group_members(
+        mut self,
+        name: &str,
+        gid: libc::gid_t,
+        members: &[&str],
+    ) -> Self {
         self.groups.insert(
             name.to_string(),
             AccountGroup {
                 name: name.to_string(),
                 gid: Gid::from_raw(gid),
-                members: members.iter().map(|member| (*member).to_string()).collect(),
+                members: Vec::new(),
             },
         );
-        self
-    }
-
-    fn with_group_and_primary_users(
-        mut self,
-        name: &str,
-        gid: libc::gid_t,
-        members: &[&str],
-        primary_users: &[&str],
-    ) -> Self {
-        self = self.with_group(name, gid, members);
-        self.primary_users.insert(
+        self.group_members.insert(
             name.to_string(),
-            primary_users
-                .iter()
-                .map(|user| (*user).to_string())
-                .collect(),
+            members.iter().map(|member| (*member).to_string()).collect(),
         );
         self
     }
@@ -189,27 +180,42 @@ impl AccountDirectory for FakeAccountDirectory {
         Ok(self.groups.get(group_name).cloned())
     }
 
-    fn primary_group_usernames(
+    fn group_member_usernames(
         &self,
         group_name: &str,
-        _gid: Gid,
-    ) -> Result<Vec<String>, crate::config::ConfigError> {
-        Ok(self
-            .primary_users
-            .get(group_name)
-            .cloned()
-            .unwrap_or_default())
+    ) -> Result<Option<Vec<String>>, crate::config::ConfigError> {
+        Ok(self.group_members.get(group_name).cloned())
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn default_global_mode_loads_pishoo_group_when_no_worker_directives() {
-    let directory = FakeAccountDirectory::default().with_group_and_primary_users(
-        "pishoo",
-        42,
-        &["alice"],
-        &["bob"],
-    );
+    let directory =
+        FakeAccountDirectory::default().with_group_members("pishoo", 42, &["alice", "bob"]);
+    let parsed = gateway::parse::parse_config_str_for_test("pishoo { pid /tmp/pishoo.pid; }")
+        .expect("parse config");
+
+    let entry = crate::config::entry::parse_entry_config_with_directory_and_mode(
+        &parsed.root,
+        &directory,
+        crate::config::worker_target::WorkerDiscoveryMode::DefaultGlobalHome,
+    )
+    .expect("parse entry config");
+
+    let names: Vec<_> = entry
+        .workers
+        .iter()
+        .map(|worker| worker.username.as_str())
+        .collect();
+    assert_eq!(names, ["alice", "bob"]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn default_global_mode_loads_www_group_when_no_worker_directives() {
+    let directory =
+        FakeAccountDirectory::default().with_group_members("_www", 70, &["alice", "bob"]);
     let parsed = gateway::parse::parse_config_str_for_test("pishoo { pid /tmp/pishoo.pid; }")
         .expect("parse config");
 
@@ -230,12 +236,8 @@ fn default_global_mode_loads_pishoo_group_when_no_worker_directives() {
 
 #[test]
 fn explicit_config_mode_does_not_load_default_pishoo_group() {
-    let directory = FakeAccountDirectory::default().with_group_and_primary_users(
-        "pishoo",
-        42,
-        &["alice"],
-        &["bob"],
-    );
+    let directory =
+        FakeAccountDirectory::default().with_group_members("pishoo", 42, &["alice", "bob"]);
     let parsed = gateway::parse::parse_config_str_for_test("pishoo { pid /tmp/pishoo.pid; }")
         .expect("parse config");
 
@@ -258,7 +260,7 @@ fn default_global_mode_uses_default_group_even_with_config_servers() {
         key.display()
     );
     let parsed = gateway::parse::parse_config_str_for_test(&conf).expect("parse config");
-    let directory = FakeAccountDirectory::default().with_group("pishoo", 42, &["alice"]);
+    let directory = FakeAccountDirectory::default().with_group_members("pishoo", 42, &["alice"]);
 
     let entry = crate::config::entry::parse_entry_config_with_directory_and_mode(
         &parsed.root,
