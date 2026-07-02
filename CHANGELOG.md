@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- macOS worker discovery now uses the existing `_www` group and checks group
+  membership through macOS membership APIs instead of bounded supplementary
+  group lists.
+- Worker process credential setup now initializes group state with the platform
+  `initgroups` path instead of carrying a precomputed supplementary group list
+  from the parent process.
+
+### Changed
+
+- Homebrew installation no longer tries to create the `pishoo` group. Operators
+  who want default worker discovery on macOS can add users to `_www` manually.
+
 ## [0.7.0] - 2026-06-24
 
 ### Added
