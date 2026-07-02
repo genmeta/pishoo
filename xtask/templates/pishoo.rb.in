@@ -17,24 +17,15 @@ class {{homebrew.class}} < Formula
     etc.install "mime.types"  => "dhttp/mime.types"  unless File.exist? "#{etc}/dhttp/mime.types"
   end
 
-  def post_install
-    return if system("/usr/bin/dscl", ".", "-read", "/Groups/pishoo", out: File::NULL, err: File::NULL)
-
-    if Process.uid.zero?
-      system "/usr/sbin/dseditgroup", "-o", "create", "pishoo"
-    else
-      opoo "pishoo group was not found; create it with: sudo dseditgroup -o create pishoo"
-    end
-  end
-
   def caveats
     <<~EOS
       Configuration files are installed at:
         #{etc}/dhttp/pishoo.conf
 
-      In default global-home mode, missing workers/groups makes pishoo load users in the pishoo group.
-      If the pishoo group was not created automatically, run:
-        sudo dseditgroup -o create pishoo
+      On macOS, default global-home mode loads worker users from the existing _www group.
+      This formula does not create or modify system groups. To opt the current user into
+      default pishoo worker discovery, run:
+        sudo dseditgroup -o edit -a "$USER" -t user _www
     EOS
   end
 
