@@ -75,10 +75,7 @@ pub(super) struct AccountGroup {
 pub(super) trait AccountDirectory {
     fn group_by_name(&self, group_name: &str) -> Result<Option<AccountGroup>, ConfigError>;
 
-    fn group_member_usernames(
-        &self,
-        group_name: &str,
-    ) -> Result<Option<Vec<String>>, ConfigError> {
+    fn group_member_usernames(&self, group_name: &str) -> Result<Option<Vec<String>>, ConfigError> {
         let Some(group) = self.group_by_name(group_name)? else {
             return Ok(None);
         };
@@ -125,10 +122,7 @@ impl AccountDirectory for SystemAccountDirectory {
     }
 
     #[cfg(target_os = "macos")]
-    fn group_member_usernames(
-        &self,
-        group_name: &str,
-    ) -> Result<Option<Vec<String>>, ConfigError> {
+    fn group_member_usernames(&self, group_name: &str) -> Result<Option<Vec<String>>, ConfigError> {
         let Some(group) = self.group_by_name(group_name)? else {
             return Ok(None);
         };
@@ -182,8 +176,10 @@ fn enumerate_passwd_users(group_name: &str) -> Result<Vec<ResolvedWorkerTarget>,
 
 #[cfg(target_os = "macos")]
 mod macos_membership {
-    use nix::errno::Errno;
-    use nix::unistd::{Gid, Uid};
+    use nix::{
+        errno::Errno,
+        unistd::{Gid, Uid},
+    };
     use snafu::ResultExt;
 
     use crate::config::{

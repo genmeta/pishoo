@@ -182,11 +182,7 @@ fn initgroups(username: &CStr, gid: Gid) -> nix::Result<()> {
     Errno::result(result).map(drop)
 }
 
-fn drop_worker_privileges(
-    username: &CStr,
-    uid: Uid,
-    gid: Gid,
-) -> Result<(), ChildPrivilegeError> {
+fn drop_worker_privileges(username: &CStr, uid: Uid, gid: Gid) -> Result<(), ChildPrivilegeError> {
     use child_privilege_error::*;
 
     setgid(gid).context(SetGidSnafu { gid: gid.as_raw() })?;

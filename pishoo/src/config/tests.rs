@@ -150,12 +150,7 @@ struct FakeAccountDirectory {
 }
 
 impl FakeAccountDirectory {
-    fn with_group_members(
-        mut self,
-        name: &str,
-        gid: libc::gid_t,
-        members: &[&str],
-    ) -> Self {
+    fn with_group_members(mut self, name: &str, gid: libc::gid_t, members: &[&str]) -> Self {
         self.groups.insert(
             name.to_string(),
             AccountGroup {
