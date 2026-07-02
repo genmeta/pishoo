@@ -38,7 +38,8 @@ struct ChildExecSpec<'a> {
     envp: &'a [CString],
     uid: Uid,
     gid: Gid,
-    supplementary_groups: &'a [Gid],
+    username: &'a CString,
+    credential_setup: ChildCredentialSetup,
     /// Socketpair FD to dup2 to FD 3 (MuxChannel IPC).
     mux_fd: &'a OwnedFd,
     max_fd: i32,
@@ -69,10 +70,18 @@ pub(crate) fn install_child_ipc_fd<Fd: AsFd>(source: Fd) -> std::io::Result<()> 
 
 #[derive(Debug, Snafu)]
 pub enum LaunchWorkerError {
-    #[snafu(display("failed to resolve supplementary groups for user `{username}`"))]
-    ResolveSupplementaryGroups {
+    #[snafu(display("worker username `{username}` contains nul byte"))]
+    InvalidUsername {
         username: String,
-        source: ResolveSupplementaryGroupsError,
+        source: std::ffi::NulError,
+    },
+    #[snafu(display("root privileges are required to launch worker `{username}`"))]
+    RootRequired {
+        username: String,
+        uid: u32,
+        gid: u32,
+        current_uid: u32,
+        current_gid: u32,
     },
     #[snafu(display("worker path contains nul byte"))]
     InvalidWorkerPath { source: std::ffi::NulError },
@@ -110,18 +119,83 @@ pub enum BuildExecEnvError {
     EntryContainsNul { source: std::ffi::NulError },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildCredentialSetup {
+    DropFromRoot,
+    AlreadyTarget,
+}
+
+fn plan_child_credentials(
+    username: &str,
+    current_uid: Uid,
+    current_euid: Uid,
+    current_gid: Gid,
+    current_egid: Gid,
+    target_uid: Uid,
+    target_gid: Gid,
+) -> Result<ChildCredentialSetup, LaunchWorkerError> {
+    if current_euid.is_root() {
+        return Ok(ChildCredentialSetup::DropFromRoot);
+    }
+
+    if current_uid == target_uid
+        && current_euid == target_uid
+        && current_gid == target_gid
+        && current_egid == target_gid
+    {
+        return Ok(ChildCredentialSetup::AlreadyTarget);
+    }
+
+    RootRequiredSnafu {
+        username: username.to_string(),
+        uid: target_uid.as_raw(),
+        gid: target_gid.as_raw(),
+        current_uid: current_uid.as_raw(),
+        current_gid: current_gid.as_raw(),
+    }
+    .fail()
+}
+
 #[derive(Debug, Snafu)]
-pub enum ResolveSupplementaryGroupsError {
-    #[snafu(display("username contains nul byte"))]
-    InvalidUsername { source: std::ffi::NulError },
-    #[snafu(display("failed to query supplementary groups for user `{username}`"))]
-    GetGroupList { username: String, source: Errno },
-    #[snafu(display("user `{username}` has too many supplementary groups ({actual} > {limit})"))]
-    TooManyGroups {
-        username: String,
-        actual: usize,
-        limit: usize,
+#[snafu(module)]
+enum ChildPrivilegeError {
+    #[snafu(display("failed to set worker primary group to {gid}"))]
+    SetGid { gid: u32, source: nix::Error },
+
+    #[snafu(display("failed to initialize worker supplementary groups for uid {uid}"))]
+    InitGroups {
+        uid: u32,
+        gid: u32,
+        source: nix::Error,
     },
+
+    #[snafu(display("failed to set worker uid to {uid}"))]
+    SetUid { uid: u32, source: nix::Error },
+}
+
+fn initgroups(username: &CStr, gid: Gid) -> nix::Result<()> {
+    let gid: libc::gid_t = gid.into();
+    #[cfg(target_vendor = "apple")]
+    let result = unsafe { libc::initgroups(username.as_ptr(), gid as libc::c_int) };
+    #[cfg(not(target_vendor = "apple"))]
+    let result = unsafe { libc::initgroups(username.as_ptr(), gid) };
+    Errno::result(result).map(drop)
+}
+
+fn drop_worker_privileges(
+    username: &CStr,
+    uid: Uid,
+    gid: Gid,
+) -> Result<(), ChildPrivilegeError> {
+    use child_privilege_error::*;
+
+    setgid(gid).context(SetGidSnafu { gid: gid.as_raw() })?;
+    initgroups(username, gid).context(InitGroupsSnafu {
+        uid: uid.as_raw(),
+        gid: gid.as_raw(),
+    })?;
+    setuid(uid).context(SetUidSnafu { uid: uid.as_raw() })?;
+    Ok(())
 }
 
 pub fn launch_worker(
@@ -131,10 +205,13 @@ pub fn launch_worker(
     username: &str,
     home: &Path,
 ) -> Result<LaunchedWorker, LaunchWorkerError> {
-    let supplementary_groups = resolve_supplementary_groups(username, gid)
-        .context(ResolveSupplementaryGroupsSnafu { username })?;
     let worker_bin =
         CString::new(worker_bin.as_os_str().as_encoded_bytes()).context(InvalidWorkerPathSnafu)?;
+    let username_cstr = CString::new(username).context(InvalidUsernameSnafu {
+        username: username.to_string(),
+    })?;
+    let credential_setup =
+        plan_child_credentials(username, getuid(), geteuid(), getgid(), getegid(), uid, gid)?;
 
     let env = build_exec_env(username, home).context(BuildExecEnvSnafu { username })?;
     let argv = vec![worker_bin.clone()];
@@ -152,7 +229,8 @@ pub fn launch_worker(
                 envp: &env,
                 uid,
                 gid,
-                supplementary_groups: &supplementary_groups,
+                username: &username_cstr,
+                credential_setup,
                 mux_fd: &child_fd,
                 max_fd,
             });
@@ -175,7 +253,8 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
         envp,
         uid,
         gid,
-        supplementary_groups,
+        username,
+        credential_setup,
         mux_fd,
         max_fd,
     } = spec;
@@ -199,21 +278,24 @@ fn child_exec(spec: ChildExecSpec<'_>) -> ! {
     let current_gid = getgid();
     let current_egid = getegid();
 
-    if current_euid.is_root() {
-        if setgroups(supplementary_groups).is_err() {
-            child_fail(126);
+    match credential_setup {
+        ChildCredentialSetup::DropFromRoot => {
+            if drop_worker_privileges(username, uid, gid).is_err() {
+                child_fail(126);
+            }
         }
-        if setgid(gid).is_err() {
-            child_fail(126);
+        ChildCredentialSetup::AlreadyTarget => {
+            if current_uid != uid
+                || current_euid != uid
+                || current_gid != gid
+                || current_egid != gid
+            {
+                child_fail(126);
+            }
         }
-        if setuid(uid).is_err() {
-            child_fail(126);
-        }
-        if getuid() != uid || geteuid() != uid || getgid() != gid || getegid() != gid {
-            child_fail(126);
-        }
-    } else if current_uid != uid || current_euid != uid || current_gid != gid || current_egid != gid
-    {
+    }
+
+    if getuid() != uid || geteuid() != uid || getgid() != gid || getegid() != gid {
         child_fail(126);
     }
 
@@ -368,107 +450,6 @@ fn max_fd() -> i32 {
     }
 }
 
-fn resolve_supplementary_groups(
-    username: &str,
-    gid: Gid,
-) -> Result<Vec<Gid>, ResolveSupplementaryGroupsError> {
-    let username_cstr = CString::new(username).context(InvalidUsernameSnafu)?;
-    let groups = getgrouplist(&username_cstr, gid).context(GetGroupListSnafu {
-        username: username.to_string(),
-    })?;
-    let groups = normalize_supplementary_groups(groups, gid);
-    let limit = supplementary_groups_max();
-    if groups.len() > limit {
-        return TooManyGroupsSnafu {
-            username: username.to_string(),
-            actual: groups.len(),
-            limit,
-        }
-        .fail();
-    }
-
-    Ok(groups)
-}
-
-fn normalize_supplementary_groups(groups: Vec<Gid>, primary_gid: Gid) -> Vec<Gid> {
-    let mut normalized = Vec::with_capacity(groups.len());
-    for group in groups {
-        if group == primary_gid || normalized.contains(&group) {
-            continue;
-        }
-        normalized.push(group);
-    }
-    normalized
-}
-
-fn supplementary_groups_max() -> usize {
-    match sysconf(SysconfVar::NGROUPS_MAX) {
-        Ok(Some(limit)) if limit > 0 => limit as usize,
-        _ => 16,
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-fn getgrouplist(username: &CStr, group: Gid) -> Result<Vec<Gid>, Errno> {
-    nix::unistd::getgrouplist(username, group)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
-    nix::unistd::setgroups(groups)
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn getgrouplist(username: &CStr, group: Gid) -> Result<Vec<Gid>, Errno> {
-    let basegid = libc::c_int::try_from(group.as_raw()).map_err(|_| Errno::EINVAL)?;
-    let mut ngroups: libc::c_int = 16;
-    let mut groups: Vec<libc::c_int> = vec![0; ngroups as usize];
-
-    loop {
-        let mut ngroups_attempt = ngroups;
-        let rc = unsafe {
-            libc::getgrouplist(
-                username.as_ptr(),
-                basegid,
-                groups.as_mut_ptr(),
-                &mut ngroups_attempt,
-            )
-        };
-
-        if rc >= 0 {
-            groups.truncate(ngroups_attempt as usize);
-            return Ok(groups
-                .into_iter()
-                .map(|gid| Gid::from_raw(gid as libc::gid_t))
-                .collect());
-        }
-
-        if ngroups_attempt <= 0 {
-            return Err(Errno::last());
-        }
-
-        if ngroups_attempt > ngroups {
-            ngroups = ngroups_attempt;
-        } else {
-            ngroups = ngroups.saturating_mul(2).max(16);
-        }
-        groups.resize(ngroups as usize, 0);
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn setgroups(groups: &[Gid]) -> Result<(), Errno> {
-    let raw_groups: Vec<libc::gid_t> = groups.iter().map(|gid| gid.as_raw()).collect();
-    let (ptr, len) = if raw_groups.is_empty() {
-        (std::ptr::null(), 0)
-    } else {
-        (raw_groups.as_ptr(), raw_groups.len() as libc::c_int)
-    };
-
-    let rc = unsafe { libc::setgroups(len, ptr) };
-    if rc == 0 { Ok(()) } else { Err(Errno::last()) }
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -476,24 +457,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_supplementary_groups_drops_primary_and_duplicates() {
-        let primary_gid = Gid::from_raw(20);
-        let normalized = normalize_supplementary_groups(
-            vec![
-                primary_gid,
-                Gid::from_raw(501),
-                Gid::from_raw(12),
-                Gid::from_raw(501),
-                Gid::from_raw(79),
-                primary_gid,
-            ],
-            primary_gid,
-        );
+    fn credential_setup_uses_root_drop_when_effective_root() {
+        let setup = plan_child_credentials(
+            "alice",
+            Uid::from_raw(0),
+            Uid::from_raw(0),
+            Gid::from_raw(0),
+            Gid::from_raw(0),
+            Uid::from_raw(501),
+            Gid::from_raw(20),
+        )
+        .expect("root can launch target worker");
 
-        assert_eq!(
-            normalized,
-            vec![Gid::from_raw(501), Gid::from_raw(12), Gid::from_raw(79)]
-        );
+        assert_eq!(setup, ChildCredentialSetup::DropFromRoot);
+    }
+
+    #[test]
+    fn credential_setup_accepts_already_target_identity() {
+        let setup = plan_child_credentials(
+            "alice",
+            Uid::from_raw(501),
+            Uid::from_raw(501),
+            Gid::from_raw(20),
+            Gid::from_raw(20),
+            Uid::from_raw(501),
+            Gid::from_raw(20),
+        )
+        .expect("already-target process can exec worker");
+
+        assert_eq!(setup, ChildCredentialSetup::AlreadyTarget);
+    }
+
+    #[test]
+    fn credential_setup_rejects_non_root_mismatched_identity() {
+        let error = plan_child_credentials(
+            "alice",
+            Uid::from_raw(501),
+            Uid::from_raw(501),
+            Gid::from_raw(20),
+            Gid::from_raw(20),
+            Uid::from_raw(502),
+            Gid::from_raw(20),
+        )
+        .expect_err("non-root process cannot launch a different worker uid");
+
+        assert!(matches!(
+            error,
+            LaunchWorkerError::RootRequired {
+                uid: 502,
+                gid: 20,
+                current_uid: 501,
+                current_gid: 20,
+                ..
+            }
+        ));
     }
 
     #[test]
