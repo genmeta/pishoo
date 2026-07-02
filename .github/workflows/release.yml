@@ -435,19 +435,19 @@ jobs:
           print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
           PY
 
+      - name: Install Rust
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - name: Read Homebrew tap destination
         id: homebrew_destination
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import tomllib
-          from pathlib import Path
-
-          destination = tomllib.loads(Path("xtask/release.toml").read_text())
-          tap = destination["destination"]["brew"]["tap"]
-          print(f"repository={tap['repository']}")
-          print(f"base_branch={tap['base_branch']}")
-          PY
+        env:
+          XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
+          XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: cargo xtask show s3-destination brew --github-output >> "$GITHUB_OUTPUT"
 
       - name: Validate release configuration
         env:
@@ -485,12 +485,6 @@ jobs:
           ref: ${{ steps.homebrew_destination.outputs.base_branch }}
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Cache cargo downloads
         uses: actions/cache@v5
