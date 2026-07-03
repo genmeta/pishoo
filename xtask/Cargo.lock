@@ -938,8 +938,8 @@ dependencies = [
 
 [[package]]
 name = "genmeta-xtask-release"
-version = "0.2.0-beta.3"
-source = "git+https://github.com/genmeta/genmeta-xtask-release.git?tag=v0.2.0-beta.3#ccc2115b1feccac5227b95997465bd5b8e0fff6a"
+version = "0.2.0-beta.4"
+source = "git+https://github.com/genmeta/genmeta-xtask-release.git?tag=v0.2.0-beta.4#a1107bc9e0e5b7539144ecfcb19b81cb7247680d"
 dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
