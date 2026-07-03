@@ -1080,6 +1080,8 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.5.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "130736aecbf6a0d3b1bef793c363ed3194b5a528e97945daae7356330971376a"
 dependencies = [
  "bon",
  "bytes",
@@ -1101,6 +1103,8 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5dee91d9ec4bf5f8fbd49a2761b1c5454aa9b088f6c53fc278f7b7934de9f38"
 dependencies = [
  "derive_more",
  "dhttp-identity",
@@ -1115,6 +1119,8 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81393cfab5863c0f1b7994c5da57c0a1e941cb62886e558c4832cfea37d1ea68"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1130,6 +1136,8 @@ dependencies = [
 [[package]]
 name = "dhttp-identity"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9006fe9bffd56d64fbe4260182039f104a84d612acdd30ec19a16583bb4ff671"
 dependencies = [
  "bytes",
  "futures",
@@ -1228,6 +1236,8 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 [[package]]
 name = "dquic"
 version = "0.7.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27db50b1f583081a6adf247411270f18cb9b1b879aaa4518a6853b6186dceb66"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -1244,6 +1254,8 @@ dependencies = [
 [[package]]
 name = "dshell"
 version = "0.6.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d263c40ce195343c9d35e8f95f6c9cb810eb2389384d81080ee1e980317bf4a"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1272,6 +1284,8 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.6.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "237928fa7d6f2039d191b8e4cf9cfdcc54b5c73bead404f5d1ad7be9cfda880d"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1617,7 +1631,7 @@ dependencies = [
 [[package]]
 name = "genmeta-xtask-release"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/genmeta-xtask-release.git#67b525b6153c8eb55335a664298eb2127a0de911"
+source = "git+https://github.com/genmeta/genmeta-xtask-release.git?tag=v0.1.0#67b525b6153c8eb55335a664298eb2127a0de911"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -1748,6 +1762,8 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "565dfd1823c49dc65add72599afe197578e56dae9861790b4d1a0d8987130d79"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -3391,6 +3407,8 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d008096ac877ed51917bec865eb512113df9e9cc0d99ade74285060b695bea5c"
 dependencies = [
  "bitflags",
  "bytes",
@@ -3412,6 +3430,8 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ff2c0dd91cf0e4cacca9e3b1ab8c2bd4bff93c17ba39f509e53f238a1fda42"
 dependencies = [
  "qbase",
  "qevent",
@@ -3424,6 +3444,8 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.7.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea5f6581e4d228dfe4c2a973c137f2a405d639ed0cdbdd75fe3baf8d642db89"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3450,6 +3472,8 @@ dependencies = [
 [[package]]
 name = "qdatagram"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d891c28529949b435a5eb4ec0e4eb67e33d514dc993138e2da36bbff5c3f77a"
 dependencies = [
  "bytes",
  "qbase",
@@ -3460,6 +3484,8 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13122bb529c62512d876c08681d57f2ab0be4b5e9943657a19b74c0c83298638"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3477,6 +3503,8 @@ dependencies = [
 [[package]]
 name = "qinterface"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3d6859183d5d4547470fd3ea641d700b79e416269f229b03b0c8709e2c98575"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3499,6 +3527,8 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5d2e2f19a8187c8ff0c0001562c18f17bfa6f82d25ec8316960944b418fc371"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3509,6 +3539,8 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4adfff2dbe1f591662695e3d91a4a0c3159b22a6c7a86aa754f07894c9e946da"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3523,6 +3555,8 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.7.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "273936b4a1c83404bc3801ebd3e090dcd1b7402607212cbc316b683c757f94e3"
 dependencies = [
  "futures",
  "qbase",
@@ -3532,6 +3566,8 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.7.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbe3e0de35ae950fa5fbe33799cdf10c80b6bce39afddd89b52f52720435fe3f"
 dependencies = [
  "bon",
  "bytes",
@@ -3554,6 +3590,8 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ce9009cdd2de1ef116833beeccf1a5426a0a8f426ee836fe6c05cba4322b915"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -4632,7 +4670,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5747,7 +5785,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -6280,7 +6318,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[patch.unused]]
-name = "qprotocol"
-version = "0.6.0"
