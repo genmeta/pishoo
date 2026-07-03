@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["gateway", "pishoo", "xtask"]
+members = ["gateway", "pishoo"]
+exclude = ["xtask"]
 
 [workspace.dependencies]
 # --- Core & Error Handling ---
