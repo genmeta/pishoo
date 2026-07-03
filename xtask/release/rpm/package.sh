@@ -262,7 +262,7 @@ run_binary() {
     write_aarch64_zig_workaround
 
     cd "$product_source"
-    cargo zigbuild $profile_args --target "$target.2.28" -p pishoo "${feature_flag[@]}"
+    cargo zigbuild $profile_args --target "$target" -p pishoo "${feature_flag[@]}"
 
     local release_dir="$product_source/target/$target/$profile"
     local topdir="${XTASK_RELEASE_OUT_DIR:?}/rpmbuild"
