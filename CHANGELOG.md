@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.8.0-beta.2] - 2026-07-06
+
+### Fixed
+
+- pishoo now loads identity access rules from the identity profile access-rule database.
+
+### Dependencies
+
+- Release manifests now target `h3x` v0.6.0-beta.2, `dhttp`
+  v0.5.0-beta.2, and `dshell` v0.6.0-beta.2.
+
+### Components
+
+- `gateway` v0.8.0-beta.2
+- `pishoo` v0.8.0-beta.2
+- `pishoo-common` v0.5.1-1
+
 ## [0.8.0-beta.1] - 2026-07-02
 
 ### Fixed
