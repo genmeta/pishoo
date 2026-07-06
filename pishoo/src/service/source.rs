@@ -12,10 +12,10 @@ use gateway::{
     },
     reverse::router::RouterState,
 };
-use snafu::{OptionExt, Report, ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use super::snapshot::ServerService;
-use crate::config::load_identity_servers;
+use crate::{config::load_identity_servers, worker::config::BuildConfigError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenRequestFingerprint {
@@ -553,13 +553,47 @@ impl PrepareContext {
     }
 }
 
+fn sqlite_access_rules_uri(path: &std::path::Path) -> String {
+    format!("sqlite://{}?mode=rw", path.display())
+}
+
+async fn load_identity_access_rules(
+    target_node: Option<&Arc<ConfigNode>>,
+    identity_profile: &IdentityProfile,
+    fallback: Arc<dhttp::access::matcher::LocationRulesMatcher>,
+) -> Result<Arc<dhttp::access::matcher::LocationRulesMatcher>, BuildConfigError> {
+    if let Some(uri) =
+        target_node.and_then(|node| node.get::<AccessRulesUri>("access_rules").ok().flatten())
+    {
+        let uri_str = uri.0.to_string();
+        return crate::policy::load_policy_bundle(Some(&uri_str))
+            .await
+            .map(|bundle| bundle.location_rules)
+            .map_err(|source| BuildConfigError::Policy { source });
+    }
+
+    let default_access_db = identity_profile.access_db_path();
+    match std::fs::metadata(&default_access_db) {
+        Ok(_) => {
+            let uri = sqlite_access_rules_uri(&default_access_db);
+            crate::policy::load_policy_bundle(Some(&uri))
+                .await
+                .map(|bundle| bundle.location_rules)
+                .map_err(|source| BuildConfigError::Policy { source })
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(fallback),
+        Err(source) => Err(BuildConfigError::InspectDefaultAccessRules {
+            path: default_access_db,
+            source,
+        }),
+    }
+}
+
 impl IdentityServiceSource {
     pub async fn prepare(
         &self,
         ctx: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
-        use crate::worker::config::BuildConfigError;
-
         let identity = self
             .identity_profile
             .load_identity()
@@ -638,27 +672,13 @@ impl IdentityServiceSource {
             .unwrap_or_default()
             .as_secs();
 
-        // Worker access control: load rules from identity server.conf if
-        // access_rules is configured. Falls back to empty rules otherwise.
-        let access_rules = if let Some(uri) = target_node
-            .as_ref()
-            .and_then(|node| node.get::<AccessRulesUri>("access_rules").ok().flatten())
-        {
-            let uri_str = uri.0.to_string();
-            match crate::policy::load_policy_bundle(Some(&uri_str)).await {
-                Ok(bundle) => bundle.location_rules,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %Report::from_error(&error),
-                        uri = %uri_str,
-                        "failed to load access rules from identity config"
-                    );
-                    ctx.access_rules.clone()
-                }
-            }
-        } else {
-            ctx.access_rules.clone()
-        };
+        let access_rules = load_identity_access_rules(
+            target_node.as_ref(),
+            &self.identity_profile,
+            ctx.access_rules.clone(),
+        )
+        .await
+        .context(prepare_server_update_error::IdentityServiceSnafu)?;
 
         let server_node = target_node.clone().unwrap_or_else(|| {
             let registry = gateway::parse::default_registry();
@@ -829,6 +849,209 @@ mod tests {
             .save_identity(cert_pem.as_bytes(), key_pem.as_bytes())
             .await
             .expect("save identity");
+    }
+
+    async fn write_identity_server_conf(profile: &dhttp::home::identity::IdentityProfile) {
+        tokio::fs::write(
+            profile.server_conf_path(),
+            "server { listen all 0; location / { root .; } }",
+        )
+        .await
+        .expect("write identity server config");
+    }
+
+    async fn write_identity_server_conf_with_access_rules(
+        profile: &dhttp::home::identity::IdentityProfile,
+        access_rules: &str,
+    ) {
+        tokio::fs::write(
+            profile.server_conf_path(),
+            format!(
+                "server {{ listen all 0; access_rules {access_rules}; location / {{ root .; }} }}"
+            ),
+        )
+        .await
+        .expect("write identity server config");
+    }
+
+    async fn write_minimal_access_db(profile: &dhttp::home::identity::IdentityProfile) {
+        use sea_orm::{ConnectionTrait, Database, Statement};
+
+        let path = profile.access_db_path();
+        tokio::fs::create_dir_all(path.parent().expect("access db path has parent"))
+            .await
+            .expect("create access db directory");
+
+        let uri = format!("sqlite://{}?mode=rwc", path.display());
+        let db = Database::connect(&uri).await.expect("connect access db");
+        db.execute_unprepared(
+            "CREATE TABLE location_rule_sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern JSON NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .await
+        .expect("create location rule sets");
+        db.execute_unprepared(
+            "CREATE TABLE location_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                location_id INTEGER NOT NULL,
+                action INTEGER NOT NULL,
+                exprs JSON NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .await
+        .expect("create location rules");
+        db.execute(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "INSERT INTO location_rule_sets (id, pattern, created_at, updated_at)
+             VALUES (1, '\"/\"', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                .to_string(),
+        ))
+        .await
+        .expect("insert location rule set");
+        db.execute(Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "INSERT INTO location_rules (location_id, action, exprs, created_at, updated_at)
+             VALUES (1, 0, '{\"infix\":\"*?\",\"polish\":\"*? \"}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                .to_string(),
+        ))
+        .await
+        .expect("insert access rule");
+    }
+
+    fn empty_prepare_context() -> PrepareContext {
+        PrepareContext {
+            h3_settings: std::sync::Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
+            access_rules: std::sync::Arc::new(
+                dhttp::access::matcher::LocationRulesMatcher::default(),
+            ),
+            router_state: dummy_router_state(),
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_service_prepare_loads_default_access_db_when_it_exists() {
+        let home = dhttp::home::DhttpHome::new(unique_test_dir("identity-default-access-db"));
+        let name = fake_name("default-access.dhttp.net");
+        let profile = home.identity_profile(name.clone());
+        write_identity(&profile, &name).await;
+        write_identity_server_conf(&profile).await;
+        write_minimal_access_db(&profile).await;
+
+        let source = IdentityServiceSource {
+            name: name.clone(),
+            home,
+            identity_profile: profile,
+        };
+
+        let prepared = source
+            .prepare(&empty_prepare_context())
+            .await
+            .expect("default access db should load");
+
+        let (_location, rules) = prepared
+            .service
+            .access_rules
+            .match_rules("/")
+            .expect("identity default access db should provide root rules");
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_service_prepare_uses_empty_access_rules_when_default_db_is_missing() {
+        let home = dhttp::home::DhttpHome::new(unique_test_dir("identity-missing-access-db"));
+        let name = fake_name("missing-access.dhttp.net");
+        let profile = home.identity_profile(name.clone());
+        write_identity(&profile, &name).await;
+        write_identity_server_conf(&profile).await;
+
+        let source = IdentityServiceSource {
+            name: name.clone(),
+            home,
+            identity_profile: profile,
+        };
+
+        let prepared = source
+            .prepare(&empty_prepare_context())
+            .await
+            .expect("missing default access db should fall back to empty rules");
+
+        assert!(
+            prepared.service.access_rules.match_rules("/").is_err(),
+            "missing default access db should not synthesize rules"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_service_prepare_errors_when_default_access_db_exists_but_is_invalid() {
+        let home = dhttp::home::DhttpHome::new(unique_test_dir("identity-invalid-access-db"));
+        let name = fake_name("invalid-access.dhttp.net");
+        let profile = home.identity_profile(name.clone());
+        write_identity(&profile, &name).await;
+        write_identity_server_conf(&profile).await;
+        let db_path = profile.access_db_path();
+        tokio::fs::create_dir_all(db_path.parent().expect("access db path has parent"))
+            .await
+            .expect("create access db directory");
+        tokio::fs::write(&db_path, b"not sqlite")
+            .await
+            .expect("write invalid access db");
+
+        let source = IdentityServiceSource {
+            name,
+            home,
+            identity_profile: profile,
+        };
+
+        let error = match source.prepare(&empty_prepare_context()).await {
+            Ok(_) => panic!("invalid existing default access db should be an error"),
+            Err(error) => error,
+        };
+        let report = snafu::Report::from_error(&error).to_string();
+
+        assert!(
+            report.contains("failed to load access rules"),
+            "unexpected error report: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_service_prepare_errors_when_explicit_access_rules_db_is_invalid() {
+        let home = dhttp::home::DhttpHome::new(unique_test_dir("identity-invalid-explicit-access"));
+        let name = fake_name("invalid-explicit-access.dhttp.net");
+        let profile = home.identity_profile(name.clone());
+        write_identity(&profile, &name).await;
+        write_identity_server_conf_with_access_rules(&profile, "sqlite:./db/access.db?mode=ro")
+            .await;
+        let db_path = profile.access_db_path();
+        tokio::fs::create_dir_all(db_path.parent().expect("access db path has parent"))
+            .await
+            .expect("create access db directory");
+        tokio::fs::write(&db_path, b"not sqlite")
+            .await
+            .expect("write invalid access db");
+
+        let source = IdentityServiceSource {
+            name,
+            home,
+            identity_profile: profile,
+        };
+
+        let error = match source.prepare(&empty_prepare_context()).await {
+            Ok(_) => panic!("invalid explicit access_rules db should be an error"),
+            Err(error) => error,
+        };
+        let report = snafu::Report::from_error(&error).to_string();
+
+        assert!(
+            report.contains("failed to load access rules"),
+            "unexpected error report: {report}"
+        );
     }
 
     #[tokio::test]

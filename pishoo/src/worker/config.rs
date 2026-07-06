@@ -4,6 +4,8 @@
 //! [`IdentityServiceSource`](crate::service::source::IdentityServiceSource) values.
 //! Runtime preparation happens in [`crate::service::source`].
 
+use std::path::PathBuf;
+
 use dhttp::home::DhttpHome;
 use futures::StreamExt;
 use gateway::error::Whatever;
@@ -17,6 +19,11 @@ use crate::policy;
 pub enum BuildConfigError {
     #[snafu(transparent)]
     Whatever { source: Whatever },
+    #[snafu(display("failed to inspect default access rules path `{}`", path.display()))]
+    InspectDefaultAccessRules {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[snafu(display("failed to load access rules"))]
     Policy { source: policy::PolicyError },
 }
