@@ -1019,9 +1019,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.5.0-beta.1"
+version = "0.5.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "130736aecbf6a0d3b1bef793c363ed3194b5a528e97945daae7356330971376a"
+checksum = "2448459a33f3c10a4df05effd62160e8cbacf19ca81ba640db86ec4b61f3d86e"
 dependencies = [
  "bon",
  "bytes",
@@ -1175,9 +1175,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dquic"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27db50b1f583081a6adf247411270f18cb9b1b879aaa4518a6853b6186dceb66"
+checksum = "c2945f40d972d12cf06777eddf20b7104378d5a614dcca56800286cff370f489"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -1193,9 +1193,9 @@ dependencies = [
 
 [[package]]
 name = "dshell"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d263c40ce195343c9d35e8f95f6c9cb810eb2389384d81080ee1e980317bf4a"
+checksum = "024bc3e3dbed799db8ab771e51851a741de22c1caba2c82f98ef557a5be34d5a"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1223,9 +1223,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dyns"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "237928fa7d6f2039d191b8e4cf9cfdcc54b5c73bead404f5d1ad7be9cfda880d"
+checksum = "1a69fa5f6ff05223697e193821019349294d1173f4dbe29fb5d2b1b27193df67"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.0-beta.1"
+version = "0.8.0-beta.3"
 dependencies = [
  "async-compression",
  "axum",
@@ -1668,9 +1668,9 @@ dependencies = [
 
 [[package]]
 name = "h3x"
-version = "0.6.0-beta.1"
+version = "0.6.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "565dfd1823c49dc65add72599afe197578e56dae9861790b4d1a0d8987130d79"
+checksum = "f9c036f15ff331def2cdb2f12428b7d62ec0ad7e8f3f0a6ff014c570cdb33853"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -2952,7 +2952,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pishoo"
-version = "0.8.0-beta.1"
+version = "0.8.0-beta.3"
 dependencies = [
  "axum",
  "clap",

@@ -8,5 +8,5 @@ publish = false
 resolver = "3"
 
 [dependencies]
-genmeta-xtask-release = { git = "https://github.com/genmeta/genmeta-xtask-release.git", tag = "v0.2.0-beta.6", version = "0.2.0-beta.6" }
+genmeta-xtask-release = { git = "https://github.com/genmeta/genmeta-xtask-release.git", tag = "v0.2.0-beta.7", version = "0.2.0-beta.7" }
 snafu = "0.9"

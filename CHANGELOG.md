@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## [0.8.0-beta.3] - 2026-07-06
+
+### Fixed
+
+- Release packaging now keeps the `pishoo-common` sidecar package in preview
+  DEB/RPM repository metadata when publishing preview pishoo packages.
+
+### Components
+
+- `gateway` v0.8.0-beta.3
+- `pishoo` v0.8.0-beta.3
+- `pishoo-common` v0.5.1-1
+
 ## [0.8.0-beta.2] - 2026-07-06
 
 ### Fixed
