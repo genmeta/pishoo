@@ -3,9 +3,9 @@
 # dpkg-buildpackage calls this via debian/rules.
 # TRIPLE is passed as an environment variable by xtask (base triple, used for
 # target/ output paths). ZIG_TARGET is the Rust target passed to
-# cargo-zigbuild. The package image pins Zig 0.14, whose GNU target default
-# is glibc 2.28, so keep the target unsuffixed to avoid cargo-zigbuild/Zig
-# target-version parsing drift. CARGO_FEATURES is
+# cargo-zigbuild. The package image pins Zig 0.16; keep GNU targets unsuffixed so
+# cargo-zigbuild and Zig own their current default glibc target selection
+# instead of mixing stale glibc/kernel suffix syntax into the Rust target. CARGO_FEATURES is
 # optional.
 #
 # This file lives in xtask/deb/ and is copied into target/.../deb/src/debian/

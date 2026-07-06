@@ -29,12 +29,12 @@ RUN set -eux; \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- --default-toolchain nightly --profile minimal -y; \
     if [ "$XTASK_RELEASE_TARGET" != "common" ]; then rustup target add "$XTASK_RELEASE_TARGET"; fi; \
-    wget -q https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz; \
-    tar -xf zig-linux-x86_64-0.14.0.tar.xz; \
-    mv zig-linux-x86_64-0.14.0 /usr/local/zig; \
+    wget -q https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz; \
+    tar -xf zig-x86_64-linux-0.16.0.tar.xz; \
+    mv zig-x86_64-linux-0.16.0 /usr/local/zig; \
     ln -s /usr/local/zig/zig /usr/local/bin/zig; \
-    rm zig-linux-x86_64-0.14.0.tar.xz; \
-    cargo install cargo-zigbuild; \
+    rm zig-x86_64-linux-0.16.0.tar.xz; \
+    cargo install --locked cargo-zigbuild; \
     chmod -R a+rX /opt/cargo /opt/rustup
 
 COPY xtask/release/deb/package.sh /opt/genmeta-release/package
