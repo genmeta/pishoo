@@ -224,7 +224,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" deb
+          "${publish_cmd[@]}" --publish-report target/publish-reports/deb.toml deb
 
       - name: Upload deb packages to GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -232,11 +232,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          assets=(target/common/deb/*.deb target/*/release/deb/*.deb)
+          report=target/publish-reports/deb.toml
+          test -f "$report"
+          mapfile -t assets < <(python3 - "$report" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as handle:
+              report = tomllib.load(handle)
+
+          for manifest in report.get("manifests", []):
+              for asset in manifest.get("artifacts", []):
+                  print(asset["local-path"])
+          PY
+          )
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "no deb release assets found" >&2
-            exit 1
+            echo "no deb release assets selected by publish report; skipping GitHub Release upload"
+            exit 0
           fi
           for attempt in {1..30}; do
             if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -258,6 +270,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             gateway/target/common/deb/**
+            gateway/target/publish-reports/*.toml
 
   linux-rpm:
     needs: github-release
@@ -369,7 +382,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" rpm
+          "${publish_cmd[@]}" --publish-report target/publish-reports/rpm.toml rpm
 
       - name: Upload rpm packages to GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -377,11 +390,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          assets=(target/common/rpm/*.rpm target/*/release/rpm/*.rpm)
+          report=target/publish-reports/rpm.toml
+          test -f "$report"
+          mapfile -t assets < <(python3 - "$report" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as handle:
+              report = tomllib.load(handle)
+
+          for manifest in report.get("manifests", []):
+              for asset in manifest.get("artifacts", []):
+                  print(asset["local-path"])
+          PY
+          )
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "no rpm release assets found" >&2
-            exit 1
+            echo "no rpm release assets selected by publish report; skipping GitHub Release upload"
+            exit 0
           fi
           for attempt in {1..30}; do
             if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -403,6 +428,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             gateway/target/common/rpm/**
+            gateway/target/publish-reports/*.toml
 
   homebrew:
     needs: github-release
@@ -519,7 +545,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
-          "${publish_cmd[@]}" brew
+          "${publish_cmd[@]}" --publish-report target/publish-reports/brew.toml brew
 
       - name: Create Homebrew tap pull request
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -578,11 +604,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          assets=(target/*/release/brew/*.tar.gz target/common/brew/pishoo-*.rb)
+          report=target/publish-reports/brew.toml
+          test -f "$report"
+          mapfile -t assets < <(python3 - "$report" <<'PY'
+          import sys
+          import tomllib
+
+          with open(sys.argv[1], "rb") as handle:
+              report = tomllib.load(handle)
+
+          for manifest in report.get("manifests", []):
+              for asset in manifest.get("artifacts", []):
+                  print(asset["local-path"])
+          PY
+          )
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "no Homebrew release assets found" >&2
-            exit 1
+            echo "no Homebrew release assets selected by publish report; skipping GitHub Release upload"
+            exit 0
           fi
           for attempt in {1..30}; do
             if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -604,3 +642,4 @@ jobs:
           if-no-files-found: ignore
           path: |
             gateway/target/common/brew/**
+            gateway/target/publish-reports/*.toml
