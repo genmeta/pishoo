@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## [0.8.0-beta.4] - 2026-07-09
+
+### Added
+
+- pishoo now keeps identity access-rule databases as live policy sources instead
+  of loading only a static in-memory snapshot.
+- Gateway and pishoo access checks now evaluate rules through the shared
+  `dhttp` access policy evaluator trait.
+
+### Changed
+
+- pishoo enables the `dhttp` access ORM facade feature for access-rule database
+  evaluation.
+
+### Fixed
+
+- Release workflows upload package assets from publish reports instead of broad
+  local artifact globs.
+
+### Dependencies
+
+- Release manifests now target `dhttp` v0.5.0-beta.3, `dhttp-access`
+  v0.4.0-beta.1 through the `dhttp` facade, `dhttp-home`
+  v0.4.0-beta.1, `dhttp-identity` v0.3.0-beta.1, `dyns`
+  v0.6.0-beta.3, `h3x` v0.6.0-beta.3, and `dshell`
+  v0.6.0-beta.2.
+
+### Components
+
+- `gateway` v0.8.0-beta.4
+- `pishoo` v0.8.0-beta.4
+- `pishoo-common` v0.5.1-1
+
 ## [0.8.0-beta.3] - 2026-07-06
 
 ### Fixed

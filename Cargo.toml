@@ -48,7 +48,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
 
 # --- QUIC Implementation ---
-h3x = { version = "0.6.0-beta.2" }
+h3x = { version = "0.6.0-beta.3" }
 
 # --- IPC / RPC ---
 remoc = { version = "0.18", default-features = false, features = [

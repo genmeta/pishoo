@@ -1019,9 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.5.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2448459a33f3c10a4df05effd62160e8cbacf19ca81ba640db86ec4b61f3d86e"
+version = "0.5.0-beta.3"
 dependencies = [
  "bon",
  "bytes",
@@ -1042,25 +1040,27 @@ dependencies = [
 
 [[package]]
 name = "dhttp-access"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5dee91d9ec4bf5f8fbd49a2761b1c5454aa9b088f6c53fc278f7b7934de9f38"
+version = "0.4.0-beta.1"
 dependencies = [
+ "chrono",
  "derive_more",
+ "dhttp-home",
  "dhttp-identity",
  "globset",
  "peg",
  "regex",
+ "regex-automata",
+ "sea-orm",
  "serde",
  "serde_json",
  "snafu",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "dhttp-home"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81393cfab5863c0f1b7994c5da57c0a1e941cb62886e558c4832cfea37d1ea68"
+version = "0.4.0-beta.1"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1075,9 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp-identity"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9006fe9bffd56d64fbe4260182039f104a84d612acdd30ec19a16583bb4ff671"
+version = "0.3.0-beta.1"
 dependencies = [
  "bytes",
  "futures",
@@ -1223,9 +1221,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dyns"
-version = "0.6.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a69fa5f6ff05223697e193821019349294d1173f4dbe29fb5d2b1b27193df67"
+version = "0.6.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1509,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.0-beta.3"
+version = "0.8.0-beta.4"
 dependencies = [
  "async-compression",
  "axum",
@@ -1668,9 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "h3x"
-version = "0.6.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9c036f15ff331def2cdb2f12428b7d62ec0ad7e8f3f0a6ff014c570cdb33853"
+version = "0.6.0-beta.3"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -2952,7 +2946,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pishoo"
-version = "0.8.0-beta.3"
+version = "0.8.0-beta.4"
 dependencies = [
  "axum",
  "clap",
@@ -3440,9 +3434,9 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbe3e0de35ae950fa5fbe33799cdf10c80b6bce39afddd89b52f52720435fe3f"
+checksum = "16fc8219fe16d92319e4ccd1c41ea87661a27abfacc4d40e77273b55fa384cf9"
 dependencies = [
  "bon",
  "bytes",
@@ -4504,7 +4498,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5535,7 +5529,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
