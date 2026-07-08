@@ -7,15 +7,17 @@ use axum::{
 };
 use dhttp::{
     access::{
+        action::RequestAction,
         expr::{
             atomics::{AtomicLocationRuleExpr, EvalError},
             eval::Evaluable,
         },
-        matcher::{LocationRulesMatcher, MatchRuleFailed},
         pattern::NormalPattern,
+        policy::{LocationRuleDecisionError, LocationRuleEvaluator, LocationRuleRequest},
     },
     h3x::{connection::ConnectionState, quic},
 };
+use snafu::Report;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use tracing::{info, warn};
 
@@ -47,24 +49,22 @@ impl<'a> AccessHttpRequest<'a> {
     }
 }
 
-impl Evaluable<AccessHttpRequest<'_>> for AtomicLocationRuleExpr {
-    type Value = Result<bool, EvalError>;
-
-    fn eval(&self, request: &AccessHttpRequest<'_>) -> Self::Value {
-        Ok(match self {
-            Self::Any(..) => true,
-            Self::ClientName(pattern) => pattern.eval(&request.client_name)?,
-            Self::Method(method) => {
+impl LocationRuleRequest for AccessHttpRequest<'_> {
+    fn eval_atomic(&self, expr: &AtomicLocationRuleExpr) -> Result<bool, EvalError> {
+        Ok(match expr {
+            AtomicLocationRuleExpr::Any(..) => true,
+            AtomicLocationRuleExpr::ClientName(pattern) => pattern.eval(&self.client_name)?,
+            AtomicLocationRuleExpr::Method(method) => {
                 let pattern: &NormalPattern = method.as_ref();
-                pattern.eval(&request.method.as_str())
+                pattern.eval(&self.method.as_str())
             }
-            Self::Header(header) => request.headers.iter().any(|(key, value)| {
+            AtomicLocationRuleExpr::Header(header) => self.headers.iter().any(|(key, value)| {
                 let Ok(value) = value.to_str() else {
                     return false;
                 };
                 header.eval(&(key.as_str(), value))
             }),
-            Self::Query(query) => request.queries.iter().any(|pair| query.eval(pair)),
+            AtomicLocationRuleExpr::Query(query) => self.queries.iter().any(|pair| query.eval(pair)),
         })
     }
 }
@@ -72,7 +72,7 @@ impl Evaluable<AccessHttpRequest<'_>> for AtomicLocationRuleExpr {
 /// Shared state for the access control middleware.
 #[derive(Clone)]
 pub struct AccessControlState {
-    pub access_rules: Arc<LocationRulesMatcher>,
+    pub access_rules: Arc<dyn LocationRuleEvaluator + Send + Sync>,
     pub server_name: Arc<str>,
 }
 
@@ -105,37 +105,46 @@ pub async fn access_control(
 
     let action = match state
         .access_rules
-        .match_rule(request.uri().path(), &http_request)
+        .evaluate(request.uri().path(), &http_request)
+        .await
     {
-        Ok((_location, action)) => action,
-        Err(MatchRuleFailed::MatchSet { .. }) => {
+        Ok(decision) => decision.action,
+        Err(LocationRuleDecisionError::NoRuleSet { .. }) => {
             // No ruleset matched the path — allow the server itself, deny others.
             if client_name.as_deref() == Some(&*state.server_name) {
                 warn!(
                     path = %request.uri().path(),
                     "no ruleset matched, allowing self only"
                 );
-                dhttp::access::action::RequestAction::Allow
+                RequestAction::Allow
             } else {
                 warn!(
                     path = %request.uri().path(),
                     client = client_name.as_deref(),
                     "no ruleset matched, denying non-self client"
                 );
-                dhttp::access::action::RequestAction::Deny
+                RequestAction::Deny
             }
         }
-        Err(MatchRuleFailed::MatchRuleInSet) => {
+        Err(LocationRuleDecisionError::NoRuleInSet { .. }) => {
             // Ruleset matched but no rule matched — deny everyone.
             warn!(
                 path = %request.uri().path(),
                 "ruleset matched but no rule matched, denying all"
             );
-            dhttp::access::action::RequestAction::Deny
+            RequestAction::Deny
+        }
+        Err(error @ LocationRuleDecisionError::Backend { .. }) => {
+            warn!(
+                path = %request.uri().path(),
+                error = %Report::from_error(&error),
+                "failed to evaluate access rules, denying request"
+            );
+            RequestAction::Deny
         }
     };
 
-    if action == dhttp::access::action::RequestAction::Deny {
+    if action == RequestAction::Deny {
         info!(
             client_name = client_name.as_deref(),
             uri = %request.uri(),
@@ -145,4 +154,65 @@ pub async fn access_control(
     }
 
     next.run(request).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{body::Body, middleware::from_fn_with_state, routing::get, Router};
+    use dhttp::access::{
+        expr::atomics::AtomicLocationRuleExpr,
+        policy::{
+            LocationRuleDecisionError, LocationRuleEvaluator, LocationRuleFuture,
+            LocationRuleRequest,
+        },
+    };
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::AccessControlState;
+
+    #[derive(Debug, snafu::Snafu)]
+    #[snafu(display("synthetic evaluator failure"))]
+    struct SyntheticEvaluatorError;
+
+    struct FailingEvaluator;
+
+    impl LocationRuleEvaluator for FailingEvaluator {
+        fn evaluate<'a>(
+            &'a self,
+            _path: &'a str,
+            _request: &'a (dyn LocationRuleRequest + Send + Sync),
+        ) -> LocationRuleFuture<'a> {
+            Box::pin(async move { Err(LocationRuleDecisionError::backend(SyntheticEvaluatorError)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_error_fails_closed_with_forbidden() {
+        let state = AccessControlState {
+            access_rules: Arc::new(FailingEvaluator),
+            server_name: Arc::from("server.pilot.dhttp.net"),
+        };
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(from_fn_with_state(state, super::access_control));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn access_http_request_evaluates_any_client() {
+        let request = Request::builder().uri("/").body(()).unwrap();
+        let access_request = super::AccessHttpRequest::new(None, &request);
+        let expr: AtomicLocationRuleExpr = "*?".parse().unwrap();
+
+        assert!(access_request.eval_atomic(&expr).unwrap());
+    }
 }
