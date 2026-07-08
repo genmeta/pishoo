@@ -37,7 +37,10 @@ pub enum PolicyError {
     ConnectDb { uri: String, source: sea_orm::DbErr },
 
     #[snafu(display("failed to validate access_rules database `{uri}`"))]
-    ValidateDb { uri: String, source: EnsureStoreError },
+    ValidateDb {
+        uri: String,
+        source: EnsureStoreError,
+    },
 }
 
 pub async fn load_policy_bundle(uri: Option<&str>) -> Result<PolicyBundle, PolicyError> {

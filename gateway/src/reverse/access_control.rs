@@ -17,8 +17,8 @@ use dhttp::{
     },
     h3x::{connection::ConnectionState, quic},
 };
-use snafu::Report;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use snafu::Report;
 use tracing::{info, warn};
 
 struct AccessHttpRequest<'a> {
@@ -64,7 +64,9 @@ impl LocationRuleRequest for AccessHttpRequest<'_> {
                 };
                 header.eval(&(key.as_str(), value))
             }),
-            AtomicLocationRuleExpr::Query(query) => self.queries.iter().any(|pair| query.eval(pair)),
+            AtomicLocationRuleExpr::Query(query) => {
+                self.queries.iter().any(|pair| query.eval(pair))
+            }
         })
     }
 }
@@ -160,7 +162,7 @@ pub async fn access_control(
 mod tests {
     use std::sync::Arc;
 
-    use axum::{body::Body, middleware::from_fn_with_state, routing::get, Router};
+    use axum::{Router, body::Body, middleware::from_fn_with_state, routing::get};
     use dhttp::access::{
         expr::atomics::AtomicLocationRuleExpr,
         policy::{
@@ -185,7 +187,9 @@ mod tests {
             _path: &'a str,
             _request: &'a (dyn LocationRuleRequest + Send + Sync),
         ) -> LocationRuleFuture<'a> {
-            Box::pin(async move { Err(LocationRuleDecisionError::backend(SyntheticEvaluatorError)) })
+            Box::pin(
+                async move { Err(LocationRuleDecisionError::backend(SyntheticEvaluatorError)) },
+            )
         }
     }
 
