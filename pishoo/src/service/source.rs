@@ -17,6 +17,9 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use super::snapshot::ServerService;
 use crate::{config::load_identity_servers, worker::config::BuildConfigError};
 
+type SharedLocationRuleEvaluator =
+    Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenRequestFingerprint {
     pub server_name: DhttpName<'static>,
@@ -65,7 +68,7 @@ pub enum ServerSource {
 
 pub struct PrepareContext {
     pub h3_settings: Arc<dhttp::h3x::dhttp::settings::Settings>,
-    pub access_rules: Arc<dhttp::access::matcher::LocationRulesMatcher>,
+    pub access_rules: SharedLocationRuleEvaluator,
     pub router_state: gateway::reverse::router::RouterState,
 }
 
@@ -560,8 +563,8 @@ fn sqlite_access_rules_uri(path: &std::path::Path) -> String {
 async fn load_identity_access_rules(
     target_node: Option<&Arc<ConfigNode>>,
     identity_profile: &IdentityProfile,
-    fallback: Arc<dhttp::access::matcher::LocationRulesMatcher>,
-) -> Result<Arc<dhttp::access::matcher::LocationRulesMatcher>, BuildConfigError> {
+    fallback: SharedLocationRuleEvaluator,
+) -> Result<SharedLocationRuleEvaluator, BuildConfigError> {
     if let Some(uri) =
         target_node.and_then(|node| node.get::<AccessRulesUri>("access_rules").ok().flatten())
     {
@@ -749,9 +752,23 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use dhttp::name::DhttpName;
+    use dhttp::{
+        access::{
+            expr::atomics::{AtomicLocationRuleExpr, EvalError},
+            policy::LocationRuleRequest,
+        },
+        name::DhttpName,
+    };
 
     use super::*;
+
+    struct TestAccessRequest;
+
+    impl LocationRuleRequest for TestAccessRequest {
+        fn eval_atomic(&self, expr: &AtomicLocationRuleExpr) -> Result<bool, EvalError> {
+            Ok(matches!(expr, AtomicLocationRuleExpr::Any(..)))
+        }
+    }
 
     #[test]
     fn fingerprint_incorporates_cert_and_key() {
@@ -954,12 +971,13 @@ mod tests {
             .await
             .expect("default access db should load");
 
-        let (_location, rules) = prepared
+        let decision = prepared
             .service
             .access_rules
-            .match_rules("/")
-            .expect("identity default access db should provide root rules");
-        assert_eq!(rules.len(), 1);
+            .evaluate("/", &TestAccessRequest)
+            .await
+            .expect("identity default access db should provide root rule decision");
+        assert_eq!(decision.location.to_string(), "/");
     }
 
     #[tokio::test]
@@ -982,7 +1000,12 @@ mod tests {
             .expect("missing default access db should fall back to empty rules");
 
         assert!(
-            prepared.service.access_rules.match_rules("/").is_err(),
+            prepared
+                .service
+                .access_rules
+                .evaluate("/", &TestAccessRequest)
+                .await
+                .is_err(),
             "missing default access db should not synthesize rules"
         );
     }

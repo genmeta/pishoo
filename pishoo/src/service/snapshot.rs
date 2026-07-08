@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dhttp::access::matcher::LocationRulesMatcher>,
+    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_node: Arc<gateway::parse::document::ConfigNode>,
     pub access_log_dir: Option<PathBuf>,

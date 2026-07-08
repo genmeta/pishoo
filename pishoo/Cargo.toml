@@ -24,7 +24,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
-dhttp = { workspace = true }
+dhttp = { workspace = true, features = ["access-orm"] }
 h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
