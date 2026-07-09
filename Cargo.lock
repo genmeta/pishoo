@@ -1020,6 +1020,8 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.5.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dedfca271d296f9c0d9fee052d337495aacb4d1b49eb4b29f09af9cd446757b1"
 dependencies = [
  "bon",
  "bytes",
@@ -1041,6 +1043,8 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.4.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbcd9d2805ace5bcac3c112e14b9df13d02f38f2a8a77897acb1cec536fe0715"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1061,6 +1065,8 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.4.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3af7727cd3f09f4f81bb928c3f7e77587a1a622796413bcbb8348e9a51b24f49"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1076,6 +1082,8 @@ dependencies = [
 [[package]]
 name = "dhttp-identity"
 version = "0.3.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45559fec32be857d9d8db20dbb7f2a728e0b8a8a2cacfaf8480df6b1ae43c318"
 dependencies = [
  "bytes",
  "futures",
@@ -1222,6 +1230,8 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.6.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd8916a250117bdecaa9aa721465c646da282dc41523361b63c8cd01693c6869"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1665,6 +1675,8 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7e242a82f0df4f9c7a8a83440a9943468ff99bd3a4f004c47cc717bb155a7a3"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -4498,7 +4510,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5529,7 +5541,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
