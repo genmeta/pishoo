@@ -5,6 +5,7 @@ use snafu::ResultExt;
 
 pub mod ast;
 pub mod builtin;
+pub mod cascade;
 pub mod diagnostic;
 pub mod document;
 pub mod domain;
@@ -15,7 +16,9 @@ pub mod include;
 pub mod normalize;
 pub mod pattern;
 pub mod registry;
+pub mod snapshot;
 pub mod source;
+pub mod tree;
 pub mod types;
 pub mod value;
 

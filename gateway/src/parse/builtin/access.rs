@@ -7,7 +7,7 @@ use crate::parse::{
     normalize,
     registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
-    types::AccessRulesUri,
+    types::{AccessRulesUri, AccessRulesUriValidationError},
 };
 
 #[derive(Debug, Snafu)]
@@ -32,6 +32,11 @@ pub enum AccessRulesUriError {
     ResolveRelativePath {
         span: SourceSpan,
         source: normalize::NormalizeDirectiveValueError,
+    },
+    #[snafu(display("invalid access_rules uri domain"))]
+    Domain {
+        span: SourceSpan,
+        source: AccessRulesUriValidationError,
     },
 }
 
@@ -84,7 +89,8 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for AccessR
 
         let uri = url::Url::parse(&normalized)
             .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
-        Ok(Self(uri))
+        AccessRulesUri::try_from(uri)
+            .context(access_rules_uri_error::DomainSnafu { span: arg.span })
     }
 }
 

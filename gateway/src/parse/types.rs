@@ -45,19 +45,19 @@ pub fn optional_server_identity(
     server_identity(node, server_name.0.clone())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoolConfig(pub bool);
 
 #[derive(Debug, Clone)]
 pub struct StringConfig(pub String);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringList(pub Vec<String>);
 
 #[derive(Debug, Clone)]
 pub struct PathConfig(pub std::path::PathBuf);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessRulesUri(pub url::Url);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,17 +119,125 @@ pub struct HeaderRule {
 #[derive(Debug, Clone)]
 pub struct HeaderRules(pub Vec<HeaderRule>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MimeTypes(pub std::collections::HashMap<String, http::HeaderValue>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultType(pub http::HeaderValue);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GzipMinLength(pub u64);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GzipCompLevel(pub i32);
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum AccessRulesUriValidationError {
+    #[snafu(display("unsupported access_rules uri scheme `{scheme}`"))]
+    UnsupportedScheme { scheme: String },
+    #[snafu(display("unsupported sqlite access_rules uri form"))]
+    UnsupportedSqliteForm,
+    #[snafu(display("access_rules sqlite path must be absolute"))]
+    RelativePath,
+    #[snafu(display("access_rules sqlite path contains a NUL byte"))]
+    NulPath,
+}
+
+impl TryFrom<url::Url> for AccessRulesUri {
+    type Error = AccessRulesUriValidationError;
+
+    fn try_from(uri: url::Url) -> Result<Self, Self::Error> {
+        if uri.scheme() != "sqlite" {
+            return Err(AccessRulesUriValidationError::UnsupportedScheme {
+                scheme: uri.scheme().to_owned(),
+            });
+        }
+        if uri.host_str().is_some()
+            || !uri.username().is_empty()
+            || uri.password().is_some()
+            || uri.port().is_some()
+            || uri.fragment().is_some()
+        {
+            return Err(AccessRulesUriValidationError::UnsupportedSqliteForm);
+        }
+        let path = std::path::Path::new(uri.path());
+        if !path.is_absolute() {
+            return Err(AccessRulesUriValidationError::RelativePath);
+        }
+        if path.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(AccessRulesUriValidationError::NulPath);
+        }
+        Ok(Self(uri))
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum GzipTypesValidationError {
+    #[snafu(display("gzip_types contains an empty MIME token"))]
+    EmptyToken,
+}
+
+impl StringList {
+    pub fn checked_gzip_types(values: Vec<String>) -> Result<Self, GzipTypesValidationError> {
+        if values.iter().any(String::is_empty) {
+            return Err(GzipTypesValidationError::EmptyToken);
+        }
+        Ok(Self(values))
+    }
+}
+
+impl GzipMinLength {
+    pub const fn checked(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl GzipCompLevel {
+    pub const fn checked(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl DefaultType {
+    pub fn checked_from_bytes(value: &[u8]) -> Result<Self, http::header::InvalidHeaderValue> {
+        http::HeaderValue::from_bytes(value).map(Self)
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum MimeTypesValidationError {
+    #[snafu(display("MIME extension must not be empty"))]
+    EmptyExtension,
+    #[snafu(display("duplicate MIME extension `{extension}`"))]
+    DuplicateExtension { extension: String },
+    #[snafu(display("invalid MIME type header value"))]
+    HeaderValue {
+        source: http::header::InvalidHeaderValue,
+    },
+}
+
+impl MimeTypes {
+    pub fn checked_from_bytes<I>(entries: I) -> Result<Self, MimeTypesValidationError>
+    where
+        I: IntoIterator<Item = (String, Vec<u8>)>,
+    {
+        let mut values = std::collections::HashMap::new();
+        for (extension, value) in entries {
+            if extension.is_empty() {
+                return Err(MimeTypesValidationError::EmptyExtension);
+            }
+            let value = http::HeaderValue::from_bytes(&value)
+                .map_err(|source| MimeTypesValidationError::HeaderValue { source })?;
+            if values.insert(extension.clone(), value).is_some() {
+                return Err(MimeTypesValidationError::DuplicateExtension { extension });
+            }
+        }
+        Ok(Self(values))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SshLoginMethods(pub Vec<String>);

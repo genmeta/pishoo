@@ -1,4 +1,4 @@
-use std::{convert::Infallible, path::PathBuf};
+use std::path::PathBuf;
 
 use snafu::{Snafu, ensure};
 
@@ -6,7 +6,7 @@ use crate::parse::{
     ast::{AstBody, AstDirective, Spanned},
     registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
-    types::{BoolConfig, PathConfig, StringConfig, StringList},
+    types::{BoolConfig, GzipTypesValidationError, PathConfig, StringConfig, StringList},
 };
 
 pub fn only_arg(directive: &AstDirective) -> Option<&Spanned<String>> {
@@ -65,20 +65,39 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for StringC
     }
 }
 
-impl DirectiveValue for StringList {
-    type Error = Infallible;
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum StringListError {
+    #[snafu(display("invalid gzip_types directive value"))]
+    GzipTypes {
+        span: SourceSpan,
+        source: GzipTypesValidationError,
+    },
 }
 
-impl<'input, 'directive> From<&'input DirectiveInput<'directive>> for StringList {
-    fn from(input: &'input DirectiveInput<'directive>) -> Self {
-        Self(
-            input
-                .directive
-                .args
-                .iter()
-                .map(|arg| arg.value.clone())
-                .collect(),
-        )
+impl DirectiveValue for StringList {
+    type Error = StringListError;
+}
+
+impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for StringList {
+    type Error = StringListError;
+
+    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
+        let values = input
+            .directive
+            .args
+            .iter()
+            .map(|arg| arg.value.clone())
+            .collect();
+        if input.directive.name.value == "gzip_types" {
+            return StringList::checked_gzip_types(values).map_err(|source| {
+                StringListError::GzipTypes {
+                    span: input.directive.span,
+                    source,
+                }
+            });
+        }
+        Ok(Self(values))
     }
 }
 

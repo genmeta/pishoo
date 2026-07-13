@@ -126,6 +126,10 @@ pub enum ParsedDirective {
 }
 
 impl DirectiveSpec {
+    pub fn matches_key<T>(&self, key: crate::parse::cascade::DirectiveKey<T>) -> bool {
+        self.name == key.name() && self.cascade == key.cascade_policy()
+    }
+
     pub fn leaf_value<T>(
         name: &'static str,
         allowed_in: Vec<ContextKey>,
@@ -298,6 +302,16 @@ impl ConfigRegistry {
             .find_map(|((registered_context, registered_name), spec)| {
                 (*registered_context == context && *registered_name == name).then_some(spec)
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn directive_matches_key<T: ConfigValue>(
+        &self,
+        context: ContextKey,
+        key: crate::parse::cascade::DirectiveKey<T>,
+    ) -> bool {
+        self.directive_spec(context, key.name().as_str())
+            .is_some_and(|spec| spec.matches_key(key))
     }
 
     pub fn build(

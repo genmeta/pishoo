@@ -37,7 +37,7 @@ pub struct ConfigSlot {
 }
 
 impl ConfigDocument {
-    pub fn new(source_map: Arc<SourceMap>, root: Arc<ConfigNode>) -> Self {
+    pub(crate) fn new(source_map: Arc<SourceMap>, root: Arc<ConfigNode>) -> Self {
         Self { source_map, root }
     }
 
@@ -47,7 +47,11 @@ impl ConfigDocument {
 }
 
 impl ConfigNode {
-    pub fn new(context: ContextKey, name: Option<Spanned<String>>, span: SourceSpan) -> Self {
+    pub(crate) fn new(
+        context: ContextKey,
+        name: Option<Spanned<String>>,
+        span: SourceSpan,
+    ) -> Self {
         Self {
             context,
             name,
@@ -59,7 +63,7 @@ impl ConfigNode {
         }
     }
 
-    pub fn insert_slot(&mut self, name: &'static str, value: TypedValue) {
+    pub(crate) fn insert_slot(&mut self, name: &'static str, value: TypedValue) {
         self.slots
             .entry(name)
             .or_insert_with(|| ConfigSlot { values: Vec::new() })
@@ -67,7 +71,7 @@ impl ConfigNode {
             .push(value);
     }
 
-    pub fn replace_slot(&mut self, name: &'static str, value: TypedValue) {
+    pub(crate) fn replace_slot(&mut self, name: &'static str, value: TypedValue) {
         self.slots.insert(
             name,
             ConfigSlot {
@@ -76,26 +80,26 @@ impl ConfigNode {
         );
     }
 
-    pub fn get_all_untyped(&self, name: &str) -> &[TypedValue] {
+    pub(crate) fn get_all_untyped(&self, name: &str) -> &[TypedValue] {
         self.slots
             .get(name)
             .map(|slot| slot.values.as_slice())
             .unwrap_or(&[])
     }
 
-    pub fn insert_child(&mut self, name: &'static str, child: Arc<ConfigNode>) {
+    pub(crate) fn insert_child(&mut self, name: &'static str, child: Arc<ConfigNode>) {
         self.children.entry(name).or_default().push(child);
     }
 
-    pub fn child_groups(&self) -> impl Iterator<Item = &[Arc<ConfigNode>]> {
+    pub(crate) fn child_groups(&self) -> impl Iterator<Item = &[Arc<ConfigNode>]> {
         self.children.values().map(Vec::as_slice)
     }
 
-    pub fn set_payload(&mut self, payload: TypedValue) {
+    pub(crate) fn set_payload(&mut self, payload: TypedValue) {
         self.payload = Some(payload);
     }
 
-    pub fn set_parent(&self, parent: Option<Weak<ConfigNode>>) {
+    pub(crate) fn set_parent(&self, parent: Option<Weak<ConfigNode>>) {
         self.parent
             .set(parent)
             .expect("parent link set multiple times for config node");
@@ -132,6 +136,38 @@ impl ConfigNode {
             }
             .build()
         })
+    }
+
+    pub(crate) fn get_with_span<T>(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Arc<T>, SourceSpan)>, ConfigQueryError>
+    where
+        T: ConfigValue,
+    {
+        let Some(slot) = self.slots.get(name) else {
+            return Ok(None);
+        };
+        if slot.values.len() > 1 {
+            return config_query_error::MultipleValuesSnafu {
+                directive: name.to_owned(),
+                span: slot.values[1].span(),
+            }
+            .fail();
+        }
+        let value = &slot.values[0];
+        value
+            .downcast::<T>()
+            .map(|value| Some((value, slot.values[0].span())))
+            .ok_or_else(|| {
+                config_query_error::TypeMismatchSnafu {
+                    directive: name.to_owned(),
+                    expected: std::any::type_name::<T>(),
+                    actual: value.type_name(),
+                    span: value.span(),
+                }
+                .build()
+            })
     }
 
     pub fn require<T>(&self, name: &str) -> Result<Arc<T>, ConfigQueryError>

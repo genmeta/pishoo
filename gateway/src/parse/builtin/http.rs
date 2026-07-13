@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use http::{HeaderName, HeaderValue, Uri};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
@@ -8,7 +6,8 @@ use crate::parse::{
     registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{
-        DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes, ProxyPass,
+        DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
+        MimeTypesValidationError, ProxyPass,
     },
 };
 
@@ -47,9 +46,9 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for Default
                 actual: input.directive.args.len(),
             });
         };
-        let value = HeaderValue::from_str(&arg.value)
+        let value = DefaultType::checked_from_bytes(arg.value.as_bytes())
             .context(default_type_error::HeaderValueSnafu { span: arg.span })?;
-        Ok(Self(value))
+        Ok(value)
     }
 }
 
@@ -92,7 +91,7 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for GzipMin
             .value
             .parse::<u64>()
             .context(gzip_min_length_error::UnsignedIntegerSnafu { span: arg.span })?;
-        Ok(Self(value))
+        Ok(Self::checked(value))
     }
 }
 
@@ -135,7 +134,7 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for GzipCom
             .value
             .parse::<i32>()
             .context(gzip_comp_level_error::SignedIntegerSnafu { span: arg.span })?;
-        Ok(Self(value))
+        Ok(Self::checked(value))
     }
 }
 
@@ -291,10 +290,10 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for HeaderR
 pub enum MimeTypesError {
     #[snafu(display("types directive must be a block"))]
     InvalidBlock { span: SourceSpan },
-    #[snafu(display("invalid MIME type header value"))]
-    HeaderValue {
+    #[snafu(display("invalid types directive entries"))]
+    Entries {
         span: SourceSpan,
-        source: http::header::InvalidHeaderValue,
+        source: MimeTypesValidationError,
     },
 }
 
@@ -311,18 +310,15 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for MimeTyp
                 span: input.directive.span,
             });
         };
-        let mut map = HashMap::new();
+        let mut entries = Vec::new();
         for directive in children {
-            let value = HeaderValue::from_str(&directive.name.value).context(
-                mime_types_error::HeaderValueSnafu {
-                    span: directive.name.span,
-                },
-            )?;
             for arg in &directive.args {
-                map.insert(arg.value.clone(), value.clone());
+                entries.push((arg.value.clone(), directive.name.value.as_bytes().to_vec()));
             }
         }
-        Ok(Self(map))
+        MimeTypes::checked_from_bytes(entries).context(mime_types_error::EntriesSnafu {
+            span: input.directive.span,
+        })
     }
 }
 
