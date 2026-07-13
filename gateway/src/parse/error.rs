@@ -3,6 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use snafu::Snafu;
 
 use crate::parse::{
+    domain::{
+        ConfigDocumentId, ConfigDocumentIdError, ConfigDocumentRoleKind, ConfigSourceSpan,
+        DirectiveName,
+    },
     grammar::ParseSyntaxError,
     source::{SourceId, SourceMap, SourceSpan},
 };
@@ -10,6 +14,9 @@ use crate::parse::{
 #[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
 pub enum LoadConfigError {
+    #[snafu(display("failed to allocate configuration document identity"))]
+    DocumentId { source: ConfigDocumentIdError },
+
     #[snafu(display("failed to read configuration source"))]
     ReadSource {
         path: PathBuf,
@@ -27,6 +34,95 @@ pub enum LoadConfigError {
 
     #[snafu(display("failed to build configuration document"))]
     BuildDocument { source: BuildDocumentError },
+
+    #[snafu(display("configuration document is invalid for its role"))]
+    DocumentRole {
+        source: Box<ConfigDocumentRoleError>,
+    },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module, visibility(pub(crate)))]
+pub enum ConfigDocumentRoleError {
+    #[snafu(display("directive `{directive}` is not allowed in a {role} configuration document"))]
+    DirectiveNotAllowed {
+        directive: DirectiveName,
+        role: &'static str,
+        span: ConfigSourceSpan,
+        source: Box<BuildDocumentError>,
+    },
+
+    #[snafu(display(
+        "{role} configuration document must contain exactly one top-level pishoo block, found {found}"
+    ))]
+    ExpectedSinglePishoo {
+        role: &'static str,
+        found: usize,
+        span: ConfigSourceSpan,
+        source: Box<BuildDocumentError>,
+    },
+
+    #[snafu(display(
+        "identity server configuration document must contain at least one server block"
+    ))]
+    MissingIdentityServer {
+        span: ConfigSourceSpan,
+        source: Box<BuildDocumentError>,
+    },
+}
+
+impl ConfigDocumentRoleError {
+    pub(crate) fn directive_not_allowed(
+        directive: DirectiveName,
+        role: ConfigDocumentRoleKind,
+        span: ConfigSourceSpan,
+    ) -> Self {
+        Self::DirectiveNotAllowed {
+            directive,
+            role: role.as_str(),
+            span,
+            source: Box::new(BuildDocumentError::InvalidContext {
+                directive: directive.as_str().to_owned(),
+                context: role.as_str(),
+                span: span.source_span(),
+            }),
+        }
+    }
+
+    pub(crate) fn expected_single_pishoo(
+        role: ConfigDocumentRoleKind,
+        found: usize,
+        span: ConfigSourceSpan,
+        first: Option<SourceSpan>,
+    ) -> Self {
+        let source = match first {
+            Some(first) => BuildDocumentError::DuplicateDirective {
+                directive: "pishoo".to_owned(),
+                first,
+                duplicate: span.source_span(),
+            },
+            None => BuildDocumentError::MissingRequiredDirective {
+                directive: "pishoo",
+                context_span: span.source_span(),
+            },
+        };
+        Self::ExpectedSinglePishoo {
+            role: role.as_str(),
+            found,
+            span,
+            source: Box::new(source),
+        }
+    }
+
+    pub(crate) fn missing_identity_server(span: ConfigSourceSpan) -> Self {
+        Self::MissingIdentityServer {
+            span,
+            source: Box::new(BuildDocumentError::MissingRequiredDirective {
+                directive: "server",
+                context_span: span.source_span(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -153,6 +249,12 @@ impl std::fmt::Display for ConfigLoadFailure {
 impl std::error::Error for ConfigLoadFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
+    }
+}
+
+impl ConfigLoadFailure {
+    pub fn document_id(&self) -> ConfigDocumentId {
+        self.source_map.document_id()
     }
 }
 

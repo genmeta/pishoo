@@ -5,7 +5,9 @@ use snafu::{OptionExt, ResultExt};
 use crate::parse::{
     ast::{AstBody, AstDirective},
     document::{ConfigDocument, ConfigNode},
-    error::{BuildDocumentError, build_document_error},
+    domain::{ConfigDocumentRoleKind, DirectiveName},
+    error::{BuildDocumentError, ConfigDocumentRoleError, build_document_error},
+    fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     normalize,
     source::{SourceMap, SourceSpan},
     value::{ConfigValue, TypedValue},
@@ -37,11 +39,14 @@ pub struct ContextSpec {
 }
 
 pub struct DirectiveSpec {
-    pub name: &'static str,
+    pub name: DirectiveName,
     pub allowed_in: Vec<ContextKey>,
     pub shape: DirectiveShape,
     parser: DirectiveParserFn,
-    pub merge: MergePolicy,
+    pub duplicate: DuplicatePolicy,
+    pub cascade: CascadePolicy,
+    pub transport: TransportPolicy,
+    pub reload: ReloadImpact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +66,32 @@ pub enum PayloadMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergePolicy {
-    RejectDuplicate,
+pub enum DuplicatePolicy {
+    Reject,
     LastWins,
     Append,
-    InheritIfMissing,
-    MergeWithParent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CascadePolicy {
+    None,
+    NearestWins,
+    ReplaceWhole,
+    MergeByKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportPolicy {
+    HypervisorOnly,
+    WorkerInheritable,
+    WorkerLocalOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadImpact {
+    Supervisor,
+    ListenerSet,
+    RuntimeState,
 }
 
 type DirectiveParserFn =
@@ -98,7 +123,10 @@ impl DirectiveSpec {
     pub fn leaf_value<T>(
         name: &'static str,
         allowed_in: Vec<ContextKey>,
-        merge: MergePolicy,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
     ) -> Self
     where
         T: DirectiveValue,
@@ -106,26 +134,39 @@ impl DirectiveSpec {
             TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
     {
         Self {
-            name,
+            name: DirectiveName::new(name),
             allowed_in,
             shape: DirectiveShape::Leaf,
             parser: slot_value_parser::<T>,
-            merge,
+            duplicate,
+            cascade,
+            transport,
+            reload,
         }
     }
 
-    pub fn raw_value<T>(name: &'static str, allowed_in: Vec<ContextKey>, merge: MergePolicy) -> Self
+    pub fn raw_value<T>(
+        name: &'static str,
+        allowed_in: Vec<ContextKey>,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self
     where
         T: DirectiveValue,
         for<'input, 'directive> T:
             TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
     {
         Self {
-            name,
+            name: DirectiveName::new(name),
             allowed_in,
             shape: DirectiveShape::RawBlock,
             parser: slot_value_parser::<T>,
-            merge,
+            duplicate,
+            cascade,
+            transport,
+            reload,
         }
     }
 
@@ -133,17 +174,23 @@ impl DirectiveSpec {
         name: &'static str,
         allowed_in: Vec<ContextKey>,
         child_context: ContextKey,
-        merge: MergePolicy,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
     ) -> Self {
         Self {
-            name,
+            name: DirectiveName::new(name),
             allowed_in,
             shape: DirectiveShape::ContextBlock {
                 child_context,
                 payload: PayloadMode::None,
             },
             parser: empty_parser,
-            merge,
+            duplicate,
+            cascade,
+            transport,
+            reload,
         }
     }
 
@@ -151,7 +198,10 @@ impl DirectiveSpec {
         name: &'static str,
         allowed_in: Vec<ContextKey>,
         child_context: ContextKey,
-        merge: MergePolicy,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
     ) -> Self
     where
         T: DirectiveValue,
@@ -159,14 +209,17 @@ impl DirectiveSpec {
             TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
     {
         Self {
-            name,
+            name: DirectiveName::new(name),
             allowed_in,
             shape: DirectiveShape::ContextBlock {
                 child_context,
                 payload: PayloadMode::Parser,
             },
             parser: payload_value_parser::<T>,
-            merge,
+            duplicate,
+            cascade,
+            transport,
+            reload,
         }
     }
 }
@@ -229,7 +282,16 @@ impl ConfigRegistry {
     }
 
     pub fn register_directive(&mut self, context: ContextKey, spec: DirectiveSpec) {
-        self.directives.insert((context, spec.name), spec);
+        self.directives.insert((context, spec.name.as_str()), spec);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn directive_spec(&self, context: ContextKey, name: &str) -> Option<&DirectiveSpec> {
+        self.directives
+            .iter()
+            .find_map(|((registered_context, registered_name), spec)| {
+                (*registered_context == context && *registered_name == name).then_some(spec)
+            })
     }
 
     pub fn build(
@@ -257,6 +319,93 @@ impl ConfigRegistry {
         let root = Arc::new(root);
         put_parent_recursively(&root, None);
         Ok(ConfigDocument::new(source_map, root))
+    }
+
+    pub(crate) fn build_for_role(
+        &self,
+        source_map: Arc<SourceMap>,
+        directives: Vec<AstDirective>,
+        options: BuildOptions<'_>,
+        role: ConfigDocumentRoleKind,
+    ) -> Result<ParsedConfigDocument, RoleDocumentBuildError> {
+        validate_document_shape(&source_map, &directives, role)?;
+        self.validate_role_directives(&source_map, &directives, context::ROOT, role)?;
+
+        let span = document_span(&directives);
+        let mut root = ConfigNode::new(context::ROOT, None, span);
+        self.build_into(
+            source_map.as_ref(),
+            &mut root,
+            context::ROOT,
+            directives,
+            &options,
+        )
+        .map_err(RoleDocumentBuildError::Build)?;
+
+        match role {
+            ConfigDocumentRoleKind::HypervisorRoot | ConfigDocumentRoleKind::WorkerPishoo => {
+                let pishoo = root
+                    .children_optional("pishoo")
+                    .first()
+                    .cloned()
+                    .expect("document role validation requires one pishoo block");
+                let fragment = ParsedPishooFragment::new(source_map, pishoo);
+                Ok(match role {
+                    ConfigDocumentRoleKind::HypervisorRoot => {
+                        ParsedConfigDocument::HypervisorRoot(fragment)
+                    }
+                    ConfigDocumentRoleKind::WorkerPishoo => {
+                        ParsedConfigDocument::WorkerPishoo(fragment)
+                    }
+                    ConfigDocumentRoleKind::IdentityServer => {
+                        unreachable!("identity role handled by the other match arm")
+                    }
+                })
+            }
+            ConfigDocumentRoleKind::IdentityServer => {
+                let servers = root
+                    .children_optional("server")
+                    .iter()
+                    .cloned()
+                    .map(|server| ParsedServerFragment::new(Arc::clone(&source_map), server))
+                    .collect();
+                Ok(ParsedConfigDocument::IdentityServers(servers))
+            }
+        }
+    }
+
+    fn validate_role_directives(
+        &self,
+        source_map: &SourceMap,
+        directives: &[AstDirective],
+        context: ContextKey,
+        role: ConfigDocumentRoleKind,
+    ) -> Result<(), RoleDocumentBuildError> {
+        for directive in directives {
+            let Some(spec) = self
+                .directives
+                .get(&(context, directive.name.value.as_str()))
+            else {
+                continue;
+            };
+            if !directive_allowed_for_role(spec, context, role) {
+                return Err(RoleDocumentBuildError::Role(Box::new(
+                    ConfigDocumentRoleError::directive_not_allowed(
+                        spec.name,
+                        role,
+                        source_map.config_span(directive.name.span),
+                    ),
+                )));
+            }
+            if let (
+                DirectiveShape::ContextBlock { child_context, .. },
+                AstBody::Block { children, .. },
+            ) = (spec.shape, &directive.body)
+            {
+                self.validate_role_directives(source_map, children, child_context, role)?;
+            }
+        }
+        Ok(())
     }
 
     fn build_into(
@@ -311,7 +460,7 @@ impl ConfigRegistry {
                     };
                     self.build_into(source_map, &mut child, child_context, children, options)?;
                     self.finalize(&mut child, child_context, options)?;
-                    node.insert_child(spec.name, Arc::new(child));
+                    node.insert_child(spec.name.as_str(), Arc::new(child));
                 }
             }
         }
@@ -360,30 +509,105 @@ fn insert_slot(
     let span = value.span();
     let value = normalize::normalize_slot_value(value, source_map).context(
         build_document_error::NormalizeDirectiveValueSnafu {
-            directive: spec.name.to_owned(),
+            directive: spec.name.as_str().to_owned(),
             span,
         },
     )?;
 
-    match spec.merge {
-        MergePolicy::RejectDuplicate if !node.get_all_untyped(spec.name).is_empty() => {
-            let first = node.get_all_untyped(spec.name)[0].span();
+    match spec.duplicate {
+        DuplicatePolicy::Reject if !node.get_all_untyped(spec.name.as_str()).is_empty() => {
+            let first = node.get_all_untyped(spec.name.as_str())[0].span();
             build_document_error::DuplicateDirectiveSnafu {
-                directive: spec.name.to_owned(),
+                directive: spec.name.as_str().to_owned(),
                 first,
                 duplicate: value.span(),
             }
             .fail()
         }
-        MergePolicy::LastWins => {
-            node.replace_slot(spec.name, value);
+        DuplicatePolicy::LastWins => {
+            node.replace_slot(spec.name.as_str(), value);
             Ok(())
         }
         _ => {
-            node.insert_slot(spec.name, value);
+            node.insert_slot(spec.name.as_str(), value);
             Ok(())
         }
     }
+}
+
+fn document_span(directives: &[AstDirective]) -> SourceSpan {
+    directives
+        .first()
+        .map(|directive| directive.span)
+        .unwrap_or(SourceSpan {
+            source_id: crate::parse::source::SourceId(0),
+            start: 0,
+            end: 0,
+        })
+}
+
+fn validate_document_shape(
+    source_map: &SourceMap,
+    directives: &[AstDirective],
+    role: ConfigDocumentRoleKind,
+) -> Result<(), RoleDocumentBuildError> {
+    match role {
+        ConfigDocumentRoleKind::HypervisorRoot | ConfigDocumentRoleKind::WorkerPishoo => {
+            let pishoo = directives
+                .iter()
+                .filter(|directive| directive.name.value == "pishoo")
+                .collect::<Vec<_>>();
+            if pishoo.len() != 1 {
+                let span = pishoo
+                    .get(1)
+                    .copied()
+                    .or_else(|| directives.first())
+                    .map_or_else(|| document_span(directives), |directive| directive.span);
+                return Err(RoleDocumentBuildError::Role(Box::new(
+                    ConfigDocumentRoleError::expected_single_pishoo(
+                        role,
+                        pishoo.len(),
+                        source_map.config_span(span),
+                        pishoo.first().map(|directive| directive.span),
+                    ),
+                )));
+            }
+        }
+        ConfigDocumentRoleKind::IdentityServer => {
+            if !directives
+                .iter()
+                .any(|directive| directive.name.value == "server")
+            {
+                return Err(RoleDocumentBuildError::Role(Box::new(
+                    ConfigDocumentRoleError::missing_identity_server(
+                        source_map.config_span(document_span(directives)),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn directive_allowed_for_role(
+    spec: &DirectiveSpec,
+    context: ContextKey,
+    role: ConfigDocumentRoleKind,
+) -> bool {
+    match role {
+        ConfigDocumentRoleKind::HypervisorRoot => {
+            context != context::ROOT || spec.name.as_str() == "pishoo"
+        }
+        ConfigDocumentRoleKind::WorkerPishoo => spec.transport != TransportPolicy::HypervisorOnly,
+        ConfigDocumentRoleKind::IdentityServer => {
+            context != context::ROOT || spec.name.as_str() == "server"
+        }
+    }
+}
+
+pub(crate) enum RoleDocumentBuildError {
+    Role(Box<ConfigDocumentRoleError>),
+    Build(BuildDocumentError),
 }
 
 fn put_parent_recursively(node: &Arc<ConfigNode>, parent: Option<&Arc<ConfigNode>>) {

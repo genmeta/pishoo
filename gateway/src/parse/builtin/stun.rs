@@ -5,7 +5,8 @@ use snafu::{ResultExt, Snafu};
 use crate::parse::{
     builtin::core::{first_arg_span, only_arg},
     registry::{
-        ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue, MergePolicy, context,
+        CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue,
+        DuplicatePolicy, ReloadImpact, TransportPolicy, context,
     },
     source::SourceSpan,
     types::{SocketAddrs, StunBindConfigValue, StunChangePort},
@@ -152,7 +153,10 @@ pub fn register(registry: &mut ConfigRegistry) {
             "stun_server",
             vec![context::SERVER],
             context::STUN_SERVER,
-            MergePolicy::Append,
+            DuplicatePolicy::Append,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
         ),
     );
     registry.register_directive(
@@ -160,7 +164,10 @@ pub fn register(registry: &mut ConfigRegistry) {
         DirectiveSpec::leaf_value::<StunBindConfigValue>(
             "bind",
             vec![context::STUN_SERVER],
-            MergePolicy::Append,
+            DuplicatePolicy::Append,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
         ),
     );
     for name in ["outer_addr", "change_addr"] {
@@ -169,7 +176,10 @@ pub fn register(registry: &mut ConfigRegistry) {
             DirectiveSpec::leaf_value::<SocketAddrs>(
                 name,
                 vec![context::STUN_SERVER],
-                MergePolicy::RejectDuplicate,
+                DuplicatePolicy::Reject,
+                CascadePolicy::None,
+                TransportPolicy::WorkerLocalOnly,
+                ReloadImpact::ListenerSet,
             ),
         );
     }
@@ -178,7 +188,10 @@ pub fn register(registry: &mut ConfigRegistry) {
         DirectiveSpec::leaf_value::<StunChangePort>(
             "change_port",
             vec![context::STUN_SERVER],
-            MergePolicy::RejectDuplicate,
+            DuplicatePolicy::Reject,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
         ),
     );
 }

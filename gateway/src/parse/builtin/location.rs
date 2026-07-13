@@ -5,8 +5,8 @@ use crate::parse::{
     document::ConfigNode,
     pattern::{ParsePatternError, Pattern},
     registry::{
-        BuildOptions, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue, MergePolicy,
-        context,
+        BuildOptions, CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue,
+        DuplicatePolicy, ReloadImpact, TransportPolicy, context,
     },
     source::SourceSpan,
     types::{
@@ -50,50 +50,52 @@ pub fn register(registry: &mut ConfigRegistry) {
             "location",
             vec![context::SERVER],
             context::LOCATION,
-            MergePolicy::Append,
+            DuplicatePolicy::Append,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
         ),
     );
-    register_leaf::<PathConfig>(registry, "root", MergePolicy::RejectDuplicate);
-    register_leaf::<PathConfig>(registry, "alias", MergePolicy::RejectDuplicate);
-    register_leaf::<BoolConfig>(registry, "gzip", MergePolicy::RejectDuplicate);
-    register_leaf::<BoolConfig>(registry, "gzip_vary", MergePolicy::RejectDuplicate);
-    register_leaf::<GzipMinLength>(registry, "gzip_min_length", MergePolicy::RejectDuplicate);
-    register_leaf::<GzipCompLevel>(registry, "gzip_comp_level", MergePolicy::RejectDuplicate);
-    register_leaf::<StringList>(registry, "gzip_types", MergePolicy::RejectDuplicate);
-    register_leaf::<StringList>(registry, "index", MergePolicy::RejectDuplicate);
-    register_leaf::<HeaderRules>(registry, "add_header", MergePolicy::Append);
-    register_leaf::<HeaderRules>(registry, "proxy_set_header", MergePolicy::Append);
-    register_leaf::<ProxyPass>(registry, "proxy_pass", MergePolicy::RejectDuplicate);
-    register_leaf::<PathConfig>(
-        registry,
-        "proxy_ssl_certificate",
-        MergePolicy::RejectDuplicate,
-    );
+    register_leaf::<PathConfig>(registry, "root", DuplicatePolicy::Reject);
+    register_leaf::<PathConfig>(registry, "alias", DuplicatePolicy::Reject);
+    register_leaf::<BoolConfig>(registry, "gzip", DuplicatePolicy::Reject);
+    register_leaf::<BoolConfig>(registry, "gzip_vary", DuplicatePolicy::Reject);
+    register_leaf::<GzipMinLength>(registry, "gzip_min_length", DuplicatePolicy::Reject);
+    register_leaf::<GzipCompLevel>(registry, "gzip_comp_level", DuplicatePolicy::Reject);
+    register_leaf::<StringList>(registry, "gzip_types", DuplicatePolicy::Reject);
+    register_leaf::<StringList>(registry, "index", DuplicatePolicy::Reject);
+    register_leaf::<HeaderRules>(registry, "add_header", DuplicatePolicy::Append);
+    register_leaf::<HeaderRules>(registry, "proxy_set_header", DuplicatePolicy::Append);
+    register_leaf::<ProxyPass>(registry, "proxy_pass", DuplicatePolicy::Reject);
+    register_leaf::<PathConfig>(registry, "proxy_ssl_certificate", DuplicatePolicy::Reject);
     register_leaf::<PathConfig>(
         registry,
         "proxy_ssl_certificate_key",
-        MergePolicy::RejectDuplicate,
+        DuplicatePolicy::Reject,
     );
     register_leaf::<PathConfig>(
         registry,
         "proxy_ssl_trusted_certificate",
-        MergePolicy::RejectDuplicate,
+        DuplicatePolicy::Reject,
     );
-    register_leaf::<SshLoginMethods>(registry, "ssh_login", MergePolicy::RejectDuplicate);
-    register_leaf::<SshSslUsers>(registry, "ssh_ssl_user", MergePolicy::Append);
-    register_leaf::<StringList>(registry, "ssh_deny", MergePolicy::RejectDuplicate);
-    register_leaf::<DefaultType>(registry, "default_type", MergePolicy::RejectDuplicate);
+    register_leaf::<SshLoginMethods>(registry, "ssh_login", DuplicatePolicy::Reject);
+    register_leaf::<SshSslUsers>(registry, "ssh_ssl_user", DuplicatePolicy::Append);
+    register_leaf::<StringList>(registry, "ssh_deny", DuplicatePolicy::Reject);
+    register_leaf::<DefaultType>(registry, "default_type", DuplicatePolicy::Reject);
     registry.register_directive(
         context::LOCATION,
         DirectiveSpec::raw_value::<MimeTypes>(
             "types",
             vec![context::LOCATION],
-            MergePolicy::RejectDuplicate,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
         ),
     );
 }
 
-fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, merge: MergePolicy)
+fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, duplicate: DuplicatePolicy)
 where
     T: crate::parse::registry::DirectiveValue,
     for<'input, 'directive> T: TryFrom<
@@ -103,7 +105,14 @@ where
 {
     registry.register_directive(
         context::LOCATION,
-        DirectiveSpec::leaf_value::<T>(name, vec![context::LOCATION], merge),
+        DirectiveSpec::leaf_value::<T>(
+            name,
+            vec![context::LOCATION],
+            duplicate,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
     );
 }
 

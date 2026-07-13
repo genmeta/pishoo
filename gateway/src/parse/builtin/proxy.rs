@@ -2,7 +2,10 @@ use snafu::{Snafu, ensure};
 
 use crate::parse::{
     document::ConfigNode,
-    registry::{BuildOptions, ConfigRegistry, DirectiveSpec, MergePolicy, context},
+    registry::{
+        BuildOptions, CascadePolicy, ConfigRegistry, DirectiveSpec, DuplicatePolicy, ReloadImpact,
+        TransportPolicy, context,
+    },
     source::SourceSpan,
     types::{
         ClientNameConfig, DefaultType, MimeTypes, PathConfig, ResolverConfig, SocketAddrs,
@@ -28,7 +31,10 @@ pub fn register(registry: &mut ConfigRegistry) {
             "proxy",
             vec![context::PISHOO],
             context::PROXY,
-            MergePolicy::Append,
+            DuplicatePolicy::Append,
+            CascadePolicy::None,
+            TransportPolicy::HypervisorOnly,
+            ReloadImpact::ListenerSet,
         ),
     );
     register_leaf::<SocketAddrs>(registry, "listen");
@@ -44,7 +50,10 @@ pub fn register(registry: &mut ConfigRegistry) {
         DirectiveSpec::raw_value::<MimeTypes>(
             "types",
             vec![context::PROXY],
-            MergePolicy::RejectDuplicate,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
         ),
     );
 }
@@ -59,7 +68,14 @@ where
 {
     registry.register_directive(
         context::PROXY,
-        DirectiveSpec::leaf_value::<T>(name, vec![context::PROXY], MergePolicy::RejectDuplicate),
+        DirectiveSpec::leaf_value::<T>(
+            name,
+            vec![context::PROXY],
+            DuplicatePolicy::Reject,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
     );
 }
 

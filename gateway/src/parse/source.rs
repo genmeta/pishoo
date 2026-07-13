@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+use crate::parse::domain::{ConfigDocumentId, ConfigSourceSpan};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub(crate) u32);
 
@@ -44,8 +46,9 @@ pub struct SourceFile {
     pub included_from: Option<IncludeTrace>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SourceMap {
+    document_id: ConfigDocumentId,
     sources: Vec<SourceFile>,
 }
 
@@ -56,6 +59,21 @@ pub struct LineColumn {
 }
 
 impl SourceMap {
+    pub(crate) fn with_document_id(document_id: ConfigDocumentId) -> Self {
+        Self {
+            document_id,
+            sources: Vec::new(),
+        }
+    }
+
+    pub fn document_id(&self) -> ConfigDocumentId {
+        self.document_id
+    }
+
+    pub fn config_span(&self, span: SourceSpan) -> ConfigSourceSpan {
+        ConfigSourceSpan::new(self.document_id, span)
+    }
+
     pub fn add_source(
         &mut self,
         path: Option<PathBuf>,
@@ -109,6 +127,14 @@ impl SourceMap {
             .copied()
             .unwrap_or_else(|| source.text.len());
         Some(source.text[start..end].trim_end_matches(['\r', '\n']))
+    }
+}
+
+impl Default for SourceMap {
+    fn default() -> Self {
+        Self::with_document_id(
+            ConfigDocumentId::try_from_index(0).expect("zero is a valid configuration document id"),
+        )
     }
 }
 

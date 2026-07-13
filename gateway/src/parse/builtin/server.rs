@@ -2,7 +2,10 @@ use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
     document::ConfigNode,
-    registry::{BuildOptions, ConfigRegistry, ContextKey, DirectiveSpec, MergePolicy, context},
+    registry::{
+        BuildOptions, CascadePolicy, ConfigRegistry, ContextKey, DirectiveSpec, DuplicatePolicy,
+        ReloadImpact, TransportPolicy, context,
+    },
     source::SourceSpan,
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, ListenConfig,
@@ -29,48 +32,121 @@ pub fn register(registry: &mut ConfigRegistry) {
     });
     registry.register_directive(context::ROOT, server_block(context::ROOT));
     registry.register_directive(context::PISHOO, server_block(context::PISHOO));
-    register_server_leaf::<ListenConfig>(registry, "listen", MergePolicy::Append);
-    register_server_leaf::<ServerNames>(registry, "server_name", MergePolicy::RejectDuplicate);
-    register_server_leaf::<ResolverConfig>(registry, "dns", MergePolicy::RejectDuplicate);
-    register_server_leaf::<BoolConfig>(registry, "gzip", MergePolicy::RejectDuplicate);
-    register_server_leaf::<BoolConfig>(registry, "gzip_vary", MergePolicy::RejectDuplicate);
+    register_server_leaf::<ListenConfig>(
+        registry,
+        "listen",
+        DuplicatePolicy::Append,
+        ReloadImpact::ListenerSet,
+    );
+    register_server_leaf::<ServerNames>(
+        registry,
+        "server_name",
+        DuplicatePolicy::Reject,
+        ReloadImpact::ListenerSet,
+    );
+    register_server_leaf::<ResolverConfig>(
+        registry,
+        "dns",
+        DuplicatePolicy::Reject,
+        ReloadImpact::ListenerSet,
+    );
+    register_server_leaf::<BoolConfig>(
+        registry,
+        "gzip",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
+    register_server_leaf::<BoolConfig>(
+        registry,
+        "gzip_vary",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
     register_server_leaf::<GzipMinLength>(
         registry,
         "gzip_min_length",
-        MergePolicy::RejectDuplicate,
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
     );
     register_server_leaf::<GzipCompLevel>(
         registry,
         "gzip_comp_level",
-        MergePolicy::RejectDuplicate,
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
     );
-    register_server_leaf::<StringList>(registry, "gzip_types", MergePolicy::RejectDuplicate);
-    register_server_leaf::<PathConfig>(registry, "ssl_certificate", MergePolicy::RejectDuplicate);
+    register_server_leaf::<StringList>(
+        registry,
+        "gzip_types",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
+    register_server_leaf::<PathConfig>(
+        registry,
+        "ssl_certificate",
+        DuplicatePolicy::Reject,
+        ReloadImpact::ListenerSet,
+    );
     register_server_leaf::<PathConfig>(
         registry,
         "ssl_certificate_key",
-        MergePolicy::RejectDuplicate,
+        DuplicatePolicy::Reject,
+        ReloadImpact::ListenerSet,
     );
-    register_server_leaf::<DefaultType>(registry, "default_type", MergePolicy::RejectDuplicate);
-    register_server_leaf::<AccessRulesUri>(registry, "access_rules", MergePolicy::RejectDuplicate);
-    register_server_leaf::<BoolConfig>(registry, "relay", MergePolicy::RejectDuplicate);
-    register_server_leaf::<BoolConfig>(registry, "stun", MergePolicy::RejectDuplicate);
+    register_server_leaf::<DefaultType>(
+        registry,
+        "default_type",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
+    register_server_leaf::<AccessRulesUri>(
+        registry,
+        "access_rules",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
+    register_server_leaf::<BoolConfig>(
+        registry,
+        "relay",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
+    register_server_leaf::<BoolConfig>(
+        registry,
+        "stun",
+        DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState,
+    );
     registry.register_directive(
         context::SERVER,
         DirectiveSpec::raw_value::<MimeTypes>(
             "types",
             vec![context::SERVER],
-            MergePolicy::RejectDuplicate,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
         ),
     );
 }
 
 fn server_block(parent: ContextKey) -> DirectiveSpec {
-    DirectiveSpec::context_empty("server", vec![parent], context::SERVER, MergePolicy::Append)
+    DirectiveSpec::context_empty(
+        "server",
+        vec![parent],
+        context::SERVER,
+        DuplicatePolicy::Append,
+        CascadePolicy::None,
+        TransportPolicy::HypervisorOnly,
+        ReloadImpact::ListenerSet,
+    )
 }
 
-fn register_server_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, merge: MergePolicy)
-where
+fn register_server_leaf<T>(
+    registry: &mut ConfigRegistry,
+    name: &'static str,
+    duplicate: DuplicatePolicy,
+    reload: ReloadImpact,
+) where
     T: crate::parse::registry::DirectiveValue,
     for<'input, 'directive> T: TryFrom<
             &'input crate::parse::registry::DirectiveInput<'directive>,
@@ -79,7 +155,14 @@ where
 {
     registry.register_directive(
         context::SERVER,
-        DirectiveSpec::leaf_value::<T>(name, vec![context::SERVER], merge),
+        DirectiveSpec::leaf_value::<T>(
+            name,
+            vec![context::SERVER],
+            duplicate,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            reload,
+        ),
     );
 }
 

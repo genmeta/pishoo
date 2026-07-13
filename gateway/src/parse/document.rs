@@ -7,6 +7,7 @@ use tokio::sync::OnceCell;
 
 use crate::parse::{
     ast::Spanned,
+    domain::ConfigDocumentId,
     error::{ConfigQueryError, config_query_error},
     registry::ContextKey,
     source::{SourceMap, SourceSpan},
@@ -38,6 +39,10 @@ pub struct ConfigSlot {
 impl ConfigDocument {
     pub fn new(source_map: Arc<SourceMap>, root: Arc<ConfigNode>) -> Self {
         Self { source_map, root }
+    }
+
+    pub fn document_id(&self) -> ConfigDocumentId {
+        self.source_map.document_id()
     }
 }
 

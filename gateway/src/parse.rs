@@ -7,7 +7,9 @@ pub mod ast;
 pub mod builtin;
 pub mod diagnostic;
 pub mod document;
+pub mod domain;
 pub mod error;
+pub mod fragment;
 pub mod grammar;
 pub mod include;
 pub mod normalize;
@@ -16,6 +18,90 @@ pub mod registry;
 pub mod source;
 pub mod types;
 pub mod value;
+
+pub struct ConfigDocumentParser<'registry> {
+    registry: &'registry registry::ConfigRegistry,
+    next_document_index: usize,
+}
+
+impl<'registry> ConfigDocumentParser<'registry> {
+    pub fn new(registry: &'registry registry::ConfigRegistry) -> Self {
+        Self {
+            registry,
+            next_document_index: 0,
+        }
+    }
+
+    pub fn parse_text(
+        &mut self,
+        text: &str,
+        source_path: &Path,
+        role: domain::ConfigDocumentRole<'_>,
+    ) -> Result<fragment::ParsedConfigDocument, error::ConfigLoadFailure> {
+        let document_id = match domain::ConfigDocumentId::try_from_index(self.next_document_index) {
+            Ok(document_id) => document_id,
+            Err(source) => {
+                return Err(error::ConfigLoadFailure {
+                    error: error::LoadConfigError::DocumentId { source },
+                    source_map: Arc::new(source::SourceMap::default()),
+                });
+            }
+        };
+        self.next_document_index = self.next_document_index.saturating_add(1);
+
+        let role_kind = role.kind();
+        let options = role.build_options();
+        let source_path = source_path.to_path_buf();
+        let mut source_map = source::SourceMap::with_document_id(document_id);
+        let source_id = source_map.add_source(
+            Some(source_path.clone()),
+            Arc::from(text),
+            source_path.parent().map(Path::to_path_buf),
+            None,
+        );
+
+        let directives = match grammar::parse_source(text, source_id)
+            .context(error::load_config_error::ParseFileSnafu { source_id })
+        {
+            Ok(directives) => directives,
+            Err(error) => {
+                return Err(error::ConfigLoadFailure {
+                    error,
+                    source_map: Arc::new(source_map),
+                });
+            }
+        };
+
+        let directives =
+            match include::expand_includes(directives, &mut source_map, source_path.parent())
+                .context(error::load_config_error::ResolveIncludeSnafu)
+            {
+                Ok(directives) => directives,
+                Err(error) => {
+                    return Err(error::ConfigLoadFailure {
+                        error,
+                        source_map: Arc::new(source_map),
+                    });
+                }
+            };
+
+        let source_map = Arc::new(source_map);
+        match self
+            .registry
+            .build_for_role(Arc::clone(&source_map), directives, options, role_kind)
+        {
+            Ok(document) => Ok(document),
+            Err(registry::RoleDocumentBuildError::Role(source)) => Err(error::ConfigLoadFailure {
+                error: error::LoadConfigError::DocumentRole { source },
+                source_map,
+            }),
+            Err(registry::RoleDocumentBuildError::Build(source)) => Err(error::ConfigLoadFailure {
+                error: error::LoadConfigError::BuildDocument { source },
+                source_map,
+            }),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

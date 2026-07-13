@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use snafu::{OptionExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::parse::{
+    domain::{ResolvedConfigPath, ResolvedConfigPathError},
     source::{SourceMap, SourceSpan},
     types::PathConfig,
     value::TypedValue,
@@ -13,6 +14,28 @@ use crate::parse::{
 pub enum NormalizeDirectiveValueError {
     #[snafu(display("relative path requires a configuration file base directory"))]
     MissingBaseDir { span: SourceSpan },
+    #[snafu(display("configuration path is not a resolved absolute path"))]
+    InvalidResolvedPath {
+        span: SourceSpan,
+        source: ResolvedConfigPathError,
+    },
+}
+
+pub fn resolve_config_path(
+    path: &Path,
+    span: SourceSpan,
+    source_map: &SourceMap,
+) -> Result<ResolvedConfigPath, NormalizeDirectiveValueError> {
+    let path: PathBuf = if path.is_absolute() {
+        path.components().collect()
+    } else {
+        let base_dir = source_map
+            .base_dir_for_span(span)
+            .context(normalize_directive_value_error::MissingBaseDirSnafu { span })?;
+        base_dir.join(path).components().collect()
+    };
+    ResolvedConfigPath::try_from(path)
+        .context(normalize_directive_value_error::InvalidResolvedPathSnafu { span })
 }
 
 pub fn normalize_path(
@@ -20,14 +43,7 @@ pub fn normalize_path(
     span: SourceSpan,
     source_map: &SourceMap,
 ) -> Result<PathBuf, NormalizeDirectiveValueError> {
-    if path.is_absolute() {
-        return Ok(path.components().collect());
-    }
-
-    let base_dir = source_map
-        .base_dir_for_span(span)
-        .context(normalize_directive_value_error::MissingBaseDirSnafu { span })?;
-    Ok(base_dir.join(path).components().collect())
+    resolve_config_path(path, span, source_map).map(Into::into)
 }
 
 pub fn normalize_slot_value(
