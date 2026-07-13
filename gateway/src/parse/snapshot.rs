@@ -1,4 +1,4 @@
-use std::{collections::HashSet, num::NonZeroU32, path::PathBuf, sync::Arc};
+use std::{any::TypeId, collections::HashSet, num::NonZeroU32, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
 use snafu::Snafu;
@@ -9,6 +9,7 @@ use crate::parse::{
         GZIP_TYPES, GZIP_VARY, InheritedSourceLocation, TYPES,
     },
     domain::{DirectiveName, ResolvedConfigPath, ResolvedConfigPathError},
+    registry::{CascadePolicy, ConfigRegistry, DirectiveShape, TransportPolicy, context},
     tree::HomeConfigTree,
     types::{
         AccessRulesUri, AccessRulesUriValidationError, BoolConfig, DefaultType, GzipCompLevel,
@@ -23,15 +24,140 @@ pub enum RootConfigSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootInheritedConfigV1 {
-    access_rules: InheritedValue<Option<AccessRulesUri>>,
-    gzip: InheritedValue<BoolConfig>,
-    gzip_vary: InheritedValue<BoolConfig>,
-    gzip_min_length: InheritedValue<GzipMinLength>,
-    gzip_comp_level: InheritedValue<GzipCompLevel>,
-    gzip_types: InheritedValue<Option<StringList>>,
-    default_type: InheritedValue<Option<DefaultType>>,
-    types: InheritedValue<Option<MimeTypes>>,
-    access_log: InheritedValue<Option<SnapshotAccessLogDirective>>,
+    access_rules: InheritedValue<Option<Arc<AccessRulesUri>>>,
+    gzip: InheritedValue<Arc<BoolConfig>>,
+    gzip_vary: InheritedValue<Arc<BoolConfig>>,
+    gzip_min_length: InheritedValue<Arc<GzipMinLength>>,
+    gzip_comp_level: InheritedValue<Arc<GzipCompLevel>>,
+    gzip_types: InheritedValue<Option<Arc<StringList>>>,
+    default_type: InheritedValue<Option<Arc<DefaultType>>>,
+    types: InheritedValue<Option<Arc<MimeTypes>>>,
+    access_log: InheritedValue<Option<Arc<SnapshotAccessLogDirective>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RootSnapshotRegistryContract;
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RootSnapshotRegistryContractError {
+    #[snafu(display("root snapshot directive `{directive}` is not registered in PISHOO"))]
+    MissingDirective { directive: DirectiveName },
+    #[snafu(display(
+        "root snapshot directive `{directive}` has value type `{actual}`, expected `{expected}`"
+    ))]
+    ValueType {
+        directive: DirectiveName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible shape"))]
+    Shape { directive: DirectiveName },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible cascade policy"))]
+    Cascade { directive: DirectiveName },
+    #[snafu(display(
+        "root snapshot directive `{directive}` is not registered as WorkerInheritable"
+    ))]
+    Transport { directive: DirectiveName },
+    #[snafu(display(
+        "reserved root snapshot directive `{directive}` was registered before its checked domain"
+    ))]
+    PrematureReservedDirective { directive: DirectiveName },
+}
+
+impl RootSnapshotRegistryContract {
+    pub(crate) fn validate(
+        registry: &ConfigRegistry,
+    ) -> Result<Self, RootSnapshotRegistryContractError> {
+        validate_snapshot_directive::<AccessRulesUri>(
+            registry,
+            ACCESS_RULES.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<BoolConfig>(
+            registry,
+            GZIP.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<BoolConfig>(
+            registry,
+            GZIP_VARY.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<GzipMinLength>(
+            registry,
+            GZIP_MIN_LENGTH.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<GzipCompLevel>(
+            registry,
+            GZIP_COMP_LEVEL.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<StringList>(
+            registry,
+            GZIP_TYPES.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<DefaultType>(
+            registry,
+            DEFAULT_TYPE.name(),
+            DirectiveShape::Leaf,
+            CascadePolicy::NearestWins,
+        )?;
+        validate_snapshot_directive::<MimeTypes>(
+            registry,
+            TYPES.name(),
+            DirectiveShape::RawBlock,
+            CascadePolicy::ReplaceWhole,
+        )?;
+        let access_log = DirectiveName::new("access_log");
+        if registry
+            .directive_contract(context::PISHOO, access_log.as_str())
+            .is_some()
+        {
+            return Err(
+                RootSnapshotRegistryContractError::PrematureReservedDirective {
+                    directive: access_log,
+                },
+            );
+        }
+        Ok(Self)
+    }
+}
+
+fn validate_snapshot_directive<T: 'static>(
+    registry: &ConfigRegistry,
+    directive: DirectiveName,
+    shape: DirectiveShape,
+    cascade: CascadePolicy,
+) -> Result<(), RootSnapshotRegistryContractError> {
+    let contract = registry
+        .directive_contract(context::PISHOO, directive.as_str())
+        .ok_or(RootSnapshotRegistryContractError::MissingDirective { directive })?;
+    if contract.value_type != Some(TypeId::of::<T>()) {
+        return Err(RootSnapshotRegistryContractError::ValueType {
+            directive,
+            expected: std::any::type_name::<T>(),
+            actual: contract.value_type_name.unwrap_or("<none>"),
+        });
+    }
+    if contract.shape != shape {
+        return Err(RootSnapshotRegistryContractError::Shape { directive });
+    }
+    if contract.cascade != cascade {
+        return Err(RootSnapshotRegistryContractError::Cascade { directive });
+    }
+    if contract.transport != TransportPolicy::WorkerInheritable {
+        return Err(RootSnapshotRegistryContractError::Transport { directive });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +198,8 @@ pub enum RootConfigSnapshotError {
     AccessRules {
         source: AccessRulesUriValidationError,
     },
+    #[snafu(display("failed to parse root snapshot access_rules URL"))]
+    AccessRulesUrl { source: url::ParseError },
     #[snafu(display("invalid root snapshot header value"))]
     HeaderValue {
         source: http::header::InvalidHeaderValue,
@@ -128,7 +256,7 @@ impl RootConfigSnapshot {
     }
 
     pub fn access_rules(&self) -> Option<&AccessRulesUri> {
-        self.v1().access_rules.value.as_ref()
+        self.v1().access_rules.value.as_deref()
     }
 
     pub fn gzip(&self) -> &BoolConfig {
@@ -148,15 +276,15 @@ impl RootConfigSnapshot {
     }
 
     pub fn gzip_types(&self) -> Option<&StringList> {
-        self.v1().gzip_types.value.as_ref()
+        self.v1().gzip_types.value.as_deref()
     }
 
     pub fn default_type(&self) -> Option<&DefaultType> {
-        self.v1().default_type.value.as_ref()
+        self.v1().default_type.value.as_deref()
     }
 
     pub fn types(&self) -> Option<&MimeTypes> {
-        self.v1().types.value.as_ref()
+        self.v1().types.value.as_deref()
     }
 
     pub(crate) fn cascade_access_rules(
@@ -231,23 +359,23 @@ fn snapshot_query<T>(
     result.map_err(|source| RootConfigSnapshotError::Query { source })
 }
 
-fn project_required<T: Clone>(
+fn project_required<T>(
     tree: &HomeConfigTree,
     directive: DirectiveName,
     value: Option<crate::parse::cascade::CascadedValue<Arc<T>>>,
-) -> Result<InheritedValue<T>, RootConfigSnapshotError> {
+) -> Result<InheritedValue<Arc<T>>, RootConfigSnapshotError> {
     let value = value.ok_or(RootConfigSnapshotError::MissingFallback { directive })?;
     let origin = project_origin(tree, value.lineage().last())?;
     Ok(InheritedValue {
-        value: value.effective().as_ref().clone(),
+        value: Arc::clone(value.effective()),
         origin,
     })
 }
 
-fn project_optional<T: Clone>(
+fn project_optional<T>(
     tree: &HomeConfigTree,
     value: Option<crate::parse::cascade::CascadedValue<Arc<T>>>,
-) -> Result<InheritedValue<Option<T>>, RootConfigSnapshotError> {
+) -> Result<InheritedValue<Option<Arc<T>>>, RootConfigSnapshotError> {
     let Some(value) = value else {
         return Ok(InheritedValue {
             value: None,
@@ -256,7 +384,7 @@ fn project_optional<T: Clone>(
     };
     let origin = project_origin(tree, value.lineage().last())?;
     Ok(InheritedValue {
-        value: Some(value.effective().as_ref().clone()),
+        value: Some(Arc::clone(value.effective())),
         origin,
     })
 }
@@ -276,25 +404,25 @@ fn project_origin(
     }
 }
 
-fn cascade_required<T: Clone>(
-    value: &InheritedValue<T>,
+fn cascade_required<T>(
+    value: &InheritedValue<Arc<T>>,
     directive: DirectiveName,
 ) -> Option<(Arc<T>, ConfigOrigin)> {
     Some((
-        Arc::new(value.value.clone()),
+        Arc::clone(&value.value),
         inherited_origin(&value.origin, directive),
     ))
 }
 
-fn cascade_optional<T: Clone>(
-    value: &InheritedValue<Option<T>>,
+fn cascade_optional<T>(
+    value: &InheritedValue<Option<Arc<T>>>,
     directive: DirectiveName,
 ) -> Option<(Arc<T>, ConfigOrigin)> {
     let origin = &value.origin;
     value
         .value
         .as_ref()
-        .map(|value| (Arc::new(value.clone()), inherited_origin(origin, directive)))
+        .map(|value| (Arc::clone(value), inherited_origin(origin, directive)))
 }
 
 fn inherited_origin(origin: &InheritedOrigin, directive: DirectiveName) -> ConfigOrigin {
@@ -397,6 +525,15 @@ impl TryFrom<&RootConfigSnapshot> for RootConfigSnapshotWire {
 
     fn try_from(snapshot: &RootConfigSnapshot) -> Result<Self, Self::Error> {
         let value = snapshot.v1();
+        let access_log = InheritedValueV1 {
+            value: value
+                .access_log
+                .value
+                .as_ref()
+                .map(|value| encode_access_log(value))
+                .transpose()?,
+            origin: encode_origin(&value.access_log.origin)?,
+        };
         Ok(Self::V1(RootInheritedConfigV1Wire {
             access_rules: encode_inherited(&value.access_rules, |value| {
                 value
@@ -417,10 +554,10 @@ impl TryFrom<&RootConfigSnapshot> for RootConfigSnapshotWire {
                     .as_ref()
                     .map(|value| HeaderValueV1(value.0.as_bytes().into()))
             })?,
-            types: encode_inherited(&value.types, |value| value.as_ref().map(encode_mime_types))?,
-            access_log: encode_inherited(&value.access_log, |value| {
-                value.as_ref().map(encode_access_log)
+            types: encode_inherited(&value.types, |value| {
+                value.as_ref().map(|value| encode_mime_types(value))
             })?,
+            access_log,
         }))
     }
 }
@@ -434,23 +571,21 @@ impl TryFrom<RootConfigSnapshotWire> for RootConfigSnapshot {
             access_rules: decode_inherited(value.access_rules, |value| {
                 value
                     .map(|value| {
-                        let uri = url::Url::parse(&value.0).map_err(|_| {
-                            RootConfigSnapshotError::AccessRules {
-                                source: AccessRulesUriValidationError::UnsupportedSqliteForm,
-                            }
-                        })?;
+                        let uri = url::Url::parse(&value.0)
+                            .map_err(|source| RootConfigSnapshotError::AccessRulesUrl { source })?;
                         AccessRulesUri::try_from(uri)
+                            .map(Arc::new)
                             .map_err(|source| RootConfigSnapshotError::AccessRules { source })
                     })
                     .transpose()
             })?,
-            gzip: decode_inherited(value.gzip, |value| Ok(BoolConfig(value)))?,
-            gzip_vary: decode_inherited(value.gzip_vary, |value| Ok(BoolConfig(value)))?,
+            gzip: decode_inherited(value.gzip, |value| Ok(Arc::new(BoolConfig(value))))?,
+            gzip_vary: decode_inherited(value.gzip_vary, |value| Ok(Arc::new(BoolConfig(value))))?,
             gzip_min_length: decode_inherited(value.gzip_min_length, |value| {
-                Ok(GzipMinLength::checked(value))
+                Ok(Arc::new(GzipMinLength::checked(value)))
             })?,
             gzip_comp_level: decode_inherited(value.gzip_comp_level, |value| {
-                Ok(GzipCompLevel::checked(value))
+                Ok(Arc::new(GzipCompLevel::checked(value)))
             })?,
             gzip_types: decode_inherited(value.gzip_types, |value| {
                 value
@@ -458,6 +593,7 @@ impl TryFrom<RootConfigSnapshotWire> for RootConfigSnapshot {
                         StringList::checked_gzip_types(
                             values.into_vec().into_iter().map(String::from).collect(),
                         )
+                        .map(Arc::new)
                         .map_err(|source| RootConfigSnapshotError::GzipTypes { source })
                     })
                     .transpose()
@@ -466,15 +602,22 @@ impl TryFrom<RootConfigSnapshotWire> for RootConfigSnapshot {
                 value
                     .map(|value| {
                         DefaultType::checked_from_bytes(&value.0)
+                            .map(Arc::new)
                             .map_err(|source| RootConfigSnapshotError::HeaderValue { source })
                     })
                     .transpose()
             })?,
             types: decode_inherited(value.types, |value| {
-                value.map(decode_mime_types).transpose()
+                value
+                    .map(decode_mime_types)
+                    .transpose()
+                    .map(|value| value.map(Arc::new))
             })?,
             access_log: decode_inherited(value.access_log, |value| {
-                value.map(decode_access_log).transpose()
+                value
+                    .map(decode_access_log)
+                    .transpose()
+                    .map(|value| value.map(Arc::new))
             })?,
         }))
     }
@@ -559,17 +702,16 @@ fn decode_mime_types(types: MimeTypesV1) -> Result<MimeTypes, RootConfigSnapshot
         .map_err(|source| RootConfigSnapshotError::MimeTypes { source })
 }
 
-fn encode_access_log(value: &SnapshotAccessLogDirective) -> AccessLogDirectiveV1 {
-    match value {
+fn encode_access_log(
+    value: &SnapshotAccessLogDirective,
+) -> Result<AccessLogDirectiveV1, RootConfigSnapshotError> {
+    Ok(match value {
         SnapshotAccessLogDirective::Off => AccessLogDirectiveV1::Off,
         SnapshotAccessLogDirective::ProfileDefault => AccessLogDirectiveV1::ProfileDefault,
-        SnapshotAccessLogDirective::Resolved(path) => {
-            AccessLogDirectiveV1::Resolved(ResolvedConfigPathV1(
-                AbsolutePathV1::try_from(path.as_ref())
-                    .expect("resolved configuration paths are checked when constructed"),
-            ))
-        }
-    }
+        SnapshotAccessLogDirective::Resolved(path) => AccessLogDirectiveV1::Resolved(
+            ResolvedConfigPathV1(AbsolutePathV1::try_from(path.as_ref())?),
+        ),
+    })
 }
 
 fn decode_access_log(
@@ -633,6 +775,8 @@ impl TryFrom<AbsolutePathV1> for PathBuf {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use remoc::codec::Codec;
+
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -690,6 +834,42 @@ pub(crate) mod test_support {
         RootConfigSnapshot::try_from(RootConfigSnapshotWire::try_from(snapshot)?)
     }
 
+    pub(crate) fn codec_round_trip(
+        snapshot: &RootConfigSnapshot,
+    ) -> Result<RootConfigSnapshot, String> {
+        let mut bytes = Vec::new();
+        <remoc::codec::Default as Codec>::serialize(&mut bytes, snapshot)
+            .map_err(|error| error.to_string())?;
+        <remoc::codec::Default as Codec>::deserialize(bytes.as_slice())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn codec_rejects_unknown_schema(snapshot: &RootConfigSnapshot) -> bool {
+        let mut bytes = Vec::new();
+        if <remoc::codec::Default as Codec>::serialize(&mut bytes, snapshot).is_err()
+            || bytes.len() < 4
+        {
+            return false;
+        }
+        bytes[..4].copy_from_slice(&1_u32.to_le_bytes());
+        <remoc::codec::Default as Codec>::deserialize::<_, RootConfigSnapshot>(bytes.as_slice())
+            .is_err()
+    }
+
+    pub(crate) fn codec_rejects_malformed_access_rules(snapshot: &RootConfigSnapshot) -> bool {
+        let Ok(mut wire) = RootConfigSnapshotWire::try_from(snapshot) else {
+            return false;
+        };
+        let RootConfigSnapshotWire::V1(value) = &mut wire;
+        value.access_rules.value = Some(AccessRulesSourceV1("not a URL".into()));
+        let mut bytes = Vec::new();
+        if <remoc::codec::Default as Codec>::serialize(&mut bytes, &wire).is_err() {
+            return false;
+        }
+        <remoc::codec::Default as Codec>::deserialize::<_, RootConfigSnapshot>(bytes.as_slice())
+            .is_err()
+    }
+
     pub(crate) fn snapshot_with_builtin_gzip(gzip: bool) -> RootConfigSnapshot {
         let builtin = || InheritedOrigin::Builtin;
         RootConfigSnapshot::V1(RootInheritedConfigV1 {
@@ -698,19 +878,19 @@ pub(crate) mod test_support {
                 origin: builtin(),
             },
             gzip: InheritedValue {
-                value: BoolConfig(gzip),
+                value: Arc::new(BoolConfig(gzip)),
                 origin: builtin(),
             },
             gzip_vary: InheritedValue {
-                value: BoolConfig(false),
+                value: Arc::new(BoolConfig(false)),
                 origin: builtin(),
             },
             gzip_min_length: InheritedValue {
-                value: GzipMinLength::checked(20),
+                value: Arc::new(GzipMinLength::checked(20)),
                 origin: builtin(),
             },
             gzip_comp_level: InheritedValue {
-                value: GzipCompLevel::checked(1),
+                value: Arc::new(GzipCompLevel::checked(1)),
                 origin: builtin(),
             },
             gzip_types: InheritedValue {
@@ -732,18 +912,42 @@ pub(crate) mod test_support {
         })
     }
 
+    pub(crate) fn gzip_types_arc(snapshot: &RootConfigSnapshot) -> Option<Arc<StringList>> {
+        snapshot.v1().gzip_types.value.clone()
+    }
+
     pub(crate) fn values_without_origins(snapshot: &RootConfigSnapshot) -> SnapshotValues {
         let value = snapshot.v1();
         SnapshotValues {
-            access_rules: value.access_rules.value.clone(),
-            gzip: value.gzip.value.clone(),
-            gzip_vary: value.gzip_vary.value.clone(),
-            gzip_min_length: value.gzip_min_length.value.clone(),
-            gzip_comp_level: value.gzip_comp_level.value.clone(),
-            gzip_types: value.gzip_types.value.clone(),
-            default_type: value.default_type.value.clone(),
-            types: value.types.value.clone(),
-            access_log: value.access_log.value.clone(),
+            access_rules: value
+                .access_rules
+                .value
+                .as_ref()
+                .map(|value| value.as_ref().clone()),
+            gzip: value.gzip.value.as_ref().clone(),
+            gzip_vary: value.gzip_vary.value.as_ref().clone(),
+            gzip_min_length: value.gzip_min_length.value.as_ref().clone(),
+            gzip_comp_level: value.gzip_comp_level.value.as_ref().clone(),
+            gzip_types: value
+                .gzip_types
+                .value
+                .as_ref()
+                .map(|value| value.as_ref().clone()),
+            default_type: value
+                .default_type
+                .value
+                .as_ref()
+                .map(|value| value.as_ref().clone()),
+            types: value
+                .types
+                .value
+                .as_ref()
+                .map(|value| value.as_ref().clone()),
+            access_log: value
+                .access_log
+                .value
+                .as_ref()
+                .map(|value| value.as_ref().clone()),
         }
     }
 
@@ -768,9 +972,8 @@ pub(crate) mod test_support {
     pub(crate) fn decode_access_rules(
         value: &str,
     ) -> Result<AccessRulesUri, RootConfigSnapshotError> {
-        let uri = url::Url::parse(value).map_err(|_| RootConfigSnapshotError::AccessRules {
-            source: AccessRulesUriValidationError::UnsupportedSqliteForm,
-        })?;
+        let uri = url::Url::parse(value)
+            .map_err(|source| RootConfigSnapshotError::AccessRulesUrl { source })?;
         AccessRulesUri::try_from(uri)
             .map_err(|source| RootConfigSnapshotError::AccessRules { source })
     }

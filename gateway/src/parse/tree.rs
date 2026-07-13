@@ -12,8 +12,11 @@ use crate::parse::{
     error::ConfigQueryError,
     fragment::{ParsedPishooFragment, ParsedServerFragment},
     registry::{CascadePolicy, ConfigRegistry, context},
-    snapshot::{RootConfigSnapshot, RootConfigSnapshotError},
-    source::{SourceId, SourceMap, SourceSpan},
+    snapshot::{
+        RootConfigSnapshot, RootConfigSnapshotError, RootSnapshotRegistryContract,
+        RootSnapshotRegistryContractError,
+    },
+    source::{ConfigDocumentSourceMap, SourceId, SourceMap, SourceSpan},
     value::ConfigValue,
 };
 
@@ -71,29 +74,14 @@ impl<'tree> AttachedConfigNode<'tree> {
 }
 
 #[derive(Debug)]
-enum ConfigSourceFragment {
-    Pishoo(ParsedPishooFragment),
-    Server(ParsedServerFragment),
-}
-
-impl ConfigSourceFragment {
-    fn source_map(&self) -> &SourceMap {
-        match self {
-            Self::Pishoo(fragment) => fragment.source_map(),
-            Self::Server(fragment) => fragment.source_map(),
-        }
-    }
-}
-
-#[derive(Debug)]
 struct ConfigSourceOwner {
     document_id: ConfigDocumentId,
-    fragment: ConfigSourceFragment,
+    sources: Arc<ConfigDocumentSourceMap>,
 }
 
 impl ConfigSourceOwner {
     fn source_map(&self) -> &SourceMap {
-        self.fragment.source_map()
+        self.sources.source_map()
     }
 }
 
@@ -105,6 +93,7 @@ pub struct HomeConfigTree {
     servers: Box<[ConfigNodeId]>,
     inherited_root: Option<Arc<RootConfigSnapshot>>,
     sources: ConfigSourceBundle,
+    _snapshot_contract: RootSnapshotRegistryContract,
 }
 
 #[derive(Debug)]
@@ -141,6 +130,10 @@ pub enum HomeConfigTreeError {
     FinalizeAttached {
         node: ConfigNodeId,
         source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(display("registry is incompatible with the root snapshot schema"))]
+    SnapshotContract {
+        source: RootSnapshotRegistryContractError,
     },
 }
 
@@ -182,6 +175,7 @@ struct HomeConfigTreeBuilder<'registry> {
     inherited_root: Option<Arc<RootConfigSnapshot>>,
     sources: Vec<ConfigSourceOwner>,
     document_ids: ConfigDocumentIdAllocator,
+    snapshot_contract: RootSnapshotRegistryContract,
 }
 
 impl<'registry> HomeConfigTreeBuilder<'registry> {
@@ -190,6 +184,8 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         fragment: ParsedPishooFragment,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
+        let snapshot_contract = RootSnapshotRegistryContract::validate(registry)
+            .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
         let synthetic_span = fragment.node().span;
         let root_node = Arc::new(ConfigNode::new(context::ROOT, None, synthetic_span));
         let mut builder = Self {
@@ -201,6 +197,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             inherited_root: None,
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
+            snapshot_contract,
         };
         let document_id = builder.allocate_document_id()?;
         builder.root = builder.push_node(None, root_node, ParentLink::Root);
@@ -213,9 +210,10 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         for server in fragment.servers() {
             builder.attach_server(server, document_id);
         }
+        let sources = fragment.source_owner();
         builder.sources.push(ConfigSourceOwner {
             document_id,
-            fragment: ConfigSourceFragment::Pishoo(fragment),
+            sources,
         });
         for fragment in identity_fragments {
             builder.attach_identity_fragment(fragment)?;
@@ -229,6 +227,8 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         worker_fragment: Option<ParsedPishooFragment>,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
+        let snapshot_contract = RootSnapshotRegistryContract::validate(registry)
+            .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
         let synthetic_span = worker_fragment
             .as_ref()
             .map_or_else(synthetic_span, |fragment| fragment.node().span);
@@ -246,6 +246,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             inherited_root: Some(Arc::new(root_snapshot)),
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
+            snapshot_contract,
         };
         builder.root = builder.push_node(None, root_node, ParentLink::Root);
         let worker_document_id = worker_fragment
@@ -264,9 +265,10 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
                     node: builder.pishoo,
                 });
             };
+            let sources = fragment.source_owner();
             builder.sources.push(ConfigSourceOwner {
                 document_id,
-                fragment: ConfigSourceFragment::Pishoo(fragment),
+                sources,
             });
         }
         for fragment in identity_fragments {
@@ -284,9 +286,10 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         } else {
             let document_id = self.allocate_document_id()?;
             self.attach_server(&fragment, document_id);
+            let sources = fragment.source_owner();
             self.sources.push(ConfigSourceOwner {
                 document_id,
-                fragment: ConfigSourceFragment::Server(fragment),
+                sources,
             });
         }
         Ok(())
@@ -407,6 +410,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             sources: ConfigSourceBundle {
                 owners: self.sources.into_boxed_slice(),
             },
+            _snapshot_contract: self.snapshot_contract,
         }))
     }
 }

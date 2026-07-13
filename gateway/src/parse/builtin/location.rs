@@ -1,5 +1,5 @@
 use http::{HeaderName, HeaderValue};
-use snafu::{Snafu, ensure};
+use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
     document::ConfigNode,
@@ -19,6 +19,8 @@ use crate::parse::{
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum FinalizeLocationError {
+    #[snafu(display("location context is missing its parsed pattern payload"))]
+    MissingPattern { span: SourceSpan },
     #[snafu(display(
         "proxy_ssl_certificate and proxy_ssl_certificate_key must be configured together"
     ))]
@@ -122,7 +124,7 @@ fn finalize_location(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pattern = node
         .payload::<Pattern>()?
-        .expect("location node should contain a pattern payload");
+        .context(finalize_location_error::MissingPatternSnafu { span: node.span })?;
     let proxy_pass = node.get::<ProxyPass>("proxy_pass")?;
     let has_cert = node.get::<PathConfig>("proxy_ssl_certificate")?.is_some();
     let has_key = node

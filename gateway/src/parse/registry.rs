@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{any::TypeId, collections::HashMap, error::Error, sync::Arc};
 
 use snafu::{OptionExt, ResultExt};
 
@@ -55,6 +55,17 @@ pub struct DirectiveSpec {
     pub cascade: CascadePolicy,
     pub transport: TransportPolicy,
     pub reload: ReloadImpact,
+    value_type: Option<TypeId>,
+    value_type_name: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DirectiveContract {
+    pub(crate) shape: DirectiveShape,
+    pub(crate) cascade: CascadePolicy,
+    pub(crate) transport: TransportPolicy,
+    pub(crate) value_type: Option<TypeId>,
+    pub(crate) value_type_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +165,8 @@ impl DirectiveSpec {
             cascade,
             transport,
             reload,
+            value_type: Some(TypeId::of::<T>()),
+            value_type_name: Some(std::any::type_name::<T>()),
         }
     }
 
@@ -179,6 +192,8 @@ impl DirectiveSpec {
             cascade,
             transport,
             reload,
+            value_type: Some(TypeId::of::<T>()),
+            value_type_name: Some(std::any::type_name::<T>()),
         }
     }
 
@@ -203,6 +218,8 @@ impl DirectiveSpec {
             cascade,
             transport,
             reload,
+            value_type: None,
+            value_type_name: None,
         }
     }
 
@@ -232,6 +249,8 @@ impl DirectiveSpec {
             cascade,
             transport,
             reload,
+            value_type: Some(TypeId::of::<T>()),
+            value_type_name: Some(std::any::type_name::<T>()),
         }
     }
 }
@@ -336,6 +355,22 @@ impl ConfigRegistry {
             .collect()
     }
 
+    pub(crate) fn directive_contract(
+        &self,
+        context: ContextKey,
+        name: &str,
+    ) -> Option<DirectiveContract> {
+        self.directives
+            .get(&(context, name))
+            .map(|spec| DirectiveContract {
+                shape: spec.shape,
+                cascade: spec.cascade,
+                transport: spec.transport,
+                value_type: spec.value_type,
+                value_type_name: spec.value_type_name,
+            })
+    }
+
     pub fn build(
         &self,
         source_map: Arc<SourceMap>,
@@ -359,7 +394,7 @@ impl ConfigRegistry {
             &options,
         )?;
         let root = Arc::new(root);
-        put_parent_recursively(&root, None);
+        put_parent_recursively(&root, None)?;
         Ok(ConfigDocument::new(source_map, root))
     }
 
@@ -726,11 +761,16 @@ pub(crate) enum RoleDocumentBuildError {
     Build(BuildDocumentError),
 }
 
-fn put_parent_recursively(node: &Arc<ConfigNode>, parent: Option<&Arc<ConfigNode>>) {
-    node.set_parent(parent.map(Arc::downgrade));
+fn put_parent_recursively(
+    node: &Arc<ConfigNode>,
+    parent: Option<&Arc<ConfigNode>>,
+) -> Result<(), BuildDocumentError> {
+    node.set_parent(parent.map(Arc::downgrade))
+        .map_err(|span| BuildDocumentError::ParentAlreadyAssigned { span })?;
     for children in node.child_groups() {
         for child in children {
-            put_parent_recursively(child, Some(node));
+            put_parent_recursively(child, Some(node))?;
         }
     }
+    Ok(())
 }

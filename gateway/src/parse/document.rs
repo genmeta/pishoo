@@ -99,10 +99,8 @@ impl ConfigNode {
         self.payload = Some(payload);
     }
 
-    pub(crate) fn set_parent(&self, parent: Option<Weak<ConfigNode>>) {
-        self.parent
-            .set(parent)
-            .expect("parent link set multiple times for config node");
+    pub(crate) fn set_parent(&self, parent: Option<Weak<ConfigNode>>) -> Result<(), SourceSpan> {
+        self.parent.set(parent).map_err(|_| self.span)
     }
 
     pub fn parent(&self) -> Option<Arc<ConfigNode>> {

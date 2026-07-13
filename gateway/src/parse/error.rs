@@ -226,6 +226,9 @@ pub enum BuildDocumentError {
         span: SourceSpan,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[snafu(display("configuration node parent was assigned more than once"))]
+    ParentAlreadyAssigned { span: SourceSpan },
 }
 
 #[derive(Debug, Snafu)]

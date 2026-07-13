@@ -142,12 +142,26 @@ pub enum AccessRulesUriValidationError {
     RelativePath,
     #[snafu(display("access_rules sqlite path contains a NUL byte"))]
     NulPath,
+    #[snafu(display("access_rules sqlite path is not valid UTF-8 on this platform"))]
+    InvalidPathEncoding,
 }
 
 impl TryFrom<url::Url> for AccessRulesUri {
     type Error = AccessRulesUriValidationError;
 
     fn try_from(uri: url::Url) -> Result<Self, Self::Error> {
+        let path = Self::decoded_sqlite_path(&uri)?;
+        if !path.is_absolute() {
+            return Err(AccessRulesUriValidationError::RelativePath);
+        }
+        Ok(Self(uri))
+    }
+}
+
+impl AccessRulesUri {
+    pub(crate) fn decoded_sqlite_path(
+        uri: &url::Url,
+    ) -> Result<PathBuf, AccessRulesUriValidationError> {
         if uri.scheme() != "sqlite" {
             return Err(AccessRulesUriValidationError::UnsupportedScheme {
                 scheme: uri.scheme().to_owned(),
@@ -161,14 +175,21 @@ impl TryFrom<url::Url> for AccessRulesUri {
         {
             return Err(AccessRulesUriValidationError::UnsupportedSqliteForm);
         }
-        let path = std::path::Path::new(uri.path());
-        if !path.is_absolute() {
-            return Err(AccessRulesUriValidationError::RelativePath);
-        }
-        if path.as_os_str().as_encoded_bytes().contains(&0) {
+        let path = percent_encoding::percent_decode_str(uri.path()).collect::<Vec<_>>();
+        if path.contains(&0) {
             return Err(AccessRulesUriValidationError::NulPath);
         }
-        Ok(Self(uri))
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            Ok(std::ffi::OsString::from_vec(path).into())
+        }
+        #[cfg(not(unix))]
+        {
+            String::from_utf8(path)
+                .map(PathBuf::from)
+                .map_err(|_| AccessRulesUriValidationError::InvalidPathEncoding)
+        }
     }
 }
 
@@ -342,6 +363,11 @@ pub struct Listens {
 pub enum ListenBindPatternError {
     #[snafu(display("unsupported listen iface range `{range}`"))]
     UnsupportedIfaceRange { range: IfaceRange },
+    #[snafu(display("failed to construct generated bind pattern `{input}`"))]
+    GeneratedBindPattern {
+        input: String,
+        source: peg::error::ParseError<peg::str::LineCol>,
+    },
 }
 
 impl Listens {
@@ -355,17 +381,17 @@ impl Listens {
     }
 
     pub fn try_to_bind_patterns(&self) -> Result<Vec<BindPattern>, ListenBindPatternError> {
-        fn parse_pattern(input: String) -> BindPattern {
+        fn parse_pattern(input: String) -> Result<BindPattern, ListenBindPatternError> {
             input
                 .parse()
-                .expect("generated bind pattern should be valid")
+                .map_err(|source| ListenBindPatternError::GeneratedBindPattern { input, source })
         }
 
         if let Some(specific_addrs) = &self.specific_addrs {
-            return Ok(specific_addrs
+            return specific_addrs
                 .iter()
                 .map(|addr| parse_pattern(format!("inet://{addr}")))
-                .collect());
+                .collect();
         }
 
         let host = match &self.range {
@@ -374,12 +400,14 @@ impl Listens {
             IfaceRange::Internal => {
                 return Ok(match self.families {
                     IpFamilies::V4 => {
-                        vec![parse_pattern(format!("inet://127.0.0.1:{}", self.port))]
+                        vec![parse_pattern(format!("inet://127.0.0.1:{}", self.port))?]
                     }
-                    IpFamilies::V6 => vec![parse_pattern(format!("inet://[::1]:{}", self.port))],
+                    IpFamilies::V6 => {
+                        vec![parse_pattern(format!("inet://[::1]:{}", self.port))?]
+                    }
                     IpFamilies::Dual => vec![
-                        parse_pattern(format!("inet://127.0.0.1:{}", self.port)),
-                        parse_pattern(format!("inet://[::1]:{}", self.port)),
+                        parse_pattern(format!("inet://127.0.0.1:{}", self.port))?,
+                        parse_pattern(format!("inet://[::1]:{}", self.port))?,
                     ],
                 });
             }
@@ -400,7 +428,7 @@ impl Listens {
         Ok(vec![parse_pattern(format!(
             "iface://{family_prefix}{host}:{}",
             self.port
-        ))])
+        ))?])
     }
 }
 

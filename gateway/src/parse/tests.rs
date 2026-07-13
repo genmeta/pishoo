@@ -11,7 +11,7 @@ use dhttp::home::DhttpHome;
 
 use crate::parse::{
     ConfigDocumentParser,
-    cascade::{GZIP, TYPES},
+    cascade::{GZIP, GZIP_TYPES, TYPES},
     document::{ConfigDocument, ConfigNode},
     domain::{ConfigDocumentRole, ConfigDocumentRoleKind, ResolvedConfigPath},
     error::{ConfigDocumentRoleError, ConfigLoadFailure, LoadConfigError},
@@ -23,7 +23,7 @@ use crate::parse::{
     snapshot::{RootConfigSnapshot, test_support as snapshot_test_support},
     source::SourceId,
     tree::{AttachedConfigNode, ParentLink, build_global_tree, build_worker_tree},
-    types::{MimeTypes, PathConfig},
+    types::{BoolConfig, MimeTypes, PathConfig, StringList},
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -624,6 +624,48 @@ fn role_parser_rejects_leaf_pishoo_registration_without_panicking() {
 }
 
 #[test]
+fn payload_free_location_registration_returns_typed_error_without_panicking() {
+    let fixture = TempConfigDir::new("payload_free_location");
+    let home = fixture.worker_home();
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::context_empty(
+            "location",
+            vec![context::SERVER],
+            context::LOCATION,
+            DuplicatePolicy::Append,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parser.parse_text(
+            "server { listen all 443; location { } }",
+            &fixture.join("identity/server.conf"),
+            ConfigDocumentRole::IdentityServer {
+                home: &home,
+                profile: &home.identity_profile(
+                    dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned())
+                        .expect("identity name"),
+                ),
+            },
+        )
+    }));
+
+    assert!(
+        outcome.is_ok(),
+        "invalid public registry contracts must not panic"
+    );
+    assert!(
+        outcome.unwrap().is_err(),
+        "invalid location shape must fail"
+    );
+}
+
+#[test]
 fn identity_role_rejects_leaf_server_registration_without_bypassing_cardinality() {
     let fixture = TempConfigDir::new("invalid_server_registration");
     let home = fixture.worker_home();
@@ -849,6 +891,60 @@ fn worker_uses_required_snapshot_value_with_builtin_origin() {
 }
 
 #[test]
+fn snapshot_container_queries_share_arc_and_local_override_uses_local_arc() {
+    let fixture = TempConfigDir::new("snapshot_arc_sharing");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip_types text/plain application/json; }",
+        &fixture.join("root/pishoo.conf"),
+        None,
+    );
+    let snapshot = build_global_tree(&registry, root, Vec::new())
+        .expect("root tree")
+        .root_snapshot()
+        .expect("snapshot");
+    let transported = snapshot_test_support::gzip_types_arc(&snapshot).expect("gzip_types");
+    let snapshot_clone = snapshot.clone();
+    assert!(Arc::ptr_eq(
+        &transported,
+        &snapshot_test_support::gzip_types_arc(&snapshot_clone).expect("cloned gzip_types")
+    ));
+
+    let inherited_tree =
+        build_worker_tree(&registry, snapshot_clone, None, Vec::new()).expect("worker tree");
+    let first = inherited_tree
+        .pishoo()
+        .cascaded(GZIP_TYPES)
+        .expect("query")
+        .expect("gzip_types");
+    let second = inherited_tree
+        .pishoo()
+        .cascaded(GZIP_TYPES)
+        .expect("query")
+        .expect("gzip_types");
+    assert!(Arc::ptr_eq(first.effective(), second.effective()));
+    assert!(Arc::ptr_eq(first.effective(), &transported));
+
+    let home = fixture.worker_home();
+    let worker = parse_worker_fragment(
+        &mut parser,
+        "pishoo { gzip_types image/png; }",
+        &fixture.worker_source_path(),
+        &home,
+    );
+    let local_tree = build_worker_tree(&registry, snapshot, Some(worker), Vec::new())
+        .expect("local worker tree");
+    let local = local_tree
+        .pishoo()
+        .cascaded(GZIP_TYPES)
+        .expect("query")
+        .expect("local gzip_types");
+    assert!(!Arc::ptr_eq(local.effective(), &transported));
+}
+
+#[test]
 fn types_replaces_the_whole_parent_map() {
     let fixture = TempConfigDir::new("types_replace");
     let registry = crate::parse::default_registry();
@@ -908,6 +1004,93 @@ fn cascade_query_rejects_registry_policy_mismatch() {
     assert!(
         server.node().cascaded(TYPES).is_err(),
         "cascade policy mismatches must not use DirectiveKey hardcoding"
+    );
+}
+
+#[test]
+fn snapshot_contract_rejects_worker_local_or_wrong_domain_registration() {
+    let fixture = TempConfigDir::new("snapshot_registry_contract");
+
+    let mut worker_local_registry = crate::parse::default_registry();
+    worker_local_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&worker_local_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip on; }",
+        &fixture.join("worker-local/pishoo.conf"),
+        None,
+    );
+    assert!(
+        build_global_tree(&worker_local_registry, root, Vec::new()).is_err(),
+        "WorkerLocalOnly values must not enter the V1 snapshot contract"
+    );
+    assert!(
+        build_worker_tree(
+            &worker_local_registry,
+            snapshot_test_support::snapshot_with_builtin_gzip(true),
+            None,
+            Vec::new(),
+        )
+        .is_err(),
+        "worker overlays must validate the same registry contract before applying a snapshot"
+    );
+
+    let mut wrong_domain_registry = crate::parse::default_registry();
+    wrong_domain_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<StringList>(
+            "gzip",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&wrong_domain_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip on; }",
+        &fixture.join("wrong-domain/pishoo.conf"),
+        None,
+    );
+    assert!(
+        build_global_tree(&wrong_domain_registry, root, Vec::new()).is_err(),
+        "the V1 gzip field must remain bound to BoolConfig"
+    );
+
+    let mut premature_access_log_registry = crate::parse::default_registry();
+    premature_access_log_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<StringList>(
+            "access_log",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&premature_access_log_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo {}",
+        &fixture.join("reserved-access-log/pishoo.conf"),
+        None,
+    );
+    assert!(
+        build_global_tree(&premature_access_log_registry, root, Vec::new()).is_err(),
+        "the reserved V1 access_log slot must remain absent until its checked domain is registered"
     );
 }
 
@@ -1113,6 +1296,26 @@ fn tree_ref_keeps_source_and_parent_alive() {
 }
 
 #[test]
+fn sealed_source_bundle_retains_only_one_source_map_owner() {
+    let fixture = TempConfigDir::new("source_owner_weight");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("global-home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 443; location / {} } }",
+        &fixture.join("global-home/pishoo.conf"),
+        Some(&home),
+    );
+    let source_owner = root.source_owner();
+
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+
+    assert_eq!(tree.servers().count(), 1);
+    assert_eq!(Arc::strong_count(&source_owner), 2);
+}
+
+#[test]
 fn cross_document_diagnostics_keep_the_correct_source_bundle() {
     let fixture = TempConfigDir::new("cross_document_sources");
     let registry = crate::parse::default_registry();
@@ -1265,9 +1468,56 @@ fn unknown_snapshot_schema_is_rejected() {
 }
 
 #[test]
+fn snapshot_real_codec_round_trips_and_rejects_unknown_or_malformed_wire() {
+    let snapshot = snapshot_test_support::snapshot_with_builtin_gzip(true);
+
+    assert_eq!(
+        snapshot_test_support::codec_round_trip(&snapshot).expect("real codec round trip"),
+        snapshot
+    );
+    assert!(snapshot_test_support::codec_rejects_unknown_schema(
+        &snapshot
+    ));
+    assert!(snapshot_test_support::codec_rejects_malformed_access_rules(
+        &snapshot
+    ));
+}
+
+#[test]
 fn snapshot_access_rules_revalidates_url_domain() {
+    assert!(matches!(
+        snapshot_test_support::decode_access_rules("not a URL"),
+        Err(
+            crate::parse::snapshot::RootConfigSnapshotError::AccessRulesUrl {
+                source: url::ParseError::RelativeUrlWithoutBase,
+            }
+        )
+    ));
     assert!(snapshot_test_support::decode_access_rules("https://example.com/rules.db").is_err());
     assert!(snapshot_test_support::decode_access_rules("sqlite://host/tmp/rules.db").is_err());
+}
+
+#[test]
+fn access_rules_rejects_literal_and_percent_encoded_nul_in_text_and_snapshot() {
+    for uri in ["sqlite:/tmp/rules\0.db", "sqlite:/tmp/rules%00.db"] {
+        let failure =
+            crate::parse::parse_config_str_for_test(&format!("pishoo {{ access_rules {uri}; }}"))
+                .expect_err("text access_rules path containing NUL must fail");
+        assert!(
+            snafu::Report::from_error(&failure.error)
+                .to_string()
+                .contains("NUL byte")
+        );
+
+        let error = snapshot_test_support::decode_access_rules(uri)
+            .expect_err("snapshot access_rules path containing NUL must fail");
+        assert!(matches!(
+            error,
+            crate::parse::snapshot::RootConfigSnapshotError::AccessRules {
+                source: crate::parse::types::AccessRulesUriValidationError::NulPath,
+            }
+        ));
+    }
 }
 
 #[test]

@@ -1,6 +1,4 @@
-use std::path::PathBuf;
-
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ResultExt, Snafu};
 
 use crate::parse::{
     builtin::core::{first_arg_span, only_arg},
@@ -24,10 +22,6 @@ pub enum AccessRulesUriError {
         span: SourceSpan,
         source: url::ParseError,
     },
-    #[snafu(display("unsupported access_rules uri scheme `{scheme}`"))]
-    UnsupportedScheme { span: SourceSpan, scheme: String },
-    #[snafu(display("unsupported sqlite access_rules uri form"))]
-    UnsupportedSqliteForm { span: SourceSpan },
     #[snafu(display("failed to resolve relative access_rules sqlite path"))]
     ResolveRelativePath {
         span: SourceSpan,
@@ -61,23 +55,8 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for AccessR
         };
         let uri = url::Url::parse(&arg.value)
             .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
-        ensure!(
-            uri.scheme() == "sqlite",
-            access_rules_uri_error::UnsupportedSchemeSnafu {
-                span: arg.span,
-                scheme: uri.scheme().to_owned(),
-            }
-        );
-        ensure!(
-            uri.host_str().is_none()
-                && uri.username().is_empty()
-                && uri.password().is_none()
-                && uri.port().is_none()
-                && uri.fragment().is_none(),
-            access_rules_uri_error::UnsupportedSqliteFormSnafu { span: arg.span }
-        );
-
-        let path = PathBuf::from(uri.path());
+        let path = AccessRulesUri::decoded_sqlite_path(&uri)
+            .context(access_rules_uri_error::DomainSnafu { span: arg.span })?;
         let normalized_path = normalize::normalize_path(&path, arg.span, input.source_map)
             .context(access_rules_uri_error::ResolveRelativePathSnafu { span: arg.span })?;
 

@@ -65,6 +65,10 @@ impl ParsedPishooFragment {
         self.sources.source_map()
     }
 
+    pub(crate) fn source_owner(&self) -> Arc<ConfigDocumentSourceMap> {
+        Arc::clone(&self.sources)
+    }
+
     #[allow(dead_code)] // consumed by the detached-to-sealed tree builder in the next parser stage
     pub(crate) fn node(&self) -> &Arc<ConfigNode> {
         &self.node
@@ -101,6 +105,10 @@ impl ParsedServerFragment {
     #[allow(dead_code)] // consumed by the detached-to-sealed tree builder in the next parser stage
     pub(crate) fn source_map(&self) -> &SourceMap {
         self.sources.source_map()
+    }
+
+    pub(crate) fn source_owner(&self) -> Arc<ConfigDocumentSourceMap> {
+        Arc::clone(&self.sources)
     }
 
     #[allow(dead_code)] // consumed by the detached-to-sealed tree builder in the next parser stage

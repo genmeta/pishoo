@@ -132,7 +132,10 @@ fn find_span(error: &(dyn Error + 'static)) -> Option<SourceSpan> {
                 context_span,
                 ..
             } => Some(*context_span),
-            crate::parse::error::BuildDocumentError::FinalizeContext { span, .. } => Some(*span),
+            crate::parse::error::BuildDocumentError::FinalizeContext { span, .. }
+            | crate::parse::error::BuildDocumentError::ParentAlreadyAssigned { span } => {
+                Some(*span)
+            }
         };
     }
     if let Some(error) = error.downcast_ref::<crate::parse::error::ResolveIncludeError>() {
