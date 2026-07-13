@@ -11,11 +11,10 @@ use crate::parse::{
     },
     error::ConfigQueryError,
     fragment::{ParsedPishooFragment, ParsedServerFragment},
-    registry::{CascadePolicy, ConfigRegistry, context},
-    snapshot::{
-        RootConfigSnapshot, RootConfigSnapshotError, RootSnapshotRegistryContract,
-        RootSnapshotRegistryContractError,
+    registry::{
+        CascadePolicy, ConfigRegistry, V1SnapshotSchemaError, ValidatedV1SnapshotSchema, context,
     },
+    snapshot::{RootConfigSnapshot, RootConfigSnapshotError},
     source::{ConfigDocumentSourceMap, SourceId, SourceMap, SourceSpan},
     value::ConfigValue,
 };
@@ -93,7 +92,7 @@ pub struct HomeConfigTree {
     servers: Box<[ConfigNodeId]>,
     inherited_root: Option<Arc<RootConfigSnapshot>>,
     sources: ConfigSourceBundle,
-    _snapshot_contract: RootSnapshotRegistryContract,
+    snapshot_schema: ValidatedV1SnapshotSchema,
 }
 
 #[derive(Debug)]
@@ -132,9 +131,7 @@ pub enum HomeConfigTreeError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
     #[snafu(display("registry is incompatible with the root snapshot schema"))]
-    SnapshotContract {
-        source: RootSnapshotRegistryContractError,
-    },
+    SnapshotContract { source: V1SnapshotSchemaError },
 }
 
 pub fn build_global_tree<I>(
@@ -175,7 +172,7 @@ struct HomeConfigTreeBuilder<'registry> {
     inherited_root: Option<Arc<RootConfigSnapshot>>,
     sources: Vec<ConfigSourceOwner>,
     document_ids: ConfigDocumentIdAllocator,
-    snapshot_contract: RootSnapshotRegistryContract,
+    snapshot_schema: ValidatedV1SnapshotSchema,
 }
 
 impl<'registry> HomeConfigTreeBuilder<'registry> {
@@ -184,7 +181,8 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         fragment: ParsedPishooFragment,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
-        let snapshot_contract = RootSnapshotRegistryContract::validate(registry)
+        let snapshot_schema = registry
+            .validate_v1_snapshot_schema()
             .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
         let synthetic_span = fragment.node().span;
         let root_node = Arc::new(ConfigNode::new(context::ROOT, None, synthetic_span));
@@ -197,7 +195,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             inherited_root: None,
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
-            snapshot_contract,
+            snapshot_schema,
         };
         let document_id = builder.allocate_document_id()?;
         builder.root = builder.push_node(None, root_node, ParentLink::Root);
@@ -227,7 +225,8 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         worker_fragment: Option<ParsedPishooFragment>,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
-        let snapshot_contract = RootSnapshotRegistryContract::validate(registry)
+        let snapshot_schema = registry
+            .validate_v1_snapshot_schema()
             .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
         let synthetic_span = worker_fragment
             .as_ref()
@@ -246,7 +245,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             inherited_root: Some(Arc::new(root_snapshot)),
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
-            snapshot_contract,
+            snapshot_schema,
         };
         builder.root = builder.push_node(None, root_node, ParentLink::Root);
         let worker_document_id = worker_fragment
@@ -410,7 +409,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             sources: ConfigSourceBundle {
                 owners: self.sources.into_boxed_slice(),
             },
-            _snapshot_contract: self.snapshot_contract,
+            snapshot_schema: self.snapshot_schema,
         }))
     }
 }
@@ -437,6 +436,10 @@ impl HomeConfigTree {
 
     pub fn root_snapshot(self: &Arc<Self>) -> Result<RootConfigSnapshot, RootConfigSnapshotError> {
         RootConfigSnapshot::project(self)
+    }
+
+    pub(crate) const fn v1_snapshot_schema(&self) -> ValidatedV1SnapshotSchema {
+        self.snapshot_schema
     }
 
     pub fn source_path(&self, span: ConfigSourceSpan) -> Option<&Path> {

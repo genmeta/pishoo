@@ -1095,6 +1095,54 @@ fn snapshot_contract_rejects_worker_local_or_wrong_domain_registration() {
 }
 
 #[test]
+fn snapshot_contract_rejects_extra_worker_inheritable_directive() {
+    let fixture = TempConfigDir::new("snapshot_registry_extra");
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "extra_inherited",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo {}",
+        &fixture.join("root/pishoo.conf"),
+        None,
+    );
+
+    assert!(matches!(
+        build_global_tree(&registry, root, Vec::new()),
+        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
+            source:
+                crate::parse::registry::V1SnapshotSchemaError::ExtraWorkerInheritableDirective {
+                    directive,
+                },
+        }) if directive.as_str() == "extra_inherited"
+    ));
+    assert!(matches!(
+        build_worker_tree(
+            &registry,
+            snapshot_test_support::snapshot_with_builtin_gzip(true),
+            None,
+            Vec::new(),
+        ),
+        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
+            source:
+                crate::parse::registry::V1SnapshotSchemaError::ExtraWorkerInheritableDirective {
+                    directive,
+                },
+        }) if directive.as_str() == "extra_inherited"
+    ));
+}
+
+#[test]
 fn cascade_lineage_is_builtin_root_worker_server_location() {
     let fixture = TempConfigDir::new("cascade_lineage");
     let registry = crate::parse::default_registry();
@@ -1540,6 +1588,35 @@ fn snapshot_mime_entries_are_sorted_and_reject_duplicates() {
         snapshot_test_support::decode_mime_entries(&[("a", b"text/a"), ("a", b"text/b")]).is_err()
     );
     assert!(snapshot_test_support::decode_mime_entries(&[("", b"text/a")]).is_err());
+}
+
+#[test]
+fn text_and_snapshot_mime_decode_use_the_same_validation_category() {
+    let text_failure =
+        crate::parse::parse_config_str_for_test("pishoo { types { text/a a; 'bad\nvalue' a; } }")
+            .expect_err("text MIME value containing a newline must fail");
+    let mut text_error: &(dyn std::error::Error + 'static) = &text_failure.error;
+    let text_category = loop {
+        if let Some(category) =
+            text_error.downcast_ref::<crate::parse::types::MimeTypesValidationError>()
+        {
+            break category;
+        }
+        text_error = text_error
+            .source()
+            .expect("text MIME failure should retain the domain error");
+    };
+    assert!(matches!(
+        text_category,
+        crate::parse::types::MimeTypesValidationError::HeaderValue { .. }
+    ));
+
+    assert!(matches!(
+        snapshot_test_support::decode_mime_entries(&[("a", b"text/a"), ("a", b"bad\nvalue")]),
+        Err(crate::parse::snapshot::RootConfigSnapshotError::MimeTypes {
+            source: crate::parse::types::MimeTypesValidationError::HeaderValue { .. },
+        })
+    ));
 }
 
 #[test]

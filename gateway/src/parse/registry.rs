@@ -1,9 +1,13 @@
 use std::{any::TypeId, collections::HashMap, error::Error, sync::Arc};
 
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::parse::{
     ast::{AstBody, AstDirective},
+    cascade::{
+        ACCESS_RULES, DEFAULT_TYPE, DirectiveKey, GZIP, GZIP_COMP_LEVEL, GZIP_MIN_LENGTH,
+        GZIP_TYPES, GZIP_VARY, TYPES,
+    },
     document::{ConfigDocument, ConfigNode},
     domain::{ConfigDocumentRoleKind, DirectiveName},
     error::{BuildDocumentError, ConfigDocumentRoleError, build_document_error},
@@ -11,6 +15,10 @@ use crate::parse::{
     normalize,
     source::{ConfigDocumentSourceMap, SourceMap, SourceSpan},
     tree::AttachedConfigNode,
+    types::{
+        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, MimeTypes,
+        StringList,
+    },
     value::{ConfigValue, TypedValue},
 };
 
@@ -57,15 +65,6 @@ pub struct DirectiveSpec {
     pub reload: ReloadImpact,
     value_type: Option<TypeId>,
     value_type_name: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DirectiveContract {
-    pub(crate) shape: DirectiveShape,
-    pub(crate) cascade: CascadePolicy,
-    pub(crate) transport: TransportPolicy,
-    pub(crate) value_type: Option<TypeId>,
-    pub(crate) value_type_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +254,222 @@ impl DirectiveSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum V1SnapshotDirectiveShape {
+    Leaf,
+    RawBlock,
+}
+
+impl V1SnapshotDirectiveShape {
+    const fn registry_shape(self) -> DirectiveShape {
+        match self {
+            Self::Leaf => DirectiveShape::Leaf,
+            Self::RawBlock => DirectiveShape::RawBlock,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct V1SnapshotDirective<T> {
+    key: DirectiveKey<T>,
+    shape: V1SnapshotDirectiveShape,
+    cascade: CascadePolicy,
+}
+
+impl<T> Clone for V1SnapshotDirective<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for V1SnapshotDirective<T> {}
+
+impl<T> V1SnapshotDirective<T> {
+    const fn new(
+        key: DirectiveKey<T>,
+        shape: V1SnapshotDirectiveShape,
+        cascade: CascadePolicy,
+    ) -> Self {
+        Self {
+            key,
+            shape,
+            cascade,
+        }
+    }
+
+    pub(crate) const fn key(self) -> DirectiveKey<T> {
+        self.key
+    }
+
+    fn erased(self) -> ErasedV1SnapshotDirective
+    where
+        T: 'static,
+    {
+        ErasedV1SnapshotDirective {
+            name: self.key.name(),
+            shape: self.shape.registry_shape(),
+            cascade: self.cascade,
+            value_type: TypeId::of::<T>,
+            value_type_name: std::any::type_name::<T>(),
+        }
+    }
+
+    fn register(self, registry: &mut ConfigRegistry)
+    where
+        T: DirectiveValue,
+        for<'input, 'directive> T:
+            TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
+    {
+        let name = self.key.name().as_str();
+        let spec = match self.shape {
+            V1SnapshotDirectiveShape::Leaf => DirectiveSpec::leaf_value::<T>(
+                name,
+                vec![context::PISHOO],
+                DuplicatePolicy::Reject,
+                self.cascade,
+                TransportPolicy::WorkerInheritable,
+                ReloadImpact::RuntimeState,
+            ),
+            V1SnapshotDirectiveShape::RawBlock => DirectiveSpec::raw_value::<T>(
+                name,
+                vec![context::PISHOO],
+                DuplicatePolicy::Reject,
+                self.cascade,
+                TransportPolicy::WorkerInheritable,
+                ReloadImpact::RuntimeState,
+            ),
+        };
+        registry.register_directive(context::PISHOO, spec);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ErasedV1SnapshotDirective {
+    name: DirectiveName,
+    shape: DirectiveShape,
+    cascade: CascadePolicy,
+    value_type: fn() -> TypeId,
+    value_type_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReservedV1SnapshotField {
+    name: DirectiveName,
+}
+
+impl ReservedV1SnapshotField {
+    const fn new(name: &'static str) -> Self {
+        Self {
+            name: DirectiveName::new(name),
+        }
+    }
+
+    pub(crate) const fn name(self) -> DirectiveName {
+        self.name
+    }
+}
+
+macro_rules! define_v1_snapshot_schema {
+    (
+        $(
+            $field:ident: $value_type:ty =
+                $key:expr, $shape:ident, $cascade:expr;
+        )+
+        @reserved $reserved:ident = $reserved_name:literal;
+    ) => {
+        #[derive(Debug)]
+        pub(crate) struct V1SnapshotSchema {
+            $(pub(crate) $field: V1SnapshotDirective<$value_type>,)+
+            pub(crate) $reserved: ReservedV1SnapshotField,
+        }
+
+        impl V1SnapshotSchema {
+            fn active_directives(
+                &self,
+            ) -> impl Iterator<Item = ErasedV1SnapshotDirective> + '_ {
+                [$(self.$field.erased(),)+].into_iter()
+            }
+
+            fn register_active_directives(&self, registry: &mut ConfigRegistry) {
+                $(self.$field.register(registry);)+
+            }
+
+            #[cfg(test)]
+            pub(crate) const fn field_names(&self) -> [&'static str; 9] {
+                [$(self.$field.key().name().as_str(),)+ self.$reserved.name().as_str()]
+            }
+        }
+
+        static V1_SNAPSHOT_SCHEMA: V1SnapshotSchema = V1SnapshotSchema {
+            $($field: V1SnapshotDirective::new(
+                $key,
+                V1SnapshotDirectiveShape::$shape,
+                $cascade,
+            ),)+
+            $reserved: ReservedV1SnapshotField::new($reserved_name),
+        };
+    };
+}
+
+define_v1_snapshot_schema! {
+    access_rules: AccessRulesUri = ACCESS_RULES, Leaf, CascadePolicy::NearestWins;
+    gzip: BoolConfig = GZIP, Leaf, CascadePolicy::NearestWins;
+    gzip_vary: BoolConfig = GZIP_VARY, Leaf, CascadePolicy::NearestWins;
+    gzip_min_length: GzipMinLength = GZIP_MIN_LENGTH, Leaf, CascadePolicy::NearestWins;
+    gzip_comp_level: GzipCompLevel = GZIP_COMP_LEVEL, Leaf, CascadePolicy::NearestWins;
+    gzip_types: StringList = GZIP_TYPES, Leaf, CascadePolicy::NearestWins;
+    default_type: DefaultType = DEFAULT_TYPE, Leaf, CascadePolicy::NearestWins;
+    types: MimeTypes = TYPES, RawBlock, CascadePolicy::ReplaceWhole;
+    @reserved access_log = "access_log";
+}
+
+#[cfg(test)]
+pub(crate) const fn v1_snapshot_field_names() -> [&'static str; 9] {
+    V1_SNAPSHOT_SCHEMA.field_names()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ValidatedV1SnapshotSchema {
+    schema: &'static V1SnapshotSchema,
+}
+
+impl ValidatedV1SnapshotSchema {
+    pub(crate) const fn schema(self) -> &'static V1SnapshotSchema {
+        self.schema
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum V1SnapshotSchemaError {
+    #[snafu(display("root snapshot directive `{directive}` is not registered in PISHOO"))]
+    MissingDirective { directive: DirectiveName },
+    #[snafu(display(
+        "root snapshot directive `{directive}` has value type `{actual}`, expected `{expected}`"
+    ))]
+    ValueType {
+        directive: DirectiveName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible shape"))]
+    Shape { directive: DirectiveName },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible cascade policy"))]
+    Cascade { directive: DirectiveName },
+    #[snafu(display(
+        "root snapshot directive `{directive}` is not registered as WorkerInheritable"
+    ))]
+    Transport { directive: DirectiveName },
+    #[snafu(display(
+        "worker-inheritable PISHOO directive `{directive}` is not part of the V1 snapshot schema"
+    ))]
+    ExtraWorkerInheritableDirective { directive: DirectiveName },
+    #[snafu(display(
+        "reserved root snapshot directive `{directive}` was registered before its checked domain"
+    ))]
+    PrematureReservedDirective { directive: DirectiveName },
+}
+
 fn slot_value_parser<T>(
     input: &DirectiveInput<'_>,
 ) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>>
@@ -355,20 +570,64 @@ impl ConfigRegistry {
             .collect()
     }
 
-    pub(crate) fn directive_contract(
+    pub(crate) fn register_v1_snapshot_directives(&mut self) {
+        V1_SNAPSHOT_SCHEMA.register_active_directives(self);
+    }
+
+    pub(crate) fn validate_v1_snapshot_schema(
         &self,
-        context: ContextKey,
-        name: &str,
-    ) -> Option<DirectiveContract> {
-        self.directives
-            .get(&(context, name))
-            .map(|spec| DirectiveContract {
-                shape: spec.shape,
-                cascade: spec.cascade,
-                transport: spec.transport,
-                value_type: spec.value_type,
-                value_type_name: spec.value_type_name,
-            })
+    ) -> Result<ValidatedV1SnapshotSchema, V1SnapshotSchemaError> {
+        for ((registered_context, registered_name), spec) in &self.directives {
+            if *registered_context != context::PISHOO {
+                continue;
+            }
+            let directive = DirectiveName::new(registered_name);
+            if *registered_name == V1_SNAPSHOT_SCHEMA.access_log.name().as_str() {
+                return Err(V1SnapshotSchemaError::PrematureReservedDirective { directive });
+            }
+            if spec.transport == TransportPolicy::WorkerInheritable
+                && !V1_SNAPSHOT_SCHEMA
+                    .active_directives()
+                    .any(|expected| expected.name.as_str() == *registered_name)
+            {
+                return Err(V1SnapshotSchemaError::ExtraWorkerInheritableDirective { directive });
+            }
+        }
+
+        for expected in V1_SNAPSHOT_SCHEMA.active_directives() {
+            let spec = self
+                .directives
+                .get(&(context::PISHOO, expected.name.as_str()))
+                .ok_or(V1SnapshotSchemaError::MissingDirective {
+                    directive: expected.name,
+                })?;
+            if spec.value_type != Some((expected.value_type)()) {
+                return Err(V1SnapshotSchemaError::ValueType {
+                    directive: expected.name,
+                    expected: expected.value_type_name,
+                    actual: spec.value_type_name.unwrap_or("<none>"),
+                });
+            }
+            if spec.shape != expected.shape {
+                return Err(V1SnapshotSchemaError::Shape {
+                    directive: expected.name,
+                });
+            }
+            if spec.cascade != expected.cascade {
+                return Err(V1SnapshotSchemaError::Cascade {
+                    directive: expected.name,
+                });
+            }
+            if spec.transport != TransportPolicy::WorkerInheritable {
+                return Err(V1SnapshotSchemaError::Transport {
+                    directive: expected.name,
+                });
+            }
+        }
+
+        Ok(ValidatedV1SnapshotSchema {
+            schema: &V1_SNAPSHOT_SCHEMA,
+        })
     }
 
     pub fn build(

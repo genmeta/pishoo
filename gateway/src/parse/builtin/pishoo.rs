@@ -3,10 +3,7 @@ use crate::parse::{
         CascadePolicy, ConfigRegistry, DirectiveSpec, DuplicatePolicy, ReloadImpact,
         TransportPolicy, context,
     },
-    types::{
-        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, MimeTypes,
-        PathConfig, StringList,
-    },
+    types::{PathConfig, StringList},
 };
 
 pub fn register(registry: &mut ConfigRegistry) {
@@ -29,24 +26,7 @@ pub fn register(registry: &mut ConfigRegistry) {
     register_hypervisor_leaf::<PathConfig>(registry, "pid");
     register_hypervisor_leaf::<StringList>(registry, "workers");
     register_hypervisor_leaf::<StringList>(registry, "groups");
-    register_inheritable_leaf::<AccessRulesUri>(registry, "access_rules");
-    register_inheritable_leaf::<BoolConfig>(registry, "gzip");
-    register_inheritable_leaf::<BoolConfig>(registry, "gzip_vary");
-    register_inheritable_leaf::<GzipMinLength>(registry, "gzip_min_length");
-    register_inheritable_leaf::<GzipCompLevel>(registry, "gzip_comp_level");
-    register_inheritable_leaf::<StringList>(registry, "gzip_types");
-    register_inheritable_leaf::<DefaultType>(registry, "default_type");
-    registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::raw_value::<MimeTypes>(
-            "types",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-    );
+    registry.register_v1_snapshot_directives();
 }
 
 fn register_hypervisor_leaf<T>(registry: &mut ConfigRegistry, name: &'static str)
@@ -66,27 +46,6 @@ where
             CascadePolicy::None,
             TransportPolicy::HypervisorOnly,
             ReloadImpact::Supervisor,
-        ),
-    );
-}
-
-fn register_inheritable_leaf<T>(registry: &mut ConfigRegistry, name: &'static str)
-where
-    T: crate::parse::registry::DirectiveValue,
-    for<'input, 'directive> T: TryFrom<
-            &'input crate::parse::registry::DirectiveInput<'directive>,
-            Error = <T as crate::parse::registry::DirectiveValue>::Error,
-        >,
-{
-    registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<T>(
-            name,
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
         ),
     );
 }

@@ -1,15 +1,12 @@
-use std::{any::TypeId, collections::HashSet, num::NonZeroU32, path::PathBuf, sync::Arc};
+use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
 use snafu::Snafu;
 
 use crate::parse::{
-    cascade::{
-        ACCESS_RULES, ConfigOrigin, DEFAULT_TYPE, GZIP, GZIP_COMP_LEVEL, GZIP_MIN_LENGTH,
-        GZIP_TYPES, GZIP_VARY, InheritedSourceLocation, TYPES,
-    },
+    cascade::{ConfigOrigin, InheritedSourceLocation},
     domain::{DirectiveName, ResolvedConfigPath, ResolvedConfigPathError},
-    registry::{CascadePolicy, ConfigRegistry, DirectiveShape, TransportPolicy, context},
+    registry::ReservedV1SnapshotField,
     tree::HomeConfigTree,
     types::{
         AccessRulesUri, AccessRulesUriValidationError, BoolConfig, DefaultType, GzipCompLevel,
@@ -33,131 +30,6 @@ pub struct RootInheritedConfigV1 {
     default_type: InheritedValue<Option<Arc<DefaultType>>>,
     types: InheritedValue<Option<Arc<MimeTypes>>>,
     access_log: InheritedValue<Option<Arc<SnapshotAccessLogDirective>>>,
-}
-
-#[derive(Debug)]
-pub(crate) struct RootSnapshotRegistryContract;
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum RootSnapshotRegistryContractError {
-    #[snafu(display("root snapshot directive `{directive}` is not registered in PISHOO"))]
-    MissingDirective { directive: DirectiveName },
-    #[snafu(display(
-        "root snapshot directive `{directive}` has value type `{actual}`, expected `{expected}`"
-    ))]
-    ValueType {
-        directive: DirectiveName,
-        expected: &'static str,
-        actual: &'static str,
-    },
-    #[snafu(display("root snapshot directive `{directive}` has an incompatible shape"))]
-    Shape { directive: DirectiveName },
-    #[snafu(display("root snapshot directive `{directive}` has an incompatible cascade policy"))]
-    Cascade { directive: DirectiveName },
-    #[snafu(display(
-        "root snapshot directive `{directive}` is not registered as WorkerInheritable"
-    ))]
-    Transport { directive: DirectiveName },
-    #[snafu(display(
-        "reserved root snapshot directive `{directive}` was registered before its checked domain"
-    ))]
-    PrematureReservedDirective { directive: DirectiveName },
-}
-
-impl RootSnapshotRegistryContract {
-    pub(crate) fn validate(
-        registry: &ConfigRegistry,
-    ) -> Result<Self, RootSnapshotRegistryContractError> {
-        validate_snapshot_directive::<AccessRulesUri>(
-            registry,
-            ACCESS_RULES.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<BoolConfig>(
-            registry,
-            GZIP.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<BoolConfig>(
-            registry,
-            GZIP_VARY.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<GzipMinLength>(
-            registry,
-            GZIP_MIN_LENGTH.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<GzipCompLevel>(
-            registry,
-            GZIP_COMP_LEVEL.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<StringList>(
-            registry,
-            GZIP_TYPES.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<DefaultType>(
-            registry,
-            DEFAULT_TYPE.name(),
-            DirectiveShape::Leaf,
-            CascadePolicy::NearestWins,
-        )?;
-        validate_snapshot_directive::<MimeTypes>(
-            registry,
-            TYPES.name(),
-            DirectiveShape::RawBlock,
-            CascadePolicy::ReplaceWhole,
-        )?;
-        let access_log = DirectiveName::new("access_log");
-        if registry
-            .directive_contract(context::PISHOO, access_log.as_str())
-            .is_some()
-        {
-            return Err(
-                RootSnapshotRegistryContractError::PrematureReservedDirective {
-                    directive: access_log,
-                },
-            );
-        }
-        Ok(Self)
-    }
-}
-
-fn validate_snapshot_directive<T: 'static>(
-    registry: &ConfigRegistry,
-    directive: DirectiveName,
-    shape: DirectiveShape,
-    cascade: CascadePolicy,
-) -> Result<(), RootSnapshotRegistryContractError> {
-    let contract = registry
-        .directive_contract(context::PISHOO, directive.as_str())
-        .ok_or(RootSnapshotRegistryContractError::MissingDirective { directive })?;
-    if contract.value_type != Some(TypeId::of::<T>()) {
-        return Err(RootSnapshotRegistryContractError::ValueType {
-            directive,
-            expected: std::any::type_name::<T>(),
-            actual: contract.value_type_name.unwrap_or("<none>"),
-        });
-    }
-    if contract.shape != shape {
-        return Err(RootSnapshotRegistryContractError::Shape { directive });
-    }
-    if contract.cascade != cascade {
-        return Err(RootSnapshotRegistryContractError::Cascade { directive });
-    }
-    if contract.transport != TransportPolicy::WorkerInheritable {
-        return Err(RootSnapshotRegistryContractError::Transport { directive });
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,26 +91,41 @@ pub enum RootConfigSnapshotError {
 impl RootConfigSnapshot {
     pub(crate) fn project(tree: &Arc<HomeConfigTree>) -> Result<Self, RootConfigSnapshotError> {
         let pishoo = tree.pishoo();
-        let access_rules = project_optional(tree, snapshot_query(pishoo.cascaded(ACCESS_RULES))?)?;
-        let gzip = project_required(tree, GZIP.name(), snapshot_query(pishoo.cascaded(GZIP))?)?;
+        let schema = tree.v1_snapshot_schema().schema();
+        let access_rules = project_optional(
+            tree,
+            snapshot_query(pishoo.cascaded(schema.access_rules.key()))?,
+        )?;
+        let gzip = project_required(
+            tree,
+            schema.gzip.key().name(),
+            snapshot_query(pishoo.cascaded(schema.gzip.key()))?,
+        )?;
         let gzip_vary = project_required(
             tree,
-            GZIP_VARY.name(),
-            snapshot_query(pishoo.cascaded(GZIP_VARY))?,
+            schema.gzip_vary.key().name(),
+            snapshot_query(pishoo.cascaded(schema.gzip_vary.key()))?,
         )?;
         let gzip_min_length = project_required(
             tree,
-            GZIP_MIN_LENGTH.name(),
-            snapshot_query(pishoo.cascaded(GZIP_MIN_LENGTH))?,
+            schema.gzip_min_length.key().name(),
+            snapshot_query(pishoo.cascaded(schema.gzip_min_length.key()))?,
         )?;
         let gzip_comp_level = project_required(
             tree,
-            GZIP_COMP_LEVEL.name(),
-            snapshot_query(pishoo.cascaded(GZIP_COMP_LEVEL))?,
+            schema.gzip_comp_level.key().name(),
+            snapshot_query(pishoo.cascaded(schema.gzip_comp_level.key()))?,
         )?;
-        let gzip_types = project_optional(tree, snapshot_query(pishoo.cascaded(GZIP_TYPES))?)?;
-        let default_type = project_optional(tree, snapshot_query(pishoo.cascaded(DEFAULT_TYPE))?)?;
-        let types = project_optional(tree, snapshot_query(pishoo.cascaded(TYPES))?)?;
+        let gzip_types = project_optional(
+            tree,
+            snapshot_query(pishoo.cascaded(schema.gzip_types.key()))?,
+        )?;
+        let default_type = project_optional(
+            tree,
+            snapshot_query(pishoo.cascaded(schema.default_type.key()))?,
+        )?;
+        let types = project_optional(tree, snapshot_query(pishoo.cascaded(schema.types.key()))?)?;
+        let access_log = project_reserved(schema.access_log);
         Ok(Self::V1(RootInheritedConfigV1 {
             access_rules,
             gzip,
@@ -248,10 +135,7 @@ impl RootConfigSnapshot {
             gzip_types,
             default_type,
             types,
-            access_log: InheritedValue {
-                value: None,
-                origin: InheritedOrigin::Builtin,
-            },
+            access_log,
         }))
     }
 
@@ -387,6 +271,13 @@ fn project_optional<T>(
         value: Some(Arc::clone(value.effective())),
         origin,
     })
+}
+
+fn project_reserved<T>(_: ReservedV1SnapshotField) -> InheritedValue<Option<Arc<T>>> {
+    InheritedValue {
+        value: None,
+        origin: InheritedOrigin::Builtin,
+    }
 }
 
 fn project_origin(
@@ -687,19 +578,14 @@ fn encode_mime_types(types: &MimeTypes) -> MimeTypesV1 {
 }
 
 fn decode_mime_types(types: MimeTypesV1) -> Result<MimeTypes, RootConfigSnapshotError> {
-    let mut seen = HashSet::new();
-    let mut entries = Vec::with_capacity(types.0.len());
-    for entry in types.0 {
-        let extension = String::from(entry.extension);
-        if !seen.insert(extension.clone()) {
-            return Err(RootConfigSnapshotError::MimeTypes {
-                source: MimeTypesValidationError::DuplicateExtension { extension },
-            });
-        }
-        entries.push((extension, entry.value.0.into_vec()));
-    }
-    MimeTypes::checked_from_bytes(entries)
-        .map_err(|source| RootConfigSnapshotError::MimeTypes { source })
+    MimeTypes::checked_from_bytes(
+        types
+            .0
+            .into_vec()
+            .into_iter()
+            .map(|entry| (String::from(entry.extension), entry.value.0.into_vec())),
+    )
+    .map_err(|source| RootConfigSnapshotError::MimeTypes { source })
 }
 
 fn encode_access_log(
@@ -815,17 +701,7 @@ pub(crate) mod test_support {
             types,
             access_log,
         ));
-        [
-            "access_rules",
-            "gzip",
-            "gzip_vary",
-            "gzip_min_length",
-            "gzip_comp_level",
-            "gzip_types",
-            "default_type",
-            "types",
-            "access_log",
-        ]
+        crate::parse::registry::v1_snapshot_field_names()
     }
 
     pub(crate) fn checked_wire_round_trip(
