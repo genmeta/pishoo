@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use snafu::{ResultExt, Snafu};
 
 use crate::parse::{
@@ -27,6 +29,8 @@ pub enum AccessRulesUriError {
         span: SourceSpan,
         source: normalize::NormalizeDirectiveValueError,
     },
+    #[snafu(display("failed to encode the access_rules configuration base path as a URL"))]
+    BasePathUrl { span: SourceSpan, path: PathBuf },
     #[snafu(display("invalid access_rules uri domain"))]
     Domain {
         span: SourceSpan,
@@ -57,17 +61,28 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for AccessR
             .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
         let path = AccessRulesUri::decoded_sqlite_path(&uri)
             .context(access_rules_uri_error::DomainSnafu { span: arg.span })?;
-        let normalized_path = normalize::normalize_path(&path, arg.span, input.source_map)
-            .context(access_rules_uri_error::ResolveRelativePathSnafu { span: arg.span })?;
-
-        let mut normalized = format!("sqlite://{}", normalized_path.display());
-        if let Some(query) = uri.query() {
-            normalized.push('?');
-            normalized.push_str(query);
+        if path.is_absolute() {
+            return AccessRulesUri::try_from(uri)
+                .context(access_rules_uri_error::DomainSnafu { span: arg.span });
         }
 
-        let uri = url::Url::parse(&normalized)
+        let base_path = normalize::normalize_path(Path::new("."), arg.span, input.source_map)
+            .context(access_rules_uri_error::ResolveRelativePathSnafu { span: arg.span })?;
+        let base_url = url::Url::from_directory_path(&base_path).map_err(|()| {
+            AccessRulesUriError::BasePathUrl {
+                span: arg.span,
+                path: base_path,
+            }
+        })?;
+        let encoded_path = uri.path().to_owned();
+        let query = uri.query().map(str::to_owned);
+        let resolved = base_url
+            .join(&encoded_path)
             .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
+        let mut uri = url::Url::parse("sqlite:///")
+            .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
+        uri.set_path(resolved.path());
+        uri.set_query(query.as_deref());
         AccessRulesUri::try_from(uri)
             .context(access_rules_uri_error::DomainSnafu { span: arg.span })
     }
@@ -102,9 +117,15 @@ mod tests {
         std::fs::create_dir_all(dir.join("db")).expect("create db dir");
         std::fs::write(dir.join("server.crt"), "dummy cert").expect("write cert");
         std::fs::write(dir.join("server.key"), "dummy key").expect("write key");
+        #[cfg(unix)]
+        let access_rules = "sqlite:./db/access%3Fpart%23name%FF.db?mode=ro%23strict";
+        #[cfg(not(unix))]
+        let access_rules = "sqlite:./db/access%3Fpart%23name.db?mode=ro%23strict";
         std::fs::write(
             dir.join("server.conf"),
-            "server {\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    access_rules sqlite:./db/access.db?mode=ro;\n}\n",
+            format!(
+                "server {{\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    access_rules {access_rules};\n}}\n"
+            ),
         )
         .expect("write config");
 
@@ -118,13 +139,17 @@ mod tests {
         .expect("config should load");
 
         let server = parsed.root.children("server").expect("server children")[0].clone();
+        #[cfg(unix)]
+        let expected_suffix = "db/access%3Fpart%23name%FF.db?mode=ro%23strict";
+        #[cfg(not(unix))]
+        let expected_suffix = "db/access%3Fpart%23name.db?mode=ro%23strict";
         assert_eq!(
             server
                 .require::<crate::parse::types::AccessRulesUri>("access_rules")
                 .expect("access_rules should be typed")
                 .0
                 .as_str(),
-            format!("sqlite://{}?mode=ro", dir.join("db/access.db").display())
+            format!("sqlite://{}/{expected_suffix}", dir.display())
         );
     }
 

@@ -42,11 +42,25 @@ pub mod context {
     pub const STUN_SERVER: ContextKey = ContextKey("gateway.stun_server");
 }
 
+#[derive(Debug, Default)]
+struct ConfigRegistryContractIdentity;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConfigRegistryContract(Arc<ConfigRegistryContractIdentity>);
+
+impl ConfigRegistryContract {
+    fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Default)]
 pub struct ConfigRegistry {
     contexts: HashMap<ContextKey, ContextSpec>,
     directives: HashMap<(ContextKey, &'static str), DirectiveSpec>,
+    cascade_policies: HashMap<ContextKey, Arc<[(DirectiveName, CascadePolicy)]>>,
     attached_finalizers: HashMap<ContextKey, AttachedContextFinalizeFn>,
+    contract: ConfigRegistryContract,
 }
 
 pub struct ContextSpec {
@@ -273,7 +287,10 @@ impl V1SnapshotDirectiveShape {
 pub(crate) struct V1SnapshotDirective<T> {
     key: DirectiveKey<T>,
     shape: V1SnapshotDirectiveShape,
+    duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
 }
 
 impl<T> Clone for V1SnapshotDirective<T> {
@@ -288,12 +305,18 @@ impl<T> V1SnapshotDirective<T> {
     const fn new(
         key: DirectiveKey<T>,
         shape: V1SnapshotDirectiveShape,
+        duplicate: DuplicatePolicy,
         cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
     ) -> Self {
         Self {
             key,
             shape,
+            duplicate,
             cascade,
+            transport,
+            reload,
         }
     }
 
@@ -308,7 +331,10 @@ impl<T> V1SnapshotDirective<T> {
         ErasedV1SnapshotDirective {
             name: self.key.name(),
             shape: self.shape.registry_shape(),
+            duplicate: self.duplicate,
             cascade: self.cascade,
+            transport: self.transport,
+            reload: self.reload,
             value_type: TypeId::of::<T>,
             value_type_name: std::any::type_name::<T>(),
         }
@@ -325,18 +351,18 @@ impl<T> V1SnapshotDirective<T> {
             V1SnapshotDirectiveShape::Leaf => DirectiveSpec::leaf_value::<T>(
                 name,
                 vec![context::PISHOO],
-                DuplicatePolicy::Reject,
+                self.duplicate,
                 self.cascade,
-                TransportPolicy::WorkerInheritable,
-                ReloadImpact::RuntimeState,
+                self.transport,
+                self.reload,
             ),
             V1SnapshotDirectiveShape::RawBlock => DirectiveSpec::raw_value::<T>(
                 name,
                 vec![context::PISHOO],
-                DuplicatePolicy::Reject,
+                self.duplicate,
                 self.cascade,
-                TransportPolicy::WorkerInheritable,
-                ReloadImpact::RuntimeState,
+                self.transport,
+                self.reload,
             ),
         };
         registry.register_directive(context::PISHOO, spec);
@@ -347,7 +373,10 @@ impl<T> V1SnapshotDirective<T> {
 struct ErasedV1SnapshotDirective {
     name: DirectiveName,
     shape: DirectiveShape,
+    duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
     value_type: fn() -> TypeId,
     value_type_name: &'static str,
 }
@@ -373,7 +402,8 @@ macro_rules! define_v1_snapshot_schema {
     (
         $(
             $field:ident: $value_type:ty =
-                $key:expr, $shape:ident, $cascade:expr;
+                $key:expr, $shape:ident, $duplicate:expr, $cascade:expr,
+                $transport:expr, $reload:expr;
         )+
         @reserved $reserved:ident = $reserved_name:literal;
     ) => {
@@ -404,7 +434,10 @@ macro_rules! define_v1_snapshot_schema {
             $($field: V1SnapshotDirective::new(
                 $key,
                 V1SnapshotDirectiveShape::$shape,
+                $duplicate,
                 $cascade,
+                $transport,
+                $reload,
             ),)+
             $reserved: ReservedV1SnapshotField::new($reserved_name),
         };
@@ -412,14 +445,28 @@ macro_rules! define_v1_snapshot_schema {
 }
 
 define_v1_snapshot_schema! {
-    access_rules: AccessRulesUri = ACCESS_RULES, Leaf, CascadePolicy::NearestWins;
-    gzip: BoolConfig = GZIP, Leaf, CascadePolicy::NearestWins;
-    gzip_vary: BoolConfig = GZIP_VARY, Leaf, CascadePolicy::NearestWins;
-    gzip_min_length: GzipMinLength = GZIP_MIN_LENGTH, Leaf, CascadePolicy::NearestWins;
-    gzip_comp_level: GzipCompLevel = GZIP_COMP_LEVEL, Leaf, CascadePolicy::NearestWins;
-    gzip_types: StringList = GZIP_TYPES, Leaf, CascadePolicy::NearestWins;
-    default_type: DefaultType = DEFAULT_TYPE, Leaf, CascadePolicy::NearestWins;
-    types: MimeTypes = TYPES, RawBlock, CascadePolicy::ReplaceWhole;
+    access_rules: AccessRulesUri = ACCESS_RULES, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    gzip: BoolConfig = GZIP, Leaf, DuplicatePolicy::Reject, CascadePolicy::NearestWins,
+        TransportPolicy::WorkerInheritable, ReloadImpact::RuntimeState;
+    gzip_vary: BoolConfig = GZIP_VARY, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    gzip_min_length: GzipMinLength = GZIP_MIN_LENGTH, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    gzip_comp_level: GzipCompLevel = GZIP_COMP_LEVEL, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    gzip_types: StringList = GZIP_TYPES, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    default_type: DefaultType = DEFAULT_TYPE, Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState;
+    types: MimeTypes = TYPES, RawBlock, DuplicatePolicy::Reject, CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerInheritable, ReloadImpact::RuntimeState;
     @reserved access_log = "access_log";
 }
 
@@ -454,12 +501,16 @@ pub enum V1SnapshotSchemaError {
     },
     #[snafu(display("root snapshot directive `{directive}` has an incompatible shape"))]
     Shape { directive: DirectiveName },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible duplicate policy"))]
+    Duplicate { directive: DirectiveName },
     #[snafu(display("root snapshot directive `{directive}` has an incompatible cascade policy"))]
     Cascade { directive: DirectiveName },
     #[snafu(display(
         "root snapshot directive `{directive}` is not registered as WorkerInheritable"
     ))]
     Transport { directive: DirectiveName },
+    #[snafu(display("root snapshot directive `{directive}` has an incompatible reload impact"))]
+    Reload { directive: DirectiveName },
     #[snafu(display(
         "worker-inheritable PISHOO directive `{directive}` is not part of the V1 snapshot schema"
     ))]
@@ -525,10 +576,26 @@ impl ConfigRegistry {
 
     pub fn register_context(&mut self, spec: ContextSpec) {
         self.contexts.insert(spec.key, spec);
+        self.advance_contract();
     }
 
     pub fn register_directive(&mut self, context: ContextKey, spec: DirectiveSpec) {
         self.directives.insert((context, spec.name.as_str()), spec);
+        self.rebuild_cascade_policies(context);
+        self.advance_contract();
+    }
+
+    fn rebuild_cascade_policies(&mut self, context: ContextKey) {
+        let mut policies: Vec<_> = self
+            .directives
+            .iter()
+            .filter_map(|((registered_context, _), spec)| {
+                (*registered_context == context).then_some((spec.name, spec.cascade))
+            })
+            .collect();
+        policies.sort_unstable_by_key(|(name, _)| name.as_str());
+        self.cascade_policies
+            .insert(context, Arc::from(policies.into_boxed_slice()));
     }
 
     pub(crate) fn register_attached_finalizer(
@@ -537,6 +604,19 @@ impl ConfigRegistry {
         finalize: AttachedContextFinalizeFn,
     ) {
         self.attached_finalizers.insert(context, finalize);
+        self.advance_contract();
+    }
+
+    fn advance_contract(&mut self) {
+        self.contract = ConfigRegistryContract::default();
+    }
+
+    pub(crate) fn contract(&self) -> ConfigRegistryContract {
+        self.contract.clone()
+    }
+
+    pub(crate) fn matches_contract(&self, contract: &ConfigRegistryContract) -> bool {
+        self.contract.matches(contract)
     }
 
     pub(crate) fn finalize_attached(
@@ -561,13 +641,11 @@ impl ConfigRegistry {
     pub(crate) fn cascade_policies(
         &self,
         context: ContextKey,
-    ) -> Box<[(DirectiveName, CascadePolicy)]> {
-        self.directives
-            .iter()
-            .filter_map(|((registered_context, _), spec)| {
-                (*registered_context == context).then_some((spec.name, spec.cascade))
-            })
-            .collect()
+    ) -> Arc<[(DirectiveName, CascadePolicy)]> {
+        self.cascade_policies
+            .get(&context)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(crate) fn register_v1_snapshot_directives(&mut self) {
@@ -613,13 +691,23 @@ impl ConfigRegistry {
                     directive: expected.name,
                 });
             }
+            if spec.duplicate != expected.duplicate {
+                return Err(V1SnapshotSchemaError::Duplicate {
+                    directive: expected.name,
+                });
+            }
             if spec.cascade != expected.cascade {
                 return Err(V1SnapshotSchemaError::Cascade {
                     directive: expected.name,
                 });
             }
-            if spec.transport != TransportPolicy::WorkerInheritable {
+            if spec.transport != expected.transport {
                 return Err(V1SnapshotSchemaError::Transport {
+                    directive: expected.name,
+                });
+            }
+            if spec.reload != expected.reload {
+                return Err(V1SnapshotSchemaError::Reload {
                     directive: expected.name,
                 });
             }
@@ -664,6 +752,7 @@ impl ConfigRegistry {
         options: BuildOptions<'_>,
         role: ConfigDocumentRoleKind,
     ) -> Result<ParsedConfigDocument, RoleDocumentBuildError> {
+        let registry_contract = self.contract();
         self.validate_role_registration(&sources, &directives, role)?;
         validate_document_shape(&sources, &directives, role)?;
         self.validate_role_directives(&sources, &directives, context::ROOT, role)?;
@@ -683,13 +772,13 @@ impl ConfigRegistry {
             ConfigDocumentRoleKind::HypervisorRoot => {
                 let pishoo = self.required_built_child(&sources, &root, "pishoo", role)?;
                 Ok(ParsedConfigDocument::HypervisorRoot(
-                    ParsedPishooFragment::new(sources, pishoo),
+                    ParsedPishooFragment::new(sources, pishoo, registry_contract),
                 ))
             }
             ConfigDocumentRoleKind::WorkerPishoo => {
                 let pishoo = self.required_built_child(&sources, &root, "pishoo", role)?;
                 Ok(ParsedConfigDocument::WorkerPishoo(
-                    ParsedPishooFragment::new(sources, pishoo),
+                    ParsedPishooFragment::new(sources, pishoo, registry_contract),
                 ))
             }
             ConfigDocumentRoleKind::IdentityServer => {
@@ -697,7 +786,13 @@ impl ConfigRegistry {
                     .children_optional("server")
                     .iter()
                     .cloned()
-                    .map(|server| ParsedServerFragment::new(Arc::clone(&sources), server))
+                    .map(|server| {
+                        ParsedServerFragment::new(
+                            Arc::clone(&sources),
+                            server,
+                            registry_contract.clone(),
+                        )
+                    })
                     .collect();
                 if servers.is_empty() {
                     return Err(RoleDocumentBuildError::Role(

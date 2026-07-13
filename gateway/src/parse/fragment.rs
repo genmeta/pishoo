@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::parse::{
     document::ConfigNode,
     domain::{ConfigDocumentId, ConfigSourceSpan},
+    registry::ConfigRegistryContract,
     source::{ConfigDocumentSourceMap, SourceMap},
 };
 
@@ -18,6 +19,7 @@ pub struct ParsedPishooFragment {
     sources: Arc<ConfigDocumentSourceMap>,
     node: Arc<ConfigNode>,
     servers: Box<[ParsedServerFragment]>,
+    registry_contract: ConfigRegistryContract,
 }
 
 #[derive(Debug)]
@@ -25,6 +27,7 @@ pub struct ParsedServerFragment {
     sources: Arc<ConfigDocumentSourceMap>,
     node: Arc<ConfigNode>,
     locations: Box<[ParsedLocationFragment]>,
+    registry_contract: ConfigRegistryContract,
 }
 
 #[derive(Debug)]
@@ -34,17 +37,24 @@ pub struct ParsedLocationFragment {
 }
 
 impl ParsedPishooFragment {
-    pub(crate) fn new(sources: Arc<ConfigDocumentSourceMap>, node: Arc<ConfigNode>) -> Self {
+    pub(crate) fn new(
+        sources: Arc<ConfigDocumentSourceMap>,
+        node: Arc<ConfigNode>,
+        registry_contract: ConfigRegistryContract,
+    ) -> Self {
         let servers = node
             .children_optional("server")
             .iter()
             .cloned()
-            .map(|server| ParsedServerFragment::new(Arc::clone(&sources), server))
+            .map(|server| {
+                ParsedServerFragment::new(Arc::clone(&sources), server, registry_contract.clone())
+            })
             .collect();
         Self {
             sources,
             node,
             servers,
+            registry_contract,
         }
     }
 
@@ -69,6 +79,10 @@ impl ParsedPishooFragment {
         Arc::clone(&self.sources)
     }
 
+    pub(crate) fn registry_contract(&self) -> &ConfigRegistryContract {
+        &self.registry_contract
+    }
+
     #[allow(dead_code)] // consumed by the detached-to-sealed tree builder in the next parser stage
     pub(crate) fn node(&self) -> &Arc<ConfigNode> {
         &self.node
@@ -76,7 +90,11 @@ impl ParsedPishooFragment {
 }
 
 impl ParsedServerFragment {
-    pub(crate) fn new(sources: Arc<ConfigDocumentSourceMap>, node: Arc<ConfigNode>) -> Self {
+    pub(crate) fn new(
+        sources: Arc<ConfigDocumentSourceMap>,
+        node: Arc<ConfigNode>,
+        registry_contract: ConfigRegistryContract,
+    ) -> Self {
         let locations = node
             .children_optional("location")
             .iter()
@@ -87,6 +105,7 @@ impl ParsedServerFragment {
             sources,
             node,
             locations,
+            registry_contract,
         }
     }
 
@@ -109,6 +128,10 @@ impl ParsedServerFragment {
 
     pub(crate) fn source_owner(&self) -> Arc<ConfigDocumentSourceMap> {
         Arc::clone(&self.sources)
+    }
+
+    pub(crate) fn registry_contract(&self) -> &ConfigRegistryContract {
+        &self.registry_contract
     }
 
     #[allow(dead_code)] // consumed by the detached-to-sealed tree builder in the next parser stage

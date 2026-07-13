@@ -34,7 +34,7 @@ struct SealedConfigNode {
     node: Arc<ConfigNode>,
     parent: ParentLink,
     children: Vec<ConfigNodeId>,
-    cascade_policies: Box<[(DirectiveName, CascadePolicy)]>,
+    cascade_policies: Arc<[(DirectiveName, CascadePolicy)]>,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +132,8 @@ pub enum HomeConfigTreeError {
     },
     #[snafu(display("registry is incompatible with the root snapshot schema"))]
     SnapshotContract { source: V1SnapshotSchemaError },
+    #[snafu(display("detached configuration fragment was parsed with another registry contract"))]
+    RegistryContractMismatch,
 }
 
 pub fn build_global_tree<I>(
@@ -181,6 +183,9 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         fragment: ParsedPishooFragment,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
+        if !registry.matches_contract(fragment.registry_contract()) {
+            return Err(HomeConfigTreeError::RegistryContractMismatch);
+        }
         let snapshot_schema = registry
             .validate_v1_snapshot_schema()
             .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
@@ -225,6 +230,12 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         worker_fragment: Option<ParsedPishooFragment>,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
     ) -> Result<Self, HomeConfigTreeError> {
+        if worker_fragment
+            .as_ref()
+            .is_some_and(|fragment| !registry.matches_contract(fragment.registry_contract()))
+        {
+            return Err(HomeConfigTreeError::RegistryContractMismatch);
+        }
         let snapshot_schema = registry
             .validate_v1_snapshot_schema()
             .map_err(|source| HomeConfigTreeError::SnapshotContract { source })?;
@@ -280,6 +291,9 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         &mut self,
         fragment: ParsedServerFragment,
     ) -> Result<(), HomeConfigTreeError> {
+        if !self.registry.matches_contract(fragment.registry_contract()) {
+            return Err(HomeConfigTreeError::RegistryContractMismatch);
+        }
         if let Some(document_id) = self.document_id(fragment.source_map()) {
             self.attach_server(&fragment, document_id);
         } else {

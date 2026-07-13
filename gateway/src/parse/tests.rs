@@ -1143,6 +1143,133 @@ fn snapshot_contract_rejects_extra_worker_inheritable_directive() {
 }
 
 #[test]
+fn snapshot_contract_rejects_last_wins_and_wrong_reload_metadata() {
+    let fixture = TempConfigDir::new("snapshot_registry_metadata");
+
+    let mut last_wins_registry = crate::parse::default_registry();
+    last_wins_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::PISHOO],
+            DuplicatePolicy::LastWins,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&last_wins_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip off; gzip on; }",
+        &fixture.join("last-wins/pishoo.conf"),
+        None,
+    );
+    assert!(matches!(
+        build_global_tree(&last_wins_registry, root, Vec::new()),
+        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
+            source: crate::parse::registry::V1SnapshotSchemaError::Duplicate { directive },
+        }) if directive.as_str() == "gzip"
+    ));
+
+    let mut wrong_reload_registry = crate::parse::default_registry();
+    wrong_reload_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::ListenerSet,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&wrong_reload_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip on; }",
+        &fixture.join("wrong-reload/pishoo.conf"),
+        None,
+    );
+    assert!(matches!(
+        build_global_tree(&wrong_reload_registry, root, Vec::new()),
+        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
+            source: crate::parse::registry::V1SnapshotSchemaError::Reload { directive },
+        }) if directive.as_str() == "gzip"
+    ));
+}
+
+#[test]
+fn detached_fragments_require_the_exact_parse_registry_contract() {
+    let fixture = TempConfigDir::new("fragment_registry_contract");
+    let mut parse_registry = crate::parse::default_registry();
+    parse_registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::PISHOO],
+            DuplicatePolicy::LastWins,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&parse_registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip off; gzip on; }",
+        &fixture.join("registry-a/pishoo.conf"),
+        None,
+    );
+    let seal_registry = crate::parse::default_registry();
+
+    assert!(matches!(
+        build_global_tree(&seal_registry, root, Vec::new()),
+        Err(crate::parse::tree::HomeConfigTreeError::RegistryContractMismatch)
+    ));
+}
+
+#[test]
+fn detached_fragments_reject_parse_registry_mutation_before_seal() {
+    let fixture = TempConfigDir::new("fragment_registry_mutation");
+    let mut registry = crate::parse::default_registry();
+    let root = {
+        let mut parser = ConfigDocumentParser::new(&registry);
+        parse_root_fragment(
+            &mut parser,
+            "pishoo { gzip on; }",
+            &fixture.join("root/pishoo.conf"),
+            None,
+        )
+    };
+    registry.register_directive(
+        context::PISHOO,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "worker_local_after_parse",
+            vec![context::PISHOO],
+            DuplicatePolicy::Reject,
+            CascadePolicy::None,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+
+    assert!(matches!(
+        build_global_tree(&registry, root, Vec::new()),
+        Err(crate::parse::tree::HomeConfigTreeError::RegistryContractMismatch)
+    ));
+}
+
+#[test]
+fn registry_shares_precomputed_cascade_policy_tables() {
+    let registry = crate::parse::default_registry();
+    let first = registry.cascade_policies(context::PISHOO);
+    let second = registry.cascade_policies(context::PISHOO);
+
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
 fn cascade_lineage_is_builtin_root_worker_server_location() {
     let fixture = TempConfigDir::new("cascade_lineage");
     let registry = crate::parse::default_registry();
@@ -1566,6 +1693,27 @@ fn access_rules_rejects_literal_and_percent_encoded_nul_in_text_and_snapshot() {
             }
         ));
     }
+}
+
+#[test]
+fn access_rules_preserves_percent_encoded_path_and_query_in_text_and_snapshot() {
+    #[cfg(unix)]
+    let source = "sqlite:/tmp/rules%3Fpart%23name%FF.db?mode=ro%23strict";
+    #[cfg(not(unix))]
+    let source = "sqlite:/tmp/rules%3Fpart%23name.db?mode=ro%23strict";
+    let expected = url::Url::parse(source).expect("fixture URL");
+
+    let document =
+        crate::parse::parse_config_str_for_test(&format!("pishoo {{ access_rules {source}; }}"))
+            .expect("text access_rules URL should parse losslessly");
+    let text = first_pishoo(&document)
+        .require::<crate::parse::types::AccessRulesUri>("access_rules")
+        .expect("text access_rules should be typed");
+    let snapshot = snapshot_test_support::decode_access_rules(source)
+        .expect("snapshot access_rules URL should decode losslessly");
+
+    assert_eq!(text.0, expected);
+    assert_eq!(snapshot.0, expected);
 }
 
 #[test]
