@@ -29,8 +29,8 @@ pub enum AccessRulesUriError {
         span: SourceSpan,
         source: normalize::NormalizeDirectiveValueError,
     },
-    #[snafu(display("failed to encode the access_rules configuration base path as a URL"))]
-    BasePathUrl { span: SourceSpan, path: PathBuf },
+    #[snafu(display("failed to encode the access_rules sqlite path as a URL"))]
+    PathUrl { span: SourceSpan, path: PathBuf },
     #[snafu(display("invalid access_rules uri domain"))]
     Domain {
         span: SourceSpan,
@@ -61,31 +61,41 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for AccessR
             .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
         let path = AccessRulesUri::decoded_sqlite_path(&uri)
             .context(access_rules_uri_error::DomainSnafu { span: arg.span })?;
-        if path.is_absolute() {
-            return AccessRulesUri::try_from(uri)
-                .context(access_rules_uri_error::DomainSnafu { span: arg.span });
-        }
-
-        let base_path = normalize::normalize_path(Path::new("."), arg.span, input.source_map)
+        let use_empty_authority = !path.is_absolute() || uri.as_str().starts_with("sqlite://");
+        let path = normalize::normalize_path(&path, arg.span, input.source_map)
             .context(access_rules_uri_error::ResolveRelativePathSnafu { span: arg.span })?;
-        let base_url = url::Url::from_directory_path(&base_path).map_err(|()| {
-            AccessRulesUriError::BasePathUrl {
-                span: arg.span,
-                path: base_path,
-            }
-        })?;
-        let encoded_path = uri.path().to_owned();
         let query = uri.query().map(str::to_owned);
-        let resolved = base_url
-            .join(&encoded_path)
-            .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
-        let mut uri = url::Url::parse("sqlite:///")
-            .context(access_rules_uri_error::UriSnafu { span: arg.span })?;
-        uri.set_path(resolved.path());
-        uri.set_query(query.as_deref());
+        let uri = encode_sqlite_path(&path, query.as_deref(), use_empty_authority, arg.span)?;
         AccessRulesUri::try_from(uri)
             .context(access_rules_uri_error::DomainSnafu { span: arg.span })
     }
+}
+
+fn encode_sqlite_path(
+    path: &Path,
+    query: Option<&str>,
+    use_empty_authority: bool,
+    span: SourceSpan,
+) -> Result<url::Url, AccessRulesUriError> {
+    let path_url = url::Url::from_file_path(path).map_err(|()| AccessRulesUriError::PathUrl {
+        span,
+        path: path.to_owned(),
+    })?;
+    if path_url.host_str().is_some() {
+        return Err(AccessRulesUriError::PathUrl {
+            span,
+            path: path.to_owned(),
+        });
+    }
+    let root = if use_empty_authority {
+        "sqlite:///"
+    } else {
+        "sqlite:/"
+    };
+    let mut uri = url::Url::parse(root).context(access_rules_uri_error::UriSnafu { span })?;
+    uri.set_path(path_url.path());
+    uri.set_query(query);
+    Ok(uri)
 }
 
 #[cfg(test)]
@@ -105,7 +115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_access_rules_relative_sqlite_is_resolved_against_source_file() {
+    async fn parse_access_rules_relative_sqlite_preserves_os_path_bytes() {
         let dir = std::env::temp_dir().join(format!(
             "gateway-relative-access-rules-{}-{}",
             std::process::id(),
@@ -117,17 +127,33 @@ mod tests {
         std::fs::create_dir_all(dir.join("db")).expect("create db dir");
         std::fs::write(dir.join("server.crt"), "dummy cert").expect("write cert");
         std::fs::write(dir.join("server.key"), "dummy key").expect("write key");
+        let mut cases = vec![("sqlite:a:b.db?mode=ro%23strict", dir.join("a:b.db"))];
         #[cfg(unix)]
-        let access_rules = "sqlite:./db/access%3Fpart%23name%FF.db?mode=ro%23strict";
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            cases.extend([
+                (r"sqlite:a\b.db?mode=ro%23strict", dir.join(r"a\b.db")),
+                ("sqlite:a%5Cb.db?mode=ro%23strict", dir.join(r"a\b.db")),
+                (
+                    "sqlite:a%3Fb%23c%FF.db?mode=ro%23strict",
+                    dir.join(std::ffi::OsString::from_vec(b"a?b#c\xff.db".to_vec())),
+                ),
+            ]);
+        }
         #[cfg(not(unix))]
-        let access_rules = "sqlite:./db/access%3Fpart%23name.db?mode=ro%23strict";
-        std::fs::write(
-            dir.join("server.conf"),
-            format!(
-                "server {{\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    access_rules {access_rules};\n}}\n"
-            ),
-        )
-        .expect("write config");
+        cases.push(("sqlite:a%3Fb%23c.db?mode=ro%23strict", dir.join("a?b#c.db")));
+        let config = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (access_rules, _))| {
+                format!(
+                    "server {{\n    listen all {};\n    server_name example-{index}.com;\n    ssl_certificate ./server.crt;\n    ssl_certificate_key ./server.key;\n    access_rules {access_rules};\n}}\n",
+                    5378 + index,
+                )
+            })
+            .collect::<String>();
+        std::fs::write(dir.join("server.conf"), config).expect("write config");
 
         let registry = crate::parse::default_registry();
         let parsed = crate::parse::load_config_file(
@@ -138,19 +164,20 @@ mod tests {
         .await
         .expect("config should load");
 
-        let server = parsed.root.children("server").expect("server children")[0].clone();
-        #[cfg(unix)]
-        let expected_suffix = "db/access%3Fpart%23name%FF.db?mode=ro%23strict";
-        #[cfg(not(unix))]
-        let expected_suffix = "db/access%3Fpart%23name.db?mode=ro%23strict";
-        assert_eq!(
-            server
+        let servers = parsed.root.children("server").expect("server children");
+        assert_eq!(servers.len(), cases.len());
+        for (server, (_, expected_path)) in servers.iter().zip(cases) {
+            let uri = &server
                 .require::<crate::parse::types::AccessRulesUri>("access_rules")
                 .expect("access_rules should be typed")
-                .0
-                .as_str(),
-            format!("sqlite://{}/{expected_suffix}", dir.display())
-        );
+                .0;
+            assert_eq!(
+                crate::parse::types::AccessRulesUri::decoded_sqlite_path(uri)
+                    .expect("access_rules path should decode"),
+                expected_path,
+            );
+            assert_eq!(uri.query(), Some("mode=ro%23strict"));
+        }
     }
 
     #[test]
