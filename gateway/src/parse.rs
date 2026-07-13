@@ -32,6 +32,17 @@ impl<'registry> ConfigDocumentParser<'registry> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_next_document_index(
+        registry: &'registry registry::ConfigRegistry,
+        next_index: u64,
+    ) -> Self {
+        Self {
+            registry,
+            document_ids: domain::ConfigDocumentIdAllocator::with_next_index(next_index),
+        }
+    }
+
     pub fn parse_text(
         &mut self,
         text: &str,
@@ -44,13 +55,14 @@ impl<'registry> ConfigDocumentParser<'registry> {
                 return Err(error::ConfigLoadFailure {
                     error: error::LoadConfigError::DocumentId { source },
                     source_map: Arc::new(source::SourceMap::default()),
+                    document_id: None,
                 });
             }
         };
         let role_kind = role.kind();
         let options = role.build_options();
         let source_path = source_path.to_path_buf();
-        let mut source_map = source::SourceMap::with_document_id(document_id);
+        let mut source_map = source::SourceMap::default();
         let source_id = source_map.add_source(
             Some(source_path.clone()),
             Arc::from(text),
@@ -66,6 +78,7 @@ impl<'registry> ConfigDocumentParser<'registry> {
                 return Err(error::ConfigLoadFailure {
                     error,
                     source_map: Arc::new(source_map),
+                    document_id: Some(document_id),
                 });
             }
         };
@@ -79,23 +92,30 @@ impl<'registry> ConfigDocumentParser<'registry> {
                     return Err(error::ConfigLoadFailure {
                         error,
                         source_map: Arc::new(source_map),
+                        document_id: Some(document_id),
                     });
                 }
             };
 
         let source_map = Arc::new(source_map);
+        let document_sources = Arc::new(source::ConfigDocumentSourceMap::new(
+            document_id,
+            Arc::clone(&source_map),
+        ));
         match self
             .registry
-            .build_for_role(Arc::clone(&source_map), directives, options, role_kind)
+            .build_for_role(document_sources, directives, options, role_kind)
         {
             Ok(document) => Ok(document),
             Err(registry::RoleDocumentBuildError::Role(source)) => Err(error::ConfigLoadFailure {
                 error: error::LoadConfigError::DocumentRole { source },
                 source_map,
+                document_id: Some(document_id),
             }),
             Err(registry::RoleDocumentBuildError::Build(source)) => Err(error::ConfigLoadFailure {
                 error: error::LoadConfigError::BuildDocument { source },
                 source_map,
+                document_id: Some(document_id),
             }),
         }
     }
@@ -173,6 +193,7 @@ fn load_config_text_inner(
             return Err(error::ConfigLoadFailure {
                 error,
                 source_map: Arc::new(source_map),
+                document_id: None,
             });
         }
     };
@@ -185,6 +206,7 @@ fn load_config_text_inner(
             return Err(error::ConfigLoadFailure {
                 error,
                 source_map: Arc::new(source_map),
+                document_id: None,
             });
         }
     };
@@ -195,7 +217,11 @@ fn load_config_text_inner(
         .context(error::load_config_error::BuildDocumentSnafu)
     {
         Ok(document) => Ok(document),
-        Err(error) => Err(error::ConfigLoadFailure { error, source_map }),
+        Err(error) => Err(error::ConfigLoadFailure {
+            error,
+            source_map,
+            document_id: None,
+        }),
     }
 }
 
@@ -214,6 +240,7 @@ pub async fn load_config_file(
                     source,
                 },
                 source_map: Arc::new(source::SourceMap::default()),
+                document_id: None,
             });
         }
     };

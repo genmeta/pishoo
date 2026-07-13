@@ -21,7 +21,7 @@ pub enum NormalizeDirectiveValueError {
     },
 }
 
-pub fn resolve_config_path(
+fn resolve_config_path(
     path: &Path,
     span: SourceSpan,
     source_map: &SourceMap,
@@ -38,7 +38,7 @@ pub fn resolve_config_path(
         .context(normalize_directive_value_error::InvalidResolvedPathSnafu { span })
 }
 
-pub fn normalize_path(
+pub(crate) fn normalize_path(
     path: &Path,
     span: SourceSpan,
     source_map: &SourceMap,
@@ -46,7 +46,7 @@ pub fn normalize_path(
     resolve_config_path(path, span, source_map).map(Into::into)
 }
 
-pub fn normalize_slot_value(
+pub(crate) fn normalize_slot_value(
     value: TypedValue,
     source_map: &SourceMap,
 ) -> Result<TypedValue, NormalizeDirectiveValueError> {

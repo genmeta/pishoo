@@ -29,16 +29,18 @@ impl ConfigDocumentIdAllocator {
     }
 
     #[cfg(test)]
-    fn with_next_index(next_index: u64) -> Self {
+    pub(crate) fn with_next_index(next_index: u64) -> Self {
         Self { next_index }
     }
 
     pub(crate) fn allocate(&mut self) -> Result<ConfigDocumentId, ConfigDocumentIdError> {
         let document_id = ConfigDocumentId::try_from_index(self.next_index)?;
-        self.next_index = self
-            .next_index
-            .checked_add(1)
-            .expect("a valid u32 document index always has a u64 successor");
+        self.next_index =
+            self.next_index
+                .checked_add(1)
+                .ok_or(ConfigDocumentIdError::CounterOverflow {
+                    index: self.next_index,
+                })?;
         Ok(document_id)
     }
 }
@@ -57,6 +59,8 @@ pub enum ConfigDocumentIdError {
         index: u64,
         source: std::num::TryFromIntError,
     },
+    #[snafu(display("configuration document counter cannot advance past index {index}"))]
+    CounterOverflow { index: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,19 +156,25 @@ impl ConfigDocumentRole<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfigDocumentRoleKind {
+pub enum ConfigDocumentRoleKind {
     HypervisorRoot,
     WorkerPishoo,
     IdentityServer,
 }
 
 impl ConfigDocumentRoleKind {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::HypervisorRoot => "hypervisor root",
             Self::WorkerPishoo => "worker pishoo",
             Self::IdentityServer => "identity server",
         }
+    }
+}
+
+impl fmt::Display for ConfigDocumentRoleKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

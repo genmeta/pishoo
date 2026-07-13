@@ -99,6 +99,23 @@ fn find_span(error: &(dyn Error + 'static)) -> Option<SourceSpan> {
             crate::parse::grammar::ParseSyntaxError::Syntax { span, .. } => Some(*span),
         };
     }
+    if let Some(error) = error.downcast_ref::<crate::parse::error::ConfigDocumentRoleError>() {
+        let span = match error {
+            crate::parse::error::ConfigDocumentRoleError::DirectiveNotAllowed { span, .. }
+            | crate::parse::error::ConfigDocumentRoleError::ExpectedSinglePishoo { span, .. }
+            | crate::parse::error::ConfigDocumentRoleError::MissingIdentityServer {
+                span, ..
+            }
+            | crate::parse::error::ConfigDocumentRoleError::InvalidDirectiveRegistration {
+                span,
+                ..
+            }
+            | crate::parse::error::ConfigDocumentRoleError::MissingBuiltDirective {
+                span, ..
+            } => span,
+        };
+        return Some(span.source_span());
+    }
     if let Some(error) = error.downcast_ref::<crate::parse::error::BuildDocumentError>() {
         return match error {
             crate::parse::error::BuildDocumentError::UnknownDirective { span, .. }

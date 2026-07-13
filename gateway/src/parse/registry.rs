@@ -9,12 +9,18 @@ use crate::parse::{
     error::{BuildDocumentError, ConfigDocumentRoleError, build_document_error},
     fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     normalize,
-    source::{SourceMap, SourceSpan},
+    source::{ConfigDocumentSourceMap, SourceMap, SourceSpan},
     value::{ConfigValue, TypedValue},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContextKey(pub &'static str);
+
+impl std::fmt::Display for ContextKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
 
 pub mod context {
     use super::ContextKey;
@@ -323,18 +329,19 @@ impl ConfigRegistry {
 
     pub(crate) fn build_for_role(
         &self,
-        source_map: Arc<SourceMap>,
+        sources: Arc<ConfigDocumentSourceMap>,
         directives: Vec<AstDirective>,
         options: BuildOptions<'_>,
         role: ConfigDocumentRoleKind,
     ) -> Result<ParsedConfigDocument, RoleDocumentBuildError> {
-        validate_document_shape(&source_map, &directives, role)?;
-        self.validate_role_directives(&source_map, &directives, context::ROOT, role)?;
+        self.validate_role_registration(&sources, &directives, role)?;
+        validate_document_shape(&sources, &directives, role)?;
+        self.validate_role_directives(&sources, &directives, context::ROOT, role)?;
 
         let span = document_span(&directives);
         let mut root = ConfigNode::new(context::ROOT, None, span);
         self.build_into(
-            source_map.as_ref(),
+            sources.source_map(),
             &mut root,
             context::ROOT,
             directives,
@@ -343,40 +350,107 @@ impl ConfigRegistry {
         .map_err(RoleDocumentBuildError::Build)?;
 
         match role {
-            ConfigDocumentRoleKind::HypervisorRoot | ConfigDocumentRoleKind::WorkerPishoo => {
-                let pishoo = root
-                    .children_optional("pishoo")
-                    .first()
-                    .cloned()
-                    .expect("document role validation requires one pishoo block");
-                let fragment = ParsedPishooFragment::new(source_map, pishoo);
-                Ok(match role {
-                    ConfigDocumentRoleKind::HypervisorRoot => {
-                        ParsedConfigDocument::HypervisorRoot(fragment)
-                    }
-                    ConfigDocumentRoleKind::WorkerPishoo => {
-                        ParsedConfigDocument::WorkerPishoo(fragment)
-                    }
-                    ConfigDocumentRoleKind::IdentityServer => {
-                        unreachable!("identity role handled by the other match arm")
-                    }
-                })
+            ConfigDocumentRoleKind::HypervisorRoot => {
+                let pishoo = self.required_built_child(&sources, &root, "pishoo", role)?;
+                Ok(ParsedConfigDocument::HypervisorRoot(
+                    ParsedPishooFragment::new(sources, pishoo),
+                ))
+            }
+            ConfigDocumentRoleKind::WorkerPishoo => {
+                let pishoo = self.required_built_child(&sources, &root, "pishoo", role)?;
+                Ok(ParsedConfigDocument::WorkerPishoo(
+                    ParsedPishooFragment::new(sources, pishoo),
+                ))
             }
             ConfigDocumentRoleKind::IdentityServer => {
-                let servers = root
+                let servers: Box<[_]> = root
                     .children_optional("server")
                     .iter()
                     .cloned()
-                    .map(|server| ParsedServerFragment::new(Arc::clone(&source_map), server))
+                    .map(|server| ParsedServerFragment::new(Arc::clone(&sources), server))
                     .collect();
+                if servers.is_empty() {
+                    return Err(RoleDocumentBuildError::Role(
+                        ConfigDocumentRoleError::missing_built_directive(
+                            DirectiveName::new("server"),
+                            role,
+                            sources.config_span(root.span),
+                        ),
+                    ));
+                }
                 Ok(ParsedConfigDocument::IdentityServers(servers))
             }
         }
     }
 
+    fn validate_role_registration(
+        &self,
+        sources: &ConfigDocumentSourceMap,
+        directives: &[AstDirective],
+        role: ConfigDocumentRoleKind,
+    ) -> Result<(), RoleDocumentBuildError> {
+        let (directive, expected_child_context) = match role {
+            ConfigDocumentRoleKind::HypervisorRoot | ConfigDocumentRoleKind::WorkerPishoo => {
+                (DirectiveName::new("pishoo"), context::PISHOO)
+            }
+            ConfigDocumentRoleKind::IdentityServer => {
+                (DirectiveName::new("server"), context::SERVER)
+            }
+        };
+        let spec = self.directives.get(&(context::ROOT, directive.as_str()));
+        let valid = spec.is_some_and(|spec| {
+            spec.allowed_in.contains(&context::ROOT)
+                && matches!(
+                    spec.shape,
+                    DirectiveShape::ContextBlock {
+                        child_context,
+                        payload: PayloadMode::None,
+                    } if child_context == expected_child_context
+                )
+                && self.contexts.contains_key(&expected_child_context)
+        });
+        if valid {
+            return Ok(());
+        }
+        let span = directives
+            .iter()
+            .find(|candidate| candidate.name.value == directive.as_str())
+            .map_or_else(
+                || document_span(directives),
+                |candidate| candidate.name.span,
+            );
+        Err(RoleDocumentBuildError::Role(
+            ConfigDocumentRoleError::invalid_directive_registration(
+                directive,
+                role,
+                expected_child_context,
+                sources.config_span(span),
+            ),
+        ))
+    }
+
+    fn required_built_child(
+        &self,
+        sources: &ConfigDocumentSourceMap,
+        root: &ConfigNode,
+        directive: &'static str,
+        role: ConfigDocumentRoleKind,
+    ) -> Result<Arc<ConfigNode>, RoleDocumentBuildError> {
+        root.children_optional(directive)
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                RoleDocumentBuildError::Role(ConfigDocumentRoleError::missing_built_directive(
+                    DirectiveName::new(directive),
+                    role,
+                    sources.config_span(root.span),
+                ))
+            })
+    }
+
     fn validate_role_directives(
         &self,
-        source_map: &SourceMap,
+        sources: &ConfigDocumentSourceMap,
         directives: &[AstDirective],
         context: ContextKey,
         role: ConfigDocumentRoleKind,
@@ -389,20 +463,20 @@ impl ConfigRegistry {
                 continue;
             };
             if !directive_allowed_for_role(spec, context, role) {
-                return Err(RoleDocumentBuildError::Role(Box::new(
+                return Err(RoleDocumentBuildError::Role(
                     ConfigDocumentRoleError::directive_not_allowed(
                         spec.name,
                         role,
-                        source_map.config_span(directive.name.span),
+                        sources.config_span(directive.name.span),
                     ),
-                )));
+                ));
             }
             if let (
                 DirectiveShape::ContextBlock { child_context, .. },
                 AstBody::Block { children, .. },
             ) = (spec.shape, &directive.body)
             {
-                self.validate_role_directives(source_map, children, child_context, role)?;
+                self.validate_role_directives(sources, children, child_context, role)?;
             }
         }
         Ok(())
@@ -455,8 +529,15 @@ impl ConfigRegistry {
                     {
                         child.set_payload(value);
                     }
-                    let AstBody::Block { children, .. } = directive.body else {
-                        unreachable!("shape checked block before child build");
+                    let children = match directive.body {
+                        AstBody::Block { children, .. } => children,
+                        AstBody::Leaf { .. } => {
+                            return build_document_error::InvalidDirectiveShapeSnafu {
+                                directive: directive_name,
+                                span: directive.span,
+                            }
+                            .fail();
+                        }
                     };
                     self.build_into(source_map, &mut child, child_context, children, options)?;
                     self.finalize(&mut child, child_context, options)?;
@@ -547,7 +628,7 @@ fn document_span(directives: &[AstDirective]) -> SourceSpan {
 }
 
 fn validate_document_shape(
-    source_map: &SourceMap,
+    sources: &ConfigDocumentSourceMap,
     directives: &[AstDirective],
     role: ConfigDocumentRoleKind,
 ) -> Result<(), RoleDocumentBuildError> {
@@ -563,14 +644,13 @@ fn validate_document_shape(
                     .copied()
                     .or_else(|| directives.first())
                     .map_or_else(|| document_span(directives), |directive| directive.span);
-                return Err(RoleDocumentBuildError::Role(Box::new(
+                return Err(RoleDocumentBuildError::Role(
                     ConfigDocumentRoleError::expected_single_pishoo(
                         role,
                         pishoo.len(),
-                        source_map.config_span(span),
-                        pishoo.first().map(|directive| directive.span),
+                        sources.config_span(span),
                     ),
-                )));
+                ));
             }
         }
         ConfigDocumentRoleKind::IdentityServer => {
@@ -578,11 +658,12 @@ fn validate_document_shape(
                 .iter()
                 .any(|directive| directive.name.value == "server")
             {
-                return Err(RoleDocumentBuildError::Role(Box::new(
+                return Err(RoleDocumentBuildError::Role(
                     ConfigDocumentRoleError::missing_identity_server(
-                        source_map.config_span(document_span(directives)),
+                        role,
+                        sources.config_span(document_span(directives)),
                     ),
-                )));
+                ));
             }
         }
     }
@@ -606,7 +687,7 @@ fn directive_allowed_for_role(
 }
 
 pub(crate) enum RoleDocumentBuildError {
-    Role(Box<ConfigDocumentRoleError>),
+    Role(ConfigDocumentRoleError),
     Build(BuildDocumentError),
 }
 

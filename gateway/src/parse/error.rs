@@ -8,6 +8,7 @@ use crate::parse::{
         DirectiveName,
     },
     grammar::ParseSyntaxError,
+    registry::ContextKey,
     source::{SourceId, SourceMap, SourceSpan},
 };
 
@@ -36,9 +37,7 @@ pub enum LoadConfigError {
     BuildDocument { source: BuildDocumentError },
 
     #[snafu(display("configuration document is invalid for its role"))]
-    DocumentRole {
-        source: Box<ConfigDocumentRoleError>,
-    },
+    DocumentRole { source: ConfigDocumentRoleError },
 }
 
 #[derive(Debug, Snafu)]
@@ -47,27 +46,42 @@ pub enum ConfigDocumentRoleError {
     #[snafu(display("directive `{directive}` is not allowed in a {role} configuration document"))]
     DirectiveNotAllowed {
         directive: DirectiveName,
-        role: &'static str,
+        role: ConfigDocumentRoleKind,
         span: ConfigSourceSpan,
-        source: Box<BuildDocumentError>,
     },
 
     #[snafu(display(
         "{role} configuration document must contain exactly one top-level pishoo block, found {found}"
     ))]
     ExpectedSinglePishoo {
-        role: &'static str,
+        role: ConfigDocumentRoleKind,
         found: usize,
         span: ConfigSourceSpan,
-        source: Box<BuildDocumentError>,
     },
 
     #[snafu(display(
         "identity server configuration document must contain at least one server block"
     ))]
     MissingIdentityServer {
+        role: ConfigDocumentRoleKind,
         span: ConfigSourceSpan,
-        source: Box<BuildDocumentError>,
+    },
+
+    #[snafu(display(
+        "directive `{directive}` has an invalid registry contract for a {role} configuration document; expected a top-level `{expected_child_context}` context block"
+    ))]
+    InvalidDirectiveRegistration {
+        directive: DirectiveName,
+        role: ConfigDocumentRoleKind,
+        expected_child_context: ContextKey,
+        span: ConfigSourceSpan,
+    },
+
+    #[snafu(display("directive `{directive}` was not built for a {role} configuration document"))]
+    MissingBuiltDirective {
+        directive: DirectiveName,
+        role: ConfigDocumentRoleKind,
+        span: ConfigSourceSpan,
     },
 }
 
@@ -79,13 +93,8 @@ impl ConfigDocumentRoleError {
     ) -> Self {
         Self::DirectiveNotAllowed {
             directive,
-            role: role.as_str(),
+            role,
             span,
-            source: Box::new(BuildDocumentError::InvalidContext {
-                directive: directive.as_str().to_owned(),
-                context: role.as_str(),
-                span: span.source_span(),
-            }),
         }
     }
 
@@ -93,34 +102,40 @@ impl ConfigDocumentRoleError {
         role: ConfigDocumentRoleKind,
         found: usize,
         span: ConfigSourceSpan,
-        first: Option<SourceSpan>,
     ) -> Self {
-        let source = match first {
-            Some(first) => BuildDocumentError::DuplicateDirective {
-                directive: "pishoo".to_owned(),
-                first,
-                duplicate: span.source_span(),
-            },
-            None => BuildDocumentError::MissingRequiredDirective {
-                directive: "pishoo",
-                context_span: span.source_span(),
-            },
-        };
-        Self::ExpectedSinglePishoo {
-            role: role.as_str(),
-            found,
+        Self::ExpectedSinglePishoo { role, found, span }
+    }
+
+    pub(crate) fn missing_identity_server(
+        role: ConfigDocumentRoleKind,
+        span: ConfigSourceSpan,
+    ) -> Self {
+        Self::MissingIdentityServer { role, span }
+    }
+
+    pub(crate) fn invalid_directive_registration(
+        directive: DirectiveName,
+        role: ConfigDocumentRoleKind,
+        expected_child_context: ContextKey,
+        span: ConfigSourceSpan,
+    ) -> Self {
+        Self::InvalidDirectiveRegistration {
+            directive,
+            role,
+            expected_child_context,
             span,
-            source: Box::new(source),
         }
     }
 
-    pub(crate) fn missing_identity_server(span: ConfigSourceSpan) -> Self {
-        Self::MissingIdentityServer {
+    pub(crate) fn missing_built_directive(
+        directive: DirectiveName,
+        role: ConfigDocumentRoleKind,
+        span: ConfigSourceSpan,
+    ) -> Self {
+        Self::MissingBuiltDirective {
+            directive,
+            role,
             span,
-            source: Box::new(BuildDocumentError::MissingRequiredDirective {
-                directive: "server",
-                context_span: span.source_span(),
-            }),
         }
     }
 }
@@ -238,6 +253,7 @@ pub enum ConfigQueryError {
 pub struct ConfigLoadFailure {
     pub error: LoadConfigError,
     pub source_map: Arc<SourceMap>,
+    pub(crate) document_id: Option<ConfigDocumentId>,
 }
 
 impl std::fmt::Display for ConfigLoadFailure {
@@ -253,8 +269,8 @@ impl std::error::Error for ConfigLoadFailure {
 }
 
 impl ConfigLoadFailure {
-    pub fn document_id(&self) -> ConfigDocumentId {
-        self.source_map.document_id()
+    pub fn document_id(&self) -> Option<ConfigDocumentId> {
+        self.document_id
     }
 }
 
@@ -273,6 +289,7 @@ mod tests {
                 },
             },
             source_map: Arc::new(SourceMap::default()),
+            document_id: None,
         };
 
         assert_eq!(failure.to_string(), "failed to load configuration");

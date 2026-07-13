@@ -41,8 +41,8 @@ impl ConfigDocument {
         Self { source_map, root }
     }
 
-    pub fn document_id(&self) -> ConfigDocumentId {
-        self.source_map.document_id()
+    pub fn document_id(&self) -> Option<ConfigDocumentId> {
+        None
     }
 }
 

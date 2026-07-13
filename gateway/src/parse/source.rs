@@ -46,10 +46,15 @@ pub struct SourceFile {
     pub included_from: Option<IncludeTrace>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SourceMap {
-    document_id: ConfigDocumentId,
     sources: Vec<SourceFile>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConfigDocumentSourceMap {
+    document_id: ConfigDocumentId,
+    source_map: Arc<SourceMap>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,21 +64,6 @@ pub struct LineColumn {
 }
 
 impl SourceMap {
-    pub(crate) fn with_document_id(document_id: ConfigDocumentId) -> Self {
-        Self {
-            document_id,
-            sources: Vec::new(),
-        }
-    }
-
-    pub fn document_id(&self) -> ConfigDocumentId {
-        self.document_id
-    }
-
-    pub fn config_span(&self, span: SourceSpan) -> ConfigSourceSpan {
-        ConfigSourceSpan::new(self.document_id, span)
-    }
-
     pub fn add_source(
         &mut self,
         path: Option<PathBuf>,
@@ -130,11 +120,24 @@ impl SourceMap {
     }
 }
 
-impl Default for SourceMap {
-    fn default() -> Self {
-        Self::with_document_id(
-            ConfigDocumentId::try_from_index(0).expect("zero is a valid configuration document id"),
-        )
+impl ConfigDocumentSourceMap {
+    pub(crate) fn new(document_id: ConfigDocumentId, source_map: Arc<SourceMap>) -> Self {
+        Self {
+            document_id,
+            source_map,
+        }
+    }
+
+    pub(crate) fn document_id(&self) -> ConfigDocumentId {
+        self.document_id
+    }
+
+    pub(crate) fn config_span(&self, span: SourceSpan) -> ConfigSourceSpan {
+        ConfigSourceSpan::new(self.document_id, span)
+    }
+
+    pub(crate) fn source_map(&self) -> &SourceMap {
+        &self.source_map
     }
 }
 
