@@ -12,10 +12,34 @@ use crate::parse::{registry::BuildOptions, source::SourceSpan};
 pub struct ConfigDocumentId(u32);
 
 impl ConfigDocumentId {
-    pub(crate) fn try_from_index(index: usize) -> Result<Self, ConfigDocumentIdError> {
+    pub(crate) fn try_from_index(index: u64) -> Result<Self, ConfigDocumentIdError> {
         let index =
             u32::try_from(index).context(config_document_id_error::IndexOverflowSnafu { index })?;
         Ok(Self(index))
+    }
+}
+
+pub(crate) struct ConfigDocumentIdAllocator {
+    next_index: u64,
+}
+
+impl ConfigDocumentIdAllocator {
+    pub(crate) fn new() -> Self {
+        Self { next_index: 0 }
+    }
+
+    #[cfg(test)]
+    fn with_next_index(next_index: u64) -> Self {
+        Self { next_index }
+    }
+
+    pub(crate) fn allocate(&mut self) -> Result<ConfigDocumentId, ConfigDocumentIdError> {
+        let document_id = ConfigDocumentId::try_from_index(self.next_index)?;
+        self.next_index = self
+            .next_index
+            .checked_add(1)
+            .expect("a valid u32 document index always has a u64 successor");
+        Ok(document_id)
     }
 }
 
@@ -30,7 +54,7 @@ impl fmt::Display for ConfigDocumentId {
 pub enum ConfigDocumentIdError {
     #[snafu(display("configuration document index exceeds the supported range"))]
     IndexOverflow {
-        index: usize,
+        index: u64,
         source: std::num::TryFromIntError,
     },
 }
@@ -180,4 +204,29 @@ pub enum ResolvedConfigPathError {
     Relative { path: PathBuf },
     #[snafu(display("resolved configuration path contains a NUL byte"))]
     Nul { path: PathBuf },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_id_allocator_errors_after_allocating_maximum_id() {
+        let maximum_index = u64::from(u32::MAX);
+        let mut allocator = ConfigDocumentIdAllocator::with_next_index(maximum_index);
+
+        assert_eq!(
+            allocator.allocate().expect("maximum id should allocate"),
+            ConfigDocumentId::try_from_index(maximum_index)
+                .expect("maximum index should be a valid document id")
+        );
+        let error = allocator
+            .allocate()
+            .expect_err("allocator must not reuse the maximum id");
+        assert!(matches!(
+            error,
+            ConfigDocumentIdError::IndexOverflow { index, .. }
+                if index == maximum_index + 1
+        ));
+    }
 }

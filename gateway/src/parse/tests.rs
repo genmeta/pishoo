@@ -451,11 +451,9 @@ fn registry_v1_metadata_is_orthogonal() {
 
 #[test]
 fn document_id_index_conversion_rejects_overflow() {
-    if usize::BITS > u32::BITS {
-        assert!(
-            crate::parse::domain::ConfigDocumentId::try_from_index(u32::MAX as usize + 1).is_err()
-        );
-    }
+    assert!(
+        crate::parse::domain::ConfigDocumentId::try_from_index(u64::from(u32::MAX) + 1).is_err()
+    );
 }
 
 #[test]

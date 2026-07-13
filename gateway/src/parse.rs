@@ -21,14 +21,14 @@ pub mod value;
 
 pub struct ConfigDocumentParser<'registry> {
     registry: &'registry registry::ConfigRegistry,
-    next_document_index: usize,
+    document_ids: domain::ConfigDocumentIdAllocator,
 }
 
 impl<'registry> ConfigDocumentParser<'registry> {
     pub fn new(registry: &'registry registry::ConfigRegistry) -> Self {
         Self {
             registry,
-            next_document_index: 0,
+            document_ids: domain::ConfigDocumentIdAllocator::new(),
         }
     }
 
@@ -38,7 +38,7 @@ impl<'registry> ConfigDocumentParser<'registry> {
         source_path: &Path,
         role: domain::ConfigDocumentRole<'_>,
     ) -> Result<fragment::ParsedConfigDocument, error::ConfigLoadFailure> {
-        let document_id = match domain::ConfigDocumentId::try_from_index(self.next_document_index) {
+        let document_id = match self.document_ids.allocate() {
             Ok(document_id) => document_id,
             Err(source) => {
                 return Err(error::ConfigLoadFailure {
@@ -47,8 +47,6 @@ impl<'registry> ConfigDocumentParser<'registry> {
                 });
             }
         };
-        self.next_document_index = self.next_document_index.saturating_add(1);
-
         let role_kind = role.kind();
         let options = role.build_options();
         let source_path = source_path.to_path_buf();
