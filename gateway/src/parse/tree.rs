@@ -7,10 +7,11 @@ use crate::parse::{
     document::ConfigNode,
     domain::{
         ConfigDocumentId, ConfigDocumentIdAllocator, ConfigDocumentIdError, ConfigSourceSpan,
+        DirectiveName,
     },
     error::ConfigQueryError,
     fragment::{ParsedPishooFragment, ParsedServerFragment},
-    registry::context,
+    registry::{CascadePolicy, ConfigRegistry, context},
     snapshot::{RootConfigSnapshot, RootConfigSnapshotError},
     source::{SourceId, SourceMap, SourceSpan},
     value::ConfigValue,
@@ -31,6 +32,42 @@ struct SealedConfigNode {
     node: Arc<ConfigNode>,
     parent: ParentLink,
     children: Vec<ConfigNodeId>,
+    cascade_policies: Box<[(DirectiveName, CascadePolicy)]>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AttachedConfigNode<'tree> {
+    nodes: &'tree [SealedConfigNode],
+    node: ConfigNodeId,
+}
+
+impl<'tree> AttachedConfigNode<'tree> {
+    fn new(nodes: &'tree [SealedConfigNode], node: ConfigNodeId) -> Self {
+        Self { nodes, node }
+    }
+
+    pub(crate) fn context(self) -> crate::parse::registry::ContextKey {
+        self.nodes[self.node.0].node.context
+    }
+
+    pub(crate) fn config(self) -> &'tree ConfigNode {
+        &self.nodes[self.node.0].node
+    }
+
+    pub(crate) fn parent(self) -> Option<Self> {
+        match self.nodes[self.node.0].parent {
+            ParentLink::Root => None,
+            ParentLink::Node(parent) => Some(Self::new(self.nodes, parent)),
+        }
+    }
+
+    pub(crate) fn children(self) -> impl Iterator<Item = Self> + 'tree {
+        self.nodes[self.node.0]
+            .children
+            .iter()
+            .copied()
+            .map(|node| Self::new(self.nodes, node))
+    }
 }
 
 #[derive(Debug)]
@@ -100,15 +137,26 @@ pub enum HomeConfigTreeError {
     InvalidContext { node: ConfigNodeId },
     #[snafu(display("sealed configuration node has no owning source document"))]
     MissingSource { node: ConfigNodeId },
+    #[snafu(display("failed to finalize an attached configuration context"))]
+    FinalizeAttached {
+        node: ConfigNodeId,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
-pub fn build_global_tree(
+pub fn build_global_tree<I>(
+    registry: &ConfigRegistry,
     root_fragment: ParsedPishooFragment,
-) -> Result<Arc<HomeConfigTree>, HomeConfigTreeError> {
-    HomeConfigTreeBuilder::global(root_fragment)?.seal()
+    identity_fragments: I,
+) -> Result<Arc<HomeConfigTree>, HomeConfigTreeError>
+where
+    I: IntoIterator<Item = ParsedServerFragment>,
+{
+    HomeConfigTreeBuilder::global(registry, root_fragment, identity_fragments.into_iter())?.seal()
 }
 
 pub fn build_worker_tree<I>(
+    registry: &ConfigRegistry,
     root_snapshot: RootConfigSnapshot,
     worker_fragment: Option<ParsedPishooFragment>,
     identity_fragments: I,
@@ -117,6 +165,7 @@ where
     I: IntoIterator<Item = ParsedServerFragment>,
 {
     HomeConfigTreeBuilder::worker(
+        registry,
         root_snapshot,
         worker_fragment,
         identity_fragments.into_iter(),
@@ -124,7 +173,8 @@ where
     .seal()
 }
 
-struct HomeConfigTreeBuilder {
+struct HomeConfigTreeBuilder<'registry> {
+    registry: &'registry ConfigRegistry,
     nodes: Vec<SealedConfigNode>,
     root: ConfigNodeId,
     pishoo: ConfigNodeId,
@@ -134,11 +184,16 @@ struct HomeConfigTreeBuilder {
     document_ids: ConfigDocumentIdAllocator,
 }
 
-impl HomeConfigTreeBuilder {
-    fn global(fragment: ParsedPishooFragment) -> Result<Self, HomeConfigTreeError> {
+impl<'registry> HomeConfigTreeBuilder<'registry> {
+    fn global(
+        registry: &'registry ConfigRegistry,
+        fragment: ParsedPishooFragment,
+        identity_fragments: impl Iterator<Item = ParsedServerFragment>,
+    ) -> Result<Self, HomeConfigTreeError> {
         let synthetic_span = fragment.node().span;
         let root_node = Arc::new(ConfigNode::new(context::ROOT, None, synthetic_span));
         let mut builder = Self {
+            registry,
             nodes: Vec::new(),
             root: ConfigNodeId(0),
             pishoo: ConfigNodeId(0),
@@ -162,10 +217,14 @@ impl HomeConfigTreeBuilder {
             document_id,
             fragment: ConfigSourceFragment::Pishoo(fragment),
         });
+        for fragment in identity_fragments {
+            builder.attach_identity_fragment(fragment)?;
+        }
         Ok(builder)
     }
 
     fn worker(
+        registry: &'registry ConfigRegistry,
         root_snapshot: RootConfigSnapshot,
         worker_fragment: Option<ParsedPishooFragment>,
         identity_fragments: impl Iterator<Item = ParsedServerFragment>,
@@ -179,6 +238,7 @@ impl HomeConfigTreeBuilder {
             |fragment| Arc::clone(fragment.node()),
         );
         let mut builder = Self {
+            registry,
             nodes: Vec::new(),
             root: ConfigNodeId(0),
             pishoo: ConfigNodeId(0),
@@ -210,18 +270,26 @@ impl HomeConfigTreeBuilder {
             });
         }
         for fragment in identity_fragments {
-            if let Some(document_id) = builder.document_id(fragment.source_map()) {
-                builder.attach_server(&fragment, document_id);
-            } else {
-                let document_id = builder.allocate_document_id()?;
-                builder.attach_server(&fragment, document_id);
-                builder.sources.push(ConfigSourceOwner {
-                    document_id,
-                    fragment: ConfigSourceFragment::Server(fragment),
-                });
-            }
+            builder.attach_identity_fragment(fragment)?;
         }
         Ok(builder)
+    }
+
+    fn attach_identity_fragment(
+        &mut self,
+        fragment: ParsedServerFragment,
+    ) -> Result<(), HomeConfigTreeError> {
+        if let Some(document_id) = self.document_id(fragment.source_map()) {
+            self.attach_server(&fragment, document_id);
+        } else {
+            let document_id = self.allocate_document_id()?;
+            self.attach_server(&fragment, document_id);
+            self.sources.push(ConfigSourceOwner {
+                document_id,
+                fragment: ConfigSourceFragment::Server(fragment),
+            });
+        }
+        Ok(())
     }
 
     fn attach_server(&mut self, fragment: &ParsedServerFragment, document_id: ConfigDocumentId) {
@@ -262,11 +330,13 @@ impl HomeConfigTreeBuilder {
         parent: ParentLink,
     ) -> ConfigNodeId {
         let id = ConfigNodeId(self.nodes.len());
+        let cascade_policies = self.registry.cascade_policies(node.context);
         self.nodes.push(SealedConfigNode {
             document_id,
             node,
             parent,
             children: Vec::new(),
+            cascade_policies,
         });
         id
     }
@@ -300,6 +370,12 @@ impl HomeConfigTreeBuilder {
             for &location in &self.nodes[server.0].children {
                 self.verify_node(location, context::LOCATION, ParentLink::Node(server))?;
             }
+        }
+        for index in 0..self.nodes.len() {
+            let node = ConfigNodeId(index);
+            self.registry
+                .finalize_attached(AttachedConfigNode::new(&self.nodes, node))
+                .map_err(|source| HomeConfigTreeError::FinalizeAttached { node, source })?;
         }
         Ok(())
     }
@@ -386,6 +462,27 @@ impl HomeConfigTree {
     where
         T: ConfigValue,
     {
+        let mut chain = Vec::new();
+        let mut current = node;
+        loop {
+            chain.push(current);
+            match self.node(current).parent {
+                ParentLink::Root => break,
+                ParentLink::Node(parent) => current = parent,
+            }
+        }
+        chain.reverse();
+        let policy = self.cascade_policy(&chain, key.name())?;
+        if !matches!(
+            policy,
+            CascadePolicy::NearestWins | CascadePolicy::ReplaceWhole
+        ) {
+            return Err(ConfigQueryError::UnsupportedCascadePolicy {
+                directive: key.name().as_str().to_owned(),
+                policy,
+            });
+        }
+
         let mut lineage = Vec::new();
         let mut effective = key.builtin();
         if effective.is_some() {
@@ -402,16 +499,7 @@ impl HomeConfigTree {
             }
         }
 
-        let mut chain = Vec::new();
-        let mut current = node;
-        loop {
-            chain.push(current);
-            match self.node(current).parent {
-                ParentLink::Root => break,
-                ParentLink::Node(parent) => current = parent,
-            }
-        }
-        for id in chain.into_iter().rev() {
+        for id in chain {
             let node = self.node(id);
             if let Some((value, span)) = node.node.get_with_span::<T>(key.name().as_str())? {
                 effective = Some(value);
@@ -425,6 +513,40 @@ impl HomeConfigTree {
             }
         }
         Ok(effective.map(|effective| CascadedValue::new(effective, lineage.into_boxed_slice())))
+    }
+
+    fn cascade_policy(
+        &self,
+        chain: &[ConfigNodeId],
+        directive: DirectiveName,
+    ) -> Result<CascadePolicy, ConfigQueryError> {
+        let mut inherited = None;
+        for &node in chain {
+            let Some(local) = self.node(node).cascade_policy(directive) else {
+                continue;
+            };
+            if let Some(inherited) = inherited
+                && inherited != local
+            {
+                return Err(ConfigQueryError::CascadePolicyMismatch {
+                    directive: directive.as_str().to_owned(),
+                    inherited,
+                    local,
+                });
+            }
+            inherited = Some(local);
+        }
+        inherited.ok_or_else(|| ConfigQueryError::MissingCascadePolicy {
+            directive: directive.as_str().to_owned(),
+        })
+    }
+}
+
+impl SealedConfigNode {
+    fn cascade_policy(&self, directive: DirectiveName) -> Option<CascadePolicy> {
+        self.cascade_policies
+            .iter()
+            .find_map(|(name, policy)| (*name == directive).then_some(*policy))
     }
 }
 

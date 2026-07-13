@@ -10,6 +10,7 @@ use crate::parse::{
     fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     normalize,
     source::{ConfigDocumentSourceMap, SourceMap, SourceSpan},
+    tree::AttachedConfigNode,
     value::{ConfigValue, TypedValue},
 };
 
@@ -37,6 +38,7 @@ pub mod context {
 pub struct ConfigRegistry {
     contexts: HashMap<ContextKey, ContextSpec>,
     directives: HashMap<(ContextKey, &'static str), DirectiveSpec>,
+    attached_finalizers: HashMap<ContextKey, AttachedContextFinalizeFn>,
 }
 
 pub struct ContextSpec {
@@ -104,6 +106,10 @@ type DirectiveParserFn =
     fn(&DirectiveInput<'_>) -> Result<ParsedDirective, Box<dyn std::error::Error + Send + Sync>>;
 pub type ContextFinalizeFn =
     fn(&mut ConfigNode, &BuildOptions<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type AttachedContextFinalizeFn =
+    for<'tree> fn(
+        AttachedConfigNode<'tree>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 pub trait DirectiveValue: ConfigValue + Sized {
     type Error: Error + Send + Sync + 'static;
@@ -126,10 +132,6 @@ pub enum ParsedDirective {
 }
 
 impl DirectiveSpec {
-    pub fn matches_key<T>(&self, key: crate::parse::cascade::DirectiveKey<T>) -> bool {
-        self.name == key.name() && self.cascade == key.cascade_policy()
-    }
-
     pub fn leaf_value<T>(
         name: &'static str,
         allowed_in: Vec<ContextKey>,
@@ -295,6 +297,24 @@ impl ConfigRegistry {
         self.directives.insert((context, spec.name.as_str()), spec);
     }
 
+    pub(crate) fn register_attached_finalizer(
+        &mut self,
+        context: ContextKey,
+        finalize: AttachedContextFinalizeFn,
+    ) {
+        self.attached_finalizers.insert(context, finalize);
+    }
+
+    pub(crate) fn finalize_attached(
+        &self,
+        node: AttachedConfigNode<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(finalize) = self.attached_finalizers.get(&node.context()) {
+            finalize(node)?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn directive_spec(&self, context: ContextKey, name: &str) -> Option<&DirectiveSpec> {
         self.directives
@@ -304,14 +324,16 @@ impl ConfigRegistry {
             })
     }
 
-    #[cfg(test)]
-    pub(crate) fn directive_matches_key<T: ConfigValue>(
+    pub(crate) fn cascade_policies(
         &self,
         context: ContextKey,
-        key: crate::parse::cascade::DirectiveKey<T>,
-    ) -> bool {
-        self.directive_spec(context, key.name().as_str())
-            .is_some_and(|spec| spec.matches_key(key))
+    ) -> Box<[(DirectiveName, CascadePolicy)]> {
+        self.directives
+            .iter()
+            .filter_map(|((registered_context, _), spec)| {
+                (*registered_context == context).then_some((spec.name, spec.cascade))
+            })
+            .collect()
     }
 
     pub fn build(
@@ -554,16 +576,15 @@ impl ConfigRegistry {
                         }
                     };
                     self.build_into(source_map, &mut child, child_context, children, options)?;
-                    self.finalize(&mut child, child_context, options)?;
                     node.insert_child(spec.name.as_str(), Arc::new(child));
                 }
             }
         }
-        self.finalize(node, context, options)?;
+        self.finalize_local(node, context, options)?;
         Ok(())
     }
 
-    fn finalize(
+    fn finalize_local(
         &self,
         node: &mut ConfigNode,
         context: ContextKey,

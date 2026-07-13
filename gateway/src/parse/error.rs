@@ -8,7 +8,7 @@ use crate::parse::{
         DirectiveName,
     },
     grammar::ParseSyntaxError,
-    registry::ContextKey,
+    registry::{CascadePolicy, ContextKey},
     source::{SourceId, SourceMap, SourceSpan},
 };
 
@@ -247,6 +247,24 @@ pub enum ConfigQueryError {
 
     #[snafu(display("missing child directive `{directive}`"))]
     MissingChild { directive: String, span: SourceSpan },
+
+    #[snafu(display(
+        "directive `{directive}` has inconsistent cascade policies ({inherited:?} and {local:?})"
+    ))]
+    CascadePolicyMismatch {
+        directive: String,
+        inherited: CascadePolicy,
+        local: CascadePolicy,
+    },
+
+    #[snafu(display("directive `{directive}` has no registered cascade policy"))]
+    MissingCascadePolicy { directive: String },
+
+    #[snafu(display("directive `{directive}` does not support typed cascading with {policy:?}"))]
+    UnsupportedCascadePolicy {
+        directive: String,
+        policy: CascadePolicy,
+    },
 }
 
 #[derive(Debug)]

@@ -280,13 +280,10 @@ fn cascade_required<T: Clone>(
     value: &InheritedValue<T>,
     directive: DirectiveName,
 ) -> Option<(Arc<T>, ConfigOrigin)> {
-    match &value.origin {
-        InheritedOrigin::Builtin => None,
-        InheritedOrigin::Source(_) => Some((
-            Arc::new(value.value.clone()),
-            inherited_origin(&value.origin, directive),
-        )),
-    }
+    Some((
+        Arc::new(value.value.clone()),
+        inherited_origin(&value.origin, directive),
+    ))
 }
 
 fn cascade_optional<T: Clone>(
@@ -691,6 +688,48 @@ pub(crate) mod test_support {
         snapshot: &RootConfigSnapshot,
     ) -> Result<RootConfigSnapshot, RootConfigSnapshotError> {
         RootConfigSnapshot::try_from(RootConfigSnapshotWire::try_from(snapshot)?)
+    }
+
+    pub(crate) fn snapshot_with_builtin_gzip(gzip: bool) -> RootConfigSnapshot {
+        let builtin = || InheritedOrigin::Builtin;
+        RootConfigSnapshot::V1(RootInheritedConfigV1 {
+            access_rules: InheritedValue {
+                value: None,
+                origin: builtin(),
+            },
+            gzip: InheritedValue {
+                value: BoolConfig(gzip),
+                origin: builtin(),
+            },
+            gzip_vary: InheritedValue {
+                value: BoolConfig(false),
+                origin: builtin(),
+            },
+            gzip_min_length: InheritedValue {
+                value: GzipMinLength::checked(20),
+                origin: builtin(),
+            },
+            gzip_comp_level: InheritedValue {
+                value: GzipCompLevel::checked(1),
+                origin: builtin(),
+            },
+            gzip_types: InheritedValue {
+                value: None,
+                origin: builtin(),
+            },
+            default_type: InheritedValue {
+                value: None,
+                origin: builtin(),
+            },
+            types: InheritedValue {
+                value: None,
+                origin: builtin(),
+            },
+            access_log: InheritedValue {
+                value: None,
+                origin: builtin(),
+            },
+        })
     }
 
     pub(crate) fn values_without_origins(snapshot: &RootConfigSnapshot) -> SnapshotValues {

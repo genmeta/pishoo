@@ -153,6 +153,9 @@ fn find_span(error: &(dyn Error + 'static)) -> Option<SourceSpan> {
             | crate::parse::error::ConfigQueryError::TypeMismatch { span, .. }
             | crate::parse::error::ConfigQueryError::MultipleValues { span, .. }
             | crate::parse::error::ConfigQueryError::MissingChild { span, .. } => Some(*span),
+            crate::parse::error::ConfigQueryError::CascadePolicyMismatch { .. }
+            | crate::parse::error::ConfigQueryError::MissingCascadePolicy { .. }
+            | crate::parse::error::ConfigQueryError::UnsupportedCascadePolicy { .. } => None,
         };
     }
     error.source().and_then(find_span)

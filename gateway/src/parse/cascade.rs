@@ -2,7 +2,6 @@ use std::{marker::PhantomData, num::NonZeroU32, path::Path, sync::Arc};
 
 use crate::parse::{
     domain::{ConfigSourceSpan, DirectiveName},
-    registry::CascadePolicy,
     snapshot::RootConfigSnapshot,
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, MimeTypes,
@@ -83,7 +82,6 @@ pub struct DirectiveKey<T> {
     name: DirectiveName,
     builtin: BuiltinValue<T>,
     snapshot: SnapshotValue<T>,
-    cascade: CascadePolicy,
     value: PhantomData<fn() -> T>,
 }
 
@@ -98,13 +96,11 @@ impl<T> Copy for DirectiveKey<T> {}
 impl<T> DirectiveKey<T> {
     pub(crate) const fn new(
         name: &'static str,
-        cascade: CascadePolicy,
         builtin: BuiltinValue<T>,
         snapshot: SnapshotValue<T>,
     ) -> Self {
         Self {
             name: DirectiveName::new(name),
-            cascade,
             builtin,
             snapshot,
             value: PhantomData,
@@ -113,10 +109,6 @@ impl<T> DirectiveKey<T> {
 
     pub const fn name(self) -> DirectiveName {
         self.name
-    }
-
-    pub const fn cascade_policy(self) -> CascadePolicy {
-        self.cascade
     }
 
     pub(crate) fn builtin(self) -> Option<Arc<T>> {
@@ -146,49 +138,32 @@ fn builtin_comp_level() -> Option<Arc<GzipCompLevel>> {
 
 pub const ACCESS_RULES: DirectiveKey<AccessRulesUri> = DirectiveKey::new(
     "access_rules",
-    CascadePolicy::NearestWins,
     absent,
     RootConfigSnapshot::cascade_access_rules,
 );
-pub const GZIP: DirectiveKey<BoolConfig> = DirectiveKey::new(
-    "gzip",
-    CascadePolicy::NearestWins,
-    builtin_false,
-    RootConfigSnapshot::cascade_gzip,
-);
+pub const GZIP: DirectiveKey<BoolConfig> =
+    DirectiveKey::new("gzip", builtin_false, RootConfigSnapshot::cascade_gzip);
 pub const GZIP_VARY: DirectiveKey<BoolConfig> = DirectiveKey::new(
     "gzip_vary",
-    CascadePolicy::NearestWins,
     builtin_false,
     RootConfigSnapshot::cascade_gzip_vary,
 );
 pub const GZIP_MIN_LENGTH: DirectiveKey<GzipMinLength> = DirectiveKey::new(
     "gzip_min_length",
-    CascadePolicy::NearestWins,
     builtin_min_length,
     RootConfigSnapshot::cascade_gzip_min_length,
 );
 pub const GZIP_COMP_LEVEL: DirectiveKey<GzipCompLevel> = DirectiveKey::new(
     "gzip_comp_level",
-    CascadePolicy::NearestWins,
     builtin_comp_level,
     RootConfigSnapshot::cascade_gzip_comp_level,
 );
-pub const GZIP_TYPES: DirectiveKey<StringList> = DirectiveKey::new(
-    "gzip_types",
-    CascadePolicy::NearestWins,
-    absent,
-    RootConfigSnapshot::cascade_gzip_types,
-);
+pub const GZIP_TYPES: DirectiveKey<StringList> =
+    DirectiveKey::new("gzip_types", absent, RootConfigSnapshot::cascade_gzip_types);
 pub const DEFAULT_TYPE: DirectiveKey<DefaultType> = DirectiveKey::new(
     "default_type",
-    CascadePolicy::NearestWins,
     absent,
     RootConfigSnapshot::cascade_default_type,
 );
-pub const TYPES: DirectiveKey<MimeTypes> = DirectiveKey::new(
-    "types",
-    CascadePolicy::ReplaceWhole,
-    absent,
-    RootConfigSnapshot::cascade_types,
-);
+pub const TYPES: DirectiveKey<MimeTypes> =
+    DirectiveKey::new("types", absent, RootConfigSnapshot::cascade_types);

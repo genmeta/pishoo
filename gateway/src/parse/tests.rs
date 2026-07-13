@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -17,15 +17,47 @@ use crate::parse::{
     error::{ConfigDocumentRoleError, ConfigLoadFailure, LoadConfigError},
     fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     registry::{
-        CascadePolicy, DirectiveSpec, DuplicatePolicy, ReloadImpact, TransportPolicy, context,
+        BuildOptions, CascadePolicy, ContextSpec, DirectiveSpec, DuplicatePolicy, ReloadImpact,
+        TransportPolicy, context,
     },
     snapshot::{RootConfigSnapshot, test_support as snapshot_test_support},
     source::SourceId,
-    tree::{ParentLink, build_global_tree, build_worker_tree},
+    tree::{AttachedConfigNode, ParentLink, build_global_tree, build_worker_tree},
     types::{MimeTypes, PathConfig},
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static LOCAL_FINALIZER_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ATTACHED_FINALIZER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn count_local_server_finalizer(
+    _node: &mut ConfigNode,
+    _options: &BuildOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    LOCAL_FINALIZER_CALLS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+fn assert_attached_server_context(
+    node: AttachedConfigNode<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let parent = node
+        .parent()
+        .ok_or_else(|| std::io::Error::other("server must be attached before finalization"))?;
+    if parent.context() != context::PISHOO {
+        return Err(std::io::Error::other("server parent must be PISHOO").into());
+    }
+    if parent
+        .children()
+        .filter(|child| child.context() == context::SERVER)
+        .count()
+        != 2
+    {
+        return Err(std::io::Error::other("finalizer must observe every attached sibling").into());
+    }
+    ATTACHED_FINALIZER_CALLS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
 
 #[derive(Debug)]
 struct TempConfigDir {
@@ -213,6 +245,7 @@ fn parse_identity_fragments(
 }
 
 fn root_snapshot_fixture(
+    registry: &crate::parse::registry::ConfigRegistry,
     parser: &mut ConfigDocumentParser<'_>,
     fixture: &TempConfigDir,
 ) -> RootConfigSnapshot {
@@ -222,7 +255,7 @@ fn root_snapshot_fixture(
         &fixture.join("root/pishoo.conf"),
         None,
     );
-    let snapshot = build_global_tree(root)
+    let snapshot = build_global_tree(registry, root, Vec::new())
         .expect("root tree should seal")
         .root_snapshot()
         .expect("root snapshot should project");
@@ -720,11 +753,6 @@ fn registry_v1_metadata_is_orthogonal() {
     assert_eq!(server.cascade, CascadePolicy::None);
     assert_eq!(server.transport, TransportPolicy::HypervisorOnly);
     assert_eq!(server.reload, ReloadImpact::ListenerSet);
-
-    for context in [context::PISHOO, context::SERVER, context::LOCATION] {
-        assert!(registry.directive_matches_key(context, GZIP));
-        assert!(registry.directive_matches_key(context, TYPES));
-    }
 }
 
 #[test]
@@ -748,7 +776,7 @@ fn missing_worker_fragment_still_builds_root_and_pishoo() {
     let fixture = TempConfigDir::new("missing_worker_fragment");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let servers = parse_identity_fragments(
         &mut parser,
@@ -758,7 +786,8 @@ fn missing_worker_fragment_still_builds_root_and_pishoo() {
         "alice.dhttp.net",
     );
 
-    let tree = build_worker_tree(snapshot, None, servers).expect("worker tree should seal");
+    let tree =
+        build_worker_tree(&registry, snapshot, None, servers).expect("worker tree should seal");
 
     assert_eq!(
         tree.pishoo().parent_link(),
@@ -779,7 +808,7 @@ fn worker_scalar_override_wins_over_root_snapshot() {
     let fixture = TempConfigDir::new("worker_override");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let worker = parse_worker_fragment(
         &mut parser,
@@ -787,7 +816,8 @@ fn worker_scalar_override_wins_over_root_snapshot() {
         &fixture.worker_source_path(),
         &home,
     );
-    let tree = build_worker_tree(snapshot, Some(worker), Vec::new()).expect("tree should seal");
+    let tree =
+        build_worker_tree(&registry, snapshot, Some(worker), Vec::new()).expect("tree should seal");
 
     let gzip = tree
         .pishoo()
@@ -798,11 +828,32 @@ fn worker_scalar_override_wins_over_root_snapshot() {
 }
 
 #[test]
+fn worker_uses_required_snapshot_value_with_builtin_origin() {
+    let registry = crate::parse::default_registry();
+    let snapshot = snapshot_test_support::snapshot_with_builtin_gzip(true);
+
+    let tree = build_worker_tree(&registry, snapshot, None, Vec::new()).expect("tree should seal");
+    let gzip = tree
+        .pishoo()
+        .cascaded(GZIP)
+        .expect("gzip query should succeed")
+        .expect("complete snapshot supplies gzip");
+
+    assert!(gzip.effective().0);
+    assert_eq!(
+        gzip.lineage(),
+        [crate::parse::cascade::ConfigOrigin::Builtin {
+            directive: GZIP.name(),
+        }]
+    );
+}
+
+#[test]
 fn types_replaces_the_whole_parent_map() {
     let fixture = TempConfigDir::new("types_replace");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let servers = parse_identity_fragments(
         &mut parser,
@@ -811,7 +862,7 @@ fn types_replaces_the_whole_parent_map() {
         &home,
         "alice.dhttp.net",
     );
-    let tree = build_worker_tree(snapshot, None, servers).expect("tree should seal");
+    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
 
     let types = tree
         .servers()
@@ -827,11 +878,45 @@ fn types_replaces_the_whole_parent_map() {
 }
 
 #[test]
+fn cascade_query_rejects_registry_policy_mismatch() {
+    let fixture = TempConfigDir::new("cascade_policy_mismatch");
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::raw_value::<MimeTypes>(
+            "types",
+            vec![context::SERVER],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
+    let home = fixture.worker_home();
+    let servers = parse_identity_fragments(
+        &mut parser,
+        "server { listen all 443; types { text/server server; } }",
+        &fixture.join("worker/identity/server.conf"),
+        &home,
+        "alice.dhttp.net",
+    );
+    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
+    let server = tree.servers().next().expect("server should attach");
+
+    assert!(
+        server.node().cascaded(TYPES).is_err(),
+        "cascade policy mismatches must not use DirectiveKey hardcoding"
+    );
+}
+
+#[test]
 fn cascade_lineage_is_builtin_root_worker_server_location() {
     let fixture = TempConfigDir::new("cascade_lineage");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let worker = parse_worker_fragment(
         &mut parser,
@@ -846,7 +931,8 @@ fn cascade_lineage_is_builtin_root_worker_server_location() {
         &home,
         "alice.dhttp.net",
     );
-    let tree = build_worker_tree(snapshot, Some(worker), servers).expect("tree should seal");
+    let tree =
+        build_worker_tree(&registry, snapshot, Some(worker), servers).expect("tree should seal");
     let location = tree
         .servers()
         .next()
@@ -882,7 +968,7 @@ fn identity_server_parent_is_home_pishoo() {
     let fixture = TempConfigDir::new("identity_parent");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let servers = parse_identity_fragments(
         &mut parser,
@@ -891,7 +977,7 @@ fn identity_server_parent_is_home_pishoo() {
         &home,
         "alice.dhttp.net",
     );
-    let tree = build_worker_tree(snapshot, None, servers).expect("tree should seal");
+    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
     let server = tree.servers().next().expect("server");
 
     assert_eq!(
@@ -912,13 +998,71 @@ fn global_direct_server_parent_is_global_pishoo() {
         &fixture.join("global-home/pishoo.conf"),
         Some(&home),
     );
-    let tree = build_global_tree(root).expect("global tree should seal");
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
     let server = tree.servers().next().expect("server");
 
     assert_eq!(
         server.node().parent_link(),
         ParentLink::Node(tree.pishoo().id())
     );
+}
+
+#[test]
+fn global_identity_server_parent_is_global_pishoo() {
+    let fixture = TempConfigDir::new("global_identity_parent");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("global-home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo {}",
+        &fixture.join("global-home/pishoo.conf"),
+        Some(&home),
+    );
+    let identities = parse_identity_fragments(
+        &mut parser,
+        "server { listen all 443; }",
+        &fixture.join("global-home/identities/alice/server.conf"),
+        &home,
+        "alice.dhttp.net",
+    );
+
+    let tree = build_global_tree(&registry, root, identities).expect("global tree should seal");
+    let server = tree.servers().next().expect("global identity server");
+
+    assert_eq!(
+        server.node().parent_link(),
+        ParentLink::Node(tree.pishoo().id())
+    );
+}
+
+#[test]
+fn attached_registry_finalizer_observes_parent_and_complete_siblings() {
+    let fixture = TempConfigDir::new("attached_finalizer");
+    let mut registry = crate::parse::default_registry();
+    registry.register_context(ContextSpec {
+        key: context::SERVER,
+        finalize: Some(count_local_server_finalizer),
+    });
+    registry.register_attached_finalizer(context::SERVER, assert_attached_server_context);
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("global-home"));
+    LOCAL_FINALIZER_CALLS.store(0, Ordering::Relaxed);
+    ATTACHED_FINALIZER_CALLS.store(0, Ordering::Relaxed);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 443; } server { listen all 444; } }",
+        &fixture.join("global-home/pishoo.conf"),
+        Some(&home),
+    );
+
+    assert_eq!(LOCAL_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(ATTACHED_FINALIZER_CALLS.load(Ordering::Relaxed), 0);
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
+
+    assert_eq!(tree.servers().count(), 2);
+    assert_eq!(LOCAL_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(ATTACHED_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -933,7 +1077,7 @@ fn location_parent_is_its_server() {
         &fixture.join("global-home/pishoo.conf"),
         Some(&home),
     );
-    let tree = build_global_tree(root).expect("global tree should seal");
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
     let server = tree.servers().next().expect("server");
     let location = server.locations().next().expect("location");
 
@@ -956,7 +1100,7 @@ fn tree_ref_keeps_source_and_parent_alive() {
         &source_path,
         Some(&home),
     );
-    let tree = build_global_tree(root).expect("tree should seal");
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
     let server = tree.servers().next().expect("server");
     let span = server.node().source_span().expect("source span");
     drop(tree);
@@ -973,7 +1117,7 @@ fn cross_document_diagnostics_keep_the_correct_source_bundle() {
     let fixture = TempConfigDir::new("cross_document_sources");
     let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&mut parser, &fixture);
+    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
     let home = fixture.worker_home();
     let alice_path = fixture.join("alice/server.conf");
     let bob_path = fixture.join("bob/server.conf");
@@ -993,7 +1137,7 @@ fn cross_document_diagnostics_keep_the_correct_source_bundle() {
         &home,
         "bob.dhttp.net",
     ));
-    let tree = build_worker_tree(snapshot, None, servers).expect("tree should seal");
+    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
     let paths = tree
         .servers()
         .map(|server| {
@@ -1017,7 +1161,7 @@ fn root_snapshot_contains_only_worker_inheritable_values() {
         &fixture.join("global-home/pishoo.conf"),
         Some(&home),
     );
-    let snapshot = build_global_tree(root)
+    let snapshot = build_global_tree(&registry, root, Vec::new())
         .expect("root tree")
         .root_snapshot()
         .expect("snapshot");
@@ -1057,11 +1201,11 @@ fn root_direct_servers_are_not_serialized() {
         &fixture.join("with/pishoo.conf"),
         Some(&home),
     );
-    let first = build_global_tree(without_server)
+    let first = build_global_tree(&registry, without_server, Vec::new())
         .unwrap()
         .root_snapshot()
         .unwrap();
-    let second = build_global_tree(with_server)
+    let second = build_global_tree(&registry, with_server, Vec::new())
         .unwrap()
         .root_snapshot()
         .unwrap();
@@ -1159,7 +1303,10 @@ fn snapshot_preserves_absence_and_gzip_fallbacks() {
         &fixture.join("root/pishoo.conf"),
         None,
     );
-    let snapshot = build_global_tree(root).unwrap().root_snapshot().unwrap();
+    let snapshot = build_global_tree(&registry, root, Vec::new())
+        .unwrap()
+        .root_snapshot()
+        .unwrap();
 
     assert!(snapshot.access_rules().is_none());
     assert!(!snapshot.gzip().0);
@@ -1189,8 +1336,14 @@ fn snapshot_equality_includes_origin() {
         &fixture.join("two/pishoo.conf"),
         None,
     );
-    let first = build_global_tree(first).unwrap().root_snapshot().unwrap();
-    let second = build_global_tree(second).unwrap().root_snapshot().unwrap();
+    let first = build_global_tree(&registry, first, Vec::new())
+        .unwrap()
+        .root_snapshot()
+        .unwrap();
+    let second = build_global_tree(&registry, second, Vec::new())
+        .unwrap()
+        .root_snapshot()
+        .unwrap();
 
     assert_eq!(
         snapshot_test_support::checked_wire_round_trip(&first).unwrap(),

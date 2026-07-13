@@ -7,6 +7,7 @@ use crate::parse::{
         ReloadImpact, TransportPolicy, context,
     },
     source::SourceSpan,
+    tree::AttachedConfigNode,
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, ListenConfig,
         MimeTypes, PathConfig, ResolverConfig, ServerName, ServerNames, StringList,
@@ -23,6 +24,10 @@ pub enum FinalizeServerError {
     MissingCertificate { span: SourceSpan },
     #[snafu(display("missing ssl_certificate_key directive in server context"))]
     MissingCertificateKey { span: SourceSpan },
+    #[snafu(display("server context is not attached to the home PISHOO context"))]
+    InvalidAttachedParent { span: SourceSpan },
+    #[snafu(display("attached location context is missing its parsed pattern"))]
+    MissingAttachedLocationPattern { span: SourceSpan },
 }
 
 pub fn register(registry: &mut ConfigRegistry) {
@@ -30,6 +35,7 @@ pub fn register(registry: &mut ConfigRegistry) {
         key: context::SERVER,
         finalize: Some(finalize_server),
     });
+    registry.register_attached_finalizer(context::SERVER, finalize_attached_server);
     registry.register_directive(context::ROOT, server_block(context::ROOT));
     registry.register_directive(context::PISHOO, server_block(context::PISHOO));
     register_server_leaf::<ListenConfig>(
@@ -204,6 +210,27 @@ fn finalize_server(
             Ok(())
         }
     }
+}
+
+fn finalize_attached_server(
+    node: AttachedConfigNode<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ensure!(
+        node.parent()
+            .is_some_and(|parent| parent.context() == context::PISHOO),
+        finalize_server_error::InvalidAttachedParentSnafu {
+            span: node.config().span,
+        }
+    );
+    for location in node.children() {
+        location
+            .config()
+            .payload::<crate::parse::pattern::Pattern>()?
+            .context(finalize_server_error::MissingAttachedLocationPatternSnafu {
+                span: location.config().span,
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
