@@ -10,41 +10,6 @@ pub struct ServerName {
     pub name: DhttpName<'static>,
 }
 
-// TLS identity configuration for clients/servers that need certificates
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerIdentity {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-    pub server_name: DhttpName<'static>,
-}
-
-pub fn server_identity(
-    node: &crate::parse::document::ConfigNode,
-    server_name: DhttpName<'static>,
-) -> Option<ServerIdentity> {
-    let cert_path = node.get::<PathConfig>("ssl_certificate").ok().flatten()?;
-    let key_path = node
-        .get::<PathConfig>("ssl_certificate_key")
-        .ok()
-        .flatten()?;
-    Some(ServerIdentity {
-        cert_path: cert_path.0.clone(),
-        key_path: key_path.0.clone(),
-        server_name,
-    })
-}
-
-pub fn optional_server_identity(
-    node: &crate::parse::document::ConfigNode,
-    server_name_key: &str,
-) -> Option<ServerIdentity> {
-    let server_name = node
-        .get::<ClientNameConfig>(server_name_key)
-        .ok()
-        .flatten()?;
-    server_identity(node, server_name.0.clone())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoolConfig(pub bool);
 

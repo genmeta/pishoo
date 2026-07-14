@@ -4,15 +4,13 @@ use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::parse::{
     ast::{AstBody, AstDirective},
-    cascade::{
-        ACCESS_RULES, DEFAULT_TYPE, DirectiveKey, GZIP, GZIP_COMP_LEVEL, GZIP_MIN_LENGTH,
-        GZIP_TYPES, GZIP_VARY, TYPES,
-    },
+    cascade::{BuiltinValue, DirectiveKey, SnapshotValue},
     document::{ConfigDocument, ConfigNode},
     domain::{ConfigDocumentRoleKind, DirectiveName},
     error::{BuildDocumentError, ConfigDocumentRoleError, build_document_error},
     fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     normalize,
+    snapshot::RootConfigSnapshot,
     source::{ConfigDocumentSourceMap, SourceMap, SourceSpan},
     tree::AttachedConfigNode,
     types::{
@@ -124,6 +122,282 @@ pub enum ReloadImpact {
     Supervisor,
     ListenerSet,
     RuntimeState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectiveCardinality {
+    Single,
+    Repeated,
+    ContextPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectiveContractMismatch {
+    Name {
+        expected: DirectiveName,
+        actual: Option<DirectiveName>,
+    },
+    Context {
+        expected: ContextKey,
+        actual: ContextKey,
+    },
+    ValueType {
+        expected: &'static str,
+        actual: &'static str,
+    },
+    Cardinality {
+        expected: DirectiveCardinality,
+        actual: DirectiveCardinality,
+    },
+    Shape {
+        expected: DirectiveShape,
+        actual: DirectiveShape,
+    },
+    Payload {
+        expected: PayloadMode,
+        actual: PayloadMode,
+    },
+    Duplicate {
+        expected: DuplicatePolicy,
+        actual: DuplicatePolicy,
+    },
+    Cascade {
+        expected: CascadePolicy,
+        actual: CascadePolicy,
+    },
+    Transport {
+        expected: TransportPolicy,
+        actual: TransportPolicy,
+    },
+    Reload {
+        expected: ReloadImpact,
+        actual: ReloadImpact,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectiveContractTemplate {
+    context: ContextKey,
+    name: DirectiveName,
+    value_type: fn() -> TypeId,
+    value_type_name: fn() -> &'static str,
+    cardinality: DirectiveCardinality,
+    shape: DirectiveShape,
+    duplicate: DuplicatePolicy,
+    cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
+}
+
+impl DirectiveContractTemplate {
+    fn freeze(self) -> DirectiveContract {
+        DirectiveContract {
+            context: self.context,
+            name: self.name,
+            value_type: Some((self.value_type)()),
+            value_type_name: Some((self.value_type_name)()),
+            cardinality: self.cardinality,
+            shape: self.shape,
+            duplicate: self.duplicate,
+            cascade: self.cascade,
+            transport: self.transport,
+            reload: self.reload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DirectiveContract {
+    context: ContextKey,
+    name: DirectiveName,
+    value_type: Option<TypeId>,
+    value_type_name: Option<&'static str>,
+    cardinality: DirectiveCardinality,
+    shape: DirectiveShape,
+    duplicate: DuplicatePolicy,
+    cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
+}
+
+fn value_type_name<T>() -> &'static str {
+    std::any::type_name::<T>()
+}
+
+impl DirectiveContract {
+    pub(crate) const fn name(self) -> DirectiveName {
+        self.name
+    }
+
+    pub(crate) const fn cascade(self) -> CascadePolicy {
+        self.cascade
+    }
+
+    pub(crate) fn mismatch(self, actual: Self) -> Option<DirectiveContractMismatch> {
+        if self.name != actual.name {
+            return Some(DirectiveContractMismatch::Name {
+                expected: self.name,
+                actual: Some(actual.name),
+            });
+        }
+        if self.context != actual.context {
+            return Some(DirectiveContractMismatch::Context {
+                expected: self.context,
+                actual: actual.context,
+            });
+        }
+        if self.cardinality != actual.cardinality {
+            return Some(DirectiveContractMismatch::Cardinality {
+                expected: self.cardinality,
+                actual: actual.cardinality,
+            });
+        }
+        if let (
+            DirectiveShape::ContextBlock {
+                payload: expected, ..
+            },
+            DirectiveShape::ContextBlock {
+                payload: actual, ..
+            },
+        ) = (self.shape, actual.shape)
+            && expected != actual
+        {
+            return Some(DirectiveContractMismatch::Payload { expected, actual });
+        }
+        if self.value_type != actual.value_type {
+            return Some(DirectiveContractMismatch::ValueType {
+                expected: self.value_type_name.unwrap_or("<none>"),
+                actual: actual.value_type_name.unwrap_or("<none>"),
+            });
+        }
+        if self.shape != actual.shape {
+            return Some(DirectiveContractMismatch::Shape {
+                expected: self.shape,
+                actual: actual.shape,
+            });
+        }
+        if self.duplicate != actual.duplicate {
+            return Some(DirectiveContractMismatch::Duplicate {
+                expected: self.duplicate,
+                actual: actual.duplicate,
+            });
+        }
+        if self.cascade != actual.cascade {
+            return Some(DirectiveContractMismatch::Cascade {
+                expected: self.cascade,
+                actual: actual.cascade,
+            });
+        }
+        if self.transport != actual.transport {
+            return Some(DirectiveContractMismatch::Transport {
+                expected: self.transport,
+                actual: actual.transport,
+            });
+        }
+        (self.reload != actual.reload).then_some(DirectiveContractMismatch::Reload {
+            expected: self.reload,
+            actual: actual.reload,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct LocalDirectiveKey<T> {
+    name: DirectiveName,
+    contract: DirectiveContractTemplate,
+    value: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for LocalDirectiveKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for LocalDirectiveKey<T> {}
+
+impl<T> LocalDirectiveKey<T> {
+    const fn new(name: DirectiveName, contract: DirectiveContractTemplate) -> Self {
+        Self {
+            name,
+            contract,
+            value: std::marker::PhantomData,
+        }
+    }
+
+    pub const fn name(self) -> DirectiveName {
+        self.name
+    }
+
+    pub(crate) fn contract(self) -> DirectiveContract {
+        self.contract.freeze()
+    }
+}
+
+#[derive(Debug)]
+pub struct RepeatedDirectiveKey<T> {
+    name: DirectiveName,
+    contract: DirectiveContractTemplate,
+    value: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for RepeatedDirectiveKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for RepeatedDirectiveKey<T> {}
+
+impl<T> RepeatedDirectiveKey<T> {
+    const fn new(name: DirectiveName, contract: DirectiveContractTemplate) -> Self {
+        Self {
+            name,
+            contract,
+            value: std::marker::PhantomData,
+        }
+    }
+
+    pub const fn name(self) -> DirectiveName {
+        self.name
+    }
+
+    pub(crate) fn contract(self) -> DirectiveContract {
+        self.contract.freeze()
+    }
+}
+
+#[derive(Debug)]
+pub struct ContextPayloadKey<T> {
+    name: DirectiveName,
+    contract: DirectiveContractTemplate,
+    value: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for ContextPayloadKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ContextPayloadKey<T> {}
+
+impl<T> ContextPayloadKey<T> {
+    const fn new(name: DirectiveName, contract: DirectiveContractTemplate) -> Self {
+        Self {
+            name,
+            contract,
+            value: std::marker::PhantomData,
+        }
+    }
+
+    pub const fn name(self) -> DirectiveName {
+        self.name
+    }
+
+    pub(crate) fn contract(self) -> DirectiveContract {
+        self.contract.freeze()
+    }
 }
 
 type DirectiveParserFn =
@@ -266,106 +540,344 @@ impl DirectiveSpec {
             value_type_name: Some(std::any::type_name::<T>()),
         }
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-enum V1SnapshotDirectiveShape {
-    Leaf,
-    RawBlock,
-}
-
-impl V1SnapshotDirectiveShape {
-    const fn registry_shape(self) -> DirectiveShape {
-        match self {
-            Self::Leaf => DirectiveShape::Leaf,
-            Self::RawBlock => DirectiveShape::RawBlock,
+    fn contract(&self, registration_context: ContextKey) -> DirectiveContract {
+        let (context, cardinality) = match self.shape {
+            DirectiveShape::Leaf | DirectiveShape::RawBlock => (
+                registration_context,
+                if self.duplicate == DuplicatePolicy::Append {
+                    DirectiveCardinality::Repeated
+                } else {
+                    DirectiveCardinality::Single
+                },
+            ),
+            DirectiveShape::ContextBlock { child_context, .. } => {
+                (child_context, DirectiveCardinality::ContextPayload)
+            }
+        };
+        DirectiveContract {
+            context,
+            name: self.name,
+            value_type: self.value_type,
+            value_type_name: self.value_type_name,
+            cardinality,
+            shape: self.shape,
+            duplicate: self.duplicate,
+            cascade: self.cascade,
+            transport: self.transport,
+            reload: self.reload,
         }
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct V1SnapshotDirective<T> {
-    key: DirectiveKey<T>,
-    shape: V1SnapshotDirectiveShape,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SingleCardinality;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RepeatedCardinality;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PayloadCardinality;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CascadedCardinality;
+
+#[derive(Debug, Clone, Copy)]
+struct DirectiveMetadata {
     duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
     transport: TransportPolicy,
     reload: ReloadImpact,
 }
 
-impl<T> Clone for V1SnapshotDirective<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for V1SnapshotDirective<T> {}
-
-impl<T> V1SnapshotDirective<T> {
+impl DirectiveMetadata {
     const fn new(
-        key: DirectiveKey<T>,
-        shape: V1SnapshotDirectiveShape,
         duplicate: DuplicatePolicy,
         cascade: CascadePolicy,
         transport: TransportPolicy,
         reload: ReloadImpact,
     ) -> Self {
         Self {
-            key,
-            shape,
             duplicate,
             cascade,
             transport,
             reload,
         }
     }
+}
 
-    pub(crate) const fn key(self) -> DirectiveKey<T> {
-        self.key
+#[derive(Debug)]
+struct DirectiveProjection<T> {
+    builtin: Option<BuiltinValue<T>>,
+    snapshot: Option<SnapshotValue<T>>,
+}
+
+impl<T> Clone for DirectiveProjection<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for DirectiveProjection<T> {}
+
+impl<T> DirectiveProjection<T> {
+    const fn new(builtin: BuiltinValue<T>, snapshot: SnapshotValue<T>) -> Self {
+        Self {
+            builtin: Some(builtin),
+            snapshot: Some(snapshot),
+        }
     }
 
-    fn erased(self) -> ErasedV1SnapshotDirective
+    const fn absent() -> Self {
+        Self {
+            builtin: None,
+            snapshot: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TypedDirectiveDefinition<T, Cardinality> {
+    registration_context: ContextKey,
+    contract_context: ContextKey,
+    name: DirectiveName,
+    shape: DirectiveShape,
+    cardinality: DirectiveCardinality,
+    duplicate: DuplicatePolicy,
+    cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
+    builtin: Option<BuiltinValue<T>>,
+    snapshot: Option<SnapshotValue<T>>,
+    value: std::marker::PhantomData<fn() -> Cardinality>,
+}
+
+impl<T, Cardinality> Clone for TypedDirectiveDefinition<T, Cardinality> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, Cardinality> Copy for TypedDirectiveDefinition<T, Cardinality> {}
+
+impl<T, Cardinality> TypedDirectiveDefinition<T, Cardinality> {
+    const fn new(
+        registration_context: ContextKey,
+        contract_context: ContextKey,
+        name: &'static str,
+        shape: DirectiveShape,
+        cardinality: DirectiveCardinality,
+        metadata: DirectiveMetadata,
+        projection: DirectiveProjection<T>,
+    ) -> Self {
+        Self {
+            registration_context,
+            contract_context,
+            name: DirectiveName::new(name),
+            shape,
+            cardinality,
+            duplicate: metadata.duplicate,
+            cascade: metadata.cascade,
+            transport: metadata.transport,
+            reload: metadata.reload,
+            builtin: projection.builtin,
+            snapshot: projection.snapshot,
+            value: std::marker::PhantomData,
+        }
+    }
+
+    const fn contract_template(self) -> DirectiveContractTemplate
     where
         T: 'static,
     {
-        ErasedV1SnapshotDirective {
-            name: self.key.name(),
-            shape: self.shape.registry_shape(),
+        DirectiveContractTemplate {
+            context: self.contract_context,
+            name: self.name,
+            value_type: TypeId::of::<T>,
+            value_type_name: value_type_name::<T>,
+            cardinality: self.cardinality,
+            shape: self.shape,
             duplicate: self.duplicate,
             cascade: self.cascade,
             transport: self.transport,
             reload: self.reload,
-            value_type: TypeId::of::<T>,
-            value_type_name: std::any::type_name::<T>(),
         }
     }
 
-    fn register(self, registry: &mut ConfigRegistry)
+    pub(crate) fn register(self, registry: &mut ConfigRegistry)
     where
         T: DirectiveValue,
         for<'input, 'directive> T:
             TryFrom<&'input DirectiveInput<'directive>, Error = <T as DirectiveValue>::Error>,
     {
-        let name = self.key.name().as_str();
         let spec = match self.shape {
-            V1SnapshotDirectiveShape::Leaf => DirectiveSpec::leaf_value::<T>(
-                name,
-                vec![context::PISHOO],
+            DirectiveShape::Leaf => DirectiveSpec::leaf_value::<T>(
+                self.name.as_str(),
+                vec![self.registration_context],
                 self.duplicate,
                 self.cascade,
                 self.transport,
                 self.reload,
             ),
-            V1SnapshotDirectiveShape::RawBlock => DirectiveSpec::raw_value::<T>(
-                name,
-                vec![context::PISHOO],
+            DirectiveShape::RawBlock => DirectiveSpec::raw_value::<T>(
+                self.name.as_str(),
+                vec![self.registration_context],
                 self.duplicate,
                 self.cascade,
                 self.transport,
                 self.reload,
             ),
+            DirectiveShape::ContextBlock { child_context, .. } => {
+                DirectiveSpec::context_payload::<T>(
+                    self.name.as_str(),
+                    vec![self.registration_context],
+                    child_context,
+                    self.duplicate,
+                    self.cascade,
+                    self.transport,
+                    self.reload,
+                )
+            }
         };
-        registry.register_directive(context::PISHOO, spec);
+        registry.register_directive(self.registration_context, spec);
+    }
+}
+
+impl<T> TypedDirectiveDefinition<T, SingleCardinality> {
+    pub(crate) const fn single_leaf(
+        context: ContextKey,
+        name: &'static str,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::new(
+            context,
+            context,
+            name,
+            DirectiveShape::Leaf,
+            DirectiveCardinality::Single,
+            DirectiveMetadata::new(duplicate, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
+    pub(crate) const fn raw(
+        context: ContextKey,
+        name: &'static str,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::new(
+            context,
+            context,
+            name,
+            DirectiveShape::RawBlock,
+            DirectiveCardinality::Single,
+            DirectiveMetadata::new(duplicate, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
+    pub(crate) const fn key(self) -> LocalDirectiveKey<T>
+    where
+        T: 'static,
+    {
+        LocalDirectiveKey::new(self.name, self.contract_template())
+    }
+}
+
+impl<T> TypedDirectiveDefinition<T, RepeatedCardinality> {
+    pub(crate) const fn repeated_leaf(
+        context: ContextKey,
+        name: &'static str,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::new(
+            context,
+            context,
+            name,
+            DirectiveShape::Leaf,
+            DirectiveCardinality::Repeated,
+            DirectiveMetadata::new(DuplicatePolicy::Append, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
+    pub(crate) const fn key(self) -> RepeatedDirectiveKey<T>
+    where
+        T: 'static,
+    {
+        RepeatedDirectiveKey::new(self.name, self.contract_template())
+    }
+}
+
+impl<T> TypedDirectiveDefinition<T, PayloadCardinality> {
+    pub(crate) const fn payload(
+        registration_context: ContextKey,
+        child_context: ContextKey,
+        name: &'static str,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::new(
+            registration_context,
+            child_context,
+            name,
+            DirectiveShape::ContextBlock {
+                child_context,
+                payload: PayloadMode::Parser,
+            },
+            DirectiveCardinality::ContextPayload,
+            DirectiveMetadata::new(duplicate, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
+    pub(crate) const fn key(self) -> ContextPayloadKey<T>
+    where
+        T: 'static,
+    {
+        ContextPayloadKey::new(self.name, self.contract_template())
+    }
+}
+
+impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
+    const fn cascaded(
+        context: ContextKey,
+        name: &'static str,
+        shape: DirectiveShape,
+        metadata: DirectiveMetadata,
+        projection: DirectiveProjection<T>,
+    ) -> Self {
+        Self::new(
+            context,
+            context,
+            name,
+            shape,
+            DirectiveCardinality::Single,
+            metadata,
+            projection,
+        )
+    }
+
+    pub(crate) const fn key(self) -> DirectiveKey<T> {
+        let builtin = match self.builtin {
+            Some(builtin) => builtin,
+            None => crate::parse::cascade::absent,
+        };
+        let snapshot = match self.snapshot {
+            Some(snapshot) => snapshot,
+            None => crate::parse::cascade::no_snapshot,
+        };
+        DirectiveKey::new(self.name.as_str(), builtin, snapshot)
     }
 }
 
@@ -379,6 +891,24 @@ struct ErasedV1SnapshotDirective {
     reload: ReloadImpact,
     value_type: fn() -> TypeId,
     value_type_name: &'static str,
+}
+
+impl ErasedV1SnapshotDirective {
+    fn from_definition<T>(definition: TypedDirectiveDefinition<T, CascadedCardinality>) -> Self
+    where
+        T: 'static,
+    {
+        Self {
+            name: definition.name,
+            shape: definition.shape,
+            duplicate: definition.duplicate,
+            cascade: definition.cascade,
+            transport: definition.transport,
+            reload: definition.reload,
+            value_type: TypeId::of::<T>,
+            value_type_name: std::any::type_name::<T>(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -402,14 +932,14 @@ macro_rules! define_v1_snapshot_schema {
     (
         $(
             $field:ident: $value_type:ty =
-                $key:expr, $shape:ident, $duplicate:expr, $cascade:expr,
-                $transport:expr, $reload:expr;
+                $name:literal, $shape:expr, $duplicate:expr, $cascade:expr,
+                $transport:expr, $reload:expr, $builtin:expr, $snapshot:expr;
         )+
         @reserved $reserved:ident = $reserved_name:literal;
     ) => {
         #[derive(Debug)]
         pub(crate) struct V1SnapshotSchema {
-            $(pub(crate) $field: V1SnapshotDirective<$value_type>,)+
+            $(pub(crate) $field: TypedDirectiveDefinition<$value_type, CascadedCardinality>,)+
             pub(crate) $reserved: ReservedV1SnapshotField,
         }
 
@@ -417,7 +947,7 @@ macro_rules! define_v1_snapshot_schema {
             fn active_directives(
                 &self,
             ) -> impl Iterator<Item = ErasedV1SnapshotDirective> + '_ {
-                [$(self.$field.erased(),)+].into_iter()
+                [$(ErasedV1SnapshotDirective::from_definition(self.$field),)+].into_iter()
             }
 
             fn register_active_directives(&self, registry: &mut ConfigRegistry) {
@@ -426,18 +956,17 @@ macro_rules! define_v1_snapshot_schema {
 
             #[cfg(test)]
             pub(crate) const fn field_names(&self) -> [&'static str; 9] {
-                [$(self.$field.key().name().as_str(),)+ self.$reserved.name().as_str()]
+                [$(self.$field.name.as_str(),)+ self.$reserved.name().as_str()]
             }
         }
 
         static V1_SNAPSHOT_SCHEMA: V1SnapshotSchema = V1SnapshotSchema {
-            $($field: V1SnapshotDirective::new(
-                $key,
-                V1SnapshotDirectiveShape::$shape,
-                $duplicate,
-                $cascade,
-                $transport,
-                $reload,
+            $($field: TypedDirectiveDefinition::cascaded(
+                context::PISHOO,
+                $name,
+                $shape,
+                DirectiveMetadata::new($duplicate, $cascade, $transport, $reload),
+                DirectiveProjection::new($builtin, $snapshot),
             ),)+
             $reserved: ReservedV1SnapshotField::new($reserved_name),
         };
@@ -445,34 +974,61 @@ macro_rules! define_v1_snapshot_schema {
 }
 
 define_v1_snapshot_schema! {
-    access_rules: AccessRulesUri = ACCESS_RULES, Leaf, DuplicatePolicy::Reject,
+    access_rules: AccessRulesUri = "access_rules", DirectiveShape::Leaf, DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    gzip: BoolConfig = GZIP, Leaf, DuplicatePolicy::Reject, CascadePolicy::NearestWins,
-        TransportPolicy::WorkerInheritable, ReloadImpact::RuntimeState;
-    gzip_vary: BoolConfig = GZIP_VARY, Leaf, DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState, crate::parse::cascade::absent,
+        RootConfigSnapshot::cascade_access_rules;
+    gzip: BoolConfig = "gzip", DirectiveShape::Leaf, DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    gzip_min_length: GzipMinLength = GZIP_MIN_LENGTH, Leaf, DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState, crate::parse::cascade::builtin_false,
+        RootConfigSnapshot::cascade_gzip;
+    gzip_vary: BoolConfig = "gzip_vary", DirectiveShape::Leaf, DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    gzip_comp_level: GzipCompLevel = GZIP_COMP_LEVEL, Leaf, DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState, crate::parse::cascade::builtin_false,
+        RootConfigSnapshot::cascade_gzip_vary;
+    gzip_min_length: GzipMinLength = "gzip_min_length", DirectiveShape::Leaf,
+        DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    gzip_types: StringList = GZIP_TYPES, Leaf, DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState, crate::parse::cascade::builtin_min_length,
+        RootConfigSnapshot::cascade_gzip_min_length;
+    gzip_comp_level: GzipCompLevel = "gzip_comp_level", DirectiveShape::Leaf,
+        DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    default_type: DefaultType = DEFAULT_TYPE, Leaf, DuplicatePolicy::Reject,
+        ReloadImpact::RuntimeState, crate::parse::cascade::builtin_comp_level,
+        RootConfigSnapshot::cascade_gzip_comp_level;
+    gzip_types: StringList = "gzip_types", DirectiveShape::Leaf, DuplicatePolicy::Reject,
         CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState;
-    types: MimeTypes = TYPES, RawBlock, DuplicatePolicy::Reject, CascadePolicy::ReplaceWhole,
-        TransportPolicy::WorkerInheritable, ReloadImpact::RuntimeState;
+        ReloadImpact::RuntimeState, crate::parse::cascade::absent,
+        RootConfigSnapshot::cascade_gzip_types;
+    default_type: DefaultType = "default_type", DirectiveShape::Leaf, DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState, crate::parse::cascade::absent,
+        RootConfigSnapshot::cascade_default_type;
+    types: MimeTypes = "types", DirectiveShape::RawBlock, DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole, TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState, crate::parse::cascade::absent,
+        RootConfigSnapshot::cascade_types;
     @reserved access_log = "access_log";
 }
 
 #[cfg(test)]
 pub(crate) const fn v1_snapshot_field_names() -> [&'static str; 9] {
     V1_SNAPSHOT_SCHEMA.field_names()
+}
+
+#[cfg(test)]
+pub(crate) const fn v1_gzip_key() -> DirectiveKey<BoolConfig> {
+    V1_SNAPSHOT_SCHEMA.gzip.key()
+}
+
+#[cfg(test)]
+pub(crate) const fn v1_gzip_types_key() -> DirectiveKey<StringList> {
+    V1_SNAPSHOT_SCHEMA.gzip_types.key()
+}
+
+#[cfg(test)]
+pub(crate) const fn v1_types_key() -> DirectiveKey<MimeTypes> {
+    V1_SNAPSHOT_SCHEMA.types.key()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -646,6 +1202,20 @@ impl ConfigRegistry {
             .get(&context)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn directive_contracts(&self, context: ContextKey) -> Arc<[DirectiveContract]> {
+        let mut contracts = self
+            .directives
+            .iter()
+            .filter_map(|((registration_context, _), spec)| {
+                let contract = spec.contract(*registration_context);
+                (contract.context == context).then_some(contract)
+            })
+            .collect::<Vec<_>>();
+        contracts
+            .sort_unstable_by_key(|contract| (contract.name.as_str(), contract.cardinality as u8));
+        Arc::from(contracts.into_boxed_slice())
     }
 
     pub(crate) fn register_v1_snapshot_directives(&mut self) {

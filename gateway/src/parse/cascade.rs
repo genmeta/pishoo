@@ -3,10 +3,6 @@ use std::{marker::PhantomData, num::NonZeroU32, path::Path, sync::Arc};
 use crate::parse::{
     domain::{ConfigSourceSpan, DirectiveName},
     snapshot::RootConfigSnapshot,
-    types::{
-        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, MimeTypes,
-        StringList,
-    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +70,9 @@ impl<T> CascadedValue<T> {
     }
 }
 
-type BuiltinValue<T> = fn() -> Option<Arc<T>>;
-type SnapshotValue<T> = fn(&RootConfigSnapshot, DirectiveName) -> Option<(Arc<T>, ConfigOrigin)>;
+pub(crate) type BuiltinValue<T> = fn() -> Option<Arc<T>>;
+pub(crate) type SnapshotValue<T> =
+    fn(&RootConfigSnapshot, DirectiveName) -> Option<(Arc<T>, ConfigOrigin)>;
 
 #[derive(Debug)]
 pub struct DirectiveKey<T> {
@@ -120,50 +117,35 @@ impl<T> DirectiveKey<T> {
     }
 }
 
-fn absent<T>() -> Option<Arc<T>> {
+pub(crate) fn absent<T>() -> Option<Arc<T>> {
     None
 }
 
-fn builtin_false() -> Option<Arc<BoolConfig>> {
-    Some(Arc::new(BoolConfig(false)))
+pub(crate) fn no_snapshot<T>(
+    _snapshot: &RootConfigSnapshot,
+    _name: DirectiveName,
+) -> Option<(Arc<T>, ConfigOrigin)> {
+    None
 }
 
-fn builtin_min_length() -> Option<Arc<GzipMinLength>> {
-    Some(Arc::new(GzipMinLength::checked(20)))
+pub(crate) fn builtin_false() -> Option<Arc<crate::parse::types::BoolConfig>> {
+    Some(Arc::new(crate::parse::types::BoolConfig(false)))
 }
 
-fn builtin_comp_level() -> Option<Arc<GzipCompLevel>> {
-    Some(Arc::new(GzipCompLevel::checked(1)))
+pub(crate) fn builtin_min_length() -> Option<Arc<crate::parse::types::GzipMinLength>> {
+    Some(Arc::new(crate::parse::types::GzipMinLength::checked(20)))
 }
 
-pub const ACCESS_RULES: DirectiveKey<AccessRulesUri> = DirectiveKey::new(
-    "access_rules",
-    absent,
-    RootConfigSnapshot::cascade_access_rules,
-);
-pub const GZIP: DirectiveKey<BoolConfig> =
-    DirectiveKey::new("gzip", builtin_false, RootConfigSnapshot::cascade_gzip);
-pub const GZIP_VARY: DirectiveKey<BoolConfig> = DirectiveKey::new(
-    "gzip_vary",
-    builtin_false,
-    RootConfigSnapshot::cascade_gzip_vary,
-);
-pub const GZIP_MIN_LENGTH: DirectiveKey<GzipMinLength> = DirectiveKey::new(
-    "gzip_min_length",
-    builtin_min_length,
-    RootConfigSnapshot::cascade_gzip_min_length,
-);
-pub const GZIP_COMP_LEVEL: DirectiveKey<GzipCompLevel> = DirectiveKey::new(
-    "gzip_comp_level",
-    builtin_comp_level,
-    RootConfigSnapshot::cascade_gzip_comp_level,
-);
-pub const GZIP_TYPES: DirectiveKey<StringList> =
-    DirectiveKey::new("gzip_types", absent, RootConfigSnapshot::cascade_gzip_types);
-pub const DEFAULT_TYPE: DirectiveKey<DefaultType> = DirectiveKey::new(
-    "default_type",
-    absent,
-    RootConfigSnapshot::cascade_default_type,
-);
-pub const TYPES: DirectiveKey<MimeTypes> =
-    DirectiveKey::new("types", absent, RootConfigSnapshot::cascade_types);
+pub(crate) fn builtin_comp_level() -> Option<Arc<crate::parse::types::GzipCompLevel>> {
+    Some(Arc::new(crate::parse::types::GzipCompLevel::checked(1)))
+}
+
+#[cfg(test)]
+pub(crate) const GZIP: DirectiveKey<crate::parse::types::BoolConfig> =
+    crate::parse::registry::v1_gzip_key();
+#[cfg(test)]
+pub(crate) const GZIP_TYPES: DirectiveKey<crate::parse::types::StringList> =
+    crate::parse::registry::v1_gzip_types_key();
+#[cfg(test)]
+pub(crate) const TYPES: DirectiveKey<crate::parse::types::MimeTypes> =
+    crate::parse::registry::v1_types_key();

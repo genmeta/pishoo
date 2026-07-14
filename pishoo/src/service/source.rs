@@ -8,6 +8,7 @@ use gateway::{
     control_plane::ListenRequest,
     parse::{
         document::ConfigNode,
+        domain::ResolvedConfigPath,
         types::{AccessRulesUri, ListenConfig, Listens, ResolverConfig, ServerNames},
     },
     reverse::router::RouterState,
@@ -137,11 +138,11 @@ impl PishooConfigServiceSource {
                 })?;
 
             let has_cert = server
-                .get::<gateway::parse::types::PathConfig>("ssl_certificate")
+                .get::<ResolvedConfigPath>("ssl_certificate")
                 .context(build_config_service_sources_error::ConfigQuerySnafu)?
                 .is_some();
             let has_key = server
-                .get::<gateway::parse::types::PathConfig>("ssl_certificate_key")
+                .get::<ResolvedConfigPath>("ssl_certificate_key")
                 .context(build_config_service_sources_error::ConfigQuerySnafu)?
                 .is_some();
             if home.is_some() && !has_cert && !has_key && server_names.0.len() > 1 {
@@ -252,15 +253,20 @@ async fn load_identity_for_server(
     server_name: &DhttpName<'static>,
 ) -> Result<dhttp::identity::Identity, BuildConfigServiceSourcesError> {
     let cert_path = server
-        .get::<gateway::parse::types::PathConfig>("ssl_certificate")
+        .get::<ResolvedConfigPath>("ssl_certificate")
         .context(build_config_service_sources_error::ConfigQuerySnafu)?;
     let key_path = server
-        .get::<gateway::parse::types::PathConfig>("ssl_certificate_key")
+        .get::<ResolvedConfigPath>("ssl_certificate_key")
         .context(build_config_service_sources_error::ConfigQuerySnafu)?;
 
     match (cert_path, key_path) {
         (Some(cert_path), Some(key_path)) => {
-            load_identity_from_paths(server_name, &cert_path.0, &key_path.0).await
+            load_identity_from_paths(
+                server_name,
+                cert_path.as_ref().as_ref(),
+                key_path.as_ref().as_ref(),
+            )
+            .await
         }
         (None, None) => {
             let home = home.context(build_config_service_sources_error::MissingDirectiveSnafu {

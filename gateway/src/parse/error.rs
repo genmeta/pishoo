@@ -258,6 +258,7 @@ pub enum ConfigQueryError {
         directive: String,
         inherited: CascadePolicy,
         local: CascadePolicy,
+        mismatch: Option<crate::parse::registry::DirectiveContractMismatch>,
     },
 
     #[snafu(display("directive `{directive}` has no registered cascade policy"))]

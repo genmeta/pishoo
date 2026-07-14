@@ -22,6 +22,107 @@ pub mod tree;
 pub mod types;
 pub mod value;
 
+pub mod keys {
+    pub mod pishoo {
+        use crate::parse::{
+            domain::ResolvedConfigPath, registry::LocalDirectiveKey, types::StringList,
+        };
+
+        pub const PID: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::pishoo::PID_KEY;
+        pub const WORKERS: LocalDirectiveKey<StringList> =
+            crate::parse::builtin::pishoo::WORKERS_KEY;
+        pub const GROUPS: LocalDirectiveKey<StringList> = crate::parse::builtin::pishoo::GROUPS_KEY;
+    }
+
+    pub mod server {
+        use crate::parse::{
+            domain::ResolvedConfigPath,
+            registry::{LocalDirectiveKey, RepeatedDirectiveKey},
+            types::{
+                AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength,
+                ListenConfig, MimeTypes, ResolverConfig, ServerNames, StringList,
+            },
+        };
+
+        pub const LISTEN: RepeatedDirectiveKey<ListenConfig> =
+            crate::parse::builtin::server::LISTEN_KEY;
+        pub const SERVER_NAME: LocalDirectiveKey<ServerNames> =
+            crate::parse::builtin::server::SERVER_NAME_KEY;
+        pub const DNS: LocalDirectiveKey<ResolverConfig> = crate::parse::builtin::server::DNS_KEY;
+        pub const GZIP: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::GZIP_KEY;
+        pub const GZIP_VARY: LocalDirectiveKey<BoolConfig> =
+            crate::parse::builtin::server::GZIP_VARY_KEY;
+        pub const GZIP_MIN_LENGTH: LocalDirectiveKey<GzipMinLength> =
+            crate::parse::builtin::server::GZIP_MIN_LENGTH_KEY;
+        pub const GZIP_COMP_LEVEL: LocalDirectiveKey<GzipCompLevel> =
+            crate::parse::builtin::server::GZIP_COMP_LEVEL_KEY;
+        pub const GZIP_TYPES: LocalDirectiveKey<StringList> =
+            crate::parse::builtin::server::GZIP_TYPES_KEY;
+        pub const SSL_CERTIFICATE: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::server::SSL_CERTIFICATE_KEY;
+        pub const SSL_CERTIFICATE_KEY: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::server::SSL_CERTIFICATE_KEY_KEY;
+        pub const DEFAULT_TYPE: LocalDirectiveKey<DefaultType> =
+            crate::parse::builtin::server::DEFAULT_TYPE_KEY;
+        pub const ACCESS_RULES: LocalDirectiveKey<AccessRulesUri> =
+            crate::parse::builtin::server::ACCESS_RULES_KEY;
+        pub const RELAY: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::RELAY_KEY;
+        pub const STUN: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::STUN_KEY;
+        pub const TYPES: LocalDirectiveKey<MimeTypes> = crate::parse::builtin::server::TYPES_KEY;
+    }
+
+    pub mod location {
+        use crate::parse::{
+            domain::ResolvedConfigPath,
+            pattern::Pattern,
+            registry::{ContextPayloadKey, LocalDirectiveKey, RepeatedDirectiveKey},
+            types::{
+                BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRules, MimeTypes,
+                ProxyPass, SshLoginMethods, SshSslUsers, StringList,
+            },
+        };
+
+        pub const PATTERN: ContextPayloadKey<Pattern> =
+            crate::parse::builtin::location::PATTERN_KEY;
+        pub const ROOT: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::location::ROOT_KEY;
+        pub const ALIAS: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::location::ALIAS_KEY;
+        pub const GZIP: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::location::GZIP_KEY;
+        pub const GZIP_VARY: LocalDirectiveKey<BoolConfig> =
+            crate::parse::builtin::location::GZIP_VARY_KEY;
+        pub const GZIP_MIN_LENGTH: LocalDirectiveKey<GzipMinLength> =
+            crate::parse::builtin::location::GZIP_MIN_LENGTH_KEY;
+        pub const GZIP_COMP_LEVEL: LocalDirectiveKey<GzipCompLevel> =
+            crate::parse::builtin::location::GZIP_COMP_LEVEL_KEY;
+        pub const GZIP_TYPES: LocalDirectiveKey<StringList> =
+            crate::parse::builtin::location::GZIP_TYPES_KEY;
+        pub const INDEX: LocalDirectiveKey<StringList> = crate::parse::builtin::location::INDEX_KEY;
+        pub const ADD_HEADER: RepeatedDirectiveKey<HeaderRules> =
+            crate::parse::builtin::location::ADD_HEADER_KEY;
+        pub const PROXY_SET_HEADER: RepeatedDirectiveKey<HeaderRules> =
+            crate::parse::builtin::location::PROXY_SET_HEADER_KEY;
+        pub const PROXY_PASS: LocalDirectiveKey<ProxyPass> =
+            crate::parse::builtin::location::PROXY_PASS_KEY;
+        pub const PROXY_SSL_CERTIFICATE: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::location::PROXY_SSL_CERTIFICATE_KEY;
+        pub const PROXY_SSL_CERTIFICATE_KEY: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::location::PROXY_SSL_CERTIFICATE_KEY_KEY;
+        pub const PROXY_SSL_TRUSTED_CERTIFICATE: LocalDirectiveKey<ResolvedConfigPath> =
+            crate::parse::builtin::location::PROXY_SSL_TRUSTED_CERTIFICATE_KEY;
+        pub const SSH_LOGIN: LocalDirectiveKey<SshLoginMethods> =
+            crate::parse::builtin::location::SSH_LOGIN_KEY;
+        pub const SSH_SSL_USER: RepeatedDirectiveKey<SshSslUsers> =
+            crate::parse::builtin::location::SSH_SSL_USER_KEY;
+        pub const SSH_DENY: LocalDirectiveKey<StringList> =
+            crate::parse::builtin::location::SSH_DENY_KEY;
+        pub const DEFAULT_TYPE: LocalDirectiveKey<DefaultType> =
+            crate::parse::builtin::location::DEFAULT_TYPE_KEY;
+        pub const TYPES: LocalDirectiveKey<MimeTypes> = crate::parse::builtin::location::TYPES_KEY;
+    }
+}
+
 pub struct ConfigDocumentParser<'registry> {
     registry: &'registry registry::ConfigRegistry,
     document_ids: domain::ConfigDocumentIdAllocator,

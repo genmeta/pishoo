@@ -3,18 +3,150 @@ use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
     document::ConfigNode,
+    domain::ResolvedConfigPath,
     pattern::{ParsePatternError, Pattern},
     registry::{
-        BuildOptions, CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue,
-        DuplicatePolicy, ReloadImpact, TransportPolicy, context,
+        BuildOptions, CascadePolicy, ConfigRegistry, ContextPayloadKey, DirectiveInput,
+        DirectiveValue, DuplicatePolicy, LocalDirectiveKey, PayloadCardinality, ReloadImpact,
+        RepeatedCardinality, RepeatedDirectiveKey, SingleCardinality, TransportPolicy,
+        TypedDirectiveDefinition, context,
     },
     source::SourceSpan,
     types::{
         BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
-        PathConfig, ProxyPass, SshLoginMethods, SshSslUsers, StringList,
+        ProxyPass, SshLoginMethods, SshSslUsers, StringList,
     },
     value::TypedValue,
 };
+
+macro_rules! single_definition {
+    ($definition:ident, $key:ident, $value:ty, $name:literal) => {
+        const $definition: TypedDirectiveDefinition<$value, SingleCardinality> =
+            TypedDirectiveDefinition::single_leaf(
+                context::LOCATION,
+                $name,
+                DuplicatePolicy::Reject,
+                CascadePolicy::NearestWins,
+                TransportPolicy::WorkerLocalOnly,
+                ReloadImpact::RuntimeState,
+            );
+        pub(crate) const $key: LocalDirectiveKey<$value> = $definition.key();
+    };
+}
+
+macro_rules! repeated_definition {
+    ($definition:ident, $key:ident, $value:ty, $name:literal) => {
+        const $definition: TypedDirectiveDefinition<$value, RepeatedCardinality> =
+            TypedDirectiveDefinition::repeated_leaf(
+                context::LOCATION,
+                $name,
+                CascadePolicy::NearestWins,
+                TransportPolicy::WorkerLocalOnly,
+                ReloadImpact::RuntimeState,
+            );
+        pub(crate) const $key: RepeatedDirectiveKey<$value> = $definition.key();
+    };
+}
+
+const PATTERN_DEFINITION: TypedDirectiveDefinition<Pattern, PayloadCardinality> =
+    TypedDirectiveDefinition::payload(
+        context::SERVER,
+        context::LOCATION,
+        "location",
+        DuplicatePolicy::Append,
+        CascadePolicy::None,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
+    );
+pub(crate) const PATTERN_KEY: ContextPayloadKey<Pattern> = PATTERN_DEFINITION.key();
+single_definition!(ROOT_DEFINITION, ROOT_KEY, ResolvedConfigPath, "root");
+single_definition!(ALIAS_DEFINITION, ALIAS_KEY, ResolvedConfigPath, "alias");
+single_definition!(GZIP_DEFINITION, GZIP_KEY, BoolConfig, "gzip");
+single_definition!(GZIP_VARY_DEFINITION, GZIP_VARY_KEY, BoolConfig, "gzip_vary");
+single_definition!(
+    GZIP_MIN_LENGTH_DEFINITION,
+    GZIP_MIN_LENGTH_KEY,
+    GzipMinLength,
+    "gzip_min_length"
+);
+single_definition!(
+    GZIP_COMP_LEVEL_DEFINITION,
+    GZIP_COMP_LEVEL_KEY,
+    GzipCompLevel,
+    "gzip_comp_level"
+);
+single_definition!(
+    GZIP_TYPES_DEFINITION,
+    GZIP_TYPES_KEY,
+    StringList,
+    "gzip_types"
+);
+single_definition!(INDEX_DEFINITION, INDEX_KEY, StringList, "index");
+repeated_definition!(
+    ADD_HEADER_DEFINITION,
+    ADD_HEADER_KEY,
+    HeaderRules,
+    "add_header"
+);
+repeated_definition!(
+    PROXY_SET_HEADER_DEFINITION,
+    PROXY_SET_HEADER_KEY,
+    HeaderRules,
+    "proxy_set_header"
+);
+single_definition!(
+    PROXY_PASS_DEFINITION,
+    PROXY_PASS_KEY,
+    ProxyPass,
+    "proxy_pass"
+);
+single_definition!(
+    PROXY_SSL_CERTIFICATE_DEFINITION,
+    PROXY_SSL_CERTIFICATE_KEY,
+    ResolvedConfigPath,
+    "proxy_ssl_certificate"
+);
+single_definition!(
+    PROXY_SSL_CERTIFICATE_KEY_DEFINITION,
+    PROXY_SSL_CERTIFICATE_KEY_KEY,
+    ResolvedConfigPath,
+    "proxy_ssl_certificate_key"
+);
+single_definition!(
+    PROXY_SSL_TRUSTED_CERTIFICATE_DEFINITION,
+    PROXY_SSL_TRUSTED_CERTIFICATE_KEY,
+    ResolvedConfigPath,
+    "proxy_ssl_trusted_certificate"
+);
+single_definition!(
+    SSH_LOGIN_DEFINITION,
+    SSH_LOGIN_KEY,
+    SshLoginMethods,
+    "ssh_login"
+);
+repeated_definition!(
+    SSH_SSL_USER_DEFINITION,
+    SSH_SSL_USER_KEY,
+    SshSslUsers,
+    "ssh_ssl_user"
+);
+single_definition!(SSH_DENY_DEFINITION, SSH_DENY_KEY, StringList, "ssh_deny");
+single_definition!(
+    DEFAULT_TYPE_DEFINITION,
+    DEFAULT_TYPE_KEY,
+    DefaultType,
+    "default_type"
+);
+const TYPES_DEFINITION: TypedDirectiveDefinition<MimeTypes, SingleCardinality> =
+    TypedDirectiveDefinition::raw(
+        context::LOCATION,
+        "types",
+        DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
+    );
+pub(crate) const TYPES_KEY: LocalDirectiveKey<MimeTypes> = TYPES_DEFINITION.key();
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -46,76 +178,26 @@ pub fn register(registry: &mut ConfigRegistry) {
         key: context::LOCATION,
         finalize: Some(finalize_location),
     });
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::context_payload::<Pattern>(
-            "location",
-            vec![context::SERVER],
-            context::LOCATION,
-            DuplicatePolicy::Append,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    register_leaf::<PathConfig>(registry, "root", DuplicatePolicy::Reject);
-    register_leaf::<PathConfig>(registry, "alias", DuplicatePolicy::Reject);
-    register_leaf::<BoolConfig>(registry, "gzip", DuplicatePolicy::Reject);
-    register_leaf::<BoolConfig>(registry, "gzip_vary", DuplicatePolicy::Reject);
-    register_leaf::<GzipMinLength>(registry, "gzip_min_length", DuplicatePolicy::Reject);
-    register_leaf::<GzipCompLevel>(registry, "gzip_comp_level", DuplicatePolicy::Reject);
-    register_leaf::<StringList>(registry, "gzip_types", DuplicatePolicy::Reject);
-    register_leaf::<StringList>(registry, "index", DuplicatePolicy::Reject);
-    register_leaf::<HeaderRules>(registry, "add_header", DuplicatePolicy::Append);
-    register_leaf::<HeaderRules>(registry, "proxy_set_header", DuplicatePolicy::Append);
-    register_leaf::<ProxyPass>(registry, "proxy_pass", DuplicatePolicy::Reject);
-    register_leaf::<PathConfig>(registry, "proxy_ssl_certificate", DuplicatePolicy::Reject);
-    register_leaf::<PathConfig>(
-        registry,
-        "proxy_ssl_certificate_key",
-        DuplicatePolicy::Reject,
-    );
-    register_leaf::<PathConfig>(
-        registry,
-        "proxy_ssl_trusted_certificate",
-        DuplicatePolicy::Reject,
-    );
-    register_leaf::<SshLoginMethods>(registry, "ssh_login", DuplicatePolicy::Reject);
-    register_leaf::<SshSslUsers>(registry, "ssh_ssl_user", DuplicatePolicy::Append);
-    register_leaf::<StringList>(registry, "ssh_deny", DuplicatePolicy::Reject);
-    register_leaf::<DefaultType>(registry, "default_type", DuplicatePolicy::Reject);
-    registry.register_directive(
-        context::LOCATION,
-        DirectiveSpec::raw_value::<MimeTypes>(
-            "types",
-            vec![context::LOCATION],
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-}
-
-fn register_leaf<T>(registry: &mut ConfigRegistry, name: &'static str, duplicate: DuplicatePolicy)
-where
-    T: crate::parse::registry::DirectiveValue,
-    for<'input, 'directive> T: TryFrom<
-            &'input crate::parse::registry::DirectiveInput<'directive>,
-            Error = <T as crate::parse::registry::DirectiveValue>::Error,
-        >,
-{
-    registry.register_directive(
-        context::LOCATION,
-        DirectiveSpec::leaf_value::<T>(
-            name,
-            vec![context::LOCATION],
-            duplicate,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
+    PATTERN_DEFINITION.register(registry);
+    ROOT_DEFINITION.register(registry);
+    ALIAS_DEFINITION.register(registry);
+    GZIP_DEFINITION.register(registry);
+    GZIP_VARY_DEFINITION.register(registry);
+    GZIP_MIN_LENGTH_DEFINITION.register(registry);
+    GZIP_COMP_LEVEL_DEFINITION.register(registry);
+    GZIP_TYPES_DEFINITION.register(registry);
+    INDEX_DEFINITION.register(registry);
+    ADD_HEADER_DEFINITION.register(registry);
+    PROXY_SET_HEADER_DEFINITION.register(registry);
+    PROXY_PASS_DEFINITION.register(registry);
+    PROXY_SSL_CERTIFICATE_DEFINITION.register(registry);
+    PROXY_SSL_CERTIFICATE_KEY_DEFINITION.register(registry);
+    PROXY_SSL_TRUSTED_CERTIFICATE_DEFINITION.register(registry);
+    SSH_LOGIN_DEFINITION.register(registry);
+    SSH_SSL_USER_DEFINITION.register(registry);
+    SSH_DENY_DEFINITION.register(registry);
+    DEFAULT_TYPE_DEFINITION.register(registry);
+    TYPES_DEFINITION.register(registry);
 }
 
 fn finalize_location(
@@ -126,9 +208,11 @@ fn finalize_location(
         .payload::<Pattern>()?
         .context(finalize_location_error::MissingPatternSnafu { span: node.span })?;
     let proxy_pass = node.get::<ProxyPass>("proxy_pass")?;
-    let has_cert = node.get::<PathConfig>("proxy_ssl_certificate")?.is_some();
+    let has_cert = node
+        .get::<ResolvedConfigPath>("proxy_ssl_certificate")?
+        .is_some();
     let has_key = node
-        .get::<PathConfig>("proxy_ssl_certificate_key")?
+        .get::<ResolvedConfigPath>("proxy_ssl_certificate_key")?
         .is_some();
     ensure!(
         !matches!(pattern.as_ref(), Pattern::Regex(_) | Pattern::CRegex(_))
@@ -155,12 +239,13 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::parse::{
+        domain::ResolvedConfigPath,
         pattern::Pattern,
         tests::{
             build_proxy_conf, build_server_conf, cleanup_temp_files, create_temp_file,
             first_server, parse_doc,
         },
-        types::{BoolConfig, DefaultType, HeaderRules, PathConfig, ProxyPass, StringList},
+        types::{BoolConfig, DefaultType, HeaderRules, ProxyPass, StringList},
     };
 
     #[test]
@@ -174,9 +259,10 @@ mod tests {
 
         assert_eq!(
             location
-                .require::<PathConfig>("root")
+                .require::<ResolvedConfigPath>("root")
                 .expect("root should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             PathBuf::from("/var/www/site")
         );
 
@@ -228,9 +314,10 @@ mod tests {
 
         assert_eq!(
             location
-                .require::<PathConfig>("alias")
+                .require::<ResolvedConfigPath>("alias")
                 .expect("alias should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             PathBuf::from("/mnt/assets")
         );
         assert_eq!(
@@ -343,7 +430,7 @@ mod tests {
         );
         assert!(
             location
-                .require::<PathConfig>("proxy_ssl_trusted_certificate")
+                .require::<ResolvedConfigPath>("proxy_ssl_trusted_certificate")
                 .is_ok()
         );
 
@@ -402,12 +489,12 @@ mod tests {
 
         assert!(
             location
-                .require::<PathConfig>("proxy_ssl_certificate")
+                .require::<ResolvedConfigPath>("proxy_ssl_certificate")
                 .is_ok()
         );
         assert!(
             location
-                .require::<PathConfig>("proxy_ssl_certificate_key")
+                .require::<ResolvedConfigPath>("proxy_ssl_certificate_key")
                 .is_ok()
         );
 
@@ -555,9 +642,10 @@ mod tests {
         let location = server.children("location").expect("location children")[0].clone();
         assert_eq!(
             location
-                .require::<crate::parse::types::PathConfig>("root")
+                .require::<crate::parse::domain::ResolvedConfigPath>("root")
                 .expect("root should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             dir
         );
     }
@@ -596,9 +684,10 @@ mod tests {
         let location = server.children("location").expect("location children")[0].clone();
         assert_eq!(
             location
-                .require::<crate::parse::types::PathConfig>("root")
+                .require::<crate::parse::domain::ResolvedConfigPath>("root")
                 .expect("root should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             dir.join("sites")
         );
     }

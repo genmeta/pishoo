@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     command::{self, IndexError, content_type, index},
-    parse::{document::ConfigNode, types::PathConfig},
+    parse::{document::ConfigNode, domain::ResolvedConfigPath},
     reverse::location::LocationMatch,
 };
 
@@ -35,10 +35,11 @@ pub async fn file_handle(
 ) -> impl IntoResponse {
     let location = &loc.location;
 
-    let file_path = if let Some(alias) = location.get::<PathConfig>("alias").ok().flatten() {
-        static_file_path(&alias.0, &loc.remaining)
-    } else if let Some(root) = location.get::<PathConfig>("root").ok().flatten() {
-        static_file_path(&root.0, req.uri().path())
+    let file_path = if let Some(alias) = location.get::<ResolvedConfigPath>("alias").ok().flatten()
+    {
+        static_file_path(alias.as_ref().as_ref(), &loc.remaining)
+    } else if let Some(root) = location.get::<ResolvedConfigPath>("root").ok().flatten() {
+        static_file_path(root.as_ref().as_ref(), req.uri().path())
     } else {
         unreachable!("file_handle requires root or alias")
     };

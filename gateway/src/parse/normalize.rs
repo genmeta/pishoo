@@ -21,7 +21,7 @@ pub enum NormalizeDirectiveValueError {
     },
 }
 
-fn resolve_config_path(
+pub(crate) fn resolve_config_path(
     path: &Path,
     span: SourceSpan,
     source_map: &SourceMap,

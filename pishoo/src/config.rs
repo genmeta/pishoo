@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use gateway::parse::{document::ConfigNode, error::ConfigQueryError, types::PathConfig};
+use gateway::parse::{document::ConfigNode, domain::ResolvedConfigPath, error::ConfigQueryError};
 use snafu::{OptionExt, ResultExt, Snafu};
 
 mod discovery;
@@ -93,8 +93,8 @@ fn first_pishoo_node(root: &Arc<ConfigNode>) -> Result<Arc<ConfigNode>, ConfigEr
 
 fn parse_pid_file(pishoo: &Arc<ConfigNode>) -> Result<PathBuf, ConfigError> {
     Ok(pishoo
-        .get::<PathConfig>("pid")
+        .get::<ResolvedConfigPath>("pid")
         .context(ConfigQuerySnafu)?
-        .map(|pid_file| pid_file.0.clone())
+        .map(|pid_file| pid_file.as_ref().as_ref().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(PID_FILE_DEFAULT)))
 }

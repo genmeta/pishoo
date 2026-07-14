@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use snafu::{Snafu, ensure};
+use snafu::{ResultExt, Snafu, ensure};
 
 use crate::parse::{
     ast::{AstBody, AstDirective, Spanned},
+    domain::ResolvedConfigPath,
+    normalize::NormalizeDirectiveValueError,
     registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{BoolConfig, GzipTypesValidationError, PathConfig, StringConfig, StringList},
@@ -178,6 +180,50 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for PathCon
             });
         };
         Ok(Self(PathBuf::from(&arg.value)))
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum ResolvedConfigPathDirectiveError {
+    #[snafu(display("invalid resolved path directive argument count"))]
+    InvalidArgumentCount {
+        span: SourceSpan,
+        expected: &'static str,
+        actual: usize,
+    },
+    #[snafu(display("failed to resolve configuration path"))]
+    Resolve {
+        span: SourceSpan,
+        source: NormalizeDirectiveValueError,
+    },
+}
+
+impl DirectiveValue for ResolvedConfigPath {
+    type Error = ResolvedConfigPathDirectiveError;
+
+    fn span(input: &DirectiveInput<'_>) -> SourceSpan {
+        first_arg_span(input)
+    }
+}
+
+impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for ResolvedConfigPath {
+    type Error = ResolvedConfigPathDirectiveError;
+
+    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
+        let Some(arg) = only_arg(input.directive) else {
+            return Err(ResolvedConfigPathDirectiveError::InvalidArgumentCount {
+                span: input.directive.span,
+                expected: "1",
+                actual: input.directive.args.len(),
+            });
+        };
+        crate::parse::normalize::resolve_config_path(
+            std::path::Path::new(&arg.value),
+            arg.span,
+            input.source_map,
+        )
+        .context(resolved_config_path_directive_error::ResolveSnafu { span: arg.span })
     }
 }
 

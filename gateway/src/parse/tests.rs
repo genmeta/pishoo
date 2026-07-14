@@ -59,6 +59,17 @@ fn assert_attached_server_context(
     Ok(())
 }
 
+fn inject_wrong_pid_type(
+    node: &mut ConfigNode,
+    _options: &BuildOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    node.insert_slot(
+        "pid",
+        crate::parse::value::TypedValue::new(StringList(vec!["wrong".to_owned()]), node.span),
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 struct TempConfigDir {
     path: PathBuf,
@@ -173,6 +184,238 @@ pub(crate) fn assert_error_chain_display_single_line(error: &(dyn std::error::Er
         );
         current = error.source();
     }
+}
+
+#[test]
+fn sealed_single_query_preserves_type_mismatch() {
+    let fixture = TempConfigDir::new("sealed_single_type_mismatch");
+    let mut registry = crate::parse::default_registry();
+    registry.register_context(ContextSpec {
+        key: context::PISHOO,
+        finalize: Some(inject_wrong_pid_type),
+    });
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let root = parse_root_fragment(&mut parser, "pishoo {}", &fixture.join("pishoo.conf"), None);
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+
+    let error = tree
+        .pishoo()
+        .local(crate::parse::keys::pishoo::PID)
+        .expect_err("wrong stored value type must remain visible");
+
+    assert!(matches!(
+        error,
+        crate::parse::error::ConfigQueryError::TypeMismatch { .. }
+    ));
+}
+
+#[test]
+fn sealed_repeated_query_preserves_order_and_cardinality() {
+    let fixture = TempConfigDir::new("sealed_repeated_order");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; listen all 4102; } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let server = tree.servers().next().expect("server should attach");
+
+    let listen = server
+        .node()
+        .repeated(crate::parse::keys::server::LISTEN)
+        .expect("listen query should succeed");
+
+    assert_eq!(listen.len(), 2);
+    assert_eq!(listen[0].0[0].port, 4101);
+    assert_eq!(listen[1].0[0].port, 4102);
+}
+
+#[test]
+fn sealed_location_payload_query_returns_location_pattern() {
+    let fixture = TempConfigDir::new("sealed_location_payload");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; location = /ready {} } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let location = tree
+        .servers()
+        .next()
+        .expect("server should attach")
+        .locations()
+        .next()
+        .expect("location should attach");
+
+    let pattern = location
+        .payload(crate::parse::keys::location::PATTERN)
+        .expect("location payload query should succeed");
+
+    assert!(matches!(
+        pattern.as_ref(),
+        crate::parse::pattern::Pattern::Exact(path) if path == "/ready"
+    ));
+}
+
+#[test]
+fn sealed_query_key_rejects_wrong_registry_contract() {
+    let fixture = TempConfigDir::new("sealed_wrong_registry_contract");
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::leaf_value::<crate::parse::types::ListenConfig>(
+            "listen",
+            vec![context::SERVER],
+            DuplicatePolicy::Append,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
+        ),
+    );
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let server = tree.servers().next().expect("server should attach");
+
+    let error = server
+        .node()
+        .repeated(crate::parse::keys::server::LISTEN)
+        .expect_err("a key must reject different frozen registry metadata");
+
+    assert!(matches!(
+        error,
+        crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
+            mismatch: Some(crate::parse::registry::DirectiveContractMismatch::Cascade { .. }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn sealed_query_keeps_tree_alive_after_registry_replacement() {
+    let fixture = TempConfigDir::new("sealed_query_registry_lifetime");
+    let source_path = fixture.join("home/pishoo.conf");
+    let tree = {
+        let registry = crate::parse::default_registry();
+        let mut parser = ConfigDocumentParser::new(&registry);
+        let root = parse_root_fragment(
+            &mut parser,
+            "pishoo { pid run/pishoo.pid; }",
+            &source_path,
+            None,
+        );
+        build_global_tree(&registry, root, Vec::new()).expect("tree should seal")
+    };
+
+    let pid = tree
+        .pishoo()
+        .local(crate::parse::keys::pishoo::PID)
+        .expect("query should not borrow the registry")
+        .expect("pid should exist");
+
+    assert_eq!(
+        pid.as_ref().as_ref(),
+        source_path.parent().unwrap().join("run/pishoo.pid")
+    );
+}
+
+#[test]
+fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
+    let fixture = TempConfigDir::new("sealed_equivalent_registry_contract");
+    let source_path = fixture.join("home/pishoo.conf");
+    let mut registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { pid run/pishoo.pid; }",
+        &source_path,
+        None,
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+
+    registry = crate::parse::default_registry();
+    assert!(registry.directive_spec(context::PISHOO, "pid").is_some());
+    let pid = tree
+        .pishoo()
+        .local(crate::parse::keys::pishoo::PID)
+        .expect("equivalent semantic contract should query")
+        .expect("pid should exist");
+
+    assert_eq!(
+        pid.as_ref().as_ref(),
+        source_path.parent().unwrap().join("run/pishoo.pid")
+    );
+}
+
+#[test]
+fn home_arena_path_query_returns_resolved_config_path() {
+    let fixture = TempConfigDir::new("home_arena_path_query");
+    let include_dir = fixture.join("includes");
+    let include_path = include_dir.join("paths.conf");
+    fs::create_dir_all(&include_dir).expect("create include directory");
+    fs::write(&include_path, "pid run/pishoo.pid;").expect("write included path");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { include includes/paths.conf; }",
+        &fixture.join("pishoo.conf"),
+        None,
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+
+    let pid: Arc<ResolvedConfigPath> = tree
+        .pishoo()
+        .local(crate::parse::keys::pishoo::PID)
+        .expect("pid query should succeed")
+        .expect("pid should exist");
+
+    assert_eq!(pid.as_ref().as_ref(), include_dir.join("run/pishoo.pid"));
+}
+
+#[test]
+fn home_arena_rejects_relative_path_without_source_base() {
+    let registry = crate::parse::default_registry();
+    let failure = crate::parse::load_config_text(
+        "pishoo { pid run/pishoo.pid; }",
+        None,
+        &registry,
+        BuildOptions::default(),
+    )
+    .expect_err("unanchored home path must be rejected");
+    let report = snafu::Report::from_error(&failure.error).to_string();
+
+    assert!(report.contains("relative path requires a configuration file base directory"));
+}
+
+#[test]
+fn independent_proxy_context_keeps_legacy_path_config() {
+    let document =
+        parse_doc("pishoo { proxy { listen 127.0.0.1:8080; ssl_certificate /tmp/proxy.pem; } }");
+    let proxy = first_pishoo(&document)
+        .children("proxy")
+        .expect("proxy should exist")[0]
+        .clone();
+
+    let certificate: Arc<PathConfig> = proxy
+        .require("ssl_certificate")
+        .expect("independent proxy path keeps its legacy type");
+
+    assert_eq!(certificate.0, PathBuf::from("/tmp/proxy.pem"));
 }
 
 fn parse_role_document(
@@ -528,14 +771,12 @@ fn resolved_config_path_is_absolute_and_source_anchored() {
     };
     let path = fragment
         .node()
-        .require::<PathConfig>("pid")
+        .require::<ResolvedConfigPath>("pid")
         .expect("pid should be typed")
-        .0
         .clone();
-    let resolved = ResolvedConfigPath::try_from(path).expect("path should be resolved");
 
-    assert_eq!(resolved.as_ref(), destination);
-    assert!(resolved.as_ref().is_absolute());
+    assert_eq!(path.as_ref().as_ref(), destination);
+    assert!(path.as_ref().as_ref().is_absolute());
     assert!(
         !destination.exists(),
         "parser must not create the destination"

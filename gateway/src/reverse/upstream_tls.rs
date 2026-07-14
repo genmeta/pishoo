@@ -17,7 +17,7 @@ use tracing::debug;
 
 use crate::{
     error::Whatever,
-    parse::{document::ConfigNode, types::PathConfig},
+    parse::{document::ConfigNode, domain::ResolvedConfigPath},
 };
 
 type Result<T, E = Whatever> = std::result::Result<T, E>;
@@ -187,10 +187,10 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 
 fn path_from_config(location: &ConfigNode, name: &str) -> Option<PathBuf> {
     location
-        .get::<PathConfig>(name)
+        .get::<ResolvedConfigPath>(name)
         .ok()
         .flatten()
-        .map(|path| path.0.clone())
+        .map(|path| path.as_ref().as_ref().to_path_buf())
 }
 
 #[cfg(test)]
@@ -224,7 +224,9 @@ mod tests {
         let span = SourceSpan::new(SourceId(0), 0, 0);
         let mut location = ConfigNode::new(context::LOCATION, None, span);
         for (name, path) in values {
-            location.insert_slot(name, TypedValue::new(PathConfig(path.clone()), span));
+            let path = ResolvedConfigPath::try_from(path.clone())
+                .expect("TLS fixture path should already be absolute");
+            location.insert_slot(name, TypedValue::new(path, span));
         }
         location
     }

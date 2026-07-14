@@ -1,10 +1,43 @@
 use crate::parse::{
+    domain::ResolvedConfigPath,
     registry::{
-        CascadePolicy, ConfigRegistry, DirectiveSpec, DuplicatePolicy, ReloadImpact,
-        TransportPolicy, context,
+        CascadePolicy, ConfigRegistry, DirectiveSpec, DuplicatePolicy, LocalDirectiveKey,
+        ReloadImpact, SingleCardinality, TransportPolicy, TypedDirectiveDefinition, context,
     },
-    types::{PathConfig, StringList},
+    types::StringList,
 };
+
+const PID_DEFINITION: TypedDirectiveDefinition<ResolvedConfigPath, SingleCardinality> =
+    TypedDirectiveDefinition::single_leaf(
+        context::PISHOO,
+        "pid",
+        DuplicatePolicy::Reject,
+        CascadePolicy::None,
+        TransportPolicy::HypervisorOnly,
+        ReloadImpact::Supervisor,
+    );
+const WORKERS_DEFINITION: TypedDirectiveDefinition<StringList, SingleCardinality> =
+    TypedDirectiveDefinition::single_leaf(
+        context::PISHOO,
+        "workers",
+        DuplicatePolicy::Reject,
+        CascadePolicy::None,
+        TransportPolicy::HypervisorOnly,
+        ReloadImpact::Supervisor,
+    );
+const GROUPS_DEFINITION: TypedDirectiveDefinition<StringList, SingleCardinality> =
+    TypedDirectiveDefinition::single_leaf(
+        context::PISHOO,
+        "groups",
+        DuplicatePolicy::Reject,
+        CascadePolicy::None,
+        TransportPolicy::HypervisorOnly,
+        ReloadImpact::Supervisor,
+    );
+
+pub(crate) const PID_KEY: LocalDirectiveKey<ResolvedConfigPath> = PID_DEFINITION.key();
+pub(crate) const WORKERS_KEY: LocalDirectiveKey<StringList> = WORKERS_DEFINITION.key();
+pub(crate) const GROUPS_KEY: LocalDirectiveKey<StringList> = GROUPS_DEFINITION.key();
 
 pub fn register(registry: &mut ConfigRegistry) {
     registry.register_context(crate::parse::registry::ContextSpec {
@@ -23,31 +56,10 @@ pub fn register(registry: &mut ConfigRegistry) {
             ReloadImpact::Supervisor,
         ),
     );
-    register_hypervisor_leaf::<PathConfig>(registry, "pid");
-    register_hypervisor_leaf::<StringList>(registry, "workers");
-    register_hypervisor_leaf::<StringList>(registry, "groups");
+    PID_DEFINITION.register(registry);
+    WORKERS_DEFINITION.register(registry);
+    GROUPS_DEFINITION.register(registry);
     registry.register_v1_snapshot_directives();
-}
-
-fn register_hypervisor_leaf<T>(registry: &mut ConfigRegistry, name: &'static str)
-where
-    T: crate::parse::registry::DirectiveValue,
-    for<'input, 'directive> T: TryFrom<
-            &'input crate::parse::registry::DirectiveInput<'directive>,
-            Error = <T as crate::parse::registry::DirectiveValue>::Error,
-        >,
-{
-    registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<T>(
-            name,
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::None,
-            TransportPolicy::HypervisorOnly,
-            ReloadImpact::Supervisor,
-        ),
-    );
 }
 
 #[cfg(test)]
@@ -55,8 +67,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::parse::{
+        domain::ResolvedConfigPath,
         tests::{first_pishoo, parse_doc},
-        types::{AccessRulesUri, MimeTypes, PathConfig, StringList},
+        types::{AccessRulesUri, MimeTypes, StringList},
     };
 
     #[test]
@@ -117,9 +130,10 @@ mod tests {
 
         assert_eq!(
             pishoo
-                .require::<PathConfig>("pid")
+                .require::<ResolvedConfigPath>("pid")
                 .expect("pid should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             PathBuf::from("/tmp/pishoo-test.pid")
         );
         assert_eq!(
@@ -158,9 +172,10 @@ mod tests {
         let pishoo = crate::parse::tests::first_pishoo(&parsed);
         assert_eq!(
             pishoo
-                .require::<crate::parse::types::PathConfig>("pid")
+                .require::<crate::parse::domain::ResolvedConfigPath>("pid")
                 .expect("pid should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             dir.join("run/pishoo.pid")
         );
     }

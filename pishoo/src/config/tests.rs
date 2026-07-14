@@ -45,6 +45,51 @@ fn extracts_pid_and_workers() {
 }
 
 #[test]
+fn pishoo_keys_query_pid_workers_and_groups_across_crate() {
+    let base = std::env::temp_dir().join(format!(
+        "pishoo-typed-keys-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    ));
+    let source_path = base.join("pishoo.conf");
+    let registry = gateway::parse::default_registry();
+    let mut parser = gateway::parse::ConfigDocumentParser::new(&registry);
+    let gateway::parse::fragment::ParsedConfigDocument::HypervisorRoot(fragment) = parser
+        .parse_text(
+            "pishoo { pid run/pishoo.pid; workers alice bob; groups admin web; }",
+            &source_path,
+            gateway::parse::domain::ConfigDocumentRole::HypervisorRoot { home: None },
+        )
+        .expect("root config should parse")
+    else {
+        panic!("expected pishoo fragment");
+    };
+    let tree = gateway::parse::tree::build_global_tree(&registry, fragment, Vec::new())
+        .expect("tree should seal");
+    let pishoo = tree.pishoo();
+
+    let pid = pishoo
+        .local(gateway::parse::keys::pishoo::PID)
+        .expect("pid query")
+        .expect("pid should exist");
+    let workers = pishoo
+        .local(gateway::parse::keys::pishoo::WORKERS)
+        .expect("workers query")
+        .expect("workers should exist");
+    let groups = pishoo
+        .local(gateway::parse::keys::pishoo::GROUPS)
+        .expect("groups query")
+        .expect("groups should exist");
+
+    assert_eq!(pid.as_ref().as_ref(), base.join("run/pishoo.pid"));
+    assert_eq!(workers.0, vec!["alice", "bob"]);
+    assert_eq!(groups.0, vec!["admin", "web"]);
+}
+
+#[test]
 fn parse_workers_from_root_config() {
     let conf = "pishoo { workers alice bob; }";
     let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
@@ -122,9 +167,10 @@ async fn parse_entry_config_servers_only_from_file_config() {
         .clone();
     assert_eq!(
         location
-            .require::<gateway::parse::types::PathConfig>("root")
+            .require::<gateway::parse::domain::ResolvedConfigPath>("root")
             .expect("root should be typed")
-            .0,
+            .as_ref()
+            .as_ref(),
         dir,
     );
 }

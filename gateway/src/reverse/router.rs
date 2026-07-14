@@ -14,9 +14,7 @@ use super::location::match_location;
 #[cfg(feature = "sshd")]
 use crate::parse::types::SshLoginMethods;
 use crate::parse::{
-    document::ConfigNode,
-    pattern::Pattern,
-    types::{PathConfig, ProxyPass},
+    document::ConfigNode, domain::ResolvedConfigPath, pattern::Pattern, types::ProxyPass,
 };
 
 #[cfg(feature = "sshd")]
@@ -104,8 +102,16 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
                 .is_some()
             {
                 Handler::call(super::proxy::proxy_handle, request, state).await
-            } else if location.get::<PathConfig>("root").ok().flatten().is_some()
-                || location.get::<PathConfig>("alias").ok().flatten().is_some()
+            } else if location
+                .get::<ResolvedConfigPath>("root")
+                .ok()
+                .flatten()
+                .is_some()
+                || location
+                    .get::<ResolvedConfigPath>("alias")
+                    .ok()
+                    .flatten()
+                    .is_some()
             {
                 Handler::call(super::file::file_handle, request, state).await
             } else {

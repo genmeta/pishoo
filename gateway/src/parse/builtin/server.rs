@@ -2,18 +2,146 @@ use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
     document::ConfigNode,
+    domain::ResolvedConfigPath,
     registry::{
         BuildOptions, CascadePolicy, ConfigRegistry, ContextKey, DirectiveSpec, DuplicatePolicy,
-        ReloadImpact, TransportPolicy, context,
+        LocalDirectiveKey, ReloadImpact, RepeatedCardinality, RepeatedDirectiveKey,
+        SingleCardinality, TransportPolicy, TypedDirectiveDefinition, context,
     },
     source::SourceSpan,
     tree::AttachedConfigNode,
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, ListenConfig,
-        MimeTypes, PathConfig, ResolverConfig, ServerName, ServerNames, StringList,
+        MimeTypes, ResolverConfig, ServerName, ServerNames, StringList,
     },
     value::TypedValue,
 };
+
+macro_rules! single_definition {
+    ($definition:ident, $key:ident, $value:ty, $name:literal, $reload:expr) => {
+        const $definition: TypedDirectiveDefinition<$value, SingleCardinality> =
+            TypedDirectiveDefinition::single_leaf(
+                context::SERVER,
+                $name,
+                DuplicatePolicy::Reject,
+                CascadePolicy::NearestWins,
+                TransportPolicy::WorkerLocalOnly,
+                $reload,
+            );
+        pub(crate) const $key: LocalDirectiveKey<$value> = $definition.key();
+    };
+}
+
+const LISTEN_DEFINITION: TypedDirectiveDefinition<ListenConfig, RepeatedCardinality> =
+    TypedDirectiveDefinition::repeated_leaf(
+        context::SERVER,
+        "listen",
+        CascadePolicy::NearestWins,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::ListenerSet,
+    );
+pub(crate) const LISTEN_KEY: RepeatedDirectiveKey<ListenConfig> = LISTEN_DEFINITION.key();
+single_definition!(
+    SERVER_NAME_DEFINITION,
+    SERVER_NAME_KEY,
+    ServerNames,
+    "server_name",
+    ReloadImpact::ListenerSet
+);
+single_definition!(
+    DNS_DEFINITION,
+    DNS_KEY,
+    ResolverConfig,
+    "dns",
+    ReloadImpact::ListenerSet
+);
+single_definition!(
+    GZIP_DEFINITION,
+    GZIP_KEY,
+    BoolConfig,
+    "gzip",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    GZIP_VARY_DEFINITION,
+    GZIP_VARY_KEY,
+    BoolConfig,
+    "gzip_vary",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    GZIP_MIN_LENGTH_DEFINITION,
+    GZIP_MIN_LENGTH_KEY,
+    GzipMinLength,
+    "gzip_min_length",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    GZIP_COMP_LEVEL_DEFINITION,
+    GZIP_COMP_LEVEL_KEY,
+    GzipCompLevel,
+    "gzip_comp_level",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    GZIP_TYPES_DEFINITION,
+    GZIP_TYPES_KEY,
+    StringList,
+    "gzip_types",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    SSL_CERTIFICATE_DEFINITION,
+    SSL_CERTIFICATE_KEY,
+    ResolvedConfigPath,
+    "ssl_certificate",
+    ReloadImpact::ListenerSet
+);
+single_definition!(
+    SSL_CERTIFICATE_KEY_DEFINITION,
+    SSL_CERTIFICATE_KEY_KEY,
+    ResolvedConfigPath,
+    "ssl_certificate_key",
+    ReloadImpact::ListenerSet
+);
+single_definition!(
+    DEFAULT_TYPE_DEFINITION,
+    DEFAULT_TYPE_KEY,
+    DefaultType,
+    "default_type",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    ACCESS_RULES_DEFINITION,
+    ACCESS_RULES_KEY,
+    AccessRulesUri,
+    "access_rules",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    RELAY_DEFINITION,
+    RELAY_KEY,
+    BoolConfig,
+    "relay",
+    ReloadImpact::RuntimeState
+);
+single_definition!(
+    STUN_DEFINITION,
+    STUN_KEY,
+    BoolConfig,
+    "stun",
+    ReloadImpact::RuntimeState
+);
+const TYPES_DEFINITION: TypedDirectiveDefinition<MimeTypes, SingleCardinality> =
+    TypedDirectiveDefinition::raw(
+        context::SERVER,
+        "types",
+        DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
+    );
+pub(crate) const TYPES_KEY: LocalDirectiveKey<MimeTypes> = TYPES_DEFINITION.key();
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -38,101 +166,21 @@ pub fn register(registry: &mut ConfigRegistry) {
     registry.register_attached_finalizer(context::SERVER, finalize_attached_server);
     registry.register_directive(context::ROOT, server_block(context::ROOT));
     registry.register_directive(context::PISHOO, server_block(context::PISHOO));
-    register_server_leaf::<ListenConfig>(
-        registry,
-        "listen",
-        DuplicatePolicy::Append,
-        ReloadImpact::ListenerSet,
-    );
-    register_server_leaf::<ServerNames>(
-        registry,
-        "server_name",
-        DuplicatePolicy::Reject,
-        ReloadImpact::ListenerSet,
-    );
-    register_server_leaf::<ResolverConfig>(
-        registry,
-        "dns",
-        DuplicatePolicy::Reject,
-        ReloadImpact::ListenerSet,
-    );
-    register_server_leaf::<BoolConfig>(
-        registry,
-        "gzip",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<BoolConfig>(
-        registry,
-        "gzip_vary",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<GzipMinLength>(
-        registry,
-        "gzip_min_length",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<GzipCompLevel>(
-        registry,
-        "gzip_comp_level",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<StringList>(
-        registry,
-        "gzip_types",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<PathConfig>(
-        registry,
-        "ssl_certificate",
-        DuplicatePolicy::Reject,
-        ReloadImpact::ListenerSet,
-    );
-    register_server_leaf::<PathConfig>(
-        registry,
-        "ssl_certificate_key",
-        DuplicatePolicy::Reject,
-        ReloadImpact::ListenerSet,
-    );
-    register_server_leaf::<DefaultType>(
-        registry,
-        "default_type",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<AccessRulesUri>(
-        registry,
-        "access_rules",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<BoolConfig>(
-        registry,
-        "relay",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    register_server_leaf::<BoolConfig>(
-        registry,
-        "stun",
-        DuplicatePolicy::Reject,
-        ReloadImpact::RuntimeState,
-    );
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::raw_value::<MimeTypes>(
-            "types",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
+    LISTEN_DEFINITION.register(registry);
+    SERVER_NAME_DEFINITION.register(registry);
+    DNS_DEFINITION.register(registry);
+    GZIP_DEFINITION.register(registry);
+    GZIP_VARY_DEFINITION.register(registry);
+    GZIP_MIN_LENGTH_DEFINITION.register(registry);
+    GZIP_COMP_LEVEL_DEFINITION.register(registry);
+    GZIP_TYPES_DEFINITION.register(registry);
+    SSL_CERTIFICATE_DEFINITION.register(registry);
+    SSL_CERTIFICATE_KEY_DEFINITION.register(registry);
+    DEFAULT_TYPE_DEFINITION.register(registry);
+    ACCESS_RULES_DEFINITION.register(registry);
+    RELAY_DEFINITION.register(registry);
+    STUN_DEFINITION.register(registry);
+    TYPES_DEFINITION.register(registry);
 }
 
 fn server_block(parent: ContextKey) -> DirectiveSpec {
@@ -145,31 +193,6 @@ fn server_block(parent: ContextKey) -> DirectiveSpec {
         TransportPolicy::HypervisorOnly,
         ReloadImpact::ListenerSet,
     )
-}
-
-fn register_server_leaf<T>(
-    registry: &mut ConfigRegistry,
-    name: &'static str,
-    duplicate: DuplicatePolicy,
-    reload: ReloadImpact,
-) where
-    T: crate::parse::registry::DirectiveValue,
-    for<'input, 'directive> T: TryFrom<
-            &'input crate::parse::registry::DirectiveInput<'directive>,
-            Error = <T as crate::parse::registry::DirectiveValue>::Error,
-        >,
-{
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::leaf_value::<T>(
-            name,
-            vec![context::SERVER],
-            duplicate,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            reload,
-        ),
-    );
 }
 
 fn finalize_server(
@@ -194,18 +217,20 @@ fn finalize_server(
         );
     }
 
-    let has_cert = node.get::<PathConfig>("ssl_certificate")?.is_some();
-    let has_key = node.get::<PathConfig>("ssl_certificate_key")?.is_some();
+    let has_cert = node.get::<ResolvedConfigPath>("ssl_certificate")?.is_some();
+    let has_key = node
+        .get::<ResolvedConfigPath>("ssl_certificate_key")?
+        .is_some();
     match (has_cert, has_key, options.has_dhttp_home_context()) {
         (true, true, _) => Ok(()),
         (false, false, true) => Ok(()),
         (false, _, _) => {
-            node.get::<PathConfig>("ssl_certificate")?
+            node.get::<ResolvedConfigPath>("ssl_certificate")?
                 .context(finalize_server_error::MissingCertificateSnafu { span: node.span })?;
             Ok(())
         }
         (_, false, _) => {
-            node.get::<PathConfig>("ssl_certificate_key")?
+            node.get::<ResolvedConfigPath>("ssl_certificate_key")?
                 .context(finalize_server_error::MissingCertificateKeySnafu { span: node.span })?;
             Ok(())
         }
@@ -236,13 +261,14 @@ fn finalize_attached_server(
 #[cfg(test)]
 mod tests {
     use crate::parse::{
+        domain::ResolvedConfigPath,
         tests::{
             assert_error_chain_display_single_line, build_server_conf, cleanup_temp_files,
             create_temp_file, first_server, parse_doc,
         },
         types::{
             AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, ListenConfig, MimeTypes,
-            PathConfig, ResolverConfig, ServerNames,
+            ResolverConfig, ServerNames,
         },
     };
 
@@ -294,16 +320,18 @@ mod tests {
 
         assert_eq!(
             server
-                .require::<PathConfig>("ssl_certificate")
+                .require::<ResolvedConfigPath>("ssl_certificate")
                 .expect("ssl_certificate should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             cert.clone()
         );
         assert_eq!(
             server
-                .require::<PathConfig>("ssl_certificate_key")
+                .require::<ResolvedConfigPath>("ssl_certificate_key")
                 .expect("ssl_certificate_key should be typed")
-                .0,
+                .as_ref()
+                .as_ref(),
             key.clone()
         );
 
@@ -348,13 +376,13 @@ mod tests {
         assert_eq!(names.0[0].name, name);
         assert!(
             server
-                .get::<PathConfig>("ssl_certificate")
+                .get::<ResolvedConfigPath>("ssl_certificate")
                 .unwrap()
                 .is_none()
         );
         assert!(
             server
-                .get::<PathConfig>("ssl_certificate_key")
+                .get::<ResolvedConfigPath>("ssl_certificate_key")
                 .unwrap()
                 .is_none()
         );

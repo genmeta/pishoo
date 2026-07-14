@@ -9,10 +9,11 @@ use crate::parse::{
         ConfigDocumentId, ConfigDocumentIdAllocator, ConfigDocumentIdError, ConfigSourceSpan,
         DirectiveName,
     },
-    error::ConfigQueryError,
+    error::{ConfigQueryError, config_query_error},
     fragment::{ParsedPishooFragment, ParsedServerFragment},
     registry::{
-        CascadePolicy, ConfigRegistry, V1SnapshotSchemaError, ValidatedV1SnapshotSchema, context,
+        CascadePolicy, ConfigRegistry, ContextPayloadKey, DirectiveContract, LocalDirectiveKey,
+        RepeatedDirectiveKey, V1SnapshotSchemaError, ValidatedV1SnapshotSchema, context,
     },
     snapshot::{RootConfigSnapshot, RootConfigSnapshotError},
     source::{ConfigDocumentSourceMap, SourceId, SourceMap, SourceSpan},
@@ -35,6 +36,7 @@ struct SealedConfigNode {
     parent: ParentLink,
     children: Vec<ConfigNodeId>,
     cascade_policies: Arc<[(DirectiveName, CascadePolicy)]>,
+    directive_contracts: Arc<[DirectiveContract]>,
 }
 
 #[derive(Clone, Copy)]
@@ -347,12 +349,14 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
     ) -> ConfigNodeId {
         let id = ConfigNodeId(self.nodes.len());
         let cascade_policies = self.registry.cascade_policies(node.context);
+        let directive_contracts = self.registry.directive_contracts(node.context);
         self.nodes.push(SealedConfigNode {
             document_id,
             node,
             parent,
             children: Vec::new(),
             cascade_policies,
+            directive_contracts,
         });
         id
     }
@@ -553,6 +557,7 @@ impl HomeConfigTree {
                     directive: directive.as_str().to_owned(),
                     inherited,
                     local,
+                    mismatch: None,
                 });
             }
             inherited = Some(local);
@@ -560,6 +565,39 @@ impl HomeConfigTree {
         inherited.ok_or_else(|| ConfigQueryError::MissingCascadePolicy {
             directive: directive.as_str().to_owned(),
         })
+    }
+
+    fn check_contract(
+        &self,
+        node: ConfigNodeId,
+        expected: DirectiveContract,
+    ) -> Result<(), ConfigQueryError> {
+        let sealed = self.node(node);
+        let Some(actual) = sealed
+            .directive_contracts
+            .iter()
+            .copied()
+            .find(|contract| contract.name() == expected.name())
+        else {
+            return Err(ConfigQueryError::CascadePolicyMismatch {
+                directive: expected.name().as_str().to_owned(),
+                inherited: expected.cascade(),
+                local: expected.cascade(),
+                mismatch: Some(crate::parse::registry::DirectiveContractMismatch::Name {
+                    expected: expected.name(),
+                    actual: None,
+                }),
+            });
+        };
+        if let Some(mismatch) = expected.mismatch(actual) {
+            return Err(ConfigQueryError::CascadePolicyMismatch {
+                directive: expected.name().as_str().to_owned(),
+                inherited: expected.cascade(),
+                local: actual.cascade(),
+                mismatch: Some(mismatch),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -658,6 +696,22 @@ impl ConfigNodeRef {
     {
         self.tree.cascaded(self.node, key)
     }
+
+    pub fn local<T>(&self, key: LocalDirectiveKey<T>) -> Result<Option<Arc<T>>, ConfigQueryError>
+    where
+        T: ConfigValue,
+    {
+        self.tree.check_contract(self.node, key.contract())?;
+        self.tree.node(self.node).node.get(key.name().as_str())
+    }
+
+    pub fn repeated<T>(&self, key: RepeatedDirectiveKey<T>) -> Result<Vec<Arc<T>>, ConfigQueryError>
+    where
+        T: ConfigValue,
+    {
+        self.tree.check_contract(self.node, key.contract())?;
+        self.tree.node(self.node).node.get_all(key.name().as_str())
+    }
 }
 
 impl ServerConfigRef {
@@ -687,5 +741,24 @@ impl LocationConfigRef {
 
     pub fn tree(&self) -> &Arc<HomeConfigTree> {
         self.0.tree()
+    }
+
+    pub fn payload<T>(&self, key: ContextPayloadKey<T>) -> Result<Arc<T>, ConfigQueryError>
+    where
+        T: ConfigValue,
+    {
+        self.0.tree.check_contract(self.0.node, key.contract())?;
+        self.0
+            .tree
+            .node(self.0.node)
+            .node
+            .payload()?
+            .ok_or_else(|| {
+                config_query_error::MissingRequiredSnafu {
+                    directive: key.name().as_str().to_owned(),
+                    span: self.0.tree.node(self.0.node).node.span,
+                }
+                .build()
+            })
     }
 }
