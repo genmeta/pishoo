@@ -41,58 +41,41 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("failed to resolve pishoo configuration source")?;
     let config_file = config_source.config_path().to_path_buf();
 
-    let registry = gateway::parse::default_registry();
-    let config = match gateway::parse::load_config_file(
-        &config_file,
-        &registry,
-        config_source.build_options(),
-    )
-    .await
-    {
-        Ok(config) => config,
-        Err(failure) => {
+    let initial_plan = pishoo::config::load_global_pishoo_plan(&config_source).await;
+    if args.test_config || args.signal.is_some() {
+        let plan = initial_plan.map_err(|error| {
             tracing::error!(
-                error = %snafu::Report::from_error(&failure.error),
-                diagnostic = %failure.diagnostic(),
+                error = %snafu::Report::from_error(&error),
                 "failed to load configuration"
             );
-            return Err(Whatever::with_source(
-                Box::new(failure),
-                "failed to load configuration".to_owned(),
-            ));
+            Whatever::with_source(Box::new(error), "failed to load configuration".to_owned())
+        })?;
+        let pid_file = pishoo::config::pid_path(plan.pishoo());
+        if args.test_config {
+            tracing::info!(path = %config_file.display(), "configuration parsed successfully");
+            return Ok(());
+        }
+        return signal::send_signal(&pid_file, args.signal.expect("signal checked above")).await;
+    }
+
+    let plan = match initial_plan {
+        Ok(plan) => Some(plan),
+        Err(error) => {
+            tracing::error!(
+                error = %snafu::Report::from_error(&error),
+                "global pishoo configuration failed; starting in config-failed state"
+            );
+            None
         }
     };
-
-    let worker_mode = if config_source.default_worker_groups_enabled() {
-        pishoo::config::worker_target::WorkerDiscoveryMode::DefaultGlobalHome
-    } else {
-        pishoo::config::worker_target::WorkerDiscoveryMode::ExplicitConfig
-    };
-    let entry_config =
-        pishoo::config::entry::parse_entry_config_with_mode(&config.root, worker_mode)
-            .whatever_context("failed to parse pishoo entry configuration")?;
-
-    if args.test_config {
-        tracing::info!(
-            path = %config_file.display(),
-            "configuration parsed successfully"
-        );
-        return Ok(());
-    }
-
-    let pid_file = entry_config.pid_file.clone();
-
-    if let Some(signal) = args.signal {
-        return signal::send_signal(&pid_file, signal).await;
-    }
-
-    let current_entry_config = entry_config;
-    let mut current_worker_targets =
-        pishoo::config::resolve_entry_worker_targets(&current_entry_config)
-            .whatever_context("failed to resolve configured worker users")?;
+    let pid_file = plan.as_ref().map_or_else(
+        || PathBuf::from(pishoo::config::PID_FILE_DEFAULT),
+        |plan| pishoo::config::pid_path(plan.pishoo()),
+    );
+    let mut current_worker_targets = Vec::new();
 
     tracing::info!(
-        pid_file = %current_entry_config.pid_file.display(),
+        pid_file = %pid_file.display(),
         "pishoo starting"
     );
 
@@ -111,20 +94,21 @@ async fn main() -> Result<(), Whatever> {
     // Write PID file (root only)
     signal::init_pid_file(&pid_file).await?;
 
-    let mut global_service_handle = pishoo::hypervisor::global_service::spawn_global_service(
-        &state,
-        &config_source,
-        &current_entry_config,
-    )
-    .await
-    .whatever_context("failed to spawn global service")?;
-    drop(current_entry_config);
-
-    state
-        .set_desired_workers(current_worker_targets.clone())
-        .await;
-    pishoo::hypervisor::process::spawn_configured_workers(&state, current_worker_targets.clone())
-        .await;
+    let mut global_service_handle = None;
+    if let Some(plan) = plan {
+        current_worker_targets = plan.desired_workers().to_vec();
+        state
+            .set_desired_workers(current_worker_targets.clone())
+            .await;
+        let global_branch = pishoo::hypervisor::global_service::spawn_global_service(&state, &plan);
+        let worker_branch = pishoo::hypervisor::process::spawn_configured_workers(
+            &state,
+            current_worker_targets.clone(),
+            plan.worker_defaults().clone(),
+        );
+        let (service, ()) = tokio::join!(global_branch, worker_branch);
+        global_service_handle = service;
+    }
 
     // Create signal handler once — reused across the main loop so that signals
     // arriving during reload are never lost.
@@ -140,7 +124,20 @@ async fn main() -> Result<(), Whatever> {
     tracing::info!("pishoo ready");
 
     loop {
-        let sig = signals.wait().await;
+        let sig = tokio::select! {
+            sig = signals.wait() => sig,
+            name = pishoo::hypervisor::global_service::wait_global_service_completion(
+                &mut global_service_handle,
+            ) => {
+                global_service_handle
+                    .as_mut()
+                    .expect("service completion requires a global service handle")
+                    .handle_service_exit(name)
+                    .await;
+                tracing::warn!("global server service exited; released its resources");
+                continue;
+            }
+        };
 
         match sig {
             signal::RootSignal::SigTerm

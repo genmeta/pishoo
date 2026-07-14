@@ -87,4 +87,4 @@ sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]
 
 [dev-dependencies]
 rcgen = "0.14"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

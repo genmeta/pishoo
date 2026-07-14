@@ -8,11 +8,7 @@ use crate::parse::{
         core::{first_arg_span, only_arg},
         net::SocketAddrsError,
     },
-    registry::{
-        CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveValue, ReloadImpact,
-        RepeatedCardinality, RepeatedDirectiveKey, TransportPolicy, TypedDirectiveDefinition,
-        context,
-    },
+    decode::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{SocketAddrs, StunBindConfigValue, StunChangePort, StunServerConfigValue},
 };
@@ -264,67 +260,28 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for StunSer
     }
 }
 
-const STUN_SERVERS_DEFINITION: TypedDirectiveDefinition<
-    StunServerConfigValue,
-    RepeatedCardinality,
-> = TypedDirectiveDefinition::repeated_raw(
-    context::SERVER,
-    "stun_server",
-    CascadePolicy::None,
-    TransportPolicy::WorkerLocalOnly,
-    ReloadImpact::ListenerSet,
-);
-pub(crate) const STUN_SERVERS_KEY: RepeatedDirectiveKey<StunServerConfigValue> =
-    STUN_SERVERS_DEFINITION.key();
-
-pub fn register(registry: &mut ConfigRegistry) {
-    STUN_SERVERS_DEFINITION.register(registry);
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::parse::{
-        ConfigDocumentParser,
-        domain::ConfigDocumentRole,
-        fragment::ParsedConfigDocument,
-        keys,
-        tests::{cleanup_temp_files, create_temp_file},
-        tree::build_global_tree,
+    use crate::parse::tests::{
+        build_server_conf, cleanup_temp_files, create_temp_file, first_server,
     };
 
-    fn sealed_server(stun: &str) -> crate::parse::tree::ServerConfigRef {
+    fn parsed_server(stun: &str) -> crate::parse::config::ServerConfig {
         let cert = create_temp_file("stun_compound_cert");
         let key = create_temp_file("stun_compound_key");
-        let text = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; {stun} }} }}",
-            cert.display(),
-            key.display()
-        );
-        let registry = crate::parse::default_registry();
-        let mut parser = ConfigDocumentParser::new(&registry);
-        let ParsedConfigDocument::HypervisorRoot(root) = parser
-            .parse_text(
-                &text,
-                std::path::Path::new("/tmp/pishoo.conf"),
-                ConfigDocumentRole::HypervisorRoot { home: None },
-            )
-            .unwrap()
-        else {
-            panic!("expected root fragment")
-        };
-        let tree = build_global_tree(&registry, root, []).unwrap();
-        let server = tree.servers().next().unwrap();
+        let text = build_server_conf(&cert, &key, stun);
+        let server = first_server(&text).unwrap();
         cleanup_temp_files(&[&cert, &key]);
         server
     }
 
     #[test]
     fn stun_compounds_preserve_block_and_bind_order() {
-        let server = sealed_server(
+        let server = parsed_server(
             "stun_server { bind 127.0.0.1:1000; bind 127.0.0.1:1001; } stun_server { bind 127.0.0.1:2000; }",
         );
-        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
-        let addresses = values
+        let addresses = server
+            .stun_servers()
             .iter()
             .flat_map(|value| value.binds.iter().map(|bind| bind.bind))
             .collect::<Vec<_>>();
@@ -340,19 +297,18 @@ mod tests {
 
     #[test]
     fn stun_bind_explicit_values_override_block_fallbacks() {
-        let server = sealed_server(
+        let server = parsed_server(
             "stun_server { outer_addr 127.0.0.1:3000; change_port 4000; bind 127.0.0.1:1000 outer_addr 127.0.0.1:3001 change_port 4001; }",
         );
-        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
-        let bind = &values[0].binds[0];
+        let bind = &server.stun_servers()[0].binds[0];
         assert_eq!(bind.outer_addr, Some("127.0.0.1:3001".parse().unwrap()));
         assert_eq!(bind.change_port, Some(4001));
     }
 
     #[test]
     fn empty_stun_server_block_remains_a_noop_compound() {
-        let server = sealed_server("stun_server {}");
-        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
+        let server = parsed_server("stun_server {}");
+        let values = server.stun_servers();
         assert_eq!(values.len(), 1);
         assert!(values[0].binds.is_empty());
     }

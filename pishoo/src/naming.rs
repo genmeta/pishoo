@@ -1,10 +1,5 @@
-use std::sync::Arc;
-
 use dhttp::name::DhttpName;
-use gateway::{
-    error::Whatever,
-    parse::{document::ConfigNode, types::ServerName},
-};
+use gateway::{error::Whatever, parse::types::ServerName};
 use snafu::ResultExt;
 
 pub fn canonicalize_genmeta_name(name: &str) -> Result<DhttpName<'static>, Whatever> {
@@ -20,12 +15,6 @@ pub fn canonicalize_server_names(server_names: &[ServerName]) -> Result<Vec<Serv
             })
         })
         .collect()
-}
-
-pub fn canonicalize_server_nodes(
-    servers: &[Arc<ConfigNode>],
-) -> Result<Vec<Arc<ConfigNode>>, Whatever> {
-    Ok(servers.to_vec())
 }
 
 #[cfg(test)]

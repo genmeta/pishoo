@@ -50,8 +50,6 @@ pub trait ProvideListener: Send + Sync {
     type Listener: quic::Listen;
     /// Error type for [`listener()`](Self::listener) operations.
     type ListenError: std::error::Error + Send + Sync;
-    /// Error type for [`rebuild_listener()`](Self::rebuild_listener) operations.
-    type RebuildError: std::error::Error + Send + Sync;
 
     /// Request the control plane to create a QUIC listener for the given
     /// server configuration.
@@ -59,17 +57,6 @@ pub trait ProvideListener: Send + Sync {
         &self,
         request: ListenRequest,
     ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
-
-    /// Atomically replace a previously acquired listener with one matching the
-    /// new request. The previous listener is consumed; implementations are
-    /// responsible for any necessary teardown of the old listener as part of
-    /// the rebuild critical section so the server name is never observed
-    /// vacant.
-    fn rebuild_listener(
-        &self,
-        old: Self::Listener,
-        request: ListenRequest,
-    ) -> impl Future<Output = Result<Self::Listener, Self::RebuildError>> + Send + '_;
 }
 
 // ---------------------------------------------------------------------------

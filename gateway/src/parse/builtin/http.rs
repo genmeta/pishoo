@@ -3,7 +3,7 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 use crate::parse::{
     builtin::core::{block_children, first_arg_span, only_arg},
-    registry::{DirectiveInput, DirectiveValue},
+    decode::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{
         DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
@@ -324,22 +324,23 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for MimeTyp
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::{
-        tests::{
-            assert_error_chain_display_single_line, build_proxy_conf, build_server_conf,
-            cleanup_temp_files, create_temp_file, first_pishoo, first_server, parse_doc,
-        },
-        types::{DefaultType, GzipCompLevel, GzipMinLength, ProxyPass},
+    use crate::parse::tests::{
+        assert_error_chain_display_single_line, build_proxy_conf, build_server_conf,
+        cleanup_temp_files, create_temp_file, first_location, parse_root,
     };
 
     #[test]
     fn parse_default_type_accepts_single_header_value() {
         let conf = "pishoo { default_type text/html; }";
 
-        let pishoo = first_pishoo(&parse_doc(conf));
-        let value = pishoo
-            .require::<DefaultType>("default_type")
-            .expect("default_type should be typed")
+        let parsed = parse_root(conf).unwrap();
+        let value = parsed
+            .pishoo()
+            .http()
+            .default_type()
+            .effective()
+            .as_ref()
+            .unwrap()
             .0
             .clone();
 
@@ -365,25 +366,12 @@ mod tests {
 
     #[test]
     fn parse_numeric_and_identity_directives_keep_typed_values() {
-        let conf = "pishoo { gzip_min_length 1100; gzip_comp_level 6; proxy { listen 127.0.0.1:8080; client_name example.com; } }";
+        let conf = "pishoo { gzip_min_length 1100; gzip_comp_level 6; }";
+        let parsed = parse_root(conf).unwrap();
+        let pishoo = parsed.pishoo();
 
-        let document = parse_doc(conf);
-        let pishoo = first_pishoo(&document);
-
-        assert_eq!(
-            pishoo
-                .require::<GzipMinLength>("gzip_min_length")
-                .expect("gzip_min_length should be typed")
-                .0,
-            1100
-        );
-        assert_eq!(
-            pishoo
-                .require::<GzipCompLevel>("gzip_comp_level")
-                .expect("gzip_comp_level should be typed")
-                .0,
-            6
-        );
+        assert_eq!(pishoo.http().gzip_min_length().effective().0, 1100);
+        assert_eq!(pishoo.http().gzip_comp_level().effective().0, 6);
     }
 
     #[test]
@@ -416,13 +404,8 @@ mod tests {
             "location /api { proxy_pass http://backend.example.com; }",
         );
 
-        let location = first_server(&parse_doc(&conf))
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
-        let proxy_pass = location
-            .require::<ProxyPass>("proxy_pass")
-            .expect("proxy_pass");
+        let location = first_location(&conf).unwrap();
+        let proxy_pass = location.proxy_pass().unwrap();
 
         assert_eq!(proxy_pass.proxy_host, "backend.example.com");
         assert!(!proxy_pass.has_explicit_uri());
@@ -441,13 +424,8 @@ mod tests {
             "location /api { proxy_pass http://backend.example.com/; }",
         );
 
-        let location = first_server(&parse_doc(&conf))
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
-        let proxy_pass = location
-            .require::<ProxyPass>("proxy_pass")
-            .expect("proxy_pass");
+        let location = first_location(&conf).unwrap();
+        let proxy_pass = location.proxy_pass().unwrap();
 
         assert!(proxy_pass.has_explicit_uri());
         assert_eq!(proxy_pass.explicit_path_and_query(), Some("/"));
@@ -465,13 +443,8 @@ mod tests {
             "location /api { proxy_pass https://backend.example.com:8443/base/?v=1; }",
         );
 
-        let location = first_server(&parse_doc(&conf))
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
-        let proxy_pass = location
-            .require::<ProxyPass>("proxy_pass")
-            .expect("proxy_pass");
+        let location = first_location(&conf).unwrap();
+        let proxy_pass = location.proxy_pass().unwrap();
 
         assert_eq!(proxy_pass.proxy_host, "backend.example.com:8443");
         assert!(proxy_pass.has_explicit_uri());
@@ -491,33 +464,17 @@ mod tests {
             "location /api { proxy_pass http://backend.example.com; }",
         );
 
-        let server = first_server(&parse_doc(&conf));
-        let location = server.children("location").expect("location exists")[0].clone();
+        let location = first_location(&conf).unwrap();
 
-        assert_eq!(
-            location
-                .require::<ProxyPass>("proxy_pass")
-                .expect("proxy_pass should be parsed")
-                .scheme_str(),
-            "http"
-        );
+        assert_eq!(location.proxy_pass().unwrap().scheme_str(), "http");
 
         let conf_https = build_server_conf(
             &cert,
             &key,
             "location /api { proxy_pass https://backend.example.com; }",
         );
-        let location_https = first_server(&parse_doc(&conf_https))
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
-        assert_eq!(
-            location_https
-                .require::<ProxyPass>("proxy_pass")
-                .expect("proxy_pass should be parsed")
-                .scheme_str(),
-            "https"
-        );
+        let location_https = first_location(&conf_https).unwrap();
+        assert_eq!(location_https.proxy_pass().unwrap().scheme_str(), "https");
 
         cleanup_temp_files(&[&cert, &key]);
     }

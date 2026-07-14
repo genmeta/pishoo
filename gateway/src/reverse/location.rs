@@ -1,6 +1,37 @@
 use std::sync::Arc;
 
-use crate::parse::{document::ConfigNode, pattern::Pattern};
+use crate::{
+    parse::{config::LocationConfig, pattern::Pattern},
+    reverse::access_log::ActiveAccessLog,
+};
+
+#[derive(Clone, Debug)]
+pub struct ConfiguredLocation {
+    config: Arc<LocationConfig>,
+    access_log: ActiveAccessLog,
+}
+
+impl ConfiguredLocation {
+    pub fn new(config: Arc<LocationConfig>, access_log: ActiveAccessLog) -> Self {
+        Self { config, access_log }
+    }
+
+    pub fn access_log(&self) -> &ActiveAccessLog {
+        &self.access_log
+    }
+
+    pub fn config(&self) -> &Arc<LocationConfig> {
+        &self.config
+    }
+}
+
+impl std::ops::Deref for ConfiguredLocation {
+    type Target = LocationConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
 
 /// Result of matching a request path against configured location blocks.
 ///
@@ -10,7 +41,8 @@ use crate::parse::{document::ConfigNode, pattern::Pattern};
 #[derive(Clone, Debug)]
 pub struct LocationMatch {
     /// The matched location configuration node.
-    pub location: Arc<ConfigNode>,
+    pub location: Arc<LocationConfig>,
+    pub access_log: ActiveAccessLog,
     /// The portion of the path that was matched by the pattern.
     ///
     /// For prefix patterns, this is the pattern string itself (e.g. "/ssh/").
@@ -28,18 +60,13 @@ pub struct LocationMatch {
 impl LocationMatch {
     /// Extract the `Pattern` from the location node.
     pub fn pattern(&self) -> Pattern {
-        self.location
-            .payload::<Pattern>()
-            .expect("location payload type should be a pattern")
-            .expect("location node should contain a pattern payload")
-            .as_ref()
-            .clone()
+        self.location.matcher().clone()
     }
 }
 
 /// Match a request path against all configured location blocks, following
 /// nginx's location selection order.
-pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<LocationMatch> {
+pub fn match_location(locations: &[Arc<ConfiguredLocation>], path: &str) -> Option<LocationMatch> {
     tracing::debug!("all locations {:#?}, path: {:?}", locations, path);
 
     let mut exact: Option<LocationMatch> = None;
@@ -48,13 +75,7 @@ pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<Locat
     let mut regex_locations = Vec::new();
 
     for location in locations {
-        let pattern = location
-            .payload::<Pattern>()
-            .ok()
-            .flatten()
-            .expect("location node should contain a pattern payload");
-
-        match pattern.as_ref() {
+        match location.matcher() {
             Pattern::Exact(expected) if path == expected => {
                 exact = Some(build_location_match(location, expected.clone(), path));
                 break;
@@ -95,35 +116,30 @@ pub fn match_location(locations: &[Arc<ConfigNode>], path: &str) -> Option<Locat
         return longest_prefix;
     }
     for location in regex_locations {
-        let pattern = location
-            .payload::<Pattern>()
-            .ok()
-            .flatten()
-            .expect("location node should contain a pattern payload");
-        if let Ok(Some(matched)) = pattern.try_match(path) {
+        if let Ok(Some(matched)) = location.matcher().try_match(path) {
             return Some(build_location_match(&location, matched.to_owned(), path));
         }
     }
     longest_prefix
 }
 
-fn build_location_match(location: &Arc<ConfigNode>, matched: String, path: &str) -> LocationMatch {
+fn build_location_match(
+    location: &Arc<ConfiguredLocation>,
+    matched: String,
+    path: &str,
+) -> LocationMatch {
     let remaining = compute_remaining(location, path, &matched);
     LocationMatch {
-        location: Arc::clone(location),
+        location: Arc::clone(location.config()),
+        access_log: location.access_log().clone(),
         matched,
         remaining,
     }
 }
 
 /// Compute the remaining path suffix after the matched portion.
-fn compute_remaining(location: &ConfigNode, path: &str, matched: &str) -> String {
-    let pattern = location
-        .payload::<Pattern>()
-        .expect("location payload type should be a pattern")
-        .expect("location node should contain a pattern payload");
-
-    match pattern.as_ref() {
+fn compute_remaining(location: &ConfiguredLocation, path: &str, matched: &str) -> String {
+    match location.matcher() {
         // For prefix-style patterns, the matched string IS the prefix — strip it.
         Pattern::Exact(_) | Pattern::Prefix(_) | Pattern::NormalPrefix(_) | Pattern::Common => {
             path.strip_prefix(matched).unwrap_or("").to_string()
@@ -136,20 +152,22 @@ fn compute_remaining(location: &ConfigNode, path: &str, matched: &str) -> String
 
 #[cfg(test)]
 mod tests {
-    use regex::Regex;
-
     use super::*;
-    use crate::parse::{
-        registry::context,
-        source::{SourceId, SourceSpan},
-        value::TypedValue,
-    };
+    use crate::parse::tests::parse_location_pattern;
 
-    fn make_location(pattern: Pattern) -> Arc<ConfigNode> {
-        let span = SourceSpan::new(SourceId(0), 0, 0);
-        let mut node = ConfigNode::new(context::LOCATION, None, span);
-        node.set_payload(TypedValue::new(pattern, span));
-        Arc::new(node)
+    fn make_location(pattern: Pattern) -> Arc<ConfiguredLocation> {
+        let syntax = match &pattern {
+            Pattern::Exact(value) => format!("= {value}"),
+            Pattern::Prefix(value) => format!("^~ {value}"),
+            Pattern::NormalPrefix(value) => value.clone(),
+            Pattern::Regex(value) => format!("~ '{}';", value.as_str()),
+            Pattern::CRegex(value) => format!("~* '{}';", value.as_str()),
+            Pattern::Common => "/".to_owned(),
+        };
+        Arc::new(ConfiguredLocation::new(
+            parse_location_pattern(syntax.trim_end_matches(';'), "").unwrap(),
+            ActiveAccessLog::Disabled,
+        ))
     }
 
     #[test]
@@ -182,7 +200,7 @@ mod tests {
     #[test]
     fn test_regex_match_remaining_is_full_path() {
         let locations = vec![make_location(Pattern::Regex(
-            Regex::new(r"\.(jpg|gif)$").unwrap(),
+            regex::Regex::new(r"\.(jpg|gif)$").unwrap(),
         ))];
 
         let m = match_location(&locations, "/images/cat.jpg").unwrap();

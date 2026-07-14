@@ -15,10 +15,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use tracing::debug;
 
-use crate::{
-    error::Whatever,
-    parse::{document::ConfigNode, domain::ResolvedConfigPath},
-};
+use crate::{error::Whatever, parse::config::LocationConfig};
 
 type Result<T, E = Whatever> = std::result::Result<T, E>;
 
@@ -31,18 +28,25 @@ struct UpstreamTlsSettings {
 
 impl UpstreamTlsSettings {
     /// 从 location 配置节点中提取上游 TLS 所需的证书路径。
-    fn from_location(location: &ConfigNode) -> Self {
+    fn from_location(location: &LocationConfig) -> Self {
+        let tls = location.proxy_tls();
         Self {
-            client_cert: path_from_config(location, "proxy_ssl_certificate"),
-            client_key: path_from_config(location, "proxy_ssl_certificate_key"),
-            trusted_ca: path_from_config(location, "proxy_ssl_trusted_certificate"),
+            client_cert: tls
+                .and_then(|tls| tls.certificate())
+                .map(|path| path.as_ref().to_path_buf()),
+            client_key: tls
+                .and_then(|tls| tls.private_key())
+                .map(|path| path.as_ref().to_path_buf()),
+            trusted_ca: tls
+                .and_then(|tls| tls.trusted_certificate())
+                .map(|p| p.as_ref().to_path_buf()),
         }
     }
 }
 
 /// 连接 HTTPS 上游，并在 TCP 连接之上完成 TLS 握手。
 pub(super) async fn connect_https(
-    location: &ConfigNode,
+    location: &LocationConfig,
     proxy_pass: &Uri,
 ) -> Result<TlsStream<TcpStream>> {
     // 先从 proxy_pass 中解析服务端主机名和端口，作为 TCP 连接与 SNI 的输入。
@@ -74,7 +78,7 @@ pub(super) async fn connect_https(
 }
 
 /// 构建上游 TLS 客户端配置，支持自定义 CA 和可选的双向 TLS 客户端证书。
-fn build_client_config(location: &ConfigNode) -> Result<Arc<ClientConfig>> {
+fn build_client_config(location: &LocationConfig) -> Result<Arc<ClientConfig>> {
     let settings = UpstreamTlsSettings::from_location(location);
 
     // 客户端证书和私钥必须成对出现，否则无法完成双向 TLS 配置。
@@ -185,24 +189,12 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     Ok(private_key)
 }
 
-fn path_from_config(location: &ConfigNode, name: &str) -> Option<PathBuf> {
-    location
-        .get::<ResolvedConfigPath>(name)
-        .ok()
-        .flatten()
-        .map(|path| path.as_ref().as_ref().to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Once};
 
     use super::*;
-    use crate::parse::{
-        registry::context,
-        source::{SourceId, SourceSpan},
-        value::TypedValue,
-    };
+    use crate::parse::tests::parse_location;
 
     static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
 
@@ -220,15 +212,13 @@ mod tests {
             .join(relative)
     }
 
-    fn test_location(values: &[(&'static str, PathBuf)]) -> ConfigNode {
-        let span = SourceSpan::new(SourceId(0), 0, 0);
-        let mut location = ConfigNode::new(context::LOCATION, None, span);
-        for (name, path) in values {
-            let path = ResolvedConfigPath::try_from(path.clone())
-                .expect("TLS fixture path should already be absolute");
-            location.insert_slot(name, TypedValue::new(path, span));
-        }
-        location
+    fn test_location(values: &[(&'static str, PathBuf)]) -> LocationConfig {
+        let body = values
+            .iter()
+            .map(|(name, path)| format!("{name} {};", path.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Arc::try_unwrap(parse_location(&body).unwrap()).expect("unique test location")
     }
 
     #[test]
@@ -281,9 +271,9 @@ mod tests {
     #[test]
     fn test_build_client_config_rejects_incomplete_identity() {
         let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
-        let location = test_location(&[("proxy_ssl_certificate", client_cert)]);
-        let error = build_client_config(&location).expect_err("incomplete identity should fail");
+        let error = parse_location(&format!("proxy_ssl_certificate {};", client_cert.display()))
+            .expect_err("incomplete identity should fail");
 
-        assert!(error.to_string().contains("must be configured together"));
+        assert!(error.contains("must be configured together"));
     }
 }

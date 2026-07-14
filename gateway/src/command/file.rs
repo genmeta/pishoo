@@ -7,7 +7,7 @@ use std::{
 use snafu::{ResultExt, Snafu};
 use tokio::fs::File;
 
-use crate::parse::{document::ConfigNode, types::StringList};
+use crate::parse::config::LocationConfig;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -87,7 +87,7 @@ pub(crate) fn safe_relative_path(path: &str) -> Result<PathBuf, SafePathError> {
 /// Returns an `io::Error` if the path doesn't exist, if it's a directory without a
 /// suitable index file, or if file/metadata operations fail.
 pub(crate) async fn index(
-    node: &Arc<ConfigNode>,
+    node: &Arc<LocationConfig>,
     file_path: impl Into<PathBuf>,
 ) -> Result<(File, u64, PathBuf), IndexError> {
     let file_path = file_path.into();
@@ -116,9 +116,7 @@ pub(crate) async fn index(
         let base_dir_path = file_path.clone();
 
         let index_files = node
-            .get::<StringList>("index")
-            .ok()
-            .flatten()
+            .index()
             .map(|index| index.0.clone())
             .ok_or(IndexError::MissingIndexFiles)?;
 
@@ -153,25 +151,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::parse::{
-        document::ConfigNode,
-        registry::context,
-        source::{SourceId, SourceSpan},
-        types::StringList,
-        value::TypedValue,
-    };
+    use crate::parse::tests::parse_location;
 
-    fn node_with_indexes(indexes: Vec<&str>) -> Arc<ConfigNode> {
-        let span = SourceSpan::new(SourceId(0), 0, 0);
-        let mut node = ConfigNode::new(context::LOCATION, None, span);
-        node.insert_slot(
-            "index",
-            TypedValue::new(
-                StringList(indexes.into_iter().map(str::to_owned).collect()),
-                span,
-            ),
-        );
-        Arc::new(node)
+    fn node_with_indexes(indexes: Vec<&str>) -> Arc<LocationConfig> {
+        parse_location(&format!("index {};", indexes.join(" "))).unwrap()
     }
 
     fn temp_dir(name: &str) -> PathBuf {

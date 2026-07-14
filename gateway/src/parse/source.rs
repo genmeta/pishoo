@@ -118,6 +118,10 @@ impl SourceMap {
             .unwrap_or_else(|| source.text.len());
         Some(source.text[start..end].trim_end_matches(['\r', '\n']))
     }
+
+    pub fn path_for_span(&self, span: SourceSpan) -> Option<&Path> {
+        self.get(span.source_id)?.path.as_deref()
+    }
 }
 
 impl ConfigDocumentSourceMap {
@@ -137,6 +141,10 @@ impl ConfigDocumentSourceMap {
     }
 
     pub(crate) fn source_map(&self) -> &SourceMap {
+        &self.source_map
+    }
+
+    pub(crate) fn source_map_arc(&self) -> &Arc<SourceMap> {
         &self.source_map
     }
 }

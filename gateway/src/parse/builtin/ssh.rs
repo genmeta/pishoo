@@ -1,7 +1,7 @@
 use snafu::Snafu;
 
 use crate::parse::{
-    registry::{DirectiveInput, DirectiveValue},
+    decode::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{SshLoginMethods, SshSslUser, SshSslUsers},
 };
@@ -78,9 +78,8 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for SshSslU
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::{
-        tests::{build_proxy_conf, cleanup_temp_files, create_temp_file, first_server, parse_doc},
-        types::{SshLoginMethods, SshSslUsers},
+    use crate::parse::tests::{
+        build_proxy_conf, cleanup_temp_files, create_temp_file, first_location,
     };
 
     #[test]
@@ -89,16 +88,8 @@ mod tests {
         let key = create_temp_file("ssh_ssl_user_key");
         let conf = build_proxy_conf(&cert, &key, "ssh_ssl_user alice aliceroot;");
 
-        let location = first_server(&parse_doc(&conf))
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
-
-        let users = location
-            .require::<SshSslUsers>("ssh_ssl_user")
-            .expect("ssh_ssl_user should be typed")
-            .0
-            .clone();
+        let location = first_location(&conf).unwrap();
+        let users = &location.ssh_users()[0].0;
         assert_eq!(users[0].name, "alice");
         assert_eq!(users[0].user, "aliceroot");
 
@@ -155,19 +146,9 @@ mod tests {
         let key = create_temp_file("ssh_login_key");
         let conf = build_proxy_conf(&cert, &key, "ssh_login ssl;");
 
-        let document = parse_doc(&conf);
-        let location = first_server(&document)
-            .children("location")
-            .expect("location exists")[0]
-            .clone();
+        let location = first_location(&conf).unwrap();
 
-        assert_eq!(
-            location
-                .require::<SshLoginMethods>("ssh_login")
-                .expect("ssh_login should be typed")
-                .0,
-            vec!["ssl".to_owned()]
-        );
+        assert_eq!(location.ssh_login().unwrap().0, vec!["ssl".to_owned()]);
 
         cleanup_temp_files(&[&cert, &key]);
     }

@@ -27,6 +27,7 @@ bytes = { workspace = true }
 http = { workspace = true }
 url = { workspace = true }
 http-body-util = { workspace = true }
+http-body = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 axum = { workspace = true }
@@ -56,6 +57,9 @@ dhttp = { workspace = true }
 async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 chrono = "0.4"
 tracing-appender = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]

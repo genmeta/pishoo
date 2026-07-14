@@ -8,7 +8,7 @@ use snafu::{ResultExt, Snafu};
 use tracing::Instrument;
 
 use crate::{
-    config::ResolvedWorkerTarget,
+    config::WorkerAccount,
     hypervisor::{
         ipc_server::WorkerControlPlane,
         state::{RootState, WorkerProcessError, WorkerStartupError, worker_startup_error},
@@ -41,27 +41,33 @@ pub enum SpawnWorkerError {
 /// 3. Schedule the startup handshake inside the worker task scope
 pub async fn spawn_worker(
     worker_bin: &std::path::Path,
-    target: &ResolvedWorkerTarget,
+    target: &WorkerAccount,
     state: Arc<RootState>,
+    root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot,
 ) -> Result<SpawnedWorker, SpawnWorkerError> {
     let launched = crate::hypervisor::launcher::launch_worker(
         worker_bin,
-        target.uid,
-        target.gid,
-        &target.name,
-        &target.dir,
+        target.uid(),
+        target.primary_gid(),
+        target.name(),
+        target.login_home(),
     )
     .context(spawn_worker_error::LaunchWorkerSnafu)?;
     let pid = launched.handle.pid();
     let mux_fd = launched.mux_fd;
+    let (root_defaults_tx, root_defaults_rx) = remoc::rch::watch::channel(root_defaults.clone());
 
     state
-        .register_worker(pid, target.uid, target.name.clone(), launched.handle)
+        .register_worker_with_defaults(
+            pid,
+            target.uid(),
+            target.name().to_owned(),
+            launched.handle,
+            root_defaults_tx,
+        )
         .await;
 
-    let uid = target.uid.as_raw();
-    let username = target.name.clone();
-    let home = target.dir.clone();
+    let account = target.clone();
     let startup_state = state.clone();
     let spawned_startup_task = state
         .spawn_worker_task(pid, move |token| {
@@ -71,7 +77,7 @@ pub async fn spawn_worker(
                     () = token.cancelled() => return,
                     result = tokio::time::timeout(
                         WORKER_STARTUP_TIMEOUT,
-                        start_worker_ipc(pid, state.clone(), mux_fd, uid, username, home),
+                        start_worker_ipc(pid, state.clone(), mux_fd, account, root_defaults, root_defaults_rx),
                     ) => result,
                 };
                 let error = match result {
@@ -92,7 +98,7 @@ pub async fn spawn_worker(
         return Err(SpawnWorkerError::ScheduleStartup { pid });
     }
 
-    tracing::info!(pid = %pid, username = %target.name, "worker launch scheduled");
+    tracing::info!(pid = %pid, username = %target.name(), "worker launch scheduled");
 
     Ok(SpawnedWorker { pid })
 }
@@ -101,9 +107,12 @@ async fn start_worker_ipc(
     pid: nix::unistd::Pid,
     state: Arc<RootState>,
     mux_fd: OwnedFd,
-    uid: u32,
-    username: String,
-    home: std::path::PathBuf,
+    account: WorkerAccount,
+    root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot,
+    root_defaults_rx: remoc::rch::watch::Receiver<
+        gateway::parse::config::RootWorkerDefaultsSnapshot,
+        remoc::codec::Default,
+    >,
 ) -> Result<(), WorkerStartupError> {
     let mux = MuxChannel::from_fd(mux_fd).context(worker_startup_error::MuxChannelFromFdSnafu)?;
     let (sink, stream) = mux
@@ -147,11 +156,11 @@ async fn start_worker_ipc(
 
     let rpc_impl = WorkerControlPlane::new(pid, state.clone(), fd_transfer);
     let (server, client) = crate::ipc::ControlPlaneServerShared::new(Arc::new(rpc_impl), 1);
-    let username_for_log = username.clone();
+    let username_for_log = account.name().to_owned();
     let bootstrap = WorkerBootstrap {
-        uid,
-        username,
-        home,
+        account,
+        root_defaults,
+        root_defaults_rx,
         control_plane: client,
     };
     let server_state = state.clone();

@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     hypervisor::{
         endpoint_factory,
-        state::{AcquireListenerError, RebuildListenerError, owner::Owner},
+        state::{AcquireListenerError, owner::Owner},
     },
     listen::RegisteredEndpoint,
 };
@@ -255,21 +255,9 @@ fn send_local_session_signal(child_pid: Pid, signal: Signal) {
 impl gateway::control_plane::ProvideListener for InProcessControlPlane {
     type Listener = RegisteredEndpoint;
     type ListenError = AcquireListenerError;
-    type RebuildError = RebuildListenerError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         self.state.acquire_listener(Owner::Local, request).await
-    }
-
-    async fn rebuild_listener(
-        &self,
-        _old: Self::Listener,
-        request: ListenRequest,
-    ) -> Result<Self::Listener, Self::RebuildError> {
-        // _old is consumed and dropped; root disarms its release guard when the
-        // rebuild transition starts, so the drop cannot release the
-        // replacement listener.
-        self.state.rebuild_listener(Owner::Local, request).await
     }
 }
 

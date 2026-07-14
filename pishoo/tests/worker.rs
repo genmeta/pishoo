@@ -4,7 +4,7 @@ fn worker_requests_root_owned_connector() {
 
     assert!(
         worker_source.contains("RemoteControlPlane::new(")
-            && worker_source.contains("bootstrap.control_plane"),
+            && worker_source.contains("control_plane,\n    } = bootstrap"),
         "worker must use RemoteControlPlane backed by the root-provided client"
     );
     assert!(
@@ -52,32 +52,16 @@ fn worker_stops_server_runtimes_before_exit() {
 }
 
 #[test]
-fn listener_rebuild_uses_control_plane_rebuild_call() {
+fn listener_changes_use_only_shutdown_and_normal_acquisition() {
     let ipc_source = include_str!("../src/ipc.rs");
     let remote_source = include_str!("../src/worker/remote_plane.rs");
     let local_source = include_str!("../src/hypervisor/in_process_plane.rs");
     let ipc_server_source = include_str!("../src/hypervisor/ipc_server.rs");
 
-    assert!(
-        ipc_source.contains("async fn rebuild_listener"),
-        "ipc ControlPlane trait must expose async fn rebuild_listener"
-    );
-    assert!(
-        ipc_source.contains("RebuildListenError"),
-        "ipc must define a dedicated RebuildListenError type"
-    );
-    assert!(
-        ipc_server_source.contains("rebuild_listener"),
-        "root WorkerControlPlane must implement rebuild_listener"
-    );
-    assert!(
-        remote_source.contains("rebuild_listener"),
-        "RemoteControlPlane must expose rebuild_listener consuming the old IpcListener"
-    );
-    assert!(
-        local_source.contains("rebuild_listener"),
-        "InProcessControlPlane must expose rebuild_listener consuming the old RegisteredEndpoint"
-    );
+    for source in [ipc_source, ipc_server_source, remote_source, local_source] {
+        assert!(!source.contains("rebuild_listener"));
+        assert!(!source.contains("RebuildListen"));
+    }
 }
 
 #[test]
@@ -104,8 +88,8 @@ fn accept_state_aborts_listener_task_on_drop() {
         "service module must expose the accept submodule"
     );
     assert!(
-        accept_source.contains("pub enum AcceptState"),
-        "service::accept must define an AcceptState enum"
+        accept_source.contains("pub struct AcceptState"),
+        "service::accept must define the owned AcceptState"
     );
     assert!(
         accept_source.contains("task: AbortOnDropHandle<L>"),
@@ -139,8 +123,8 @@ fn worker_uses_dhttp_home_api_for_user_home() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
 
     assert!(
-        worker_source.contains("DhttpHome::for_user_home_dir"),
-        "worker must construct user dhttp home through the dhttp home API"
+        worker_source.contains("account.dhttp_home().clone()"),
+        "worker must use the root-selected DhttpHome from its typed account bootstrap"
     );
     assert!(
         !worker_source.contains("join(\".dhttp\")"),

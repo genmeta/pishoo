@@ -48,7 +48,8 @@ pub(crate) fn worker_binary_path() -> PathBuf {
 /// from being spawned.
 pub async fn spawn_configured_workers(
     state: &Arc<RootState>,
-    worker_targets: Vec<crate::config::ResolvedWorkerTarget>,
+    worker_targets: Vec<crate::config::WorkerAccount>,
+    root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot,
 ) {
     if worker_targets.is_empty() {
         tracing::info!("no worker targets resolved");
@@ -60,14 +61,14 @@ pub async fn spawn_configured_workers(
     let worker_bin = worker_binary_path();
 
     for target in &worker_targets {
-        match spawn_worker(&worker_bin, target, state.clone()).await {
+        match spawn_worker(&worker_bin, target, state.clone(), root_defaults.clone()).await {
             Ok(_) => spawned += 1,
             Err(error) => {
                 // Worker spawn failures (fork/exec, IPC negotiation, hello
                 // timeout) are per-user problems that must not bring down the
                 // entire root process.  Log and continue to the next worker.
                 tracing::error!(
-                    user = %target.name,
+                    user = %target.name(),
                     error = %Report::from_error(&error),
                     "failed to spawn worker, skipping user"
                 );

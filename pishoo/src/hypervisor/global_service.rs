@@ -5,46 +5,13 @@
 
 use std::sync::Arc;
 
-use snafu::{ResultExt, Snafu};
-
 use crate::{
     hypervisor::{in_process_plane::InProcessControlPlane, state::RootState},
     service::{
         runtime::RuntimeRegistry,
-        source::{PishooConfigServiceSource, PrepareContext, ServerSource},
+        source::{PrepareContext, ServerSource, TypedServerSource},
     },
 };
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum BuildGlobalSourcesError {
-    #[snafu(display("failed to load identity services"))]
-    IdentityServices {
-        source: crate::worker::config::BuildConfigError,
-    },
-    #[snafu(display("failed to load pishoo config services"))]
-    ConfigServices {
-        source: crate::service::source::BuildConfigServiceSourcesError,
-    },
-    #[snafu(display("failed to prepare global service context"))]
-    PrepareContext {
-        source: crate::service::source::BuildPrepareContextError,
-    },
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum SpawnGlobalServiceError {
-    #[snafu(display("failed to build global service sources"))]
-    Build { source: BuildGlobalSourcesError },
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum ReplaceGlobalServiceError {
-    #[snafu(display("failed to build global service sources"))]
-    Build { source: BuildGlobalSourcesError },
-}
 
 /// Handle to a running global service, used for shutdown and replacement.
 pub struct GlobalServiceHandle {
@@ -57,6 +24,31 @@ impl GlobalServiceHandle {
         if let Some(registry) = self.registry.take() {
             registry.shutdown().await;
         }
+    }
+
+    pub async fn wait_service_completion(&mut self) -> dhttp::name::DhttpName<'static> {
+        self.registry
+            .as_mut()
+            .expect("a live global service handle owns its registry")
+            .wait_service_completion()
+            .await
+    }
+
+    pub async fn handle_service_exit(&mut self, name: dhttp::name::DhttpName<'static>) {
+        self.registry
+            .as_mut()
+            .expect("a live global service handle owns its registry")
+            .handle_service_exit(name)
+            .await;
+    }
+}
+
+pub async fn wait_global_service_completion(
+    handle: &mut Option<GlobalServiceHandle>,
+) -> dhttp::name::DhttpName<'static> {
+    match handle {
+        Some(handle) => handle.wait_service_completion().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -71,64 +63,47 @@ impl Drop for GlobalServiceHandle {
 }
 
 async fn build_global_sources(
-    source: &crate::config::PishooConfigSource,
-    entry_config: &crate::config::EntryConfig,
+    plan: &crate::config::GlobalPishooPlan,
     router_state: gateway::reverse::router::RouterState,
-) -> Result<(Vec<ServerSource>, PrepareContext), BuildGlobalSourcesError> {
-    let mut sources = Vec::new();
-    let mut ctx = None;
-
-    if source.load_identity_services() {
-        let home = source.dhttp_home().expect("global source has dhttp home");
-        let identity_sources = crate::worker::config::load_identity_service_sources(home)
-            .await
-            .context(build_global_sources_error::IdentityServicesSnafu)?;
-        sources.extend(
-            identity_sources
-                .into_iter()
-                .map(ServerSource::IdentityService),
-        );
-    }
-
-    if !entry_config.config_services.is_empty() {
-        let (config_sources, config_ctx) = PishooConfigServiceSource::load_all(
-            &entry_config.config_services,
-            source.dhttp_home(),
-            router_state.clone(),
-        )
-        .await
-        .context(build_global_sources_error::ConfigServicesSnafu)?;
-        sources.extend(config_sources);
-        ctx = Some(config_ctx);
-    }
-
-    let ctx = match ctx {
-        Some(ctx) => ctx,
-        None => {
-            let Some(home) = source.dhttp_home() else {
-                return Ok((
-                    sources,
-                    PrepareContext::load_config_service(None, router_state)
-                        .await
-                        .context(build_global_sources_error::PrepareContextSnafu)?,
-                ));
-            };
-            PrepareContext::load_worker(home, router_state)
-                .await
-                .context(build_global_sources_error::PrepareContextSnafu)?
+) -> (Vec<ServerSource>, PrepareContext) {
+    let mut configs = Vec::new();
+    for candidate in plan.direct_servers() {
+        match candidate.result() {
+            Ok(server) => configs.push(Arc::new(server.clone())),
+            Err(error) => {
+                tracing::warn!(error = %snafu::Report::from_error(error), "direct server config rejected")
+            }
         }
-    };
-
-    Ok((sources, ctx))
+    }
+    if let Some(home) = plan.home() {
+        match crate::config::load_identity_server_candidates(home, plan.worker_defaults()).await {
+            Ok(candidates) => {
+                for candidate in candidates.into_vec() {
+                    let (profile, result) = candidate.into_parts();
+                    match result {
+                        Ok(Some(server)) => configs.push(Arc::new(server)),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(profile = ?profile.map(|p| p.name().to_string()), error = %snafu::Report::from_error(&error), "identity server config rejected")
+                        }
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(
+                error = %snafu::Report::from_error(&error),
+                "global identity service discovery failed"
+            ),
+        }
+    }
+    TypedServerSource::load_all(configs, router_state).await
 }
 
 /// Spawn the global service from configuration. Returns `None` if no global
 /// services are configured.
 pub async fn spawn_global_service(
     state: &Arc<RootState>,
-    source: &crate::config::PishooConfigSource,
-    entry_config: &crate::config::EntryConfig,
-) -> Result<Option<GlobalServiceHandle>, SpawnGlobalServiceError> {
+    plan: &crate::config::GlobalPishooPlan,
+) -> Option<GlobalServiceHandle> {
     let plane = Arc::new(InProcessControlPlane::new(state.clone()));
 
     let router_state = gateway::reverse::router::RouterState {
@@ -138,13 +113,11 @@ pub async fn spawn_global_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = build_global_sources(source, entry_config, router_state)
-        .await
-        .context(spawn_global_service_error::BuildSnafu)?;
+    let (sources, ctx) = build_global_sources(plan, router_state).await;
 
     if sources.is_empty() {
         tracing::debug!("no global services configured");
-        return Ok(None);
+        return None;
     }
 
     let service_count = sources.len();
@@ -153,18 +126,17 @@ pub async fn spawn_global_service(
 
     tracing::info!(services = service_count, "global service started");
 
-    Ok(Some(GlobalServiceHandle {
+    Some(GlobalServiceHandle {
         registry: Some(registry),
-    }))
+    })
 }
 
 /// Replace the running global service with a freshly built one.
 pub async fn replace_global_service(
     state: &Arc<RootState>,
     handle: &mut Option<GlobalServiceHandle>,
-    source: &crate::config::PishooConfigSource,
-    entry_config: &crate::config::EntryConfig,
-) -> Result<(), ReplaceGlobalServiceError> {
+    plan: &crate::config::GlobalPishooPlan,
+) {
     let plane = Arc::new(InProcessControlPlane::new(state.clone()));
 
     let router_state = gateway::reverse::router::RouterState {
@@ -174,15 +146,13 @@ pub async fn replace_global_service(
         task_scope: Arc::new(state.local_task_scope()),
     };
 
-    let (sources, ctx) = build_global_sources(source, entry_config, router_state)
-        .await
-        .context(replace_global_service_error::BuildSnafu)?;
+    let (sources, ctx) = build_global_sources(plan, router_state).await;
 
     if sources.is_empty() {
         if let Some(old) = handle.take() {
             old.shutdown().await;
         }
-        return Ok(());
+        return;
     }
 
     if let Some(registry) = handle
@@ -190,7 +160,7 @@ pub async fn replace_global_service(
         .and_then(|existing| existing.registry.as_mut())
     {
         registry.apply_sources(sources, &ctx).await;
-        return Ok(());
+        return;
     }
 
     let mut new_registry = RuntimeRegistry::new(plane);
@@ -201,6 +171,4 @@ pub async fn replace_global_service(
     *handle = Some(GlobalServiceHandle {
         registry: Some(new_registry),
     });
-
-    Ok(())
 }

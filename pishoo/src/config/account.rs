@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 use dhttp::home::DhttpHome;
 use nix::unistd::{Gid, Uid};
@@ -19,7 +22,7 @@ pub enum WorkerAccountError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct WorkerAccount {
+pub struct WorkerAccount {
     name: String,
     uid: Uid,
     primary_gid: Gid,
@@ -68,23 +71,23 @@ impl WorkerAccount {
         )
     }
 
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub(crate) const fn uid(&self) -> Uid {
+    pub const fn uid(&self) -> Uid {
         self.uid
     }
 
-    pub(crate) const fn primary_gid(&self) -> Gid {
+    pub const fn primary_gid(&self) -> Gid {
         self.primary_gid
     }
 
-    pub(crate) fn login_home(&self) -> &std::path::Path {
+    pub fn login_home(&self) -> &std::path::Path {
         &self.login_home
     }
 
-    pub(crate) fn dhttp_home(&self) -> &DhttpHome {
+    pub fn dhttp_home(&self) -> &DhttpHome {
         &self.dhttp_home
     }
 }
@@ -147,22 +150,14 @@ pub(crate) fn select_worker_dhttp_home(target: &ResolvedWorkerTarget) -> DhttpHo
     DhttpHome::for_user_home_dir(target.dir.clone())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WorkerCredentialSnapshot {
-    pub(crate) real_uid: Uid,
-    pub(crate) effective_uid: Uid,
-    pub(crate) real_gid: Gid,
-    pub(crate) effective_gid: Gid,
-}
-
 #[derive(Debug, Snafu)]
-pub(crate) enum BuildWorkerRosterError {
+pub enum BuildWorkerRosterError {
     #[snafu(display("duplicate worker uid {uid}"))]
     DuplicateUid { uid: Uid },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WorkerRoster(BTreeMap<u32, WorkerAccount>);
+pub struct WorkerRoster(BTreeMap<u32, WorkerAccount>);
 
 impl WorkerRoster {
     pub(crate) fn new(
@@ -180,8 +175,49 @@ impl WorkerRoster {
         Ok(Self(roster))
     }
 
-    pub(crate) fn get(&self, uid: Uid) -> Option<&WorkerAccount> {
-        self.0.get(&uid.as_raw())
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn to_vec(&self) -> Vec<WorkerAccount> {
+        self.0.values().cloned().collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkerDiff {
+    pub unchanged: Vec<WorkerAccount>,
+    pub added: Vec<WorkerAccount>,
+    pub removed: Vec<WorkerAccount>,
+    pub changed: Vec<(WorkerAccount, WorkerAccount)>,
+}
+pub fn compute_worker_diff(current: &[WorkerAccount], next: &[WorkerAccount]) -> WorkerDiff {
+    let current_map: HashMap<&str, &WorkerAccount> =
+        current.iter().map(|v| (v.name(), v)).collect();
+    let next_map: HashMap<&str, &WorkerAccount> = next.iter().map(|v| (v.name(), v)).collect();
+    let mut unchanged = Vec::new();
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+    for n in next {
+        match current_map.get(n.name()) {
+            Some(c) if c.uid() == n.uid() => unchanged.push(n.clone()),
+            Some(c) => changed.push(((*c).clone(), n.clone())),
+            None => added.push(n.clone()),
+        }
+    }
+    for c in current {
+        if !next_map.contains_key(c.name()) {
+            removed.push(c.clone())
+        }
+    }
+    WorkerDiff {
+        unchanged,
+        added,
+        removed,
+        changed,
     }
 }
 
@@ -193,8 +229,8 @@ mod tests {
     use nix::unistd::{Gid, Uid, User};
 
     use super::{
-        BuildWorkerRosterError, WorkerAccount, WorkerAccountError, WorkerCredentialSnapshot,
-        WorkerRoster, select_worker_dhttp_home,
+        BuildWorkerRosterError, WorkerAccount, WorkerAccountError, WorkerRoster,
+        select_worker_dhttp_home,
     };
 
     fn account() -> WorkerAccount {
@@ -318,20 +354,6 @@ mod tests {
         let decoded: WorkerAccount = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, original);
         assert_ne!(decoded.login_home(), decoded.dhttp_home().as_path());
-    }
-
-    #[test]
-    fn worker_credentials_keep_real_and_effective_ids_typed() {
-        let credentials = WorkerCredentialSnapshot {
-            real_uid: Uid::from_raw(1),
-            effective_uid: Uid::from_raw(2),
-            real_gid: Gid::from_raw(3),
-            effective_gid: Gid::from_raw(4),
-        };
-        assert_eq!(credentials.real_uid, Uid::from_raw(1));
-        assert_eq!(credentials.effective_uid, Uid::from_raw(2));
-        assert_eq!(credentials.real_gid, Gid::from_raw(3));
-        assert_eq!(credentials.effective_gid, Gid::from_raw(4));
     }
 
     #[test]

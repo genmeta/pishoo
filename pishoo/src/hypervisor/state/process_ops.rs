@@ -64,12 +64,16 @@ impl RootState {
     ///
     /// If another worker already holds the same UID, the old one is cleaned
     /// up first (uid-replaced).
-    pub async fn register_worker(
+    pub async fn register_worker_with_defaults(
         self: &Arc<Self>,
         pid: Pid,
         uid: Uid,
         username: String,
         worker_handle: WorkerHandle,
+        root_defaults_tx: remoc::rch::watch::Sender<
+            gateway::parse::config::RootWorkerDefaultsSnapshot,
+            remoc::codec::Default,
+        >,
     ) {
         let replaced_pid = {
             let inner = self.inner.lock().await;
@@ -94,10 +98,45 @@ impl RootState {
                 username: username.clone(),
                 tasks: TaskScope::new(),
                 worker_handle,
+                root_defaults_tx,
             },
         );
         inner.users.insert(uid, pid);
         tracing::debug!(pid = %pid, uid = uid.as_raw(), %username, "registered worker");
+    }
+
+    pub async fn dispatch_worker_defaults(
+        &self,
+        snapshot: gateway::parse::config::RootWorkerDefaultsSnapshot,
+    ) {
+        let inner = self.inner.lock().await;
+        for (pid, record) in &inner.processes {
+            if let Err(error) = record.root_defaults_tx.send(snapshot.clone()) {
+                tracing::warn!(pid = %pid, error = %error, "failed to dispatch worker defaults snapshot");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn register_worker(
+        self: &Arc<Self>,
+        pid: Pid,
+        uid: Uid,
+        username: String,
+        worker_handle: WorkerHandle,
+    ) {
+        let defaults = gateway::parse::TypedConfigParser::new()
+            .parse_root(
+                "pishoo {}",
+                std::path::Path::new("/tmp/test-root.conf"),
+                None,
+            )
+            .unwrap()
+            .pishoo()
+            .worker_defaults();
+        let (root_defaults_tx, _root_defaults_rx) = remoc::rch::watch::channel(defaults);
+        self.register_worker_with_defaults(pid, uid, username, worker_handle, root_defaults_tx)
+            .await;
     }
 
     /// Check whether a worker with the given PID is registered.
@@ -393,11 +432,11 @@ impl RootState {
         }
     }
 
-    pub async fn set_desired_workers(&self, targets: Vec<crate::config::ResolvedWorkerTarget>) {
+    pub async fn set_desired_workers(&self, targets: Vec<crate::config::WorkerAccount>) {
         let mut inner = self.inner.lock().await;
         let desired: std::collections::HashMap<_, _> = targets
             .into_iter()
-            .map(|target| (target.uid, target))
+            .map(|target| (target.uid(), target))
             .collect();
         inner
             .failed_workers
@@ -408,7 +447,7 @@ impl RootState {
     /// Drain the set of failed-but-still-desired workers so the reload
     /// orchestrator can retry spawning them. After draining, the registry
     /// is empty until the next worker failure parks another entry.
-    pub async fn take_failed_desired_workers(&self) -> Vec<crate::config::ResolvedWorkerTarget> {
+    pub async fn take_failed_desired_workers(&self) -> Vec<crate::config::WorkerAccount> {
         let mut inner = self.inner.lock().await;
         inner
             .failed_workers
@@ -416,7 +455,7 @@ impl RootState {
             .map(|(uid, record)| {
                 tracing::info!(
                     uid = uid.as_raw(),
-                    user = %record.target.name,
+                    user = %record.target.name(),
                     reason = %record.reason,
                     "retrying failed worker on reload"
                 );
@@ -429,10 +468,7 @@ impl RootState {
         self.inner.lock().await.desired_workers.clear();
     }
 
-    pub async fn desired_worker_target(
-        &self,
-        uid: Uid,
-    ) -> Option<crate::config::ResolvedWorkerTarget> {
+    pub async fn desired_worker_target(&self, uid: Uid) -> Option<crate::config::WorkerAccount> {
         self.inner.lock().await.desired_workers.get(&uid).cloned()
     }
 }

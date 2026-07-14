@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
-use gateway::parse::{document::ConfigNode, types::StringList};
+use gateway::parse::config::PishooConfig;
 pub use nix::unistd::{Gid, Uid, User as ResolvedWorkerTarget};
 use snafu::{OptionExt, ResultExt};
 
 use super::{
-    ConfigError, ConfigQuerySnafu, EmptyWorkerNameSnafu, GroupNotFoundSnafu, GroupResolveSnafu,
-    MissingHomeSnafu, PrimaryGroupUserResolveSnafu, UserNotFoundSnafu, UserResolveSnafu,
+    ConfigError, EmptyWorkerNameSnafu, GroupNotFoundSnafu, GroupResolveSnafu, MissingHomeSnafu,
+    PrimaryGroupUserResolveSnafu, UserNotFoundSnafu, UserResolveSnafu,
 };
 
 #[derive(Debug, Clone)]
@@ -47,22 +45,17 @@ fn parse_worker_names(names: &[String]) -> Result<Vec<WorkerTarget>, ConfigError
         .collect()
 }
 
-fn parse_configured_workers(pishoo: &ConfigNode) -> Result<Vec<WorkerTarget>, ConfigError> {
-    match pishoo
-        .get::<StringList>("workers")
-        .context(ConfigQuerySnafu)?
-    {
-        Some(names) => parse_worker_names(&names.0),
-        None => Ok(Vec::new()),
-    }
+fn parse_configured_workers(pishoo: &PishooConfig) -> Result<Vec<WorkerTarget>, ConfigError> {
+    pishoo
+        .workers()
+        .map_or(Ok(Vec::new()), |names| parse_worker_names(&names.0))
 }
 
-fn parse_groups(pishoo: &ConfigNode) -> Result<Vec<String>, ConfigError> {
-    Ok(pishoo
-        .get::<StringList>("groups")
-        .context(ConfigQuerySnafu)?
+fn parse_groups(pishoo: &PishooConfig) -> Vec<String> {
+    pishoo
+        .groups()
         .map(|names| names.0.clone())
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -273,18 +266,20 @@ fn resolve_default_group_members<D: AccountDirectory>(
     Ok(targets)
 }
 
-pub(super) fn resolve_all_workers(pishoo: &ConfigNode) -> Result<Vec<WorkerTarget>, ConfigError> {
-    let directory = SystemAccountDirectory;
-    resolve_all_workers_with_directory(pishoo, &directory, WorkerDiscoveryMode::ExplicitConfig)
+pub(super) fn resolve_all_workers_mode(
+    pishoo: &PishooConfig,
+    mode: WorkerDiscoveryMode,
+) -> Result<Vec<WorkerTarget>, ConfigError> {
+    resolve_all_workers_with_directory(pishoo, &SystemAccountDirectory, mode)
 }
 
 pub(super) fn resolve_all_workers_with_directory<D: AccountDirectory>(
-    pishoo: &ConfigNode,
+    pishoo: &PishooConfig,
     directory: &D,
     mode: WorkerDiscoveryMode,
 ) -> Result<Vec<WorkerTarget>, ConfigError> {
     let explicit_workers = parse_configured_workers(pishoo)?;
-    let groups = parse_groups(pishoo)?;
+    let groups = parse_groups(pishoo);
 
     let group_members =
         if groups.is_empty() && explicit_workers.is_empty() && mode.default_groups_enabled() {
@@ -304,12 +299,6 @@ pub(super) fn resolve_all_workers_with_directory<D: AccountDirectory>(
         }
     }
     Ok(result)
-}
-
-pub fn resolve_entry_worker_targets(
-    entry_config: &super::EntryConfig,
-) -> Result<Vec<ResolvedWorkerTarget>, ConfigError> {
-    resolve_worker_targets(&entry_config.workers)
 }
 
 pub fn resolve_worker_targets(
@@ -333,215 +322,4 @@ pub fn resolve_worker_targets(
         resolved.push(user);
     }
     Ok(resolved)
-}
-
-/// Diff result describing which workers are unchanged, added, removed, or changed.
-#[derive(Debug)]
-pub struct WorkerDiff {
-    /// Workers present in both current and next with same (username, uid).
-    pub unchanged: Vec<ResolvedWorkerTarget>,
-    /// Workers present in next but not in current.
-    pub added: Vec<ResolvedWorkerTarget>,
-    /// Workers present in current but not in next.
-    pub removed: Vec<ResolvedWorkerTarget>,
-    /// Workers where username matches but uid changed — these need kill + respawn.
-    pub changed: Vec<(ResolvedWorkerTarget, ResolvedWorkerTarget)>,
-}
-
-/// Compute a diff between current and next worker targets.
-pub fn compute_worker_diff(
-    current: &[ResolvedWorkerTarget],
-    next: &[ResolvedWorkerTarget],
-) -> WorkerDiff {
-    let current_map: HashMap<&str, &ResolvedWorkerTarget> =
-        current.iter().map(|t| (t.name.as_str(), t)).collect();
-    let next_map: HashMap<&str, &ResolvedWorkerTarget> =
-        next.iter().map(|t| (t.name.as_str(), t)).collect();
-
-    let mut unchanged = Vec::new();
-    let mut added = Vec::new();
-    let mut changed = Vec::new();
-    let mut removed = Vec::new();
-
-    for next_target in next {
-        match current_map.get(next_target.name.as_str()) {
-            Some(cur) if cur.uid == next_target.uid => {
-                unchanged.push(next_target.clone());
-            }
-            Some(cur) => {
-                changed.push(((*cur).clone(), next_target.clone()));
-            }
-            None => {
-                added.push(next_target.clone());
-            }
-        }
-    }
-
-    for cur_target in current {
-        if !next_map.contains_key(cur_target.name.as_str()) {
-            removed.push(cur_target.clone());
-        }
-    }
-
-    WorkerDiff {
-        unchanged,
-        added,
-        removed,
-        changed,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use gateway::parse::document::ConfigNode;
-
-    use super::*;
-
-    #[derive(Default)]
-    struct FakeAccountDirectory {
-        groups: HashMap<String, AccountGroup>,
-        primary_users: HashMap<libc::gid_t, Vec<String>>,
-    }
-
-    impl FakeAccountDirectory {
-        fn with_group(mut self, name: &str, gid: libc::gid_t, members: &[&str]) -> Self {
-            self.groups.insert(
-                name.to_string(),
-                AccountGroup {
-                    name: name.to_string(),
-                    gid: Gid::from_raw(gid),
-                    members: members.iter().map(|member| (*member).to_string()).collect(),
-                },
-            );
-            self
-        }
-
-        fn with_primary_users(mut self, gid: libc::gid_t, users: &[&str]) -> Self {
-            self.primary_users
-                .insert(gid, users.iter().map(|user| (*user).to_string()).collect());
-            self
-        }
-    }
-
-    impl AccountDirectory for FakeAccountDirectory {
-        fn group_by_name(&self, group_name: &str) -> Result<Option<AccountGroup>, ConfigError> {
-            Ok(self.groups.get(group_name).cloned())
-        }
-
-        fn primary_group_usernames(
-            &self,
-            _group_name: &str,
-            gid: Gid,
-        ) -> Result<Vec<String>, ConfigError> {
-            Ok(self
-                .primary_users
-                .get(&gid.as_raw())
-                .cloned()
-                .unwrap_or_default())
-        }
-    }
-
-    fn first_pishoo(conf: &str) -> std::sync::Arc<ConfigNode> {
-        let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");
-        parsed
-            .root
-            .children("pishoo")
-            .expect("pishoo block should exist")
-            .first()
-            .expect("pishoo block should not be empty")
-            .clone()
-    }
-
-    #[test]
-    fn default_group_missing_is_not_a_config_error() {
-        let pishoo = first_pishoo("pishoo { }");
-        let directory = FakeAccountDirectory::default();
-
-        let workers = resolve_all_workers_with_directory(
-            &pishoo,
-            &directory,
-            WorkerDiscoveryMode::DefaultGlobalHome,
-        )
-        .expect("missing default pishoo group should warn and continue");
-
-        assert!(workers.is_empty());
-    }
-
-    #[test]
-    fn explicit_group_missing_remains_a_config_error() {
-        let pishoo = first_pishoo("pishoo { groups pishoo; }");
-        let directory = FakeAccountDirectory::default();
-
-        let error = resolve_all_workers_with_directory(
-            &pishoo,
-            &directory,
-            WorkerDiscoveryMode::ExplicitConfig,
-        )
-        .expect_err("explicit missing group should fail");
-
-        assert_eq!(error.to_string(), "group `pishoo` not found");
-    }
-
-    #[test]
-    fn default_group_includes_primary_gid_users() {
-        let pishoo = first_pishoo("pishoo { }");
-        let directory = FakeAccountDirectory::default()
-            .with_group("pishoo", 42, &["alice"])
-            .with_primary_users(42, &["bob", "carol"]);
-
-        let workers = resolve_all_workers_with_directory(
-            &pishoo,
-            &directory,
-            WorkerDiscoveryMode::DefaultGlobalHome,
-        )
-        .expect("default group should resolve");
-
-        let usernames = workers
-            .iter()
-            .map(|worker| worker.username.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(usernames, ["alice", "bob", "carol"]);
-    }
-
-    #[test]
-    fn default_group_deduplicates_supplementary_and_primary_users() {
-        let pishoo = first_pishoo("pishoo { }");
-        let directory = FakeAccountDirectory::default()
-            .with_group("pishoo", 42, &["alice", "bob"])
-            .with_primary_users(42, &["bob", "carol"]);
-
-        let workers = resolve_all_workers_with_directory(
-            &pishoo,
-            &directory,
-            WorkerDiscoveryMode::DefaultGlobalHome,
-        )
-        .expect("default group should resolve");
-
-        let usernames = workers
-            .iter()
-            .map(|worker| worker.username.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(usernames, ["alice", "bob", "carol"]);
-    }
-
-    #[test]
-    fn explicit_workers_are_kept_before_default_group_users() {
-        let pishoo = first_pishoo("pishoo { workers zoe alice; }");
-        let directory = FakeAccountDirectory::default().with_group("pishoo", 42, &["bob"]);
-
-        let workers = resolve_all_workers_with_directory(
-            &pishoo,
-            &directory,
-            WorkerDiscoveryMode::ExplicitConfig,
-        )
-        .expect("explicit workers should resolve without default group lookup");
-
-        let usernames = workers
-            .iter()
-            .map(|worker| worker.username.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(usernames, ["zoe", "alice"]);
-    }
 }

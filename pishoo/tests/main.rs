@@ -250,7 +250,7 @@ fn root_state_exposes_explicit_listener_operations() {
 
     assert!(source.contains("pub async fn acquire_listener"));
     assert!(source.contains("pub async fn release_listener"));
-    assert!(source.contains("pub async fn rebuild_listener"));
+    assert!(!source.contains("pub async fn rebuild_listener"));
     assert!(source.contains("pub async fn clear_listener_poison"));
     assert!(!source.contains("pub async fn release_server"));
 }
@@ -324,12 +324,11 @@ fn hypervisor_uses_global_service_module_name() {
 }
 
 #[test]
-fn entry_config_uses_pishoo_config_service_names() {
-    let entry_source = include_str!("../src/config/entry.rs");
+fn global_plan_owns_direct_server_candidates() {
+    let plan_source = include_str!("../src/config/plan.rs");
     let global_service_source = include_str!("../src/hypervisor/global_service.rs");
 
-    assert!(entry_source.contains("config_services"));
-    assert!(!entry_source.contains("local_servers"));
-    assert!(!entry_source.contains("parse_local_servers"));
+    assert!(plan_source.contains("direct_servers"));
+    assert!(!plan_source.contains("local_servers"));
     assert!(!global_service_source.contains("local_servers"));
 }

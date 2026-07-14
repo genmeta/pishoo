@@ -124,37 +124,12 @@ pub enum RemoteConnectError {
     Protocol { source: crate::ipc::ConnectError },
 }
 
-/// Error from a remote rebuild request.
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum RemoteRebuildError {
-    #[snafu(transparent)]
-    Protocol {
-        source: crate::ipc::RebuildListenError,
-    },
-}
-
 impl gateway::control_plane::ProvideListener for RemoteControlPlane {
     type Listener = IpcListener<IpcCodec>;
     type ListenError = RemoteListenError;
-    type RebuildError = RemoteRebuildError;
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         let ipc_client = self.client.listener(request).await?;
-        Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
-    }
-
-    async fn rebuild_listener(
-        &self,
-        _old: Self::Listener,
-        request: ListenRequest,
-    ) -> Result<Self::Listener, Self::RebuildError> {
-        // _old is consumed without explicit shutdown: root destroys its side
-        // of the listener as part of the rebuild critical section, so calling
-        // shutdown on the old IpcListener would race against a server that
-        // has already gone away. Root disarms the old handle's release guard
-        // before installing the replacement.
-        let ipc_client = self.client.rebuild_listener(request).await?;
         Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
     }
 }
@@ -185,7 +160,7 @@ mod tests {
     use super::RemoteControlPlane;
     use crate::ipc::{
         ConnectError, ControlPlane, ControlPlaneClient, ControlPlaneServerShared, ListenError,
-        RebuildListenError, SpawnSessionError,
+        SpawnSessionError,
     };
 
     struct AckingSpawnPlane {
@@ -198,15 +173,6 @@ mod tests {
             _request: ListenRequest,
         ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, ListenError> {
             Err(ListenError::Internal {
-                message: "not used by this test".to_owned(),
-            })
-        }
-
-        async fn rebuild_listener(
-            &self,
-            _request: ListenRequest,
-        ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, RebuildListenError> {
-            Err(RebuildListenError::Internal {
                 message: "not used by this test".to_owned(),
             })
         }

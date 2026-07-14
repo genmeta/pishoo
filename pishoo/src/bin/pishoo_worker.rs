@@ -10,13 +10,13 @@
 
 use std::sync::Arc;
 
-use dhttp::{h3x::ipc::transport::MuxChannel, home::DhttpHome};
+use dhttp::h3x::ipc::transport::MuxChannel;
 use gateway::error::Whatever;
 use pishoo::{
     ipc::{WorkerBootstrap, WorkerHello},
     worker::remote_plane::RemoteControlPlane,
 };
-use snafu::{OptionExt, Report, ResultExt};
+use snafu::{FromString, OptionExt, Report, ResultExt};
 use tracing::Instrument;
 
 #[tokio::main]
@@ -56,6 +56,8 @@ async fn main() -> Result<(), Whatever> {
         .await
         .whatever_context("failed to establish remoc transport")?;
     let worker_tasks = Arc::new(pishoo::hypervisor::task_scope::TaskScope::new());
+    let transport_ended = tokio_util::sync::CancellationToken::new();
+    let connection_ended = transport_ended.clone();
     worker_tasks.spawn(|token| async move {
         tokio::select! {
             biased;
@@ -67,6 +69,7 @@ async fn main() -> Result<(), Whatever> {
                         "root remoc connection ended"
                     );
                 }
+                connection_ended.cancel();
             }
         }
     });
@@ -79,9 +82,9 @@ async fn main() -> Result<(), Whatever> {
         .whatever_context("root closed channel without sending bootstrap")?;
 
     tracing::debug!(
-        uid = bootstrap.uid,
-        username = %bootstrap.username,
-        home = %bootstrap.home.display(),
+        uid = bootstrap.account.uid().as_raw(),
+        username = %bootstrap.account.name(),
+        home = %bootstrap.account.login_home().display(),
         "bootstrap received"
     );
 
@@ -101,12 +104,14 @@ async fn main() -> Result<(), Whatever> {
 
     // Create the RemoteControlPlane from the bootstrap's ControlPlane client.
     // Pass FdTransfer so worker-side requests can reserve receiver-chosen FD IDs.
-    let plane = Arc::new(RemoteControlPlane::new(
-        bootstrap.control_plane,
-        fd_transfer,
-    ));
-
-    let dhttp_home = DhttpHome::for_user_home_dir(bootstrap.home.clone());
+    let WorkerBootstrap {
+        account,
+        root_defaults,
+        mut root_defaults_rx,
+        control_plane,
+    } = bootstrap;
+    let plane = Arc::new(RemoteControlPlane::new(control_plane, fd_transfer));
+    let dhttp_home = account.dhttp_home().clone();
 
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .whatever_context("failed to create SIGTERM listener")?;
@@ -126,9 +131,19 @@ async fn main() -> Result<(), Whatever> {
         #[cfg(feature = "sshd")]
         task_scope: worker_tasks.clone(),
     };
-    let mut runtime =
-        pishoo::service::runtime::WorkerRuntime::new(plane.clone(), dhttp_home, router_state);
-    runtime.start().await;
+    let mut runtime = pishoo::service::runtime::WorkerRuntime::new(
+        plane.clone(),
+        dhttp_home,
+        root_defaults,
+        router_state,
+    );
+    if let Err(error) = runtime.start().await {
+        runtime.shutdown().await;
+        return Err(Whatever::with_source(
+            Box::new(error),
+            "initial worker configuration failed".to_owned(),
+        ));
+    }
 
     loop {
         tokio::select! {
@@ -146,8 +161,45 @@ async fn main() -> Result<(), Whatever> {
             }
             _ = hup_signal.recv() => {
                 tracing::info!(signal = "SIGHUP", "received reload signal");
-                runtime.reload().await;
+                if let Err(error) = runtime.reload().await {
+                    tracing::error!(error = %snafu::Report::from_error(&error), "worker reload failed; shutting down");
+                    runtime.shutdown().await;
+                    return Err(Whatever::with_source(
+                        Box::new(error),
+                        "worker reload failed".to_owned(),
+                    ));
+                }
                 tracing::info!(signal = "SIGHUP", "reload complete");
+            }
+            changed = root_defaults_rx.changed() => {
+                if let Err(error) = changed {
+                    tracing::error!(error = %error, "root defaults channel closed; shutting down worker");
+                    runtime.shutdown().await;
+                    worker_tasks.cancel_and_wait().await;
+                    return Err(Whatever::with_source(Box::new(error), "root defaults channel closed".to_owned()));
+                }
+                let defaults = root_defaults_rx
+                    .borrow_and_update()
+                    .whatever_context("failed to receive root defaults snapshot")?
+                    .clone();
+                tracing::info!("received root defaults reload");
+                if let Err(error) = runtime.reload_with_root_defaults(defaults).await {
+                    tracing::error!(error = %snafu::Report::from_error(&error), "root defaults reload failed; shutting down");
+                    runtime.shutdown().await;
+                    worker_tasks.cancel_and_wait().await;
+                    return Err(Whatever::with_source(Box::new(error), "root defaults reload failed".to_owned()));
+                }
+                tracing::info!(source = "root_defaults", "reload complete");
+            }
+            _ = transport_ended.cancelled() => {
+                tracing::error!("root control-plane transport ended; shutting down worker");
+                runtime.shutdown().await;
+                worker_tasks.cancel_and_wait().await;
+                return Err(Whatever::without_source("root control-plane transport ended".to_owned()));
+            }
+            name = runtime.wait_service_completion() => {
+                runtime.handle_service_exit(name).await;
+                tracing::warn!("worker server service exited; released its resources");
             }
             _ = usr1_signal.recv() => {
                 tracing::info!(signal = "SIGUSR1", "received reopen signal");

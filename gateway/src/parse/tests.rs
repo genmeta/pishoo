@@ -1,120 +1,101 @@
 use std::{
-    fs,
+    error::Error,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::Arc,
 };
 
-use dhttp::home::DhttpHome;
-
-use crate::parse::{
-    ConfigDocumentParser,
-    cascade::{DirectiveKey, GZIP, GZIP_TYPES},
-    document::{ConfigDocument, ConfigNode},
-    domain::{ConfigDocumentRole, ConfigDocumentRoleKind, ResolvedConfigPath},
-    error::{ConfigDocumentRoleError, ConfigLoadFailure, LoadConfigError},
-    fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
-    registry::{
-        BuildOptions, CascadePolicy, CascadedCardinality, ConfigRegistry, ContextSpec,
-        DirectiveContractMismatch, DirectiveMetadata, DirectiveProjection, DirectiveShape,
-        DirectiveSpec, DuplicatePolicy, ReloadImpact, TransportPolicy, TypedDirectiveDefinition,
-        context,
+use super::{
+    ParsedPishooConfig, TypedConfigParser,
+    config::{
+        AccessLogDirective, LocationConfig, OriginScope, ResolvedAccessLogConfig, ServerConfig,
     },
-    snapshot::{RootConfigSnapshot, test_support as snapshot_test_support},
-    source::SourceId,
-    tree::{AttachedConfigNode, ParentLink, build_global_tree, build_worker_tree},
-    types::{BoolConfig, MimeTypes, PathConfig, StringList},
-    value::ConfigValue,
+    error::ConfigLoadFailure,
 };
 
-static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-static LOCAL_FINALIZER_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ATTACHED_FINALIZER_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-fn count_local_server_finalizer(
-    _node: &mut ConfigNode,
-    _options: &BuildOptions<'_>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    LOCAL_FINALIZER_CALLS.fetch_add(1, Ordering::Relaxed);
-    Ok(())
+pub(crate) fn parse_root(text: &str) -> Result<ParsedPishooConfig, ConfigLoadFailure> {
+    TypedConfigParser::new().parse_root(text, Path::new("/tmp/pishoo.conf"), None)
 }
 
-fn assert_attached_server_context(
-    node: AttachedConfigNode<'_>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let parent = node
-        .parent()
-        .ok_or_else(|| std::io::Error::other("server must be attached before finalization"))?;
-    if parent.context() != context::PISHOO {
-        return Err(std::io::Error::other("server parent must be PISHOO").into());
-    }
-    if parent
-        .children()
-        .filter(|child| child.context() == context::SERVER)
-        .count()
-        != 2
-    {
-        return Err(std::io::Error::other("finalizer must observe every attached sibling").into());
-    }
-    ATTACHED_FINALIZER_CALLS.fetch_add(1, Ordering::Relaxed);
-    Ok(())
-}
-
-fn inject_wrong_pid_type(
-    node: &mut ConfigNode,
-    _options: &BuildOptions<'_>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    node.insert_slot(
-        "pid",
-        crate::parse::value::TypedValue::new(StringList(vec!["wrong".to_owned()]), node.span),
+pub(crate) fn parse_direct_server(extra: &str) -> Result<ServerConfig, String> {
+    let text = format!(
+        "pishoo {{ server {{ listen all 5378; server_name example.com; \
+         ssl_certificate /tmp/server.crt; ssl_certificate_key /tmp/server.key; {extra} }} }}"
     );
-    Ok(())
-}
-
-#[derive(Debug)]
-struct TempConfigDir {
-    path: PathBuf,
-}
-
-impl TempConfigDir {
-    fn new(prefix: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "gateway_parse_{prefix}_{}_{}",
-            std::process::id(),
-            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).expect("create temporary config fixture directory");
-        Self { path }
-    }
-
-    fn join(&self, path: impl AsRef<Path>) -> PathBuf {
-        self.path.join(path)
-    }
-
-    fn worker_home(&self) -> DhttpHome {
-        DhttpHome::new(self.join(".dhttp"))
-    }
-
-    fn worker_source_path(&self) -> PathBuf {
-        self.join(".dhttp/pishoo.conf")
+    let parsed =
+        parse_root(&text).map_err(|error| snafu::Report::from_error(&error).to_string())?;
+    match parsed
+        .servers()
+        .first()
+        .expect("fixture has one server")
+        .result()
+    {
+        Ok(server) => Ok(server.clone()),
+        Err(error) => Err(snafu::Report::from_error(error).to_string()),
     }
 }
 
-impl Drop for TempConfigDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
+pub(crate) fn first_server(text: &str) -> Result<ServerConfig, String> {
+    let parsed = parse_root(text).map_err(|error| snafu::Report::from_error(&error).to_string())?;
+    parsed
+        .into_parts()
+        .1
+        .into_vec()
+        .into_iter()
+        .next()
+        .expect("fixture has one server")
+        .into_result()
+        .map_err(|error| snafu::Report::from_error(&error).to_string())
 }
 
-pub(crate) fn create_temp_file(prefix: &str) -> PathBuf {
+pub(crate) fn first_location(text: &str) -> Result<LocationConfig, String> {
+    first_server(text)?
+        .locations()
+        .first()
+        .cloned()
+        .ok_or_else(|| "fixture has no location".to_owned())
+}
+
+pub(crate) fn parse_location(body: &str) -> Result<Arc<LocationConfig>, String> {
+    parse_location_pattern("/", body)
+}
+
+pub(crate) fn parse_location_pattern(
+    pattern: &str,
+    body: &str,
+) -> Result<Arc<LocationConfig>, String> {
+    let server = parse_direct_server(&format!("location {pattern} {{ {body} }}"))?;
+    Ok(Arc::new(
+        server
+            .locations()
+            .first()
+            .expect("fixture has one location")
+            .clone(),
+    ))
+}
+
+pub(crate) fn build_server_conf(cert: &Path, key: &Path, body: &str) -> String {
+    format!(
+        "pishoo {{ server {{ listen all 5378; server_name example.com; \
+         ssl_certificate {}; ssl_certificate_key {}; {body} }} }}",
+        cert.display(),
+        key.display(),
+    )
+}
+
+pub(crate) fn build_proxy_conf(cert: &Path, key: &Path, body: &str) -> String {
+    build_server_conf(cert, key, &format!("location / {{ {body} }}"))
+}
+
+pub(crate) fn create_temp_file(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "gateway_{prefix}_{}_{}.pem",
+        "gateway-{name}-{}-{}",
         std::process::id(),
-        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos(),
     ));
-    std::fs::write(&path, "dummy").expect("write temp config fixture");
+    std::fs::write(&path, b"fixture").expect("create temporary fixture");
     path
 }
 
@@ -124,2276 +105,208 @@ pub(crate) fn cleanup_temp_files(paths: &[&Path]) {
     }
 }
 
-pub(crate) fn parse_doc(conf: &str) -> ConfigDocument {
-    crate::parse::parse_config_str_for_test(conf).expect("config should parse")
-}
-
-pub(crate) fn first_pishoo(document: &ConfigDocument) -> Arc<ConfigNode> {
-    document.root.children("pishoo").expect("pishoo children")[0].clone()
-}
-
-pub(crate) fn first_server(document: &ConfigDocument) -> Arc<ConfigNode> {
-    first_pishoo(document)
-        .children("server")
-        .expect("server children")[0]
-        .clone()
-}
-
-pub(crate) fn build_server_conf(
-    server_cert: &Path,
-    server_key: &Path,
-    server_body: &str,
-) -> String {
-    format!(
-        "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; {} }} }}",
-        server_cert.display(),
-        server_key.display(),
-        server_body
-    )
-}
-
-pub(crate) fn build_proxy_conf(
-    server_cert: &Path,
-    server_key: &Path,
-    location_body: &str,
-) -> String {
-    format!(
-        r#"
-pishoo {{
-    server {{
-        listen all 5378;
-        server_name example.com;
-        ssl_certificate {};
-        ssl_certificate_key {};
-        location /api {{
-            {}
-        }}
-    }}
-}}
-"#,
-        server_cert.display(),
-        server_key.display(),
-        location_body
-    )
-}
-
-pub(crate) fn assert_error_chain_display_single_line(error: &(dyn std::error::Error + 'static)) {
+pub(crate) fn assert_error_chain_display_single_line(error: &(dyn Error + 'static)) {
     let mut current = Some(error);
     while let Some(error) = current {
-        assert!(
-            !error.to_string().contains('\n'),
-            "error display should be single-line: {}",
-            error
-        );
+        assert!(!error.to_string().contains('\n'));
         current = error.source();
     }
 }
 
 #[test]
-fn sealed_single_query_preserves_type_mismatch() {
-    let fixture = TempConfigDir::new("sealed_single_type_mismatch");
-    let mut registry = crate::parse::default_registry();
-    registry.register_context(ContextSpec {
-        key: context::PISHOO,
-        finalize: Some(inject_wrong_pid_type),
-    });
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let root = parse_root_fragment(&mut parser, "pishoo {}", &fixture.join("pishoo.conf"), None);
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-
-    let error = tree
-        .pishoo()
-        .local(crate::parse::keys::pishoo::PID)
-        .expect_err("wrong stored value type must remain visible");
-
-    assert!(matches!(
-        error,
-        crate::parse::error::ConfigQueryError::TypeMismatch { .. }
-    ));
-}
-
-#[test]
-fn sealed_repeated_query_preserves_order_and_cardinality() {
-    let fixture = TempConfigDir::new("sealed_repeated_order");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; listen all 4102; } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let server = tree.servers().next().expect("server should attach");
-
-    let listen = server
-        .node()
-        .repeated(crate::parse::keys::server::LISTEN)
-        .expect("listen query should succeed");
-
-    assert_eq!(listen.len(), 2);
-    assert_eq!(listen[0].0[0].port, 4101);
-    assert_eq!(listen[1].0[0].port, 4102);
-}
-
-#[test]
-fn sealed_location_payload_query_returns_location_pattern() {
-    let fixture = TempConfigDir::new("sealed_location_payload");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; location = /ready {} } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let location = tree
-        .servers()
-        .next()
-        .expect("server should attach")
-        .locations()
-        .next()
-        .expect("location should attach");
-
-    let pattern = location
-        .payload(crate::parse::keys::location::PATTERN)
-        .expect("location payload query should succeed");
-
-    assert!(matches!(
-        pattern.as_ref(),
-        crate::parse::pattern::Pattern::Exact(path) if path == "/ready"
-    ));
-}
-
-#[test]
-fn sealed_query_key_rejects_wrong_registry_contract() {
-    let fixture = TempConfigDir::new("sealed_wrong_registry_contract");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::leaf_value::<crate::parse::types::ListenConfig>(
-            "listen",
-            vec![context::SERVER],
-            DuplicatePolicy::Append,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let server = tree.servers().next().expect("server should attach");
-
-    let error = server
-        .node()
-        .repeated(crate::parse::keys::server::LISTEN)
-        .expect_err("a key must reject different frozen registry metadata");
-
-    assert!(matches!(
-        error,
-        crate::parse::error::ConfigQueryError::ContractMismatch {
-            mismatch: crate::parse::registry::DirectiveContractMismatch::Cascade { .. },
-            ..
-        }
-    ));
-}
-
-#[test]
-fn sealed_query_keeps_tree_alive_after_registry_replacement() {
-    let fixture = TempConfigDir::new("sealed_query_registry_lifetime");
-    let source_path = fixture.join("home/pishoo.conf");
-    let tree = {
-        let registry = crate::parse::default_registry();
-        let mut parser = ConfigDocumentParser::new(&registry);
-        let root = parse_root_fragment(
-            &mut parser,
-            "pishoo { pid run/pishoo.pid; }",
-            &source_path,
-            None,
-        );
-        build_global_tree(&registry, root, Vec::new()).expect("tree should seal")
-    };
-
-    let pid = tree
-        .pishoo()
-        .local(crate::parse::keys::pishoo::PID)
-        .expect("query should not borrow the registry")
-        .expect("pid should exist");
-
-    assert_eq!(
-        pid.as_ref().as_ref(),
-        source_path.parent().unwrap().join("run/pishoo.pid")
-    );
-}
-
-#[test]
-fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
-    let fixture = TempConfigDir::new("sealed_equivalent_registry_contract");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; types { text/plain txt; } } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-
-    let pishoo_definition = cascaded_definition::<MimeTypes>(
-        context::PISHOO,
-        "types",
-        DirectiveShape::RawBlock,
-        DuplicatePolicy::Reject,
-        CascadePolicy::ReplaceWhole,
-        TransportPolicy::HypervisorOnly,
-        ReloadImpact::ListenerSet,
-    );
-    let server_definition = cascaded_definition::<MimeTypes>(
-        context::SERVER,
-        "types",
-        DirectiveShape::RawBlock,
-        DuplicatePolicy::Reject,
-        CascadePolicy::ReplaceWhole,
-        TransportPolicy::WorkerInheritable,
-        ReloadImpact::Supervisor,
-    );
-    let mut replacement = ConfigRegistry::new();
-    replacement.register_context(ContextSpec {
-        key: context::PISHOO,
-        finalize: None,
-    });
-    replacement.register_context(ContextSpec {
-        key: context::SERVER,
-        finalize: None,
-    });
-    pishoo_definition.register(&mut replacement);
-    server_definition.register(&mut replacement);
-    assert!(
-        replacement
-            .directive_spec(context::SERVER, "types")
-            .is_some()
-    );
-
-    let types = tree
-        .servers()
-        .next()
-        .expect("server should attach")
-        .node()
-        .cascaded(server_definition.key_inheriting(pishoo_definition.key()))
-        .expect("equivalent semantic contract should query")
-        .expect("types should exist");
-
-    assert!(types.effective().0.contains_key("txt"));
-}
-
-#[test]
-fn sealed_cascaded_query_rejects_empty_ancestor_contract_drift() {
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<StringList>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::ValueType { .. }),
-    );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Append,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cardinality { .. }),
-    );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::raw_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Shape { .. }),
-    );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::LastWins,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Duplicate { .. }),
-    );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
-    );
-    assert_ancestor_gzip_contract_accepted(DirectiveSpec::leaf_value::<BoolConfig>(
-        "gzip",
-        vec![context::SERVER],
-        DuplicatePolicy::Reject,
-        CascadePolicy::NearestWins,
-        TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState,
-    ));
-    assert_ancestor_gzip_contract_accepted(DirectiveSpec::leaf_value::<BoolConfig>(
-        "gzip",
-        vec![context::SERVER],
-        DuplicatePolicy::Reject,
-        CascadePolicy::NearestWins,
-        TransportPolicy::WorkerLocalOnly,
-        ReloadImpact::ListenerSet,
-    ));
-}
-
-#[test]
-fn sealed_query_reports_contract_mismatch_diagnostics() {
-    let error = ancestor_gzip_contract_error(DirectiveSpec::raw_value::<BoolConfig>(
-        "gzip",
-        vec![context::SERVER],
-        DuplicatePolicy::Reject,
-        CascadePolicy::NearestWins,
-        TransportPolicy::WorkerLocalOnly,
-        ReloadImpact::RuntimeState,
-    ));
-    let crate::parse::error::ConfigQueryError::ContractMismatch {
-        directive,
-        context: actual_context,
-        mismatch,
-    } = &error
-    else {
-        panic!("expected typed directive contract mismatch");
-    };
-    let rendered = error.to_string();
-
-    assert_eq!(directive.as_str(), "gzip");
-    assert_eq!(*actual_context, context::SERVER);
-    assert!(matches!(
-        mismatch,
-        DirectiveContractMismatch::Shape {
-            expected: DirectiveShape::Leaf,
-            actual: DirectiveShape::RawBlock,
-        }
-    ));
-    assert!(rendered.contains("`gzip`"));
-    assert!(rendered.contains(context::SERVER.0));
-    assert!(rendered.contains("shape"));
-    assert!(rendered.contains("Leaf"));
-    assert!(rendered.contains("RawBlock"));
-    assert!(!rendered.contains("inconsistent cascade policies"));
-    assert_query_contract_mismatch_domain(*mismatch);
-}
-
-fn assert_query_contract_mismatch_domain(mismatch: DirectiveContractMismatch) {
-    match mismatch {
-        DirectiveContractMismatch::Name { .. }
-        | DirectiveContractMismatch::Context { .. }
-        | DirectiveContractMismatch::ValueType { .. }
-        | DirectiveContractMismatch::Cardinality { .. }
-        | DirectiveContractMismatch::Shape { .. }
-        | DirectiveContractMismatch::Payload { .. }
-        | DirectiveContractMismatch::Duplicate { .. }
-        | DirectiveContractMismatch::Cascade { .. } => {}
-    }
-}
-
-fn cascaded_definition<T>(
-    context: crate::parse::registry::ContextKey,
-    name: &'static str,
-    shape: DirectiveShape,
-    duplicate: DuplicatePolicy,
-    cascade: CascadePolicy,
-    transport: TransportPolicy,
-    reload: ReloadImpact,
-) -> TypedDirectiveDefinition<T, CascadedCardinality> {
-    TypedDirectiveDefinition::cascaded(
-        context,
-        name,
-        shape,
-        DirectiveMetadata::new(duplicate, cascade, transport, reload),
-        DirectiveProjection::absent(),
-    )
-}
-
-fn assert_cascaded_contract_mismatch<T>(
-    node: &crate::parse::tree::ConfigNodeRef,
-    key: DirectiveKey<T>,
-    expected: fn(DirectiveContractMismatch) -> bool,
-) where
-    T: ConfigValue,
-{
-    let Err(crate::parse::error::ConfigQueryError::ContractMismatch { mismatch, .. }) =
-        node.cascaded(key)
-    else {
-        panic!("cascaded query should reject the semantic contract mismatch");
-    };
-    assert!(expected(mismatch));
-}
-
-fn ancestor_gzip_contract_result(
-    spec: DirectiveSpec,
-) -> Result<(), crate::parse::error::ConfigQueryError> {
-    let fixture = TempConfigDir::new("sealed_ancestor_contract_mismatch");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(context::SERVER, spec);
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; server { listen all 4101; location / { gzip off; } } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let location = tree
-        .servers()
-        .next()
-        .expect("server should attach")
-        .locations()
-        .next()
-        .expect("location should attach");
-
-    location
-        .node()
-        .cascaded(crate::parse::keys::location::GZIP)
-        .map(|_| ())
-}
-
-fn ancestor_gzip_contract_error(spec: DirectiveSpec) -> crate::parse::error::ConfigQueryError {
-    ancestor_gzip_contract_result(spec)
-        .expect_err("an unused ancestor definition must still match the query contract")
-}
-
-fn assert_ancestor_gzip_contract_mismatch(
-    spec: DirectiveSpec,
-    expected: fn(DirectiveContractMismatch) -> bool,
-) {
-    let crate::parse::error::ConfigQueryError::ContractMismatch {
-        directive,
-        context: actual_context,
-        mismatch,
-    } = ancestor_gzip_contract_error(spec)
-    else {
-        panic!("expected typed directive contract mismatch");
-    };
-    assert_eq!(directive.as_str(), "gzip");
-    assert_eq!(actual_context, context::SERVER);
-    assert!(expected(mismatch));
-}
-
-fn assert_ancestor_gzip_contract_accepted(spec: DirectiveSpec) {
-    ancestor_gzip_contract_result(spec)
-        .expect("transport and reload metadata are outside typed query identity");
-}
-
-#[test]
-fn home_arena_path_query_returns_resolved_config_path() {
-    let fixture = TempConfigDir::new("home_arena_path_query");
-    let include_dir = fixture.join("includes");
-    let include_path = include_dir.join("paths.conf");
-    fs::create_dir_all(&include_dir).expect("create include directory");
-    fs::write(&include_path, "pid run/pishoo.pid;").expect("write included path");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { include includes/paths.conf; }",
-        &fixture.join("pishoo.conf"),
-        None,
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-
-    let pid: Arc<ResolvedConfigPath> = tree
-        .pishoo()
-        .local(crate::parse::keys::pishoo::PID)
-        .expect("pid query should succeed")
-        .expect("pid should exist");
-
-    assert_eq!(pid.as_ref().as_ref(), include_dir.join("run/pishoo.pid"));
-}
-
-#[test]
-fn home_arena_rejects_relative_path_without_source_base() {
-    let registry = crate::parse::default_registry();
-    let failure = crate::parse::load_config_text(
-        "pishoo { pid run/pishoo.pid; }",
-        None,
-        &registry,
-        BuildOptions::default(),
-    )
-    .expect_err("unanchored home path must be rejected");
-    let report = snafu::Report::from_error(&failure.error).to_string();
-
-    assert!(report.contains("relative path requires a configuration file base directory"));
-}
-
-#[test]
-fn independent_proxy_context_keeps_legacy_path_config() {
-    let document =
-        parse_doc("pishoo { proxy { listen 127.0.0.1:8080; ssl_certificate /tmp/proxy.pem; } }");
-    let proxy = first_pishoo(&document)
-        .children("proxy")
-        .expect("proxy should exist")[0]
-        .clone();
-
-    let certificate: Arc<PathConfig> = proxy
-        .require("ssl_certificate")
-        .expect("independent proxy path keeps its legacy type");
-
-    assert_eq!(certificate.0, PathBuf::from("/tmp/proxy.pem"));
-}
-
-fn parse_role_document(
-    text: &str,
-    source_path: &Path,
-    role: ConfigDocumentRole<'_>,
-) -> Result<ParsedConfigDocument, ConfigLoadFailure> {
-    let registry = crate::parse::default_registry();
-    ConfigDocumentParser::new(&registry).parse_text(text, source_path, role)
-}
-
-fn parse_root_fragment(
-    parser: &mut ConfigDocumentParser<'_>,
-    text: &str,
-    source_path: &Path,
-    home: Option<&DhttpHome>,
-) -> ParsedPishooFragment {
-    let ParsedConfigDocument::HypervisorRoot(fragment) = parser
-        .parse_text(
-            text,
-            source_path,
-            ConfigDocumentRole::HypervisorRoot { home },
-        )
-        .expect("root document should parse")
-    else {
-        panic!("expected root pishoo fragment");
-    };
-    fragment
-}
-
-fn parse_worker_fragment(
-    parser: &mut ConfigDocumentParser<'_>,
-    text: &str,
-    source_path: &Path,
-    home: &DhttpHome,
-) -> ParsedPishooFragment {
-    let ParsedConfigDocument::WorkerPishoo(fragment) = parser
-        .parse_text(text, source_path, ConfigDocumentRole::WorkerPishoo { home })
-        .expect("worker document should parse")
-    else {
-        panic!("expected worker pishoo fragment");
-    };
-    fragment
-}
-
-fn parse_identity_fragments(
-    parser: &mut ConfigDocumentParser<'_>,
-    text: &str,
-    source_path: &Path,
-    home: &DhttpHome,
-    identity: &str,
-) -> Vec<ParsedServerFragment> {
-    let name = dhttp::name::DhttpName::try_from(identity.to_owned())
-        .expect("identity fixture name should be valid");
-    let profile = home.identity_profile(name);
-    let ParsedConfigDocument::IdentityServers(servers) = parser
-        .parse_text(
-            text,
-            source_path,
-            ConfigDocumentRole::IdentityServer {
-                home,
-                profile: &profile,
-            },
-        )
-        .expect("identity document should parse")
-    else {
-        panic!("expected identity server fragments");
-    };
-    servers.into_vec()
-}
-
-fn root_snapshot_fixture(
-    registry: &crate::parse::registry::ConfigRegistry,
-    parser: &mut ConfigDocumentParser<'_>,
-    fixture: &TempConfigDir,
-) -> RootConfigSnapshot {
-    let root = parse_root_fragment(
-        parser,
-        "pishoo { gzip on; gzip_vary on; gzip_min_length 42; gzip_comp_level 4; types { text/root root; } }",
-        &fixture.join("root/pishoo.conf"),
-        None,
-    );
-    let snapshot = build_global_tree(registry, root, Vec::new())
-        .expect("root tree should seal")
-        .root_snapshot()
-        .expect("root snapshot should project");
-    snapshot_test_support::checked_wire_round_trip(&snapshot)
-        .expect("root snapshot wire round trip should remain checked")
-}
-
-fn expect_role_error(failure: &ConfigLoadFailure) -> &ConfigDocumentRoleError {
-    let LoadConfigError::DocumentRole { source } = &failure.error else {
-        panic!("expected document role error, got {:#?}", failure.error);
-    };
-    source
-}
-
-#[test]
-fn worker_role_rejects_hypervisor_only_directives() {
-    let fixture = TempConfigDir::new("worker_hypervisor_only");
-    let home = fixture.worker_home();
-    let source_path = fixture.worker_source_path();
-    let failure = parse_role_document(
-        "pishoo { pid /run/pishoo.pid; }",
-        &source_path,
-        ConfigDocumentRole::WorkerPishoo { home: &home },
-    )
-    .expect_err("worker config must reject supervisor directives");
-
-    let ConfigDocumentRoleError::DirectiveNotAllowed {
-        directive,
-        role,
-        span,
-    } = expect_role_error(&failure)
-    else {
-        panic!("expected role-rejected directive");
-    };
-    assert_eq!(directive.as_str(), "pid");
-    assert_eq!(Some(span.document_id()), failure.document_id());
-    assert_eq!(*role, ConfigDocumentRoleKind::WorkerPishoo);
-    assert!(!span.is_empty());
-    let cause = std::error::Error::source(&failure.error).expect("role error should be the cause");
-    let role_cause = cause
-        .downcast_ref::<ConfigDocumentRoleError>()
-        .expect("load error should expose the genuine role error cause");
-    assert!(std::error::Error::source(role_cause).is_none());
-    assert!(
-        failure
-            .diagnostic()
-            .to_string()
-            .contains(&source_path.display().to_string())
-    );
-}
-
-#[test]
-fn worker_role_rejects_direct_server_children() {
-    let fixture = TempConfigDir::new("worker_server_child");
-    let home = fixture.worker_home();
-    let source_path = fixture.worker_source_path();
-    let failure = parse_role_document(
-        "pishoo { server { listen all 443; } }",
-        &source_path,
-        ConfigDocumentRole::WorkerPishoo { home: &home },
-    )
-    .expect_err("worker config must reject direct server declarations");
-
-    let ConfigDocumentRoleError::DirectiveNotAllowed {
-        directive,
-        role,
-        span,
-    } = expect_role_error(&failure)
-    else {
-        panic!("expected role-rejected directive");
-    };
-    assert_eq!(directive.as_str(), "server");
-    assert_eq!(Some(span.document_id()), failure.document_id());
-    assert_eq!(*role, ConfigDocumentRoleKind::WorkerPishoo);
-    assert!(!span.is_empty());
-}
-
-#[test]
-fn hypervisor_root_requires_exactly_one_pishoo() {
-    let fixture = TempConfigDir::new("root_pishoo_cardinality");
-    let source = fixture.join("pishoo.conf");
-    for (text, expected) in [("", 0), ("pishoo {} pishoo {}", 2)] {
-        let failure = parse_role_document(
-            text,
-            &source,
-            ConfigDocumentRole::HypervisorRoot { home: None },
-        )
-        .expect_err("hypervisor root must contain exactly one pishoo block");
-
-        let ConfigDocumentRoleError::ExpectedSinglePishoo {
-            role, found, span, ..
-        } = expect_role_error(&failure)
-        else {
-            panic!("expected pishoo cardinality error");
-        };
-        assert_eq!(*found, expected);
-        assert_eq!(Some(span.document_id()), failure.document_id());
-        assert_eq!(*role, ConfigDocumentRoleKind::HypervisorRoot);
-    }
-}
-
-#[test]
-fn existing_worker_document_requires_exactly_one_pishoo() {
-    let fixture = TempConfigDir::new("worker_pishoo_cardinality");
-    let home = fixture.worker_home();
-    let source_path = fixture.worker_source_path();
-    for (text, expected) in [("", 0), ("pishoo {} pishoo {}", 2)] {
-        let failure = parse_role_document(
-            text,
-            &source_path,
-            ConfigDocumentRole::WorkerPishoo { home: &home },
-        )
-        .expect_err("an existing worker document must contain exactly one pishoo block");
-
-        let ConfigDocumentRoleError::ExpectedSinglePishoo {
-            role, found, span, ..
-        } = expect_role_error(&failure)
-        else {
-            panic!("expected pishoo cardinality error");
-        };
-        assert_eq!(*found, expected);
-        assert_eq!(Some(span.document_id()), failure.document_id());
-        assert_eq!(*role, ConfigDocumentRoleKind::WorkerPishoo);
-    }
-}
-
-#[test]
-fn worker_unknown_directive_is_a_configuration_error() {
-    let fixture = TempConfigDir::new("worker_unknown");
-    let home = fixture.worker_home();
-    let source_path = fixture.worker_source_path();
-    let failure = parse_role_document(
-        "pishoo { unknown_setting on; }",
-        &source_path,
-        ConfigDocumentRole::WorkerPishoo { home: &home },
-    )
-    .expect_err("worker config must reject unknown directives");
-
-    let report = snafu::Report::from_error(&failure.error).to_string();
-    assert!(report.contains("unknown directive `unknown_setting`"));
-    assert!(failure.document_id().is_some());
-    assert!(
-        failure
-            .diagnostic()
-            .to_string()
-            .contains(&source_path.display().to_string())
-    );
-}
-
-#[test]
-fn default_root_uses_global_home_source_context() {
-    let fixture = TempConfigDir::new("default_root_source");
-    let home = DhttpHome::new(fixture.path.clone());
-    let source_path = fixture.join("pishoo.conf");
-    let ParsedConfigDocument::HypervisorRoot(fragment) = parse_role_document(
-        "pishoo { server { listen all 443; } }",
-        &source_path,
-        ConfigDocumentRole::HypervisorRoot { home: Some(&home) },
-    )
-    .expect("default root should parse") else {
-        panic!("expected hypervisor root fragment");
-    };
-
-    let source = fragment
-        .source_map()
-        .get(SourceId(0))
-        .expect("root source should exist");
-    assert_eq!(source.path.as_deref(), Some(source_path.as_path()));
-    assert_eq!(source.base_dir.as_deref(), Some(fixture.path.as_path()));
-}
-
-#[test]
-fn explicit_root_uses_explicit_file_source_context() {
-    let fixture = TempConfigDir::new("explicit_root_source");
-    let source_path = fixture.join("custom/pishoo.conf");
-    let failure = parse_role_document(
-        "pishoo { server { listen all 443; } }",
-        &source_path,
-        ConfigDocumentRole::HypervisorRoot { home: None },
-    )
-    .expect_err("an explicit root without home context must provide TLS paths");
-
-    assert!(matches!(
-        failure.error,
-        LoadConfigError::BuildDocument { .. }
-    ));
-    assert!(
-        failure
-            .diagnostic()
-            .to_string()
-            .contains(&source_path.display().to_string())
-    );
-}
-
-#[test]
-fn identity_document_returns_detached_server_fragments() {
-    let fixture = TempConfigDir::new("identity_fragments");
-    let home = fixture.worker_home();
-    let name = dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned())
-        .expect("identity name should be valid");
-    let profile = home.identity_profile(name);
-    let ParsedConfigDocument::IdentityServers(servers) = parse_role_document(
-        "server { listen all 443; } server { listen all 444; }",
-        &fixture.join(".dhttp/identities/alice/server.conf"),
-        ConfigDocumentRole::IdentityServer {
-            home: &home,
-            profile: &profile,
-        },
-    )
-    .expect("identity server document should parse") else {
-        panic!("expected identity server fragments");
-    };
-
-    assert_eq!(servers.len(), 2);
-    assert!(
-        servers
-            .iter()
-            .all(|server| server.node().parent().is_none())
-    );
-}
-
-#[test]
-fn identity_document_requires_at_least_one_server() {
-    let fixture = TempConfigDir::new("identity_cardinality");
-    let home = fixture.worker_home();
-    let name = dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned())
-        .expect("identity name should be valid");
-    let profile = home.identity_profile(name);
-    let failure = parse_role_document(
-        "",
-        &fixture.join(".dhttp/identities/alice/server.conf"),
-        ConfigDocumentRole::IdentityServer {
-            home: &home,
-            profile: &profile,
-        },
-    )
-    .expect_err("identity server document must not be empty");
-
-    let ConfigDocumentRoleError::MissingIdentityServer { role, span } = expect_role_error(&failure)
-    else {
-        panic!("expected missing identity server error");
-    };
-    assert_eq!(*role, ConfigDocumentRoleKind::IdentityServer);
-    assert_eq!(Some(span.document_id()), failure.document_id());
-}
-
-#[test]
-fn resolved_config_path_is_absolute_and_source_anchored() {
-    let fixture = TempConfigDir::new("resolved_config_path");
-    let include_dir = fixture.join("includes");
-    let include_name = format!(
-        "paths-{}-{}.conf",
-        std::process::id(),
-        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    );
-    let include_path = include_dir.join(&include_name);
-    let destination = include_dir.join("run/pishoo.pid");
-    std::fs::create_dir_all(&include_dir).expect("create include fixture directory");
-    let _ = std::fs::remove_file(&destination);
-    std::fs::write(&include_path, "pid run/pishoo.pid;").expect("write include fixture");
-
-    let text = format!("pishoo {{ include includes/{include_name}; }}");
-    let ParsedConfigDocument::HypervisorRoot(fragment) = parse_role_document(
-        &text,
-        &fixture.join("pishoo.conf"),
-        ConfigDocumentRole::HypervisorRoot { home: None },
-    )
-    .expect("included path should parse") else {
-        panic!("expected hypervisor root fragment");
-    };
-    let path = fragment
-        .node()
-        .require::<ResolvedConfigPath>("pid")
-        .expect("pid should be typed")
-        .clone();
-
-    assert_eq!(path.as_ref().as_ref(), destination);
-    assert!(path.as_ref().as_ref().is_absolute());
-    assert!(
-        !destination.exists(),
-        "parser must not create the destination"
-    );
-    assert!(ResolvedConfigPath::try_from(PathBuf::from("relative/path")).is_err());
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-
-        let nul_path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/nul\0path".to_vec()));
-        assert!(ResolvedConfigPath::try_from(nul_path).is_err());
-    }
-}
-
-#[test]
-fn document_ids_keep_equal_source_spans_distinct() {
-    let root_fixture = TempConfigDir::new("root_document_id");
-    let worker_fixture = TempConfigDir::new("worker_document_id");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let ParsedConfigDocument::HypervisorRoot(root) = parser
-        .parse_text(
-            "pishoo {}",
-            &root_fixture.join("pishoo.conf"),
-            ConfigDocumentRole::HypervisorRoot { home: None },
-        )
-        .expect("root document should parse")
-    else {
-        panic!("expected hypervisor root fragment");
-    };
-    let home = worker_fixture.worker_home();
-    let ParsedConfigDocument::WorkerPishoo(worker) = parser
-        .parse_text(
-            "pishoo {}",
-            &worker_fixture.worker_source_path(),
-            ConfigDocumentRole::WorkerPishoo { home: &home },
-        )
-        .expect("worker document should parse")
-    else {
-        panic!("expected worker pishoo fragment");
-    };
-
-    assert_eq!(root.span().start(), worker.span().start());
-    assert_eq!(root.span().end(), worker.span().end());
-    assert_ne!(root.span(), worker.span());
-    assert_ne!(root.document_id(), worker.document_id());
-}
-
-#[test]
-fn role_parser_rejects_leaf_pishoo_registration_without_panicking() {
-    let fixture = TempConfigDir::new("invalid_pishoo_registration");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::ROOT,
-        DirectiveSpec::leaf_value::<PathConfig>(
-            "pishoo",
-            vec![context::ROOT],
-            DuplicatePolicy::Reject,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::Supervisor,
-        ),
-    );
-    let text = format!("pishoo {};", fixture.join("value").display());
-    let failure = ConfigDocumentParser::new(&registry)
-        .parse_text(
-            &text,
-            &fixture.join("pishoo.conf"),
-            ConfigDocumentRole::HypervisorRoot { home: None },
-        )
-        .expect_err("a role-required pishoo registration must be a pishoo context block");
-
-    let ConfigDocumentRoleError::InvalidDirectiveRegistration {
-        directive,
-        role,
-        expected_child_context,
-        span,
-    } = expect_role_error(&failure)
-    else {
-        panic!("expected invalid role directive registration");
-    };
-    assert_eq!(directive.as_str(), "pishoo");
-    assert_eq!(*role, ConfigDocumentRoleKind::HypervisorRoot);
-    assert_eq!(*expected_child_context, context::PISHOO);
-    assert_eq!(Some(span.document_id()), failure.document_id());
-}
-
-#[test]
-fn payload_free_location_registration_returns_typed_error_without_panicking() {
-    let fixture = TempConfigDir::new("payload_free_location");
-    let home = fixture.worker_home();
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::context_empty(
-            "location",
-            vec![context::SERVER],
-            context::LOCATION,
-            DuplicatePolicy::Append,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parser.parse_text(
-            "server { listen all 443; location { } }",
-            &fixture.join("identity/server.conf"),
-            ConfigDocumentRole::IdentityServer {
-                home: &home,
-                profile: &home.identity_profile(
-                    dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned())
-                        .expect("identity name"),
-                ),
-            },
-        )
-    }));
-
-    assert!(
-        outcome.is_ok(),
-        "invalid public registry contracts must not panic"
-    );
-    assert!(
-        outcome.unwrap().is_err(),
-        "invalid location shape must fail"
-    );
-}
-
-#[test]
-fn identity_role_rejects_leaf_server_registration_without_bypassing_cardinality() {
-    let fixture = TempConfigDir::new("invalid_server_registration");
-    let home = fixture.worker_home();
-    let name = dhttp::name::DhttpName::try_from("alice.dhttp.net".to_owned())
-        .expect("identity name should be valid");
-    let profile = home.identity_profile(name);
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::ROOT,
-        DirectiveSpec::leaf_value::<PathConfig>(
-            "server",
-            vec![context::ROOT],
-            DuplicatePolicy::Append,
-            CascadePolicy::None,
-            TransportPolicy::HypervisorOnly,
-            ReloadImpact::ListenerSet,
-        ),
-    );
-    let text = format!("server {};", fixture.join("value").display());
-    let failure = ConfigDocumentParser::new(&registry)
-        .parse_text(
-            &text,
-            &fixture.join(".dhttp/identities/alice/server.conf"),
-            ConfigDocumentRole::IdentityServer {
-                home: &home,
-                profile: &profile,
-            },
-        )
-        .expect_err("a role-required server registration must be a server context block");
-
-    let ConfigDocumentRoleError::InvalidDirectiveRegistration {
-        directive,
-        role,
-        expected_child_context,
-        span,
-    } = expect_role_error(&failure)
-    else {
-        panic!("expected invalid role directive registration");
-    };
-    assert_eq!(directive.as_str(), "server");
-    assert_eq!(*role, ConfigDocumentRoleKind::IdentityServer);
-    assert_eq!(*expected_child_context, context::SERVER);
-    assert_eq!(Some(span.document_id()), failure.document_id());
-}
-
-#[test]
-fn document_id_exhaustion_has_no_document_namespace_or_source_span() {
-    let fixture = TempConfigDir::new("document_id_exhaustion");
-    let registry = crate::parse::default_registry();
-    let maximum_index = u64::from(u32::MAX);
-    let mut parser = ConfigDocumentParser::with_next_document_index(&registry, maximum_index);
-    let ParsedConfigDocument::HypervisorRoot(maximum) = parser
-        .parse_text(
-            "pishoo {}",
-            &fixture.join("maximum.conf"),
-            ConfigDocumentRole::HypervisorRoot { home: None },
-        )
-        .expect("the maximum document id should allocate")
-    else {
-        panic!("expected hypervisor root fragment");
-    };
-    assert_eq!(
-        maximum.document_id(),
-        crate::parse::domain::ConfigDocumentId::try_from_index(maximum_index)
-            .expect("maximum index should be supported")
-    );
-
-    let failure = parser
-        .parse_text(
-            "pishoo {}",
-            &fixture.join("exhausted.conf"),
-            ConfigDocumentRole::HypervisorRoot { home: None },
-        )
-        .expect_err("the document id allocator should be exhausted");
-
-    assert!(failure.document_id().is_none());
-    assert!(failure.source_map.get(SourceId(0)).is_none());
-    assert!(matches!(
-        failure.error,
-        LoadConfigError::DocumentId {
-            source: crate::parse::domain::ConfigDocumentIdError::IndexOverflow { index, .. },
-        } if index == maximum_index + 1
-    ));
-}
-
-#[test]
-fn registry_v1_metadata_is_orthogonal() {
-    let registry = crate::parse::default_registry();
-    for name in ["pid", "workers", "groups"] {
-        let spec = registry
-            .directive_spec(context::PISHOO, name)
-            .expect("supervisor directive should be registered");
-        assert_eq!(spec.duplicate, DuplicatePolicy::Reject);
-        assert_eq!(spec.cascade, CascadePolicy::None);
-        assert_eq!(spec.transport, TransportPolicy::HypervisorOnly);
-        assert_eq!(spec.reload, ReloadImpact::Supervisor);
-    }
-    for name in [
-        "access_rules",
-        "gzip",
-        "gzip_vary",
-        "gzip_min_length",
-        "gzip_comp_level",
-        "gzip_types",
-        "default_type",
-    ] {
-        let spec = registry
-            .directive_spec(context::PISHOO, name)
-            .expect("runtime default should be registered");
-        assert_eq!(spec.duplicate, DuplicatePolicy::Reject);
-        assert_eq!(spec.cascade, CascadePolicy::NearestWins);
-        assert_eq!(spec.transport, TransportPolicy::WorkerInheritable);
-        assert_eq!(spec.reload, ReloadImpact::RuntimeState);
-    }
-    let types = registry
-        .directive_spec(context::PISHOO, "types")
-        .expect("types should be registered");
-    assert_eq!(types.duplicate, DuplicatePolicy::Reject);
-    assert_eq!(types.cascade, CascadePolicy::ReplaceWhole);
-    assert_eq!(types.transport, TransportPolicy::WorkerInheritable);
-    assert_eq!(types.reload, ReloadImpact::RuntimeState);
-
-    let server = registry
-        .directive_spec(context::PISHOO, "server")
-        .expect("root server declaration should be registered");
-    assert_eq!(server.duplicate, DuplicatePolicy::Append);
-    assert_eq!(server.cascade, CascadePolicy::None);
-    assert_eq!(server.transport, TransportPolicy::HypervisorOnly);
-    assert_eq!(server.reload, ReloadImpact::ListenerSet);
-}
-
-#[test]
-fn document_id_index_conversion_rejects_overflow() {
-    assert!(
-        crate::parse::domain::ConfigDocumentId::try_from_index(u64::from(u32::MAX) + 1).is_err()
-    );
-}
-
-#[test]
-fn loose_documents_do_not_expose_comparable_fake_namespaces() {
-    let first = parse_doc("pishoo {}");
-    let second = parse_doc("pishoo {}");
-
-    assert!(first.document_id().is_none());
-    assert!(second.document_id().is_none());
-}
-
-#[test]
-fn missing_worker_fragment_still_builds_root_and_pishoo() {
-    let fixture = TempConfigDir::new("missing_worker_fragment");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let servers = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; }",
-        &fixture.join("worker/identity/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-
-    let tree =
-        build_worker_tree(&registry, snapshot, None, servers).expect("worker tree should seal");
-
-    assert_eq!(
-        tree.pishoo().parent_link(),
-        ParentLink::Node(tree.root().id())
-    );
-    let server = tree
-        .servers()
-        .next()
-        .expect("identity server should attach");
-    assert_eq!(
-        server.node().parent_link(),
-        ParentLink::Node(tree.pishoo().id())
-    );
-}
-
-#[test]
-fn worker_scalar_override_wins_over_root_snapshot() {
-    let fixture = TempConfigDir::new("worker_override");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let worker = parse_worker_fragment(
-        &mut parser,
-        "pishoo { gzip off; }",
-        &fixture.worker_source_path(),
-        &home,
-    );
-    let tree =
-        build_worker_tree(&registry, snapshot, Some(worker), Vec::new()).expect("tree should seal");
-
-    let gzip = tree
-        .pishoo()
-        .cascaded(GZIP)
-        .expect("gzip query should succeed")
-        .expect("gzip has a builtin fallback");
-    assert!(!gzip.effective().0);
-}
-
-#[test]
-fn worker_uses_required_snapshot_value_with_builtin_origin() {
-    let registry = crate::parse::default_registry();
-    let snapshot = snapshot_test_support::snapshot_with_builtin_gzip(true);
-
-    let tree = build_worker_tree(&registry, snapshot, None, Vec::new()).expect("tree should seal");
-    let gzip = tree
-        .pishoo()
-        .cascaded(GZIP)
-        .expect("gzip query should succeed")
-        .expect("complete snapshot supplies gzip");
-
-    assert!(gzip.effective().0);
-    assert_eq!(
-        gzip.lineage(),
-        [crate::parse::cascade::ConfigOrigin::Builtin {
-            directive: GZIP.name(),
-        }]
-    );
-}
-
-#[test]
-fn snapshot_container_queries_share_arc_and_local_override_uses_local_arc() {
-    let fixture = TempConfigDir::new("snapshot_arc_sharing");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip_types text/plain application/json; }",
-        &fixture.join("root/pishoo.conf"),
-        None,
-    );
-    let snapshot = build_global_tree(&registry, root, Vec::new())
-        .expect("root tree")
-        .root_snapshot()
-        .expect("snapshot");
-    let transported = snapshot_test_support::gzip_types_arc(&snapshot).expect("gzip_types");
-    let snapshot_clone = snapshot.clone();
-    assert!(Arc::ptr_eq(
-        &transported,
-        &snapshot_test_support::gzip_types_arc(&snapshot_clone).expect("cloned gzip_types")
-    ));
-
-    let inherited_tree =
-        build_worker_tree(&registry, snapshot_clone, None, Vec::new()).expect("worker tree");
-    let first = inherited_tree
-        .pishoo()
-        .cascaded(GZIP_TYPES)
-        .expect("query")
-        .expect("gzip_types");
-    let second = inherited_tree
-        .pishoo()
-        .cascaded(GZIP_TYPES)
-        .expect("query")
-        .expect("gzip_types");
-    assert!(Arc::ptr_eq(first.effective(), second.effective()));
-    assert!(Arc::ptr_eq(first.effective(), &transported));
-
-    let home = fixture.worker_home();
-    let worker = parse_worker_fragment(
-        &mut parser,
-        "pishoo { gzip_types image/png; }",
-        &fixture.worker_source_path(),
-        &home,
-    );
-    let local_tree = build_worker_tree(&registry, snapshot, Some(worker), Vec::new())
-        .expect("local worker tree");
-    let local = local_tree
-        .pishoo()
-        .cascaded(GZIP_TYPES)
-        .expect("query")
-        .expect("local gzip_types");
-    assert!(!Arc::ptr_eq(local.effective(), &transported));
-}
-
-#[test]
-fn types_replaces_the_whole_parent_map() {
-    let fixture = TempConfigDir::new("types_replace");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let servers = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; types { text/server server; } }",
-        &fixture.join("worker/identity/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
-
-    let types = tree
-        .servers()
-        .next()
-        .expect("server should attach")
-        .node()
-        .cascaded(crate::parse::keys::server::TYPES)
-        .expect("types query should succeed")
-        .expect("types should be configured");
-    assert_eq!(types.effective().0.len(), 1);
-    assert!(types.effective().0.contains_key("server"));
-    assert!(!types.effective().0.contains_key("root"));
-}
-
-#[test]
-fn cascade_query_rejects_registry_policy_mismatch() {
-    let fixture = TempConfigDir::new("cascade_policy_mismatch");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::raw_value::<MimeTypes>(
-            "types",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let servers = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; types { text/server server; } }",
-        &fixture.join("worker/identity/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
-    let server = tree.servers().next().expect("server should attach");
-
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        crate::parse::keys::server::TYPES,
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
-    );
-}
-
-#[test]
-fn cascade_query_distinguishes_cross_context_policy_conflict() {
-    let fixture = TempConfigDir::new("cascade_cross_context_policy_conflict");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let pishoo_definition = cascaded_definition::<BoolConfig>(
-        context::PISHOO,
-        "gzip",
-        DirectiveShape::Leaf,
-        DuplicatePolicy::Reject,
-        CascadePolicy::NearestWins,
-        TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState,
-    );
-    let server_definition = cascaded_definition::<BoolConfig>(
-        context::SERVER,
-        "gzip",
-        DirectiveShape::Leaf,
-        DuplicatePolicy::Reject,
-        CascadePolicy::ReplaceWhole,
-        TransportPolicy::WorkerLocalOnly,
-        ReloadImpact::RuntimeState,
-    );
-    let error = tree
-        .servers()
-        .next()
-        .expect("server should attach")
-        .node()
-        .cascaded(server_definition.key_inheriting(pishoo_definition.key()))
-        .expect_err("matching contracts with conflicting policies must stay a policy error");
-
-    assert!(matches!(
-        error,
-        crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
-            inherited_context: context::PISHOO,
-            inherited: CascadePolicy::NearestWins,
-            local_context: context::SERVER,
-            local: CascadePolicy::ReplaceWhole,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn snapshot_contract_rejects_worker_local_or_wrong_domain_registration() {
-    let fixture = TempConfigDir::new("snapshot_registry_contract");
-
-    let mut worker_local_registry = crate::parse::default_registry();
-    worker_local_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&worker_local_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; }",
-        &fixture.join("worker-local/pishoo.conf"),
-        None,
-    );
-    assert!(
-        build_global_tree(&worker_local_registry, root, Vec::new()).is_err(),
-        "WorkerLocalOnly values must not enter the V1 snapshot contract"
-    );
-    assert!(
-        build_worker_tree(
-            &worker_local_registry,
-            snapshot_test_support::snapshot_with_builtin_gzip(true),
-            None,
-            Vec::new(),
-        )
-        .is_err(),
-        "worker overlays must validate the same registry contract before applying a snapshot"
-    );
-
-    let mut wrong_domain_registry = crate::parse::default_registry();
-    wrong_domain_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<StringList>(
-            "gzip",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&wrong_domain_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; }",
-        &fixture.join("wrong-domain/pishoo.conf"),
-        None,
-    );
-    assert!(
-        build_global_tree(&wrong_domain_registry, root, Vec::new()).is_err(),
-        "the V1 gzip field must remain bound to BoolConfig"
-    );
-
-    let mut premature_access_log_registry = crate::parse::default_registry();
-    premature_access_log_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<StringList>(
-            "access_log",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&premature_access_log_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo {}",
-        &fixture.join("reserved-access-log/pishoo.conf"),
-        None,
-    );
-    assert!(
-        build_global_tree(&premature_access_log_registry, root, Vec::new()).is_err(),
-        "the reserved V1 access_log slot must remain absent until its checked domain is registered"
-    );
-}
-
-#[test]
-fn snapshot_contract_rejects_extra_worker_inheritable_directive() {
-    let fixture = TempConfigDir::new("snapshot_registry_extra");
-    let mut registry = crate::parse::default_registry();
-    registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "extra_inherited",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo {}",
-        &fixture.join("root/pishoo.conf"),
-        None,
-    );
-
-    assert!(matches!(
-        build_global_tree(&registry, root, Vec::new()),
-        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
-            source:
-                crate::parse::registry::V1SnapshotSchemaError::ExtraWorkerInheritableDirective {
-                    directive,
-                },
-        }) if directive.as_str() == "extra_inherited"
-    ));
-    assert!(matches!(
-        build_worker_tree(
-            &registry,
-            snapshot_test_support::snapshot_with_builtin_gzip(true),
-            None,
-            Vec::new(),
-        ),
-        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
-            source:
-                crate::parse::registry::V1SnapshotSchemaError::ExtraWorkerInheritableDirective {
-                    directive,
-                },
-        }) if directive.as_str() == "extra_inherited"
-    ));
-}
-
-#[test]
-fn snapshot_contract_rejects_last_wins_and_wrong_reload_metadata() {
-    let fixture = TempConfigDir::new("snapshot_registry_metadata");
-
-    let mut last_wins_registry = crate::parse::default_registry();
-    last_wins_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::PISHOO],
-            DuplicatePolicy::LastWins,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&last_wins_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip off; gzip on; }",
-        &fixture.join("last-wins/pishoo.conf"),
-        None,
-    );
-    assert!(matches!(
-        build_global_tree(&last_wins_registry, root, Vec::new()),
-        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
-            source: crate::parse::registry::V1SnapshotSchemaError::Duplicate { directive },
-        }) if directive.as_str() == "gzip"
-    ));
-
-    let mut wrong_reload_registry = crate::parse::default_registry();
-    wrong_reload_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::ListenerSet,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&wrong_reload_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; }",
-        &fixture.join("wrong-reload/pishoo.conf"),
-        None,
-    );
-    assert!(matches!(
-        build_global_tree(&wrong_reload_registry, root, Vec::new()),
-        Err(crate::parse::tree::HomeConfigTreeError::SnapshotContract {
-            source: crate::parse::registry::V1SnapshotSchemaError::Reload { directive },
-        }) if directive.as_str() == "gzip"
-    ));
-}
-
-#[test]
-fn detached_fragments_require_the_exact_parse_registry_contract() {
-    let fixture = TempConfigDir::new("fragment_registry_contract");
-    let mut parse_registry = crate::parse::default_registry();
-    parse_registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::PISHOO],
-            DuplicatePolicy::LastWins,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-    let mut parser = ConfigDocumentParser::new(&parse_registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip off; gzip on; }",
-        &fixture.join("registry-a/pishoo.conf"),
-        None,
-    );
-    let seal_registry = crate::parse::default_registry();
-
-    assert!(matches!(
-        build_global_tree(&seal_registry, root, Vec::new()),
-        Err(crate::parse::tree::HomeConfigTreeError::RegistryContractMismatch)
-    ));
-}
-
-#[test]
-fn detached_fragments_reject_parse_registry_mutation_before_seal() {
-    let fixture = TempConfigDir::new("fragment_registry_mutation");
-    let mut registry = crate::parse::default_registry();
-    let root = {
-        let mut parser = ConfigDocumentParser::new(&registry);
-        parse_root_fragment(
-            &mut parser,
+fn concrete_tree_computes_full_lineage_during_construction() {
+    let root = TypedConfigParser::new()
+        .parse_root("pishoo { gzip off; }", Path::new("/tmp/root.conf"), None)
+        .unwrap();
+    let root_defaults = root.pishoo().worker_defaults();
+    let home = dhttp::home::DhttpHome::for_user_home_dir(PathBuf::from("/tmp/home"));
+    let worker = TypedConfigParser::new()
+        .parse_worker(
             "pishoo { gzip on; }",
-            &fixture.join("root/pishoo.conf"),
-            None,
+            Path::new("/tmp/home/.config/dhttp/pishoo.conf"),
+            &home,
+            &root_defaults,
         )
-    };
-    registry.register_directive(
-        context::PISHOO,
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "worker_local_after_parse",
-            vec![context::PISHOO],
-            DuplicatePolicy::Reject,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        ),
-    );
-
-    assert!(matches!(
-        build_global_tree(&registry, root, Vec::new()),
-        Err(crate::parse::tree::HomeConfigTreeError::RegistryContractMismatch)
-    ));
-}
-
-#[test]
-fn sealed_nodes_share_precomputed_context_contract_tables() {
-    let fixture = TempConfigDir::new("shared_sealed_contract_tables");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; location / {} } server { listen all 4102; location /two {} } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let servers = tree.servers().collect::<Vec<_>>();
-    let first_location = servers[0].locations().next().expect("first location");
-    let second_location = servers[1].locations().next().expect("second location");
-
-    assert!(tree.contract_tables_shared(servers[0].node().id(), servers[1].node().id()));
-    assert!(tree.contract_tables_shared(first_location.node().id(), second_location.node().id()));
-}
-
-#[test]
-fn cascade_lineage_is_builtin_root_worker_server_location() {
-    let fixture = TempConfigDir::new("cascade_lineage");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let worker = parse_worker_fragment(
-        &mut parser,
-        "pishoo { gzip off; }",
-        &fixture.worker_source_path(),
-        &home,
-    );
-    let servers = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; gzip on; location / { gzip off; } }",
-        &fixture.join("worker/identity/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-    let tree =
-        build_worker_tree(&registry, snapshot, Some(worker), servers).expect("tree should seal");
-    let location = tree
-        .servers()
-        .next()
-        .expect("server")
-        .locations()
-        .next()
-        .expect("location");
-    let gzip = location
-        .node()
-        .cascaded(crate::parse::keys::location::GZIP)
-        .expect("gzip query")
-        .expect("gzip fallback");
+        .unwrap();
+    let worker_defaults = worker.pishoo().worker_defaults();
+    let profile = home.identity_profile("example.com".parse().unwrap());
+    let identity = TypedConfigParser::new()
+        .parse_identity(
+            "server { listen all 443; location / { gzip off; } }",
+            Path::new("/tmp/home/.config/dhttp/identity/example.com/server.conf"),
+            profile,
+            &worker_defaults,
+        )
+        .unwrap();
+    let server = identity.result().as_ref().unwrap();
+    let gzip = server.locations()[0].http().gzip();
 
     assert!(!gzip.effective().0);
-    assert_eq!(gzip.lineage().len(), 5);
-    assert!(matches!(
-        gzip.lineage()[0],
-        crate::parse::cascade::ConfigOrigin::Builtin { .. }
-    ));
-    assert!(matches!(
-        gzip.lineage()[1],
-        crate::parse::cascade::ConfigOrigin::RootInherited { .. }
-    ));
-    assert!(
-        gzip.lineage()[2..]
+    assert_eq!(
+        gzip.lineage()
             .iter()
-            .all(|origin| matches!(origin, crate::parse::cascade::ConfigOrigin::Source(_)))
-    );
-}
-
-#[test]
-fn identity_server_parent_is_home_pishoo() {
-    let fixture = TempConfigDir::new("identity_parent");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let servers = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; }",
-        &fixture.join("identity/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
-    let server = tree.servers().next().expect("server");
-
-    assert_eq!(
-        server.node().parent_link(),
-        ParentLink::Node(tree.pishoo().id())
-    );
-}
-
-#[test]
-fn global_direct_server_parent_is_global_pishoo() {
-    let fixture = TempConfigDir::new("global_server_parent");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 443; } }",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
-    let server = tree.servers().next().expect("server");
-
-    assert_eq!(
-        server.node().parent_link(),
-        ParentLink::Node(tree.pishoo().id())
-    );
-}
-
-#[test]
-fn global_identity_server_parent_is_global_pishoo() {
-    let fixture = TempConfigDir::new("global_identity_parent");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo {}",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-    let identities = parse_identity_fragments(
-        &mut parser,
-        "server { listen all 443; }",
-        &fixture.join("global-home/identities/alice/server.conf"),
-        &home,
-        "alice.dhttp.net",
-    );
-
-    let tree = build_global_tree(&registry, root, identities).expect("global tree should seal");
-    let server = tree.servers().next().expect("global identity server");
-
-    assert_eq!(
-        server.node().parent_link(),
-        ParentLink::Node(tree.pishoo().id())
-    );
-}
-
-#[test]
-fn attached_registry_finalizer_observes_parent_and_complete_siblings() {
-    let fixture = TempConfigDir::new("attached_finalizer");
-    let mut registry = crate::parse::default_registry();
-    registry.register_context(ContextSpec {
-        key: context::SERVER,
-        finalize: Some(count_local_server_finalizer),
-    });
-    registry.register_attached_finalizer(context::SERVER, assert_attached_server_context);
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    LOCAL_FINALIZER_CALLS.store(0, Ordering::Relaxed);
-    ATTACHED_FINALIZER_CALLS.store(0, Ordering::Relaxed);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 443; } server { listen all 444; } }",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-
-    assert_eq!(LOCAL_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
-    assert_eq!(ATTACHED_FINALIZER_CALLS.load(Ordering::Relaxed), 0);
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
-
-    assert_eq!(tree.servers().count(), 2);
-    assert_eq!(LOCAL_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
-    assert_eq!(ATTACHED_FINALIZER_CALLS.load(Ordering::Relaxed), 2);
-}
-
-#[test]
-fn location_parent_is_its_server() {
-    let fixture = TempConfigDir::new("location_parent");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 443; location / { root /tmp; } } }",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("global tree should seal");
-    let server = tree.servers().next().expect("server");
-    let location = server.locations().next().expect("location");
-
-    assert_eq!(
-        location.node().parent_link(),
-        ParentLink::Node(server.node().id())
-    );
-}
-
-#[test]
-fn tree_ref_keeps_source_and_parent_alive() {
-    let fixture = TempConfigDir::new("ref_lifetime");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let source_path = fixture.join("global-home/pishoo.conf");
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 443; } }",
-        &source_path,
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let server = tree.servers().next().expect("server");
-    let span = server.node().source_span().expect("source span");
-    drop(tree);
-
-    assert_eq!(
-        server.node().parent_link(),
-        ParentLink::Node(server.tree().pishoo().id())
-    );
-    assert_eq!(server.tree().source_path(span), Some(source_path.as_path()));
-}
-
-#[test]
-fn sealed_source_bundle_retains_only_one_source_map_owner() {
-    let fixture = TempConfigDir::new("source_owner_weight");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 443; location / {} } }",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-    let source_owner = root.source_owner();
-
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-
-    assert_eq!(tree.servers().count(), 1);
-    assert_eq!(Arc::strong_count(&source_owner), 2);
-}
-
-#[test]
-fn cross_document_diagnostics_keep_the_correct_source_bundle() {
-    let fixture = TempConfigDir::new("cross_document_sources");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let snapshot = root_snapshot_fixture(&registry, &mut parser, &fixture);
-    let home = fixture.worker_home();
-    let alice_path = fixture.join("alice/server.conf");
-    let bob_path = fixture.join("bob/server.conf");
-    let mut alice_parser = ConfigDocumentParser::new(&registry);
-    let mut servers = parse_identity_fragments(
-        &mut alice_parser,
-        "server { listen all 443; }",
-        &alice_path,
-        &home,
-        "alice.dhttp.net",
-    );
-    let mut bob_parser = ConfigDocumentParser::new(&registry);
-    servers.extend(parse_identity_fragments(
-        &mut bob_parser,
-        "server { listen all 444; }",
-        &bob_path,
-        &home,
-        "bob.dhttp.net",
-    ));
-    let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
-    let paths = tree
-        .servers()
-        .map(|server| {
-            let span = server.node().source_span().expect("source span");
-            tree.source_path(span).expect("source path").to_path_buf()
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(paths, vec![alice_path, bob_path]);
-}
-
-#[test]
-fn root_snapshot_contains_only_worker_inheritable_values() {
-    let fixture = TempConfigDir::new("snapshot_allowlist");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { pid /run/pishoo.pid; workers alice; groups www; gzip on; server { listen all 443; } }",
-        &fixture.join("global-home/pishoo.conf"),
-        Some(&home),
-    );
-    let snapshot = build_global_tree(&registry, root, Vec::new())
-        .expect("root tree")
-        .root_snapshot()
-        .expect("snapshot");
-
-    assert_eq!(
-        snapshot_test_support::wire_field_names(&snapshot),
+            .map(|origin| origin.scope())
+            .collect::<Vec<_>>(),
         [
-            "access_rules",
-            "gzip",
-            "gzip_vary",
-            "gzip_min_length",
-            "gzip_comp_level",
-            "gzip_types",
-            "default_type",
-            "types",
-            "access_log",
+            OriginScope::Builtin,
+            OriginScope::RootPishoo,
+            OriginScope::WorkerPishoo,
+            OriginScope::Location,
         ]
     );
-    assert!(snapshot.gzip().0);
 }
 
 #[test]
-fn root_direct_servers_are_not_serialized() {
-    let fixture = TempConfigDir::new("snapshot_no_servers");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("global-home"));
-    let without_server = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; }",
-        &fixture.join("without/pishoo.conf"),
-        Some(&home),
-    );
-    let with_server = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; server { listen all 443; } }",
-        &fixture.join("with/pishoo.conf"),
-        Some(&home),
-    );
-    let first = build_global_tree(&registry, without_server, Vec::new())
-        .unwrap()
-        .root_snapshot()
-        .unwrap();
-    let second = build_global_tree(&registry, with_server, Vec::new())
-        .unwrap()
-        .root_snapshot()
-        .unwrap();
-
-    assert_ne!(first, second, "source origin remains part of equality");
-    assert_eq!(
-        snapshot_test_support::values_without_origins(&first),
-        snapshot_test_support::values_without_origins(&second)
-    );
-}
-
-#[test]
-fn resolved_root_path_round_trips_without_worker_rebase() {
-    let root = ResolvedConfigPath::try_from(PathBuf::from("/srv/root/logs/access.log")).unwrap();
-    let decoded = snapshot_test_support::round_trip_resolved_path(root.clone()).unwrap();
-
-    assert_eq!(decoded, root);
-}
-
-#[cfg(unix)]
-#[test]
-fn resolved_root_non_utf8_path_round_trips_on_unix() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/non-utf8-\xff".to_vec()));
-    let resolved = ResolvedConfigPath::try_from(path).unwrap();
-    let decoded = snapshot_test_support::round_trip_resolved_path(resolved.clone()).unwrap();
-
-    assert_eq!(decoded, resolved);
-}
-
-#[test]
-fn snapshot_absolute_path_rejects_relative_or_nul_bytes() {
-    assert!(snapshot_test_support::decode_absolute_path(b"relative/path").is_err());
-    assert!(snapshot_test_support::decode_absolute_path(b"/tmp/nul\0path").is_err());
-}
-
-#[test]
-fn root_path_without_source_base_is_a_configuration_error() {
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let failure = parser
-        .parse_text(
-            "pishoo { access_rules sqlite:relative/rules.db; }",
-            Path::new("pishoo.conf"),
-            ConfigDocumentRole::HypervisorRoot { home: None },
+fn lineage_points_to_the_explicit_directive() {
+    let parsed = TypedConfigParser::new()
+        .parse_root(
+            "pishoo {\n    gzip on;\n}",
+            Path::new("/etc/pishoo/pishoo.conf"),
+            None,
         )
-        .expect_err("unanchored root path must be rejected");
-    let error = snafu::Report::from_error(&failure.error).to_string();
+        .unwrap();
+    let origin = parsed.pishoo().http().gzip().lineage().last().unwrap();
 
-    assert!(error.contains("resolve relative access_rules sqlite path"));
+    assert_eq!(origin.path(), Some(Path::new("/etc/pishoo/pishoo.conf")));
+    assert_eq!(origin.line(), Some(2));
+    assert_eq!(origin.column(), Some(5));
 }
 
 #[test]
-fn unknown_snapshot_schema_is_rejected() {
-    assert!(snapshot_test_support::decode_schema(2).is_err());
+fn direct_server_semantic_failure_is_isolated_as_candidate() {
+    let parsed = parse_root(
+        "pishoo { server { listen all 443; server_name bad.example; } \
+         server { listen all 444; server_name good.example; ssl_certificate /tmp/c; ssl_certificate_key /tmp/k; } }",
+    )
+    .unwrap();
+
+    assert!(parsed.servers()[0].result().is_err());
+    assert!(parsed.servers()[1].result().is_ok());
 }
 
 #[test]
-fn snapshot_real_codec_round_trips_and_rejects_unknown_or_malformed_wire() {
-    let snapshot = snapshot_test_support::snapshot_with_builtin_gzip(true);
-
-    assert_eq!(
-        snapshot_test_support::codec_round_trip(&snapshot).expect("real codec round trip"),
-        snapshot
-    );
-    assert!(snapshot_test_support::codec_rejects_unknown_schema(
-        &snapshot
-    ));
-    assert!(snapshot_test_support::codec_rejects_malformed_access_rules(
-        &snapshot
-    ));
-}
-
-#[test]
-fn snapshot_access_rules_revalidates_url_domain() {
-    assert!(matches!(
-        snapshot_test_support::decode_access_rules("not a URL"),
-        Err(
-            crate::parse::snapshot::RootConfigSnapshotError::AccessRulesUrl {
-                source: url::ParseError::RelativeUrlWithoutBase,
-            }
-        )
-    ));
-    assert!(snapshot_test_support::decode_access_rules("https://example.com/rules.db").is_err());
-    assert!(snapshot_test_support::decode_access_rules("sqlite://host/tmp/rules.db").is_err());
-}
-
-#[test]
-fn access_rules_rejects_literal_and_percent_encoded_nul_in_text_and_snapshot() {
-    for uri in ["sqlite:/tmp/rules\0.db", "sqlite:/tmp/rules%00.db"] {
-        let failure =
-            crate::parse::parse_config_str_for_test(&format!("pishoo {{ access_rules {uri}; }}"))
-                .expect_err("text access_rules path containing NUL must fail");
-        assert!(
-            snafu::Report::from_error(&failure.error)
-                .to_string()
-                .contains("NUL byte")
-        );
-
-        let error = snapshot_test_support::decode_access_rules(uri)
-            .expect_err("snapshot access_rules path containing NUL must fail");
-        assert!(matches!(
-            error,
-            crate::parse::snapshot::RootConfigSnapshotError::AccessRules {
-                source: crate::parse::types::AccessRulesUriValidationError::NulPath,
-            }
-        ));
-    }
-}
-
-#[test]
-fn access_rules_preserves_percent_encoded_path_and_query_in_text_and_snapshot() {
-    #[cfg(unix)]
-    let source = "sqlite:/tmp/rules%3Fpart%23name%FF.db?mode=ro%23strict";
-    #[cfg(not(unix))]
-    let source = "sqlite:/tmp/rules%3Fpart%23name.db?mode=ro%23strict";
-    let expected = url::Url::parse(source).expect("fixture URL");
-
-    let document =
-        crate::parse::parse_config_str_for_test(&format!("pishoo {{ access_rules {source}; }}"))
-            .expect("text access_rules URL should parse losslessly");
-    let text = first_pishoo(&document)
-        .require::<crate::parse::types::AccessRulesUri>("access_rules")
-        .expect("text access_rules should be typed");
-    let snapshot = snapshot_test_support::decode_access_rules(source)
-        .expect("snapshot access_rules URL should decode losslessly");
-
-    assert_eq!(text.0, expected);
-    assert_eq!(snapshot.0, expected);
-}
-
-#[test]
-fn snapshot_header_values_revalidate_from_bytes() {
-    assert!(snapshot_test_support::decode_header_value(b"text/plain").is_ok());
-    assert!(snapshot_test_support::decode_header_value(b"bad\nvalue").is_err());
-}
-
-#[test]
-fn snapshot_mime_entries_are_sorted_and_reject_duplicates() {
-    let types = MimeTypes(std::collections::HashMap::from([
-        ("z".to_owned(), http::HeaderValue::from_static("text/z")),
-        ("a".to_owned(), http::HeaderValue::from_static("text/a")),
-    ]));
-    assert_eq!(
-        snapshot_test_support::mime_wire_extensions(&types),
-        ["a", "z"]
-    );
+fn duplicate_scalar_directive_is_rejected() {
+    let failure = parse_root("pishoo { gzip on; gzip off; }").unwrap_err();
     assert!(
-        snapshot_test_support::decode_mime_entries(&[("a", b"text/a"), ("a", b"text/b")]).is_err()
+        snafu::Report::from_error(&failure)
+            .to_string()
+            .contains("duplicate directive `gzip`")
     );
-    assert!(snapshot_test_support::decode_mime_entries(&[("", b"text/a")]).is_err());
 }
 
 #[test]
-fn text_and_snapshot_mime_decode_use_the_same_validation_category() {
-    let text_failure =
-        crate::parse::parse_config_str_for_test("pishoo { types { text/a a; 'bad\nvalue' a; } }")
-            .expect_err("text MIME value containing a newline must fail");
-    let mut text_error: &(dyn std::error::Error + 'static) = &text_failure.error;
-    let text_category = loop {
-        if let Some(category) =
-            text_error.downcast_ref::<crate::parse::types::MimeTypesValidationError>()
-        {
-            break category;
-        }
-        text_error = text_error
-            .source()
-            .expect("text MIME failure should retain the domain error");
-    };
-    assert!(matches!(
-        text_category,
-        crate::parse::types::MimeTypesValidationError::HeaderValue { .. }
-    ));
+fn server_accepts_multiple_location_blocks() {
+    let server = parse_direct_server("location / {} location /files {}").unwrap();
 
-    assert!(matches!(
-        snapshot_test_support::decode_mime_entries(&[("a", b"text/a"), ("a", b"bad\nvalue")]),
-        Err(crate::parse::snapshot::RootConfigSnapshotError::MimeTypes {
-            source: crate::parse::types::MimeTypesValidationError::HeaderValue { .. },
-        })
-    ));
+    assert_eq!(server.locations().len(), 2);
 }
 
 #[test]
-fn snapshot_preserves_absence_and_gzip_fallbacks() {
-    let fixture = TempConfigDir::new("snapshot_fallbacks");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo {}",
-        &fixture.join("root/pishoo.conf"),
-        None,
+fn root_snapshot_checked_serde_round_trip_preserves_every_field() {
+    let parsed = parse_root(
+        "pishoo { gzip on; gzip_vary on; gzip_min_length 91; gzip_comp_level 4; \
+         gzip_types text/plain application/json; default_type application/octet-stream; \
+         access_log /tmp/access.log; }",
+    )
+    .unwrap();
+    let expected = parsed.pishoo().worker_defaults();
+    let bytes = serde_json::to_vec(&expected).unwrap();
+    let actual = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(expected, actual);
+}
+
+#[test]
+fn access_log_defaults_follow_server_identity_ownership() {
+    let direct = parse_direct_server("").unwrap();
+    assert_eq!(
+        direct.http().access_log().effective(),
+        &AccessLogDirective::Off
     );
-    let snapshot = build_global_tree(&registry, root, Vec::new())
+
+    let home = dhttp::home::DhttpHome::for_user_home_dir(PathBuf::from("/tmp/alice"));
+    let profile = home.identity_profile("alice.dhttp.net".parse().unwrap());
+    let defaults = TypedConfigParser::new()
+        .parse_root(
+            "pishoo {}",
+            Path::new("/etc/pishoo/pishoo.conf"),
+            Some(&home),
+        )
         .unwrap()
-        .root_snapshot()
+        .pishoo()
+        .worker_defaults();
+    let identity = TypedConfigParser::new()
+        .parse_identity(
+            "server { listen all 443; location / {} }",
+            &profile.server_conf_path(),
+            profile.clone(),
+            &defaults,
+        )
         .unwrap();
+    let server = identity.result().as_ref().unwrap();
 
-    assert!(snapshot.access_rules().is_none());
-    assert!(!snapshot.gzip().0);
-    assert!(!snapshot.gzip_vary().0);
-    assert_eq!(snapshot.gzip_min_length().0, 20);
-    assert_eq!(snapshot.gzip_comp_level().0, 1);
-    assert!(snapshot.gzip_types().is_none());
-    assert!(snapshot.default_type().is_none());
-    assert!(snapshot.types().is_none());
-    assert!(!snapshot_test_support::has_access_log(&snapshot));
+    assert_eq!(
+        server.http().access_log().effective(),
+        &AccessLogDirective::ProfileDefault
+    );
+    assert_eq!(
+        server
+            .http()
+            .access_log()
+            .effective()
+            .materialize(server.identity())
+            .unwrap(),
+        ResolvedAccessLogConfig::Enabled(
+            super::domain::ResolvedConfigPath::try_from(profile.access_log_path()).unwrap()
+        )
+    );
 }
 
 #[test]
-fn snapshot_equality_includes_origin() {
-    let fixture = TempConfigDir::new("snapshot_origin_equality");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let first = parse_root_fragment(
-        &mut parser,
-        "pishoo { gzip on; }",
-        &fixture.join("one/pishoo.conf"),
-        None,
+fn location_access_log_override_keeps_location_lineage() {
+    let server = first_server(
+        "pishoo { access_log /tmp/root.log; server { listen all 443; \
+         server_name example.com; ssl_certificate /tmp/c; ssl_certificate_key /tmp/k; \
+         location /private { access_log off; } } }",
+    )
+    .unwrap();
+    let access_log = server.locations()[0].http().access_log();
+
+    assert_eq!(access_log.effective(), &AccessLogDirective::Off);
+    assert_eq!(
+        access_log.lineage().last().unwrap().scope(),
+        OriginScope::Location
     );
-    let second = parse_root_fragment(
-        &mut parser,
-        "pishoo {\n gzip on;\n}",
-        &fixture.join("two/pishoo.conf"),
-        None,
-    );
-    let first = build_global_tree(&registry, first, Vec::new())
+}
+
+#[test]
+fn root_access_log_path_survives_worker_snapshot_without_rebasing() {
+    let home = dhttp::home::DhttpHome::for_user_home_dir(PathBuf::from("/home/alice"));
+    let root = TypedConfigParser::new()
+        .parse_root(
+            "pishoo { access_log logs/access.log; }",
+            Path::new("/etc/pishoo/pishoo.conf"),
+            Some(&home),
+        )
         .unwrap()
-        .root_snapshot()
-        .unwrap();
-    let second = build_global_tree(&registry, second, Vec::new())
-        .unwrap()
-        .root_snapshot()
+        .pishoo()
+        .worker_defaults();
+    let worker = TypedConfigParser::new()
+        .parse_worker(
+            "pishoo {}",
+            Path::new("/home/alice/.config/dhttp/pishoo.conf"),
+            &home,
+            &root,
+        )
         .unwrap();
 
     assert_eq!(
-        snapshot_test_support::checked_wire_round_trip(&first).unwrap(),
-        first
-    );
-    assert_ne!(first, second);
-    assert_eq!(
-        snapshot_test_support::values_without_origins(&first),
-        snapshot_test_support::values_without_origins(&second)
+        worker
+            .pishoo()
+            .http()
+            .access_log()
+            .effective()
+            .resolved_path(),
+        Some(Path::new("/etc/pishoo/logs/access.log"))
     );
 }

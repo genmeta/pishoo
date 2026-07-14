@@ -61,11 +61,11 @@ async fn proxy_inner(
 
     // add custom response headers
     command::add_header(location, &mut parts);
-    if let Ok(Some(proxy_pass)) = location.get::<ProxyPass>("proxy_pass")
-        && let Some(public_base) = public_base_for_proxy_redirect(loc, &proxy_pass)
+    if let Some(proxy_pass) = location.proxy_pass()
+        && let Some(public_base) = public_base_for_proxy_redirect(loc, proxy_pass)
         && let Some(public_origin) = public_origin.as_deref()
     {
-        rewrite_proxy_redirect_default(&proxy_pass, public_origin, public_base, &mut parts.headers);
+        rewrite_proxy_redirect_default(proxy_pass, public_origin, public_base, &mut parts.headers);
     }
 
     let resp = http::Response::from_parts(parts, body);
@@ -86,15 +86,15 @@ fn pass(
     async move {
         let (parts, body) = req.into_parts();
         let proxy_pass = location
-            .require::<ProxyPass>("proxy_pass")
-            .whatever_context::<_, Whatever>("failed to read proxy_pass directive")?;
+            .proxy_pass()
+            .expect("proxy handler requires proxy_pass");
 
         tracing::debug!(proxy_pass = %proxy_pass.raw, "resolved proxy_pass target");
 
         let normalized = super::request_uri::normalize_request_uri(&parts.uri)
             .whatever_context::<_, Whatever>("failed to normalize request uri")?;
         let target =
-            super::request_uri::build_upstream_request_target(&proxy_pass, &loc, &normalized)
+            super::request_uri::build_upstream_request_target(proxy_pass, &loc, &normalized)
                 .whatever_context::<_, Whatever>("failed to build proxy upstream request target")?;
 
         tracing::info!(target, "proxying request to upstream path and query");

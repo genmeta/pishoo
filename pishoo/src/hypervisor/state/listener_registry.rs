@@ -57,19 +57,6 @@ pub(super) enum ReleasePlan<R = ()> {
 }
 
 #[derive(Debug)]
-pub(super) enum RebuildPlan<R = ()> {
-    Rebuild {
-        resource: R,
-        guard: AsyncReleaseGuard,
-        done: Completion,
-    },
-    Wait(Completion),
-    NotOwner,
-    NotFound,
-    Conflict,
-}
-
-#[derive(Debug)]
 pub(super) struct ListenerRegistry<R = ()> {
     entries: HashMap<DhttpName<'static>, ListenerSlot<R>>,
 }
@@ -327,68 +314,6 @@ impl<R> ListenerRegistry<R> {
                 self.entries
                     .insert(name.clone(), ListenerSlot::Poisoned { reason });
                 ReleasePlan::Poisoned
-            }
-        }
-    }
-
-    pub(super) fn plan_rebuild(
-        &mut self,
-        owner: Owner,
-        name: &DhttpName<'static>,
-    ) -> RebuildPlan<R> {
-        match self.entries.remove(name) {
-            None => RebuildPlan::NotFound,
-            Some(ListenerSlot::Transition {
-                owner: existing_owner,
-                done,
-            }) => {
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Transition {
-                        owner: existing_owner,
-                        done: done.clone(),
-                    },
-                );
-                RebuildPlan::Wait(done)
-            }
-            Some(ListenerSlot::Active {
-                owner: existing_owner,
-                resource,
-                guard,
-            }) if existing_owner == owner => {
-                let done = Completion::new();
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Transition {
-                        owner: existing_owner,
-                        done: done.clone(),
-                    },
-                );
-                RebuildPlan::Rebuild {
-                    resource,
-                    guard,
-                    done,
-                }
-            }
-            Some(ListenerSlot::Active {
-                owner: existing_owner,
-                resource,
-                guard,
-            }) => {
-                self.entries.insert(
-                    name.clone(),
-                    ListenerSlot::Active {
-                        owner: existing_owner,
-                        resource,
-                        guard,
-                    },
-                );
-                RebuildPlan::NotOwner
-            }
-            Some(ListenerSlot::Poisoned { reason }) => {
-                self.entries
-                    .insert(name.clone(), ListenerSlot::Poisoned { reason });
-                RebuildPlan::Conflict
             }
         }
     }

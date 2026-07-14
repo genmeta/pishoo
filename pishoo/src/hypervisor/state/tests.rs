@@ -1,9 +1,6 @@
-use std::{
-    ffi::CString,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use dhttp::{
@@ -18,7 +15,7 @@ use gateway::{
     control_plane::ListenRequest,
     parse::types::{IfaceRange, IpFamilies, Listens},
 };
-use nix::unistd::{Pid, Uid};
+use nix::unistd::{Gid, Pid, Uid};
 
 use super::{owner::Owner, *};
 use crate::hypervisor::worker_handle::WorkerHandle;
@@ -404,7 +401,7 @@ async fn test_cancelled_acquire_listener_destroys_built_endpoint() {
 }
 
 #[tokio::test]
-async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_replacement() {
+async fn closed_listener_can_be_reacquired_by_the_same_owner() {
     let state = test_state();
     let owner = Owner::Local;
     let server_name = "stale-rebuild.user.dhttp.net";
@@ -415,17 +412,20 @@ async fn test_stale_registered_endpoint_drop_after_rebuild_does_not_release_repl
         .expect("initial acquire should succeed");
     assert!(is_active(&state, server_name).await);
 
-    let _replacement = state
-        .rebuild_listener(owner, test_request("stale-rebuild"))
+    dhttp::h3x::quic::Listen::shutdown(&old_listener)
         .await
-        .expect("rebuild should succeed");
+        .unwrap();
+    let _replacement = state
+        .acquire_listener(owner, test_request("stale-rebuild"))
+        .await
+        .expect("reacquire should succeed after normal shutdown");
 
     drop(old_listener);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(
         is_active(&state, server_name).await,
-        "dropping the consumed old handle must not release the replacement"
+        "dropping the stale old handle must not release the replacement"
     );
 
     state
@@ -705,15 +705,14 @@ async fn test_fail_worker_queues_typed_error_without_cleanup() {
 #[tokio::test]
 async fn test_desired_worker_targets_are_uid_keyed() {
     let state = test_state();
-    let target = nix::unistd::User {
-        name: "restart-user".to_owned(),
-        passwd: CString::new("x").unwrap(),
-        uid: Uid::from_raw(7001),
-        gid: nix::unistd::Gid::from_raw(7001),
-        gecos: CString::new("").unwrap(),
-        dir: std::path::PathBuf::from("/home/restart-user"),
-        shell: std::path::PathBuf::from("/bin/sh"),
-    };
+    let target = crate::config::WorkerAccount::new(
+        "restart-user".to_owned(),
+        Uid::from_raw(7001),
+        Gid::from_raw(7001),
+        std::path::PathBuf::from("/home/restart-user"),
+        dhttp::home::DhttpHome::for_user_home_dir("/home/restart-user"),
+    )
+    .unwrap();
 
     state.set_desired_workers(vec![target.clone()]).await;
 
@@ -721,8 +720,8 @@ async fn test_desired_worker_targets_are_uid_keyed() {
         state
             .desired_worker_target(Uid::from_raw(7001))
             .await
-            .map(|worker| worker.name),
-        Some(target.name)
+            .map(|worker| worker.name().to_owned()),
+        Some(target.name().to_owned())
     );
     assert!(
         state

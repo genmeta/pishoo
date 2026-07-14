@@ -1,211 +1,23 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
-use dhttp::name::DhttpName;
+use dhttp::{h3x::quic::Listen as _, name::DhttpName};
 use gateway::control_plane::{ControlPlane, ProvideListener};
-use snafu::Report;
+use snafu::{Report, ResultExt};
 
 use super::{
-    accept::AcceptState,
-    snapshot::ServerService,
-    source::{ListenerSpec, PrepareContext, PreparedServerUpdate, ServerFingerprint, ServerSource},
+    accept::DrainOutcome,
+    resource::ServerResources,
+    set::{ResourceSet, ServerServiceHandle, ServiceSet},
+    source::{PrepareContext, ServerSource},
 };
-
-pub struct ServerRuntime<P>
-where
-    P: ProvideListener,
-{
-    name: DhttpName<'static>,
-    source: ServerSource,
-    listener_spec: ListenerSpec,
-    service: Arc<ServerService>,
-    accept: AcceptState<P::Listener>,
-    fingerprint: ServerFingerprint,
-    plane: Arc<P>,
-}
-
-pub enum ReloadServerOutcome {
-    KeptOldOnPrepareFailure,
-    SkippedAcceptNotRunning,
-    SwappedServiceOnReusedListener,
-    RebuiltListener,
-    StoppedAfterFatalRebuild,
-}
-
-impl<P> ServerRuntime<P>
-where
-    P: ProvideListener + Send + Sync + 'static,
-    P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
-    <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
-    <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
-        Send + Sync,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
-        Send + Sync,
-{
-    pub fn start(
-        source: ServerSource,
-        prepared: PreparedServerUpdate,
-        plane: Arc<P>,
-        listener: P::Listener,
-    ) -> Self {
-        Self {
-            name: prepared.name,
-            source,
-            listener_spec: prepared.listener_spec,
-            service: prepared.service.clone(),
-            accept: AcceptState::start(listener, prepared.service),
-            fingerprint: prepared.fingerprint,
-            plane,
-        }
-    }
-
-    pub fn name(&self) -> &DhttpName<'static> {
-        &self.name
-    }
-
-    pub fn fingerprint(&self) -> &ServerFingerprint {
-        &self.fingerprint
-    }
-
-    pub async fn reload(
-        &mut self,
-        new_source: ServerSource,
-        ctx: &PrepareContext,
-    ) -> ReloadServerOutcome {
-        let prepared = match new_source.prepare(ctx).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                tracing::warn!(
-                    server_name = %self.name,
-                    error = %Report::from_error(&error),
-                    "failed to prepare server reload"
-                );
-                return ReloadServerOutcome::KeptOldOnPrepareFailure;
-            }
-        };
-
-        self.apply_reload(new_source, prepared).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn reload_with_prepared(
-        &mut self,
-        new_source: ServerSource,
-        prepared_result: Result<
-            PreparedServerUpdate,
-            crate::service::source::PrepareServerUpdateError,
-        >,
-    ) -> ReloadServerOutcome {
-        let prepared = match prepared_result {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::warn!(
-                    server_name = %self.name,
-                    error = %Report::from_error(&error),
-                    "failed to prepare server reload"
-                );
-                return ReloadServerOutcome::KeptOldOnPrepareFailure;
-            }
-        };
-        self.apply_reload(new_source, prepared).await
-    }
-
-    async fn apply_reload(
-        &mut self,
-        new_source: ServerSource,
-        prepared: PreparedServerUpdate,
-    ) -> ReloadServerOutcome {
-        // Future refinement: split hard listener identity from soft updateable fields.
-        // The first implementation rebuilds on any ListenRequest fingerprint change,
-        // but TLS material or resolver metadata may later become updateable without
-        // rebuilding the underlying listener.
-        if prepared.listener_spec == self.listener_spec {
-            let Some(listener) = self.stop_accept().await else {
-                tracing::error!(
-                    server_name = %self.name,
-                    "accept loop was not running during reload; skipping"
-                );
-                return ReloadServerOutcome::SkippedAcceptNotRunning;
-            };
-
-            self.commit(new_source, prepared);
-            self.start_accept(listener);
-
-            ReloadServerOutcome::SwappedServiceOnReusedListener
-        } else {
-            let old_listener = match self.stop_accept().await {
-                Some(listener) => listener,
-                None => {
-                    tracing::error!(
-                        server_name = %self.name,
-                        "failed to recover listener before rebuild (was not running)"
-                    );
-                    return ReloadServerOutcome::StoppedAfterFatalRebuild;
-                }
-            };
-
-            let request = prepared.listen_request.clone();
-
-            match self.plane.rebuild_listener(old_listener, request).await {
-                Ok(new_listener) => {
-                    self.commit(new_source, prepared);
-                    self.start_accept(new_listener);
-                    ReloadServerOutcome::RebuiltListener
-                }
-                Err(error) => {
-                    tracing::error!(
-                        server_name = %self.name,
-                        error = %Report::from_error(&error),
-                        "listener rebuild failed; old listener was consumed by the control plane"
-                    );
-                    ReloadServerOutcome::StoppedAfterFatalRebuild
-                }
-            }
-        }
-    }
-
-    pub async fn remove(mut self) {
-        let recovered = self.stop_accept().await;
-        if let Some(listener) = recovered {
-            let _ = dhttp::h3x::quic::Listen::shutdown(&listener)
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(
-                        server_name = %self.name,
-                        error = %Report::from_error(error),
-                        "failed to shut down listener during removal"
-                    );
-                });
-        }
-    }
-
-    async fn stop_accept(&mut self) -> Option<P::Listener> {
-        self.accept.take_listener().await.ok()
-    }
-
-    fn start_accept(&mut self, listener: P::Listener) {
-        self.accept = AcceptState::start(listener, self.service.clone());
-    }
-
-    fn commit(&mut self, new_source: ServerSource, prepared: PreparedServerUpdate) {
-        self.source = new_source;
-        self.listener_spec = prepared.listener_spec;
-        self.fingerprint = prepared.fingerprint;
-        self.service = prepared.service;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn accept_state(&self) -> &AcceptState<P::Listener> {
-        &self.accept
-    }
-}
 
 pub struct RuntimeRegistry<P>
 where
     P: ProvideListener,
 {
     plane: Arc<P>,
-    servers: HashMap<DhttpName<'static>, ServerRuntime<P>>,
+    resources: ResourceSet<P::Listener>,
+    services: ServiceSet<P::Listener>,
 }
 
 impl<P> RuntimeRegistry<P>
@@ -214,90 +26,171 @@ where
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
-        Send + Sync,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
-        Send + Sync,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
 {
     pub fn new(plane: Arc<P>) -> Self {
-        Self {
-            plane,
-            servers: HashMap::new(),
-        }
+        Self { plane, resources: ResourceSet::default(), services: ServiceSet::default() }
     }
 
     pub async fn apply_sources(&mut self, sources: Vec<ServerSource>, ctx: &PrepareContext) {
-        let mut new_names = std::collections::HashSet::new();
+        self.stop_finished_services().await;
+        let desired = sources.iter().map(|source| source.name().clone()).collect::<HashSet<_>>();
+        let removed = self.resources.servers.keys().filter(|name| !desired.contains(*name)).cloned().collect::<Vec<_>>();
+        for name in removed { self.stop_server(&name).await; }
+        for source in sources { self.reconcile_server(source, ctx).await; }
+    }
 
-        for source in sources {
-            let name = source.name().clone();
-            new_names.insert(name.clone());
+    async fn reconcile_server(&mut self, source: ServerSource, ctx: &PrepareContext) {
+        let name = source.name().clone();
+        self.stop_service(&name).await;
 
-            let is_fatal = match self.servers.entry(name.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let outcome = entry.get_mut().reload(source, ctx).await;
-                    matches!(outcome, ReloadServerOutcome::StoppedAfterFatalRebuild)
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let prepared = match source.prepare(ctx).await {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            tracing::warn!(
-                                server_name = %name,
-                                error = %snafu::Report::from_error(&error),
-                                "failed to prepare new server"
-                            );
-                            continue;
-                        }
-                    };
+        let prepared = match source.prepare(ctx).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(server_name = %name, error = %Report::from_error(&error), "server service preparation failed");
+                self.release_resource(&name).await;
+                return;
+            }
+        };
 
-                    let listener = match self.plane.listener(prepared.listen_request.clone()).await
-                    {
-                        Ok(listener) => listener,
-                        Err(error) => {
-                            tracing::error!(
-                                server_name = %name,
-                                error = %snafu::Report::from_error(&error),
-                                "control plane failed to provide listener"
-                            );
-                            continue;
-                        }
-                    };
+        let access_logs = match self.resources.acquire_access_logs(prepared.access_logs) {
+            Ok(access_logs) => access_logs,
+            Err(error) => {
+                tracing::warn!(
+                    server_name = %name,
+                    error = %Report::from_error(&error),
+                    "server access log resource acquisition failed"
+                );
+                self.release_resource(&name).await;
+                return;
+            }
+        };
 
-                    let server =
-                        ServerRuntime::start(source, prepared, self.plane.clone(), listener);
-                    entry.insert(server);
-                    false
+        let reusable = self.resources.servers.get(&name)
+            .is_some_and(|resources| resources.listener_spec() == &prepared.listener_spec);
+        if !reusable { self.release_resource(&name).await; }
+
+        if !self.resources.servers.contains_key(&name) {
+            let listener = match self.plane.listener(prepared.listen_request.clone()).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::error!(server_name = %name, error = %Report::from_error(&error), "server listener acquisition failed");
+                    return;
                 }
             };
+            self.resources.servers.insert(
+                name.clone(),
+                ServerResources::new(listener, prepared.listener_spec.clone(), access_logs),
+            );
+        } else {
+            self.resources
+                .servers
+                .get_mut(&name)
+                .expect("reusable resource exists")
+                .replace_access_logs(access_logs);
+        }
 
-            if is_fatal {
-                let removed = self.servers.remove(&name);
-                if let Some(server) = removed {
-                    server.remove().await;
+        let listener = self.resources.servers.get_mut(&name).expect("resource inserted").take_listener();
+        let service = Arc::new(prepared.service.activate(
+            self.resources
+                .servers
+                .get(&name)
+                .expect("resource inserted")
+                .access_logs()
+                .clone(),
+        ));
+        let completed = self.services.completion_sender();
+        self.services.servers.insert(
+            name.clone(),
+            ServerServiceHandle::start(name, listener, service, completed),
+        );
+    }
+
+    async fn stop_finished_services(&mut self) {
+        let finished = self
+            .services
+            .servers
+            .iter()
+            .filter(|(_, service)| service.is_finished())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in finished {
+            tracing::warn!(server_name = %name, "server service exited unexpectedly");
+            self.stop_server(&name).await;
+        }
+    }
+
+    pub async fn wait_service_completion(&mut self) -> DhttpName<'static> {
+        loop {
+            let completion = self.services.next_completed().await;
+            if self
+                .services
+                .servers
+                .get(&completion.name)
+                .is_some_and(|service| service.owns_completion(&completion))
+            {
+                return completion.name;
+            }
+        }
+    }
+
+    pub async fn handle_service_exit(&mut self, name: DhttpName<'static>) {
+        tracing::warn!(server_name = %name, "server service exited unexpectedly");
+        self.stop_server(&name).await;
+    }
+
+    async fn stop_service(&mut self, name: &DhttpName<'static>) {
+        let Some(service) = self.services.servers.remove(name) else { return };
+        match service.drain().await {
+            DrainOutcome::Returned(listener) => {
+                if let Some(resources) = self.resources.servers.get_mut(name) {
+                    resources.put_listener(listener);
+                } else {
+                    let _ = listener.shutdown().await;
                 }
             }
+            DrainOutcome::Aborted => {
+                self.resources.servers.remove(name);
+            }
         }
+    }
 
-        let mut to_remove = Vec::new();
-        for name in self.servers.keys() {
-            if !new_names.contains(name) {
-                to_remove.push(name.clone());
-            }
+    async fn release_resource(&mut self, name: &DhttpName<'static>) {
+        let Some(mut resources) = self.resources.servers.remove(name) else { return };
+        let listener = resources.take_listener();
+        if let Err(error) = listener.shutdown().await {
+            tracing::warn!(server_name = %name, error = %Report::from_error(&error), "server listener shutdown failed");
         }
-        for name in to_remove {
-            if let Some(server) = self.servers.remove(&name) {
-                server.remove().await;
-            }
-        }
+    }
+
+    async fn stop_server(&mut self, name: &DhttpName<'static>) {
+        self.stop_service(name).await;
+        self.release_resource(name).await;
     }
 
     pub async fn shutdown(mut self) {
-        let servers = std::mem::take(&mut self.servers);
-        for (_, server) in servers {
-            server.remove().await;
-        }
+        let names = self.resources.servers.keys().cloned().collect::<Vec<_>>();
+        for name in names { self.stop_server(&name).await; }
     }
+
+    #[cfg(test)]
+    pub(crate) fn contains_service(&self, name: &str) -> bool {
+        self.services.servers.keys().any(|candidate| candidate.as_full() == name)
+    }
+}
+
+#[derive(Debug, snafu::Snafu)]
+#[snafu(module(worker_reload_error))]
+pub enum WorkerReloadError {
+    #[snafu(display("failed to load worker configuration"))]
+    Config {
+        source: gateway::parse::error::ConfigLoadFailure,
+    },
+    #[snafu(display("failed to enumerate worker identities"))]
+    Identities {
+        source: crate::config::plan::LoadIdentityServerCandidatesError,
+    },
 }
 
 pub struct WorkerRuntime<P>
@@ -305,7 +198,8 @@ where
     P: ControlPlane + ProvideListener,
 {
     registry: RuntimeRegistry<P>,
-    dhttp_config: dhttp::home::DhttpHome,
+    dhttp_home: dhttp::home::DhttpHome,
+    root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot,
     router_state: gateway::reverse::router::RouterState,
 }
 
@@ -315,250 +209,194 @@ where
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority:
-        Send + Sync,
-    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority:
-        Send + Sync,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
+    <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
 {
-    pub fn new(
-        plane: Arc<P>,
-        dhttp_config: dhttp::home::DhttpHome,
-        router_state: gateway::reverse::router::RouterState,
-    ) -> Self {
-        Self {
-            registry: RuntimeRegistry::new(plane),
-            dhttp_config,
-            router_state,
-        }
+    pub fn new(plane: Arc<P>, dhttp_home: dhttp::home::DhttpHome, root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot, router_state: gateway::reverse::router::RouterState) -> Self {
+        Self { registry: RuntimeRegistry::new(plane), dhttp_home, root_defaults, router_state }
     }
 
-    pub async fn start(&mut self) {
-        self.reload().await;
-    }
+    pub async fn start(&mut self) -> Result<(), WorkerReloadError> { self.reload().await }
 
-    pub async fn reload(&mut self) {
-        let sources =
-            match crate::worker::config::load_identity_service_sources(&self.dhttp_config).await {
-                Ok(sources) => sources,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %snafu::Report::from_error(&error),
-                        "failed to load identity service sources"
-                    );
-                    return;
-                }
-            };
-
-        let ctx = match crate::service::source::PrepareContext::load_worker(
-            &self.dhttp_config,
-            self.router_state.clone(),
-        )
-        .await
-        {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                tracing::warn!(
-                    error = %snafu::Report::from_error(&error),
-                    "failed to load worker prepare context"
-                );
-                return;
-            }
+    pub async fn reload(&mut self) -> Result<(), WorkerReloadError> {
+        let mut parser = gateway::parse::TypedConfigParser::new();
+        let path = self.dhttp_home.join(crate::config::PishooConfigSource::CONFIG_FILE_NAME);
+        let defaults = match gateway::parse::load_worker_config_file(&mut parser, &path, &self.dhttp_home, &self.root_defaults).await.context(worker_reload_error::ConfigSnafu)? {
+            Some(parsed) => parsed.pishoo().worker_defaults(),
+            None => self.root_defaults.clone(),
         };
-
-        let server_sources: Vec<ServerSource> =
-            sources.into_iter().map(ServerSource::IdentityService).collect();
-        self.registry.apply_sources(server_sources, &ctx).await;
+        let candidates = crate::config::load_identity_server_candidates(&self.dhttp_home, &defaults).await.context(worker_reload_error::IdentitiesSnafu)?;
+        let mut configs = Vec::new();
+        for candidate in candidates.into_vec() {
+            let (profile, result) = candidate.into_parts();
+            match result {
+                Ok(Some(server)) => configs.push(Arc::new(server)),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(profile = ?profile.map(|profile| profile.name().to_string()), error = %Report::from_error(&error), "identity server config rejected"),
+            }
+        }
+        let (sources, ctx) = crate::service::source::TypedServerSource::load_all(configs, self.router_state.clone()).await;
+        self.registry.apply_sources(sources, &ctx).await;
+        Ok(())
     }
 
-    pub async fn shutdown(self) {
-        self.registry.shutdown().await;
+    pub async fn reload_with_root_defaults(&mut self, root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot) -> Result<(), WorkerReloadError> {
+        self.root_defaults = root_defaults;
+        self.reload().await
+    }
+
+    pub async fn shutdown(self) { self.registry.shutdown().await; }
+
+    pub async fn wait_service_completion(&mut self) -> DhttpName<'static> {
+        self.registry.wait_service_completion().await
+    }
+
+    pub async fn handle_service_exit(&mut self, name: DhttpName<'static>) {
+        self.registry.handle_service_exit(name).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use snafu::Snafu;
 
     use super::*;
     use crate::service::source::{ListenerSpec, ServerSource};
 
-    struct FakeListener;
-
+    struct FakeListener {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
     #[derive(Debug, Snafu)]
-    #[snafu(display("fake listener never errors in these tests"))]
+    #[snafu(display("fake listener error"))]
     struct FakeListenerError;
-
     impl dhttp::h3x::quic::Listen for FakeListener {
         type Connection = dhttp::h3x::dquic::prelude::Connection;
         type Error = FakeListenerError;
-
         async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
             std::future::pending().await
         }
-
         async fn shutdown(&self) -> Result<(), Self::Error> {
+            self.operations.lock().unwrap().push("shutdown");
             Ok(())
         }
     }
 
-    #[derive(Debug, Snafu)]
-    #[snafu(display("fake plane never rebuilds in these tests"))]
-    struct FakeRebuildError;
-
-    struct FakePlane;
-
+    struct FakePlane {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
     impl gateway::control_plane::ProvideListener for FakePlane {
         type Listener = FakeListener;
-        type ListenError = FakeRebuildError;
-        type RebuildError = FakeRebuildError;
-
+        type ListenError = FakeListenerError;
         async fn listener(
             &self,
             _request: gateway::control_plane::ListenRequest,
         ) -> Result<Self::Listener, Self::ListenError> {
-            Err(FakeRebuildError)
-        }
-
-        async fn rebuild_listener(
-            &self,
-            _old: Self::Listener,
-            _request: gateway::control_plane::ListenRequest,
-        ) -> Result<Self::Listener, Self::RebuildError> {
-            Err(FakeRebuildError)
+            self.operations.lock().unwrap().push("acquire");
+            Ok(FakeListener {
+                operations: self.operations.clone(),
+            })
         }
     }
 
-    fn fake_runtime(name: &str, generation: u64) -> ServerRuntime<FakePlane> {
-        let spec = ListenerSpec::fake("same");
-        let source = ServerSource::fake_success(name, generation, spec.clone());
-        let name_owned = DhttpName::try_from(name.to_owned()).expect("valid dhttp name");
-        ServerRuntime {
-            name: name_owned,
-            source,
-            listener_spec: spec.clone(),
-            service: Arc::new(ServerService::fake()),
-            accept: AcceptState::Stopped {
-                listener: FakeListener,
+    fn context() -> PrepareContext {
+        PrepareContext {
+            h3_settings: Arc::new(dhttp::h3x::dhttp::settings::Settings::default()),
+            router_state: gateway::reverse::router::RouterState {
+                #[cfg(feature = "sshd")]
+                session_spawner: Arc::new(DummySpawner),
+                #[cfg(feature = "sshd")]
+                task_scope: Arc::new(DummyScope),
             },
-            fingerprint: ServerFingerprint {
-                listener_spec: spec,
-                service_generation: generation,
-            },
-            plane: Arc::new(FakePlane),
         }
+    }
+
+    #[cfg(feature = "sshd")]
+    struct DummySpawner;
+    #[cfg(feature = "sshd")]
+    impl gateway::control_plane::DynSpawnSession for DummySpawner {
+        fn spawn_session<'a>(
+            &'a self,
+            _username: &'a str,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<
+                gateway::control_plane::SessionTransport,
+                Box<dyn std::error::Error + Send + Sync>,
+            >,
+        > {
+            Box::pin(async { std::future::pending().await })
+        }
+    }
+    #[cfg(feature = "sshd")]
+    struct DummyScope;
+    #[cfg(feature = "sshd")]
+    impl gateway::reverse::router::DynTaskScope for DummyScope {
+        fn token(&self) -> tokio_util::sync::CancellationToken {
+            tokio_util::sync::CancellationToken::new()
+        }
+        fn spawn(&self, _task: futures::future::BoxFuture<'static, ()>) {}
     }
 
     #[tokio::test]
-    async fn reload_prepare_failure_keeps_current_fingerprint() {
-        let mut runtime = fake_runtime("alpha.example", 1);
-        let failing_source = ServerSource::fake_prepare_error("alpha.example");
-        let prepared_result = if let ServerSource::Fake(fake) = &failing_source {
-            fake.prepare()
-        } else {
-            unreachable!()
-        };
-
-        let outcome = runtime
-            .reload_with_prepared(failing_source, prepared_result)
+    async fn changed_listener_drains_closes_and_reacquires_in_one_round() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = RuntimeRegistry::new(Arc::new(FakePlane {
+            operations: operations.clone(),
+        }));
+        runtime
+            .apply_sources(
+                vec![ServerSource::fake_success(
+                    "alpha.dhttp.net",
+                    1,
+                    ListenerSpec::fake("a"),
+                )],
+                &context(),
+            )
+            .await;
+        runtime
+            .apply_sources(
+                vec![ServerSource::fake_success(
+                    "alpha.dhttp.net",
+                    2,
+                    ListenerSpec::fake("b"),
+                )],
+                &context(),
+            )
             .await;
 
-        assert!(matches!(
-            outcome,
-            ReloadServerOutcome::KeptOldOnPrepareFailure
-        ));
-        assert_eq!(runtime.fingerprint().generation_for_test(), 1);
+        assert_eq!(
+            *operations.lock().unwrap(),
+            ["acquire", "shutdown", "acquire"]
+        );
+        assert!(runtime.contains_service("alpha.dhttp.net"));
     }
 
     #[tokio::test]
-    async fn unchanged_listener_reload_swaps_service_for_future_accepts() {
-        let mut runtime = fake_runtime("alpha.example", 1);
-        let source = ServerSource::fake_success("alpha.example", 2, ListenerSpec::fake("same"));
-        let prepared_result = if let ServerSource::Fake(fake) = &source {
-            fake.prepare()
-        } else {
-            unreachable!()
-        };
+    async fn preparation_failure_stops_only_that_server() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = RuntimeRegistry::new(Arc::new(FakePlane { operations }));
+        runtime
+            .apply_sources(
+                vec![
+                    ServerSource::fake_success("good.dhttp.net", 1, ListenerSpec::fake("good")),
+                    ServerSource::fake_success("bad.dhttp.net", 1, ListenerSpec::fake("bad")),
+                ],
+                &context(),
+            )
+            .await;
+        runtime
+            .apply_sources(
+                vec![
+                    ServerSource::fake_success("good.dhttp.net", 2, ListenerSpec::fake("good")),
+                    ServerSource::fake_prepare_error("bad.dhttp.net"),
+                ],
+                &context(),
+            )
+            .await;
 
-        let outcome = runtime.reload_with_prepared(source, prepared_result).await;
-
-        assert!(matches!(
-            outcome,
-            ReloadServerOutcome::SwappedServiceOnReusedListener
-        ));
-        assert_eq!(runtime.fingerprint().generation_for_test(), 2);
-    }
-
-    #[tokio::test]
-    async fn reused_listener_reload_keeps_accept_running() {
-        let mut runtime = fake_runtime("alpha.example", 1);
-        let source = ServerSource::fake_success("alpha.example", 2, ListenerSpec::fake("same"));
-        let prepared_result = if let ServerSource::Fake(fake) = &source {
-            fake.prepare()
-        } else {
-            unreachable!()
-        };
-
-        let _ = runtime.reload_with_prepared(source, prepared_result).await;
-
-        assert!(matches!(
-            runtime.accept_state(),
-            AcceptState::Running { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn remove_completes_even_when_release_fails() {
-        struct FailingListener {}
-        impl dhttp::h3x::quic::Listen for FailingListener {
-            type Connection = dhttp::h3x::dquic::prelude::Connection;
-            type Error = FakeListenerError;
-            async fn accept(&mut self) -> Result<Arc<Self::Connection>, Self::Error> {
-                std::future::pending().await
-            }
-            async fn shutdown(&self) -> Result<(), Self::Error> {
-                Err(FakeListenerError)
-            }
-        }
-
-        struct FailingPlane;
-
-        impl gateway::control_plane::ProvideListener for FailingPlane {
-            type Listener = FailingListener;
-            type ListenError = FakeRebuildError;
-            type RebuildError = FakeRebuildError;
-
-            async fn listener(
-                &self,
-                _request: gateway::control_plane::ListenRequest,
-            ) -> Result<Self::Listener, Self::ListenError> {
-                Err(FakeRebuildError)
-            }
-            async fn rebuild_listener(
-                &self,
-                _old: Self::Listener,
-                _request: gateway::control_plane::ListenRequest,
-            ) -> Result<Self::Listener, Self::RebuildError> {
-                Err(FakeRebuildError)
-            }
-        }
-
-        let runtime = ServerRuntime {
-            name: DhttpName::try_from("alpha.example".to_owned()).unwrap(),
-            source: ServerSource::fake_success("alpha.example", 1, ListenerSpec::fake("same")),
-            listener_spec: ListenerSpec::fake("same"),
-            service: Arc::new(ServerService::fake()),
-            accept: AcceptState::Stopped {
-                listener: FailingListener {},
-            },
-            fingerprint: ServerFingerprint {
-                listener_spec: ListenerSpec::fake("same"),
-                service_generation: 1,
-            },
-            plane: Arc::new(FailingPlane),
-        };
-
-        runtime.remove().await; // Should not panic or hang
+        assert!(runtime.contains_service("good.dhttp.net"));
+        assert!(!runtime.contains_service("bad.dhttp.net"));
     }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dhttp::endpoint::Endpoint;
 use gateway::{forward, parse};
-use snafu::{FromString, OptionExt, ResultExt, Whatever, whatever};
+use snafu::{FromString, ResultExt, Whatever, whatever};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -27,14 +27,8 @@ async fn main() -> Result<(), Whatever> {
         std::process::exit(1);
     };
     let config_file = std::path::Path::new(config_file);
-    let registry = parse::default_registry();
-    let config = match parse::load_config_file(
-        config_file,
-        &registry,
-        parse::registry::BuildOptions::default(),
-    )
-    .await
-    {
+    let mut parser = parse::TypedConfigParser::new();
+    let config = match parse::load_root_config_file(&mut parser, config_file, None).await {
         Ok(config) => config,
         Err(failure) => {
             tracing::error!(
@@ -51,14 +45,7 @@ async fn main() -> Result<(), Whatever> {
 
     // TODO 对于绑定到 [::]:0 的监听, 应该进行特殊操作, 每个 server 都单独绑定到 不同端口 上
 
-    let pishoo = config
-        .root
-        .children("pishoo")
-        .ok()
-        .and_then(|pishoo| pishoo.first())
-        .whatever_context("no pishoo block found")?;
-
-    let proxies = pishoo.children_optional("proxy").to_vec();
+    let proxies = config.pishoo().forward_proxies();
     if proxies.is_empty() {
         whatever!("no proxy found in pishoo configuration");
     }
@@ -73,7 +60,7 @@ async fn main() -> Result<(), Whatever> {
 
     let mut handler = JoinSet::new();
 
-    for proxy in proxies {
+    for proxy in proxies.iter().cloned() {
         let span = tracing::info_span!("forward_example_proxy");
         let client = client.clone();
         handler.spawn(

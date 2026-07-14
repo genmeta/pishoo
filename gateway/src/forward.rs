@@ -13,7 +13,7 @@ use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
 use hyper::{Request, Response, server::conn::http1, service::service_fn, upgrade::OnUpgrade};
 use hyper_util::rt::tokio::TokioIo;
-use snafu::{OptionExt, Report, ResultExt, Snafu};
+use snafu::{Report, ResultExt, Snafu};
 use tokio::{
     io,
     net::{TcpListener, TcpStream},
@@ -25,7 +25,6 @@ use crate::{
     command,
     error::{BoxError, Result, Whatever},
     forward,
-    parse::{document::ConfigNode, types::SocketAddrs},
 };
 
 mod normal;
@@ -36,6 +35,13 @@ use task_scope::ForwardTaskScope;
 
 #[allow(dead_code)]
 pub static ALPN: &[u8] = b"h3";
+
+#[derive(Clone, Debug)]
+pub struct ForwardConfig {
+    pub listen: SocketAddr,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
 
 type BoxResponse = Response<UnsyncBoxBody<Bytes, BoxError>>;
 
@@ -76,20 +82,14 @@ fn configure_tcp_keepalive(stream: &TcpStream) {
 /// # Returns
 /// * `Result<(SocketAddr, impl Future)>` - The address and server task
 pub async fn serve(
-    node: Arc<ConfigNode>,
+    config: ForwardConfig,
     client: Arc<Endpoint>,
 ) -> Result<(
     SocketAddr,
     impl Future<Output = Result<()>> + Send + 'static,
 )> {
     tracing::info!("starting forward proxy server");
-    let listen = node
-        .require::<SocketAddrs>("listen")
-        .whatever_context::<_, Whatever>("failed to read forward proxy listen directive")?;
-    let addr = *listen
-        .0
-        .first()
-        .whatever_context::<_, Whatever>("missing forward proxy listen address")?;
+    let addr = config.listen;
 
     let (listener, local_addr) = async {
         let listener = TcpListener::bind(addr).await?;
@@ -102,7 +102,7 @@ pub async fn serve(
     info!(%local_addr, "listening on http endpoint");
 
     // 访问权限控制
-    let acl = Arc::new(command::acl(&node));
+    let acl = Arc::new(command::acl(&config.allow, &config.deny));
     let semaphore = Arc::new(Semaphore::new(1024));
     let task_scope = ForwardTaskScope::new();
     let task_spawner = task_scope.spawner();

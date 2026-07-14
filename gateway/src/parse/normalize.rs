@@ -5,8 +5,6 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use crate::parse::{
     domain::{ResolvedConfigPath, ResolvedConfigPathError},
     source::{SourceMap, SourceSpan},
-    types::PathConfig,
-    value::TypedValue,
 };
 
 #[derive(Debug, Snafu)]
@@ -44,17 +42,4 @@ pub(crate) fn normalize_path(
     source_map: &SourceMap,
 ) -> Result<PathBuf, NormalizeDirectiveValueError> {
     resolve_config_path(path, span, source_map).map(Into::into)
-}
-
-pub(crate) fn normalize_slot_value(
-    value: TypedValue,
-    source_map: &SourceMap,
-) -> Result<TypedValue, NormalizeDirectiveValueError> {
-    let span = value.span();
-    if let Some(path) = value.downcast::<PathConfig>() {
-        let normalized = normalize_path(&path.0, span, source_map)?;
-        return Ok(TypedValue::new(PathConfig(normalized), span));
-    }
-
-    Ok(value)
 }

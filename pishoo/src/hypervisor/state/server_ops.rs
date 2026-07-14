@@ -10,11 +10,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::{
-    AcquireListenerError, ListenerResource, RebuildListenerError, ReleaseListenerError, RootState,
+    AcquireListenerError, ListenerResource, ReleaseListenerError, RootState,
     acquire_listener_error,
-    listener_registry::{AcquirePlan, RebuildPlan, ReleasePlan},
+    listener_registry::{AcquirePlan, ReleasePlan},
     owner::Owner,
-    rebuild_listener_error,
 };
 use crate::{
     hypervisor::{endpoint_factory, resource::AsyncReleaseGuard},
@@ -41,7 +40,6 @@ struct BuiltListener {
 }
 
 type AcquireListenerSender = oneshot::Sender<Result<RegisteredEndpoint, AcquireListenerError>>;
-type RebuildListenerSender = oneshot::Sender<Result<RegisteredEndpoint, RebuildListenerError>>;
 
 struct AcquireListenerTransition {
     owner: Owner,
@@ -50,16 +48,6 @@ struct AcquireListenerTransition {
     bind_patterns: Arc<Vec<dhttp::h3x::dquic::binds::BindPattern>>,
     done: crate::hypervisor::resource::Completion,
     tx: AcquireListenerSender,
-}
-
-struct RebuildListenerTransition {
-    owner: Owner,
-    server_name: DhttpName<'static>,
-    request: ListenRequest,
-    bind_patterns: Arc<Vec<dhttp::h3x::dquic::binds::BindPattern>>,
-    old_resource: ListenerResource,
-    done: crate::hypervisor::resource::Completion,
-    tx: RebuildListenerSender,
 }
 
 impl RootState {
@@ -209,65 +197,6 @@ impl RootState {
         }
     }
 
-    /// Rebuild an owned listener without exposing a vacant interleaving window.
-    pub async fn rebuild_listener(
-        self: &Arc<Self>,
-        owner: Owner,
-        request: ListenRequest,
-    ) -> Result<RegisteredEndpoint, RebuildListenerError> {
-        let server_name = self.listener_name(&request);
-        let bind_patterns = request
-            .bind
-            .iter()
-            .map(gateway::parse::types::Listens::try_to_bind_patterns)
-            .collect::<Result<Vec<_>, _>>()
-            .context(acquire_listener_error::BuildBindPatternsSnafu)
-            .context(rebuild_listener_error::ReplacementSnafu)?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let bind_patterns = Arc::new(bind_patterns);
-
-        loop {
-            let plan = {
-                let mut registry = self.listeners.write().await;
-                registry.plan_rebuild(owner, &server_name)
-            };
-
-            match plan {
-                RebuildPlan::Rebuild {
-                    resource,
-                    guard,
-                    done,
-                } => {
-                    guard.disarm();
-                    let (tx, rx) = oneshot::channel();
-                    self.spawn_rebuild_listener_transition(RebuildListenerTransition {
-                        owner,
-                        server_name,
-                        request,
-                        bind_patterns,
-                        old_resource: resource,
-                        done,
-                        tx,
-                    });
-                    return rx
-                        .await
-                        .unwrap_or(Err(RebuildListenerError::TransitionStopped));
-                }
-                RebuildPlan::Wait(done) => done.wait().await,
-                RebuildPlan::NotOwner => return Err(RebuildListenerError::NotOwner),
-                RebuildPlan::NotFound => {
-                    return self
-                        .acquire_listener(owner, request)
-                        .await
-                        .context(rebuild_listener_error::ReplacementSnafu);
-                }
-                RebuildPlan::Conflict => return Err(RebuildListenerError::ConflictedName),
-            }
-        }
-    }
-
     /// Remove all poisoned listener entries from the registry.
     pub async fn clear_listener_poison(&self) -> Vec<DhttpName<'static>> {
         let mut registry = self.listeners.write().await;
@@ -388,57 +317,6 @@ impl RootState {
         );
     }
 
-    fn spawn_rebuild_listener_transition(self: &Arc<Self>, transition: RebuildListenerTransition) {
-        let state = self.clone();
-        self.spawn_resource_transition(
-            async move {
-                state.run_rebuild_listener_transition(transition).await;
-            }
-            .in_current_span(),
-        );
-    }
-
-    async fn run_rebuild_listener_transition(
-        self: Arc<Self>,
-        transition: RebuildListenerTransition,
-    ) {
-        self.destroy_listener_resource(transition.old_resource)
-            .await;
-
-        let built = self
-            .build_listener_resource(
-                transition.owner,
-                &transition.server_name,
-                &transition.request,
-                transition.bind_patterns,
-            )
-            .await;
-        match built {
-            Ok(built) => {
-                self.pause_listener_delivery_for_test().await;
-                self.commit_and_deliver_rebuilt_listener(
-                    transition.owner,
-                    transition.server_name,
-                    transition.done,
-                    built,
-                    transition.tx,
-                )
-                .await;
-            }
-            Err(error) => {
-                self.finish_listener_transition_vacant(
-                    transition.owner,
-                    &transition.server_name,
-                    &transition.done,
-                )
-                .await;
-                let _ = transition
-                    .tx
-                    .send(Err(RebuildListenerError::Replacement { source: error }));
-            }
-        }
-    }
-
     async fn commit_and_deliver_acquired_listener(
         &self,
         owner: Owner,
@@ -475,42 +353,6 @@ impl RootState {
         }
     }
 
-    async fn commit_and_deliver_rebuilt_listener(
-        &self,
-        owner: Owner,
-        server_name: DhttpName<'static>,
-        done: crate::hypervisor::resource::Completion,
-        built: BuiltListener,
-        tx: oneshot::Sender<Result<RegisteredEndpoint, RebuildListenerError>>,
-    ) {
-        let BuiltListener {
-            resource,
-            registered,
-            guard,
-        } = built;
-        match self
-            .commit_listener_transition_active(
-                owner,
-                server_name.clone(),
-                &done,
-                resource,
-                guard.clone(),
-            )
-            .await
-        {
-            Ok(()) => {
-                self.deliver_rebuilt_listener(server_name, registered, tx)
-                    .await;
-            }
-            Err(resource) => {
-                done.complete();
-                self.destroy_uncommitted_listener(resource, registered, guard)
-                    .await;
-                let _ = tx.send(Err(RebuildListenerError::ConflictedName));
-            }
-        }
-    }
-
     async fn commit_listener_transition_active(
         &self,
         owner: Owner,
@@ -528,22 +370,6 @@ impl RootState {
         server_name: DhttpName<'static>,
         registered: RegisteredEndpoint,
         tx: oneshot::Sender<Result<RegisteredEndpoint, AcquireListenerError>>,
-    ) {
-        match tx.send(Ok(registered)) {
-            Ok(()) => {}
-            Err(Ok(registered)) => {
-                self.shutdown_undelivered_listener(server_name, registered)
-                    .await;
-            }
-            Err(Err(_)) => {}
-        }
-    }
-
-    async fn deliver_rebuilt_listener(
-        &self,
-        server_name: DhttpName<'static>,
-        registered: RegisteredEndpoint,
-        tx: oneshot::Sender<Result<RegisteredEndpoint, RebuildListenerError>>,
     ) {
         match tx.send(Ok(registered)) {
             Ok(()) => {}

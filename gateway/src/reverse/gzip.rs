@@ -4,10 +4,7 @@ use async_compression::{Level, tokio::bufread::GzipEncoder};
 use http::response::Parts;
 use tokio_util::io::ReaderStream;
 
-use crate::parse::{
-    document::ConfigNode,
-    types::{BoolConfig, GzipCompLevel, GzipMinLength, StringList},
-};
+use crate::parse::config::LocationConfig;
 
 /// Gzip 压缩配置，从 location 节点中提取
 pub struct GzipConfig {
@@ -21,40 +18,17 @@ pub struct GzipConfig {
 
 impl GzipConfig {
     /// 从 location 配置和请求头中提取 gzip 配置
-    pub fn from_location(location: &Arc<ConfigNode>, accept_encoding: Option<&str>) -> Self {
+    pub fn from_location(location: &Arc<LocationConfig>, accept_encoding: Option<&str>) -> Self {
         let accept_gzip = accept_encoding.map(|v| v.contains("gzip")).unwrap_or(false);
 
         Self {
-            enabled: location
-                .inherited::<BoolConfig>("gzip")
-                .ok()
-                .flatten()
-                .map(|value| value.0)
-                .unwrap_or(false),
+            enabled: location.http().gzip().effective().0,
             accept_gzip,
-            vary: location
-                .inherited::<BoolConfig>("gzip_vary")
-                .ok()
-                .flatten()
-                .map(|value| value.0)
-                .unwrap_or(false),
-            min_length: location
-                .inherited::<GzipMinLength>("gzip_min_length")
-                .ok()
-                .flatten()
-                .map(|value| value.0)
-                .unwrap_or(20),
-            comp_level: location
-                .inherited::<GzipCompLevel>("gzip_comp_level")
-                .ok()
-                .flatten()
-                .map(|value| value.0)
-                .unwrap_or(1),
-            types: location
-                .inherited::<StringList>("gzip_types")
-                .ok()
-                .flatten()
-                .map(|value| value.0.clone()),
+            vary: location.http().gzip_vary().effective().0,
+            min_length: location.http().gzip_min_length().effective().0,
+            comp_level: location.http().gzip_comp_level().effective().0,
+            types: Some(location.http().gzip_types().effective().0.clone())
+                .filter(|types| !types.is_empty()),
         }
     }
 
@@ -113,7 +87,7 @@ impl GzipConfig {
 ///
 /// Returns a new response with the body wrapped in gzip, or the original response unchanged.
 pub fn compress_response(
-    location: &Arc<ConfigNode>,
+    location: &Arc<LocationConfig>,
     accept_encoding: Option<&str>,
     response: http::Response<hyper::body::Incoming>,
 ) -> http::Response<axum::body::Body> {
@@ -150,7 +124,7 @@ pub fn compress_response(
 ///
 /// Returns the response with appropriate headers and optionally compressed body.
 pub fn compress_file_response(
-    location: &Arc<ConfigNode>,
+    location: &Arc<LocationConfig>,
     accept_encoding: Option<&str>,
     mut parts: http::response::Parts,
     file: tokio::fs::File,

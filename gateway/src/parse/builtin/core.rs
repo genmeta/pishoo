@@ -4,9 +4,9 @@ use snafu::{ResultExt, Snafu, ensure};
 
 use crate::parse::{
     ast::{AstBody, AstDirective, Spanned},
+    decode::{DirectiveInput, DirectiveValue},
     domain::ResolvedConfigPath,
     normalize::NormalizeDirectiveValueError,
-    registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{BoolConfig, GzipTypesValidationError, PathConfig, StringConfig, StringList},
 };

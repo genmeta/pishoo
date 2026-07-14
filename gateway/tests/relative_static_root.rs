@@ -64,25 +64,35 @@ async fn router_serves_static_file_from_config_relative_root() {
     .expect("write index");
     std::fs::write(
         dir.join("server.conf"),
-        "server {\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./fullchain.crt;\n    ssl_certificate_key ./privkey.pem;\n    location / { root .; index index.html; }\n}\n",
+        "pishoo { server {\n    listen all 5378;\n    server_name example.com;\n    ssl_certificate ./fullchain.crt;\n    ssl_certificate_key ./privkey.pem;\n    location / { root .; index index.html; }\n} }\n",
     )
     .expect("write config");
 
-    let registry = parse::default_registry();
-    let document = parse::load_config_file(
-        &dir.join("server.conf"),
-        &registry,
-        parse::registry::BuildOptions::default(),
-    )
-    .await
-    .expect("config should load");
-
-    let server = document.root.children("server").expect("server children")[0].clone();
+    let text = std::fs::read_to_string(dir.join("server.conf")).unwrap();
+    let parsed = parse::TypedConfigParser::new()
+        .parse_root(&text, &dir.join("server.conf"), None)
+        .expect("config should load");
+    let server = parsed.servers()[0]
+        .result()
+        .as_ref()
+        .expect("server should build");
     let locations = server
-        .children("location")
-        .expect("location children")
-        .to_vec();
-    let router = NginxRouter::new(locations, dummy_router_state());
+        .locations()
+        .iter()
+        .cloned()
+        .map(std::sync::Arc::new)
+        .map(|location| {
+            std::sync::Arc::new(gateway::reverse::location::ConfiguredLocation::new(
+                location,
+                gateway::reverse::access_log::ActiveAccessLog::Disabled,
+            ))
+        })
+        .collect();
+    let router = NginxRouter::new(
+        locations,
+        gateway::reverse::access_log::ActiveAccessLog::Disabled,
+        dummy_router_state(),
+    );
 
     let response = router
         .oneshot(

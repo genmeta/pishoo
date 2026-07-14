@@ -6,8 +6,6 @@
 //! - [`WorkerBootstrap`] / [`WorkerHello`]: one-shot bootstrap handshake.
 //! - Error types for control plane operations.
 
-use std::path::PathBuf;
-
 use dhttp::h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
 use gateway::control_plane::{ConnectorRequest, ListenRequest};
 use serde::{Deserialize, Serialize};
@@ -20,9 +18,12 @@ use snafu::Snafu;
 /// Sent from root to worker immediately after establishing the remoc channel.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerBootstrap {
-    pub uid: u32,
-    pub username: String,
-    pub home: PathBuf,
+    pub account: crate::config::WorkerAccount,
+    pub root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot,
+    pub root_defaults_rx: remoc::rch::watch::Receiver<
+        gateway::parse::config::RootWorkerDefaultsSnapshot,
+        remoc::codec::Default,
+    >,
     /// RPC client for calling the root control plane.
     pub control_plane: ControlPlaneClient,
 }
@@ -48,27 +49,6 @@ pub enum ListenError {
     #[snafu(display("listener conflicts with an existing listener"))]
     Conflict,
     #[snafu(display("invalid listen request: {reason}"))]
-    InvalidRequest { reason: String },
-    #[snafu(display("internal error: {message}"))]
-    Internal { message: String },
-    #[snafu(transparent)]
-    Call { source: remoc::rtc::CallError },
-}
-
-/// Error returned by [`ControlPlane::rebuild_listener`].
-///
-/// Rebuild atomically replaces an owned listener so the server name is never
-/// momentarily vacant during reload.
-#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
-#[snafu(module)]
-pub enum RebuildListenError {
-    #[snafu(display("listener is not owned by this worker"))]
-    NotOwner,
-    #[snafu(display("server name conflicts with an existing listener"))]
-    Conflict,
-    #[snafu(display("replacement listener failed after old listener was destroyed: {reason}"))]
-    Replacement { reason: String },
-    #[snafu(display("invalid rebuild request: {reason}"))]
     InvalidRequest { reason: String },
     #[snafu(display("internal error: {message}"))]
     Internal { message: String },
@@ -119,14 +99,6 @@ pub trait ControlPlane: Send + Sync {
     /// [`IpcListener`](dhttp::h3x::ipc::capability::listener::IpcListener) from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
 
-    /// Atomically replace a previously acquired listener with one matching the
-    /// new request. The previous listener is destroyed by root as part of the
-    /// same critical section, so the server name is never observed vacant.
-    async fn rebuild_listener(
-        &self,
-        request: ListenRequest,
-    ) -> Result<IpcListenClient, RebuildListenError>;
-
     /// Request an outbound QUIC connector.
     ///
     /// Root creates the connector, wraps it in an IPC `ConnectAdapter`, and
@@ -141,4 +113,31 @@ pub trait ControlPlane: Send + Sync {
     /// The returned `u64` echoes `fd_id` after the FD delivery is queued to
     /// the local mux writer FIFO.
     async fn spawn_session(&self, username: String, fd_id: u64) -> Result<u64, SpawnSessionError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    fn snapshot(label: &str) -> gateway::parse::config::RootWorkerDefaultsSnapshot {
+        let path = PathBuf::from(format!("/tmp/{label}.conf"));
+        gateway::parse::TypedConfigParser::new()
+            .parse_root("pishoo { gzip on; }", &path, None)
+            .unwrap()
+            .pishoo()
+            .worker_defaults()
+    }
+
+    #[tokio::test]
+    async fn root_defaults_watch_coalesces_to_latest_snapshot() {
+        let (sender, mut receiver) =
+            remoc::rch::watch::channel::<_, remoc::codec::Default>(snapshot("root-a"));
+        sender.send(snapshot("root-b")).unwrap();
+        sender.send(snapshot("root-c")).unwrap();
+
+        receiver.changed().await.unwrap();
+        let actual = receiver.borrow_and_update().unwrap().clone();
+
+        assert_eq!(actual, snapshot("root-c"));
+    }
 }

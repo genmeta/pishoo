@@ -34,8 +34,8 @@ use tracing::Instrument;
 
 use super::{endpoint_factory, state::RootState, task_scope::TaskScope};
 use crate::{
-    hypervisor::state::{AcquireListenerError, RebuildListenerError},
-    ipc::{ConnectError, ListenError, RebuildListenError},
+    hypervisor::state::AcquireListenerError,
+    ipc::{ConnectError, ListenError},
 };
 
 /// Per-worker [`ControlPlane`](crate::ipc::ControlPlane) implementation.
@@ -139,64 +139,6 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
                     | AcquireListenerError::OwnerUnavailable
                     | AcquireListenerError::TransitionStopped => ListenError::Internal {
                         message: format!("failed to prepare endpoint for `{server_name}`"),
-                    },
-                }
-            })?;
-
-        Ok(self.wrap_listener(task_scope, server_name.clone(), adapter))
-    }
-
-    async fn rebuild_listener(
-        &self,
-        request: ListenRequest,
-    ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, RebuildListenError> {
-        let server_name = request.identity.name().as_full().to_owned();
-        let owner = self
-            .state
-            .owner_for_pid(self.caller_pid)
-            .await
-            .ok_or_else(|| RebuildListenError::Internal {
-                message: format!("unknown caller pid {}", self.caller_pid),
-            })?;
-        let task_scope = self
-            .state
-            .task_scope_for_owner(owner)
-            .await
-            .ok_or_else(|| RebuildListenError::Internal {
-                message: format!("unknown caller pid {}", self.caller_pid),
-            })?;
-
-        let adapter = self
-            .state
-            .rebuild_listener(owner, request)
-            .await
-            .map_err(|error| {
-                let report = snafu::Report::from_error(&error).to_string();
-                tracing::warn!(
-                    caller_pid = %self.caller_pid,
-                    %server_name,
-                    error = %report,
-                    "rebuild listener request failed"
-                );
-                match error {
-                    RebuildListenerError::NotOwner => RebuildListenError::NotOwner,
-                    RebuildListenerError::ConflictedName => RebuildListenError::Conflict,
-                    RebuildListenerError::TransitionStopped => RebuildListenError::Internal {
-                        message: format!("failed to replace endpoint for `{server_name}`"),
-                    },
-                    RebuildListenerError::Replacement { source } => match source {
-                        AcquireListenerError::BuildBindPatterns { .. } => {
-                            RebuildListenError::InvalidRequest { reason: report }
-                        }
-                        AcquireListenerError::DuplicateListen
-                        | AcquireListenerError::ConflictedName => RebuildListenError::Conflict,
-                        AcquireListenerError::BuildEndpoint { .. }
-                        | AcquireListenerError::CreatePublisher { .. }
-                        | AcquireListenerError::MissingPublisher
-                        | AcquireListenerError::OwnerUnavailable
-                        | AcquireListenerError::TransitionStopped => {
-                            RebuildListenError::Replacement { reason: report }
-                        }
                     },
                 }
             })?;

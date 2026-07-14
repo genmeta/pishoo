@@ -1,4 +1,4 @@
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 use axum::middleware::from_fn_with_state;
 use dhttp::h3x::{
@@ -7,9 +7,9 @@ use dhttp::h3x::{
 };
 use gateway::reverse::{
     access_control::{AccessControlState, access_control},
-    access_log::{AccessLogState, access_log},
+    access_log::{AccessLogState, ActiveAccessLog, access_log},
     body_adapter::BodyAdapterLayer,
-    log::AccessLogWriter,
+    location::ConfiguredLocation,
     router::NginxRouter,
 };
 use snafu::Report;
@@ -17,13 +17,36 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument;
 
+use super::resource::AccessLogResources;
+
+pub struct PreparedServerService {
+    pub h3_settings: Arc<Settings>,
+    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
+    pub router_state: gateway::reverse::router::RouterState,
+    pub server_config: Arc<gateway::parse::config::ServerConfig>,
+    pub server_name: dhttp::name::DhttpName<'static>,
+}
+
+impl PreparedServerService {
+    pub fn activate(self, access_logs: AccessLogResources) -> ServerService {
+        ServerService {
+            h3_settings: self.h3_settings,
+            access_rules: self.access_rules,
+            router_state: self.router_state,
+            server_config: self.server_config,
+            server_name: self.server_name,
+            access_logs,
+        }
+    }
+}
+
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
     pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
     pub router_state: gateway::reverse::router::RouterState,
-    pub server_node: Arc<gateway::parse::document::ConfigNode>,
-    pub access_log_dir: Option<PathBuf>,
+    pub server_config: Arc<gateway::parse::config::ServerConfig>,
     pub server_name: dhttp::name::DhttpName<'static>,
+    pub access_logs: AccessLogResources,
 }
 
 impl ServerService {
@@ -39,37 +62,37 @@ impl ServerService {
         <L::Connection as quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
         <L::Connection as quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
     {
-        let locations = self.server_node.children_optional("location").to_vec();
+        assert_eq!(
+            self.server_config.locations().len(),
+            self.access_logs.locations.len(),
+            "access log resources correspond to every configured location"
+        );
+        let locations = self
+            .server_config
+            .locations()
+            .iter()
+            .cloned()
+            .zip(self.access_logs.locations.iter().cloned())
+            .map(|(location, output)| {
+                Arc::new(ConfiguredLocation::new(
+                    Arc::new(location),
+                    ActiveAccessLog::from_output(output),
+                ))
+            })
+            .collect();
 
-        let nginx_router = NginxRouter::new(locations, self.router_state.clone());
+        let server_access_log = ActiveAccessLog::from_output(self.access_logs.server.clone());
+        let nginx_router = NginxRouter::new(
+            locations,
+            server_access_log.clone(),
+            self.router_state.clone(),
+        );
         let access_state = AccessControlState {
             access_rules: self.access_rules.clone(),
             server_name: Arc::from(self.server_name.as_full()),
         };
-
-        let access_log_writer = match &self.access_log_dir {
-            Some(dir) => match AccessLogWriter::new(dir.clone()) {
-                Ok(writer) => {
-                    tracing::debug!(
-                        server_name = %self.server_name,
-                        dir = %dir.display(),
-                        "access log writer created"
-                    );
-                    writer
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        server_name = %self.server_name,
-                        error = %Report::from_error(&error),
-                        "failed to create access log writer, access logging disabled"
-                    );
-                    AccessLogWriter::disabled()
-                }
-            },
-            None => AccessLogWriter::disabled(),
-        };
         let access_log_state = AccessLogState {
-            writer: access_log_writer,
+            server: server_access_log,
         };
 
         let service_stack = ServiceBuilder::new()
@@ -137,8 +160,8 @@ where
 
 #[cfg(test)]
 impl ServerService {
-    pub(crate) fn fake() -> Self {
-        Self {
+    pub(crate) fn fake() -> PreparedServerService {
+        PreparedServerService {
             h3_settings: Arc::new(Settings::default()),
             access_rules: Arc::new(dhttp::access::matcher::LocationRulesMatcher::default()),
             router_state: {
@@ -185,21 +208,24 @@ impl ServerService {
                     ),
                 }
             },
-            server_node: {
-                let registry = gateway::parse::default_registry();
-                let doc = gateway::parse::load_config_text(
-                    "",
+            server_config: {
+                let mut parser = gateway::parse::TypedConfigParser::new();
+                let parsed = parser.parse_root(
+                    "pishoo { server { listen all 443; server_name test.example; ssl_certificate /tmp/test.crt; ssl_certificate_key /tmp/test.key; } }",
+                    std::path::Path::new("/tmp/pishoo.conf"),
                     None,
-                    &registry,
-                    gateway::parse::registry::BuildOptions {
-                        dhttp_home: None,
-                        identity_profile: None,
-                    },
+                ).unwrap();
+                Arc::new(
+                    parsed
+                        .into_parts()
+                        .1
+                        .into_vec()
+                        .pop()
+                        .unwrap()
+                        .into_result()
+                        .unwrap(),
                 )
-                .unwrap();
-                doc.root
             },
-            access_log_dir: None,
             server_name: dhttp::name::DhttpName::try_from("test.example").unwrap(),
         }
     }

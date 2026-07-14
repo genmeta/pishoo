@@ -4,8 +4,8 @@ use snafu::{ResultExt, Snafu};
 
 use crate::parse::{
     builtin::core::{first_arg_span, only_arg},
+    decode::{DirectiveInput, DirectiveValue},
     normalize,
-    registry::{DirectiveInput, DirectiveValue},
     source::SourceSpan,
     types::{AccessRulesUri, AccessRulesUriValidationError},
 };
@@ -143,7 +143,7 @@ mod tests {
         }
         #[cfg(not(unix))]
         cases.push(("sqlite:a%3Fb%23c.db?mode=ro%23strict", dir.join("a?b#c.db")));
-        let config = cases
+        let servers = cases
             .iter()
             .enumerate()
             .map(|(index, (access_rules, _))| {
@@ -153,23 +153,25 @@ mod tests {
                 )
             })
             .collect::<String>();
+        let config = format!("pishoo {{ {servers} }}");
         std::fs::write(dir.join("server.conf"), config).expect("write config");
 
-        let registry = crate::parse::default_registry();
-        let parsed = crate::parse::load_config_file(
-            &dir.join("server.conf"),
-            &registry,
-            crate::parse::registry::BuildOptions::default(),
-        )
-        .await
-        .expect("config should load");
+        let text = std::fs::read_to_string(dir.join("server.conf")).unwrap();
+        let parsed = crate::parse::TypedConfigParser::new()
+            .parse_root(&text, &dir.join("server.conf"), None)
+            .expect("config should load");
 
-        let servers = parsed.root.children("server").expect("server children");
-        assert_eq!(servers.len(), cases.len());
-        for (server, (_, expected_path)) in servers.iter().zip(cases) {
+        assert_eq!(parsed.servers().len(), cases.len());
+        for (server, (_, expected_path)) in parsed.servers().iter().zip(cases) {
             let uri = &server
-                .require::<crate::parse::types::AccessRulesUri>("access_rules")
-                .expect("access_rules should be typed")
+                .result()
+                .as_ref()
+                .unwrap()
+                .http()
+                .access_rules()
+                .effective()
+                .as_ref()
+                .unwrap()
                 .0;
             assert_eq!(
                 crate::parse::types::AccessRulesUri::decoded_sqlite_path(uri)

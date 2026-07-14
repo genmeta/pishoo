@@ -1099,7 +1099,6 @@ dependencies = [
  "http",
  "sha2 0.10.9",
  "snafu",
- "tracing-subscriber",
  "x509-parser",
 ]
 
@@ -1537,6 +1536,7 @@ dependencies = [
  "glob",
  "h3x",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1548,6 +1548,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "serde_json",
  "snafu",
  "socket2",
  "tokio",

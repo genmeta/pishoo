@@ -177,22 +177,22 @@ fn prepend_public_origin(public_origin: Option<&str>, target: String) -> String 
 mod tests {
     use super::*;
     use crate::{
-        parse::{
-            pattern::Pattern,
-            registry::context,
-            source::{SourceId, SourceSpan},
-            types::ProxyPass,
-            value::TypedValue,
-        },
+        parse::{pattern::Pattern, tests::parse_location_pattern, types::ProxyPass},
         reverse::location::LocationMatch,
     };
 
     fn make_location_match(pattern: Pattern, matched: &str, remaining: &str) -> LocationMatch {
-        let span = SourceSpan::new(SourceId(0), 0, 0);
-        let mut node = crate::parse::document::ConfigNode::new(context::LOCATION, None, span);
-        node.set_payload(TypedValue::new(pattern, span));
+        let syntax = match pattern {
+            Pattern::Exact(value) => format!("= {value}"),
+            Pattern::Prefix(value) => format!("^~ {value}"),
+            Pattern::NormalPrefix(value) => value,
+            Pattern::Regex(value) => format!("~ '{}'", value.as_str()),
+            Pattern::CRegex(value) => format!("~* '{}'", value.as_str()),
+            Pattern::Common => "/".to_owned(),
+        };
         LocationMatch {
-            location: std::sync::Arc::new(node),
+            location: parse_location_pattern(&syntax, "").unwrap(),
+            access_log: crate::reverse::access_log::ActiveAccessLog::Disabled,
             matched: matched.to_owned(),
             remaining: remaining.to_owned(),
         }

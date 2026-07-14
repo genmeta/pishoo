@@ -18,7 +18,6 @@ use tracing::Instrument;
 
 use crate::{
     control_plane::DynSpawnSession,
-    parse::types::StringList,
     reverse::{location::LocationMatch, router::RouterState},
 };
 
@@ -109,9 +108,7 @@ pub async fn sshd_handle(
 
     let ssh_deny = loc
         .location
-        .get::<StringList>("ssh_deny")
-        .ok()
-        .flatten()
+        .ssh_deny()
         .map(|value| value.0.clone())
         .unwrap_or_default();
 

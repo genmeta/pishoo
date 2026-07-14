@@ -81,19 +81,6 @@ pub enum ReleaseListenerError {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum RebuildListenerError {
-    #[snafu(display("listener is not owned by caller"))]
-    NotOwner,
-    #[snafu(display("server name conflicted"))]
-    ConflictedName,
-    #[snafu(display("failed to acquire replacement listener"))]
-    Replacement { source: AcquireListenerError },
-    #[snafu(display("listener transition stopped before result delivery"))]
-    TransitionStopped,
-}
-
-#[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
 pub enum WorkerStartupError {
     #[snafu(display("worker startup timed out"))]
@@ -171,7 +158,7 @@ pub struct WorkerFailure {
 }
 
 pub(super) struct FailedWorkerRecord {
-    pub(super) target: crate::config::ResolvedWorkerTarget,
+    pub(super) target: crate::config::WorkerAccount,
     pub(super) reason: String,
 }
 
@@ -185,6 +172,11 @@ pub(super) struct WorkerProcessRecord {
     pub(super) tasks: TaskScope,
     /// Handle to the spawned worker process.
     pub(super) worker_handle: WorkerHandle,
+    /// Latest root defaults are delivered without an apply acknowledgement.
+    pub(super) root_defaults_tx: remoc::rch::watch::Sender<
+        gateway::parse::config::RootWorkerDefaultsSnapshot,
+        remoc::codec::Default,
+    >,
 }
 
 /// Summary produced by worker cleanup.
@@ -206,7 +198,7 @@ pub(super) struct Inner {
     /// uid → pid mapping (one worker per uid).
     pub(super) users: HashMap<Uid, Pid>,
     /// uid → desired worker target from the current root configuration.
-    pub(super) desired_workers: HashMap<Uid, crate::config::ResolvedWorkerTarget>,
+    pub(super) desired_workers: HashMap<Uid, crate::config::WorkerAccount>,
     /// uid → failed worker target waiting for the next reload retry.
     pub(super) failed_workers: HashMap<Uid, FailedWorkerRecord>,
     /// Pending process-level failures reported by worker-scoped tasks.

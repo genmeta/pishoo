@@ -4,18 +4,16 @@ use http::{HeaderValue, Request, header, response::Parts};
 
 use super::variables;
 use crate::parse::{
-    document::ConfigNode,
-    types::{DefaultType, HeaderRule, HeaderRules, MimeTypes, ProxyPass},
+    config::LocationConfig,
+    types::{HeaderRule, HeaderRules},
 };
 
-pub(crate) fn proxy_set_header<T>(node: &Arc<ConfigNode>, req: Request<T>) -> Request<T> {
+pub(crate) fn proxy_set_header<T>(node: &Arc<LocationConfig>, req: Request<T>) -> Request<T> {
     let (mut parts, body) = req.into_parts();
 
     // 默认将 Host 变更为 proxy_pass target
     let proxy_host = node
-        .get::<ProxyPass>("proxy_pass")
-        .ok()
-        .flatten()
+        .proxy_pass()
         .map(|proxy_pass| proxy_pass.proxy_host.clone());
     if let Some(host) = proxy_host {
         parts.headers.insert(
@@ -30,7 +28,7 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<ConfigNode>, req: Request<T>) -> Re
         .headers
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
     // 遍历 proxy_set_header 中的记录, 匹配 Header, 设置支持的字段
-    let proxy_set_header = header_rules(node, "proxy_set_header");
+    let proxy_set_header = header_rules(node.proxy_set_headers());
 
     for HeaderRule {
         name,
@@ -57,8 +55,8 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<ConfigNode>, req: Request<T>) -> Re
 ///
 /// * `node` - A config node potentially containing header configurations under the key "add_header".
 /// * `parts` - A mutable reference to `http::response::Parts` where headers will be added.
-pub(crate) fn add_header(node: &Arc<ConfigNode>, parts: &mut Parts) {
-    let add_header = header_rules(node, "add_header");
+pub(crate) fn add_header(node: &Arc<LocationConfig>, parts: &mut Parts) {
+    let add_header = header_rules(node.add_headers());
 
     for HeaderRule {
         name,
@@ -73,28 +71,20 @@ pub(crate) fn add_header(node: &Arc<ConfigNode>, parts: &mut Parts) {
 }
 
 /// Determines and sets the "Content-Type" header for a given file path based on configuration.
-pub(crate) fn content_type(node: &Arc<ConfigNode>, parts: &mut Parts, file_path: &Path) {
-    let mime_types = node.inherited::<MimeTypes>("types").ok().flatten();
-    let default_type = node.inherited::<DefaultType>("default_type").ok().flatten();
+pub(crate) fn content_type(node: &Arc<LocationConfig>, parts: &mut Parts, file_path: &Path) {
+    let mime_types = node.http().types().effective().as_ref();
+    let default_type = node.http().default_type().effective().as_ref();
 
     if let Some(mime_types) = mime_types
-        && let Some(content_type) = infer_content_type(
-            file_path,
-            &mime_types.0,
-            default_type.as_ref().map(|v| &v.0),
-        )
+        && let Some(content_type) =
+            infer_content_type(file_path, &mime_types.0, default_type.map(|v| &v.0))
     {
         parts.headers.insert("Content-Type", content_type.clone());
     }
 }
 
-fn header_rules(node: &ConfigNode, name: &str) -> Vec<HeaderRule> {
-    node.get_all::<HeaderRules>(name)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flat_map(|headers| headers.0.clone())
-        .collect()
+fn header_rules(rules: &[HeaderRules]) -> Vec<HeaderRule> {
+    rules.iter().flat_map(|headers| headers.0.clone()).collect()
 }
 
 /// Infers the `Content-Type` `HeaderValue` for a given file path based on its extension.
@@ -116,32 +106,14 @@ fn infer_content_type<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{
-        document::ConfigNode,
-        registry::context,
-        source::{SourceId, SourceSpan},
-        value::TypedValue,
-    };
+    use crate::parse::tests::parse_location;
 
     #[test]
     fn proxy_set_header_defaults_host_to_proxy_host_with_port() {
-        let span = SourceSpan::new(SourceId(0), 0, 0);
-        let mut node = ConfigNode::new(context::LOCATION, None, span);
-        node.insert_slot(
-            "proxy_pass",
-            TypedValue::new(
-                ProxyPass {
-                    raw: "http://backend.example.com:8080/base/".to_string(),
-                    uri: "http://backend.example.com:8080/base/".parse().unwrap(),
-                    proxy_host: "backend.example.com:8080".to_string(),
-                    explicit_path_and_query: Some("/base/".to_string()),
-                },
-                span,
-            ),
-        );
+        let node = parse_location("proxy_pass http://backend.example.com:8080/base/;").unwrap();
 
         let req = http::Request::builder().uri("/echo").body(()).unwrap();
-        let req = proxy_set_header(&Arc::new(node), req);
+        let req = proxy_set_header(&node, req);
         assert_eq!(
             req.headers()[http::header::HOST],
             "backend.example.com:8080"

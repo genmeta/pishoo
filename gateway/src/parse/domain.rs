@@ -3,10 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dhttp::home::{DhttpHome, identity::IdentityProfile};
 use snafu::{ResultExt, Snafu};
 
-use crate::parse::{registry::BuildOptions, source::SourceSpan};
+use crate::parse::source::SourceSpan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConfigDocumentId(u32);
@@ -88,93 +87,6 @@ impl ConfigSourceSpan {
 
     pub fn is_empty(&self) -> bool {
         self.span.is_empty()
-    }
-
-    pub(crate) fn source_span(&self) -> SourceSpan {
-        self.span
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DirectiveName(&'static str);
-
-impl DirectiveName {
-    pub(crate) const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        self.0
-    }
-}
-
-impl fmt::Display for DirectiveName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-#[derive(Debug)]
-pub enum ConfigDocumentRole<'a> {
-    HypervisorRoot {
-        home: Option<&'a DhttpHome>,
-    },
-    WorkerPishoo {
-        home: &'a DhttpHome,
-    },
-    IdentityServer {
-        home: &'a DhttpHome,
-        profile: &'a IdentityProfile,
-    },
-}
-
-impl ConfigDocumentRole<'_> {
-    pub(crate) fn kind(&self) -> ConfigDocumentRoleKind {
-        match self {
-            Self::HypervisorRoot { .. } => ConfigDocumentRoleKind::HypervisorRoot,
-            Self::WorkerPishoo { .. } => ConfigDocumentRoleKind::WorkerPishoo,
-            Self::IdentityServer { .. } => ConfigDocumentRoleKind::IdentityServer,
-        }
-    }
-
-    pub(crate) fn build_options(&self) -> BuildOptions<'_> {
-        match self {
-            Self::HypervisorRoot { home } => BuildOptions {
-                dhttp_home: *home,
-                identity_profile: None,
-            },
-            Self::WorkerPishoo { home } => BuildOptions {
-                dhttp_home: Some(home),
-                identity_profile: None,
-            },
-            Self::IdentityServer { home, profile } => BuildOptions {
-                dhttp_home: Some(home),
-                identity_profile: Some(profile),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigDocumentRoleKind {
-    HypervisorRoot,
-    WorkerPishoo,
-    IdentityServer,
-}
-
-impl ConfigDocumentRoleKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::HypervisorRoot => "hypervisor root",
-            Self::WorkerPishoo => "worker pishoo",
-            Self::IdentityServer => "identity server",
-        }
-    }
-}
-
-impl fmt::Display for ConfigDocumentRoleKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
