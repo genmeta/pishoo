@@ -88,16 +88,19 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
                     return Ok(response);
                 }
             };
-            let active_access_log = loc_match.access_log.clone();
-
-            if let Some(target) =
-                proxy_prefix_slash_redirect(&loc_match, &normalized, public_origin.as_deref())
-            {
+            if let Some((target, redirect_access_log)) = proxy_prefix_slash_redirect(
+                &locations,
+                &loc_match,
+                &normalized,
+                public_origin.as_deref(),
+            ) {
                 let mut response =
                     (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]).into_response();
-                response.extensions_mut().insert(active_access_log);
+                response.extensions_mut().insert(redirect_access_log);
                 return Ok(response);
             }
+
+            let active_access_log = loc_match.access_log.clone();
 
             // Inject LocationMatch into request extensions for extractors
             request.extensions_mut().insert(loc_match.clone());
@@ -127,17 +130,37 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
 }
 
 fn proxy_prefix_slash_redirect(
-    route: &super::location::LocationMatch,
+    locations: &[Arc<ConfiguredLocation>],
+    selected: &super::location::LocationMatch,
     normalized: &super::request_uri::NormalizedRequestUri,
     public_origin: Option<&str>,
-) -> Option<String> {
-    route.location.proxy_pass()?;
-    let prefix = match route.location.matcher() {
-        crate::parse::pattern::Pattern::Prefix(prefix)
-        | crate::parse::pattern::Pattern::NormalPrefix(prefix) => prefix,
-        _ => return None,
-    };
-    super::request_uri::build_prefix_slash_redirect(prefix, normalized, public_origin)
+) -> Option<(String, ActiveAccessLog)> {
+    match selected.pattern() {
+        crate::parse::pattern::Pattern::Exact(_)
+        | crate::parse::pattern::Pattern::Regex(_)
+        | crate::parse::pattern::Pattern::CRegex(_) => return None,
+        _ => {}
+    }
+
+    locations
+        .iter()
+        .filter_map(|location| {
+            location.proxy_pass()?;
+            let prefix = match location.matcher() {
+                crate::parse::pattern::Pattern::Prefix(prefix)
+                | crate::parse::pattern::Pattern::NormalPrefix(prefix) => prefix,
+                _ => return None,
+            };
+            let trimmed = prefix.strip_suffix('/')?;
+            if trimmed.len() <= selected.matched.len() {
+                return None;
+            }
+            let target =
+                super::request_uri::build_prefix_slash_redirect(prefix, normalized, public_origin)?;
+            Some((prefix.len(), target, location.access_log().clone()))
+        })
+        .max_by_key(|(prefix_len, _, _)| *prefix_len)
+        .map(|(_, target, access_log)| (target, access_log))
 }
 
 #[cfg(test)]
@@ -146,7 +169,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        parse::{domain::ResolvedConfigPath, tests::parse_location},
+        parse::{
+            domain::ResolvedConfigPath,
+            tests::{parse_location, parse_location_pattern},
+        },
         reverse::{location::ConfiguredLocation, log::AccessLogOutput},
     };
 
@@ -228,5 +254,34 @@ mod tests {
         drop(response);
         drop(output);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn proxy_prefix_redirect_is_checked_before_the_common_fallback() {
+        let api = Arc::new(ConfiguredLocation::new(
+            parse_location_pattern("/api/", "proxy_pass http://backend/;").unwrap(),
+            ActiveAccessLog::Disabled,
+        ));
+        let common = Arc::new(ConfiguredLocation::new(
+            parse_location("").unwrap(),
+            ActiveAccessLog::Disabled,
+        ));
+        let router = NginxRouter::new(vec![api, common], ActiveAccessLog::Disabled, router_state());
+
+        let response = router
+            .oneshot(
+                http::Request::builder()
+                    .uri("https://frontend.example.com/api?x=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://frontend.example.com/api/?x=1"
+        );
     }
 }
