@@ -43,6 +43,7 @@ pub mod keys {
             types::{
                 AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength,
                 ListenConfig, MimeTypes, ResolverConfig, ServerNames, StringList,
+                StunServerConfigValue,
             },
         };
 
@@ -70,6 +71,8 @@ pub mod keys {
             crate::parse::builtin::server::ACCESS_RULES_KEY;
         pub const RELAY: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::RELAY_KEY;
         pub const STUN: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::STUN_KEY;
+        pub const STUN_SERVERS: RepeatedDirectiveKey<StunServerConfigValue> =
+            crate::parse::builtin::stun::STUN_SERVERS_KEY;
         pub const TYPES: DirectiveKey<MimeTypes> = crate::parse::builtin::server::TYPES_KEY;
     }
 

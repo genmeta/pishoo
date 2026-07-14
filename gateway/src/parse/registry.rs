@@ -37,7 +37,6 @@ pub mod context {
     pub const SERVER: ContextKey = ContextKey("gateway.server");
     pub const LOCATION: ContextKey = ContextKey("gateway.location");
     pub const PROXY: ContextKey = ContextKey("gateway.proxy");
-    pub const STUN_SERVER: ContextKey = ContextKey("gateway.stun_server");
 }
 
 #[derive(Debug, Default)]
@@ -783,6 +782,24 @@ impl<T> TypedDirectiveDefinition<T, SingleCardinality> {
 }
 
 impl<T> TypedDirectiveDefinition<T, RepeatedCardinality> {
+    pub(crate) const fn repeated_raw(
+        context: ContextKey,
+        name: &'static str,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::new(
+            context,
+            context,
+            name,
+            DirectiveShape::RawBlock,
+            DirectiveCardinality::Repeated,
+            DirectiveMetadata::new(DuplicatePolicy::Append, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
     pub(crate) const fn repeated_leaf(
         context: ContextKey,
         name: &'static str,

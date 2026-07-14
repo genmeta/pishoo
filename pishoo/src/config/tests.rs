@@ -10,6 +10,15 @@ use crate::config::{
     },
 };
 
+#[test]
+fn pishoo_public_stun_servers_key_is_repeated() {
+    fn accepts_repeated<T>(_: gateway::parse::registry::RepeatedDirectiveKey<T>) {}
+
+    accepts_repeated::<gateway::parse::types::StunServerConfigValue>(
+        gateway::parse::keys::server::STUN_SERVERS,
+    );
+}
+
 fn create_temp_tls_files() -> (PathBuf, PathBuf) {
     let base = std::env::temp_dir().join(format!(
         "pishoo-config-test-{}",

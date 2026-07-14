@@ -3,13 +3,18 @@ use std::net::SocketAddr;
 use snafu::{ResultExt, Snafu};
 
 use crate::parse::{
-    builtin::core::{first_arg_span, only_arg},
+    ast::AstBody,
+    builtin::{
+        core::{first_arg_span, only_arg},
+        net::SocketAddrsError,
+    },
     registry::{
-        CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveSpec, DirectiveValue,
-        DuplicatePolicy, ReloadImpact, TransportPolicy, context,
+        CascadePolicy, ConfigRegistry, DirectiveInput, DirectiveValue, ReloadImpact,
+        RepeatedCardinality, RepeatedDirectiveKey, TransportPolicy, TypedDirectiveDefinition,
+        context,
     },
     source::SourceSpan,
-    types::{SocketAddrs, StunBindConfigValue, StunChangePort},
+    types::{SocketAddrs, StunBindConfigValue, StunChangePort, StunServerConfigValue},
 };
 
 #[derive(Debug, Snafu)]
@@ -142,205 +147,226 @@ impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for StunCha
     }
 }
 
-pub fn register(registry: &mut ConfigRegistry) {
-    registry.register_context(crate::parse::registry::ContextSpec {
-        key: context::STUN_SERVER,
-        finalize: None,
-    });
-    registry.register_directive(
-        context::SERVER,
-        DirectiveSpec::context_empty(
-            "stun_server",
-            vec![context::SERVER],
-            context::STUN_SERVER,
-            DuplicatePolicy::Append,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        ),
-    );
-    registry.register_directive(
-        context::STUN_SERVER,
-        DirectiveSpec::leaf_value::<StunBindConfigValue>(
-            "bind",
-            vec![context::STUN_SERVER],
-            DuplicatePolicy::Append,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        ),
-    );
-    for name in ["outer_addr", "change_addr"] {
-        registry.register_directive(
-            context::STUN_SERVER,
-            DirectiveSpec::leaf_value::<SocketAddrs>(
-                name,
-                vec![context::STUN_SERVER],
-                DuplicatePolicy::Reject,
-                CascadePolicy::None,
-                TransportPolicy::WorkerLocalOnly,
-                ReloadImpact::ListenerSet,
-            ),
-        );
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum StunServerConfigValueError {
+    #[snafu(display("stun_server must use block form"))]
+    ExpectedBlock { span: SourceSpan },
+    #[snafu(display("unknown stun_server child directive `{name}`"))]
+    UnknownChild { name: String, span: SourceSpan },
+    #[snafu(display("stun_server child directive `{name}` must use leaf form"))]
+    ExpectedLeaf { name: String, span: SourceSpan },
+    #[snafu(display("duplicate stun_server fallback directive `{name}`"))]
+    DuplicateFallback { name: String, span: SourceSpan },
+    #[snafu(display("invalid stun_server bind directive"))]
+    Bind { source: StunBindConfigValueError },
+    #[snafu(display("invalid stun_server address fallback"))]
+    Address { source: SocketAddrsError },
+    #[snafu(display("invalid stun_server change_port fallback"))]
+    ChangePort { source: StunChangePortError },
+}
+
+impl DirectiveValue for StunServerConfigValue {
+    type Error = StunServerConfigValueError;
+}
+
+impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for StunServerConfigValue {
+    type Error = StunServerConfigValueError;
+
+    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
+        let AstBody::Block { children, .. } = &input.directive.body else {
+            return stun_server_config_value_error::ExpectedBlockSnafu {
+                span: input.directive.span,
+            }
+            .fail();
+        };
+        let mut binds = Vec::new();
+        let mut outer_addr = None;
+        let mut change_addr = None;
+        let mut change_port = None;
+        for child in children {
+            if !child.is_leaf() {
+                return stun_server_config_value_error::ExpectedLeafSnafu {
+                    name: child.name.value.clone(),
+                    span: child.span,
+                }
+                .fail();
+            }
+            let child_input = DirectiveInput {
+                directive: child,
+                context: input.context,
+                source_map: input.source_map,
+            };
+            match child.name.value.as_str() {
+                "bind" => binds.push(
+                    StunBindConfigValue::try_from(&child_input)
+                        .context(stun_server_config_value_error::BindSnafu)?,
+                ),
+                "outer_addr" => {
+                    if outer_addr.is_some() {
+                        return stun_server_config_value_error::DuplicateFallbackSnafu {
+                            name: child.name.value.clone(),
+                            span: child.span,
+                        }
+                        .fail();
+                    }
+                    outer_addr = SocketAddrs::try_from(&child_input)
+                        .context(stun_server_config_value_error::AddressSnafu)?
+                        .0
+                        .first()
+                        .copied();
+                }
+                "change_addr" => {
+                    if change_addr.is_some() {
+                        return stun_server_config_value_error::DuplicateFallbackSnafu {
+                            name: child.name.value.clone(),
+                            span: child.span,
+                        }
+                        .fail();
+                    }
+                    change_addr = SocketAddrs::try_from(&child_input)
+                        .context(stun_server_config_value_error::AddressSnafu)?
+                        .0
+                        .first()
+                        .copied();
+                }
+                "change_port" => {
+                    if change_port.is_some() {
+                        return stun_server_config_value_error::DuplicateFallbackSnafu {
+                            name: child.name.value.clone(),
+                            span: child.span,
+                        }
+                        .fail();
+                    }
+                    change_port = Some(
+                        StunChangePort::try_from(&child_input)
+                            .context(stun_server_config_value_error::ChangePortSnafu)?
+                            .0,
+                    );
+                }
+                name => {
+                    return stun_server_config_value_error::UnknownChildSnafu {
+                        name: name.to_owned(),
+                        span: child.name.span,
+                    }
+                    .fail();
+                }
+            }
+        }
+        for bind in &mut binds {
+            bind.outer_addr = bind.outer_addr.or(outer_addr);
+            bind.change_addr = bind.change_addr.or(change_addr);
+            bind.change_port = bind.change_port.or(change_port);
+        }
+        Ok(Self {
+            binds: binds.into_boxed_slice(),
+        })
     }
-    registry.register_directive(
-        context::STUN_SERVER,
-        DirectiveSpec::leaf_value::<StunChangePort>(
-            "change_port",
-            vec![context::STUN_SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::None,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        ),
-    );
+}
+
+const STUN_SERVERS_DEFINITION: TypedDirectiveDefinition<
+    StunServerConfigValue,
+    RepeatedCardinality,
+> = TypedDirectiveDefinition::repeated_raw(
+    context::SERVER,
+    "stun_server",
+    CascadePolicy::None,
+    TransportPolicy::WorkerLocalOnly,
+    ReloadImpact::ListenerSet,
+);
+pub(crate) const STUN_SERVERS_KEY: RepeatedDirectiveKey<StunServerConfigValue> =
+    STUN_SERVERS_DEFINITION.key();
+
+pub fn register(registry: &mut ConfigRegistry) {
+    STUN_SERVERS_DEFINITION.register(registry);
 }
 
 #[cfg(test)]
 mod tests {
     use crate::parse::{
-        tests::{
-            assert_error_chain_display_single_line, cleanup_temp_files, create_temp_file,
-            first_server, parse_doc,
-        },
-        types::{SocketAddrs, StunBindConfigValue, StunChangePort},
+        ConfigDocumentParser,
+        domain::ConfigDocumentRole,
+        fragment::ParsedConfigDocument,
+        keys,
+        tests::{cleanup_temp_files, create_temp_file},
+        tree::build_global_tree,
     };
 
-    #[test]
-    fn parse_stun_bind_and_ports() {
-        let cert = create_temp_file("stun_bind_cert");
-        let key = create_temp_file("stun_bind_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 10.0.0.1:20000 outer_addr 10.0.0.2:20001 change_addr 10.0.0.3:20002 change_port 3478; }} }} }}",
+    fn sealed_server(stun: &str) -> crate::parse::tree::ServerConfigRef {
+        let cert = create_temp_file("stun_compound_cert");
+        let key = create_temp_file("stun_compound_key");
+        let text = format!(
+            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; {stun} }} }}",
             cert.display(),
             key.display()
         );
-
-        let server = first_server(&parse_doc(&conf));
-        let stun = server
-            .children("stun_server")
-            .expect("stun_server should exist")[0]
-            .clone();
-        let bind = stun.require::<StunBindConfigValue>("bind").unwrap();
-        assert_eq!(
-            bind.bind,
-            "10.0.0.1:20000".parse::<std::net::SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            bind.outer_addr.unwrap(),
-            "10.0.0.2:20001".parse::<std::net::SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            bind.change_addr.unwrap(),
-            "10.0.0.3:20002".parse::<std::net::SocketAddr>().unwrap()
-        );
-        assert_eq!(bind.change_port.unwrap(), 3478);
-
+        let registry = crate::parse::default_registry();
+        let mut parser = ConfigDocumentParser::new(&registry);
+        let ParsedConfigDocument::HypervisorRoot(root) = parser
+            .parse_text(
+                &text,
+                std::path::Path::new("/tmp/pishoo.conf"),
+                ConfigDocumentRole::HypervisorRoot { home: None },
+            )
+            .unwrap()
+        else {
+            panic!("expected root fragment")
+        };
+        let tree = build_global_tree(&registry, root, []).unwrap();
+        let server = tree.servers().next().unwrap();
         cleanup_temp_files(&[&cert, &key]);
+        server
     }
 
     #[test]
-    fn parse_stun_bind_config_rejects_unknown_option() {
-        let cert = create_temp_file("stun_bind_unknown_cert");
-        let key = create_temp_file("stun_bind_unknown_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 10.0.0.1:20000 bad 10.0.0.1:20001; }} }} }}",
-            cert.display(),
-            key.display()
+    fn stun_compounds_preserve_block_and_bind_order() {
+        let server = sealed_server(
+            "stun_server { bind 127.0.0.1:1000; bind 127.0.0.1:1001; } stun_server { bind 127.0.0.1:2000; }",
         );
+        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
+        let addresses = values
+            .iter()
+            .flat_map(|value| value.binds.iter().map(|bind| bind.bind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            addresses,
+            [
+                "127.0.0.1:1000".parse().unwrap(),
+                "127.0.0.1:1001".parse().unwrap(),
+                "127.0.0.1:2000".parse().unwrap(),
+            ]
+        );
+    }
 
-        let failure = crate::parse::parse_config_str_for_test(&conf)
-            .expect_err("unknown bind option should fail");
+    #[test]
+    fn stun_bind_explicit_values_override_block_fallbacks() {
+        let server = sealed_server(
+            "stun_server { outer_addr 127.0.0.1:3000; change_port 4000; bind 127.0.0.1:1000 outer_addr 127.0.0.1:3001 change_port 4001; }",
+        );
+        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
+        let bind = &values[0].binds[0];
+        assert_eq!(bind.outer_addr, Some("127.0.0.1:3001".parse().unwrap()));
+        assert_eq!(bind.change_port, Some(4001));
+    }
 
+    #[test]
+    fn empty_stun_server_block_remains_a_noop_compound() {
+        let server = sealed_server("stun_server {}");
+        let values = server.node().repeated(keys::server::STUN_SERVERS).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!(values[0].binds.is_empty());
+    }
+
+    #[test]
+    fn stun_server_leaf_form_is_rejected() {
+        let failure = crate::parse::parse_config_str_for_test(
+            "pishoo { server { listen all 1; server_name x; ssl_certificate /tmp/c; ssl_certificate_key /tmp/k; stun_server value; } }",
+        )
+        .unwrap_err();
         assert!(
             snafu::Report::from_error(&failure.error)
                 .to_string()
-                .contains("invalid stun_server bind directive option")
+                .contains("stun_server must use block form")
         );
-
-        cleanup_temp_files(&[&cert, &key]);
-    }
-
-    #[test]
-    fn parse_stun_change_port_accepts_valid_port() {
-        let cert = create_temp_file("stun_port_valid_cert");
-        let key = create_temp_file("stun_port_valid_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; change_port 3478; }} }} }}",
-            cert.display(),
-            key.display()
-        );
-
-        let server = first_server(&parse_doc(&conf));
-        let stun = server
-            .children("stun_server")
-            .expect("stun_server should exist")[0]
-            .clone();
-        assert_eq!(
-            stun.require::<StunChangePort>("change_port").unwrap().0,
-            3478
-        );
-
-        cleanup_temp_files(&[&cert, &key]);
-    }
-
-    #[test]
-    fn parse_stun_server_accepts_outer_addr_and_change_addr() {
-        let cert = create_temp_file("stun_addr_cert");
-        let key = create_temp_file("stun_addr_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; outer_addr 127.0.0.1:20001; change_addr 127.0.0.1:20002; }} }} }}",
-            cert.display(),
-            key.display()
-        );
-
-        let server = first_server(&parse_doc(&conf));
-        let stun = server
-            .children("stun_server")
-            .expect("stun_server should exist")[0]
-            .clone();
-
-        assert_eq!(
-            stun.require::<SocketAddrs>("outer_addr")
-                .expect("outer_addr should be typed")
-                .0,
-            vec![
-                "127.0.0.1:20001"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("outer address should parse")
-            ]
-        );
-        assert_eq!(
-            stun.require::<SocketAddrs>("change_addr")
-                .expect("change_addr should be typed")
-                .0,
-            vec![
-                "127.0.0.1:20002"
-                    .parse::<std::net::SocketAddr>()
-                    .expect("change address should parse")
-            ]
-        );
-
-        cleanup_temp_files(&[&cert, &key]);
-    }
-
-    #[test]
-    fn parse_stun_change_port_rejects_invalid_value() {
-        let cert = create_temp_file("stun_port_cert");
-        let key = create_temp_file("stun_port_key");
-        let conf = format!(
-            "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate {}; ssl_certificate_key {}; stun_server {{ bind 127.0.0.1:20000; change_port invalid; }} }} }}",
-            cert.display(),
-            key.display()
-        );
-
-        let failure = crate::parse::parse_config_str_for_test(&conf)
-            .expect_err("invalid change_port should fail");
-        let report = snafu::Report::from_error(&failure.error).to_string();
-
-        assert!(report.contains("failed to parse directive `change_port`"));
-        assert_error_chain_display_single_line(&failure.error);
-
-        cleanup_temp_files(&[&cert, &key]);
     }
 }

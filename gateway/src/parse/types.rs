@@ -237,7 +237,7 @@ pub struct SshSslUser {
 #[derive(Debug, Clone)]
 pub struct SshSslUsers(pub Vec<SshSslUser>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StunBindConfigValue {
     pub bind: std::net::SocketAddr,
     pub outer_addr: Option<std::net::SocketAddr>,
@@ -245,8 +245,13 @@ pub struct StunBindConfigValue {
     pub change_port: Option<u16>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StunChangePort(pub u16);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StunServerConfigValue {
+    pub binds: Box<[StunBindConfigValue]>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IpFamilies {
