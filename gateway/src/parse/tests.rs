@@ -11,19 +11,22 @@ use dhttp::home::DhttpHome;
 
 use crate::parse::{
     ConfigDocumentParser,
-    cascade::{GZIP, GZIP_TYPES, TYPES},
+    cascade::{DirectiveKey, GZIP, GZIP_TYPES},
     document::{ConfigDocument, ConfigNode},
     domain::{ConfigDocumentRole, ConfigDocumentRoleKind, ResolvedConfigPath},
     error::{ConfigDocumentRoleError, ConfigLoadFailure, LoadConfigError},
     fragment::{ParsedConfigDocument, ParsedPishooFragment, ParsedServerFragment},
     registry::{
-        BuildOptions, CascadePolicy, ContextSpec, DirectiveSpec, DuplicatePolicy, ReloadImpact,
-        TransportPolicy, context,
+        BuildOptions, CascadePolicy, CascadedCardinality, ConfigRegistry, ContextSpec,
+        DirectiveContractMismatch, DirectiveMetadata, DirectiveProjection, DirectiveShape,
+        DirectiveSpec, DuplicatePolicy, ReloadImpact, TransportPolicy, TypedDirectiveDefinition,
+        context,
     },
     snapshot::{RootConfigSnapshot, test_support as snapshot_test_support},
     source::SourceId,
     tree::{AttachedConfigNode, ParentLink, build_global_tree, build_worker_tree},
-    types::{BoolConfig, MimeTypes, PathConfig, StringList},
+    types::{BoolConfig, ListenConfig, MimeTypes, PathConfig, StringList},
+    value::ConfigValue,
 };
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -336,29 +339,198 @@ fn sealed_query_keeps_tree_alive_after_registry_replacement() {
 #[test]
 fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
     let fixture = TempConfigDir::new("sealed_equivalent_registry_contract");
-    let source_path = fixture.join("home/pishoo.conf");
-    let mut registry = crate::parse::default_registry();
+    let registry = crate::parse::default_registry();
     let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
     let root = parse_root_fragment(
         &mut parser,
-        "pishoo { pid run/pishoo.pid; }",
-        &source_path,
-        None,
+        "pishoo { server { listen all 4101; types { text/plain txt; } } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
     );
     let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
 
-    registry = crate::parse::default_registry();
-    assert!(registry.directive_spec(context::PISHOO, "pid").is_some());
-    let pid = tree
-        .pishoo()
-        .local(crate::parse::keys::pishoo::PID)
-        .expect("equivalent semantic contract should query")
-        .expect("pid should exist");
-
-    assert_eq!(
-        pid.as_ref().as_ref(),
-        source_path.parent().unwrap().join("run/pishoo.pid")
+    let definition = cascaded_definition::<MimeTypes>(
+        context::SERVER,
+        "types",
+        DirectiveShape::RawBlock,
+        DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
     );
+    let mut replacement = ConfigRegistry::new();
+    replacement.register_context(ContextSpec {
+        key: context::SERVER,
+        finalize: None,
+    });
+    definition.register(&mut replacement);
+    assert!(
+        replacement
+            .directive_spec(context::SERVER, "types")
+            .is_some()
+    );
+
+    let types = tree
+        .servers()
+        .next()
+        .expect("server should attach")
+        .node()
+        .cascaded(definition.key())
+        .expect("equivalent semantic contract should query")
+        .expect("types should exist");
+
+    assert!(types.effective().0.contains_key("txt"));
+}
+
+#[test]
+fn sealed_cascaded_query_rejects_each_contract_field_mismatch() {
+    let fixture = TempConfigDir::new("sealed_cascaded_contract_mismatch");
+    let registry = crate::parse::default_registry();
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; types { text/plain txt; } } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let server = tree.servers().next().expect("server should attach");
+
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<StringList>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::ValueType { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<ListenConfig>(
+            context::SERVER,
+            "listen",
+            DirectiveShape::Leaf,
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cardinality { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::Leaf,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Shape { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::LastWins,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Duplicate { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Transport { .. }),
+    );
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::ListenerSet,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Reload { .. }),
+    );
+}
+
+fn cascaded_definition<T>(
+    context: crate::parse::registry::ContextKey,
+    name: &'static str,
+    shape: DirectiveShape,
+    duplicate: DuplicatePolicy,
+    cascade: CascadePolicy,
+    transport: TransportPolicy,
+    reload: ReloadImpact,
+) -> TypedDirectiveDefinition<T, CascadedCardinality> {
+    TypedDirectiveDefinition::cascaded(
+        context,
+        name,
+        shape,
+        DirectiveMetadata::new(duplicate, cascade, transport, reload),
+        DirectiveProjection::absent(),
+    )
+}
+
+fn assert_cascaded_contract_mismatch<T>(
+    node: &crate::parse::tree::ConfigNodeRef,
+    key: DirectiveKey<T>,
+    expected: fn(DirectiveContractMismatch) -> bool,
+) where
+    T: ConfigValue,
+{
+    let Err(crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
+        mismatch: Some(mismatch),
+        ..
+    }) = node.cascaded(key)
+    else {
+        panic!("cascaded query should reject the semantic contract mismatch");
+    };
+    assert!(expected(mismatch));
 }
 
 #[test]
@@ -1206,7 +1378,18 @@ fn types_replaces_the_whole_parent_map() {
         .next()
         .expect("server should attach")
         .node()
-        .cascaded(TYPES)
+        .cascaded(
+            cascaded_definition::<MimeTypes>(
+                context::SERVER,
+                "types",
+                DirectiveShape::RawBlock,
+                DuplicatePolicy::Reject,
+                CascadePolicy::ReplaceWhole,
+                TransportPolicy::WorkerLocalOnly,
+                ReloadImpact::RuntimeState,
+            )
+            .key(),
+        )
         .expect("types query should succeed")
         .expect("types should be configured");
     assert_eq!(types.effective().0.len(), 1);
@@ -1242,9 +1425,19 @@ fn cascade_query_rejects_registry_policy_mismatch() {
     let tree = build_worker_tree(&registry, snapshot, None, servers).expect("tree should seal");
     let server = tree.servers().next().expect("server should attach");
 
-    assert!(
-        server.node().cascaded(TYPES).is_err(),
-        "cascade policy mismatches must not use DirectiveKey hardcoding"
+    assert_cascaded_contract_mismatch(
+        server.node(),
+        cascaded_definition::<MimeTypes>(
+            context::SERVER,
+            "types",
+            DirectiveShape::RawBlock,
+            DuplicatePolicy::Reject,
+            CascadePolicy::ReplaceWhole,
+            TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        )
+        .key(),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
     );
 }
 
@@ -1541,7 +1734,24 @@ fn cascade_lineage_is_builtin_root_worker_server_location() {
         .expect("location");
     let gzip = location
         .node()
-        .cascaded(GZIP)
+        .cascaded(
+            TypedDirectiveDefinition::cascaded(
+                context::LOCATION,
+                "gzip",
+                DirectiveShape::Leaf,
+                DirectiveMetadata::new(
+                    DuplicatePolicy::Reject,
+                    CascadePolicy::NearestWins,
+                    TransportPolicy::WorkerLocalOnly,
+                    ReloadImpact::RuntimeState,
+                ),
+                DirectiveProjection::new(
+                    crate::parse::cascade::builtin_false,
+                    RootConfigSnapshot::cascade_gzip,
+                ),
+            )
+            .key(),
+        )
         .expect("gzip query")
         .expect("gzip fallback");
 

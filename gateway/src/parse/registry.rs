@@ -176,7 +176,7 @@ pub enum DirectiveContractMismatch {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DirectiveContractTemplate {
+pub(crate) struct DirectiveContractTemplate {
     context: ContextKey,
     name: DirectiveName,
     value_type: fn() -> TypeId,
@@ -190,7 +190,7 @@ struct DirectiveContractTemplate {
 }
 
 impl DirectiveContractTemplate {
-    fn freeze(self) -> DirectiveContract {
+    pub(crate) fn freeze(self) -> DirectiveContract {
         DirectiveContract {
             context: self.context,
             name: self.name,
@@ -583,7 +583,7 @@ pub(crate) struct PayloadCardinality;
 pub(crate) struct CascadedCardinality;
 
 #[derive(Debug, Clone, Copy)]
-struct DirectiveMetadata {
+pub(crate) struct DirectiveMetadata {
     duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
     transport: TransportPolicy,
@@ -591,7 +591,7 @@ struct DirectiveMetadata {
 }
 
 impl DirectiveMetadata {
-    const fn new(
+    pub(crate) const fn new(
         duplicate: DuplicatePolicy,
         cascade: CascadePolicy,
         transport: TransportPolicy,
@@ -607,7 +607,7 @@ impl DirectiveMetadata {
 }
 
 #[derive(Debug)]
-struct DirectiveProjection<T> {
+pub(crate) struct DirectiveProjection<T> {
     builtin: Option<BuiltinValue<T>>,
     snapshot: Option<SnapshotValue<T>>,
 }
@@ -621,14 +621,14 @@ impl<T> Clone for DirectiveProjection<T> {
 impl<T> Copy for DirectiveProjection<T> {}
 
 impl<T> DirectiveProjection<T> {
-    const fn new(builtin: BuiltinValue<T>, snapshot: SnapshotValue<T>) -> Self {
+    pub(crate) const fn new(builtin: BuiltinValue<T>, snapshot: SnapshotValue<T>) -> Self {
         Self {
             builtin: Some(builtin),
             snapshot: Some(snapshot),
         }
     }
 
-    const fn absent() -> Self {
+    pub(crate) const fn absent() -> Self {
         Self {
             builtin: None,
             snapshot: None,
@@ -850,7 +850,7 @@ impl<T> TypedDirectiveDefinition<T, PayloadCardinality> {
 }
 
 impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
-    const fn cascaded(
+    pub(crate) const fn cascaded(
         context: ContextKey,
         name: &'static str,
         shape: DirectiveShape,
@@ -868,7 +868,10 @@ impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
         )
     }
 
-    pub(crate) const fn key(self) -> DirectiveKey<T> {
+    pub(crate) const fn key(self) -> DirectiveKey<T>
+    where
+        T: 'static,
+    {
         let builtin = match self.builtin {
             Some(builtin) => builtin,
             None => crate::parse::cascade::absent,
@@ -877,7 +880,7 @@ impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
             Some(snapshot) => snapshot,
             None => crate::parse::cascade::no_snapshot,
         };
-        DirectiveKey::new(self.name.as_str(), builtin, snapshot)
+        DirectiveKey::new(self.name, self.contract_template(), builtin, snapshot)
     }
 }
 
@@ -1024,11 +1027,6 @@ pub(crate) const fn v1_gzip_key() -> DirectiveKey<BoolConfig> {
 #[cfg(test)]
 pub(crate) const fn v1_gzip_types_key() -> DirectiveKey<StringList> {
     V1_SNAPSHOT_SCHEMA.gzip_types.key()
-}
-
-#[cfg(test)]
-pub(crate) const fn v1_types_key() -> DirectiveKey<MimeTypes> {
-    V1_SNAPSHOT_SCHEMA.types.key()
 }
 
 #[derive(Debug, Clone, Copy)]

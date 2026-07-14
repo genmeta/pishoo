@@ -2,6 +2,7 @@ use std::{marker::PhantomData, num::NonZeroU32, path::Path, sync::Arc};
 
 use crate::parse::{
     domain::{ConfigSourceSpan, DirectiveName},
+    registry::{DirectiveContract, DirectiveContractTemplate},
     snapshot::RootConfigSnapshot,
 };
 
@@ -77,6 +78,7 @@ pub(crate) type SnapshotValue<T> =
 #[derive(Debug)]
 pub struct DirectiveKey<T> {
     name: DirectiveName,
+    contract: DirectiveContractTemplate,
     builtin: BuiltinValue<T>,
     snapshot: SnapshotValue<T>,
     value: PhantomData<fn() -> T>,
@@ -92,12 +94,14 @@ impl<T> Copy for DirectiveKey<T> {}
 
 impl<T> DirectiveKey<T> {
     pub(crate) const fn new(
-        name: &'static str,
+        name: DirectiveName,
+        contract: DirectiveContractTemplate,
         builtin: BuiltinValue<T>,
         snapshot: SnapshotValue<T>,
     ) -> Self {
         Self {
-            name: DirectiveName::new(name),
+            name,
+            contract,
             builtin,
             snapshot,
             value: PhantomData,
@@ -106,6 +110,10 @@ impl<T> DirectiveKey<T> {
 
     pub const fn name(self) -> DirectiveName {
         self.name
+    }
+
+    pub(crate) fn contract(self) -> DirectiveContract {
+        self.contract.freeze()
     }
 
     pub(crate) fn builtin(self) -> Option<Arc<T>> {
@@ -146,6 +154,3 @@ pub(crate) const GZIP: DirectiveKey<crate::parse::types::BoolConfig> =
 #[cfg(test)]
 pub(crate) const GZIP_TYPES: DirectiveKey<crate::parse::types::StringList> =
     crate::parse::registry::v1_gzip_types_key();
-#[cfg(test)]
-pub(crate) const TYPES: DirectiveKey<crate::parse::types::MimeTypes> =
-    crate::parse::registry::v1_types_key();

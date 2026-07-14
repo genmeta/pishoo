@@ -487,6 +487,7 @@ impl HomeConfigTree {
     where
         T: ConfigValue,
     {
+        self.check_contract(node, key.contract())?;
         let mut chain = Vec::new();
         let mut current = node;
         loop {
