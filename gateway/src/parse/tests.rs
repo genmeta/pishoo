@@ -356,8 +356,8 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
         DirectiveShape::RawBlock,
         DuplicatePolicy::Reject,
         CascadePolicy::ReplaceWhole,
-        TransportPolicy::WorkerInheritable,
-        ReloadImpact::RuntimeState,
+        TransportPolicy::HypervisorOnly,
+        ReloadImpact::ListenerSet,
     );
     let server_definition = cascaded_definition::<MimeTypes>(
         context::SERVER,
@@ -365,8 +365,8 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
         DirectiveShape::RawBlock,
         DuplicatePolicy::Reject,
         CascadePolicy::ReplaceWhole,
-        TransportPolicy::WorkerLocalOnly,
-        ReloadImpact::RuntimeState,
+        TransportPolicy::WorkerInheritable,
+        ReloadImpact::Supervisor,
     );
     let mut replacement = ConfigRegistry::new();
     replacement.register_context(ContextSpec {
@@ -398,7 +398,7 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
 }
 
 #[test]
-fn sealed_cascaded_query_rejects_ancestor_contract_drift_without_value() {
+fn sealed_cascaded_query_rejects_empty_ancestor_contract_drift() {
     assert_ancestor_gzip_contract_mismatch(
         DirectiveSpec::leaf_value::<StringList>(
             "gzip",
@@ -454,33 +454,7 @@ fn sealed_cascaded_query_rejects_ancestor_contract_drift_without_value() {
         ),
         |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
     );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerInheritable,
-            ReloadImpact::RuntimeState,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Transport { .. }),
-    );
-    assert_ancestor_gzip_contract_mismatch(
-        DirectiveSpec::leaf_value::<BoolConfig>(
-            "gzip",
-            vec![context::SERVER],
-            DuplicatePolicy::Reject,
-            CascadePolicy::NearestWins,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        ),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Reload { .. }),
-    );
-}
-
-#[test]
-fn directive_contract_mismatch_display_names_context_and_expected_actual_values() {
-    let error = ancestor_gzip_contract_error(DirectiveSpec::leaf_value::<BoolConfig>(
+    assert_ancestor_gzip_contract_accepted(DirectiveSpec::leaf_value::<BoolConfig>(
         "gzip",
         vec![context::SERVER],
         DuplicatePolicy::Reject,
@@ -488,14 +462,65 @@ fn directive_contract_mismatch_display_names_context_and_expected_actual_values(
         TransportPolicy::WorkerInheritable,
         ReloadImpact::RuntimeState,
     ));
+    assert_ancestor_gzip_contract_accepted(DirectiveSpec::leaf_value::<BoolConfig>(
+        "gzip",
+        vec![context::SERVER],
+        DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::ListenerSet,
+    ));
+}
+
+#[test]
+fn sealed_query_reports_contract_mismatch_diagnostics() {
+    let error = ancestor_gzip_contract_error(DirectiveSpec::raw_value::<BoolConfig>(
+        "gzip",
+        vec![context::SERVER],
+        DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
+    ));
+    let crate::parse::error::ConfigQueryError::ContractMismatch {
+        directive,
+        context: actual_context,
+        mismatch,
+    } = &error
+    else {
+        panic!("expected typed directive contract mismatch");
+    };
     let rendered = error.to_string();
 
+    assert_eq!(directive.as_str(), "gzip");
+    assert_eq!(*actual_context, context::SERVER);
+    assert!(matches!(
+        mismatch,
+        DirectiveContractMismatch::Shape {
+            expected: DirectiveShape::Leaf,
+            actual: DirectiveShape::RawBlock,
+        }
+    ));
     assert!(rendered.contains("`gzip`"));
     assert!(rendered.contains(context::SERVER.0));
-    assert!(rendered.contains("transport"));
-    assert!(rendered.contains("WorkerLocalOnly"));
-    assert!(rendered.contains("WorkerInheritable"));
+    assert!(rendered.contains("shape"));
+    assert!(rendered.contains("Leaf"));
+    assert!(rendered.contains("RawBlock"));
     assert!(!rendered.contains("inconsistent cascade policies"));
+    assert_query_contract_mismatch_domain(*mismatch);
+}
+
+fn assert_query_contract_mismatch_domain(mismatch: DirectiveContractMismatch) {
+    match mismatch {
+        DirectiveContractMismatch::Name { .. }
+        | DirectiveContractMismatch::Context { .. }
+        | DirectiveContractMismatch::ValueType { .. }
+        | DirectiveContractMismatch::Cardinality { .. }
+        | DirectiveContractMismatch::Shape { .. }
+        | DirectiveContractMismatch::Payload { .. }
+        | DirectiveContractMismatch::Duplicate { .. }
+        | DirectiveContractMismatch::Cascade { .. } => {}
+    }
 }
 
 fn cascaded_definition<T>(
@@ -531,7 +556,9 @@ fn assert_cascaded_contract_mismatch<T>(
     assert!(expected(mismatch));
 }
 
-fn ancestor_gzip_contract_error(spec: DirectiveSpec) -> crate::parse::error::ConfigQueryError {
+fn ancestor_gzip_contract_result(
+    spec: DirectiveSpec,
+) -> Result<(), crate::parse::error::ConfigQueryError> {
     let fixture = TempConfigDir::new("sealed_ancestor_contract_mismatch");
     let mut registry = crate::parse::default_registry();
     registry.register_directive(context::SERVER, spec);
@@ -555,7 +582,12 @@ fn ancestor_gzip_contract_error(spec: DirectiveSpec) -> crate::parse::error::Con
     location
         .node()
         .cascaded(crate::parse::keys::location::GZIP)
-        .expect_err("an unused ancestor definition must still match the key contract")
+        .map(|_| ())
+}
+
+fn ancestor_gzip_contract_error(spec: DirectiveSpec) -> crate::parse::error::ConfigQueryError {
+    ancestor_gzip_contract_result(spec)
+        .expect_err("an unused ancestor definition must still match the query contract")
 }
 
 fn assert_ancestor_gzip_contract_mismatch(
@@ -573,6 +605,11 @@ fn assert_ancestor_gzip_contract_mismatch(
     assert_eq!(directive.as_str(), "gzip");
     assert_eq!(actual_context, context::SERVER);
     assert!(expected(mismatch));
+}
+
+fn assert_ancestor_gzip_contract_accepted(spec: DirectiveSpec) {
+    ancestor_gzip_contract_result(spec)
+        .expect("transport and reload metadata are outside typed query identity");
 }
 
 #[test]

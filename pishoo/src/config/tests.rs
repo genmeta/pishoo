@@ -139,7 +139,25 @@ fn public_key_inventory_has_semantic_query_domains() {
 }
 
 #[test]
-fn public_cascaded_keys_query_server_and_location_across_crate() {
+fn pishoo_public_cascaded_keys_query_server_and_location_across_crate() {
+    fn cascaded<T>(_: gateway::parse::cascade::DirectiveKey<T>) {}
+
+    cascaded(gateway::parse::keys::server::GZIP);
+    cascaded(gateway::parse::keys::server::GZIP_VARY);
+    cascaded(gateway::parse::keys::server::GZIP_MIN_LENGTH);
+    cascaded(gateway::parse::keys::server::GZIP_COMP_LEVEL);
+    cascaded(gateway::parse::keys::server::GZIP_TYPES);
+    cascaded(gateway::parse::keys::server::DEFAULT_TYPE);
+    cascaded(gateway::parse::keys::server::ACCESS_RULES);
+    cascaded(gateway::parse::keys::server::TYPES);
+    cascaded(gateway::parse::keys::location::GZIP);
+    cascaded(gateway::parse::keys::location::GZIP_VARY);
+    cascaded(gateway::parse::keys::location::GZIP_MIN_LENGTH);
+    cascaded(gateway::parse::keys::location::GZIP_COMP_LEVEL);
+    cascaded(gateway::parse::keys::location::GZIP_TYPES);
+    cascaded(gateway::parse::keys::location::DEFAULT_TYPE);
+    cascaded(gateway::parse::keys::location::TYPES);
+
     let base = std::env::temp_dir().join(format!(
         "pishoo-cascaded-keys-{}-{}",
         std::process::id(),
@@ -149,7 +167,18 @@ fn public_cascaded_keys_query_server_and_location_across_crate() {
             .as_nanos()
     ));
     let source_path = base.join("pishoo.conf");
-    let registry = gateway::parse::default_registry();
+    let mut registry = gateway::parse::default_registry();
+    registry.register_directive(
+        gateway::parse::registry::context::SERVER,
+        gateway::parse::registry::DirectiveSpec::leaf_value::<gateway::parse::types::BoolConfig>(
+            "gzip",
+            vec![gateway::parse::registry::context::SERVER],
+            gateway::parse::registry::DuplicatePolicy::Reject,
+            gateway::parse::registry::CascadePolicy::NearestWins,
+            gateway::parse::registry::TransportPolicy::WorkerInheritable,
+            gateway::parse::registry::ReloadImpact::ListenerSet,
+        ),
+    );
     let mut parser = gateway::parse::ConfigDocumentParser::new(&registry);
     let gateway::parse::fragment::ParsedConfigDocument::HypervisorRoot(fragment) = parser
         .parse_text(

@@ -165,14 +165,6 @@ pub enum DirectiveContractMismatch {
         expected: CascadePolicy,
         actual: CascadePolicy,
     },
-    Transport {
-        expected: TransportPolicy,
-        actual: TransportPolicy,
-    },
-    Reload {
-        expected: ReloadImpact,
-        actual: ReloadImpact,
-    },
 }
 
 impl std::fmt::Display for DirectiveContractMismatch {
@@ -208,12 +200,6 @@ impl std::fmt::Display for DirectiveContractMismatch {
             Self::Cascade { expected, actual } => {
                 write!(f, "cascade policy expected {expected:?}, actual {actual:?}")
             }
-            Self::Transport { expected, actual } => {
-                write!(f, "transport expected {expected:?}, actual {actual:?}")
-            }
-            Self::Reload { expected, actual } => {
-                write!(f, "reload impact expected {expected:?}, actual {actual:?}")
-            }
         }
     }
 }
@@ -228,8 +214,6 @@ pub(crate) struct DirectiveContractTemplate {
     shape: DirectiveShape,
     duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
-    transport: TransportPolicy,
-    reload: ReloadImpact,
 }
 
 impl DirectiveContractTemplate {
@@ -243,8 +227,6 @@ impl DirectiveContractTemplate {
             shape: self.shape,
             duplicate: self.duplicate,
             cascade: self.cascade,
-            transport: self.transport,
-            reload: self.reload,
         }
     }
 }
@@ -259,8 +241,6 @@ pub(crate) struct DirectiveContract {
     shape: DirectiveShape,
     duplicate: DuplicatePolicy,
     cascade: CascadePolicy,
-    transport: TransportPolicy,
-    reload: ReloadImpact,
 }
 
 fn value_type_name<T>() -> &'static str {
@@ -329,21 +309,9 @@ impl DirectiveContract {
                 actual: actual.duplicate,
             });
         }
-        if self.cascade != actual.cascade {
-            return Some(DirectiveContractMismatch::Cascade {
-                expected: self.cascade,
-                actual: actual.cascade,
-            });
-        }
-        if self.transport != actual.transport {
-            return Some(DirectiveContractMismatch::Transport {
-                expected: self.transport,
-                actual: actual.transport,
-            });
-        }
-        (self.reload != actual.reload).then_some(DirectiveContractMismatch::Reload {
-            expected: self.reload,
-            actual: actual.reload,
+        (self.cascade != actual.cascade).then_some(DirectiveContractMismatch::Cascade {
+            expected: self.cascade,
+            actual: actual.cascade,
         })
     }
 }
@@ -611,8 +579,6 @@ impl DirectiveSpec {
             shape: self.shape,
             duplicate: self.duplicate,
             cascade: self.cascade,
-            transport: self.transport,
-            reload: self.reload,
         }
     }
 }
@@ -746,8 +712,6 @@ impl<T, Cardinality> TypedDirectiveDefinition<T, Cardinality> {
             shape: self.shape,
             duplicate: self.duplicate,
             cascade: self.cascade,
-            transport: self.transport,
-            reload: self.reload,
         }
     }
 
