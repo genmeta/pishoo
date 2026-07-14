@@ -252,13 +252,23 @@ pub enum ConfigQueryError {
     MissingChild { directive: String, span: SourceSpan },
 
     #[snafu(display(
-        "directive `{directive}` has inconsistent cascade policies ({inherited:?} and {local:?})"
+        "directive `{directive}` has inconsistent cascade policies: context `{inherited_context}` uses {inherited:?}, context `{local_context}` uses {local:?}"
     ))]
     CascadePolicyMismatch {
         directive: String,
+        inherited_context: ContextKey,
         inherited: CascadePolicy,
+        local_context: ContextKey,
         local: CascadePolicy,
-        mismatch: Option<crate::parse::registry::DirectiveContractMismatch>,
+    },
+
+    #[snafu(display(
+        "directive `{directive}` has an incompatible contract in context `{context}`: {mismatch}"
+    ))]
+    ContractMismatch {
+        directive: DirectiveName,
+        context: ContextKey,
+        mismatch: crate::parse::registry::DirectiveContractMismatch,
     },
 
     #[snafu(display("directive `{directive}` has no registered cascade policy"))]
@@ -316,5 +326,22 @@ mod tests {
 
         assert_eq!(failure.to_string(), "failed to load configuration");
         assert!(std::error::Error::source(&failure).is_some());
+    }
+
+    #[test]
+    fn cascade_policy_mismatch_display_names_both_contexts() {
+        let error = ConfigQueryError::CascadePolicyMismatch {
+            directive: "gzip".to_owned(),
+            inherited_context: crate::parse::registry::context::PISHOO,
+            inherited: CascadePolicy::NearestWins,
+            local_context: crate::parse::registry::context::SERVER,
+            local: CascadePolicy::ReplaceWhole,
+        };
+        let rendered = error.to_string();
+
+        assert!(rendered.contains(crate::parse::registry::context::PISHOO.0));
+        assert!(rendered.contains(crate::parse::registry::context::SERVER.0));
+        assert!(rendered.contains("NearestWins"));
+        assert!(rendered.contains("ReplaceWhole"));
     }
 }

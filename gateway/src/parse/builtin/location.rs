@@ -2,14 +2,15 @@ use http::{HeaderName, HeaderValue};
 use snafu::{OptionExt, Snafu, ensure};
 
 use crate::parse::{
+    cascade::DirectiveKey,
     document::ConfigNode,
     domain::ResolvedConfigPath,
     pattern::{ParsePatternError, Pattern},
     registry::{
-        BuildOptions, CascadePolicy, ConfigRegistry, ContextPayloadKey, DirectiveInput,
-        DirectiveValue, DuplicatePolicy, LocalDirectiveKey, PayloadCardinality, ReloadImpact,
-        RepeatedCardinality, RepeatedDirectiveKey, SingleCardinality, TransportPolicy,
-        TypedDirectiveDefinition, context,
+        BuildOptions, CascadePolicy, CascadedCardinality, ConfigRegistry, ContextPayloadKey,
+        DirectiveInput, DirectiveValue, DuplicatePolicy, LocalDirectiveKey, PayloadCardinality,
+        ReloadImpact, RepeatedCardinality, RepeatedDirectiveKey, SingleCardinality,
+        TransportPolicy, TypedDirectiveDefinition, context,
     },
     source::SourceSpan,
     types::{
@@ -31,6 +32,21 @@ macro_rules! single_definition {
                 ReloadImpact::RuntimeState,
             );
         pub(crate) const $key: LocalDirectiveKey<$value> = $definition.key();
+    };
+}
+
+macro_rules! cascaded_definition {
+    ($definition:ident, $key:ident, $value:ty, $name:literal, $parent:expr) => {
+        const $definition: TypedDirectiveDefinition<$value, CascadedCardinality> =
+            TypedDirectiveDefinition::cascaded_leaf(
+                context::LOCATION,
+                $name,
+                DuplicatePolicy::Reject,
+                CascadePolicy::NearestWins,
+                TransportPolicy::WorkerLocalOnly,
+                ReloadImpact::RuntimeState,
+            );
+        pub(crate) const $key: DirectiveKey<$value> = $definition.key_inheriting($parent);
     };
 }
 
@@ -61,25 +77,40 @@ const PATTERN_DEFINITION: TypedDirectiveDefinition<Pattern, PayloadCardinality> 
 pub(crate) const PATTERN_KEY: ContextPayloadKey<Pattern> = PATTERN_DEFINITION.key();
 single_definition!(ROOT_DEFINITION, ROOT_KEY, ResolvedConfigPath, "root");
 single_definition!(ALIAS_DEFINITION, ALIAS_KEY, ResolvedConfigPath, "alias");
-single_definition!(GZIP_DEFINITION, GZIP_KEY, BoolConfig, "gzip");
-single_definition!(GZIP_VARY_DEFINITION, GZIP_VARY_KEY, BoolConfig, "gzip_vary");
-single_definition!(
+cascaded_definition!(
+    GZIP_DEFINITION,
+    GZIP_KEY,
+    BoolConfig,
+    "gzip",
+    crate::parse::builtin::server::GZIP_KEY
+);
+cascaded_definition!(
+    GZIP_VARY_DEFINITION,
+    GZIP_VARY_KEY,
+    BoolConfig,
+    "gzip_vary",
+    crate::parse::builtin::server::GZIP_VARY_KEY
+);
+cascaded_definition!(
     GZIP_MIN_LENGTH_DEFINITION,
     GZIP_MIN_LENGTH_KEY,
     GzipMinLength,
-    "gzip_min_length"
+    "gzip_min_length",
+    crate::parse::builtin::server::GZIP_MIN_LENGTH_KEY
 );
-single_definition!(
+cascaded_definition!(
     GZIP_COMP_LEVEL_DEFINITION,
     GZIP_COMP_LEVEL_KEY,
     GzipCompLevel,
-    "gzip_comp_level"
+    "gzip_comp_level",
+    crate::parse::builtin::server::GZIP_COMP_LEVEL_KEY
 );
-single_definition!(
+cascaded_definition!(
     GZIP_TYPES_DEFINITION,
     GZIP_TYPES_KEY,
     StringList,
-    "gzip_types"
+    "gzip_types",
+    crate::parse::builtin::server::GZIP_TYPES_KEY
 );
 single_definition!(INDEX_DEFINITION, INDEX_KEY, StringList, "index");
 repeated_definition!(
@@ -131,14 +162,15 @@ repeated_definition!(
     "ssh_ssl_user"
 );
 single_definition!(SSH_DENY_DEFINITION, SSH_DENY_KEY, StringList, "ssh_deny");
-single_definition!(
+cascaded_definition!(
     DEFAULT_TYPE_DEFINITION,
     DEFAULT_TYPE_KEY,
     DefaultType,
-    "default_type"
+    "default_type",
+    crate::parse::builtin::server::DEFAULT_TYPE_KEY
 );
-const TYPES_DEFINITION: TypedDirectiveDefinition<MimeTypes, SingleCardinality> =
-    TypedDirectiveDefinition::raw(
+const TYPES_DEFINITION: TypedDirectiveDefinition<MimeTypes, CascadedCardinality> =
+    TypedDirectiveDefinition::cascaded_raw(
         context::LOCATION,
         "types",
         DuplicatePolicy::Reject,
@@ -146,7 +178,8 @@ const TYPES_DEFINITION: TypedDirectiveDefinition<MimeTypes, SingleCardinality> =
         TransportPolicy::WorkerLocalOnly,
         ReloadImpact::RuntimeState,
     );
-pub(crate) const TYPES_KEY: LocalDirectiveKey<MimeTypes> = TYPES_DEFINITION.key();
+pub(crate) const TYPES_KEY: DirectiveKey<MimeTypes> =
+    TYPES_DEFINITION.key_inheriting(crate::parse::builtin::server::TYPES_KEY);
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]

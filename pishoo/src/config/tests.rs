@@ -90,6 +90,98 @@ fn pishoo_keys_query_pid_workers_and_groups_across_crate() {
 }
 
 #[test]
+fn public_key_inventory_has_semantic_query_domains() {
+    fn local<T>(_: gateway::parse::registry::LocalDirectiveKey<T>) {}
+    fn repeated<T>(_: gateway::parse::registry::RepeatedDirectiveKey<T>) {}
+    fn payload<T>(_: gateway::parse::registry::ContextPayloadKey<T>) {}
+    fn cascaded<T>(_: gateway::parse::cascade::DirectiveKey<T>) {}
+
+    local(gateway::parse::keys::pishoo::PID);
+    local(gateway::parse::keys::pishoo::WORKERS);
+    local(gateway::parse::keys::pishoo::GROUPS);
+
+    repeated(gateway::parse::keys::server::LISTEN);
+    local(gateway::parse::keys::server::SERVER_NAME);
+    local(gateway::parse::keys::server::DNS);
+    cascaded(gateway::parse::keys::server::GZIP);
+    cascaded(gateway::parse::keys::server::GZIP_VARY);
+    cascaded(gateway::parse::keys::server::GZIP_MIN_LENGTH);
+    cascaded(gateway::parse::keys::server::GZIP_COMP_LEVEL);
+    cascaded(gateway::parse::keys::server::GZIP_TYPES);
+    local(gateway::parse::keys::server::SSL_CERTIFICATE);
+    local(gateway::parse::keys::server::SSL_CERTIFICATE_KEY);
+    cascaded(gateway::parse::keys::server::DEFAULT_TYPE);
+    cascaded(gateway::parse::keys::server::ACCESS_RULES);
+    local(gateway::parse::keys::server::RELAY);
+    local(gateway::parse::keys::server::STUN);
+    cascaded(gateway::parse::keys::server::TYPES);
+
+    payload(gateway::parse::keys::location::PATTERN);
+    local(gateway::parse::keys::location::ROOT);
+    local(gateway::parse::keys::location::ALIAS);
+    cascaded(gateway::parse::keys::location::GZIP);
+    cascaded(gateway::parse::keys::location::GZIP_VARY);
+    cascaded(gateway::parse::keys::location::GZIP_MIN_LENGTH);
+    cascaded(gateway::parse::keys::location::GZIP_COMP_LEVEL);
+    cascaded(gateway::parse::keys::location::GZIP_TYPES);
+    local(gateway::parse::keys::location::INDEX);
+    repeated(gateway::parse::keys::location::ADD_HEADER);
+    repeated(gateway::parse::keys::location::PROXY_SET_HEADER);
+    local(gateway::parse::keys::location::PROXY_PASS);
+    local(gateway::parse::keys::location::PROXY_SSL_CERTIFICATE);
+    local(gateway::parse::keys::location::PROXY_SSL_CERTIFICATE_KEY);
+    local(gateway::parse::keys::location::PROXY_SSL_TRUSTED_CERTIFICATE);
+    local(gateway::parse::keys::location::SSH_LOGIN);
+    repeated(gateway::parse::keys::location::SSH_SSL_USER);
+    local(gateway::parse::keys::location::SSH_DENY);
+    cascaded(gateway::parse::keys::location::DEFAULT_TYPE);
+    cascaded(gateway::parse::keys::location::TYPES);
+}
+
+#[test]
+fn public_cascaded_keys_query_server_and_location_across_crate() {
+    let base = std::env::temp_dir().join(format!(
+        "pishoo-cascaded-keys-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    ));
+    let source_path = base.join("pishoo.conf");
+    let registry = gateway::parse::default_registry();
+    let mut parser = gateway::parse::ConfigDocumentParser::new(&registry);
+    let gateway::parse::fragment::ParsedConfigDocument::HypervisorRoot(fragment) = parser
+        .parse_text(
+            "pishoo { gzip on; server { listen all 4101; ssl_certificate cert.pem; ssl_certificate_key key.pem; gzip off; location / { gzip on; } } }",
+            &source_path,
+            gateway::parse::domain::ConfigDocumentRole::HypervisorRoot { home: None },
+        )
+        .expect("root config should parse")
+    else {
+        panic!("expected pishoo fragment");
+    };
+    let tree = gateway::parse::tree::build_global_tree(&registry, fragment, Vec::new())
+        .expect("tree should seal");
+    let server = tree.servers().next().expect("server should attach");
+    let location = server.locations().next().expect("location should attach");
+
+    let server_gzip = server
+        .node()
+        .cascaded(gateway::parse::keys::server::GZIP)
+        .expect("server gzip query")
+        .expect("server gzip should inherit a value");
+    let location_gzip = location
+        .node()
+        .cascaded(gateway::parse::keys::location::GZIP)
+        .expect("location gzip query")
+        .expect("location gzip should inherit a value");
+
+    assert!(!server_gzip.effective().0);
+    assert!(location_gzip.effective().0);
+}
+
+#[test]
 fn parse_workers_from_root_config() {
     let conf = "pishoo { workers alice bob; }";
     let parsed = gateway::parse::parse_config_str_for_test(conf).expect("parse config");

@@ -25,7 +25,7 @@ use crate::parse::{
     snapshot::{RootConfigSnapshot, test_support as snapshot_test_support},
     source::SourceId,
     tree::{AttachedConfigNode, ParentLink, build_global_tree, build_worker_tree},
-    types::{BoolConfig, ListenConfig, MimeTypes, PathConfig, StringList},
+    types::{BoolConfig, MimeTypes, PathConfig, StringList},
     value::ConfigValue,
 };
 
@@ -301,8 +301,8 @@ fn sealed_query_key_rejects_wrong_registry_contract() {
 
     assert!(matches!(
         error,
-        crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
-            mismatch: Some(crate::parse::registry::DirectiveContractMismatch::Cascade { .. }),
+        crate::parse::error::ConfigQueryError::ContractMismatch {
+            mismatch: crate::parse::registry::DirectiveContractMismatch::Cascade { .. },
             ..
         }
     ));
@@ -350,7 +350,16 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
     );
     let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
 
-    let definition = cascaded_definition::<MimeTypes>(
+    let pishoo_definition = cascaded_definition::<MimeTypes>(
+        context::PISHOO,
+        "types",
+        DirectiveShape::RawBlock,
+        DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState,
+    );
+    let server_definition = cascaded_definition::<MimeTypes>(
         context::SERVER,
         "types",
         DirectiveShape::RawBlock,
@@ -361,10 +370,15 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
     );
     let mut replacement = ConfigRegistry::new();
     replacement.register_context(ContextSpec {
+        key: context::PISHOO,
+        finalize: None,
+    });
+    replacement.register_context(ContextSpec {
         key: context::SERVER,
         finalize: None,
     });
-    definition.register(&mut replacement);
+    pishoo_definition.register(&mut replacement);
+    server_definition.register(&mut replacement);
     assert!(
         replacement
             .directive_spec(context::SERVER, "types")
@@ -376,7 +390,7 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
         .next()
         .expect("server should attach")
         .node()
-        .cascaded(definition.key())
+        .cascaded(server_definition.key_inheriting(pishoo_definition.key()))
         .expect("equivalent semantic contract should query")
         .expect("types should exist");
 
@@ -384,118 +398,104 @@ fn sealed_query_accepts_equivalent_frozen_contract_from_new_registry() {
 }
 
 #[test]
-fn sealed_cascaded_query_rejects_each_contract_field_mismatch() {
-    let fixture = TempConfigDir::new("sealed_cascaded_contract_mismatch");
-    let registry = crate::parse::default_registry();
-    let mut parser = ConfigDocumentParser::new(&registry);
-    let home = DhttpHome::new(fixture.join("home"));
-    let root = parse_root_fragment(
-        &mut parser,
-        "pishoo { server { listen all 4101; types { text/plain txt; } } }",
-        &fixture.join("home/pishoo.conf"),
-        Some(&home),
-    );
-    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
-    let server = tree.servers().next().expect("server should attach");
-
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<StringList>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
+fn sealed_cascaded_query_rejects_ancestor_contract_drift_without_value() {
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<StringList>(
+            "gzip",
+            vec![context::SERVER],
             DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
+            CascadePolicy::NearestWins,
             TransportPolicy::WorkerLocalOnly,
             ReloadImpact::RuntimeState,
-        )
-        .key(),
+        ),
         |mismatch| matches!(mismatch, DirectiveContractMismatch::ValueType { .. }),
     );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<ListenConfig>(
-            context::SERVER,
-            "listen",
-            DirectiveShape::Leaf,
-            DuplicatePolicy::Reject,
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
+            DuplicatePolicy::Append,
             CascadePolicy::NearestWins,
             TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::ListenerSet,
-        )
-        .key(),
+            ReloadImpact::RuntimeState,
+        ),
         |mismatch| matches!(mismatch, DirectiveContractMismatch::Cardinality { .. }),
     );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::Leaf,
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        )
-        .key(),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Shape { .. }),
-    );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
-            DuplicatePolicy::LastWins,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerLocalOnly,
-            ReloadImpact::RuntimeState,
-        )
-        .key(),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Duplicate { .. }),
-    );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::raw_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
             DuplicatePolicy::Reject,
             CascadePolicy::NearestWins,
             TransportPolicy::WorkerLocalOnly,
             ReloadImpact::RuntimeState,
-        )
-        .key(),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
+        ),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Shape { .. }),
     );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
-            DuplicatePolicy::Reject,
-            CascadePolicy::ReplaceWhole,
-            TransportPolicy::WorkerInheritable,
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
+            DuplicatePolicy::LastWins,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
             ReloadImpact::RuntimeState,
-        )
-        .key(),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Transport { .. }),
+        ),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Duplicate { .. }),
     );
-    assert_cascaded_contract_mismatch(
-        server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
             DuplicatePolicy::Reject,
             CascadePolicy::ReplaceWhole,
             TransportPolicy::WorkerLocalOnly,
+            ReloadImpact::RuntimeState,
+        ),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
+    );
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerInheritable,
+            ReloadImpact::RuntimeState,
+        ),
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Transport { .. }),
+    );
+    assert_ancestor_gzip_contract_mismatch(
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
+            DuplicatePolicy::Reject,
+            CascadePolicy::NearestWins,
+            TransportPolicy::WorkerLocalOnly,
             ReloadImpact::ListenerSet,
-        )
-        .key(),
+        ),
         |mismatch| matches!(mismatch, DirectiveContractMismatch::Reload { .. }),
     );
+}
+
+#[test]
+fn directive_contract_mismatch_display_names_context_and_expected_actual_values() {
+    let error = ancestor_gzip_contract_error(DirectiveSpec::leaf_value::<BoolConfig>(
+        "gzip",
+        vec![context::SERVER],
+        DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins,
+        TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState,
+    ));
+    let rendered = error.to_string();
+
+    assert!(rendered.contains("`gzip`"));
+    assert!(rendered.contains(context::SERVER.0));
+    assert!(rendered.contains("transport"));
+    assert!(rendered.contains("WorkerLocalOnly"));
+    assert!(rendered.contains("WorkerInheritable"));
+    assert!(!rendered.contains("inconsistent cascade policies"));
 }
 
 fn cascaded_definition<T>(
@@ -523,13 +523,55 @@ fn assert_cascaded_contract_mismatch<T>(
 ) where
     T: ConfigValue,
 {
-    let Err(crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
-        mismatch: Some(mismatch),
-        ..
-    }) = node.cascaded(key)
+    let Err(crate::parse::error::ConfigQueryError::ContractMismatch { mismatch, .. }) =
+        node.cascaded(key)
     else {
         panic!("cascaded query should reject the semantic contract mismatch");
     };
+    assert!(expected(mismatch));
+}
+
+fn ancestor_gzip_contract_error(spec: DirectiveSpec) -> crate::parse::error::ConfigQueryError {
+    let fixture = TempConfigDir::new("sealed_ancestor_contract_mismatch");
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(context::SERVER, spec);
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { gzip on; server { listen all 4101; location / { gzip off; } } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let location = tree
+        .servers()
+        .next()
+        .expect("server should attach")
+        .locations()
+        .next()
+        .expect("location should attach");
+
+    location
+        .node()
+        .cascaded(crate::parse::keys::location::GZIP)
+        .expect_err("an unused ancestor definition must still match the key contract")
+}
+
+fn assert_ancestor_gzip_contract_mismatch(
+    spec: DirectiveSpec,
+    expected: fn(DirectiveContractMismatch) -> bool,
+) {
+    let crate::parse::error::ConfigQueryError::ContractMismatch {
+        directive,
+        context: actual_context,
+        mismatch,
+    } = ancestor_gzip_contract_error(spec)
+    else {
+        panic!("expected typed directive contract mismatch");
+    };
+    assert_eq!(directive.as_str(), "gzip");
+    assert_eq!(actual_context, context::SERVER);
     assert!(expected(mismatch));
 }
 
@@ -1378,18 +1420,7 @@ fn types_replaces_the_whole_parent_map() {
         .next()
         .expect("server should attach")
         .node()
-        .cascaded(
-            cascaded_definition::<MimeTypes>(
-                context::SERVER,
-                "types",
-                DirectiveShape::RawBlock,
-                DuplicatePolicy::Reject,
-                CascadePolicy::ReplaceWhole,
-                TransportPolicy::WorkerLocalOnly,
-                ReloadImpact::RuntimeState,
-            )
-            .key(),
-        )
+        .cascaded(crate::parse::keys::server::TYPES)
         .expect("types query should succeed")
         .expect("types should be configured");
     assert_eq!(types.effective().0.len(), 1);
@@ -1427,18 +1458,71 @@ fn cascade_query_rejects_registry_policy_mismatch() {
 
     assert_cascaded_contract_mismatch(
         server.node(),
-        cascaded_definition::<MimeTypes>(
-            context::SERVER,
-            "types",
-            DirectiveShape::RawBlock,
+        crate::parse::keys::server::TYPES,
+        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
+    );
+}
+
+#[test]
+fn cascade_query_distinguishes_cross_context_policy_conflict() {
+    let fixture = TempConfigDir::new("cascade_cross_context_policy_conflict");
+    let mut registry = crate::parse::default_registry();
+    registry.register_directive(
+        context::SERVER,
+        DirectiveSpec::leaf_value::<BoolConfig>(
+            "gzip",
+            vec![context::SERVER],
             DuplicatePolicy::Reject,
             CascadePolicy::ReplaceWhole,
             TransportPolicy::WorkerLocalOnly,
             ReloadImpact::RuntimeState,
-        )
-        .key(),
-        |mismatch| matches!(mismatch, DirectiveContractMismatch::Cascade { .. }),
+        ),
     );
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let pishoo_definition = cascaded_definition::<BoolConfig>(
+        context::PISHOO,
+        "gzip",
+        DirectiveShape::Leaf,
+        DuplicatePolicy::Reject,
+        CascadePolicy::NearestWins,
+        TransportPolicy::WorkerInheritable,
+        ReloadImpact::RuntimeState,
+    );
+    let server_definition = cascaded_definition::<BoolConfig>(
+        context::SERVER,
+        "gzip",
+        DirectiveShape::Leaf,
+        DuplicatePolicy::Reject,
+        CascadePolicy::ReplaceWhole,
+        TransportPolicy::WorkerLocalOnly,
+        ReloadImpact::RuntimeState,
+    );
+    let error = tree
+        .servers()
+        .next()
+        .expect("server should attach")
+        .node()
+        .cascaded(server_definition.key_inheriting(pishoo_definition.key()))
+        .expect_err("matching contracts with conflicting policies must stay a policy error");
+
+    assert!(matches!(
+        error,
+        crate::parse::error::ConfigQueryError::CascadePolicyMismatch {
+            inherited_context: context::PISHOO,
+            inherited: CascadePolicy::NearestWins,
+            local_context: context::SERVER,
+            local: CascadePolicy::ReplaceWhole,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1695,12 +1779,24 @@ fn detached_fragments_reject_parse_registry_mutation_before_seal() {
 }
 
 #[test]
-fn registry_shares_precomputed_cascade_policy_tables() {
+fn sealed_nodes_share_precomputed_context_contract_tables() {
+    let fixture = TempConfigDir::new("shared_sealed_contract_tables");
     let registry = crate::parse::default_registry();
-    let first = registry.cascade_policies(context::PISHOO);
-    let second = registry.cascade_policies(context::PISHOO);
+    let mut parser = ConfigDocumentParser::new(&registry);
+    let home = DhttpHome::new(fixture.join("home"));
+    let root = parse_root_fragment(
+        &mut parser,
+        "pishoo { server { listen all 4101; location / {} } server { listen all 4102; location /two {} } }",
+        &fixture.join("home/pishoo.conf"),
+        Some(&home),
+    );
+    let tree = build_global_tree(&registry, root, Vec::new()).expect("tree should seal");
+    let servers = tree.servers().collect::<Vec<_>>();
+    let first_location = servers[0].locations().next().expect("first location");
+    let second_location = servers[1].locations().next().expect("second location");
 
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(tree.contract_tables_shared(servers[0].node().id(), servers[1].node().id()));
+    assert!(tree.contract_tables_shared(first_location.node().id(), second_location.node().id()));
 }
 
 #[test]
@@ -1734,24 +1830,7 @@ fn cascade_lineage_is_builtin_root_worker_server_location() {
         .expect("location");
     let gzip = location
         .node()
-        .cascaded(
-            TypedDirectiveDefinition::cascaded(
-                context::LOCATION,
-                "gzip",
-                DirectiveShape::Leaf,
-                DirectiveMetadata::new(
-                    DuplicatePolicy::Reject,
-                    CascadePolicy::NearestWins,
-                    TransportPolicy::WorkerLocalOnly,
-                    ReloadImpact::RuntimeState,
-                ),
-                DirectiveProjection::new(
-                    crate::parse::cascade::builtin_false,
-                    RootConfigSnapshot::cascade_gzip,
-                ),
-            )
-            .key(),
-        )
+        .cascaded(crate::parse::keys::location::GZIP)
         .expect("gzip query")
         .expect("gzip fallback");
 

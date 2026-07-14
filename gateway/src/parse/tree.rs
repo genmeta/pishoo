@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, path::Path, sync::Arc};
+use std::{collections::HashMap, num::NonZeroU32, path::Path, sync::Arc};
 
 use snafu::Snafu;
 
@@ -35,8 +35,6 @@ struct SealedConfigNode {
     node: Arc<ConfigNode>,
     parent: ParentLink,
     children: Vec<ConfigNodeId>,
-    cascade_policies: Arc<[(DirectiveName, CascadePolicy)]>,
-    directive_contracts: Arc<[DirectiveContract]>,
 }
 
 #[derive(Clone, Copy)]
@@ -93,6 +91,7 @@ pub struct HomeConfigTree {
     pishoo: ConfigNodeId,
     servers: Box<[ConfigNodeId]>,
     inherited_root: Option<Arc<RootConfigSnapshot>>,
+    contract_tables: HashMap<crate::parse::registry::ContextKey, Arc<[DirectiveContract]>>,
     sources: ConfigSourceBundle,
     snapshot_schema: ValidatedV1SnapshotSchema,
 }
@@ -174,6 +173,7 @@ struct HomeConfigTreeBuilder<'registry> {
     pishoo: ConfigNodeId,
     servers: Vec<ConfigNodeId>,
     inherited_root: Option<Arc<RootConfigSnapshot>>,
+    contract_tables: HashMap<crate::parse::registry::ContextKey, Arc<[DirectiveContract]>>,
     sources: Vec<ConfigSourceOwner>,
     document_ids: ConfigDocumentIdAllocator,
     snapshot_schema: ValidatedV1SnapshotSchema,
@@ -200,6 +200,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             pishoo: ConfigNodeId(0),
             servers: Vec::new(),
             inherited_root: None,
+            contract_tables: registry.frozen_contract_tables(),
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
             snapshot_schema,
@@ -256,6 +257,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             pishoo: ConfigNodeId(0),
             servers: Vec::new(),
             inherited_root: Some(Arc::new(root_snapshot)),
+            contract_tables: registry.frozen_contract_tables(),
             sources: Vec::new(),
             document_ids: ConfigDocumentIdAllocator::new(),
             snapshot_schema,
@@ -348,15 +350,11 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
         parent: ParentLink,
     ) -> ConfigNodeId {
         let id = ConfigNodeId(self.nodes.len());
-        let cascade_policies = self.registry.cascade_policies(node.context);
-        let directive_contracts = self.registry.directive_contracts(node.context);
         self.nodes.push(SealedConfigNode {
             document_id,
             node,
             parent,
             children: Vec::new(),
-            cascade_policies,
-            directive_contracts,
         });
         id
     }
@@ -424,6 +422,7 @@ impl<'registry> HomeConfigTreeBuilder<'registry> {
             pishoo: self.pishoo,
             servers: self.servers.into_boxed_slice(),
             inherited_root: self.inherited_root,
+            contract_tables: self.contract_tables,
             sources: ConfigSourceBundle {
                 owners: self.sources.into_boxed_slice(),
             },
@@ -487,7 +486,6 @@ impl HomeConfigTree {
     where
         T: ConfigValue,
     {
-        self.check_contract(node, key.contract())?;
         let mut chain = Vec::new();
         let mut current = node;
         loop {
@@ -498,6 +496,7 @@ impl HomeConfigTree {
             }
         }
         chain.reverse();
+        self.check_cascaded_contracts(&chain, key)?;
         let policy = self.cascade_policy(&chain, key.name())?;
         if !matches!(
             policy,
@@ -546,26 +545,33 @@ impl HomeConfigTree {
         chain: &[ConfigNodeId],
         directive: DirectiveName,
     ) -> Result<CascadePolicy, ConfigQueryError> {
-        let mut inherited = None;
+        let mut inherited = None::<(crate::parse::registry::ContextKey, CascadePolicy)>;
         for &node in chain {
-            let Some(local) = self.node(node).cascade_policy(directive) else {
+            let context = self.node(node).node.context;
+            let Some(local) = self
+                .directive_contract(context, directive)
+                .map(DirectiveContract::cascade)
+            else {
                 continue;
             };
-            if let Some(inherited) = inherited
-                && inherited != local
+            if let Some((inherited_context, inherited_policy)) = inherited
+                && inherited_policy != local
             {
                 return Err(ConfigQueryError::CascadePolicyMismatch {
                     directive: directive.as_str().to_owned(),
-                    inherited,
+                    inherited_context,
+                    inherited: inherited_policy,
+                    local_context: context,
                     local,
-                    mismatch: None,
                 });
             }
-            inherited = Some(local);
+            inherited = Some((context, local));
         }
-        inherited.ok_or_else(|| ConfigQueryError::MissingCascadePolicy {
-            directive: directive.as_str().to_owned(),
-        })
+        inherited
+            .map(|(_, policy)| policy)
+            .ok_or_else(|| ConfigQueryError::MissingCascadePolicy {
+                directive: directive.as_str().to_owned(),
+            })
     }
 
     fn check_contract(
@@ -573,40 +579,105 @@ impl HomeConfigTree {
         node: ConfigNodeId,
         expected: DirectiveContract,
     ) -> Result<(), ConfigQueryError> {
-        let sealed = self.node(node);
-        let Some(actual) = sealed
-            .directive_contracts
-            .iter()
-            .copied()
-            .find(|contract| contract.name() == expected.name())
-        else {
-            return Err(ConfigQueryError::CascadePolicyMismatch {
-                directive: expected.name().as_str().to_owned(),
-                inherited: expected.cascade(),
-                local: expected.cascade(),
-                mismatch: Some(crate::parse::registry::DirectiveContractMismatch::Name {
-                    expected: expected.name(),
-                    actual: None,
-                }),
-            });
+        let context = self.node(node).node.context;
+        let actual = self.directive_contract(context, expected.name());
+        Self::ensure_contract(expected, actual, context)?;
+        Ok(())
+    }
+
+    fn check_cascaded_contracts<T>(
+        &self,
+        chain: &[ConfigNodeId],
+        key: DirectiveKey<T>,
+    ) -> Result<(), ConfigQueryError> {
+        let expected = key.contracts().collect::<Vec<_>>();
+        let target = *chain.last().expect("a cascade chain always has a target");
+        let target_context = self.node(target).node.context;
+        let target_expected = *expected
+            .last()
+            .expect("a directive key always has a target contract");
+        Self::ensure_contract(
+            target_expected,
+            self.directive_contract(target_context, key.name()),
+            target_context,
+        )?;
+
+        for &expected in expected[..expected.len() - 1].iter().rev() {
+            let actual = chain
+                .iter()
+                .rev()
+                .map(|&node| self.node(node).node.context)
+                .find(|&context| context == expected.context())
+                .and_then(|context| self.directive_contract(context, key.name()));
+            Self::ensure_contract(expected, actual, expected.context())?;
+        }
+
+        for actual in chain[..chain.len() - 1].iter().filter_map(|&node| {
+            let context = self.node(node).node.context;
+            self.directive_contract(context, key.name())
+        }) {
+            if !expected
+                .iter()
+                .any(|expected| expected.context() == actual.context())
+            {
+                return Err(ConfigQueryError::ContractMismatch {
+                    directive: key.name(),
+                    context: actual.context(),
+                    mismatch: crate::parse::registry::DirectiveContractMismatch::Context {
+                        expected: target_expected.context(),
+                        actual: actual.context(),
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_contract(
+        expected: DirectiveContract,
+        actual: Option<DirectiveContract>,
+        context: crate::parse::registry::ContextKey,
+    ) -> Result<(), ConfigQueryError> {
+        let mismatch = match actual {
+            Some(actual) => expected.mismatch(actual),
+            None => Some(crate::parse::registry::DirectiveContractMismatch::Name {
+                expected: expected.name(),
+                actual: None,
+            }),
         };
-        if let Some(mismatch) = expected.mismatch(actual) {
-            return Err(ConfigQueryError::CascadePolicyMismatch {
-                directive: expected.name().as_str().to_owned(),
-                inherited: expected.cascade(),
-                local: actual.cascade(),
-                mismatch: Some(mismatch),
+        if let Some(mismatch) = mismatch {
+            return Err(ConfigQueryError::ContractMismatch {
+                directive: expected.name(),
+                context,
+                mismatch,
             });
         }
         Ok(())
     }
-}
 
-impl SealedConfigNode {
-    fn cascade_policy(&self, directive: DirectiveName) -> Option<CascadePolicy> {
-        self.cascade_policies
+    fn directive_contract(
+        &self,
+        context: crate::parse::registry::ContextKey,
+        directive: DirectiveName,
+    ) -> Option<DirectiveContract> {
+        self.contract_tables
+            .get(&context)?
             .iter()
-            .find_map(|(name, policy)| (*name == directive).then_some(*policy))
+            .find(|contract| contract.name() == directive)
+            .copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contract_tables_shared(&self, first: ConfigNodeId, second: ConfigNodeId) -> bool {
+        let first_context = self.node(first).node.context;
+        let second_context = self.node(second).node.context;
+        match (
+            self.contract_tables.get(&first_context),
+            self.contract_tables.get(&second_context),
+        ) {
+            (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+            _ => false,
+        }
     }
 }
 

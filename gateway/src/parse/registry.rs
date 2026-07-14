@@ -56,7 +56,7 @@ impl ConfigRegistryContract {
 pub struct ConfigRegistry {
     contexts: HashMap<ContextKey, ContextSpec>,
     directives: HashMap<(ContextKey, &'static str), DirectiveSpec>,
-    cascade_policies: HashMap<ContextKey, Arc<[(DirectiveName, CascadePolicy)]>>,
+    contract_tables: HashMap<ContextKey, Arc<[DirectiveContract]>>,
     attached_finalizers: HashMap<ContextKey, AttachedContextFinalizeFn>,
     contract: ConfigRegistryContract,
 }
@@ -175,6 +175,49 @@ pub enum DirectiveContractMismatch {
     },
 }
 
+impl std::fmt::Display for DirectiveContractMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name { expected, actual } => write!(
+                f,
+                "name expected `{}`, actual {}",
+                expected.as_str(),
+                actual.map_or("<missing>", |actual| actual.as_str())
+            ),
+            Self::Context { expected, actual } => {
+                write!(f, "context expected `{expected}`, actual `{actual}`")
+            }
+            Self::ValueType { expected, actual } => {
+                write!(f, "value type expected `{expected}`, actual `{actual}`")
+            }
+            Self::Cardinality { expected, actual } => {
+                write!(f, "cardinality expected {expected:?}, actual {actual:?}")
+            }
+            Self::Shape { expected, actual } => {
+                write!(f, "shape expected {expected:?}, actual {actual:?}")
+            }
+            Self::Payload { expected, actual } => {
+                write!(f, "payload expected {expected:?}, actual {actual:?}")
+            }
+            Self::Duplicate { expected, actual } => {
+                write!(
+                    f,
+                    "duplicate policy expected {expected:?}, actual {actual:?}"
+                )
+            }
+            Self::Cascade { expected, actual } => {
+                write!(f, "cascade policy expected {expected:?}, actual {actual:?}")
+            }
+            Self::Transport { expected, actual } => {
+                write!(f, "transport expected {expected:?}, actual {actual:?}")
+            }
+            Self::Reload { expected, actual } => {
+                write!(f, "reload impact expected {expected:?}, actual {actual:?}")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DirectiveContractTemplate {
     context: ContextKey,
@@ -206,7 +249,7 @@ impl DirectiveContractTemplate {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectiveContract {
     context: ContextKey,
     name: DirectiveName,
@@ -225,6 +268,10 @@ fn value_type_name<T>() -> &'static str {
 }
 
 impl DirectiveContract {
+    pub(crate) const fn context(self) -> ContextKey {
+        self.context
+    }
+
     pub(crate) const fn name(self) -> DirectiveName {
         self.name
     }
@@ -763,25 +810,6 @@ impl<T> TypedDirectiveDefinition<T, SingleCardinality> {
         )
     }
 
-    pub(crate) const fn raw(
-        context: ContextKey,
-        name: &'static str,
-        duplicate: DuplicatePolicy,
-        cascade: CascadePolicy,
-        transport: TransportPolicy,
-        reload: ReloadImpact,
-    ) -> Self {
-        Self::new(
-            context,
-            context,
-            name,
-            DirectiveShape::RawBlock,
-            DirectiveCardinality::Single,
-            DirectiveMetadata::new(duplicate, cascade, transport, reload),
-            DirectiveProjection::absent(),
-        )
-    }
-
     pub(crate) const fn key(self) -> LocalDirectiveKey<T>
     where
         T: 'static,
@@ -868,6 +896,40 @@ impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
         )
     }
 
+    pub(crate) const fn cascaded_leaf(
+        context: ContextKey,
+        name: &'static str,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::cascaded(
+            context,
+            name,
+            DirectiveShape::Leaf,
+            DirectiveMetadata::new(duplicate, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
+    pub(crate) const fn cascaded_raw(
+        context: ContextKey,
+        name: &'static str,
+        duplicate: DuplicatePolicy,
+        cascade: CascadePolicy,
+        transport: TransportPolicy,
+        reload: ReloadImpact,
+    ) -> Self {
+        Self::cascaded(
+            context,
+            name,
+            DirectiveShape::RawBlock,
+            DirectiveMetadata::new(duplicate, cascade, transport, reload),
+            DirectiveProjection::absent(),
+        )
+    }
+
     pub(crate) const fn key(self) -> DirectiveKey<T>
     where
         T: 'static,
@@ -881,6 +943,13 @@ impl<T> TypedDirectiveDefinition<T, CascadedCardinality> {
             None => crate::parse::cascade::no_snapshot,
         };
         DirectiveKey::new(self.name, self.contract_template(), builtin, snapshot)
+    }
+
+    pub(crate) const fn key_inheriting(self, parent: DirectiveKey<T>) -> DirectiveKey<T>
+    where
+        T: 'static,
+    {
+        parent.inheriting(self.contract_template())
     }
 }
 
@@ -1019,14 +1088,36 @@ pub(crate) const fn v1_snapshot_field_names() -> [&'static str; 9] {
     V1_SNAPSHOT_SCHEMA.field_names()
 }
 
-#[cfg(test)]
 pub(crate) const fn v1_gzip_key() -> DirectiveKey<BoolConfig> {
     V1_SNAPSHOT_SCHEMA.gzip.key()
 }
 
-#[cfg(test)]
 pub(crate) const fn v1_gzip_types_key() -> DirectiveKey<StringList> {
     V1_SNAPSHOT_SCHEMA.gzip_types.key()
+}
+
+pub(crate) const fn v1_access_rules_key() -> DirectiveKey<AccessRulesUri> {
+    V1_SNAPSHOT_SCHEMA.access_rules.key()
+}
+
+pub(crate) const fn v1_gzip_vary_key() -> DirectiveKey<BoolConfig> {
+    V1_SNAPSHOT_SCHEMA.gzip_vary.key()
+}
+
+pub(crate) const fn v1_gzip_min_length_key() -> DirectiveKey<GzipMinLength> {
+    V1_SNAPSHOT_SCHEMA.gzip_min_length.key()
+}
+
+pub(crate) const fn v1_gzip_comp_level_key() -> DirectiveKey<GzipCompLevel> {
+    V1_SNAPSHOT_SCHEMA.gzip_comp_level.key()
+}
+
+pub(crate) const fn v1_default_type_key() -> DirectiveKey<DefaultType> {
+    V1_SNAPSHOT_SCHEMA.default_type.key()
+}
+
+pub(crate) const fn v1_types_key() -> DirectiveKey<MimeTypes> {
+    V1_SNAPSHOT_SCHEMA.types.key()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1135,21 +1226,29 @@ impl ConfigRegistry {
 
     pub fn register_directive(&mut self, context: ContextKey, spec: DirectiveSpec) {
         self.directives.insert((context, spec.name.as_str()), spec);
-        self.rebuild_cascade_policies(context);
+        self.rebuild_contract_tables();
         self.advance_contract();
     }
 
-    fn rebuild_cascade_policies(&mut self, context: ContextKey) {
-        let mut policies: Vec<_> = self
-            .directives
-            .iter()
-            .filter_map(|((registered_context, _), spec)| {
-                (*registered_context == context).then_some((spec.name, spec.cascade))
+    fn rebuild_contract_tables(&mut self) {
+        let mut contract_tables = HashMap::<ContextKey, Vec<DirectiveContract>>::new();
+        for ((registration_context, _), spec) in &self.directives {
+            let contract = spec.contract(*registration_context);
+            contract_tables
+                .entry(contract.context())
+                .or_default()
+                .push(contract);
+        }
+        self.contract_tables = contract_tables
+            .into_iter()
+            .map(|(context, mut contracts)| {
+                contracts.sort_unstable_by_key(|contract| {
+                    (contract.name.as_str(), contract.cardinality as u8)
+                });
+                contracts.dedup();
+                (context, Arc::from(contracts.into_boxed_slice()))
             })
             .collect();
-        policies.sort_unstable_by_key(|(name, _)| name.as_str());
-        self.cascade_policies
-            .insert(context, Arc::from(policies.into_boxed_slice()));
     }
 
     pub(crate) fn register_attached_finalizer(
@@ -1192,28 +1291,8 @@ impl ConfigRegistry {
             })
     }
 
-    pub(crate) fn cascade_policies(
-        &self,
-        context: ContextKey,
-    ) -> Arc<[(DirectiveName, CascadePolicy)]> {
-        self.cascade_policies
-            .get(&context)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn directive_contracts(&self, context: ContextKey) -> Arc<[DirectiveContract]> {
-        let mut contracts = self
-            .directives
-            .iter()
-            .filter_map(|((registration_context, _), spec)| {
-                let contract = spec.contract(*registration_context);
-                (contract.context == context).then_some(contract)
-            })
-            .collect::<Vec<_>>();
-        contracts
-            .sort_unstable_by_key(|contract| (contract.name.as_str(), contract.cardinality as u8));
-        Arc::from(contracts.into_boxed_slice())
+    pub(crate) fn frozen_contract_tables(&self) -> HashMap<ContextKey, Arc<[DirectiveContract]>> {
+        self.contract_tables.clone()
     }
 
     pub(crate) fn register_v1_snapshot_directives(&mut self) {

@@ -37,6 +37,7 @@ pub mod keys {
 
     pub mod server {
         use crate::parse::{
+            cascade::DirectiveKey,
             domain::ResolvedConfigPath,
             registry::{LocalDirectiveKey, RepeatedDirectiveKey},
             types::{
@@ -50,30 +51,31 @@ pub mod keys {
         pub const SERVER_NAME: LocalDirectiveKey<ServerNames> =
             crate::parse::builtin::server::SERVER_NAME_KEY;
         pub const DNS: LocalDirectiveKey<ResolverConfig> = crate::parse::builtin::server::DNS_KEY;
-        pub const GZIP: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::GZIP_KEY;
-        pub const GZIP_VARY: LocalDirectiveKey<BoolConfig> =
+        pub const GZIP: DirectiveKey<BoolConfig> = crate::parse::builtin::server::GZIP_KEY;
+        pub const GZIP_VARY: DirectiveKey<BoolConfig> =
             crate::parse::builtin::server::GZIP_VARY_KEY;
-        pub const GZIP_MIN_LENGTH: LocalDirectiveKey<GzipMinLength> =
+        pub const GZIP_MIN_LENGTH: DirectiveKey<GzipMinLength> =
             crate::parse::builtin::server::GZIP_MIN_LENGTH_KEY;
-        pub const GZIP_COMP_LEVEL: LocalDirectiveKey<GzipCompLevel> =
+        pub const GZIP_COMP_LEVEL: DirectiveKey<GzipCompLevel> =
             crate::parse::builtin::server::GZIP_COMP_LEVEL_KEY;
-        pub const GZIP_TYPES: LocalDirectiveKey<StringList> =
+        pub const GZIP_TYPES: DirectiveKey<StringList> =
             crate::parse::builtin::server::GZIP_TYPES_KEY;
         pub const SSL_CERTIFICATE: LocalDirectiveKey<ResolvedConfigPath> =
             crate::parse::builtin::server::SSL_CERTIFICATE_KEY;
         pub const SSL_CERTIFICATE_KEY: LocalDirectiveKey<ResolvedConfigPath> =
             crate::parse::builtin::server::SSL_CERTIFICATE_KEY_KEY;
-        pub const DEFAULT_TYPE: LocalDirectiveKey<DefaultType> =
+        pub const DEFAULT_TYPE: DirectiveKey<DefaultType> =
             crate::parse::builtin::server::DEFAULT_TYPE_KEY;
-        pub const ACCESS_RULES: LocalDirectiveKey<AccessRulesUri> =
+        pub const ACCESS_RULES: DirectiveKey<AccessRulesUri> =
             crate::parse::builtin::server::ACCESS_RULES_KEY;
         pub const RELAY: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::RELAY_KEY;
         pub const STUN: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::server::STUN_KEY;
-        pub const TYPES: LocalDirectiveKey<MimeTypes> = crate::parse::builtin::server::TYPES_KEY;
+        pub const TYPES: DirectiveKey<MimeTypes> = crate::parse::builtin::server::TYPES_KEY;
     }
 
     pub mod location {
         use crate::parse::{
+            cascade::DirectiveKey,
             domain::ResolvedConfigPath,
             pattern::Pattern,
             registry::{ContextPayloadKey, LocalDirectiveKey, RepeatedDirectiveKey},
@@ -89,14 +91,14 @@ pub mod keys {
             crate::parse::builtin::location::ROOT_KEY;
         pub const ALIAS: LocalDirectiveKey<ResolvedConfigPath> =
             crate::parse::builtin::location::ALIAS_KEY;
-        pub const GZIP: LocalDirectiveKey<BoolConfig> = crate::parse::builtin::location::GZIP_KEY;
-        pub const GZIP_VARY: LocalDirectiveKey<BoolConfig> =
+        pub const GZIP: DirectiveKey<BoolConfig> = crate::parse::builtin::location::GZIP_KEY;
+        pub const GZIP_VARY: DirectiveKey<BoolConfig> =
             crate::parse::builtin::location::GZIP_VARY_KEY;
-        pub const GZIP_MIN_LENGTH: LocalDirectiveKey<GzipMinLength> =
+        pub const GZIP_MIN_LENGTH: DirectiveKey<GzipMinLength> =
             crate::parse::builtin::location::GZIP_MIN_LENGTH_KEY;
-        pub const GZIP_COMP_LEVEL: LocalDirectiveKey<GzipCompLevel> =
+        pub const GZIP_COMP_LEVEL: DirectiveKey<GzipCompLevel> =
             crate::parse::builtin::location::GZIP_COMP_LEVEL_KEY;
-        pub const GZIP_TYPES: LocalDirectiveKey<StringList> =
+        pub const GZIP_TYPES: DirectiveKey<StringList> =
             crate::parse::builtin::location::GZIP_TYPES_KEY;
         pub const INDEX: LocalDirectiveKey<StringList> = crate::parse::builtin::location::INDEX_KEY;
         pub const ADD_HEADER: RepeatedDirectiveKey<HeaderRules> =
@@ -117,9 +119,9 @@ pub mod keys {
             crate::parse::builtin::location::SSH_SSL_USER_KEY;
         pub const SSH_DENY: LocalDirectiveKey<StringList> =
             crate::parse::builtin::location::SSH_DENY_KEY;
-        pub const DEFAULT_TYPE: LocalDirectiveKey<DefaultType> =
+        pub const DEFAULT_TYPE: DirectiveKey<DefaultType> =
             crate::parse::builtin::location::DEFAULT_TYPE_KEY;
-        pub const TYPES: LocalDirectiveKey<MimeTypes> = crate::parse::builtin::location::TYPES_KEY;
+        pub const TYPES: DirectiveKey<MimeTypes> = crate::parse::builtin::location::TYPES_KEY;
     }
 }
 

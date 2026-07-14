@@ -78,7 +78,8 @@ pub(crate) type SnapshotValue<T> =
 #[derive(Debug)]
 pub struct DirectiveKey<T> {
     name: DirectiveName,
-    contract: DirectiveContractTemplate,
+    contracts: [Option<DirectiveContractTemplate>; 4],
+    contract_count: usize,
     builtin: BuiltinValue<T>,
     snapshot: SnapshotValue<T>,
     value: PhantomData<fn() -> T>,
@@ -101,7 +102,8 @@ impl<T> DirectiveKey<T> {
     ) -> Self {
         Self {
             name,
-            contract,
+            contracts: [Some(contract), None, None, None],
+            contract_count: 1,
             builtin,
             snapshot,
             value: PhantomData,
@@ -112,8 +114,22 @@ impl<T> DirectiveKey<T> {
         self.name
     }
 
-    pub(crate) fn contract(self) -> DirectiveContract {
-        self.contract.freeze()
+    pub(crate) const fn inheriting(mut self, contract: DirectiveContractTemplate) -> Self {
+        assert!(
+            self.contract_count < self.contracts.len(),
+            "gateway cascade contract chain is full"
+        );
+        self.contracts[self.contract_count] = Some(contract);
+        self.contract_count += 1;
+        self
+    }
+
+    pub(crate) fn contracts(self) -> impl Iterator<Item = DirectiveContract> {
+        self.contracts
+            .into_iter()
+            .take(self.contract_count)
+            .flatten()
+            .map(DirectiveContractTemplate::freeze)
     }
 
     pub(crate) fn builtin(self) -> Option<Arc<T>> {
