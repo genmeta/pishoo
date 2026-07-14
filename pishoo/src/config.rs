@@ -3,8 +3,12 @@ use std::{path::PathBuf, sync::Arc};
 use gateway::parse::{document::ConfigNode, domain::ResolvedConfigPath, error::ConfigQueryError};
 use snafu::{OptionExt, ResultExt, Snafu};
 
+#[allow(dead_code)] // prepared as one domain before the atomic runtime cutover
+mod account;
 mod discovery;
 pub mod entry;
+#[allow(dead_code)] // prepared as one sealed model before the atomic runtime cutover
+mod home_tree;
 pub mod root;
 pub mod source;
 pub mod worker_target;
