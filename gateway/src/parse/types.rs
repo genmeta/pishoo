@@ -269,7 +269,9 @@ impl FromStr for IpFamilies {
             "v4only" => Ok(IpFamilies::V4),
             "v6only" => Ok(IpFamilies::V6),
             "dual" => Ok(IpFamilies::Dual),
-            _ => whatever!("invalid ip families: {s}, expected `v4only`, `v6only` or `dual`"),
+            _ => {
+                whatever!("invalid ip families: {s}, expected `v4only`, `v6only` or `dual`");
+            }
         }
     }
 }

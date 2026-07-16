@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## [0.8.0-beta.5] - 2026-07-16
+
+### Added
+
+- pishoo builds inherited per-account DHTTP home trees and compiles them into a
+  static service pipeline for reload execution.
+
+### Changed
+
+- Gateway configuration parsing now uses role-aware typed domains, sealed
+  inherited trees, and typed compound STUN server values.
+- Reload snapshots and service plans now enforce exhaustive, immutable parser
+  and transport contracts before worker activation.
+
+### Fixed
+
+- Cascaded and inherited configuration queries preserve typed identity and
+  registry contracts, including native OS paths for SQLite databases.
+- Slash-directory proxy requests redirect before fallback routing is evaluated.
+- IP-family parse errors compile cleanly with the release packaging nightly toolchain.
+
+### Dependencies
+
+- Release manifests now target `dhttp` v0.6.0-beta.4, including
+  `dhttp-access` v0.4.0-beta.2 and `dhttp-home` v0.5.0-beta.1 through
+  the facade; discovery and transport dependencies target `dyns`
+  v0.7.0-beta.2, `h3x` v0.6.0-beta.4, `dquic` v0.7.0-beta.4, and
+  `dshell` v0.6.0-beta.3.
+
+### Components
+
+- `gateway` v0.8.0-beta.5
+- `pishoo` v0.8.0-beta.5
+- `pishoo-common` v0.5.1-1 (unchanged)
+
 ## [0.8.0-beta.4] - 2026-07-09
 
 ### Added
