@@ -2,11 +2,16 @@
 
 ## Unreleased
 
+## [0.8.0-beta.6] - 2026-07-17
+
 ### Changed
 
 - Non-macOS default worker discovery now uses the `dhttp` group, and Linux
   DEB/RPM installation hooks ensure that group exists instead of creating the
   legacy `pishoo` group. macOS continues to use `_www`.
+- `pishoo-common` now follows the current pishoo source version. Linux packages
+  render it as `0.8.0~beta.6-1`, while pishoo accepts common packages from the
+  last published `0.5.1-1` through its current package version.
 
 ### Fixed
 
@@ -14,6 +19,12 @@
   again load the identity profile's `db/access.db`; only a genuinely absent
   implicit database falls back to an empty policy, while explicit or damaged
   databases fail service preparation.
+
+### Components
+
+- `pishoo` v0.8.0-beta.6
+- `gateway` v0.8.0-beta.5 (unchanged)
+- `pishoo-common` v0.8.0-beta.6 (`0.8.0~beta.6-1` for DEB/RPM)
 
 ## [0.8.0-beta.5] - 2026-07-16
 

@@ -30,7 +30,7 @@ architecture = "target"
 dockerfile = "xtask/release/deb/Dockerfile"
 
 [package.pishoo.deb.requires.pishoo-common.version]
-">=" = { from = "dependency" }
+">=" = { value = "0.5.1-1" }
 "<=" = { from = "self" }
 
 
@@ -40,7 +40,7 @@ architecture = "target"
 dockerfile = "xtask/release/rpm/Dockerfile"
 
 [package.pishoo.rpm.requires.pishoo-common.version]
-">=" = { from = "dependency" }
+">=" = { value = "0.5.1-1" }
 "<=" = { from = "self" }
 
 
@@ -55,7 +55,7 @@ value = "/opt/homebrew/etc/dhttp"
 value = "/usr/local/etc/dhttp"
 
 [package.pishoo-common]
-version = "0.5.1"
+version = "0.8.0-beta.6"
 description = "Common files for pishoo"
 license = "Apache-2.0"
 homepage = "https://dhttp.net"
