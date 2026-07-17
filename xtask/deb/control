@@ -8,7 +8,7 @@ Homepage: https://www.dhttp.net
 Package: pishoo-common
 Architecture: all
 Multi-Arch: foreign
-Depends: ${misc:Depends}
+Depends: adduser, ${misc:Depends}
 Description: modern, secure, QUIC-powered web/proxy engine - common files
  Pishoo ("Prosperity Guardian Beast") is a powerful proxy server optimized for
  HTTP/3 and end-to-end encrypted communication. Built for privacy and security

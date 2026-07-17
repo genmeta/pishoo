@@ -115,7 +115,15 @@ install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/pishoo.service
 %{_unitdir}/pishoo.service
 
 %pre
-getent group dhttp >/dev/null || groupadd --system dhttp || :
+if getent group dhttp >/dev/null; then
+    :
+else
+    status=\$?
+    if [ "\$status" -ne 2 ]; then
+        exit "\$status"
+    fi
+    groupadd --system dhttp
+fi
 
 %post
 %systemd_post pishoo.service
