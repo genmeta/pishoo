@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- pishoo identity services without an explicit `access_rules` directive once
+  again load the identity profile's `db/access.db`; only a genuinely absent
+  implicit database falls back to an empty policy, while explicit or damaged
+  databases fail service preparation.
+
 ## [0.8.0-beta.5] - 2026-07-16
 
 ### Added

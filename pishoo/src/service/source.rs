@@ -187,7 +187,11 @@ impl TypedServerSource {
             .effective()
             .as_ref()
             .map(|uri| uri.0.as_str());
-        let policy = crate::policy::load_policy_bundle(access_rules_uri)
+        let identity_profile = match self.server_config.identity() {
+            ServerIdentity::Profile(profile) => Some(profile),
+            ServerIdentity::Direct { .. } => None,
+        };
+        let policy = crate::policy::load_policy_bundle(access_rules_uri, identity_profile)
             .await
             .context(prepare_server_update_error::PolicySnafu {
                 name: self.name.to_string(),
