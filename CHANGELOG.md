@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Non-macOS default worker discovery now uses the `dhttp` group, and Linux
+  DEB/RPM installation hooks ensure that group exists instead of creating the
+  legacy `pishoo` group. macOS continues to use `_www`.
+
 ### Fixed
 
 - pishoo identity services without an explicit `access_rules` directive once

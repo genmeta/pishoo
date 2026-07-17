@@ -16,7 +16,7 @@ pub struct WorkerTarget {
 const DEFAULT_GROUPS: &[&str] = &["_www"];
 
 #[cfg(not(target_os = "macos"))]
-const DEFAULT_GROUPS: &[&str] = &["pishoo"];
+const DEFAULT_GROUPS: &[&str] = &["dhttp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerDiscoveryMode {
@@ -322,4 +322,21 @@ pub fn resolve_worker_targets(
         resolved.push(user);
     }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_GROUPS;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_worker_group_is_www() {
+        assert_eq!(DEFAULT_GROUPS, &["_www"]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_default_worker_group_is_dhttp() {
+        assert_eq!(DEFAULT_GROUPS, &["dhttp"]);
+    }
 }

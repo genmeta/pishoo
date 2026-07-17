@@ -2,7 +2,7 @@
 set -e
 case "$1" in
     configure)
-        addgroup --system --quiet pishoo || true
+        addgroup --system --quiet dhttp || true
         install -d -m 0755 /etc/dhttp
         ;;
 esac

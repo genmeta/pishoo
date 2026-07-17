@@ -24,8 +24,8 @@ identity services load identity profiles through the DHTTP home API.
 
 Use `pishoo -c <file>` only for a standalone config file. Explicit config mode
 does not infer a DHTTP home, does not load identity profile `server.conf` files,
-and does not enumerate the default `pishoo` group when `workers` and `groups` are
-absent.
+and does not enumerate the platform default worker group (`dhttp` on non-macOS,
+`_www` on macOS) when `workers` and `groups` are absent.
 
 ### 启动反向代理
 

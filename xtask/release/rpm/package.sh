@@ -115,7 +115,7 @@ install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/pishoo.service
 %{_unitdir}/pishoo.service
 
 %pre
-getent group pishoo >/dev/null || groupadd --system pishoo || :
+getent group dhttp >/dev/null || groupadd --system dhttp || :
 
 %post
 %systemd_post pishoo.service
