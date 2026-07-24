@@ -7,6 +7,7 @@ pub mod location;
 pub mod log;
 mod proxy;
 mod request_uri;
+mod tunnel;
 pub mod router;
 #[cfg(feature = "sshd")]
 pub mod sshd;

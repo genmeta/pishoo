@@ -1,21 +1,31 @@
 use std::{str::FromStr, sync::Arc};
 
 use axum::{Extension, response::IntoResponse};
-use http::{Request, Response, StatusCode, Uri, Version};
-use hyper::body::Incoming;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
+use h3x::{extended_connect, qpack::field::Protocol};
+use http::{
+    Request, Response, StatusCode, Uri, Version,
+    header::{
+        CONNECTION, HOST, SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_PROTOCOL,
+        SEC_WEBSOCKET_VERSION, UPGRADE,
+    },
+};
+use http_body_util::Empty;
+use hyper::{body::Incoming, upgrade::Upgraded};
 use hyper_util::rt::TokioIo;
-use snafu::{Report, ResultExt};
+use snafu::{Report, ResultExt, ensure_whatever};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{self, AsyncRead, AsyncWrite},
     net::TcpStream,
 };
-use tracing::{Instrument, debug, error};
+use tracing::{Instrument, debug, error, info, warn};
 
 use crate::{
     command,
     error::{Result, Whatever},
     parse::{pattern::Pattern, types::ProxyPass},
-    reverse::location::LocationMatch,
+    reverse::{location::LocationMatch, tunnel::TunnelIo},
 };
 
 /// Axum-style handler for reverse proxy requests.
@@ -44,6 +54,10 @@ async fn proxy_inner(
 
     // proxy_set_header
     let req = command::proxy_set_header(location, req);
+
+    if is_h3_websocket_connect(&req) {
+        return proxy_h3_websocket(loc, req).await;
+    }
 
     let accept_encoding = req
         .headers()
@@ -157,7 +171,7 @@ where
 
     tokio::spawn(
         async move {
-            if let Err(error) = conn.await {
+            if let Err(error) = conn.with_upgrades().await {
                 error!(
                     error = %Report::from_error(error),
                     "connection maintenance failed"
@@ -174,6 +188,202 @@ where
 
     debug!("finished sending request body");
     Ok(response)
+}
+
+async fn proxy_h3_websocket(
+    loc: &LocationMatch,
+    req: Request<axum::body::Body>,
+) -> Result<axum::response::Response> {
+    let upstream_request = build_websocket_request(loc, &req)?;
+    let (response, connect) = extended_connect::hyper::accept(req)
+        .await
+        .whatever_context::<_, Whatever>("failed to accept H3 WebSocket extended connect")?;
+    let (upstream, headers) = establish_websocket_upstream(loc, upstream_request).await?;
+
+    let (mut parts, body) = response.into_parts();
+    copy_h3_websocket_response_headers(&mut parts.headers, &headers);
+    tokio::spawn(tunnel_h3_connect(connect, upstream).in_current_span());
+
+    Ok(http::Response::from_parts(
+        parts,
+        axum::body::Body::new(body),
+    ))
+}
+
+fn build_websocket_request(
+    loc: &LocationMatch,
+    req: &Request<axum::body::Body>,
+) -> Result<Request<Empty<Bytes>>> {
+    let proxy_pass = loc
+        .location
+        .proxy_pass()
+        .expect("proxy handler requires proxy_pass");
+    let normalized = super::request_uri::normalize_request_uri(req.uri())
+        .whatever_context::<_, Whatever>("failed to normalize WebSocket request uri")?;
+    let target =
+        super::request_uri::build_upstream_request_target(proxy_pass, loc, &normalized)
+            .whatever_context::<_, Whatever>("failed to build WebSocket upstream request target")?;
+    let target_uri = Uri::from_str(&target).whatever_context::<_, Whatever>(format!(
+        "failed to generate WebSocket target uri from `{target}`"
+    ))?;
+
+    let mut websocket = Request::builder()
+        .method(http::Method::GET)
+        .uri(target_uri)
+        .version(Version::HTTP_11)
+        .body(Empty::new())
+        .expect("HTTP/1.1 WebSocket request with an empty body is valid");
+    let headers = websocket.headers_mut();
+    *headers = req.headers().clone();
+    headers.insert(
+        HOST,
+        http::HeaderValue::from_str(&proxy_pass.proxy_host)
+            .whatever_context::<_, Whatever>("invalid WebSocket upstream host header")?,
+    );
+    headers.insert(CONNECTION, http::HeaderValue::from_static("Upgrade"));
+    headers.insert(UPGRADE, http::HeaderValue::from_static("websocket"));
+    headers
+        .entry(SEC_WEBSOCKET_VERSION)
+        .or_insert(http::HeaderValue::from_static("13"));
+    if !headers.contains_key(SEC_WEBSOCKET_KEY) {
+        headers.insert(SEC_WEBSOCKET_KEY, generated_websocket_key()?);
+    }
+    Ok(websocket)
+}
+
+fn generated_websocket_key() -> Result<http::HeaderValue> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .whatever_context::<_, Whatever>("failed to generate WebSocket handshake nonce")?;
+    let encoded = STANDARD.encode(nonce);
+    let value = encoded
+        .parse()
+        .whatever_context::<_, Whatever>("generated WebSocket handshake nonce is invalid")?;
+    Ok(value)
+}
+
+async fn establish_websocket_upstream(
+    loc: &LocationMatch,
+    request: Request<Empty<Bytes>>,
+) -> Result<(Upgraded, http::HeaderMap)> {
+    let location = Arc::clone(&loc.location);
+    let proxy_pass = location
+        .proxy_pass()
+        .expect("proxy handler requires proxy_pass");
+    let scheme = proxy_pass.scheme_str();
+    let host = proxy_pass.host();
+    let port = proxy_pass.port_u16().unwrap_or(match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => unreachable!("unsupported proxy_pass scheme"),
+    });
+
+    match scheme {
+        "http" => {
+            let io = TcpStream::connect((host, port))
+                .await
+                .whatever_context::<_, Whatever>(format!(
+                    "cannot connect to WebSocket target server {host}:{port}"
+                ))?;
+            send_websocket_request(io, request).await
+        }
+        "https" => {
+            let io = super::upstream_tls::connect_https(&location, &proxy_pass.uri).await?;
+            send_websocket_request(io, request).await
+        }
+        _ => unreachable!("unsupported proxy_pass scheme"),
+    }
+}
+
+async fn send_websocket_request<I>(
+    io: I,
+    request: Request<Empty<Bytes>>,
+) -> Result<(Upgraded, http::HeaderMap)>
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake(TokioIo::new(io))
+        .await
+        .whatever_context::<_, Whatever>("failed to establish WebSocket upstream connection")?;
+
+    tokio::spawn(
+        async move {
+            if let Err(error) = conn.with_upgrades().await {
+                error!(error = %Report::from_error(error), "WebSocket upstream connection failed");
+            }
+        }
+        .in_current_span(),
+    );
+
+    let mut response = sender
+        .send_request(request)
+        .await
+        .whatever_context::<_, Whatever>("failed to send WebSocket handshake to upstream")?;
+    ensure_whatever!(
+        response.status() == StatusCode::SWITCHING_PROTOCOLS,
+        "WebSocket upstream rejected handshake with status {}",
+        response.status()
+    );
+
+    let headers = response.headers().clone();
+    let upgrade = hyper::upgrade::on(&mut response);
+    drop(response);
+    let upgraded = upgrade
+        .await
+        .whatever_context::<_, Whatever>("WebSocket upstream did not upgrade the connection")?;
+    Ok((upgraded, headers))
+}
+
+fn is_h3_websocket_connect<B>(request: &Request<B>) -> bool {
+    request.method() == http::Method::CONNECT
+        && request
+            .extensions()
+            .get::<Protocol>()
+            .is_some_and(|protocol| protocol.as_str().eq_ignore_ascii_case("websocket"))
+}
+
+fn copy_h3_websocket_response_headers(
+    destination: &mut http::HeaderMap,
+    upstream: &http::HeaderMap,
+) {
+    for name in [SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_EXTENSIONS] {
+        if let Some(value) = upstream.get(&name) {
+            destination.insert(name, value.clone());
+        }
+    }
+}
+
+async fn tunnel_h3_connect(connect: extended_connect::EstablishedConnect, upstream: Upgraded) {
+    let (reader, writer) = match connect.into_streams().await {
+        Ok(streams) => streams,
+        Err(error) => {
+            warn!(error = %Report::from_error(&error), "H3 WebSocket stream takeover failed");
+            return;
+        }
+    };
+    let client = TunnelIo::new(reader.into_reader(), writer.into_writer());
+    copy_websocket_tunnel(client, TokioIo::new(upstream)).await;
+}
+
+async fn copy_websocket_tunnel<Client, Upstream>(mut client: Client, mut upstream: Upstream)
+where
+    Client: AsyncRead + AsyncWrite + Unpin,
+    Upstream: AsyncRead + AsyncWrite + Unpin,
+{
+    match io::copy_bidirectional(&mut client, &mut upstream).await {
+        Ok((from_client, from_upstream)) => {
+            info!(
+                from_client,
+                from_upstream, "WebSocket proxy tunnel completed"
+            );
+        }
+        Err(error) => {
+            debug!(error = %Report::from_error(&error), "WebSocket proxy tunnel ended with IO error");
+        }
+    }
 }
 
 fn public_base_for_proxy_redirect<'a>(
@@ -324,9 +534,254 @@ fn append_query_and_fragment(path: String, query: Option<&str>, fragment: Option
 
 #[cfg(test)]
 mod tests {
-    use http::{HeaderValue, Response, StatusCode};
+    use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+
+    use base64::Engine as _;
+    use futures::{SinkExt, StreamExt};
+    use h3x::{
+        connection::ConnectionBuilder,
+        dhttp::settings::Settings,
+        dquic::{
+            Identity, Network, QuicEndpoint,
+            cert::handy::{ToCertificate, ToPrivateKey},
+            net::IO,
+        },
+        endpoint::{H3Endpoint, hyper::TowerService},
+        extended_connect::settings::EnableConnectProtocol,
+    };
+    use http::{
+        HeaderMap, HeaderValue, Response, StatusCode, header::SEC_WEBSOCKET_ACCEPT, uri::Authority,
+    };
+    use http_body_util::{Empty, combinators::UnsyncBoxBody};
+    use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+    use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
+    };
+    use tower::service_fn as tower_service_fn;
 
     use super::*;
+    use crate::{
+        parse::tests::parse_location,
+        reverse::{
+            access_log::ActiveAccessLog,
+            location::{ConfiguredLocation, match_location},
+        },
+    };
+
+    const H3_SERVER_CERT: &[u8] = include_bytes!("../../tests/fixtures/h3-localhost.cert");
+    const H3_SERVER_KEY: &[u8] = include_bytes!("../../tests/fixtures/h3-localhost.key");
+    type H3RequestBody = UnsyncBoxBody<Bytes, h3x::dhttp::message::MessageStreamError>;
+
+    fn reverse_proxy_location(upstream: SocketAddr) -> LocationMatch {
+        let location = parse_location(&format!("proxy_pass http://{upstream};")).unwrap();
+        let configured = Arc::new(ConfiguredLocation::new(location, ActiveAccessLog::Disabled));
+        match_location(&[configured], "/ws").unwrap()
+    }
+
+    async fn start_upstream_websocket_echo() -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let service = service_fn(|mut request: Request<Incoming>| async move {
+                        let key = request
+                            .headers()
+                            .get(SEC_WEBSOCKET_KEY)
+                            .unwrap()
+                            .as_bytes()
+                            .to_vec();
+                        let upgrade = hyper::upgrade::on(&mut request);
+                        tokio::spawn(async move {
+                            let upgraded = upgrade.await.unwrap();
+                            let mut socket = WebSocketStream::from_raw_socket(
+                                TokioIo::new(upgraded),
+                                Role::Server,
+                                None,
+                            )
+                            .await;
+                            while let Some(message) = socket.next().await {
+                                let message = message.unwrap();
+                                if socket.send(message).await.is_err() {
+                                    return;
+                                }
+                            }
+                        });
+
+                        let response = Response::builder()
+                            .status(StatusCode::SWITCHING_PROTOCOLS)
+                            .header(CONNECTION, "Upgrade")
+                            .header(UPGRADE, "websocket")
+                            .header(SEC_WEBSOCKET_ACCEPT, derive_accept_key(&key))
+                            .body(Empty::<Bytes>::new())
+                            .unwrap();
+                        Ok::<_, Infallible>(response)
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        (address, task)
+    }
+
+    async fn start_h3_reverse_proxy(upstream: SocketAddr) -> (Authority, JoinHandle<()>) {
+        let identity = Arc::new(Identity {
+            name: "localhost".parse().unwrap(),
+            certs: Arc::new(H3_SERVER_CERT.to_certificate()),
+            key: Arc::new(H3_SERVER_KEY.to_private_key()),
+            ocsp: Arc::new(None),
+        });
+        let network = Network::builder().build();
+        let quic = QuicEndpoint::builder()
+            .network(network.clone())
+            .identity(identity)
+            .bind(Arc::new(vec!["127.0.0.1:0".parse().unwrap()]))
+            .build()
+            .await;
+        let port = network
+            .quic()
+            .interfaces()
+            .into_iter()
+            .next()
+            .unwrap()
+            .borrow()
+            .bound_addr()
+            .unwrap()
+            .port();
+        let authority = Authority::from_maybe_shared(format!("localhost:{port}")).unwrap();
+        let settings = Settings::default().with(EnableConnectProtocol::setting(true));
+        let mut endpoint = H3Endpoint::builder()
+            .quic(quic)
+            .builder(Arc::new(ConnectionBuilder::new(Arc::new(settings))))
+            .build();
+        let loc = reverse_proxy_location(upstream);
+        let service = TowerService(tower_service_fn(move |request: Request<H3RequestBody>| {
+            let loc = loc.clone();
+            async move {
+                let request = request.map(axum::body::Body::new);
+                Ok::<_, Infallible>(proxy_inner(&loc, request).await.unwrap())
+            }
+        }));
+        let task = tokio::spawn(async move {
+            let _ = endpoint.listen(service).await;
+        });
+        (authority, task)
+    }
+
+    #[test]
+    fn build_http1_websocket_request_generates_handshake_nonce() {
+        let location = parse_location("proxy_pass http://127.0.0.1:3000;").unwrap();
+        let configured =
+            std::sync::Arc::new(ConfiguredLocation::new(location, ActiveAccessLog::Disabled));
+        let loc = match_location(&[configured], "/ws").unwrap();
+        let request = Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://spike.dhttp.net/ws")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let upstream = build_websocket_request(&loc, &request).unwrap();
+        assert_eq!(upstream.method(), http::Method::GET);
+        assert_eq!(upstream.version(), Version::HTTP_11);
+        assert_eq!(upstream.uri(), "/ws");
+        assert_eq!(upstream.headers()[HOST], "127.0.0.1:3000");
+        assert_eq!(upstream.headers()[CONNECTION], "Upgrade");
+        assert_eq!(upstream.headers()[UPGRADE], "websocket");
+        assert_eq!(upstream.headers()[SEC_WEBSOCKET_VERSION], "13");
+
+        let nonce = STANDARD
+            .decode(upstream.headers()[SEC_WEBSOCKET_KEY].as_bytes())
+            .unwrap();
+        assert_eq!(nonce.len(), 16);
+    }
+
+    #[test]
+    fn recognizes_h3_websocket_extended_connect() {
+        let mut request = Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://spike.dhttp.net/ws")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(Protocol::new("websocket"));
+
+        assert!(is_h3_websocket_connect(&request));
+    }
+
+    #[tokio::test]
+    async fn proxies_h3_websocket_extended_connect_and_bidirectional_frames() {
+        let (upstream, upstream_task) = start_upstream_websocket_echo().await;
+        let (authority, proxy_task) = start_h3_reverse_proxy(upstream).await;
+        let client = H3Endpoint::new(QuicEndpoint::builder().build().await);
+        let test = async {
+            let connection = client.connect(authority.clone()).await.unwrap();
+            let request = Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(format!("https://{authority}/ws"))
+                .extension(Protocol::new("websocket"))
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let response = connection
+                .execute_hyper_request(request)
+                .await
+                .unwrap()
+                .map(UnsyncBoxBody::new);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(SEC_WEBSOCKET_ACCEPT));
+
+            let connect = extended_connect::hyper::establish(response).await.unwrap();
+            let (reader, writer) = connect.into_streams().await.unwrap();
+            let mut websocket = WebSocketStream::from_raw_socket(
+                TunnelIo::new(reader.into_reader(), writer.into_writer()),
+                Role::Client,
+                None,
+            )
+            .await;
+            websocket
+                .send(Message::Text("proxied h3 websocket".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                websocket.next().await.unwrap().unwrap(),
+                Message::Text("proxied h3 websocket".into())
+            );
+            websocket.close(None).await.unwrap();
+        };
+
+        let result = timeout(Duration::from_secs(10), test).await;
+        upstream_task.abort();
+        proxy_task.abort();
+        result.unwrap();
+    }
+
+    #[test]
+    fn h3_websocket_response_forwards_only_negotiated_headers() {
+        let mut upstream = HeaderMap::new();
+        upstream.insert(
+            SEC_WEBSOCKET_ACCEPT,
+            HeaderValue::from_static("http1-handshake"),
+        );
+        upstream.insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("graphql-transport-ws"),
+        );
+        upstream.insert(
+            SEC_WEBSOCKET_EXTENSIONS,
+            HeaderValue::from_static("permessage-deflate"),
+        );
+        let mut destination = HeaderMap::new();
+
+        copy_h3_websocket_response_headers(&mut destination, &upstream);
+
+        assert!(!destination.contains_key(SEC_WEBSOCKET_ACCEPT));
+        assert_eq!(destination[SEC_WEBSOCKET_PROTOCOL], "graphql-transport-ws");
+        assert_eq!(destination[SEC_WEBSOCKET_EXTENSIONS], "permessage-deflate");
+    }
 
     #[test]
     fn rewrite_proxy_redirect_default_rewrites_upstream_location() {

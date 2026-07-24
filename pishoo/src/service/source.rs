@@ -80,7 +80,8 @@ pub struct PrepareContext {
 
 impl PrepareContext {
     pub fn new(router_state: RouterState) -> Self {
-        let settings = dhttp::h3x::dhttp::settings::Settings::default();
+        let settings = dhttp::h3x::dhttp::settings::Settings::default()
+            .with(dhttp::h3x::extended_connect::settings::EnableConnectProtocol::setting(true));
         #[cfg(feature = "sshd")]
         let settings = settings
             .with_all(dhttp::h3x::dhttp::webtransport::settings::WebTransportSupport::default());
