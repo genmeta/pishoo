@@ -1,48 +1,135 @@
-# gateway
+<p align="center">
+  <img src="assets/pishoo/pishoo-readme-title.png" alt="PISHOO — It's the gateway that keeps your data privacy and security." width="900">
+</p>
 
-## Pishoo Multi-Process Supervisor
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.8.0--beta.7-0b7285?style=flat-square" alt="Version 0.8.0-beta.7">
+  <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
+</p>
 
-Pishoo is a privilege-separated, multi-process reverse proxy supervisor. The root process manages worker lifecycle, privileged resources (PID file, QUIC listeners), and server ownership registry. Individual worker processes (each running under a dedicated user) handle business logic, per-server routing, and connection handling.
+Pishoo takes its name from Pixiu(貔貅), an auspicious creature in ancient Chinese mythology. The name reflects its role in protecting local data, securing the network boundary, and controlling external access. Like Nginx, Pishoo provides web serving, reverse proxying, load balancing, and NAT traversal support in the DHttp protocol stack. Unlike traditional reverse proxies such as Nginx, which typically rely on fixed listening ports and publicly reachable network exposure, DHttp does not impose that requirement. As a result, Pishoo can be deployed on any endpoint.
 
-### Architecture
+## Why Pishoo?
 
-- **Root supervisor**: Starts/stops workers, maintains `uid -> worker` and `server_name -> owner worker` registries, forwards connections to owning workers, forwards system signals.
-- **Worker processes**: Each runs under a dedicated unprivileged user. Owns user identity services, router construction, TLS cert/key handling, and business proxy behavior through the user's DHTTP home.
+**Gateways Protect Data Assets:** Why do your privacy and data so often leak while internet platforms are less concerned? Platforms have gateways! A gateway is the essential infrastructure. Keep your private data behind a protected boundary.
 
-### Configuration
+- **Personal Server:** Cloud servers are not the only option. You should be free to choose any device as your personal server.
+- **Agent Home:** The best way to access an intelligent assistant is not through a chat app, but directly in your browser. Let your agents live inside Pishoo.
 
-Default `pishoo` startup loads the global DHTTP home:
+## How it works
 
-```text
-<global DHTTP home>/pishoo.conf
-<global DHTTP home>/<identity>/server.conf
-```
+- **DHttp Inside:** Pishoo is a DHttp-native gateway that lets any endpoint expose services without requiring a public IP address or a fixed listening port.
+- **APIs Everywhere:** The agentic internet is driving a new wave of API openness, in which every agent ultimately has its own open API.
+- **Access Control:** API access requires authorization, not a login—an authorized name is all it need.
 
-The main process owns global identity services and pishoo config services. Worker
-processes own user identity services for their Unix users. Both global and user
-identity services load identity profiles through the DHTTP home API.
+## Getting started
 
-Use `pishoo -c <file>` only for a standalone config file. Explicit config mode
-does not infer a DHTTP home, does not load identity profile `server.conf` files,
-and does not enumerate the platform default worker group (`dhttp` on non-macOS,
-`_www` on macOS) when `workers` and `groups` are absent.
+### Install Pishoo
 
-### 启动反向代理
+Pishoo supports mainstream Linux distributions and macOS on both Arm and x86 architectures. For a quick deployment, we recommend installing the `gmutils` operations toolkit alongside Pishoo.
 
-```sh
-cargo run -p pishoo
-```
-
-This starts the root supervisor, which then launches each configured worker process.
-
-### 启动正向代理
+#### Linux (Debian 11+)
 
 ```sh
-cargo run -p gateway --example forward config/forward.conf
+wget -qO- https://download.dhttp.net/ppa/key/public.key | gpg --dearmor | sudo tee /etc/apt/keyrings/genmeta.gpg > /dev/null
+
+sudo tee /etc/apt/sources.list.d/genmeta.sources > /dev/null <<'EOF'
+Types: deb
+URIs: https://download.dhttp.net/ppa/genmeta
+Suites: stable preview
+Components: main
+Signed-By: /etc/apt/keyrings/genmeta.gpg
+EOF
+
+sudo apt update
+sudo apt install pishoo gmutils
 ```
 
-### 测试请求
+#### macOS
 
 ```sh
-curl -x http://127.0.0.1:5379 http://test2.dhttp.net/static/TODO.md
+brew tap genmeta/preview https://github.com/genmeta/homebrew-preview
+brew trust genmeta/preview
+brew update
+brew install pishoo gmutils
 ```
+
+### Deploy Server Name and Certs
+
+You can purchase a domain name and certificate, then place them in the appropriate location. However, we recommend using `gmutils` to install them automatically.
+
+```sh
+genmeta identity apply
+```
+
+### Configuration files
+
+- Linux global configuration: `/etc/dhttp/pishoo.conf`
+- macOS global configuration: `$(brew --prefix)/etc/dhttp/pishoo.conf`
+- Per-identity service configuration: `<DHTTP home>/<identity>/server.conf`, for example `~/.dhttp/your.name/server.conf`
+
+Pishoo loads the global configuration and then discovers `server.conf` files for users in the platform worker group: `dhttp` on Linux and `_www` on macOS. The identity directory also contains the generated certificate and private key under `ssl/`; do not rename or manually change their permissions.
+
+Add the account that owns the identity to the worker group:
+
+```sh
+# Linux
+sudo usermod -aG dhttp "$USER"
+
+# macOS
+sudo dseditgroup -o edit -a "$USER" -t user _www
+```
+
+### Configuration example
+
+The global file can remain minimal. The packaged default configuration only needs a PID file when the platform default worker group should be discovered automatically:
+
+```nginx
+# /etc/dhttp/pishoo.conf on Linux
+pishoo {
+    pid /var/run/pishoo.pid;
+}
+```
+
+Put the service configuration in your identity directory. Pishoo derives the service identity and TLS material from that directory, while the following example serves a static site and proxies `/app` to a local application:
+
+```nginx
+# ~/.dhttp/your.name/server.conf
+server {
+    location / {
+        root  templates;
+        index index.html;
+    }
+
+    location /app {
+        proxy_pass http://127.0.0.1:8081;
+    }
+}
+```
+
+### Run
+
+Validate and start (or reload) Pishoo after changing its configuration:
+
+```sh
+# Linux
+sudo pishoo -t
+sudo systemctl start pishoo
+sudo systemctl reload pishoo
+
+# macOS
+sudo pishoo -t
+sudo brew services start pishoo
+sudo brew services reload pishoo
+```
+
+### Access
+
+You can access Pishoo with [`genmeta-curl`](https://docs.dhttp.net/docs/core-components/utils/cli-curl), [DHttp SDK](https://docs.dhttp.net/docs/core-components/sdk), or [AnySee browser](https://docs.dhttp.net/zh/docs/core-components/anysee).
+
+```bash
+genmeta curl https://your.name~/welcome
+```
+
+For directive reference and additional reverse-proxy examples, see the official [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo).
