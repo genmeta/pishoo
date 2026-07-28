@@ -60,8 +60,8 @@ fn generated_rpm_preinstall() -> String {
             format!("{}:{}", bin.display(), path.to_string_lossy()),
         )
         .env("XTASK_RELEASE_PACKAGE_ID", "pishoo-common")
-        .env("XTASK_RELEASE_PACKAGE_VERSION", "0.8.0~beta.6-1")
-        .env("XTASK_RELEASE_SOURCE_VERSION", "0.8.0-beta.6")
+        .env("XTASK_RELEASE_PACKAGE_VERSION", "0.8.0~beta.7-1")
+        .env("XTASK_RELEASE_SOURCE_VERSION", "0.8.0-beta.7")
         .env("XTASK_RELEASE_REPO_ROOT", repository_root)
         .env("XTASK_RELEASE_OUT_DIR", &out)
         .output()

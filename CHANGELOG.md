@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## [0.8.0-beta.7] - 2026-07-28
+
+### Added
+
+- Pishoo reverse proxy now supports WebSocket connections over HTTP/3 extended
+  CONNECT, tunneling frames to HTTP/1.1 or HTTPS upstream WebSocket servers.
+
+### Fixed
+
+- Linux DEB/RPM installation hooks now create the `dhttp` group only when it is
+  absent, and propagate lookup or group-creation failures instead of masking
+  them. The DEB package now declares its required `adduser` dependency.
+
+### Components
+
+- `pishoo` v0.8.0-beta.7
+- `gateway` v0.8.0-beta.5 (unchanged)
+- `pishoo-common` v0.8.0-beta.7 (`0.8.0~beta.7-1` for DEB/RPM)
+
 ## [0.8.0-beta.6] - 2026-07-17
 
 ### Changed
