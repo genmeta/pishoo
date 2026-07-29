@@ -1011,6 +1011,7 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.6.0-beta.5"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "bon",
  "bytes",
@@ -1034,6 +1035,7 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.4.0-beta.2"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1054,6 +1056,7 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0-beta.1"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1085,6 +1088,7 @@ dependencies = [
 [[package]]
 name = "dhttp-log"
 version = "0.1.0-beta.1"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "chrono",
  "dhttp-identity",
@@ -1679,6 +1683,7 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.0-beta.4"
+source = "git+https://github.com/genmeta/h3x.git?branch=fix%2Fha-http3-reliability#8649fe9a286fe3086a6b6501e7c123b8756388a4"
 dependencies = [
  "arc-swap",
  "async-channel",

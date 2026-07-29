@@ -48,7 +48,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-service = "0.3"
 
 # --- QUIC Implementation ---
-h3x = { path = "../h3x", version = "0.6.0-beta.4" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "fix/ha-http3-reliability", version = "0.6.0-beta.4" }
 dquic = { version = "0.7.0-beta.4", default-features = false }
 
 # --- IPC / RPC ---
@@ -90,7 +90,7 @@ form_urlencoded = "1"
 percent-encoding = "2"
 socket2 = "0.6"
 x509-parser = "0.18"
-dhttp = { path = "../dhttp/dhttp", version = "0.6.0-beta.5" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", branch = "fix/ha-http3-reliability", version = "0.6.0-beta.5" }
 
 # --- System Interaction ---
 libc = "0.2"
@@ -114,4 +114,4 @@ panic = "abort"
 strip = "symbols"
 
 [patch.crates-io]
-h3x = { path = "../h3x" }
+h3x = { git = "https://github.com/genmeta/h3x.git", branch = "fix/ha-http3-reliability" }
