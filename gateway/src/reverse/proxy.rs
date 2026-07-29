@@ -23,7 +23,7 @@ use hyper_util::{
 };
 use snafu::{Report, ResultExt, ensure_whatever};
 use tokio::{
-    io::{self, AsyncRead, AsyncWrite},
+    io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 use tracing::{Instrument, debug, error, info, warn};
@@ -32,7 +32,10 @@ use crate::{
     command,
     error::{Result, Whatever},
     parse::{pattern::Pattern, types::ProxyPass},
-    reverse::{location::LocationMatch, tunnel::TunnelIo},
+    reverse::{
+        location::LocationMatch,
+        tunnel::{ObservedIo, TunnelIo},
+    },
 };
 
 type HttpUpstreamClient = Client<HttpConnector, axum::body::Body>;
@@ -403,12 +406,18 @@ async fn tunnel_h3_connect(connect: extended_connect::EstablishedConnect, upstre
     copy_websocket_tunnel(client, TokioIo::new(upstream)).await;
 }
 
-async fn copy_websocket_tunnel<Client, Upstream>(mut client: Client, mut upstream: Upstream)
+async fn copy_websocket_tunnel<Client, Upstream>(client: Client, upstream: Upstream)
 where
     Client: AsyncRead + AsyncWrite + Unpin,
     Upstream: AsyncRead + AsyncWrite + Unpin,
 {
-    match io::copy_bidirectional(&mut client, &mut upstream).await {
+    let (client_reader, client_writer) = io::split(ObservedIo::new(client, "h3-client"));
+    let (upstream_reader, upstream_writer) = io::split(ObservedIo::new(upstream, "http1-upstream"));
+
+    match tokio::try_join!(
+        copy_and_flush(client_reader, upstream_writer),
+        copy_and_flush(upstream_reader, client_writer),
+    ) {
         Ok((from_client, from_upstream)) => {
             info!(
                 from_client,
@@ -418,6 +427,29 @@ where
         Err(error) => {
             debug!(error = %Report::from_error(&error), "WebSocket proxy tunnel ended with IO error");
         }
+    }
+}
+
+async fn copy_and_flush<Reader, Writer>(mut reader: Reader, mut writer: Writer) -> io::Result<u64>
+where
+    Reader: AsyncRead + Unpin,
+    Writer: AsyncWrite + Unpin,
+{
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut total = 0_u64;
+
+    loop {
+        let bytes = reader.read(&mut buffer).await?;
+        if bytes == 0 {
+            writer.shutdown().await?;
+            return Ok(total);
+        }
+
+        writer.write_all(&buffer[..bytes]).await?;
+        // h3x buffers small AsyncWrite payloads. A live WebSocket may remain
+        // idle after one frame, so flush each forwarded chunk before reading.
+        writer.flush().await?;
+        total += bytes as u64;
     }
 }
 
@@ -572,10 +604,12 @@ mod tests {
     use std::{
         convert::Infallible,
         net::SocketAddr,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::{Context, Poll},
         time::Duration,
     };
 
@@ -597,7 +631,7 @@ mod tests {
     };
     use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
     use hyper::{body::Incoming, server::conn::http1, service::service_fn};
-    use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
+    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::timeout};
     use tokio_tungstenite::{
         WebSocketStream,
         tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
@@ -616,6 +650,37 @@ mod tests {
     const H3_SERVER_CERT: &[u8] = include_bytes!("../../tests/fixtures/h3-localhost.cert");
     const H3_SERVER_KEY: &[u8] = include_bytes!("../../tests/fixtures/h3-localhost.key");
     type H3RequestBody = UnsyncBoxBody<Bytes, h3x::dhttp::message::MessageStreamError>;
+
+    struct FlushReportingWriter {
+        buffered: Vec<u8>,
+        flushed: mpsc::UnboundedSender<Vec<u8>>,
+    }
+
+    impl AsyncWrite for FlushReportingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.buffered.extend_from_slice(buffer);
+            Poll::Ready(Ok(buffer.len()))
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            if !self.buffered.is_empty() {
+                let buffered = std::mem::take(&mut self.buffered);
+                let _ = self.flushed.send(buffered);
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_flush(context)
+        }
+    }
 
     fn reverse_proxy_location(upstream: SocketAddr) -> LocationMatch {
         let location = parse_location(&format!("proxy_pass http://{upstream};")).unwrap();
@@ -670,6 +735,18 @@ mod tests {
                             .await;
                             while let Some(message) = socket.next().await {
                                 let message = message.unwrap();
+                                if message == Message::Text("burst".into()) {
+                                    for index in 0..8 {
+                                        if socket
+                                            .send(Message::Text(format!("burst-{index}").into()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if socket.send(message).await.is_err() {
                                     return;
                                 }
@@ -748,6 +825,7 @@ mod tests {
         let request = Request::builder()
             .method(http::Method::CONNECT)
             .uri("https://spike.dhttp.net/ws")
+            .header(SEC_WEBSOCKET_EXTENSIONS, "permessage-deflate")
             .body(axum::body::Body::empty())
             .unwrap();
 
@@ -758,6 +836,10 @@ mod tests {
         assert_eq!(upstream.headers()[HOST], "127.0.0.1:3000");
         assert_eq!(upstream.headers()[CONNECTION], "Upgrade");
         assert_eq!(upstream.headers()[UPGRADE], "websocket");
+        assert_eq!(
+            upstream.headers()[SEC_WEBSOCKET_EXTENSIONS],
+            "permessage-deflate"
+        );
         assert_eq!(upstream.headers()[SEC_WEBSOCKET_VERSION], "13");
 
         let nonce = STANDARD
@@ -787,6 +869,29 @@ mod tests {
 
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_tunnel_flushes_a_small_chunk_while_source_stays_open() {
+        let (mut source, reader) = io::duplex(64);
+        let (flushed_tx, mut flushed_rx) = mpsc::unbounded_channel();
+        let copy_task = tokio::spawn(copy_and_flush(
+            reader,
+            FlushReportingWriter {
+                buffered: Vec::new(),
+                flushed: flushed_tx,
+            },
+        ));
+
+        source.write_all(b"auth_ok").await.unwrap();
+
+        let flushed = timeout(Duration::from_secs(1), flushed_rx.recv())
+            .await
+            .expect("small WebSocket chunk remained buffered")
+            .expect("flush observer closed");
+        assert_eq!(flushed, b"auth_ok");
+
+        copy_task.abort();
     }
 
     #[test]
@@ -838,6 +943,27 @@ mod tests {
                 websocket.next().await.unwrap().unwrap(),
                 Message::Text("proxied h3 websocket".into())
             );
+
+            for index in 0..4 {
+                websocket
+                    .send(Message::Text(format!("client-{index}").into()))
+                    .await
+                    .unwrap();
+            }
+            for index in 0..4 {
+                assert_eq!(
+                    websocket.next().await.unwrap().unwrap(),
+                    Message::Text(format!("client-{index}").into())
+                );
+            }
+
+            websocket.send(Message::Text("burst".into())).await.unwrap();
+            for index in 0..8 {
+                assert_eq!(
+                    websocket.next().await.unwrap().unwrap(),
+                    Message::Text(format!("burst-{index}").into())
+                );
+            }
 
             websocket.close(None).await.unwrap();
         };
