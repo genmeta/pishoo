@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-use http::{HeaderValue, Request, header, response::Parts};
+use http::{HeaderMap, HeaderValue, Request, header, response::Parts};
 
 use super::variables;
 use crate::parse::{
@@ -10,6 +10,8 @@ use crate::parse::{
 
 pub(crate) fn proxy_set_header<T>(node: &Arc<LocationConfig>, req: Request<T>) -> Request<T> {
     let (mut parts, body) = req.into_parts();
+
+    strip_hop_by_hop_headers(&mut parts.headers);
 
     // 默认将 Host 变更为 proxy_pass target
     let proxy_host = node
@@ -23,10 +25,6 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<LocationConfig>, req: Request<T>) -
         );
     };
 
-    // 默认将 Connection 变更为 close
-    parts
-        .headers
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
     // 遍历 proxy_set_header 中的记录, 匹配 Header, 设置支持的字段
     let proxy_set_header = header_rules(node.proxy_set_headers());
 
@@ -42,6 +40,32 @@ pub(crate) fn proxy_set_header<T>(node: &Arc<LocationConfig>, req: Request<T>) -
     }
 
     Request::from_parts(parts, body)
+}
+
+pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    let connection_headers = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| http::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect::<Vec<_>>();
+
+    for name in connection_headers {
+        headers.remove(name);
+    }
+    for name in [
+        header::CONNECTION,
+        http::HeaderName::from_static("keep-alive"),
+        header::PROXY_AUTHENTICATE,
+        header::PROXY_AUTHORIZATION,
+        header::TE,
+        header::TRAILER,
+        header::TRANSFER_ENCODING,
+        header::UPGRADE,
+    ] {
+        headers.remove(name);
+    }
 }
 
 /// Adds headers to the HTTP response parts based on configuration in the node.
@@ -118,5 +142,20 @@ mod tests {
             req.headers()[http::header::HOST],
             "backend.example.com:8080"
         );
+        assert!(!req.headers().contains_key(http::header::CONNECTION));
+    }
+
+    #[test]
+    fn proxy_set_header_strips_connection_nominated_headers() {
+        let node = parse_location("proxy_pass http://backend.example.com;").unwrap();
+        let req = http::Request::builder()
+            .header(http::header::CONNECTION, "keep-alive, x-internal")
+            .header("x-internal", "remove")
+            .body(())
+            .unwrap();
+
+        let req = proxy_set_header(&node, req);
+        assert!(!req.headers().contains_key(http::header::CONNECTION));
+        assert!(!req.headers().contains_key("x-internal"));
     }
 }
