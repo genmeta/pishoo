@@ -195,6 +195,18 @@ fn duplicate_scalar_directive_is_rejected() {
 }
 
 #[test]
+fn root_network_listen_preserves_interface_scope() {
+    let parsed = parse_root("pishoo { network_listen en0 0; }").unwrap();
+    let listens = &parsed.pishoo().network_listen().unwrap().0;
+
+    assert_eq!(listens.len(), 1);
+    assert_eq!(
+        listens[0].try_to_bind_patterns().unwrap()[0].to_string(),
+        "iface://en0:0"
+    );
+}
+
+#[test]
 fn server_accepts_multiple_location_blocks() {
     let server = parse_direct_server("location / {} location /files {}").unwrap();
 

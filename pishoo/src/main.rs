@@ -83,7 +83,21 @@ async fn main() -> Result<(), Whatever> {
 
     // Build the shared Network used by every registered SNI. Workers register
     // by calling back through IPC (request_listen) — no servers are added up-front.
+    let network_bind = plan
+        .as_ref()
+        .and_then(|plan| plan.pishoo().network_listen())
+        .map(|listen| {
+            listen
+                .0
+                .iter()
+                .map(gateway::parse::types::Listens::try_to_bind_patterns)
+                .collect::<Result<Vec<_>, _>>()
+                .map(|patterns| Arc::new(patterns.into_iter().flatten().collect::<Vec<_>>()))
+        })
+        .transpose()
+        .whatever_context("failed to build shared network bind patterns")?;
     let network = DhttpNetwork::builder()
+        .maybe_bind(network_bind)
         .build()
         .await
         .whatever_context("failed to build dhttp network")?;

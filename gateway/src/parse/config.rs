@@ -211,6 +211,7 @@ pub struct PishooConfig {
     pid: Option<ResolvedConfigPath>,
     workers: Option<StringList>,
     groups: Option<StringList>,
+    network_listen: Option<ListenConfig>,
     http: EffectiveHttpConfig,
     forward_proxies: Box<[crate::forward::ForwardConfig]>,
 }
@@ -221,6 +222,7 @@ impl PishooConfig {
         pid: Option<ResolvedConfigPath>,
         workers: Option<StringList>,
         groups: Option<StringList>,
+        network_listen: Option<ListenConfig>,
         http: EffectiveHttpConfig,
         forward_proxies: Box<[crate::forward::ForwardConfig]>,
     ) -> Self {
@@ -229,6 +231,7 @@ impl PishooConfig {
             pid,
             workers,
             groups,
+            network_listen,
             http,
             forward_proxies,
         }
@@ -244,6 +247,9 @@ impl PishooConfig {
     }
     pub fn groups(&self) -> Option<&StringList> {
         self.groups.as_ref()
+    }
+    pub fn network_listen(&self) -> Option<&ListenConfig> {
+        self.network_listen.as_ref()
     }
     pub fn http(&self) -> &EffectiveHttpConfig {
         &self.http

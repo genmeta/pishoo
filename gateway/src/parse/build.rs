@@ -312,6 +312,7 @@ impl TypedConfigParser {
         let mut pid = None;
         let mut workers = None;
         let mut groups = None;
+        let mut network_listen = None;
         let mut http = LocalHttp::default();
         let mut seen = std::collections::HashMap::new();
         for directive in children {
@@ -338,6 +339,9 @@ impl TypedConfigParser {
                 "pid" => pid = Some(parse(directive, ConfigContext::Pishoo, sources)?),
                 "workers" => workers = Some(parse(directive, ConfigContext::Pishoo, sources)?),
                 "groups" => groups = Some(parse(directive, ConfigContext::Pishoo, sources)?),
+                "network_listen" => {
+                    network_listen = Some(parse(directive, ConfigContext::Pishoo, sources)?)
+                }
                 name if parse_http(name, directive, ConfigContext::Pishoo, sources, &mut http)? => {
                 }
                 name => {
@@ -373,6 +377,7 @@ impl TypedConfigParser {
                 pid,
                 workers,
                 groups,
+                network_listen,
                 effective,
                 forward_proxies,
             ),
