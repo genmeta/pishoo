@@ -6,6 +6,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::parse::config::LocationConfig;
 
+const MAX_BUFFERED_PROXY_RESPONSE: u64 = 2 * 1024 * 1024;
+
 /// Gzip 压缩配置，从 location 节点中提取
 pub struct GzipConfig {
     pub enabled: bool,
@@ -86,11 +88,11 @@ impl GzipConfig {
 /// Compress a hyper `Incoming` response body if the location config requires it.
 ///
 /// Returns a new response with the body wrapped in gzip, or the original response unchanged.
-pub fn compress_response(
+pub async fn compress_response(
     location: &Arc<LocationConfig>,
     accept_encoding: Option<&str>,
     response: http::Response<hyper::body::Incoming>,
-) -> http::Response<axum::body::Body> {
+) -> Result<http::Response<axum::body::Body>, hyper::Error> {
     use futures::TryStreamExt;
 
     let gzip = GzipConfig::from_location(location, accept_encoding);
@@ -114,9 +116,21 @@ pub fn compress_response(
         let compressed = GzipEncoder::with_quality(body_stream, gzip.level());
         let stream = ReaderStream::new(compressed);
         let body = axum::body::Body::from_stream(stream);
-        http::Response::from_parts(parts, body)
+        Ok(http::Response::from_parts(parts, body))
+    } else if content_length.is_some_and(|length| length <= MAX_BUFFERED_PROXY_RESPONSE) {
+        // Finite proxy responses are emitted as one body frame. Besides reducing IPC
+        // chatter, this prevents a worker-side stream teardown from truncating a
+        // response between the small chunks produced by Hyper's HTTP/1 decoder.
+        let bytes = http_body_util::BodyExt::collect(body).await?.to_bytes();
+        Ok(http::Response::from_parts(
+            parts,
+            axum::body::Body::from(bytes),
+        ))
     } else {
-        http::Response::from_parts(parts, axum::body::Body::new(body))
+        Ok(http::Response::from_parts(
+            parts,
+            axum::body::Body::new(body),
+        ))
     }
 }
 
