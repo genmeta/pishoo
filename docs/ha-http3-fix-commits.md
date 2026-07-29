@@ -343,3 +343,48 @@ release 构建成功，lockfile 中 dhttp 0.6.0-beta.5 和 h3x 0.6.0-beta.4 均�
 - location：`sky.lee~` 根 location（id 1）
 
 重启 pishoo 后，access log 已确认该 identity 对首页静态资源、manifest 和 `/api/onboarding` 获得 200。该数据库变更不应误记为上述任一源码提交。
+
+## 8. IPC FD 交付确认与 HA 冷启动复测（2026-07-29）
+
+### `8649fe9 fix(ipc): acknowledge fd delivery before bridging`
+
+**现象**
+
+HAR 27-29 中，Home Assistant 冷启动会长期停留在 loading，或首次显示 `Unable to connect to Home Assistant`，等待前端主动重试后才成功。pishoo 日志显示根进程已经把 QUIC stream 对应的 FD 排入 IPC，但 worker 可能在收到首个 request payload 前结束等待；随后根进程向已经关闭的 IPC bridge 发送数据并得到 `Broken pipe`。
+
+**根本原因**
+
+原 `FdDelivery::deliver` 在 FD frame 进入本地 mux writer 队列后立即返回，不能证明 worker 已经接收 FD。与此同时，worker 丢弃 `FdReceiver` 只清理本地等待槽，不会通知根进程。RPC 取消与 FD 交付并发时，根进程因此可能在接收端已经退出后仍创建 QUIC/IPC bridge，造成首次请求丢失；前端重试创建新 stream 后才恢复。
+
+**修复方案**
+
+- 为 mux transport 增加独立的 `ACK_FDS` 和 `CANCEL_FDS` 控制帧。
+- worker 实际取得 FD 后发送 ACK；等待方被丢弃时发送 CANCEL。
+- `FdDelivery::deliver` 只有收到 ACK 才报告成功。收到 CANCEL 时停止本次交付，上层会用 `H3_REQUEST_CANCELLED` 结束对应 QUIC stream，不再启动失去接收端的 bridge。
+- ACK/CANCEL 由 mux reader/writer 后台任务处理，不依赖对应 remoc RPC future 是否仍在被 poll。
+- 将等待 ACK 的 FD 交付限制为最多 32 组，约束跨确认往返期间持有的 descriptor 数量。
+
+**验证**
+
+- `cargo fmt --all -- --check` 通过。
+- `cargo test --features ipc ipc::transport::tests`：6 个测试通过，包括 ACK 前不得完成、receiver drop 取消、先 CANCEL 后创建 delivery 的重放，以及 512 组并发 FD pair identity 压力测试。
+- 使用修复后的本地 h3x 构建 pishoo release，并重启 `gui/501/net.genmeta.pishoo-source`。
+- HAR 30 共 154 个请求：148 个返回 200；6 个 `status=0` 均为认证页面跳转触发的 `net::ERR_ABORTED`，相同资源随后重新请求成功。`/auth/token` 约 440 ms，`manifest.json` 约 412 ms，WebSocket 正常建立，未再出现 HAR 29 中的 30 秒首次加载超时。
+- HAR 30 时间段日志中的 reset code 268 是 HTTP/3 `H3_REQUEST_CANCELLED`，与浏览器主动取消旧页面请求一致，不属于新的传输失败。
+
+### release 构建参数
+
+以下值会在编译时进入依赖配置，不能只在重启时设置 LaunchAgent 环境变量。测试二进制使用：
+
+```sh
+env \
+  DHTTP_CERT_SERVER_URL=https://api.genmeta.net \
+  DHTTP_H3_DNS_SERVER=https://ddns.genmeta.net:4433 \
+  DHTTP_STUN_SERVER=nat.genmeta.net \
+  DHTTP_MDNS_SERVICE=_dhttp.local \
+  DHTTP_ROOT_CA=/Users/lixiaofeng/code/genmeta/certserver/pki/public/root/root-bundle.pem \
+  DHTTP_GLOBAL_HOME=/opt/homebrew/etc/dhttp \
+  cargo build --release
+```
+
+漏掉这些编译参数时，二进制会回退到默认的 `https://dhttp.example.net/`，表现为 `sky.lee~` 无法连接；因此后续复测必须确认构建命令和运行中的二进制路径 `/Users/lixiaofeng/code/genmeta/pishoo/target/release/pishoo`。
