@@ -26,6 +26,7 @@ required-features = ["sshd"]
 gateway = { workspace = true }
 dhttp = { workspace = true, features = ["access-orm"] }
 h3x = { workspace = true, features = ["ipc"] }
+dquic = { workspace = true, optional = true, features = ["telemetry"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 
@@ -81,7 +82,7 @@ sshd = [
     "nix/uio",
 ]
 pam = ["sshd", "dshell/pam", "gateway/pam"]
-qlog = ["gateway/qlog"]
+qlog = ["gateway/qlog", "dep:dquic"]
 console_subscriber = ["dep:console-subscriber"]
 sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]
 

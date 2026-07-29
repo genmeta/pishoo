@@ -2961,6 +2961,7 @@ dependencies = [
  "clap",
  "console-subscriber",
  "dhttp",
+ "dquic",
  "dshell",
  "futures",
  "gateway",

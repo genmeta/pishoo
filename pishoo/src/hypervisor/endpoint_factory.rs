@@ -4,14 +4,23 @@
 //! resolver stacks live here so the registry code does not duplicate Endpoint
 //! builder internals.
 
-use std::sync::Arc;
+use std::{
+    io,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use dhttp::{
     ddns::{
         BuildQuicEndpointWithDnsError, DhttpDnsPlan, quic_endpoint_builder_with_dns,
         resolvers::DnsScheme,
     },
-    dquic::{QuicEndpoint, binds::BindPattern},
+    dquic::{
+        QuicEndpoint,
+        binds::BindPattern,
+        log::{QLog, handy::LegacySeqLogger},
+        server::ServerQuicConfig,
+    },
     endpoint::{BuildEndpointError, Endpoint, InvalidEndpointPartsError},
     h3x::endpoint::H3Endpoint,
     identity::Identity,
@@ -20,6 +29,9 @@ use dhttp::{
 };
 use http::Uri;
 use snafu::{ResultExt, Snafu};
+
+const PISHOO_QLOG_DIR_ENV: &str = "PISHOO_QLOG_DIR";
+static SERVER_QLOGGER: OnceLock<Arc<dyn QLog + Send + Sync>> = OnceLock::new();
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -30,6 +42,30 @@ pub enum BuildRegisteredEndpointError {
     },
     #[snafu(display("invalid endpoint parts"))]
     InvalidParts { source: InvalidEndpointPartsError },
+    #[snafu(display("failed to create qlog directory {}", path.display()))]
+    CreateQlogDirectory { path: PathBuf, source: io::Error },
+}
+
+fn enable_server_qlog_from_env(
+    config: &mut ServerQuicConfig,
+) -> Result<(), BuildRegisteredEndpointError> {
+    let Some(qlog_dir) = std::env::var_os(PISHOO_QLOG_DIR_ENV).map(PathBuf::from) else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(&qlog_dir).map_err(|source| {
+        BuildRegisteredEndpointError::CreateQlogDirectory {
+            path: qlog_dir.clone(),
+            source,
+        }
+    })?;
+
+    let qlogger = SERVER_QLOGGER.get_or_init(|| {
+        tracing::info!(path = %qlog_dir.display(), "pishoo QUIC qlog enabled");
+        Arc::new(LegacySeqLogger::new(qlog_dir))
+    });
+    config.qlogger = qlogger.clone();
+    Ok(())
 }
 
 pub async fn build_registered_endpoint(
@@ -43,19 +79,22 @@ pub async fn build_registered_endpoint(
     dns_plan.push_dns(DnsScheme::Mdns);
     dns_plan.push_dns(DnsScheme::System);
 
+    let mut server_config = trust::default_server_quic_config();
+    enable_server_qlog_from_env(&mut server_config)?;
     let raw_network = network.network().clone();
     let builder = quic_endpoint_builder_with_dns(
         |resolver| {
             let raw_network = raw_network.clone();
             let identity = identity.clone();
             let bind_patterns = bind_patterns.clone();
+            let server_config = server_config.clone();
             async move {
                 QuicEndpoint::builder()
                     .network(raw_network)
                     .identity(identity)
                     .resolver(resolver)
                     .client(trust::default_client_quic_config())
-                    .server(trust::default_server_quic_config())
+                    .server(server_config)
                     .bind(bind_patterns)
                     .build()
                     .await
