@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/pishoo/pishoo-readme-title.png" alt="PISHOO — It's the gateway that keeps your data privacy and security." width="900">
+  <img src="assets/pishoo/pishoo-readme-title.png" alt="PISHOO — It's the gateway that keeps your data private and secure." width="900">
 </p>
 
 <p align="center">
@@ -12,10 +12,10 @@ Pishoo takes its name from Pixiu(貔貅), an auspicious creature in ancient Chin
 
 ## Why Pishoo?
 
-**Gateways Protect Data Assets:** Why do your privacy and data so often leak while internet platforms are less concerned? Platforms have gateways! A gateway is the essential infrastructure. Keep your private data behind a protected boundary.
+**Gateways Protect Data Assets:** Why are your privacy and data so often leak while internet platforms seem less concerned? Platforms have gateways! It's the gateway that plays a critical role in protecting your private data. Think about it: isn't a gate meant to protect private territory? So, get Pishoo and put the gateway in front of your private data assets.
 
 - **Personal Server:** Cloud servers are not the only option. You should be free to choose any device as your personal server.
-- **Agent Home:** The best way to access an intelligent assistant is not through a chat app, but directly in your browser. Let your agents live inside Pishoo.
+- **Agent Home:** The best way to access an intelligent assistant is not through a chat app, but directly in your browser. To make that happen, let your agents live behind Pishoo.
 
 ## How it works
 
