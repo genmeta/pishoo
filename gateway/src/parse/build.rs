@@ -761,6 +761,7 @@ fn build_location(
     let mut add = Vec::new();
     let mut set = Vec::new();
     let mut pass = None;
+    let mut return_response = None;
     let mut cert = None;
     let mut key = None;
     let mut trusted = None;
@@ -777,6 +778,7 @@ fn build_location(
             "add_header" => add.push(parse(x, ConfigContext::Location, s)?),
             "proxy_set_header" => set.push(parse(x, ConfigContext::Location, s)?),
             "proxy_pass" => pass = Some(parse(x, ConfigContext::Location, s)?),
+            "return" => return_response = Some(parse(x, ConfigContext::Location, s)?),
             "proxy_ssl_certificate" => cert = Some(parse(x, ConfigContext::Location, s)?),
             "proxy_ssl_certificate_key" => key = Some(parse(x, ConfigContext::Location, s)?),
             "proxy_ssl_trusted_certificate" => {
@@ -825,6 +827,7 @@ fn build_location(
         add.into_boxed_slice(),
         set.into_boxed_slice(),
         pass,
+        return_response,
         proxy_tls,
         login,
         users.into_boxed_slice(),

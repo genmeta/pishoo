@@ -9,8 +9,8 @@ use super::{
     source::{SourceMap, SourceSpan},
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRules,
-        ListenConfig, MimeTypes, ProxyPass, ResolverConfig, SshLoginMethods, SshSslUsers,
-        StringList, StunServerConfigValue,
+        ListenConfig, MimeTypes, ProxyPass, ResolverConfig, ReturnResponse, SshLoginMethods,
+        SshSslUsers, StringList, StunServerConfigValue,
     },
 };
 
@@ -523,6 +523,7 @@ pub struct LocationConfig {
     add_headers: Box<[HeaderRules]>,
     proxy_set_headers: Box<[HeaderRules]>,
     proxy_pass: Option<ProxyPass>,
+    return_response: Option<ReturnResponse>,
     proxy_tls: Option<PreparedProxyTlsPaths>,
     ssh_login: Option<SshLoginMethods>,
     ssh_users: Box<[SshSslUsers]>,
@@ -540,6 +541,7 @@ impl LocationConfig {
         add_headers: Box<[HeaderRules]>,
         proxy_set_headers: Box<[HeaderRules]>,
         proxy_pass: Option<ProxyPass>,
+        return_response: Option<ReturnResponse>,
         proxy_tls: Option<PreparedProxyTlsPaths>,
         ssh_login: Option<SshLoginMethods>,
         ssh_users: Box<[SshSslUsers]>,
@@ -555,6 +557,7 @@ impl LocationConfig {
             add_headers,
             proxy_set_headers,
             proxy_pass,
+            return_response,
             proxy_tls,
             ssh_login,
             ssh_users,
@@ -587,6 +590,9 @@ impl LocationConfig {
     }
     pub fn proxy_pass(&self) -> Option<&ProxyPass> {
         self.proxy_pass.as_ref()
+    }
+    pub fn return_response(&self) -> Option<&ReturnResponse> {
+        self.return_response.as_ref()
     }
     pub fn proxy_tls(&self) -> Option<&PreparedProxyTlsPaths> {
         self.proxy_tls.as_ref()
