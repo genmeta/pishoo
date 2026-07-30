@@ -107,7 +107,9 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
 
             let location = &loc_match.location;
 
-            let response = if location.proxy_pass().is_some() {
+            let response = if location.return_response().is_some() {
+                Handler::call(super::return_response::return_handle, request, state).await
+            } else if location.proxy_pass().is_some() {
                 Handler::call(super::proxy::proxy_handle, request, state).await
             } else if location.root().is_some() || location.alias().is_some() {
                 Handler::call(super::file::file_handle, request, state).await
@@ -165,6 +167,7 @@ fn proxy_prefix_slash_redirect(
 
 #[cfg(test)]
 mod tests {
+    use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     use super::*;
@@ -282,6 +285,64 @@ mod tests {
         assert_eq!(
             response.headers().get(header::LOCATION).unwrap(),
             "https://frontend.example.com/api/?x=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn return_response_takes_priority_and_preserves_headers_and_body() {
+        let location = Arc::new(ConfiguredLocation::new(
+            parse_location(
+                "return 503 \"service unavailable\"; add_header X-Maintenance yes always; proxy_pass http://unreachable.invalid;",
+            )
+            .unwrap(),
+            ActiveAccessLog::Disabled,
+        ));
+        let router = NginxRouter::new(vec![location], ActiveAccessLog::Disabled, router_state());
+
+        let response = router
+            .oneshot(
+                http::Request::builder()
+                    .uri("/anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-maintenance"], "yes");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "service unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn return_redirect_sets_location() {
+        let location = Arc::new(ConfiguredLocation::new(
+            parse_location("return 308 https://example.com/new;").unwrap(),
+            ActiveAccessLog::Disabled,
+        ));
+        let router = NginxRouter::new(vec![location], ActiveAccessLog::Disabled, router_state());
+
+        let response = router
+            .oneshot(
+                http::Request::builder()
+                    .uri("/old")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "https://example.com/new"
         );
     }
 }

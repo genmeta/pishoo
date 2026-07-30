@@ -1,6 +1,7 @@
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 use dhttp::{h3x::dquic::binds::BindPattern, name::DhttpName};
+use http::StatusCode;
 use snafu::{Snafu, whatever};
 
 use super::Result;
@@ -31,6 +32,19 @@ pub struct ProxyPass {
     pub uri: http::Uri,
     pub proxy_host: String,
     pub explicit_path_and_query: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReturnResponse {
+    Status(StatusCode),
+    Text {
+        status: StatusCode,
+        body: String,
+    },
+    Redirect {
+        status: StatusCode,
+        location: http::HeaderValue,
+    },
 }
 
 impl ProxyPass {

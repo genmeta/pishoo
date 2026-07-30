@@ -1,4 +1,4 @@
-use http::{HeaderName, HeaderValue, Uri};
+use http::{HeaderName, HeaderValue, StatusCode, Uri};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 use crate::parse::{
@@ -7,7 +7,7 @@ use crate::parse::{
     source::SourceSpan,
     types::{
         DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
-        MimeTypesValidationError, ProxyPass,
+        MimeTypesValidationError, ProxyPass, ReturnResponse,
     },
 };
 
@@ -25,6 +25,94 @@ pub enum DefaultTypeError {
         span: SourceSpan,
         source: http::header::InvalidHeaderValue,
     },
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum ReturnResponseError {
+    #[snafu(display("invalid return directive argument count"))]
+    InvalidArgumentCount {
+        span: SourceSpan,
+        expected: &'static str,
+        actual: usize,
+    },
+    #[snafu(display("invalid return status code"))]
+    StatusCode {
+        span: SourceSpan,
+        source: http::status::InvalidStatusCode,
+    },
+    #[snafu(display("return does not support informational status codes"))]
+    InformationalStatus {
+        span: SourceSpan,
+        status: StatusCode,
+    },
+    #[snafu(display("return status `{status}` cannot include a response body"))]
+    BodylessStatus {
+        span: SourceSpan,
+        status: StatusCode,
+    },
+    #[snafu(display("invalid return redirect location"))]
+    RedirectLocation {
+        span: SourceSpan,
+        source: http::header::InvalidHeaderValue,
+    },
+}
+
+impl DirectiveValue for ReturnResponse {
+    type Error = ReturnResponseError;
+
+    fn span(input: &DirectiveInput<'_>) -> SourceSpan {
+        first_arg_span(input)
+    }
+}
+
+impl<'input, 'directive> TryFrom<&'input DirectiveInput<'directive>> for ReturnResponse {
+    type Error = ReturnResponseError;
+
+    fn try_from(input: &'input DirectiveInput<'directive>) -> Result<Self, Self::Error> {
+        let args = &input.directive.args;
+        let [status, rest @ ..] = args.as_slice() else {
+            return Err(ReturnResponseError::InvalidArgumentCount {
+                span: input.directive.span,
+                expected: "1 or 2",
+                actual: args.len(),
+            });
+        };
+        let status_span = status.span;
+        let status = status
+            .value
+            .parse::<StatusCode>()
+            .context(return_response_error::StatusCodeSnafu { span: status_span })?;
+        if status.is_informational() {
+            return Err(ReturnResponseError::InformationalStatus {
+                span: status_span,
+                status,
+            });
+        }
+        match rest {
+            [] => Ok(ReturnResponse::Status(status)),
+            [value] if status.is_redirection() => Ok(ReturnResponse::Redirect {
+                status,
+                location: HeaderValue::from_str(&value.value)
+                    .context(return_response_error::RedirectLocationSnafu { span: value.span })?,
+            }),
+            [value] if status != StatusCode::NO_CONTENT && status != StatusCode::NOT_MODIFIED => {
+                Ok(ReturnResponse::Text {
+                    status,
+                    body: value.value.clone(),
+                })
+            }
+            [_] => Err(ReturnResponseError::BodylessStatus {
+                span: status_span,
+                status,
+            }),
+            _ => Err(ReturnResponseError::InvalidArgumentCount {
+                span: input.directive.span,
+                expected: "1 or 2",
+                actual: args.len(),
+            }),
+        }
+    }
 }
 
 impl DirectiveValue for DefaultType {
@@ -348,6 +436,50 @@ mod tests {
             value.to_str().expect("default_type should be valid"),
             "text/html"
         );
+    }
+
+    #[test]
+    fn parse_return_builds_status_text_and_redirect_responses() {
+        let status = first_location("pishoo { server { listen all 5378; server_name example.com; ssl_certificate /tmp/server.crt; ssl_certificate_key /tmp/server.key; location / { return 204; } } }").unwrap();
+        assert!(matches!(
+            status.return_response(),
+            Some(crate::parse::types::ReturnResponse::Status(
+                http::StatusCode::NO_CONTENT
+            ))
+        ));
+
+        let text = first_location("pishoo { server { listen all 5378; server_name example.com; ssl_certificate /tmp/server.crt; ssl_certificate_key /tmp/server.key; location / { return 503 \"service unavailable\"; } } }").unwrap();
+        assert!(matches!(
+            text.return_response(),
+            Some(crate::parse::types::ReturnResponse::Text { status, body })
+                if *status == http::StatusCode::SERVICE_UNAVAILABLE && body == "service unavailable"
+        ));
+
+        let redirect = first_location("pishoo { server { listen all 5378; server_name example.com; ssl_certificate /tmp/server.crt; ssl_certificate_key /tmp/server.key; location / { return 308 https://example.com/new; } } }").unwrap();
+        assert!(matches!(
+            redirect.return_response(),
+            Some(crate::parse::types::ReturnResponse::Redirect { status, location })
+                if *status == http::StatusCode::PERMANENT_REDIRECT && location == "https://example.com/new"
+        ));
+    }
+
+    #[test]
+    fn parse_return_rejects_invalid_shapes_and_bodyless_status_bodies() {
+        for directive in [
+            "return;",
+            "return invalid;",
+            "return 103;",
+            "return 204 body;",
+            "return 503 one two;",
+        ] {
+            let conf = format!(
+                "pishoo {{ server {{ listen all 5378; server_name example.com; ssl_certificate /tmp/server.crt; ssl_certificate_key /tmp/server.key; location / {{ {directive} }} }} }}"
+            );
+            assert!(
+                crate::parse::parse_config_str_for_test(&conf).is_err(),
+                "directive `{directive}` should fail"
+            );
+        }
     }
 
     #[test]
