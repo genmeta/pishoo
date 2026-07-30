@@ -105,11 +105,11 @@ async fn proxy_inner(
     }
 
     let resp = http::Response::from_parts(parts, body);
-    Ok(super::gzip::compress_response(
-        location,
-        accept_encoding.as_deref(),
-        resp,
-    ))
+    Ok(
+        super::gzip::compress_response(location, accept_encoding.as_deref(), resp)
+            .await
+            .whatever_context::<_, Whatever>("failed to read upstream response body")?,
+    )
 }
 
 /// Forward the request to the configured upstream.
