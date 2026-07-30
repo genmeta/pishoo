@@ -21,9 +21,7 @@ env:
   DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}
   DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem
   DHTTP_BOOTSTRAP_URL: ${{ vars.DHTTP_BOOTSTRAP_URL }}
-  DHTTP_STUN_SERVER: ${{ vars.DHTTP_STUN_SERVER }}
   DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}
-  DHTTP_HTTP_DNS_SERVER: ${{ vars.DHTTP_HTTP_DNS_SERVER }}
   DHTTP_MDNS_SERVICE: ${{ vars.DHTTP_MDNS_SERVICE }}
   DHTTP_CERT_SERVER_URL: ${{ vars.DHTTP_CERT_SERVER_URL }}
 
@@ -159,9 +157,8 @@ jobs:
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
             DHTTP_ROOT_CA
-            DHTTP_STUN_SERVER
+            DHTTP_BOOTSTRAP_URL
             DHTTP_H3_DNS_SERVER
-            DHTTP_HTTP_DNS_SERVER
             DHTTP_MDNS_SERVICE
             DHTTP_CERT_SERVER_URL
             XTASK_RELEASE_S3_ACCESS_KEY_ID
@@ -340,9 +337,8 @@ jobs:
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
             DHTTP_ROOT_CA
-            DHTTP_STUN_SERVER
+            DHTTP_BOOTSTRAP_URL
             DHTTP_H3_DNS_SERVER
-            DHTTP_HTTP_DNS_SERVER
             DHTTP_MDNS_SERVICE
             DHTTP_CERT_SERVER_URL
             XTASK_RELEASE_S3_ACCESS_KEY_ID
@@ -491,9 +487,8 @@ jobs:
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
             DHTTP_ROOT_CA
-            DHTTP_STUN_SERVER
+            DHTTP_BOOTSTRAP_URL
             DHTTP_H3_DNS_SERVER
-            DHTTP_HTTP_DNS_SERVER
             DHTTP_MDNS_SERVICE
             DHTTP_CERT_SERVER_URL
             XTASK_RELEASE_S3_ACCESS_KEY_ID
