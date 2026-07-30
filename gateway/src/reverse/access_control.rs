@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use axum::{
     extract::{Request, State},
@@ -19,7 +19,12 @@ use dhttp::{
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use snafu::Report;
+use tokio::sync::{Mutex, OnceCell};
 use tracing::{info, warn};
+
+type DynConnectionState = ConnectionState<dyn quic::DynConnection>;
+type ClientNameCell = Arc<OnceCell<Option<String>>>;
+type ClientNameCache = Vec<(Weak<DynConnectionState>, ClientNameCell)>;
 
 struct AccessHttpRequest<'a> {
     client_name: Option<&'a str>,
@@ -76,6 +81,55 @@ impl LocationRuleRequest for AccessHttpRequest<'_> {
 pub struct AccessControlState {
     pub access_rules: Arc<dyn LocationRuleEvaluator + Send + Sync>,
     pub server_name: Arc<str>,
+    client_names: Arc<Mutex<ClientNameCache>>,
+}
+
+impl AccessControlState {
+    pub fn new(
+        access_rules: Arc<dyn LocationRuleEvaluator + Send + Sync>,
+        server_name: Arc<str>,
+    ) -> Self {
+        Self {
+            access_rules,
+            server_name,
+            client_names: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn client_name(&self, connection: &Arc<DynConnectionState>) -> Option<String> {
+        let candidate = Arc::downgrade(connection);
+        let client_name = {
+            let mut cache = self.client_names.lock().await;
+            cache.retain(|(connection, _)| connection.strong_count() > 0);
+
+            if let Some((_, client_name)) = cache
+                .iter()
+                .find(|(connection, _)| Weak::ptr_eq(connection, &candidate))
+            {
+                client_name.clone()
+            } else {
+                let client_name = Arc::new(OnceCell::new());
+                cache.push((candidate, client_name.clone()));
+                client_name
+            }
+        };
+
+        match client_name
+            .get_or_try_init(|| async {
+                connection
+                    .remote_authority()
+                    .await
+                    .map(|authority| authority.map(|authority| authority.name().to_owned()))
+            })
+            .await
+        {
+            Ok(client_name) => client_name.clone(),
+            Err(error) => {
+                warn!(error = %error, "failed to fetch remote authority from connection");
+                None
+            }
+        }
+    }
 }
 
 /// Axum middleware that enforces firewall access control rules.
@@ -89,18 +143,8 @@ pub async fn access_control(
     request: Request,
     next: Next,
 ) -> Response {
-    let client_name = match request
-        .extensions()
-        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
-    {
-        Some(conn) => match conn.remote_authority().await {
-            Ok(Some(authority)) => Some(authority.name().to_owned()),
-            Ok(None) => None,
-            Err(error) => {
-                warn!(error = %error, "failed to fetch remote authority from connection");
-                None
-            }
-        },
+    let client_name = match request.extensions().get::<Arc<DynConnectionState>>() {
+        Some(connection) => state.client_name(connection).await,
         None => None,
     };
     let http_request = AccessHttpRequest::new(client_name.as_deref(), &request);
@@ -195,10 +239,10 @@ mod tests {
 
     #[tokio::test]
     async fn backend_error_fails_closed_with_forbidden() {
-        let state = AccessControlState {
-            access_rules: Arc::new(FailingEvaluator),
-            server_name: Arc::from("server.pilot.dhttp.net"),
-        };
+        let state = AccessControlState::new(
+            Arc::new(FailingEvaluator),
+            Arc::from("server.pilot.dhttp.net"),
+        );
         let app = Router::new()
             .route("/", get(|| async { "ok" }))
             .layer(from_fn_with_state(state, super::access_control));
