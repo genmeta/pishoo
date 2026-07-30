@@ -195,6 +195,16 @@ fn duplicate_scalar_directive_is_rejected() {
 }
 
 #[test]
+fn root_rejects_network_listen_directive() {
+    let failure = parse_root("pishoo { network_listen en0 443; }").unwrap_err();
+    assert!(
+        snafu::Report::from_error(&failure)
+            .to_string()
+            .contains("unknown directive `network_listen`")
+    );
+}
+
+#[test]
 fn server_accepts_multiple_location_blocks() {
     let server = parse_direct_server("location / {} location /files {}").unwrap();
 
