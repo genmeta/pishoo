@@ -41,5 +41,10 @@ refs/
 doc
 tmp/
 
+# Local reliability diagnostics
+/docs/ha-http3-fix-commits.md
+/config/pishoo-stun-*.conf
+/config/pishoo2.conf
+
 TODO
 pishoo.pid
