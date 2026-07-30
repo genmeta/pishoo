@@ -1010,9 +1010,8 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.6.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63d2eb9b7468efa85ff15f00c6e876cee46c2b3c018664b7158b407955d6e931"
+version = "0.6.0-beta.5"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "bon",
  "bytes",
@@ -1020,6 +1019,7 @@ dependencies = [
  "dhttp-home",
  "dhttp-identity",
  "dhttp-log",
+ "dquic",
  "dyns",
  "futures",
  "h3x",
@@ -1035,8 +1035,7 @@ dependencies = [
 [[package]]
 name = "dhttp-access"
 version = "0.4.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de04ba6e93d5e47b75d8381377a5d710dac52baed5790c56ec93a4e31f7e2756"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1057,8 +1056,7 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e64e413db3551f260e158d18dcd73906dbebf938399dd3bcb8a286e612fa0ee"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1090,8 +1088,7 @@ dependencies = [
 [[package]]
 name = "dhttp-log"
 version = "0.1.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77e7070b6a8ead2399f5d8f959cd8c8b10ccd769651ed67e0b36d54cc4bce35e"
+source = "git+https://github.com/genmeta/dhttp.git?branch=fix%2Fha-http3-reliability#2ca942bc6758a25fb3f2b5ddec1eebe71a75b3cc"
 dependencies = [
  "chrono",
  "dhttp-identity",
@@ -1686,8 +1683,7 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54d7e49e7fe31d63059488ac6635d663ba53a8211657faae18d5940757e034ae"
+source = "git+https://github.com/genmeta/h3x.git?branch=fix%2Fha-http3-reliability#8649fe9a286fe3086a6b6501e7c123b8756388a4"
 dependencies = [
  "arc-swap",
  "async-channel",
