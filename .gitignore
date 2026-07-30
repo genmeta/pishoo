@@ -21,6 +21,12 @@ tarpaulin-report.html
 *.log
 .DS_Store
 
+# Local environment configuration (keep the shared template in version control)
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # Keychain files
 keychain/test.genmeta.net
 keychain/mcp.test.genmeta.net
