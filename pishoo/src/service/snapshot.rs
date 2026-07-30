@@ -87,10 +87,10 @@ impl ServerService {
             server_access_log.clone(),
             self.router_state.clone(),
         );
-        let access_state = AccessControlState {
-            access_rules: self.access_rules.clone(),
-            server_name: Arc::from(self.server_name.as_full()),
-        };
+        let access_state = AccessControlState::new(
+            self.access_rules.clone(),
+            Arc::from(self.server_name.as_full()),
+        );
         let access_log_state = AccessLogState {
             server: server_access_log,
         };
