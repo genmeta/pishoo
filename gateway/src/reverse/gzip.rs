@@ -6,6 +6,14 @@ use tokio_util::io::ReaderStream;
 
 use crate::parse::config::LocationConfig;
 
+const MAX_BUFFERED_PROXY_RESPONSE: u64 = 2 * 1024 * 1024;
+
+fn should_buffer_proxy_response(size_hint: &http_body::SizeHint) -> bool {
+    size_hint
+        .exact()
+        .is_some_and(|length| length <= MAX_BUFFERED_PROXY_RESPONSE)
+}
+
 /// Gzip 压缩配置，从 location 节点中提取
 pub struct GzipConfig {
     pub enabled: bool,
@@ -86,22 +94,19 @@ impl GzipConfig {
 /// Compress a hyper `Incoming` response body if the location config requires it.
 ///
 /// Returns a new response with the body wrapped in gzip, or the original response unchanged.
-pub fn compress_response(
+pub async fn compress_response(
     location: &Arc<LocationConfig>,
     accept_encoding: Option<&str>,
     response: http::Response<hyper::body::Incoming>,
-) -> http::Response<axum::body::Body> {
+) -> Result<http::Response<axum::body::Body>, hyper::Error> {
     use futures::TryStreamExt;
 
     let gzip = GzipConfig::from_location(location, accept_encoding);
 
     let (mut parts, body) = response.into_parts();
 
-    let content_length = parts
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
+    let body_size = http_body::Body::size_hint(&body);
+    let content_length = body_size.exact();
 
     let should_compress = gzip.should_compress(&parts, content_length);
 
@@ -114,9 +119,42 @@ pub fn compress_response(
         let compressed = GzipEncoder::with_quality(body_stream, gzip.level());
         let stream = ReaderStream::new(compressed);
         let body = axum::body::Body::from_stream(stream);
-        http::Response::from_parts(parts, body)
+        Ok(http::Response::from_parts(parts, body))
+    } else if should_buffer_proxy_response(&body_size) {
+        // Finite proxy responses are emitted as one body frame. Besides reducing IPC
+        // chatter, this prevents a worker-side stream teardown from truncating a
+        // response between the small chunks produced by Hyper's HTTP/1 decoder.
+        let bytes = http_body_util::BodyExt::collect(body).await?.to_bytes();
+        Ok(http::Response::from_parts(
+            parts,
+            axum::body::Body::from(bytes),
+        ))
     } else {
-        http::Response::from_parts(parts, axum::body::Body::new(body))
+        Ok(http::Response::from_parts(
+            parts,
+            axum::body::Body::new(body),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http_body::SizeHint;
+
+    use super::{MAX_BUFFERED_PROXY_RESPONSE, should_buffer_proxy_response};
+
+    #[test]
+    fn buffers_only_exact_bodies_within_the_limit() {
+        let mut unknown = SizeHint::new();
+        unknown.set_lower(1);
+
+        assert!(!should_buffer_proxy_response(&unknown));
+        assert!(should_buffer_proxy_response(&SizeHint::with_exact(
+            MAX_BUFFERED_PROXY_RESPONSE,
+        )));
+        assert!(!should_buffer_proxy_response(&SizeHint::with_exact(
+            MAX_BUFFERED_PROXY_RESPONSE + 1,
+        )));
     }
 }
 
