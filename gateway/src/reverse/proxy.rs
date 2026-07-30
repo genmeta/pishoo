@@ -1,4 +1,8 @@
-use std::{str::FromStr, sync::Arc};
+use std::{
+    str::FromStr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use axum::{Extension, response::IntoResponse};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,7 +17,10 @@ use http::{
 };
 use http_body_util::Empty;
 use hyper::{body::Incoming, upgrade::Upgraded};
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+};
 use snafu::{Report, ResultExt, ensure_whatever};
 use tokio::{
     io::{self, AsyncRead, AsyncWrite},
@@ -27,6 +34,19 @@ use crate::{
     parse::{pattern::Pattern, types::ProxyPass},
     reverse::{location::LocationMatch, tunnel::TunnelIo},
 };
+
+type HttpUpstreamClient = Client<HttpConnector, axum::body::Body>;
+
+fn http_upstream_client() -> &'static HttpUpstreamClient {
+    static CLIENT: OnceLock<HttpUpstreamClient> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_timer(TokioTimer::new())
+            .pool_max_idle_per_host(32)
+            .build_http()
+    })
+}
 
 /// Axum-style handler for reverse proxy requests.
 ///
@@ -72,6 +92,8 @@ async fn proxy_inner(
 
     debug!("sending response");
     let (mut parts, body) = resp.into_parts();
+
+    command::strip_hop_by_hop_headers(&mut parts.headers);
 
     // add custom response headers
     command::add_header(location, &mut parts);
@@ -133,12 +155,26 @@ fn pass(
 
         match scheme {
             "http" => {
-                let io = TcpStream::connect((host, port))
+                let authority = proxy_pass.proxy_host.as_str();
+                new_parts.uri = Uri::builder()
+                    .scheme("http")
+                    .authority(authority)
+                    .path_and_query(
+                        target_uri
+                            .path_and_query()
+                            .map(|value| value.as_str())
+                            .unwrap_or("/"),
+                    )
+                    .build()
+                    .whatever_context::<_, Whatever>(format!(
+                        "failed to build HTTP upstream URI for {authority}"
+                    ))?;
+                Ok(http_upstream_client()
+                    .request(Request::from_parts(new_parts, body))
                     .await
                     .whatever_context::<_, Whatever>(format!(
-                        "cannot connect to target server {host}:{port}"
-                    ))?;
-                send_request(io, new_parts, body, target_uri).await
+                        "failed to send request to target {host}:{port}"
+                    ))?)
             }
             "https" => {
                 let io = super::upstream_tls::connect_https(&location, &proxy_pass.uri).await?;
@@ -534,7 +570,15 @@ fn append_query_and_fragment(path: String, query: Option<&str>, fragment: Option
 
 #[cfg(test)]
 mod tests {
-    use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{
+        convert::Infallible,
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use base64::Engine as _;
     use futures::{SinkExt, StreamExt};
@@ -552,7 +596,7 @@ mod tests {
     use http::{
         HeaderMap, HeaderValue, Response, StatusCode, header::SEC_WEBSOCKET_ACCEPT, uri::Authority,
     };
-    use http_body_util::{Empty, combinators::UnsyncBoxBody};
+    use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
     use hyper::{body::Incoming, server::conn::http1, service::service_fn};
     use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
     use tokio_tungstenite::{
@@ -578,6 +622,28 @@ mod tests {
         let location = parse_location(&format!("proxy_pass http://{upstream};")).unwrap();
         let configured = Arc::new(ConfiguredLocation::new(location, ActiveAccessLog::Disabled));
         match_location(&[configured], "/ws").unwrap()
+    }
+
+    async fn start_counted_http_upstream() -> (SocketAddr, Arc<AtomicUsize>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_for_task = Arc::clone(&accepted);
+        let task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                accepted_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let service = service_fn(|_request: Request<Incoming>| async move {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (address, accepted, task)
     }
 
     async fn start_upstream_websocket_echo() -> (SocketAddr, JoinHandle<()>) {
@@ -701,6 +767,29 @@ mod tests {
         assert_eq!(nonce.len(), 16);
     }
 
+    #[tokio::test]
+    async fn reuses_http_upstream_connection_after_response_body_is_consumed() {
+        let (upstream, accepted, upstream_task) = start_counted_http_upstream().await;
+        let loc = reverse_proxy_location(upstream);
+
+        for path in ["/first", "/second"] {
+            let request = Request::builder()
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = proxy_inner(&loc, request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(CONNECTION));
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                Bytes::from_static(b"ok")
+            );
+        }
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        upstream_task.abort();
+    }
+
     #[test]
     fn recognizes_h3_websocket_extended_connect() {
         let mut request = Request::builder()
@@ -750,6 +839,7 @@ mod tests {
                 websocket.next().await.unwrap().unwrap(),
                 Message::Text("proxied h3 websocket".into())
             );
+
             websocket.close(None).await.unwrap();
         };
 
