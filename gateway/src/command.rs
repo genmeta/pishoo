@@ -5,7 +5,7 @@ pub(crate) mod variables;
 
 pub use file::IndexError;
 pub(crate) use file::index;
-pub(crate) use header::{add_header, content_type, proxy_set_header};
+pub(crate) use header::{add_header, content_type, proxy_set_header, strip_hop_by_hop_headers};
 
 pub(crate) fn acl(allow: &[String], deny: &[String]) -> acl::Acl {
     let allow = acl::parse_host_matches(allow);
