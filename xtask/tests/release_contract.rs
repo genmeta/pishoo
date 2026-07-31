@@ -22,6 +22,17 @@ fn release_contract(root: &Path) -> ReleaseContract {
 }
 
 #[test]
+fn deb_packaging_disables_sparse_binary_copies() {
+    let rules = std::fs::read_to_string(repository_root().join("xtask/deb/rules"))
+        .expect("deb rules should be readable");
+
+    for binary in ["pishoo", "pishoo-worker", "pishoo-ssh-session"] {
+        let copy = format!("cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/{binary}");
+        assert!(rules.contains(&copy), "missing non-sparse copy for {binary}");
+    }
+}
+
+#[test]
 fn pishoo_common_package_version_follows_pishoo() {
     let root = repository_root();
     let contract = release_contract(&root);

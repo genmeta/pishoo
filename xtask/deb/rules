@@ -60,13 +60,13 @@ endif
 override_dh_auto_install:
 ifdef TRIPLE
 	mkdir -p debian/pishoo/usr/bin
-	cp $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo debian/pishoo/usr/bin/
+	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo debian/pishoo/usr/bin/
 	chmod 755 debian/pishoo/usr/bin/pishoo
 	mkdir -p debian/pishoo/usr/libexec/pishoo
-	cp $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-worker debian/pishoo/usr/libexec/pishoo/
+	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-worker debian/pishoo/usr/libexec/pishoo/
 	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-worker
 ifdef PISHOO_SSH_SESSION_BIN
-	cp $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
+	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
 	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-ssh-session
 endif
 endif
