@@ -8,20 +8,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
 
-Pishoo takes its name from Pixiu(貔貅), an auspicious creature in ancient Chinese mythology. The name reflects its role in protecting local data, securing the network boundary, and controlling external access. Like Nginx, Pishoo provides web serving, reverse proxying, load balancing, and NAT traversal support in the DHttp protocol stack. Unlike traditional reverse proxies such as Nginx, which typically rely on fixed listening ports and publicly reachable network exposure, DHttp does not impose that requirement. As a result, Pishoo can be deployed on any endpoint.
+Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chinese mythology. The name reflects its role in protecting local data, securing the network boundary, and controlling external access. Like Nginx in the conventional HTTP stack, Pishoo provides web serving, reverse proxying, load balancing, and support for NAT traversal in the DHttp stack. The key difference is how services are exposed. A conventional Nginx deployment typically exposes a service through a fixed listening port on a publicly reachable address. With DHttp, the service itself does not need a fixed public IP address or port, allowing Pishoo to be deployed on any endpoint.
 
 ## Why Pishoo?
 
-**Gateways Protect Data Assets:** Why are your privacy and data so often leak while internet platforms seem less concerned? Platforms have gateways! It's the gateway that plays a critical role in protecting your private data. Think about it: isn't a gate meant to protect private territory? So, get Pishoo and put the gateway in front of your private data assets.
+**Gateways Protect Data Assets:** Why does your private data often seem more exposed than the data held by large platforms? One reason is that large platforms place gateways in front of their services. Like a gate that protects private territory, a gateway helps control what a service exposes and who can access it. Put Pishoo in front of the data and services you run yourself to retain that control.
 
-- **Personal Server:** Cloud servers are not the only option. You should be free to choose any device as your personal server.
-- **Agent Home:** The best way to access an intelligent assistant is not through a chat app, but directly in your browser. To make that happen, let your agents live behind Pishoo.
+- **Personal Server:** Cloud servers are not your only option. With Pishoo, you are free to choose any device as your personal server.
+- **Agent Home:** The best way to access your AI agent is directly in your browser, not through a chat app. To make that possible, run your agent behind Pishoo.
 
 ## How it works
 
 - **DHttp Inside:** Pishoo is a DHttp-native gateway that lets any endpoint expose services without requiring a public IP address or a fixed listening port.
 - **APIs Everywhere:** The agentic internet is driving a new wave of API openness, in which every agent ultimately has its own open API.
-- **Access Control:** API access requires authorization, not a login—an authorized name is all it need.
+- **Access Control:** Open APIs do not mean unrestricted access. Pishoo grants API access to authorized names rather than requiring a traditional login.
 
 ## Getting started
 
@@ -55,9 +55,9 @@ brew update
 brew install pishoo gmutils
 ```
 
-### Deploy Server Name and Certs
+### Create an identity
 
-You can purchase a domain name and certificate, then place them in the appropriate location. However, we recommend using `gmutils` to install them automatically.
+You can purchase a name and certificate, then place them in the appropriate location. However, we recommend using `gmutils` to install them automatically.
 
 ```sh
 genmeta identity apply
