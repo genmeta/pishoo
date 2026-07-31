@@ -536,7 +536,7 @@ fn append_query_and_fragment(path: String, query: Option<&str>, fragment: Option
 mod tests {
     use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 
-    use base64::Engine as _;
+    use base64::Engine;
     use futures::{SinkExt, StreamExt};
     use h3x::{
         connection::ConnectionBuilder,

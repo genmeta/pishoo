@@ -1,4 +1,6 @@
 use std::{
+    io::Read,
+    os::unix::fs::PermissionsExt,
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -50,23 +52,22 @@ async fn unix_launcher_sets_explicit_exec_environment() {
     let user = current_user();
     let home = unique_home_dir("pishoo-launcher-env");
     std::fs::create_dir_all(&home).expect("create temp home");
-
-    let launched = launch_worker(
-        Path::new("/usr/bin/env"),
-        user.uid,
-        user.gid,
-        &user.name,
-        &home,
+    let worker = home.join("print-environment");
+    std::fs::write(
+        &worker,
+        "#!/bin/sh\nprintf '%s\\n' \"$HOME\" \"$USER\" \"$LOGNAME\" \"$PATH\" \"$PISHOO_USER\" >&3\n",
     )
-    .expect("launch worker");
+    .expect("write environment probe");
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700))
+        .expect("make environment probe executable");
 
+    let launched =
+        launch_worker(&worker, user.uid, user.gid, &user.name, &home).expect("launch worker");
     let mut handle = launched.handle;
-
-    // /usr/bin/env prints environment to inherited stdout and exits.
-    // Since stdout is no longer piped (it is inherited), we can only verify
-    // the process exits successfully, confirming the exec environment was
-    // valid enough for `env` to run.
-    drop(launched.mux_fd);
+    let mut ipc = std::os::unix::net::UnixStream::from(launched.mux_fd);
+    let mut output = String::new();
+    ipc.read_to_string(&mut output)
+        .expect("read environment probe output");
 
     let mut exit_status = None;
     for _ in 0..20 {
@@ -79,6 +80,18 @@ async fn unix_launcher_sets_explicit_exec_environment() {
     let status = exit_status.expect("env worker exited");
     assert!(
         matches!(status, WaitStatus::Exited(_, 0)),
-        "env worker must exit successfully"
+        "environment probe must exit successfully"
+    );
+
+    let values = output.lines().collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        [
+            home.to_str().expect("temporary home is valid UTF-8"),
+            user.name.as_str(),
+            user.name.as_str(),
+            std::env::var("PATH").as_deref().unwrap_or("/usr/bin:/bin"),
+            user.name.as_str(),
+        ]
     );
 }

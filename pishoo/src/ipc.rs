@@ -42,7 +42,7 @@ pub struct WorkerHello {
 // Control plane errors
 // ---------------------------------------------------------------------------
 
-/// Error returned by [`ControlPlane::listen`].
+/// Error returned by [`ControlPlane::listener`].
 #[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
 pub enum ListenError {
@@ -56,7 +56,7 @@ pub enum ListenError {
     Call { source: remoc::rtc::CallError },
 }
 
-/// Error returned by [`ControlPlane::connect`].
+/// Error returned by [`ControlPlane::connector`].
 #[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
 pub enum ConnectError {
@@ -88,7 +88,8 @@ pub enum SpawnSessionError {
 ///
 /// Workers call these methods to request listeners and connectors from root.
 /// The returned [`IpcListenClient`] / [`IpcConnectClient`] are used by the
-/// worker to construct [`IpcListener`] / [`IpcConnector`] with the local
+/// worker to construct [`dhttp::h3x::ipc::quic::IpcListener`] /
+/// [`dhttp::h3x::ipc::quic::IpcConnector`] with the local
 /// [`FdTransfer`](dhttp::h3x::ipc::transport::FdTransfer).
 #[remoc::rtc::remote]
 pub trait ControlPlane: Send + Sync {
@@ -96,14 +97,14 @@ pub trait ControlPlane: Send + Sync {
     ///
     /// Root creates the listener, wraps it in an IPC `ListenAdapter`, and
     /// returns an [`IpcListenClient`] that the worker constructs an
-    /// [`IpcListener`](dhttp::h3x::ipc::capability::listener::IpcListener) from.
+    /// [`dhttp::h3x::ipc::quic::IpcListener`] from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
 
     /// Request an outbound QUIC connector.
     ///
     /// Root creates the connector, wraps it in an IPC `ConnectAdapter`, and
     /// returns an [`IpcConnectClient`] that the worker constructs an
-    /// [`IpcConnector`](dhttp::h3x::ipc::capability::connector::IpcConnector) from.
+    /// [`dhttp::h3x::ipc::quic::IpcConnector`] from.
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError>;
 
     /// Request root to spawn an SSH session child process for the given user.

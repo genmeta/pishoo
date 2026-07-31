@@ -2,7 +2,7 @@
 //!
 //! Submodules:
 //! - [`accept`]: per-server accept loop and listener swap.
-//! - [`runtime`]: [`runtime::ServerRuntime`] / [`runtime::RuntimeRegistry`] /
+//! - [`runtime`]: [`runtime::RuntimeRegistry`] /
 //!   [`runtime::WorkerRuntime`] — lifecycle and diff-based source application.
 //! - [`snapshot`]: [`snapshot::ServerService`] — immutable per-server
 //!   configuration handed to accept loops.

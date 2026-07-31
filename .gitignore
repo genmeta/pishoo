@@ -27,11 +27,6 @@ tarpaulin-report.html
 .env.*.local
 !.env.example
 
-# Keychain files
-keychain/test.genmeta.net
-keychain/mcp.test.genmeta.net
-keychain/borber.pilot.genmeta.net
-
 # Agent instructions
 AGENTS.md
 libstun.rlib
