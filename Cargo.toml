@@ -96,7 +96,7 @@ libc = "0.2"
 nix = "0.31"
 
 # --- Database ORM ---
-sea-orm = { version = "1", features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "2", features = ["runtime-tokio-rustls"] }
 sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
 
 # --- workspace ---
