@@ -97,7 +97,7 @@ nix = "0.31"
 
 # --- Database ORM ---
 sea-orm = { version = "1", features = ["runtime-tokio-rustls"] }
-sea-orm-migration = { version = "1", features = ["runtime-tokio-rustls"] }
+sea-orm-migration = { version = "2", features = ["runtime-tokio-rustls"] }
 
 # --- workspace ---
 gateway = { path = "gateway", default-features = false }
