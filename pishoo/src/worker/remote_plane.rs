@@ -2,12 +2,13 @@
 //!
 //! Wraps a [`ControlPlaneClient`] (remoc RPC client) and implements
 //! [`gateway::control_plane::ControlPlane`]. The returned
-//! [`IpcListener`] / [`IpcConnector`] wrap the RPC clients received from
+//! [`dhttp::h3x::ipc::quic::IpcListener`] /
+//! [`dhttp::h3x::ipc::quic::IpcConnector`] wrap the RPC clients received from
 //! root, combined with the worker-side [`FdTransfer`] for MuxChannel FD
 //! reception.
 //!
 //! For SSH session spawning, the control plane itself implements
-//! [`SpawnSession`]: calls the remoc RPC, then receives the session
+//! `SpawnSession`: calls the remoc RPC, then receives the session
 //! child's MuxChannel FD via a receiver-chosen FD transfer ID.
 
 #[cfg(feature = "sshd")]

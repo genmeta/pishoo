@@ -191,25 +191,21 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Once};
+    use std::path::PathBuf;
 
     use super::*;
     use crate::parse::tests::parse_location;
 
-    static INSTALL_CRYPTO_PROVIDER: Once = Once::new();
-
     fn ensure_crypto_provider() {
-        INSTALL_CRYPTO_PROVIDER.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .expect("ring crypto provider should install once");
-        });
+        // The provider is process-global. Another parallel test may have
+        // already installed a compatible provider, which is not an error.
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    fn fixture_path(relative: &str) -> PathBuf {
+    fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(relative)
+            .join("tests/fixtures/upstream_tls")
+            .join(name)
     }
 
     fn test_location(values: &[(&'static str, PathBuf)]) -> LocationConfig {
@@ -223,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_load_cert_chain_from_existing_fixture() {
-        let cert_path = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
+        let cert_path = fixture_path("test.example.pem");
 
         let certs = load_cert_chain(&cert_path, "test fixture certificate")
             .expect("fixture certificate should load");
@@ -233,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_load_private_key_from_existing_fixture() {
-        let key_path = fixture_path("keychain/test.genmeta.net/test.genmeta.net.key");
+        let key_path = fixture_path("test.example.key");
 
         let key = load_private_key(&key_path).expect("fixture private key should load");
 
@@ -244,7 +240,7 @@ mod tests {
     fn test_build_client_config_with_trusted_ca_only() {
         ensure_crypto_provider();
 
-        let trusted_ca = fixture_path("keychain/root.crt");
+        let trusted_ca = fixture_path("root.crt");
         let location = test_location(&[("proxy_ssl_trusted_certificate", trusted_ca)]);
         let client_config = build_client_config(&location).expect("client config should build");
 
@@ -255,9 +251,9 @@ mod tests {
     fn test_build_client_config_with_client_identity() {
         ensure_crypto_provider();
 
-        let trusted_ca = fixture_path("keychain/root.crt");
-        let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
-        let client_key = fixture_path("keychain/test.genmeta.net/test.genmeta.net.key");
+        let trusted_ca = fixture_path("root.crt");
+        let client_cert = fixture_path("test.example.pem");
+        let client_key = fixture_path("test.example.key");
         let location = test_location(&[
             ("proxy_ssl_trusted_certificate", trusted_ca),
             ("proxy_ssl_certificate", client_cert),
@@ -270,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_build_client_config_rejects_incomplete_identity() {
-        let client_cert = fixture_path("keychain/test.genmeta.net/test.genmeta.net.pem");
+        let client_cert = fixture_path("test.example.pem");
         let error = parse_location(&format!("proxy_ssl_certificate {};", client_cert.display()))
             .expect_err("incomplete identity should fail");
 

@@ -37,7 +37,7 @@ fn local_connector_type_is_dhttp_endpoint() {
 fn worker_does_not_embed_root_cert_store() {
     let worker_source = include_str!("../src/bin/pishoo_worker.rs");
     assert!(
-        !worker_source.contains("include_bytes!(\"../../../keychain/root.crt\")"),
+        !worker_source.contains("include_bytes!("),
         "worker must not assemble root cert store locally"
     );
 }

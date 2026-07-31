@@ -366,6 +366,33 @@ mod tests {
             gecos: std::ffi::CString::new("").unwrap(),
             dir: PathBuf::from("/home/alice"),
             shell: PathBuf::from("/bin/sh"),
+            #[cfg(any(
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "ios",
+                target_os = "macos",
+                target_os = "netbsd",
+                target_os = "openbsd",
+            ))]
+            change: 0,
+            #[cfg(any(
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "ios",
+                target_os = "macos",
+                target_os = "netbsd",
+                target_os = "openbsd",
+            ))]
+            expire: 0,
+            #[cfg(any(
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "ios",
+                target_os = "macos",
+                target_os = "netbsd",
+                target_os = "openbsd",
+            ))]
+            class: std::ffi::CString::default(),
         };
         assert_eq!(
             select_worker_dhttp_home(&target).as_path(),
