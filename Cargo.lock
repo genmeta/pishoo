@@ -1010,9 +1010,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.6.0-beta.4"
+version = "0.6.0-beta.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63d2eb9b7468efa85ff15f00c6e876cee46c2b3c018664b7158b407955d6e931"
+checksum = "862330de248ab781141f03ef4e7666a4bb4c2acd047bb272c2334cb193cf97d6"
 dependencies = [
  "bon",
  "bytes",
@@ -1020,6 +1020,7 @@ dependencies = [
  "dhttp-home",
  "dhttp-identity",
  "dhttp-log",
+ "dquic",
  "dyns",
  "futures",
  "h3x",
