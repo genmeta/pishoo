@@ -1,13 +1,12 @@
 name: Release
 
 on:
-  pull_request:
-  workflow_dispatch:
   push:
-    branches:
-      - master
+    branches: ["main"]
     tags:
-      - 'v*'
+      - "v*"
+  pull_request:
+    branches: ["main"]
 
 permissions:
   contents: write
@@ -21,6 +20,7 @@ env:
   XTASK_RELEASE_S3_ENDPOINT_URL: ${{ vars.XTASK_RELEASE_S3_ENDPOINT_URL }}
   DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}
   DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem
+  DHTTP_BOOTSTRAP_URL: ${{ vars.DHTTP_BOOTSTRAP_URL }}
   DHTTP_STUN_SERVER: ${{ vars.DHTTP_STUN_SERVER }}
   DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}
   DHTTP_HTTP_DNS_SERVER: ${{ vars.DHTTP_HTTP_DNS_SERVER }}
@@ -125,7 +125,6 @@ jobs:
           print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
           PY
 
-
       - name: Install Rust
         run: |
           rustup toolchain install nightly --profile minimal
@@ -206,7 +205,7 @@ jobs:
           cargo xtask package --overwrite-manifest \
             deb "${deb_args[@]}" --features sshd,pam
 
-      - name: Publish S3 for deb artifacts
+      - name: Publish or dry-run S3 for deb artifacts
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
@@ -224,6 +223,7 @@ jobs:
           if [[ "$mode" == "dry-run" ]]; then
             publish_cmd+=(--dry-run)
           fi
+          echo "S3 publish mode: $mode"
           "${publish_cmd[@]}" --publish-report target/publish-reports/deb.toml deb
 
       - name: Upload deb packages to GitHub Release
@@ -308,7 +308,6 @@ jobs:
           pem = os.environ["DHTTP_ROOT_CA_PEM"]
           print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
           PY
-
 
       - name: Install Rust
         run: |
