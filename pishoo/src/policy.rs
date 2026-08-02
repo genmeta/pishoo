@@ -206,19 +206,19 @@ mod tests {
     }
 
     async fn create_minimal_access_schema(db: &sea_orm::DatabaseConnection) {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE location_rule_sets (id INTEGER PRIMARY KEY AUTOINCREMENT, pattern JSON NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)".to_owned(),
         ))
         .await
         .expect("create location rule sets");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "CREATE TABLE location_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, location_id INTEGER NOT NULL, action INTEGER NOT NULL, exprs JSON NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(location_id) REFERENCES location_rule_sets(id) ON DELETE CASCADE)".to_owned(),
         ))
         .await
         .expect("create location rules");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "INSERT INTO location_rule_sets (id, pattern, created_at, updated_at) VALUES (1, '\"/\"', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')".to_owned(),
         ))
@@ -227,7 +227,7 @@ mod tests {
     }
 
     async fn replace_root_rule(db: &sea_orm::DatabaseConnection, action: i32, expr: &str) {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             "DELETE FROM location_rules WHERE location_id = 1".to_owned(),
         ))
@@ -239,7 +239,7 @@ mod tests {
         })
         .to_string()
         .replace('\'', "''");
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             format!(
                 "INSERT INTO location_rules (location_id, action, exprs, created_at, updated_at) VALUES (1, {action}, '{expr_json}', '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z')"
