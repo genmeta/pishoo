@@ -5,7 +5,7 @@ use std::sync::{
 
 use dhttp::{
     certificate::{
-        CertificateChainKey, CertificateChainKind, CertificateSequence, DhttpSubjectKeyIdentifier,
+        CertificateChainKey, CertificateSequence, CertificateUsage, DhttpSubjectKeyIdentifier,
         OwnerHash,
     },
     identity::Identity,
@@ -58,7 +58,7 @@ fn dhttp_subject_key_identifier_der() -> Vec<u8> {
     let value = DhttpSubjectKeyIdentifier::new(
         CertificateChainKey::new(
             CertificateSequence::from(0u8),
-            CertificateChainKind::Primary,
+            CertificateUsage::ClientAndServer,
         ),
         owner_hash,
     )
