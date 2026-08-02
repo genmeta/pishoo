@@ -84,9 +84,10 @@ case ",$features," in
 esac
 export PISHOO_WORKER_BIN=/usr/libexec/pishoo/pishoo-worker
 export HOME=/tmp
-export RUSTUP_HOME=/opt/rustup
-export CARGO_HOME=/opt/cargo
-export PATH=/opt/cargo/bin:/usr/local/zig:$PATH
+: "${RUSTUP_HOME:=/usr/local/rustup}"
+: "${CARGO_HOME:=/usr/local/cargo}"
+export RUSTUP_HOME CARGO_HOME
+export PATH="$CARGO_HOME/bin:/usr/local/zig:$PATH"
 export TRIPLE=$target
 export ZIG_TARGET=$target
 export BUILD_PROFILE=$profile
