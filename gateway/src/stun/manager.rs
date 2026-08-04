@@ -19,7 +19,7 @@ use dhttp::{
         },
         qtraversal::{
             nat::{
-                client::{NatType, StunClientsComponent},
+                client::{NatType, StunClientComponent},
                 router::{StunRouter, StunRouterComponent},
                 server::{StunServer, StunServerConfig},
             },
@@ -332,10 +332,11 @@ fn collect_fullcone_bind_uris(network: &Arc<Network>) -> HashSet<BindUri> {
         };
         let is_fullcone = bind_iface
             .borrow()
-            .with_component(|clients: &StunClientsComponent| {
-                clients.with_clients(|map| {
-                    map.values()
-                        .any(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
+            .with_component(|component: &StunClientComponent| {
+                component.with_client(|client| {
+                    client.is_some_and(|client| {
+                        matches!(client.get_nat_type(), Some(Ok(NatType::FullCone)))
+                    })
                 })
             })
             .ok()
@@ -468,11 +469,12 @@ fn compute_change_address(
     is_ipv4: bool,
 ) -> Option<SocketAddr> {
     let own_outer_ips: HashSet<IpAddr> = iface
-        .with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|map| {
-                map.values()
-                    .filter_map(|c| c.get_outer_addr()?.ok())
-                    .map(|a| a.ip())
+        .with_component(|component: &StunClientComponent| {
+            component.with_client(|client| {
+                client
+                    .and_then(|client| client.get_outer_addr()?.ok())
+                    .map(|addr| addr.ip())
+                    .into_iter()
                     .collect::<HashSet<_>>()
             })
         })
@@ -482,12 +484,11 @@ fn compute_change_address(
 
     // 取一个当前已解析成功的 outer addr 作为环上的"本机坐标"
     let own_outer_addr: Option<SocketAddr> = iface
-        .with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|map| {
-                map.values()
-                    .filter_map(|c| c.get_outer_addr()?.ok())
-                    .filter(|a| a.is_ipv4() == is_ipv4)
-                    .min_by_key(|a| (a.port(), a.ip()))
+        .with_component(|component: &StunClientComponent| {
+            component.with_client(|client| {
+                client
+                    .and_then(|client| client.get_outer_addr()?.ok())
+                    .filter(|addr| addr.is_ipv4() == is_ipv4)
             })
         })
         .ok()
@@ -496,12 +497,14 @@ fn compute_change_address(
 
     // 收集所有"当前可达"的候选 agent 地址（同地址族，不在本机 outer IP 集合中）
     let mut candidates: Vec<SocketAddr> = iface
-        .with_component(|clients: &StunClientsComponent| {
-            clients.with_clients(|map| {
-                map.iter()
-                    .filter_map(|(agent, client)| client.get_outer_addr()?.ok().map(|_| *agent))
+        .with_component(|component: &StunClientComponent| {
+            component.with_client(|client| {
+                client
+                    .filter(|client| client.get_outer_addr().is_some_and(|outer| outer.is_ok()))
+                    .map(|client| client.agent_addr())
                     .filter(|agent| agent.is_ipv4() == is_ipv4)
                     .filter(|agent| !own_outer_ips.contains(&agent.ip()))
+                    .into_iter()
                     .collect::<Vec<_>>()
             })
         })
@@ -565,11 +568,14 @@ async fn publish_stun_endpoints(
         };
         let iface = bind_iface.borrow();
         let fullcone_outers: Vec<SocketAddr> = iface
-            .with_component(|clients: &StunClientsComponent| {
-                clients.with_clients(|map| {
-                    map.values()
-                        .filter(|c| matches!(c.get_nat_type(), Some(Ok(NatType::FullCone))))
-                        .filter_map(|c| c.get_outer_addr()?.ok())
+            .with_component(|component: &StunClientComponent| {
+                component.with_client(|client| {
+                    client
+                        .filter(|client| {
+                            matches!(client.get_nat_type(), Some(Ok(NatType::FullCone)))
+                        })
+                        .and_then(|client| client.get_outer_addr()?.ok())
+                        .into_iter()
                         .collect::<Vec<_>>()
                 })
             })
