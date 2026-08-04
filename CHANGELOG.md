@@ -9,6 +9,8 @@
 - Promote gateway, pishoo, and pishoo-common to the stable 0.8.0 release.
 - Align transport dependencies with dhttp 0.6.0, h3x 0.6.0, and dshell 0.6.0.
 - Adapt STUN publication to one STUN client per interface.
+- Write the authenticated short DHTTP identity in access logs instead of a
+  transport IP address, reusing the per-connection identity cache.
 
 ### Components
 

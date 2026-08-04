@@ -51,18 +51,19 @@ impl AccessLogOutput {
 
     /// Formatting and delivery are deliberately best-effort after the output
     /// has been acquired. A request response must not depend on log delivery.
-    pub fn write(&self, record: &AccessLogRecord) {
-        let formatted = match DefaultAccessFormatter::format(record) {
-            Ok(formatted) => formatted,
-            Err(error) => {
-                tracing::warn!(
-                    path = %self.path.as_ref().display(),
-                    error = %Report::from_error(&error),
-                    "failed to format access log record"
-                );
-                return;
-            }
-        };
+    pub fn write(&self, record: &AccessLogRecord, client_identity: Option<&str>) {
+        let formatted =
+            match DefaultAccessFormatter::format_with_client_identity(record, client_identity) {
+                Ok(formatted) => formatted,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %self.path.as_ref().display(),
+                        error = %Report::from_error(&error),
+                        "failed to format access log record"
+                    );
+                    return;
+                }
+            };
 
         let mut writer = self.writer.clone();
         if let Err(error) = writer.write_all(formatted.as_bytes()) {
@@ -180,7 +181,7 @@ mod tests {
         let path = temp.0.join("nested/custom.log");
         let resolved = ResolvedConfigPath::try_from(path.clone()).unwrap();
         let output = AccessLogOutput::open(resolved).unwrap();
-        output.write(&sample_record());
+        output.write(&sample_record(), None);
         drop(output);
 
         for _ in 0..100 {
