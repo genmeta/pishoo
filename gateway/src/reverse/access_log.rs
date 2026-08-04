@@ -1,6 +1,6 @@
 mod body;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -9,12 +9,15 @@ use axum::{
     response::Response,
 };
 use body::{AccessLogBody, AccessRecordSeed};
-use dhttp::log::access::{
-    AccessLogRecord, AccessRequestTarget, BodyBytesEmitted, ClientAddress, OptionalReferer,
-    OptionalUserAgent,
+use dhttp::{
+    log::access::{
+        AccessLogRecord, AccessRequestTarget, BodyBytesEmitted, ClientAddress, OptionalReferer,
+        OptionalUserAgent,
+    },
+    name::DhttpName,
 };
 
-use super::log::AccessLogOutput;
+use super::{access_control::ClientNameResolver, log::AccessLogOutput};
 
 #[derive(Clone, Debug)]
 pub enum ActiveAccessLog {
@@ -34,6 +37,7 @@ impl ActiveAccessLog {
 #[derive(Clone, Debug)]
 pub struct AccessLogState {
     pub server: ActiveAccessLog,
+    pub client_names: ClientNameResolver,
 }
 
 pub async fn access_log(
@@ -41,7 +45,12 @@ pub async fn access_log(
     request: Request,
     next: Next,
 ) -> Response {
-    let seed = RequestSeed::capture(&request);
+    let client_identity = state
+        .client_names
+        .resolve(&request)
+        .await
+        .map(|name| short_client_identity(&name));
+    let seed = RequestSeed::capture(&request, client_identity);
     let response = next.run(request).await;
     let active = response
         .extensions()
@@ -55,7 +64,8 @@ pub async fn access_log(
     let (parts, body) = response.into_parts();
     let record = seed.complete(parts.status);
     if record.has_no_body() {
-        output.write(&record.finish(BodyBytesEmitted::ZERO));
+        let (record, client_identity) = record.finish(BodyBytesEmitted::ZERO);
+        output.write(&record, client_identity.as_deref());
         return Response::from_parts(parts, body);
     }
 
@@ -64,6 +74,7 @@ pub async fn access_log(
 
 struct RequestSeed {
     client: ClientAddress,
+    client_identity: Option<String>,
     method: http::Method,
     target: AccessRequestTarget,
     version: http::Version,
@@ -72,15 +83,10 @@ struct RequestSeed {
 }
 
 impl RequestSeed {
-    fn capture(request: &Request) -> Self {
-        let client = request
-            .extensions()
-            .get::<SocketAddr>()
-            .map_or(ClientAddress::Unknown, |address| {
-                ClientAddress::Ip(address.ip())
-            });
+    fn capture(request: &Request, client_identity: Option<String>) -> Self {
         Self {
-            client,
+            client: ClientAddress::Unknown,
+            client_identity,
             method: request.method().clone(),
             target: AccessRequestTarget::from(request.uri()),
             version: request.version(),
@@ -92,6 +98,7 @@ impl RequestSeed {
     fn complete(self, status: http::StatusCode) -> AccessRecordSeed {
         AccessRecordSeed {
             client: self.client,
+            client_identity: self.client_identity,
             method: self.method,
             target: self.target,
             version: self.version,
@@ -110,8 +117,8 @@ impl AccessRecordSeed {
             || self.status == http::StatusCode::NOT_MODIFIED
     }
 
-    fn finish(self, body_bytes: BodyBytesEmitted) -> AccessLogRecord {
-        AccessLogRecord {
+    fn finish(self, body_bytes: BodyBytesEmitted) -> (AccessLogRecord, Option<String>) {
+        let record = AccessLogRecord {
             completed_at: chrono::Local::now().fixed_offset(),
             client: self.client,
             method: self.method,
@@ -121,8 +128,15 @@ impl AccessRecordSeed {
             body_bytes,
             referer: self.referer,
             user_agent: self.user_agent,
-        }
+        };
+        (record, self.client_identity)
     }
+}
+
+fn short_client_identity(name: &str) -> String {
+    name.strip_suffix(DhttpName::SUFFIX)
+        .unwrap_or(name)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -136,30 +150,37 @@ mod tests {
                 .uri("/private?token=secret")
                 .body(Body::empty())
                 .unwrap(),
+            None,
         )
         .complete(status)
     }
 
     #[test]
     fn request_capture_discards_query_and_unallowlisted_headers() {
-        let mut request = Request::builder()
+        let request = Request::builder()
             .uri("/private?token=secret")
             .header(http::header::AUTHORIZATION, "Bearer secret")
             .header(http::header::COOKIE, "session=secret")
             .body(Body::empty())
             .unwrap();
-        request
-            .extensions_mut()
-            .insert(SocketAddr::from(([127, 0, 0, 1], 443)));
-
-        let record = RequestSeed::capture(&request)
+        let (record, client_identity) = RequestSeed::capture(&request, None)
             .complete(http::StatusCode::OK)
             .finish(BodyBytesEmitted::ZERO);
 
         assert_eq!(record.target.path(), Some("/private"));
-        assert_eq!(record.client, ClientAddress::Ip([127, 0, 0, 1].into()));
+        assert_eq!(record.client, ClientAddress::Unknown);
         assert_eq!(record.referer.value(), None);
         assert_eq!(record.user_agent.value(), None);
+        assert_eq!(client_identity, None);
+    }
+
+    #[test]
+    fn client_identity_omits_only_the_dhttp_suffix() {
+        assert_eq!(
+            short_client_identity("reimu.pilot.dhttp.net"),
+            "reimu.pilot"
+        );
+        assert_eq!(short_client_identity("service.example"), "service.example");
     }
 
     #[test]

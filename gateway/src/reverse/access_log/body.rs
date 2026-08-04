@@ -14,6 +14,7 @@ use crate::reverse::log::AccessLogOutput;
 
 pub(super) struct AccessRecordSeed {
     pub client: ClientAddress,
+    pub client_identity: Option<String>,
     pub method: http::Method,
     pub target: AccessRequestTarget,
     pub version: http::Version,
@@ -41,7 +42,8 @@ impl<B> AccessLogBody<B> {
 
     fn finalize(&mut self) {
         let Some(seed) = self.seed.take() else { return };
-        self.output.write(&seed.finish(self.bytes));
+        let (record, client_identity) = seed.finish(self.bytes);
+        self.output.write(&record, client_identity.as_deref());
     }
 }
 
@@ -147,6 +149,7 @@ mod tests {
     fn seed() -> AccessRecordSeed {
         AccessRecordSeed {
             client: ClientAddress::Unknown,
+            client_identity: Some("reimu.pilot".to_owned()),
             method: http::Method::GET,
             target: "/body".parse().unwrap(),
             version: http::Version::HTTP_3,
@@ -173,6 +176,7 @@ mod tests {
         assert!(body.frame().await.unwrap().is_err());
         let contents = log.wait_for_line();
         assert_eq!(contents.lines().count(), 1);
+        assert!(contents.starts_with("reimu.pilot - - ["), "{contents}");
         assert!(contents.contains(" 200 3 "), "{contents}");
     }
 

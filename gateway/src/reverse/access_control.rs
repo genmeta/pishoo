@@ -1,4 +1,7 @@
-use std::sync::{Arc, Weak};
+use std::{
+    future::Future,
+    sync::{Arc, Weak},
+};
 
 use axum::{
     extract::{Request, State},
@@ -25,6 +28,62 @@ use tracing::{info, warn};
 type DynConnectionState = ConnectionState<dyn quic::DynConnection>;
 type ClientNameCell = Arc<OnceCell<Option<String>>>;
 type ClientNameCache = Vec<(Weak<DynConnectionState>, ClientNameCell)>;
+
+#[derive(Clone, Debug, Default)]
+pub struct ClientNameResolver {
+    client_names: Arc<Mutex<ClientNameCache>>,
+}
+
+impl ClientNameResolver {
+    pub(crate) fn resolve<'a>(
+        &'a self,
+        request: &Request,
+    ) -> impl Future<Output = Option<String>> + Send + 'a {
+        let connection = request
+            .extensions()
+            .get::<Arc<DynConnectionState>>()
+            .cloned();
+        async move {
+            let connection = connection?;
+            self.resolve_connection(&connection).await
+        }
+    }
+
+    async fn resolve_connection(&self, connection: &Arc<DynConnectionState>) -> Option<String> {
+        let candidate = Arc::downgrade(connection);
+        let client_name = {
+            let mut cache = self.client_names.lock().await;
+            cache.retain(|(connection, _)| connection.strong_count() > 0);
+
+            if let Some((_, client_name)) = cache
+                .iter()
+                .find(|(connection, _)| Weak::ptr_eq(connection, &candidate))
+            {
+                client_name.clone()
+            } else {
+                let client_name = Arc::new(OnceCell::new());
+                cache.push((candidate, client_name.clone()));
+                client_name
+            }
+        };
+
+        match client_name
+            .get_or_try_init(|| async {
+                connection
+                    .remote_authority()
+                    .await
+                    .map(|authority| authority.map(|authority| authority.name().to_owned()))
+            })
+            .await
+        {
+            Ok(client_name) => client_name.clone(),
+            Err(error) => {
+                warn!(error = %error, "failed to fetch remote authority from connection");
+                None
+            }
+        }
+    }
+}
 
 struct AccessHttpRequest<'a> {
     client_name: Option<&'a str>,
@@ -81,7 +140,7 @@ impl LocationRuleRequest for AccessHttpRequest<'_> {
 pub struct AccessControlState {
     pub access_rules: Arc<dyn LocationRuleEvaluator + Send + Sync>,
     pub server_name: Arc<str>,
-    client_names: Arc<Mutex<ClientNameCache>>,
+    client_names: ClientNameResolver,
 }
 
 impl AccessControlState {
@@ -92,43 +151,12 @@ impl AccessControlState {
         Self {
             access_rules,
             server_name,
-            client_names: Arc::new(Mutex::new(Vec::new())),
+            client_names: ClientNameResolver::default(),
         }
     }
 
-    async fn client_name(&self, connection: &Arc<DynConnectionState>) -> Option<String> {
-        let candidate = Arc::downgrade(connection);
-        let client_name = {
-            let mut cache = self.client_names.lock().await;
-            cache.retain(|(connection, _)| connection.strong_count() > 0);
-
-            if let Some((_, client_name)) = cache
-                .iter()
-                .find(|(connection, _)| Weak::ptr_eq(connection, &candidate))
-            {
-                client_name.clone()
-            } else {
-                let client_name = Arc::new(OnceCell::new());
-                cache.push((candidate, client_name.clone()));
-                client_name
-            }
-        };
-
-        match client_name
-            .get_or_try_init(|| async {
-                connection
-                    .remote_authority()
-                    .await
-                    .map(|authority| authority.map(|authority| authority.name().to_owned()))
-            })
-            .await
-        {
-            Ok(client_name) => client_name.clone(),
-            Err(error) => {
-                warn!(error = %error, "failed to fetch remote authority from connection");
-                None
-            }
-        }
+    pub fn client_names(&self) -> ClientNameResolver {
+        self.client_names.clone()
     }
 }
 
@@ -143,10 +171,7 @@ pub async fn access_control(
     request: Request,
     next: Next,
 ) -> Response {
-    let client_name = match request.extensions().get::<Arc<DynConnectionState>>() {
-        Some(connection) => state.client_name(connection).await,
-        None => None,
-    };
+    let client_name = state.client_names.resolve(&request).await;
     let http_request = AccessHttpRequest::new(client_name.as_deref(), &request);
 
     let action = match state

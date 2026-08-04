@@ -93,6 +93,7 @@ impl ServerService {
         );
         let access_log_state = AccessLogState {
             server: server_access_log,
+            client_names: access_state.client_names(),
         };
 
         let service_stack = ServiceBuilder::new()
