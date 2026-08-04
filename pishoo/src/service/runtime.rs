@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use dhttp::{h3x::quic::Listen as _, name::DhttpName};
-use gateway::control_plane::{ControlPlane, ProvideListener};
+use gateway::control_plane::{ConnectorRequest, ControlPlane, ProvideConnector, ProvideListener};
 use snafu::{Report, ResultExt};
 
 use super::{
@@ -22,12 +22,15 @@ where
 
 impl<P> RuntimeRegistry<P>
 where
-    P: ProvideListener + Send + Sync + 'static,
+    P: ProvideListener + ProvideConnector + Send + Sync + 'static,
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
     <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
     <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
+    P::Connector: Send + Sync + 'static,
+    <P::Connector as dhttp::h3x::quic::Connect>::Connection: Send + Sync + 'static,
+    P::ConnectError: std::fmt::Display,
 {
     pub fn new(plane: Arc<P>) -> Self {
         Self { plane, resources: ResourceSet::default(), services: ServiceSet::default() }
@@ -45,7 +48,7 @@ where
         let name = source.name().clone();
         self.stop_service(&name).await;
 
-        let prepared = match source.prepare(ctx).await {
+        let mut prepared = match source.prepare(ctx).await {
             Ok(prepared) => prepared,
             Err(error) => {
                 tracing::warn!(server_name = %name, error = %Report::from_error(&error), "server service preparation failed");
@@ -53,6 +56,34 @@ where
                 return;
             }
         };
+
+        if prepared.service.access_control.is_some() {
+            match self
+                .plane
+                .connector(ConnectorRequest {
+                    identity: Some(prepared.listen_request.identity.clone()),
+                })
+                .await
+            {
+                Ok(connector) => {
+                    prepared.service.contact_notifier = Some(Arc::new(
+                        super::snapshot::DhttpContactNotifier::new(
+                            connector,
+                            prepared
+                                .contact_name
+                                .clone()
+                                .expect("profile access control has a contact name"),
+                            prepared.service.h3_settings.clone(),
+                        ),
+                    ));
+                }
+                Err(error) => tracing::warn!(
+                    server_name = %name,
+                    %error,
+                    "contact notification connector is unavailable"
+                ),
+            }
+        }
 
         let access_logs = match self.resources.acquire_access_logs(prepared.access_logs) {
             Ok(access_logs) => access_logs,
@@ -211,6 +242,9 @@ where
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
     <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithLocalAuthority>::LocalAuthority: Send + Sync,
     <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
+    P::Connector: Send + Sync + 'static,
+    <P::Connector as dhttp::h3x::quic::Connect>::Connection: Send + Sync + 'static,
+    P::ConnectError: std::fmt::Display,
 {
     pub fn new(plane: Arc<P>, dhttp_home: dhttp::home::DhttpHome, root_defaults: gateway::parse::config::RootWorkerDefaultsSnapshot, router_state: gateway::reverse::router::RouterState) -> Self {
         Self { registry: RuntimeRegistry::new(plane), dhttp_home, root_defaults, router_state }
@@ -286,6 +320,21 @@ mod tests {
     struct FakePlane {
         operations: Arc<Mutex<Vec<&'static str>>>,
     }
+
+    struct FakeConnector;
+
+    impl dhttp::h3x::quic::Connect for FakeConnector {
+        type Connection = dhttp::h3x::dquic::prelude::Connection;
+        type Error = FakeListenerError;
+
+        async fn connect(
+            &self,
+            _server: &http::uri::Authority,
+        ) -> Result<Arc<Self::Connection>, Self::Error> {
+            std::future::pending().await
+        }
+    }
+
     impl gateway::control_plane::ProvideListener for FakePlane {
         type Listener = FakeListener;
         type ListenError = FakeListenerError;
@@ -297,6 +346,18 @@ mod tests {
             Ok(FakeListener {
                 operations: self.operations.clone(),
             })
+        }
+    }
+
+    impl gateway::control_plane::ProvideConnector for FakePlane {
+        type Connector = FakeConnector;
+        type ConnectError = FakeListenerError;
+
+        async fn connector(
+            &self,
+            _request: gateway::control_plane::ConnectorRequest,
+        ) -> Result<Self::Connector, Self::ConnectError> {
+            Ok(FakeConnector)
         }
     }
 

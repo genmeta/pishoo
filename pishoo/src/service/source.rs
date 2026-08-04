@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use dhttp::name::DhttpName;
 use gateway::{
@@ -34,6 +34,7 @@ pub struct ServerFingerprint {
 
 pub struct PreparedServerUpdate {
     pub name: DhttpName<'static>,
+    pub contact_name: Option<String>,
     pub listen_request: ListenRequest,
     pub listener_spec: ListenerSpec,
     pub service: PreparedServerService,
@@ -44,11 +45,6 @@ pub struct PreparedServerUpdate {
 #[derive(Debug, Snafu)]
 #[snafu(module(prepare_server_update_error))]
 pub enum PrepareServerUpdateError {
-    #[snafu(display("failed to load access policy for server `{name}`"))]
-    Policy {
-        name: String,
-        source: crate::policy::PolicyError,
-    },
     #[snafu(display("failed to materialize access log configuration for server `{name}`"))]
     AccessLog {
         name: String,
@@ -68,6 +64,8 @@ pub enum ServerSource {
 pub struct TypedServerSource {
     name: DhttpName<'static>,
     identity: dhttp::identity::Identity,
+    access_control: Option<Arc<access_control::AccessService>>,
+    contact_name: Option<String>,
     bind: Vec<Listens>,
     dns_resolver_url: Option<http::Uri>,
     server_config: Arc<ServerConfig>,
@@ -118,6 +116,18 @@ pub enum BuildTypedServerSourceError {
         name: String,
         source: dhttp::home::identity::ssl::LoadIdentityError,
     },
+    #[snafu(display("failed to create access-control directory `{}` for profile `{name}`", path.display()))]
+    AccessControlDirectory {
+        name: String,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[snafu(display("failed to load access-control database `{}` for profile `{name}`", path.display()))]
+    AccessControl {
+        name: String,
+        path: PathBuf,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl TypedServerSource {
@@ -163,6 +173,50 @@ impl TypedServerSource {
             return Err(BuildTypedServerSourceError::MissingName);
         }
         let identity = load_identity(&config).await?;
+        let (access_control, contact_name) = match config.identity() {
+            ServerIdentity::Profile(profile) => {
+                let path = profile.access_db_path();
+                let directory = path
+                    .parent()
+                    .expect("identity profile access database always has a parent")
+                    .to_path_buf();
+                std::fs::create_dir_all(&directory).map_err(|source| {
+                    BuildTypedServerSourceError::AccessControlDirectory {
+                        name: profile.name().to_string(),
+                        path: directory,
+                        source,
+                    }
+                })?;
+                let subject_key_identifier =
+                    identity.dhttp_subject_key_identifier().map_err(|source| {
+                        BuildTypedServerSourceError::AccessControl {
+                            name: profile.name().to_string(),
+                            path: path.clone(),
+                            source: Box::new(source),
+                        }
+                    })?;
+                let owner_hash = subject_key_identifier.owner_hash().as_str();
+                let owner_subject_id = access_control::SubjectId::new(owner_hash.as_bytes())
+                    .expect("DHTTP owner hash is a valid access-control subject ID");
+                let uri = format!("sqlite://{}?mode=rwc", path.display());
+                let service = access_control::AccessService::load_from_db(
+                    &uri,
+                    profile.name().as_full(),
+                    &owner_subject_id,
+                )
+                .await
+                .map_err(|source| BuildTypedServerSourceError::AccessControl {
+                    name: profile.name().to_string(),
+                    path,
+                    source: Box::new(source),
+                })?;
+                (
+                    Some(Arc::new(service)),
+                    Some(profile.name().as_full().to_owned()),
+                )
+            }
+            ServerIdentity::Direct { .. } => (None, None),
+        };
         let resolver = config.resolver().map(|resolver| resolver.0.clone());
         Ok(config
             .names()
@@ -170,6 +224,8 @@ impl TypedServerSource {
             .map(|name| Self {
                 name: name.clone(),
                 identity: identity.clone(),
+                access_control: access_control.clone(),
+                contact_name: contact_name.clone(),
                 bind: bind.clone(),
                 dns_resolver_url: resolver.clone(),
                 server_config: config.clone(),
@@ -181,22 +237,6 @@ impl TypedServerSource {
         &self,
         context: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
-        let access_rules_uri = self
-            .server_config
-            .http()
-            .access_rules()
-            .effective()
-            .as_ref()
-            .map(|uri| uri.0.as_str());
-        let identity_profile = match self.server_config.identity() {
-            ServerIdentity::Profile(profile) => Some(profile),
-            ServerIdentity::Direct { .. } => None,
-        };
-        let policy = crate::policy::load_policy_bundle(access_rules_uri, identity_profile)
-            .await
-            .context(prepare_server_update_error::PolicySnafu {
-                name: self.name.to_string(),
-            })?;
         let listen_request = ListenRequest {
             identity: self.identity.clone(),
             bind: self.bind.clone(),
@@ -238,7 +278,9 @@ impl TypedServerSource {
         };
         let service = PreparedServerService {
             h3_settings: context.h3_settings.clone(),
-            access_rules: policy.location_rules,
+            access_control: self.access_control.clone(),
+            contact_notifier: None,
+            owner_name: self.contact_name.clone(),
             router_state: context.router_state.clone(),
             server_config: self.server_config.clone(),
             server_name: self.name.clone(),
@@ -249,6 +291,7 @@ impl TypedServerSource {
             .as_nanos() as u64;
         Ok(PreparedServerUpdate {
             name: self.name.clone(),
+            contact_name: self.contact_name.clone(),
             listen_request,
             listener_spec: listener_spec.clone(),
             service,
@@ -364,6 +407,7 @@ impl FakeServerSource {
                 service_generation,
             } => Ok(PreparedServerUpdate {
                 name: self.name.clone(),
+                contact_name: None,
                 listen_request: fake_listen_request(&self.name),
                 listener_spec: listener_spec.clone(),
                 service: super::snapshot::ServerService::fake(),

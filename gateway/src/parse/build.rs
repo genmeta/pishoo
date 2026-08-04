@@ -16,8 +16,8 @@ use super::{
     error::{ConfigLoadFailure, LoadConfigError},
     source::{ConfigDocumentSourceMap, SourceMap, SourceSpan},
     types::{
-        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRule,
-        HeaderRules, MimeTypes, ProxyPass, ServerNames, StringList,
+        BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRule, HeaderRules, MimeTypes,
+        ProxyPass, ServerNames, StringList,
     },
 };
 
@@ -128,7 +128,6 @@ impl IdentityServerCandidate {
 
 #[derive(Default)]
 struct LocalHttp {
-    access_rules: Option<Assignment<AccessRulesUri>>,
     gzip: Option<Assignment<BoolConfig>>,
     gzip_vary: Option<Assignment<BoolConfig>>,
     gzip_min_length: Option<Assignment<GzipMinLength>>,
@@ -459,7 +458,6 @@ fn builtin<T>(value: T) -> Cascaded<T> {
 }
 fn builtin_http() -> EffectiveHttpConfig {
     EffectiveHttpConfig::new(
-        builtin(None),
         builtin(BoolConfig(false)),
         builtin(BoolConfig(false)),
         builtin(GzipMinLength(20)),
@@ -492,12 +490,6 @@ fn overlay_http(
     sources: &SourceMap,
 ) -> EffectiveHttpConfig {
     EffectiveHttpConfig::new(
-        cascade(
-            parent.access_rules(),
-            local.access_rules.map(|value| value.map(Some)),
-            scope,
-            sources,
-        ),
         cascade(parent.gzip(), local.gzip, scope, sources),
         cascade(parent.gzip_vary(), local.gzip_vary, scope, sources),
         cascade(
@@ -536,7 +528,6 @@ fn parse_http(
     h: &mut LocalHttp,
 ) -> Result<bool, BuildTypedConfigError> {
     match name {
-        "access_rules" => h.access_rules = Some(parse_assignment(d, c, s)?),
         "gzip" => h.gzip = Some(parse_assignment(d, c, s)?),
         "gzip_vary" => h.gzip_vary = Some(parse_assignment(d, c, s)?),
         "gzip_min_length" => h.gzip_min_length = Some(parse_assignment(d, c, s)?),

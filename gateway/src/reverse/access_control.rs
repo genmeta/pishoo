@@ -6,156 +6,108 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dhttp::{
-    access::{
-        action::RequestAction,
-        expr::{
-            atomics::{AtomicLocationRuleExpr, EvalError},
-            eval::Evaluable,
-        },
-        pattern::NormalPattern,
-        policy::{LocationRuleDecisionError, LocationRuleEvaluator, LocationRuleRequest},
-    },
     h3x::{connection::ConnectionState, quic},
+    identity::RemoteAuthorityCertificateExt as _,
 };
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use snafu::Report;
+use http::StatusCode;
 use tracing::{info, warn};
-
-struct AccessHttpRequest<'a> {
-    client_name: Option<&'a str>,
-    method: &'a Method,
-    headers: &'a HeaderMap<HeaderValue>,
-    queries: Vec<(&'a str, &'a str)>,
-}
-
-impl<'a> AccessHttpRequest<'a> {
-    fn new<T>(client_name: Option<&'a str>, request: &'a http::Request<T>) -> Self {
-        Self {
-            client_name,
-            method: request.method(),
-            headers: request.headers(),
-            queries: request.uri().query().map_or_else(Vec::new, |query| {
-                query
-                    .split('&')
-                    .filter_map(|pair| {
-                        let mut parts = pair.splitn(2, '=');
-                        let key = parts.next()?;
-                        let value = parts.next().unwrap_or("");
-                        Some((key, value))
-                    })
-                    .collect()
-            }),
-        }
-    }
-}
-
-impl LocationRuleRequest for AccessHttpRequest<'_> {
-    fn eval_atomic(&self, expr: &AtomicLocationRuleExpr) -> Result<bool, EvalError> {
-        Ok(match expr {
-            AtomicLocationRuleExpr::Any(..) => true,
-            AtomicLocationRuleExpr::ClientName(pattern) => pattern.eval(&self.client_name)?,
-            AtomicLocationRuleExpr::Method(method) => {
-                let pattern: &NormalPattern = method.as_ref();
-                pattern.eval(&self.method.as_str())
-            }
-            AtomicLocationRuleExpr::Header(header) => self.headers.iter().any(|(key, value)| {
-                let Ok(value) = value.to_str() else {
-                    return false;
-                };
-                header.eval(&(key.as_str(), value))
-            }),
-            AtomicLocationRuleExpr::Query(query) => {
-                self.queries.iter().any(|pair| query.eval(pair))
-            }
-        })
-    }
-}
 
 /// Shared state for the access control middleware.
 #[derive(Clone)]
 pub struct AccessControlState {
-    pub access_rules: Arc<dyn LocationRuleEvaluator + Send + Sync>,
-    pub server_name: Arc<str>,
+    pub acl: Option<Arc<access_control::AccessService>>,
 }
 
-/// Axum middleware that enforces firewall access control rules.
-///
-/// When no ruleset matches the request path (`MatchSet`), the request is
-/// allowed only if the client is the server itself; all others are denied.
-/// When a ruleset matches but no individual rule matches (`MatchRuleInSet`),
-/// the request is denied for everyone.
-pub async fn access_control(
+pub fn access_control(
     State(state): State<AccessControlState>,
-    request: Request,
+    mut request: Request,
     next: Next,
-) -> Response {
-    let client_name = match request
-        .extensions()
-        .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
-    {
-        Some(conn) => match conn.remote_authority().await {
-            Ok(Some(authority)) => Some(authority.name().to_owned()),
-            Ok(None) => None,
+) -> futures::future::BoxFuture<'static, Response> {
+    Box::pin(async move {
+        let Some(acl) = state.acl else {
+            return next.run(request).await;
+        };
+
+        let connection = request
+            .extensions()
+            .get::<Arc<ConnectionState<dyn quic::DynConnection>>>()
+            .cloned();
+        let visitor = match remote_visitor(connection).await {
+            Ok(visitor) => visitor,
             Err(error) => {
-                warn!(error = %error, "failed to fetch remote authority from connection");
-                None
+                warn!(error, uri = %request.uri(), "failed to read verified remote identity");
+                return StatusCode::FORBIDDEN.into_response();
             }
-        },
-        None => None,
-    };
-    let http_request = AccessHttpRequest::new(client_name.as_deref(), &request);
+        };
+        let (name, subject_id) = visitor.as_ref().map_or((None, None), |visitor| {
+            (Some(visitor.name()), Some(visitor.subject_id()))
+        });
+        if let Some(visitor) = &visitor {
+            request.extensions_mut().insert(visitor.clone());
+        }
+        let headers = access_control::Headers {
+            method: request.method().clone(),
+            path: request.uri().path_and_query().map_or_else(
+                || request.uri().path().to_owned(),
+                |path| path.as_str().to_owned(),
+            ),
+            fields: request.headers().clone(),
+            request_id: None,
+        };
 
-    let action = match state
-        .access_rules
-        .evaluate(request.uri().path(), &http_request)
+        match acl.auth(headers, name, subject_id).await {
+            Ok(access_control::AuthResult::Allowed) => next.run(request).await,
+            Ok(access_control::AuthResult::Denied) => {
+                info!(client_name = name, uri = %request.uri(), "access control denied request");
+                StatusCode::FORBIDDEN.into_response()
+            }
+            Ok(access_control::AuthResult::Reviewing(id, state, reviews)) => {
+                let decision = state.await;
+                reviews.del(id);
+                match decision {
+                    Ok(access_control::Action::Allow) => next.run(request).await,
+                    Ok(access_control::Action::Deny) => {
+                        info!(review_id = id, client_name = name, uri = %request.uri(), "access control review denied request");
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                    Err(error) => {
+                        info!(review_id = id, client_name = name, uri = %request.uri(), %error, "access control review was cancelled");
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, client_name = name, uri = %request.uri(), "access control evaluation failed");
+                StatusCode::FORBIDDEN.into_response()
+            }
+        }
+    })
+}
+
+async fn remote_visitor(
+    connection: Option<Arc<ConnectionState<dyn quic::DynConnection>>>,
+) -> Result<Option<access_control::Visitor>, String> {
+    let Some(connection) = connection else {
+        return Ok(None);
+    };
+    let authority = connection
+        .remote_authority()
         .await
-    {
-        Ok(decision) => decision.action,
-        Err(LocationRuleDecisionError::NoRuleSet { .. }) => {
-            // No ruleset matched the path — allow the server itself, deny others.
-            if client_name.as_deref() == Some(&*state.server_name) {
-                warn!(
-                    path = %request.uri().path(),
-                    "no ruleset matched, allowing self only"
-                );
-                RequestAction::Allow
-            } else {
-                warn!(
-                    path = %request.uri().path(),
-                    client = client_name.as_deref(),
-                    "no ruleset matched, denying non-self client"
-                );
-                RequestAction::Deny
-            }
-        }
-        Err(LocationRuleDecisionError::NoRuleInSet { .. }) => {
-            // Ruleset matched but no rule matched — deny everyone.
-            warn!(
-                path = %request.uri().path(),
-                "ruleset matched but no rule matched, denying all"
-            );
-            RequestAction::Deny
-        }
-        Err(error @ LocationRuleDecisionError::Backend { .. }) => {
-            warn!(
-                path = %request.uri().path(),
-                error = %Report::from_error(&error),
-                "failed to evaluate access rules, denying request"
-            );
-            RequestAction::Deny
-        }
+        .map_err(|error| error.to_string())?;
+    let Some(authority) = authority else {
+        return Ok(None);
     };
+    let subject_key_identifier = authority
+        .dhttp_subject_key_identifier()
+        .map_err(|error| error.to_string())?;
+    let owner_hash = subject_key_identifier.owner_hash().as_str();
+    let subject_id = access_control::SubjectId::new(owner_hash.as_bytes())
+        .map_err(|_| String::from("invalid DHTTP owner hash length"))?;
 
-    if action == RequestAction::Deny {
-        info!(
-            client_name = client_name.as_deref(),
-            uri = %request.uri(),
-            "firewall rules denied request"
-        );
-        return StatusCode::FORBIDDEN.into_response();
-    }
-
-    next.run(request).await
+    Ok(Some(access_control::Visitor::new(
+        authority.name(),
+        subject_id,
+    )))
 }
 
 #[cfg(test)]
@@ -163,41 +115,23 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{Router, body::Body, middleware::from_fn_with_state, routing::get};
-    use dhttp::access::{
-        expr::atomics::AtomicLocationRuleExpr,
-        policy::{
-            LocationRuleDecisionError, LocationRuleEvaluator, LocationRuleFuture,
-            LocationRuleRequest,
-        },
-    };
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
     use super::AccessControlState;
 
-    #[derive(Debug, snafu::Snafu)]
-    #[snafu(display("synthetic evaluator failure"))]
-    struct SyntheticEvaluatorError;
-
-    struct FailingEvaluator;
-
-    impl LocationRuleEvaluator for FailingEvaluator {
-        fn evaluate<'a>(
-            &'a self,
-            _path: &'a str,
-            _request: &'a (dyn LocationRuleRequest + Send + Sync),
-        ) -> LocationRuleFuture<'a> {
-            Box::pin(
-                async move { Err(LocationRuleDecisionError::backend(SyntheticEvaluatorError)) },
-            )
-        }
-    }
-
     #[tokio::test]
-    async fn backend_error_fails_closed_with_forbidden() {
+    async fn profile_with_an_empty_access_database_denies_requests() {
         let state = AccessControlState {
-            access_rules: Arc::new(FailingEvaluator),
-            server_name: Arc::from("server.pilot.dhttp.net"),
+            acl: Some(Arc::new(
+                access_control::AccessService::load_from_db(
+                    "sqlite::memory:",
+                    "server.example",
+                    &access_control::SubjectId::new([1]).unwrap(),
+                )
+                .await
+                .unwrap(),
+            )),
         };
         let app = Router::new()
             .route("/", get(|| async { "ok" }))
@@ -211,12 +145,70 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    #[test]
-    fn access_http_request_evaluates_any_client() {
-        let request = Request::builder().uri("/").body(()).unwrap();
-        let access_request = super::AccessHttpRequest::new(None, &request);
-        let expr: AtomicLocationRuleExpr = "*?".parse().unwrap();
+    #[tokio::test]
+    async fn direct_server_without_access_control_allows_requests() {
+        let state = AccessControlState { acl: None };
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(from_fn_with_state(state, super::access_control));
 
-        assert!(access_request.eval_atomic(&expr).unwrap());
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reviewed_request_waits_for_and_obeys_approval() {
+        let service = Arc::new(
+            access_control::AccessService::load_from_db(
+                "sqlite::memory:",
+                "server.example",
+                &access_control::SubjectId::new([1]).unwrap(),
+            )
+            .await
+            .unwrap(),
+        );
+        service
+            .set_policy(
+                access_control::Method::Unspecified,
+                "/",
+                access_control::Effect::Review,
+                access_control::Grantee::All,
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(from_fn_with_state(
+                AccessControlState {
+                    acl: Some(service.clone()),
+                },
+                super::access_control,
+            ));
+        let request = tokio::spawn(async move {
+            app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        });
+        let id = loop {
+            let (_, reviews) = service.pending_live_reviews(0, 1);
+            if let Some(access_control::ReviewRecord::Live { id, .. }) = reviews.into_iter().next()
+            {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        };
+        service
+            .decide_review(
+                access_control::ReviewTarget::Live(id),
+                access_control::Action::Allow,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(request.await.unwrap().status(), StatusCode::OK);
     }
 }

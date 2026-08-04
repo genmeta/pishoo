@@ -8,9 +8,9 @@ use super::{
     pattern::Pattern,
     source::{SourceMap, SourceSpan},
     types::{
-        AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRules,
-        ListenConfig, MimeTypes, ProxyPass, ResolverConfig, ReturnResponse, SshLoginMethods,
-        SshSslUsers, StringList, StunServerConfigValue,
+        BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRules, ListenConfig,
+        MimeTypes, ProxyPass, ResolverConfig, ReturnResponse, SshLoginMethods, SshSslUsers,
+        StringList, StunServerConfigValue,
     },
 };
 
@@ -136,7 +136,6 @@ pub enum MaterializeAccessLogError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveHttpConfig {
-    access_rules: Cascaded<Option<AccessRulesUri>>,
     gzip: Cascaded<BoolConfig>,
     gzip_vary: Cascaded<BoolConfig>,
     gzip_min_length: Cascaded<GzipMinLength>,
@@ -150,7 +149,6 @@ pub struct EffectiveHttpConfig {
 impl EffectiveHttpConfig {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        access_rules: Cascaded<Option<AccessRulesUri>>,
         gzip: Cascaded<BoolConfig>,
         gzip_vary: Cascaded<BoolConfig>,
         gzip_min_length: Cascaded<GzipMinLength>,
@@ -161,7 +159,6 @@ impl EffectiveHttpConfig {
         access_log: Cascaded<AccessLogDirective>,
     ) -> Self {
         Self {
-            access_rules,
             gzip,
             gzip_vary,
             gzip_min_length,
@@ -171,9 +168,6 @@ impl EffectiveHttpConfig {
             types,
             access_log,
         }
-    }
-    pub fn access_rules(&self) -> &Cascaded<Option<AccessRulesUri>> {
-        &self.access_rules
     }
     pub fn gzip(&self) -> &Cascaded<BoolConfig> {
         &self.gzip
@@ -276,7 +270,6 @@ struct CascadedWire<T> {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RootWorkerDefaultsWire {
-    access_rules: CascadedWire<Option<String>>,
     gzip: CascadedWire<bool>,
     gzip_vary: CascadedWire<bool>,
     gzip_min_length: CascadedWire<u64>,
@@ -312,9 +305,6 @@ impl serde::Serialize for RootWorkerDefaultsSnapshot {
     {
         let h = &self.http;
         RootWorkerDefaultsWire {
-            access_rules: encode(h.access_rules(), |v| {
-                v.as_ref().map(|v| v.0.as_str().to_owned())
-            }),
             gzip: encode(h.gzip(), |v| v.0),
             gzip_vary: encode(h.gzip_vary(), |v| v.0),
             gzip_min_length: encode(h.gzip_min_length(), |v| v.0),
@@ -348,15 +338,6 @@ impl<'de> serde::Deserialize<'de> for RootWorkerDefaultsSnapshot {
     {
         use serde::de::Error as _;
         let w = RootWorkerDefaultsWire::deserialize(deserializer)?;
-        let access_rules = decode(w.access_rules, |v| {
-            v.map(|v| {
-                url::Url::parse(&v)
-                    .map_err(|e| e.to_string())
-                    .and_then(|u| AccessRulesUri::try_from(u).map_err(|e| e.to_string()))
-            })
-            .transpose()
-        })
-        .map_err(D::Error::custom)?;
         let gzip = decode(w.gzip, |v| Ok(BoolConfig(v))).map_err(D::Error::custom)?;
         let gzip_vary = decode(w.gzip_vary, |v| Ok(BoolConfig(v))).map_err(D::Error::custom)?;
         let gzip_min_length = decode(w.gzip_min_length, |v| Ok(GzipMinLength::checked(v)))
@@ -388,7 +369,6 @@ impl<'de> serde::Deserialize<'de> for RootWorkerDefaultsSnapshot {
         })
         .map_err(D::Error::custom)?;
         Ok(Self::from_http(EffectiveHttpConfig::new(
-            access_rules,
             gzip,
             gzip_vary,
             gzip_min_length,

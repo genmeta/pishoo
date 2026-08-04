@@ -9,5 +9,4 @@ pub mod worker;
 pub mod config;
 pub mod listen;
 pub mod naming;
-pub mod policy;
 pub mod tls;

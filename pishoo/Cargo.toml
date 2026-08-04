@@ -23,8 +23,9 @@ required-features = ["sshd"]
 
 [dependencies]
 # --- Workspace Member ---
+access_control = { workspace = true }
 gateway = { workspace = true }
-dhttp = { workspace = true, features = ["access-orm"] }
+dhttp = { workspace = true }
 h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
 rustls-pemfile = "2"
@@ -55,10 +56,6 @@ clap = { workspace = true }
 # --- DShell ---
 dshell = { workspace = true, optional = true }
 
-# --- Database & ORM ---
-sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
-
 # --- Logging & Tracing ---
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -71,7 +68,6 @@ nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 sha2 = "0.11"
 
 [features]
-default = ["sqlx-sqlite"]
 sshd = [
     "gateway/sshd",
     "dep:dshell",
@@ -83,7 +79,6 @@ sshd = [
 pam = ["sshd", "dshell/pam", "gateway/pam"]
 qlog = ["gateway/qlog"]
 console_subscriber = ["dep:console-subscriber"]
-sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]
 
 [dev-dependencies]
 rcgen = "0.14"

@@ -1,6 +1,6 @@
 use std::{future::Future, sync::Arc};
 
-use axum::middleware::from_fn_with_state;
+use axum::{Router, middleware::from_fn_with_state};
 use dhttp::h3x::{
     connection::ConnectionBuilder, dhttp::settings::Settings, endpoint::H3Endpoint,
     hyper::TowerService, quic,
@@ -19,9 +19,82 @@ use tracing::Instrument;
 
 use super::resource::AccessLogResources;
 
+pub(crate) struct DhttpContactNotifier<C> {
+    connector: Arc<C>,
+    local_name: String,
+    settings: Arc<Settings>,
+}
+
+impl<C> DhttpContactNotifier<C> {
+    pub(crate) fn new(connector: C, local_name: String, settings: Arc<Settings>) -> Self {
+        Self {
+            connector: Arc::new(connector),
+            local_name,
+            settings,
+        }
+    }
+}
+
+impl<C> access_control::ContactNotifier for DhttpContactNotifier<C>
+where
+    C: quic::Connect + Send + Sync + 'static,
+    C::Connection: Send + Sync + 'static,
+    C::Error: std::fmt::Display,
+{
+    fn granted_update<'a>(
+        &'a self,
+        contact: &'a str,
+        body: Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), access_control::NotifyError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let authority = contact.parse::<http::uri::Authority>().map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string())) as access_control::NotifyError
+            })?;
+            let quic = self.connector.connect(&authority).await.map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string())) as access_control::NotifyError
+            })?;
+            let connection = ConnectionBuilder::new(self.settings.clone())
+                .build(quic)
+                .await
+                .map_err(|error| {
+                    Box::new(std::io::Error::other(error.to_string()))
+                        as access_control::NotifyError
+                })?;
+            let uri = format!("https://{contact}/contact/{}", self.local_name);
+            let request = http::Request::builder()
+                .method(http::Method::PATCH)
+                .uri(uri)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .map_err(|error| {
+                    Box::new(std::io::Error::other(error.to_string()))
+                        as access_control::NotifyError
+                })?;
+            let response = connection
+                .execute_hyper_request(request)
+                .await
+                .map_err(|error| {
+                    Box::new(std::io::Error::other(error.to_string()))
+                        as access_control::NotifyError
+                })?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(Box::new(std::io::Error::other(format!(
+                    "contact notification returned {}",
+                    response.status()
+                ))) as access_control::NotifyError)
+            }
+        })
+    }
+}
+
 pub struct PreparedServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
+    pub access_control: Option<Arc<access_control::AccessService>>,
+    pub contact_notifier: Option<Arc<dyn access_control::ContactNotifier>>,
+    pub owner_name: Option<String>,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_config: Arc<gateway::parse::config::ServerConfig>,
     pub server_name: dhttp::name::DhttpName<'static>,
@@ -31,7 +104,9 @@ impl PreparedServerService {
     pub fn activate(self, access_logs: AccessLogResources) -> ServerService {
         ServerService {
             h3_settings: self.h3_settings,
-            access_rules: self.access_rules,
+            access_control: self.access_control,
+            contact_notifier: self.contact_notifier,
+            owner_name: self.owner_name,
             router_state: self.router_state,
             server_config: self.server_config,
             server_name: self.server_name,
@@ -42,7 +117,9 @@ impl PreparedServerService {
 
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
+    pub access_control: Option<Arc<access_control::AccessService>>,
+    pub contact_notifier: Option<Arc<dyn access_control::ContactNotifier>>,
+    pub owner_name: Option<String>,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_config: Arc<gateway::parse::config::ServerConfig>,
     pub server_name: dhttp::name::DhttpName<'static>,
@@ -88,18 +165,28 @@ impl ServerService {
             self.router_state.clone(),
         );
         let access_state = AccessControlState {
-            access_rules: self.access_rules.clone(),
-            server_name: Arc::from(self.server_name.as_full()),
+            acl: self.access_control.clone(),
         };
         let access_log_state = AccessLogState {
             server: server_access_log,
         };
 
+        let application = match &self.access_control {
+            Some(access_control) => access_control::management_router_with_notifier(
+                access_control.clone(),
+                self.owner_name
+                    .clone()
+                    .expect("profile access control has an owner name"),
+                self.contact_notifier.clone(),
+            )
+            .fallback_service(nginx_router),
+            None => Router::new().fallback_service(nginx_router),
+        };
         let service_stack = ServiceBuilder::new()
             .layer(BodyAdapterLayer)
             .layer(from_fn_with_state(access_log_state, access_log))
             .layer(from_fn_with_state(access_state, access_control))
-            .service(nginx_router);
+            .service(application);
 
         let builder = ConnectionBuilder::new(self.h3_settings.clone());
         #[cfg(feature = "sshd")]
@@ -163,7 +250,9 @@ impl ServerService {
     pub(crate) fn fake() -> PreparedServerService {
         PreparedServerService {
             h3_settings: Arc::new(Settings::default()),
-            access_rules: Arc::new(dhttp::access::matcher::LocationRulesMatcher::default()),
+            access_control: None,
+            contact_notifier: None,
+            owner_name: None,
             router_state: {
                 #[cfg(feature = "sshd")]
                 struct DummySpawner;

@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{fmt, net::SocketAddr, str::FromStr};
 
 use dhttp::{h3x::dquic::binds::BindPattern, name::DhttpName};
 use http::StatusCode;
@@ -22,9 +22,6 @@ pub struct StringList(pub Vec<String>);
 
 #[derive(Debug, Clone)]
 pub struct PathConfig(pub std::path::PathBuf);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessRulesUri(pub url::Url);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyPass {
@@ -109,68 +106,6 @@ pub struct GzipMinLength(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GzipCompLevel(pub i32);
-
-#[derive(Debug, Snafu)]
-#[snafu(module)]
-pub enum AccessRulesUriValidationError {
-    #[snafu(display("unsupported access_rules uri scheme `{scheme}`"))]
-    UnsupportedScheme { scheme: String },
-    #[snafu(display("unsupported sqlite access_rules uri form"))]
-    UnsupportedSqliteForm,
-    #[snafu(display("access_rules sqlite path must be absolute"))]
-    RelativePath,
-    #[snafu(display("access_rules sqlite path contains a NUL byte"))]
-    NulPath,
-    #[snafu(display("access_rules sqlite path is not valid UTF-8 on this platform"))]
-    InvalidPathEncoding,
-}
-
-impl TryFrom<url::Url> for AccessRulesUri {
-    type Error = AccessRulesUriValidationError;
-
-    fn try_from(uri: url::Url) -> Result<Self, Self::Error> {
-        let path = Self::decoded_sqlite_path(&uri)?;
-        if !path.is_absolute() {
-            return Err(AccessRulesUriValidationError::RelativePath);
-        }
-        Ok(Self(uri))
-    }
-}
-
-impl AccessRulesUri {
-    pub(crate) fn decoded_sqlite_path(
-        uri: &url::Url,
-    ) -> Result<PathBuf, AccessRulesUriValidationError> {
-        if uri.scheme() != "sqlite" {
-            return Err(AccessRulesUriValidationError::UnsupportedScheme {
-                scheme: uri.scheme().to_owned(),
-            });
-        }
-        if uri.host_str().is_some()
-            || !uri.username().is_empty()
-            || uri.password().is_some()
-            || uri.port().is_some()
-            || uri.fragment().is_some()
-        {
-            return Err(AccessRulesUriValidationError::UnsupportedSqliteForm);
-        }
-        let path = percent_encoding::percent_decode_str(uri.path()).collect::<Vec<_>>();
-        if path.contains(&0) {
-            return Err(AccessRulesUriValidationError::NulPath);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            Ok(std::ffi::OsString::from_vec(path).into())
-        }
-        #[cfg(not(unix))]
-        {
-            String::from_utf8(path)
-                .map(PathBuf::from)
-                .map_err(|_| AccessRulesUriValidationError::InvalidPathEncoding)
-        }
-    }
-}
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
