@@ -2640,3 +2640,87 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "dhttp"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "dhttp-access"
+version = "0.4.0"
+
+[[patch.unused]]
+name = "dhttp-home"
+version = "0.5.0"
+
+[[patch.unused]]
+name = "dhttp-identity"
+version = "0.3.0"
+
+[[patch.unused]]
+name = "dhttp-log"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dquic"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "dshell"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "dyns"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "h3x"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qbase"
+version = "0.6.2"
+
+[[patch.unused]]
+name = "qcongestion"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qconnection"
+version = "0.8.0"
+
+[[patch.unused]]
+name = "qdatagram"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qevent"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qinterface"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "qmacro"
+version = "0.5.1"
+
+[[patch.unused]]
+name = "qrecovery"
+version = "0.6.0"
+
+[[patch.unused]]
+name = "qresolve"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "qtraversal"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "qudp"
+version = "0.7.0"
+
+[[patch.unused]]
+name = "rankey"
+version = "0.2.2"
