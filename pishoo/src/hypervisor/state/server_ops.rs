@@ -11,9 +11,10 @@ use tracing::Instrument;
 
 use super::{
     AcquireListenerError, ListenerResource, ReleaseListenerError, RootState,
-    acquire_listener_error,
-    listener_registry::{AcquirePlan, ReleasePlan},
+    UpdateListenerIdentityError, acquire_listener_error,
+    listener_registry::{AcquirePlan, InspectActive, ReleasePlan},
     owner::Owner,
+    update_listener_identity_error,
 };
 use crate::{
     hypervisor::{endpoint_factory, resource::AsyncReleaseGuard},
@@ -134,6 +135,58 @@ impl RootState {
     ) -> Result<(), ReleaseListenerError> {
         self.release_listener_inner(owner, server_name, Some(guard))
             .await
+    }
+
+    pub async fn update_listener_identity(
+        &self,
+        owner: Owner,
+        identity: dhttp::identity::Identity,
+    ) -> Result<gateway::control_plane::UpdateListenerIdentityOutcome, UpdateListenerIdentityError>
+    {
+        let server_name = DhttpName::try_from(identity.name().clone())
+            .context(update_listener_identity_error::InvalidNameSnafu)?;
+
+        loop {
+            let plan = {
+                let registry = self.listeners.read().await;
+                registry.inspect_active(owner, &server_name, |resource, guard| {
+                    (resource.endpoint.clone(), guard.clone())
+                })
+            };
+            let (endpoint, guard) = match plan {
+                InspectActive::Active(active) => active,
+                InspectActive::Wait(done) => {
+                    done.wait().await;
+                    continue;
+                }
+                InspectActive::NotFound => {
+                    return Err(UpdateListenerIdentityError::NotFound);
+                }
+                InspectActive::NotOwner => return Err(UpdateListenerIdentityError::NotOwner),
+                InspectActive::Poisoned => return Err(UpdateListenerIdentityError::Poisoned),
+            };
+
+            let outcome = endpoint
+                .replace_identity(Arc::new(identity))
+                .await
+                .context(update_listener_identity_error::ReplaceSnafu)?;
+            let still_active =
+                self.listeners
+                    .read()
+                    .await
+                    .is_active_guard(owner, &server_name, &guard);
+            if !still_active {
+                return Err(UpdateListenerIdentityError::StaleListener);
+            }
+            return Ok(match outcome {
+                dhttp::endpoint::ReplaceIdentityOutcome::Updated => {
+                    gateway::control_plane::UpdateListenerIdentityOutcome::Updated
+                }
+                dhttp::endpoint::ReplaceIdentityOutcome::Unchanged => {
+                    gateway::control_plane::UpdateListenerIdentityOutcome::Unchanged
+                }
+            });
+        }
     }
 
     pub(crate) fn release_listener_for_dropped_handle(

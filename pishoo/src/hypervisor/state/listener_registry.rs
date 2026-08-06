@@ -57,6 +57,15 @@ pub(super) enum ReleasePlan<R = ()> {
 }
 
 #[derive(Debug)]
+pub(super) enum InspectActive<T> {
+    Active(T),
+    Wait(Completion),
+    NotOwner,
+    NotFound,
+    Poisoned,
+}
+
+#[derive(Debug)]
 pub(super) struct ListenerRegistry<R = ()> {
     entries: HashMap<DhttpName<'static>, ListenerSlot<R>>,
 }
@@ -316,6 +325,41 @@ impl<R> ListenerRegistry<R> {
                 ReleasePlan::Poisoned
             }
         }
+    }
+
+    pub(super) fn inspect_active<T>(
+        &self,
+        owner: Owner,
+        name: &DhttpName<'static>,
+        inspect: impl FnOnce(&R, &AsyncReleaseGuard) -> T,
+    ) -> InspectActive<T> {
+        match self.entries.get(name) {
+            None => InspectActive::NotFound,
+            Some(ListenerSlot::Transition { done, .. }) => InspectActive::Wait(done.clone()),
+            Some(ListenerSlot::Active {
+                owner: existing_owner,
+                resource,
+                guard,
+            }) if *existing_owner == owner => InspectActive::Active(inspect(resource, guard)),
+            Some(ListenerSlot::Active { .. }) => InspectActive::NotOwner,
+            Some(ListenerSlot::Poisoned { .. }) => InspectActive::Poisoned,
+        }
+    }
+
+    pub(super) fn is_active_guard(
+        &self,
+        owner: Owner,
+        name: &DhttpName<'static>,
+        expected_guard: &AsyncReleaseGuard,
+    ) -> bool {
+        matches!(
+            self.entries.get(name),
+            Some(ListenerSlot::Active {
+                owner: existing_owner,
+                guard,
+                ..
+            }) if *existing_owner == owner && guard.ptr_eq(expected_guard)
+        )
     }
 
     pub(super) fn clear_poisoned(&mut self) -> Vec<DhttpName<'static>> {

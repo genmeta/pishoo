@@ -44,6 +44,8 @@ pub struct PreparedServerUpdate {
 #[derive(Debug, Snafu)]
 #[snafu(module(prepare_server_update_error))]
 pub enum PrepareServerUpdateError {
+    #[snafu(display("failed to load server identity"))]
+    Identity { source: BuildTypedServerSourceError },
     #[snafu(display("failed to load access policy for server `{name}`"))]
     Policy {
         name: String,
@@ -65,14 +67,79 @@ pub enum ServerSource {
     Fake(FakeServerSource),
 }
 
+#[derive(Clone)]
 pub struct TypedServerSource {
     name: DhttpName<'static>,
-    identity: dhttp::identity::Identity,
+    identity_source: TlsIdentitySource,
     bind: Vec<Listens>,
     dns_resolver_url: Option<http::Uri>,
     server_config: Arc<ServerConfig>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum TlsIdentitySource {
+    Profile(dhttp::home::identity::IdentityProfile),
+    Direct {
+        name: DhttpName<'static>,
+        certificate: std::path::PathBuf,
+        private_key: std::path::PathBuf,
+    },
+}
+
+impl TlsIdentitySource {
+    pub(crate) async fn load(
+        &self,
+    ) -> Result<dhttp::identity::Identity, BuildTypedServerSourceError> {
+        match self {
+            Self::Profile(profile) => profile.load_identity().await.context(
+                build_typed_server_source_error::LoadIdentitySnafu {
+                    name: profile.name().to_string(),
+                },
+            ),
+            Self::Direct {
+                name,
+                certificate,
+                private_key,
+            } => {
+                let cert = tokio::fs::read(certificate.as_path()).await.context(
+                    build_typed_server_source_error::ReadCertSnafu { path: certificate },
+                )?;
+                let key = tokio::fs::read(private_key.as_path())
+                    .await
+                    .context(build_typed_server_source_error::ReadKeySnafu { path: private_key })?;
+                let (certs, key) = crate::tls::validate_tls_material(&cert, &key)
+                    .context(build_typed_server_source_error::InvalidTlsSnafu)?;
+                Ok(dhttp::identity::Identity::new(
+                    name.clone().into(),
+                    certs,
+                    key,
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn watch_targets(&self) -> Vec<(std::path::PathBuf, bool)> {
+        match self {
+            Self::Profile(profile) => vec![(profile.path().to_owned(), true)],
+            Self::Direct {
+                certificate,
+                private_key,
+                ..
+            } => {
+                let mut roots = Vec::new();
+                for path in [certificate, private_key] {
+                    let root = path.parent().unwrap_or(path.as_path()).to_owned();
+                    if !roots.contains(&root) {
+                        roots.push(root);
+                    }
+                }
+                roots.into_iter().map(|root| (root, false)).collect()
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct PrepareContext {
     pub h3_settings: Arc<dhttp::h3x::dhttp::settings::Settings>,
     pub router_state: RouterState,
@@ -121,6 +188,10 @@ pub enum BuildTypedServerSourceError {
 }
 
 impl TypedServerSource {
+    pub(crate) fn name(&self) -> &DhttpName<'static> {
+        &self.name
+    }
+
     pub async fn load_all(
         configs: impl IntoIterator<Item = Arc<ServerConfig>>,
         router_state: RouterState,
@@ -162,14 +233,28 @@ impl TypedServerSource {
         if config.names().is_empty() {
             return Err(BuildTypedServerSourceError::MissingName);
         }
-        let identity = load_identity(&config).await?;
+        let identity_source = match config.identity() {
+            ServerIdentity::Profile(profile) => TlsIdentitySource::Profile(profile.clone()),
+            ServerIdentity::Direct {
+                certificate,
+                private_key,
+            } => TlsIdentitySource::Direct {
+                name: config
+                    .names()
+                    .first()
+                    .ok_or(BuildTypedServerSourceError::MissingName)?
+                    .clone(),
+                certificate: certificate.as_ref().to_owned(),
+                private_key: private_key.as_ref().to_owned(),
+            },
+        };
         let resolver = config.resolver().map(|resolver| resolver.0.clone());
         Ok(config
             .names()
             .iter()
             .map(|name| Self {
                 name: name.clone(),
-                identity: identity.clone(),
+                identity_source: identity_source.clone(),
                 bind: bind.clone(),
                 dns_resolver_url: resolver.clone(),
                 server_config: config.clone(),
@@ -181,6 +266,11 @@ impl TypedServerSource {
         &self,
         context: &PrepareContext,
     ) -> Result<PreparedServerUpdate, PrepareServerUpdateError> {
+        let identity = self
+            .identity_source
+            .load()
+            .await
+            .context(prepare_server_update_error::IdentitySnafu)?;
         let access_rules_uri = self
             .server_config
             .http()
@@ -198,7 +288,7 @@ impl TypedServerSource {
                 name: self.name.to_string(),
             })?;
         let listen_request = ListenRequest {
-            identity: self.identity.clone(),
+            identity: identity.clone(),
             bind: self.bind.clone(),
             dns_resolver_url: self.dns_resolver_url.clone(),
         };
@@ -206,7 +296,7 @@ impl TypedServerSource {
             request_fingerprint: ListenRequestFingerprint {
                 server_name: self.name.clone(),
                 bind_debug: format!("{:?}", self.bind),
-                identity_debug: compute_identity_fingerprint(&self.identity),
+                identity_debug: compute_identity_fingerprint(&identity),
                 dns_resolver_debug: self.dns_resolver_url.as_ref().map(ToString::to_string),
             },
         };
@@ -259,43 +349,9 @@ impl TypedServerSource {
             },
         })
     }
-}
 
-async fn load_identity(
-    config: &ServerConfig,
-) -> Result<dhttp::identity::Identity, BuildTypedServerSourceError> {
-    match config.identity() {
-        ServerIdentity::Profile(profile) => profile.load_identity().await.context(
-            build_typed_server_source_error::LoadIdentitySnafu {
-                name: profile.name().to_string(),
-            },
-        ),
-        ServerIdentity::Direct {
-            certificate,
-            private_key,
-        } => {
-            let name = config
-                .names()
-                .first()
-                .ok_or(BuildTypedServerSourceError::MissingName)?;
-            let cert = tokio::fs::read(certificate.as_ref()).await.context(
-                build_typed_server_source_error::ReadCertSnafu {
-                    path: certificate.as_ref(),
-                },
-            )?;
-            let key = tokio::fs::read(private_key.as_ref()).await.context(
-                build_typed_server_source_error::ReadKeySnafu {
-                    path: private_key.as_ref(),
-                },
-            )?;
-            let (certs, key) = crate::tls::validate_tls_material(&cert, &key)
-                .context(build_typed_server_source_error::InvalidTlsSnafu)?;
-            Ok(dhttp::identity::Identity::new(
-                name.clone().into(),
-                certs,
-                key,
-            ))
-        }
+    pub(crate) fn identity_source(&self) -> &TlsIdentitySource {
+        &self.identity_source
     }
 }
 
@@ -305,6 +361,14 @@ impl ServerSource {
             Self::Typed(source) => &source.name,
             #[cfg(test)]
             Self::Fake(source) => &source.name,
+        }
+    }
+
+    pub(crate) fn typed(&self) -> Option<&TypedServerSource> {
+        match self {
+            Self::Typed(source) => Some(source),
+            #[cfg(test)]
+            Self::Fake(_) => None,
         }
     }
     pub async fn prepare(
@@ -439,5 +503,33 @@ fn fake_listen_request(name: &DhttpName<'static>) -> ListenRequest {
         ),
         bind: vec![],
         dns_resolver_url: None,
+    }
+}
+
+#[cfg(test)]
+mod identity_source_tests {
+    use super::*;
+
+    #[test]
+    fn profile_watches_the_whole_profile_for_atomic_ssl_directory_swaps() {
+        let path = std::path::PathBuf::from("/tmp/watch.example.dhttp.net");
+        let profile = dhttp::home::identity::IdentityProfile::try_from(path.clone()).unwrap();
+        let source = TlsIdentitySource::Profile(profile);
+
+        assert_eq!(source.watch_targets(), vec![(path, true)]);
+    }
+
+    #[test]
+    fn direct_identity_watches_distinct_parent_directories_non_recursively() {
+        let source = TlsIdentitySource::Direct {
+            name: DhttpName::try_from("watch.example.dhttp.net".to_owned()).unwrap(),
+            certificate: "/tmp/certs/fullchain.crt".into(),
+            private_key: "/tmp/keys/privkey.pem".into(),
+        };
+
+        assert_eq!(
+            source.watch_targets(),
+            vec![("/tmp/certs".into(), false), ("/tmp/keys".into(), false)]
+        );
     }
 }

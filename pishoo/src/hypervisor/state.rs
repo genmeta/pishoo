@@ -81,6 +81,27 @@ pub enum ReleaseListenerError {
 }
 
 #[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum UpdateListenerIdentityError {
+    #[snafu(display("listener identity is not a dhttp name"))]
+    InvalidName {
+        source: dhttp::name::InvalidDhttpName,
+    },
+    #[snafu(display("listener was not found"))]
+    NotFound,
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+    #[snafu(display("listener name is poisoned"))]
+    Poisoned,
+    #[snafu(display("listener changed while its identity was being updated"))]
+    StaleListener,
+    #[snafu(display("failed to replace listener identity"))]
+    Replace {
+        source: dhttp::endpoint::ReplaceIdentityError,
+    },
+}
+
+#[derive(Debug, Snafu)]
 #[snafu(module, visibility(pub(crate)))]
 pub enum WorkerStartupError {
     #[snafu(display("worker startup timed out"))]

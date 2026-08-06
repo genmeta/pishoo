@@ -9,6 +9,7 @@
 //! - [`source`]: [`source::ServerSource`] enum and per-variant loaders.
 
 pub mod accept;
+mod identity_watcher;
 pub mod resource;
 pub mod runtime;
 pub mod set;

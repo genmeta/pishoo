@@ -18,7 +18,9 @@ use dhttp::h3x::ipc::{
     quic::{IpcConnector, IpcListener},
     transport::FdTransfer,
 };
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
+use gateway::control_plane::{
+    ConnectorRequest, ListenRequest, UpdateListenerIdentityOutcome, UpdateListenerIdentityRequest,
+};
 use snafu::Snafu;
 
 // Import the RTC trait so that methods are visible on ControlPlaneClient.
@@ -125,6 +127,16 @@ pub enum RemoteConnectError {
     Protocol { source: crate::ipc::ConnectError },
 }
 
+/// Error from a remote listener identity update.
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+pub enum RemoteUpdateIdentityError {
+    #[snafu(transparent)]
+    Protocol {
+        source: crate::ipc::UpdateIdentityError,
+    },
+}
+
 impl gateway::control_plane::ProvideListener for RemoteControlPlane {
     type Listener = IpcListener<IpcCodec>;
     type ListenError = RemoteListenError;
@@ -132,6 +144,17 @@ impl gateway::control_plane::ProvideListener for RemoteControlPlane {
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         let ipc_client = self.client.listener(request).await?;
         Ok(IpcListener::new(ipc_client, self.fd_transfer.clone()))
+    }
+}
+
+impl gateway::control_plane::UpdateListenerIdentity for RemoteControlPlane {
+    type UpdateIdentityError = RemoteUpdateIdentityError;
+
+    async fn update_listener_identity(
+        &self,
+        request: UpdateListenerIdentityRequest,
+    ) -> Result<UpdateListenerIdentityOutcome, Self::UpdateIdentityError> {
+        Ok(self.client.update_listener_identity(request).await?)
     }
 }
 
@@ -153,7 +176,10 @@ mod tests {
     use std::{os::fd::OwnedFd, sync::Arc, time::Duration};
 
     use dhttp::h3x::ipc::transport::{FdTransfer, FdVec, MuxChannel};
-    use gateway::control_plane::{ConnectorRequest, ListenRequest, SpawnSession};
+    use gateway::control_plane::{
+        ConnectorRequest, ListenRequest, SpawnSession, UpdateListenerIdentityOutcome,
+        UpdateListenerIdentityRequest,
+    };
     use remoc::prelude::ServerShared;
     use tokio_util::task::AbortOnDropHandle;
     use tracing::Instrument;
@@ -161,7 +187,7 @@ mod tests {
     use super::RemoteControlPlane;
     use crate::ipc::{
         ConnectError, ControlPlane, ControlPlaneClient, ControlPlaneServerShared, ListenError,
-        SpawnSessionError,
+        SpawnSessionError, UpdateIdentityError,
     };
 
     struct AckingSpawnPlane {
@@ -174,6 +200,15 @@ mod tests {
             _request: ListenRequest,
         ) -> Result<dhttp::h3x::ipc::quic::IpcListenClient, ListenError> {
             Err(ListenError::Internal {
+                message: "not used by this test".to_owned(),
+            })
+        }
+
+        async fn update_listener_identity(
+            &self,
+            _request: UpdateListenerIdentityRequest,
+        ) -> Result<UpdateListenerIdentityOutcome, UpdateIdentityError> {
+            Err(UpdateIdentityError::Internal {
                 message: "not used by this test".to_owned(),
             })
         }

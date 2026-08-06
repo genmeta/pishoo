@@ -35,6 +35,10 @@ impl<L> ServerResources<L> {
         &self.listener_spec
     }
 
+    pub fn update_identity_fingerprint(&mut self, fingerprint: String) {
+        self.listener_spec.request_fingerprint.identity_debug = fingerprint;
+    }
+
     pub fn take_listener(&mut self) -> L {
         self.listener
             .take()
