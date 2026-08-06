@@ -1,6 +1,6 @@
-use std::future::Future;
 #[cfg(feature = "sshd")]
 use std::os::fd::OwnedFd;
+use std::{future::Future, sync::Arc};
 
 use dhttp::{h3x::quic, identity::Identity, name::Name};
 #[cfg(feature = "sshd")]
@@ -57,6 +57,29 @@ pub trait ProvideListener: Send + Sync {
         &self,
         request: ListenRequest,
     ) -> impl Future<Output = Result<Self::Listener, Self::ListenError>> + Send + '_;
+}
+
+/// A request to replace the TLS material for an existing listener.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateListenerIdentityRequest {
+    pub identity: Identity,
+}
+
+/// Result of updating a listener identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateListenerIdentityOutcome {
+    Updated,
+    Unchanged,
+}
+
+/// Capability to update a listener's certificate and private key in place.
+pub trait UpdateListenerIdentity: Send + Sync {
+    type UpdateIdentityError: std::error::Error + Send + Sync;
+
+    fn update_listener_identity(
+        &self,
+        request: UpdateListenerIdentityRequest,
+    ) -> impl Future<Output = Result<UpdateListenerIdentityOutcome, Self::UpdateIdentityError>> + Send + '_;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,16 +181,22 @@ impl<T: SpawnSession> DynSpawnSession for T {
 /// [`SpawnSession`] so that DShell handlers can spawn session child
 /// processes through the control plane.
 #[cfg(feature = "sshd")]
-pub trait ControlPlane: ProvideListener + ProvideConnector + SpawnSession {}
+pub trait ControlPlane:
+    ProvideListener + UpdateListenerIdentity + ProvideConnector + SpawnSession
+{
+}
 
 #[cfg(feature = "sshd")]
-impl<T: ProvideListener + ProvideConnector + SpawnSession> ControlPlane for T {}
+impl<T: ProvideListener + UpdateListenerIdentity + ProvideConnector + SpawnSession> ControlPlane
+    for T
+{
+}
 
 #[cfg(not(feature = "sshd"))]
-pub trait ControlPlane: ProvideListener + ProvideConnector {}
+pub trait ControlPlane: ProvideListener + UpdateListenerIdentity + ProvideConnector {}
 
 #[cfg(not(feature = "sshd"))]
-impl<T: ProvideListener + ProvideConnector> ControlPlane for T {}
+impl<T: ProvideListener + UpdateListenerIdentity + ProvideConnector> ControlPlane for T {}
 
 // ---------------------------------------------------------------------------
 // Custom serde for ListenRequest / ConnectorRequest
@@ -179,6 +208,8 @@ struct IdentityHelper {
     name: Name<'static>,
     certs: Vec<Vec<u8>>,
     key: Vec<u8>,
+    #[serde(default)]
+    ocsp: Option<Vec<u8>>,
 }
 
 impl IdentityHelper {
@@ -187,13 +218,16 @@ impl IdentityHelper {
             name: id.name().clone(),
             certs: id.certs().iter().map(|c| c.to_vec()).collect(),
             key: id.key().secret_der().to_vec(),
+            ocsp: id.ocsp.as_ref().clone(),
         }
     }
 
     fn into_identity<E: serde::de::Error>(self) -> Result<Identity, E> {
         let certs = self.certs.into_iter().map(CertificateDer::from).collect();
         let key = PrivateKeyDer::try_from(self.key).map_err(E::custom)?;
-        Ok(Identity::new(self.name, certs, key))
+        let mut identity = Identity::new(self.name, certs, key);
+        identity.ocsp = Arc::new(self.ocsp);
+        Ok(identity)
     }
 }
 
@@ -231,6 +265,29 @@ impl<'de> Deserialize<'de> for ListenRequest {
 }
 
 #[derive(Serialize, Deserialize)]
+struct UpdateListenerIdentityRequestHelper {
+    identity: IdentityHelper,
+}
+
+impl Serialize for UpdateListenerIdentityRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        UpdateListenerIdentityRequestHelper {
+            identity: IdentityHelper::from_identity(&self.identity),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdateListenerIdentityRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let helper = UpdateListenerIdentityRequestHelper::deserialize(deserializer)?;
+        Ok(Self {
+            identity: helper.identity.into_identity()?,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 struct ConnectorRequestHelper {
     identity: Option<IdentityHelper>,
 }
@@ -253,5 +310,35 @@ impl<'de> Deserialize<'de> for ConnectorRequest {
                 .map(IdentityHelper::into_identity)
                 .transpose()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustls::pki_types::pem::PemObject as _;
+
+    use super::*;
+
+    #[test]
+    fn update_listener_identity_request_round_trips_tls_material() {
+        let request = UpdateListenerIdentityRequest {
+            identity: Identity::new(
+                "serde.example.dhttp.net".parse().unwrap(),
+                vec![CertificateDer::from(vec![1, 2, 3])],
+                PrivateKeyDer::from_pem_slice(include_bytes!("../tests/fixtures/h3-localhost.key"))
+                    .expect("fixture contains a valid private key"),
+            ),
+        };
+
+        let encoded = serde_json::to_vec(&request).expect("serialize update request");
+        let decoded: UpdateListenerIdentityRequest =
+            serde_json::from_slice(&encoded).expect("deserialize update request");
+
+        assert_eq!(decoded.identity.name(), request.identity.name());
+        assert_eq!(decoded.identity.certs(), request.identity.certs());
+        assert_eq!(
+            decoded.identity.key().secret_der(),
+            request.identity.key().secret_der()
+        );
     }
 }

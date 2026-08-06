@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dhttp::endpoint::{BuildEndpointError, Endpoint};
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
+use gateway::control_plane::{
+    ConnectorRequest, ListenRequest, UpdateListenerIdentityOutcome, UpdateListenerIdentityRequest,
+};
 #[cfg(feature = "sshd")]
 use nix::{
     errno::Errno,
@@ -26,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     hypervisor::{
         endpoint_factory,
-        state::{AcquireListenerError, owner::Owner},
+        state::{AcquireListenerError, UpdateListenerIdentityError, owner::Owner},
     },
     listen::RegisteredEndpoint,
 };
@@ -258,6 +260,19 @@ impl gateway::control_plane::ProvideListener for InProcessControlPlane {
 
     async fn listener(&self, request: ListenRequest) -> Result<Self::Listener, Self::ListenError> {
         self.state.acquire_listener(Owner::Local, request).await
+    }
+}
+
+impl gateway::control_plane::UpdateListenerIdentity for InProcessControlPlane {
+    type UpdateIdentityError = UpdateListenerIdentityError;
+
+    async fn update_listener_identity(
+        &self,
+        request: UpdateListenerIdentityRequest,
+    ) -> Result<UpdateListenerIdentityOutcome, Self::UpdateIdentityError> {
+        self.state
+            .update_listener_identity(Owner::Local, request.identity)
+            .await
     }
 }
 

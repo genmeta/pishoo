@@ -17,7 +17,9 @@ use dhttp::h3x::ipc::{
     },
     transport::FdTransfer,
 };
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
+use gateway::control_plane::{
+    ConnectorRequest, ListenRequest, UpdateListenerIdentityOutcome, UpdateListenerIdentityRequest,
+};
 use nix::unistd::Pid;
 #[cfg(feature = "sshd")]
 use nix::{
@@ -34,8 +36,8 @@ use tracing::Instrument;
 
 use super::{endpoint_factory, state::RootState, task_scope::TaskScope};
 use crate::{
-    hypervisor::state::AcquireListenerError,
-    ipc::{ConnectError, ListenError},
+    hypervisor::state::{AcquireListenerError, UpdateListenerIdentityError},
+    ipc::{ConnectError, ListenError, UpdateIdentityError},
 };
 
 /// Per-worker [`ControlPlane`](crate::ipc::ControlPlane) implementation.
@@ -144,6 +146,45 @@ impl crate::ipc::ControlPlane for WorkerControlPlane {
             })?;
 
         Ok(self.wrap_listener(task_scope, server_name.clone(), adapter))
+    }
+
+    async fn update_listener_identity(
+        &self,
+        request: UpdateListenerIdentityRequest,
+    ) -> Result<UpdateListenerIdentityOutcome, UpdateIdentityError> {
+        let server_name = request.identity.name().as_full().to_owned();
+        let owner = self
+            .state
+            .owner_for_pid(self.caller_pid)
+            .await
+            .ok_or_else(|| UpdateIdentityError::Internal {
+                message: format!("unknown caller pid {}", self.caller_pid),
+            })?;
+
+        self.state
+            .update_listener_identity(owner, request.identity)
+            .await
+            .map_err(|error| {
+                let report = snafu::Report::from_error(&error).to_string();
+                tracing::warn!(
+                    caller_pid = %self.caller_pid,
+                    %server_name,
+                    error = %report,
+                    "listener identity update failed"
+                );
+                match error {
+                    UpdateListenerIdentityError::NotFound => UpdateIdentityError::NotFound,
+                    UpdateListenerIdentityError::NotOwner => UpdateIdentityError::NotOwner,
+                    UpdateListenerIdentityError::Poisoned
+                    | UpdateListenerIdentityError::StaleListener => {
+                        UpdateIdentityError::Unavailable
+                    }
+                    UpdateListenerIdentityError::InvalidName { .. }
+                    | UpdateListenerIdentityError::Replace { .. } => {
+                        UpdateIdentityError::InvalidRequest { reason: report }
+                    }
+                }
+            })
     }
 
     async fn connector(&self, request: ConnectorRequest) -> Result<IpcConnectClient, ConnectError> {

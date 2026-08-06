@@ -7,7 +7,9 @@
 //! - Error types for control plane operations.
 
 use dhttp::h3x::ipc::quic::{IpcConnectClient, IpcListenClient};
-use gateway::control_plane::{ConnectorRequest, ListenRequest};
+use gateway::control_plane::{
+    ConnectorRequest, ListenRequest, UpdateListenerIdentityOutcome, UpdateListenerIdentityRequest,
+};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 
@@ -68,6 +70,24 @@ pub enum ConnectError {
     Call { source: remoc::rtc::CallError },
 }
 
+/// Error returned by [`ControlPlane::update_listener_identity`].
+#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
+#[snafu(module)]
+pub enum UpdateIdentityError {
+    #[snafu(display("listener was not found"))]
+    NotFound,
+    #[snafu(display("listener is not owned by caller"))]
+    NotOwner,
+    #[snafu(display("listener is not available for identity updates"))]
+    Unavailable,
+    #[snafu(display("invalid identity update: {reason}"))]
+    InvalidRequest { reason: String },
+    #[snafu(display("internal error: {message}"))]
+    Internal { message: String },
+    #[snafu(transparent)]
+    Call { source: remoc::rtc::CallError },
+}
+
 /// Error returned by [`ControlPlane::spawn_session`].
 #[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
 #[snafu(module)]
@@ -99,6 +119,12 @@ pub trait ControlPlane: Send + Sync {
     /// returns an [`IpcListenClient`] that the worker constructs an
     /// [`dhttp::h3x::ipc::quic::IpcListener`] from.
     async fn listener(&self, request: ListenRequest) -> Result<IpcListenClient, ListenError>;
+
+    /// Replace certificate and private-key material for an existing listener.
+    async fn update_listener_identity(
+        &self,
+        request: UpdateListenerIdentityRequest,
+    ) -> Result<UpdateListenerIdentityOutcome, UpdateIdentityError>;
 
     /// Request an outbound QUIC connector.
     ///

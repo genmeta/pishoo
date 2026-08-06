@@ -1,28 +1,42 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dhttp::{h3x::quic::Listen as _, name::DhttpName};
-use gateway::control_plane::{ControlPlane, ProvideListener};
+use gateway::control_plane::{
+    ControlPlane, ProvideListener, UpdateListenerIdentity, UpdateListenerIdentityOutcome,
+    UpdateListenerIdentityRequest,
+};
 use snafu::{Report, ResultExt};
 
 use super::{
     accept::DrainOutcome,
+    identity_watcher::IdentityWatcher,
     resource::ServerResources,
     set::{ResourceSet, ServerServiceHandle, ServiceSet},
-    source::{PrepareContext, ServerSource},
+    source::{
+        PrepareContext, PrepareServerUpdateError, ServerSource, TypedServerSource,
+        compute_identity_fingerprint,
+    },
 };
 
 pub struct RuntimeRegistry<P>
 where
-    P: ProvideListener,
+    P: ProvideListener + UpdateListenerIdentity,
 {
     plane: Arc<P>,
     resources: ResourceSet<P::Listener>,
     services: ServiceSet<P::Listener>,
+    typed_sources: HashMap<DhttpName<'static>, TypedServerSource>,
+    recoverable_identity_failures: HashSet<DhttpName<'static>>,
+    prepare_context: Option<PrepareContext>,
+    identity_watcher: IdentityWatcher,
 }
 
 impl<P> RuntimeRegistry<P>
 where
-    P: ProvideListener + Send + Sync + 'static,
+    P: ProvideListener + UpdateListenerIdentity + Send + Sync + 'static,
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
@@ -30,10 +44,27 @@ where
     <<P::Listener as dhttp::h3x::quic::Listen>::Connection as dhttp::h3x::quic::WithRemoteAuthority>::RemoteAuthority: Send + Sync,
 {
     pub fn new(plane: Arc<P>) -> Self {
-        Self { plane, resources: ResourceSet::default(), services: ServiceSet::default() }
+        Self {
+            plane,
+            resources: ResourceSet::default(),
+            services: ServiceSet::default(),
+            typed_sources: HashMap::new(),
+            recoverable_identity_failures: HashSet::new(),
+            prepare_context: None,
+            identity_watcher: IdentityWatcher::new(),
+        }
     }
 
     pub async fn apply_sources(&mut self, sources: Vec<ServerSource>, ctx: &PrepareContext) {
+        self.typed_sources = sources
+            .iter()
+            .filter_map(|source| source.typed().cloned())
+            .map(|source| (source.name().clone(), source))
+            .collect();
+        self.recoverable_identity_failures
+            .retain(|name| self.typed_sources.contains_key(name));
+        self.prepare_context = Some(ctx.clone());
+        self.identity_watcher.reconfigure(&self.typed_sources);
         self.stop_finished_services().await;
         let desired = sources.iter().map(|source| source.name().clone()).collect::<HashSet<_>>();
         let removed = self.resources.servers.keys().filter(|name| !desired.contains(*name)).cloned().collect::<Vec<_>>();
@@ -46,8 +77,16 @@ where
         self.stop_service(&name).await;
 
         let prepared = match source.prepare(ctx).await {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                self.recoverable_identity_failures.remove(&name);
+                prepared
+            }
             Err(error) => {
+                if matches!(error, PrepareServerUpdateError::Identity { .. }) {
+                    self.recoverable_identity_failures.insert(name.clone());
+                } else {
+                    self.recoverable_identity_failures.remove(&name);
+                }
                 tracing::warn!(server_name = %name, error = %Report::from_error(&error), "server service preparation failed");
                 self.release_resource(&name).await;
                 return;
@@ -123,14 +162,81 @@ where
 
     pub async fn wait_service_completion(&mut self) -> DhttpName<'static> {
         loop {
-            let completion = self.services.next_completed().await;
-            if self
-                .services
-                .servers
-                .get(&completion.name)
-                .is_some_and(|service| service.owns_completion(&completion))
+            enum RuntimeEvent {
+                Service(super::set::ServiceCompletion),
+                Identities(Vec<DhttpName<'static>>),
+            }
+            let event = tokio::select! {
+                completion = self.services.next_completed() => RuntimeEvent::Service(completion),
+                names = self.identity_watcher.next_changes() => RuntimeEvent::Identities(names),
+            };
+            match event {
+                RuntimeEvent::Service(completion)
+                    if self
+                        .services
+                        .servers
+                        .get(&completion.name)
+                        .is_some_and(|service| service.owns_completion(&completion)) =>
+                {
+                    return completion.name;
+                }
+                RuntimeEvent::Service(_) => {}
+                RuntimeEvent::Identities(names) => {
+                    for name in names {
+                        self.reload_identity(&name).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reload_identity(&mut self, name: &DhttpName<'static>) {
+        let Some(source) = self.typed_sources.get(name).cloned() else {
+            return;
+        };
+        let identity = match source.identity_source().load().await {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(server_name = %name, error = %Report::from_error(&error), "TLS identity reload failed; keeping current identity");
+                return;
+            }
+        };
+
+        let fingerprint = compute_identity_fingerprint(&identity);
+        let Some(resources) = self.resources.servers.get(name) else {
+            if self.recoverable_identity_failures.contains(name)
+                && let Some(context) = self.prepare_context.clone()
             {
-                return completion.name;
+                self.reconcile_server(ServerSource::Typed(source), &context).await;
+            }
+            return;
+        };
+        if resources.listener_spec().request_fingerprint.identity_debug == fingerprint {
+            return;
+        }
+
+        match self
+            .plane
+            .update_listener_identity(UpdateListenerIdentityRequest { identity })
+            .await
+        {
+            Ok(UpdateListenerIdentityOutcome::Updated) => {
+                self.resources
+                    .servers
+                    .get_mut(name)
+                    .expect("identity update keeps the listener resource")
+                    .update_identity_fingerprint(fingerprint);
+                tracing::info!(server_name = %name, "TLS identity reloaded");
+            }
+            Ok(UpdateListenerIdentityOutcome::Unchanged) => {
+                self.resources
+                    .servers
+                    .get_mut(name)
+                    .expect("identity update keeps the listener resource")
+                    .update_identity_fingerprint(fingerprint);
+            }
+            Err(error) => {
+                tracing::warn!(server_name = %name, error = %Report::from_error(&error), "TLS identity control-plane update failed; keeping current identity");
             }
         }
     }
@@ -195,7 +301,7 @@ pub enum WorkerReloadError {
 
 pub struct WorkerRuntime<P>
 where
-    P: ControlPlane + ProvideListener,
+    P: ControlPlane + ProvideListener + UpdateListenerIdentity,
 {
     registry: RuntimeRegistry<P>,
     dhttp_home: dhttp::home::DhttpHome,
@@ -205,7 +311,7 @@ where
 
 impl<P> WorkerRuntime<P>
 where
-    P: ControlPlane + ProvideListener + Send + Sync + 'static,
+    P: ControlPlane + ProvideListener + UpdateListenerIdentity + Send + Sync + 'static,
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
@@ -297,6 +403,19 @@ mod tests {
             Ok(FakeListener {
                 operations: self.operations.clone(),
             })
+        }
+    }
+
+    impl gateway::control_plane::UpdateListenerIdentity for FakePlane {
+        type UpdateIdentityError = FakeListenerError;
+
+        async fn update_listener_identity(
+            &self,
+            _request: gateway::control_plane::UpdateListenerIdentityRequest,
+        ) -> Result<gateway::control_plane::UpdateListenerIdentityOutcome, Self::UpdateIdentityError>
+        {
+            self.operations.lock().unwrap().push("update");
+            Ok(gateway::control_plane::UpdateListenerIdentityOutcome::Updated)
         }
     }
 

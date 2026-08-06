@@ -629,6 +629,67 @@ async fn test_release_wrong_owner() {
 }
 
 #[tokio::test]
+async fn test_update_listener_identity_keeps_registered_endpoint_active() {
+    let state = test_state();
+    let listener = state
+        .acquire_listener(Owner::Local, test_request("rotate"))
+        .await
+        .expect("listener should be acquired");
+    let old_key = listener
+        .endpoint()
+        .identity()
+        .unwrap()
+        .key()
+        .secret_der()
+        .to_vec();
+
+    let outcome = state
+        .update_listener_identity(Owner::Local, test_identity("rotate"))
+        .await
+        .expect("owner should update its active listener");
+
+    assert_eq!(
+        outcome,
+        gateway::control_plane::UpdateListenerIdentityOutcome::Updated
+    );
+    assert_ne!(
+        listener.endpoint().identity().unwrap().key().secret_der(),
+        old_key
+    );
+    assert!(is_active(&state, "rotate.user.dhttp.net").await);
+}
+
+#[tokio::test]
+async fn test_update_listener_identity_rejects_wrong_owner() {
+    let state = test_state();
+    let listener = state
+        .acquire_listener(Owner::Local, test_request("rotate-owner"))
+        .await
+        .expect("listener should be acquired");
+    let original_key = listener
+        .endpoint()
+        .identity()
+        .unwrap()
+        .key()
+        .secret_der()
+        .to_vec();
+
+    let error = state
+        .update_listener_identity(
+            Owner::worker(Uid::from_raw(5000), Pid::from_raw(11111)),
+            test_identity("rotate-owner"),
+        )
+        .await
+        .expect_err("a different owner must not update the listener");
+
+    assert!(matches!(error, UpdateListenerIdentityError::NotOwner));
+    assert_eq!(
+        listener.endpoint().identity().unwrap().key().secret_der(),
+        original_key
+    );
+}
+
+#[tokio::test]
 async fn test_release_nonexistent() {
     let state = test_state();
     // Should not panic.
