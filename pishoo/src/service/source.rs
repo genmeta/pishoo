@@ -1,6 +1,10 @@
-use std::sync::Arc;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use dhttp::name::DhttpName;
+use dhttp::{home::identity::ssl::SSL_DIR_NAME, name::DhttpName};
 use gateway::{
     control_plane::ListenRequest,
     parse::{
@@ -12,6 +16,9 @@ use gateway::{
 use snafu::{ResultExt, Snafu};
 
 use super::{resource::AccessLogResourcePlan, snapshot::PreparedServerService};
+
+const SSL_STAGE_DIR_PREFIX: &str = ".ssl-stage-";
+const SSL_BACKUP_DIR_PREFIX: &str = ".ssl-backup-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenRequestFingerprint {
@@ -86,6 +93,35 @@ pub(crate) enum TlsIdentitySource {
     },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum TlsIdentityWatchFilter {
+    Profile { roots: Vec<PathBuf> },
+    Direct { material_paths: Vec<PathBuf> },
+}
+
+impl TlsIdentityWatchFilter {
+    pub(crate) fn matches(&self, path: &Path) -> bool {
+        match self {
+            Self::Profile { roots } => roots.iter().any(|root| {
+                let Ok(relative) = path.strip_prefix(root) else {
+                    return false;
+                };
+                let Some(std::path::Component::Normal(component)) = relative.components().next()
+                else {
+                    return false;
+                };
+
+                component == OsStr::new(SSL_DIR_NAME)
+                    || component.to_str().is_some_and(|component| {
+                        component.starts_with(SSL_STAGE_DIR_PREFIX)
+                            || component.starts_with(SSL_BACKUP_DIR_PREFIX)
+                    })
+            }),
+            Self::Direct { material_paths } => material_paths.iter().any(|target| path == target),
+        }
+    }
+}
+
 impl TlsIdentitySource {
     pub(crate) async fn load(
         &self,
@@ -134,6 +170,44 @@ impl TlsIdentitySource {
                     }
                 }
                 roots.into_iter().map(|root| (root, false)).collect()
+            }
+        }
+    }
+
+    pub(crate) fn watch_filter(&self) -> TlsIdentityWatchFilter {
+        match self {
+            Self::Profile(profile) => {
+                let mut roots = vec![profile.path().to_owned()];
+                if let Ok(canonical) = std::fs::canonicalize(profile.path())
+                    && !roots.contains(&canonical)
+                {
+                    roots.push(canonical);
+                }
+                TlsIdentityWatchFilter::Profile { roots }
+            }
+            Self::Direct {
+                certificate,
+                private_key,
+                ..
+            } => {
+                let mut material_paths = Vec::new();
+                for path in [certificate, private_key] {
+                    if !material_paths.contains(path) {
+                        material_paths.push(path.clone());
+                    }
+                    if let Some(file_name) = path.file_name() {
+                        let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
+                        if let Ok(canonical_parent) =
+                            std::fs::canonicalize(parent.unwrap_or(Path::new(".")))
+                        {
+                            let canonical = canonical_parent.join(file_name);
+                            if !material_paths.contains(&canonical) {
+                                material_paths.push(canonical);
+                            }
+                        }
+                    }
+                }
+                TlsIdentityWatchFilter::Direct { material_paths }
             }
         }
     }
@@ -531,5 +605,56 @@ mod identity_source_tests {
             source.watch_targets(),
             vec![("/tmp/certs".into(), false), ("/tmp/keys".into(), false)]
         );
+    }
+
+    #[test]
+    fn profile_matches_only_tls_material_and_atomic_swap_paths() {
+        let path = std::path::PathBuf::from("/tmp/watch.example.dhttp.net");
+        let profile = dhttp::home::identity::IdentityProfile::try_from(path.clone()).unwrap();
+        let source = TlsIdentitySource::Profile(profile);
+
+        for changed in [
+            path.join("ssl"),
+            path.join("ssl/fullchain.crt"),
+            path.join("ssl/privkey.pem"),
+            path.join(".ssl-stage-123-1/fullchain.crt"),
+            path.join(".ssl-backup-123-1/privkey.pem"),
+        ] {
+            assert!(
+                source.watch_filter().matches(&changed),
+                "{}",
+                changed.display()
+            );
+        }
+
+        for unchanged in [
+            path.clone(),
+            path.join("logs/access.log"),
+            path.join("logs/cert.log"),
+            path.join("db/access.db"),
+            path.join("server.conf"),
+            path.join("other/ssl/fullchain.crt"),
+        ] {
+            assert!(
+                !source.watch_filter().matches(&unchanged),
+                "{}",
+                unchanged.display()
+            );
+        }
+    }
+
+    #[test]
+    fn direct_identity_matches_only_configured_material_files() {
+        let source = TlsIdentitySource::Direct {
+            name: DhttpName::try_from("watch.example.dhttp.net".to_owned()).unwrap(),
+            certificate: "/tmp/certs/fullchain.crt".into(),
+            private_key: "/tmp/keys/privkey.pem".into(),
+        };
+
+        let filter = source.watch_filter();
+        assert!(filter.matches(Path::new("/tmp/certs/fullchain.crt")));
+        assert!(filter.matches(Path::new("/tmp/keys/privkey.pem")));
+        assert!(!filter.matches(Path::new("/tmp/certs/access.log")));
+        assert!(!filter.matches(Path::new("/tmp/keys/other.pem")));
     }
 }
