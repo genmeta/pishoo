@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## [0.8.1-beta.1] - 2026-08-07
+
+### Added
+
+- Reload active TLS identities when certificate files change, including
+  coordinated updates across the root and worker control planes.
+
+### Changed
+
+- Identity watchers now filter certificate changes precisely and preserve the
+  active listener while the replacement is applied.
+
+### Dependencies
+
+- Release manifests target `dhttp` v0.6.1-beta.2 and `h3x` v0.6.1-beta.1.
+
+### Components
+
+- `pishoo` v0.8.1-beta.1
+- `gateway` v0.8.1-beta.1
+- `pishoo-common` v0.8.1-beta.1 (`0.8.1~beta.1-1` for DEB/RPM)
+
 ## [0.8.0] - 2026-08-04
 
 ### Changed
