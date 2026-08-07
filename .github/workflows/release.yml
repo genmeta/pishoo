@@ -21,9 +21,9 @@ env:
   DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}
   DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem
   DHTTP_BOOTSTRAP_URL: ${{ vars.DHTTP_BOOTSTRAP_URL }}
-  DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_H3_DNS_SERVER }}
-  DHTTP_MDNS_SERVICE: ${{ vars.DHTTP_MDNS_SERVICE }}
-  DHTTP_CERT_SERVER_URL: ${{ vars.DHTTP_CERT_SERVER_URL }}
+  DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_NAME_SERVICE }}
+  DHTTP_MDNS_SERVICE: ${{ vars.DHTTP_MDNS_SERVICE_DOMAIN }}
+  DHTTP_CERT_SERVER_URL: ${{ vars.DHTTP_CA_SERVICE }}
 
 jobs:
   github-release:
