@@ -69,7 +69,12 @@ impl fmt::Display for FixedResolver {
 }
 
 impl Resolve for FixedResolver {
-    fn lookup<'a>(&'a self, _name: &'a str) -> ResolveFuture<'a> {
+    fn lookup<'a>(
+        &'a self,
+        _hostname: &'a str,
+        _servname: &'a str,
+        _family: Option<dhttp::dquic::qresolve::Family>,
+    ) -> ResolveFuture<'a> {
         let endpoint = EndpointAddr::direct(self.0);
         async move { Ok(stream::iter([(Source::System, endpoint)]).boxed()) }.boxed()
     }
