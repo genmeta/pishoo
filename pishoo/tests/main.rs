@@ -70,6 +70,10 @@ fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
 
     assert!(registered_endpoint_source.contains("DhttpDnsPlan::new()"));
     assert!(registered_endpoint_source.contains("quic_endpoint_builder_with_dns"));
+    assert!(
+        registered_endpoint_source.contains(".mdns_driver(network.mdns_driver())"),
+        "root-owned endpoints must reuse the DhttpNetwork mDNS driver"
+    );
     assert!(registered_endpoint_source.contains("H3Endpoint::new(quic)"));
     assert!(registered_endpoint_source.contains("Endpoint::from_parts"));
     assert!(
