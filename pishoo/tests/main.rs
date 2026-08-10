@@ -56,7 +56,7 @@ fn root_state_keeps_dhttp_network_wrapper() {
 }
 
 #[test]
-fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
+fn endpoint_factory_keeps_dns_resource_ownership_inside_dhttp() {
     let source = include_str!("../src/hypervisor/endpoint_factory.rs");
     let start = source
         .find("pub async fn build_registered_endpoint(\n")
@@ -65,32 +65,22 @@ fn endpoint_factory_uses_dhttp_v2_dns_construction_helpers() {
         .find("pub async fn build_connector_endpoint")
         .expect("connector endpoint builder should follow registered endpoint builder");
     let registered_endpoint_source = &source[start..end];
-    let default_client_config = ["default_", "client_quic_config()"].concat();
-    let default_server_config = ["default_", "server_quic_config()"].concat();
 
-    assert!(registered_endpoint_source.contains("DhttpDnsPlan::new()"));
-    assert!(registered_endpoint_source.contains("quic_endpoint_builder_with_dns"));
     assert!(
-        registered_endpoint_source.contains(".mdns_driver(network.mdns_driver())"),
-        "root-owned endpoints must reuse the DhttpNetwork mDNS driver"
+        registered_endpoint_source.contains("Endpoint::builder()")
+            && registered_endpoint_source.contains(".network(network)"),
+        "root-owned endpoints must delegate DNS resource ownership to dhttp Endpoint"
     );
-    assert!(registered_endpoint_source.contains("H3Endpoint::new(quic)"));
-    assert!(registered_endpoint_source.contains("Endpoint::from_parts"));
+    assert!(
+        !registered_endpoint_source.contains("quic_endpoint_builder_with_dns")
+            && !registered_endpoint_source.contains("QuicEndpoint::builder()")
+            && !registered_endpoint_source.contains("Endpoint::from_parts")
+            && !registered_endpoint_source.contains("mdns_driver"),
+        "pishoo must not assemble dhttp DNS internals or pair a network with its resources"
+    );
     assert!(
         !source.contains("DHTTP_H3_DNS_SERVER"),
-        "endpoint factory should use ddns resolver defaults instead of reading DHTTP DNS constants"
-    );
-    assert!(
-        !registered_endpoint_source.contains("\n    Endpoint::builder()"),
-        "root-owned endpoints should use Endpoint::from_parts around explicitly built H3 endpoints"
-    );
-    assert!(
-        registered_endpoint_source.contains(&default_client_config),
-        "raw registered endpoints must install the DHTTP client QUIC defaults so H3 DNS and endpoint-originated H3 connections advertise the h3 ALPN"
-    );
-    assert!(
-        registered_endpoint_source.contains(&default_server_config),
-        "raw registered endpoints must install the DHTTP server QUIC defaults so inbound H3 peers negotiate the h3 ALPN and DHTTP trust policy"
+        "endpoint factory should use dhttp defaults instead of reading DNS constants"
     );
 }
 
@@ -154,9 +144,9 @@ fn registered_endpoint_uses_dhttp_dns_schemes_for_publishers() {
     let registered_endpoint_source = &source[start..end];
 
     assert!(
-        registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::H3)")
-            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::Mdns)")
-            && registered_endpoint_source.contains("dns_plan.push_dns(DnsScheme::System)"),
+        registered_endpoint_source.contains(".dns(DnsScheme::H3)")
+            && registered_endpoint_source.contains(".dns(DnsScheme::Mdns)")
+            && registered_endpoint_source.contains(".dns(DnsScheme::System)"),
         "registered endpoint should pass the H3/mDNS/System DNS plan to dhttp"
     );
     assert!(
@@ -182,7 +172,7 @@ fn registered_endpoint_with_resolver_uri_sets_h3_dns_server() {
     );
     assert!(
         registered_endpoint_source.contains(".h3_dns_server(h3_dns_server.to_string().into())"),
-        "resolver URI should be passed to quic_endpoint_builder_with_dns as the H3 DNS base URI"
+        "resolver URI should be passed to dhttp Endpoint as the H3 DNS base URI"
     );
     assert!(
         !source.contains("build_registered_endpoint_with_resolver")
