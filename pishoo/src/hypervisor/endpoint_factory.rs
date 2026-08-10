@@ -62,7 +62,8 @@ pub async fn build_registered_endpoint(
             }
         },
         &dns_plan,
-    );
+    )
+    .mdns_driver(network.mdns_driver());
 
     let (quic, publishers) = match h3_dns_server {
         Some(h3_dns_server) => {
