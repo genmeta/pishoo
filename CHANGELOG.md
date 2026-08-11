@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## [0.8.1-beta.2] - 2026-08-11
+
+### Fixed
+
+- Reuse the network-owned mDNS resolver and driver across endpoint identities,
+  avoiding duplicate multicast bindings and publication loops.
+- Adapt fixed resolvers to the latest dquic lookup contract, including service
+  names and address-family constraints.
+
+### Dependencies
+
+- Release manifests target `dhttp` v0.6.1 and `h3x` v0.6.1, which carry the
+  dquic v0.7.1 bounded ACK-journal fix.
+
+### Components
+
+- `pishoo` v0.8.1-beta.2
+- `gateway` v0.8.1-beta.2
+- `pishoo-common` v0.8.1-beta.2 (`0.8.1~beta.2-1` for DEB/RPM)
+
 ## [0.8.1-beta.1] - 2026-08-07
 
 ### Added
