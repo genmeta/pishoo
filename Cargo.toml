@@ -60,7 +60,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- DShell ---
-dshell = { version = "0.6.1-beta.1" }
+dshell = { version = "0.6.1" }
 
 # --- Security & TLS ---
 getrandom = "0.4"
