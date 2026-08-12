@@ -29,7 +29,7 @@ rm -rf "$out/staging"
 mkdir -p "$out/staging"
 product_source="$out/product-source"
 prepare_product_source "$product_source"
-args=(build --release --manifest-path "$product_source/pishoo/Cargo.toml" --target "$target")
+args=(build --locked --release --manifest-path "$product_source/pishoo/Cargo.toml" --target "$target")
 if [ -n "$features" ]; then
     args+=(--features "$features")
 fi

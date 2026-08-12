@@ -6,4 +6,4 @@ DHTTP_MDNS_SERVICE = "_dhttp.local"
 DHTTP_ROOT_CA = { value = "keychain/root.crt", relative = true }
 
 [alias]
-xtask = "run --manifest-path xtask/Cargo.toml --"
+xtask = "run --locked --manifest-path xtask/Cargo.toml --"

@@ -46,6 +46,7 @@ fn generated_rpm_preinstall() -> String {
     let bin = test_dir.path().join("bin");
     let out = test_dir.path().join("out");
     fs::create_dir(&bin).expect("fake command directory should be created");
+    write_fake_command(&bin, "install", "exit 0");
     write_fake_command(&bin, "rpmbuild", "exit 0");
 
     let xtask_root = Path::new(env!("CARGO_MANIFEST_DIR"));

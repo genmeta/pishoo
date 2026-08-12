@@ -22,13 +22,41 @@ fn release_contract(root: &Path) -> ReleaseContract {
 }
 
 #[test]
+fn release_builds_use_the_committed_lockfile() {
+    let root = repository_root();
+    let cargo_config = std::fs::read_to_string(root.join(".cargo/config.toml"))
+        .expect("cargo config should be readable");
+    assert!(
+        cargo_config.contains("xtask = \"run --locked"),
+        "cargo xtask must use the xtask lockfile"
+    );
+
+    for (path, command) in [
+        ("xtask/release/brew/pishoo.sh", "args=(build --locked"),
+        ("xtask/release/rpm/package.sh", "cargo zigbuild --locked"),
+        ("xtask/deb/rules", "cargo zigbuild --locked"),
+    ] {
+        let contents = std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|error| panic!("{path} should be readable: {error}"));
+        assert!(
+            contents.contains(command),
+            "{path} must build release artifacts with --locked"
+        );
+    }
+}
+
+#[test]
 fn deb_packaging_disables_sparse_binary_copies() {
     let rules = std::fs::read_to_string(repository_root().join("xtask/deb/rules"))
         .expect("deb rules should be readable");
 
     for binary in ["pishoo", "pishoo-worker", "pishoo-ssh-session"] {
-        let copy = format!("cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/{binary}");
-        assert!(rules.contains(&copy), "missing non-sparse copy for {binary}");
+        let copy =
+            format!("cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/{binary}");
+        assert!(
+            rules.contains(&copy),
+            "missing non-sparse copy for {binary}"
+        );
     }
 }
 
@@ -59,13 +87,13 @@ fn pishoo_common_package_version_follows_pishoo() {
         PackageVersion::deb(common.source_version.clone(), deb.revision.clone())
             .expect("pishoo-common deb version should compose")
             .as_string(),
-        "0.8.1~beta.2-1"
+        "0.8.1-1"
     );
     assert_eq!(
         PackageVersion::rpm(common.source_version, rpm.release.clone())
             .expect("pishoo-common rpm version should compose")
             .as_string(),
-        "0.8.1~beta.2-1"
+        "0.8.1-1"
     );
 }
 
@@ -114,19 +142,13 @@ fn pishoo_linux_requirements_keep_published_floor_and_current_ceiling() {
             .get("pishoo-common")
             .expect("pishoo-common bounds should resolve");
         assert_eq!(common.minimum.as_deref(), Some("0.5.1-1"));
-        assert_eq!(common.maximum.as_deref(), Some("0.8.1~beta.2-1"));
+        assert_eq!(common.maximum.as_deref(), Some("0.8.1-1"));
 
         let entries = linux_requirement_entries(system, "pishoo-common", common.clone())
             .expect("pishoo-common requirement entries should render");
         let expected = match system {
-            PackageSystem::Deb => vec![
-                "pishoo-common (>= 0.5.1-1)",
-                "pishoo-common (<= 0.8.1~beta.2-1)",
-            ],
-            PackageSystem::Rpm => vec![
-                "pishoo-common >= 0.5.1-1",
-                "pishoo-common <= 0.8.1~beta.2-1",
-            ],
+            PackageSystem::Deb => vec!["pishoo-common (>= 0.5.1-1)", "pishoo-common (<= 0.8.1-1)"],
+            PackageSystem::Rpm => vec!["pishoo-common >= 0.5.1-1", "pishoo-common <= 0.8.1-1"],
             PackageSystem::Brew | PackageSystem::Scoop => unreachable!(),
         };
         assert_eq!(entries, expected);
