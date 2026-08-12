@@ -571,8 +571,8 @@ jobs:
 
           branch="publish/pishoo/${GITHUB_REF_NAME}"
           commit_message="feat: release pishoo ${GITHUB_REF_NAME}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "genmeta-developer"
+          git config user.email "developer@genmeta.net"
           git switch -c "$branch"
           git add "$FORMULA_NAME"
           git commit -m "$commit_message"

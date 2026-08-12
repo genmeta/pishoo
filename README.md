@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/pishoo/pishoo-readme-title.png" alt="PISHOO — It's the gateway that keeps your data private and secure." width="900">
+  <img src="https://media.dhttp.net/img/pishoo/pishoo-readme-title.jpg" alt="PISHOO — It's the gateway that keeps your data private and secure." width="900">
 </p>
 
 <p align="center">
