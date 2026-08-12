@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.8.1] - 2026-08-12
+
+### Changed
+
+- Promote gateway, pishoo, and pishoo-common to the stable 0.8.1 release.
+- Require every release build path to use the committed Cargo lockfile.
+
+### Dependencies
+
+- Release manifests target stable `dhttp` v0.6.1 and `h3x` v0.6.1.
+
+### Components
+
+- `pishoo` v0.8.1
+- `gateway` v0.8.1
+- `pishoo-common` v0.8.1 (`0.8.1-1` for DEB/RPM)
+
 ## [0.8.1-beta.2] - 2026-08-11
 
 ### Fixed

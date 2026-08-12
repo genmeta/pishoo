@@ -54,7 +54,7 @@ ifdef TRIPLE
 	fi && \
 	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
 	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
-	cargo zigbuild $(CARGO_PROFILE_ARGS) --manifest-path pishoo/Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
+	cargo zigbuild --locked $(CARGO_PROFILE_ARGS) --manifest-path pishoo/Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
 endif
 
 override_dh_auto_install:

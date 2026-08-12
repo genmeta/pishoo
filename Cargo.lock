@@ -1243,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.6.1-beta.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e56be49acafefd26a6e30078e5ee2da380243f183849dbf4fc05bddd6aabf0b"
+checksum = "0b8f3e8381da1110026accdce99205ac6f0ee40fbdf27f78b8bffde63adb23bf"
 dependencies = [
  "bon",
  "bytes",
@@ -1269,9 +1269,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp-access"
-version = "0.4.1-beta.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33495401590d92114798a357edc627d60ef346bdacee86adc687d2cbb02f466f"
+checksum = "3173d398cebddc0429b0400d76b4b213dd8861fcb075507f7a98a5af9761c221"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1414,6 +1414,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-lookup"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e39034cee21a2f5bbb66ba0e3689819c4bb5d00382a282006e802a7ffa6c41d"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "socket2",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1421,9 +1433,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dquic"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "433504181420731850109ed0f1d6f0beeeb08eaa7fdbdd4804c5bcb68f46504e"
+checksum = "5d10c3b8e494a05ebbc2fa4a95f5cfb6d0c74150592cf6a4b3726cebf1bcdbd2"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -1469,9 +1481,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dyns"
-version = "0.7.1-beta.1"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3db584a53a6957ace2dc39782cc1636e433eecbd4dfa38a375d64f50907b2e37"
+checksum = "715d758c4bdf4efda8c1ff25263360dbb959bc43b598bc504a940da11341cf7f"
 dependencies = [
  "base64",
  "bitfield-struct",
@@ -1751,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.1-beta.1"
+version = "0.8.1"
 dependencies = [
  "async-compression",
  "axum",
@@ -1915,9 +1927,9 @@ dependencies = [
 
 [[package]]
 name = "h3x"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d445c8f0cc3a61f412e0e73c2103e929cba60b98d7f6f7473de6eab785c2e73"
+checksum = "def1570b6089f681f8c4e2a6be789a710c35adefb13d1702ae12b773ce70fb7e"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -3333,7 +3345,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pishoo"
-version = "0.8.1-beta.1"
+version = "0.8.1"
 dependencies = [
  "axum",
  "clap",
@@ -3639,9 +3651,9 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "185dcad8bce14f7661068b95bd7deb7c78874c8562f64b9f0ea3325c08e29935"
+checksum = "cdf276aac377445913da578d3f271581ccfecedd462191262f4754774301d740"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -3662,9 +3674,9 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ff2c0dd91cf0e4cacca9e3b1ab8c2bd4bff93c17ba39f509e53f238a1fda42"
+checksum = "5d62373ba5efac234022a2bd0e44bb17ef0636e5e0a96eddd0fa8c25b36fe29c"
 dependencies = [
  "qbase",
  "qevent",
@@ -3676,9 +3688,9 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8f344cd2b0ccec7c4ba659bc121e4d91d69e54e3e84e24069f8544c95536c84"
+checksum = "a32a259a9cfd105c1ab2e16a9bde5e92c8ed5097176ececefb248a231d14e087"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3693,6 +3705,7 @@ dependencies = [
  "qrecovery",
  "qresolve",
  "qtraversal",
+ "rand 0.10.2",
  "ring",
  "rustls",
  "thiserror 2.0.20",
@@ -3704,9 +3717,9 @@ dependencies = [
 
 [[package]]
 name = "qdatagram"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d891c28529949b435a5eb4ec0e4eb67e33d514dc993138e2da36bbff5c3f77a"
+checksum = "7a0f60c93e96b701aab86ffd19dd793ca32204ffbdb22873a0fc7250354430ff"
 dependencies = [
  "bytes",
  "qbase",
@@ -3716,9 +3729,9 @@ dependencies = [
 
 [[package]]
 name = "qevent"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13122bb529c62512d876c08681d57f2ab0be4b5e9943657a19b74c0c83298638"
+checksum = "fe1ae732037095373eb6165187cbf4faa708b40d30a5130826cea4d902f0c94a"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3735,9 +3748,9 @@ dependencies = [
 
 [[package]]
 name = "qinterface"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "956afb64d3f75fb2290952d53daf31a74a904c6f9ec15189e6cf9eca8fb5d437"
+checksum = "bdbebd4045bb69f4dfda6ee4485ac0fe720993c75911ff39328a1c0c18c46917"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3770,9 +3783,9 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4adfff2dbe1f591662695e3d91a4a0c3159b22a6c7a86aa754f07894c9e946da"
+checksum = "ac44c315b39bb8ea938563c695aeda92ff639541c41a057546fe90111db2e2f0"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3786,10 +3799,11 @@ dependencies = [
 
 [[package]]
 name = "qresolve"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea529cc688e7f0037d10437995196485c031469ab64e135507fa3fea5a3c8822"
+checksum = "373f616de77c7a9d0e8ace2777f5f41a704958f911420f5d5170bd298588ce5d"
 dependencies = [
+ "dns-lookup",
  "futures",
  "qbase",
  "tokio",
@@ -3797,9 +3811,9 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2235cdf417cf1f96dece8c0f8fe57e9e75fe9bb7c2b4b114fa7a8afd17830ba"
+checksum = "dd52c8656f08a52e84a66862788574eb7c007b2704725d120ce48be4d3781f05"
 dependencies = [
  "bon",
  "bytes",
@@ -3821,9 +3835,9 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93939a2b57e188c23e6e414f79226a6096c517bbc9e2a3486aa8cedd63022c08"
+checksum = "8e46f68ba7b82db198fa719fecbf54d5a88a66f5dd5ad45e19551dde530db2ed"
 dependencies = [
  "bytes",
  "cfg-if",
