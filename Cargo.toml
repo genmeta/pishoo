@@ -89,7 +89,7 @@ form_urlencoded = "1"
 percent-encoding = "2"
 socket2 = "0.6"
 x509-parser = "0.18"
-dhttp = "0.6.1"
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "52c6c00d59234c616ac055ed3ee8b52333031dcf" }
 
 # --- System Interaction ---
 libc = "0.2"
