@@ -19,11 +19,10 @@ env:
   CARGO_TERM_COLOR: always
   XTASK_RELEASE_S3_ENDPOINT_URL: ${{ vars.XTASK_RELEASE_S3_ENDPOINT_URL }}
   DHTTP_ROOT_CA_PEM: ${{ secrets.DHTTP_ROOT_CA_PEM }}
-  DHTTP_ROOT_CA: ${{ github.workspace }}/.release/dhttp-root-ca.pem
   DHTTP_BOOTSTRAP_URL: ${{ vars.DHTTP_BOOTSTRAP_URL }}
-  DHTTP_H3_DNS_SERVER: ${{ vars.DHTTP_NAME_SERVICE }}
-  DHTTP_MDNS_SERVICE: ${{ vars.DHTTP_MDNS_SERVICE_DOMAIN }}
-  DHTTP_CERT_SERVER_URL: ${{ vars.DHTTP_CA_SERVICE }}
+  DHTTP_NAME_SERVICE: ${{ vars.DHTTP_NAME_SERVICE }}
+  DHTTP_MDNS_SERVICE_DOMAIN: ${{ vars.DHTTP_MDNS_SERVICE_DOMAIN }}
+  DHTTP_CA_SERVICE: ${{ vars.DHTTP_CA_SERVICE }}
 
 jobs:
   github-release:
@@ -108,21 +107,6 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Materialize DHTTP root CA
-        run: |
-          set -euo pipefail
-          if [ -z "${DHTTP_ROOT_CA_PEM:-}" ]; then
-            echo "missing required release configuration: DHTTP_ROOT_CA_PEM" >&2
-            exit 1
-          fi
-          mkdir -p "$(dirname "$DHTTP_ROOT_CA")"
-          python3 - <<'PY' > "$DHTTP_ROOT_CA"
-          import os
-
-          pem = os.environ["DHTTP_ROOT_CA_PEM"]
-          print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
-          PY
-
       - name: Install Rust
         run: |
           rustup toolchain install nightly --profile minimal
@@ -156,11 +140,11 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
-            DHTTP_ROOT_CA
+            DHTTP_ROOT_CA_PEM
             DHTTP_BOOTSTRAP_URL
-            DHTTP_H3_DNS_SERVER
-            DHTTP_MDNS_SERVICE
-            DHTTP_CERT_SERVER_URL
+            DHTTP_NAME_SERVICE
+            DHTTP_MDNS_SERVICE_DOMAIN
+            DHTTP_CA_SERVICE
             XTASK_RELEASE_S3_ACCESS_KEY_ID
             XTASK_RELEASE_S3_SECRET_ACCESS_KEY
             XTASK_RELEASE_APT_SIGNING_KEY
@@ -291,21 +275,6 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Materialize DHTTP root CA
-        run: |
-          set -euo pipefail
-          if [ -z "${DHTTP_ROOT_CA_PEM:-}" ]; then
-            echo "missing required release configuration: DHTTP_ROOT_CA_PEM" >&2
-            exit 1
-          fi
-          mkdir -p "$(dirname "$DHTTP_ROOT_CA")"
-          python3 - <<'PY' > "$DHTTP_ROOT_CA"
-          import os
-
-          pem = os.environ["DHTTP_ROOT_CA_PEM"]
-          print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
-          PY
-
       - name: Install Rust
         run: |
           rustup toolchain install nightly --profile minimal
@@ -336,11 +305,11 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
-            DHTTP_ROOT_CA
+            DHTTP_ROOT_CA_PEM
             DHTTP_BOOTSTRAP_URL
-            DHTTP_H3_DNS_SERVER
-            DHTTP_MDNS_SERVICE
-            DHTTP_CERT_SERVER_URL
+            DHTTP_NAME_SERVICE
+            DHTTP_MDNS_SERVICE_DOMAIN
+            DHTTP_CA_SERVICE
             XTASK_RELEASE_S3_ACCESS_KEY_ID
             XTASK_RELEASE_S3_SECRET_ACCESS_KEY
           )
@@ -447,21 +416,6 @@ jobs:
           path: gateway
           persist-credentials: false
 
-      - name: Materialize DHTTP root CA
-        run: |
-          set -euo pipefail
-          if [ -z "${DHTTP_ROOT_CA_PEM:-}" ]; then
-            echo "missing required release configuration: DHTTP_ROOT_CA_PEM" >&2
-            exit 1
-          fi
-          mkdir -p "$(dirname "$DHTTP_ROOT_CA")"
-          python3 - <<'PY' > "$DHTTP_ROOT_CA"
-          import os
-
-          pem = os.environ["DHTTP_ROOT_CA_PEM"]
-          print(pem.replace("\\n", "\n"), end="" if pem.endswith("\n") else "\n")
-          PY
-
       - name: Install Rust
         run: |
           rustup toolchain install nightly --profile minimal
@@ -486,11 +440,11 @@ jobs:
           missing=0
           required=(
             XTASK_RELEASE_S3_ENDPOINT_URL
-            DHTTP_ROOT_CA
+            DHTTP_ROOT_CA_PEM
             DHTTP_BOOTSTRAP_URL
-            DHTTP_H3_DNS_SERVER
-            DHTTP_MDNS_SERVICE
-            DHTTP_CERT_SERVER_URL
+            DHTTP_NAME_SERVICE
+            DHTTP_MDNS_SERVICE_DOMAIN
+            DHTTP_CA_SERVICE
             XTASK_RELEASE_S3_ACCESS_KEY_ID
             XTASK_RELEASE_S3_SECRET_ACCESS_KEY
             HOMEBREW_TAP_GITHUB_TOKEN

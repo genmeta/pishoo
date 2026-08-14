@@ -46,6 +46,42 @@ fn release_builds_use_the_committed_lockfile() {
 }
 
 #[test]
+fn release_build_uses_canonical_dhttp_environment() {
+    let root = repository_root();
+    let contract = release_contract(&root);
+    let package = contract.package("pishoo").expect("pishoo should exist");
+    let names = package
+        .build
+        .env
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        [
+            "DHTTP_BOOTSTRAP_URL",
+            "DHTTP_CA_SERVICE",
+            "DHTTP_GLOBAL_HOME",
+            "DHTTP_MDNS_SERVICE_DOMAIN",
+            "DHTTP_NAME_SERVICE",
+            "DHTTP_ROOT_CA_PEM",
+        ]
+    );
+
+    let root_ca = package
+        .build
+        .env
+        .get("DHTTP_ROOT_CA_PEM")
+        .expect("root CA PEM binding should exist");
+    assert_eq!(root_ca.env.as_deref(), Some("DHTTP_ROOT_CA_PEM"));
+    assert!(
+        root_ca.container_path.is_none(),
+        "PEM content must be passed directly instead of mounted as a path"
+    );
+}
+
+#[test]
 fn deb_packaging_disables_sparse_binary_copies() {
     let rules = std::fs::read_to_string(repository_root().join("xtask/deb/rules"))
         .expect("deb rules should be readable");

@@ -11,7 +11,7 @@ fn main_does_not_build_custom_server_quic_config() {
     );
     assert!(
         !main_source.contains("pishoo::tls::root_cert_store()"),
-        "main must use the DHTTP_ROOT_CA from dhttp defaults"
+        "main must use DHTTP_ROOT_CA_PEM from dhttp defaults"
     );
     assert!(
         !main_source.contains("WebPkiClientVerifier"),
@@ -79,7 +79,7 @@ fn endpoint_factory_keeps_dns_resource_ownership_inside_dhttp() {
         "pishoo must not assemble dhttp DNS internals or pair a network with its resources"
     );
     assert!(
-        !source.contains("DHTTP_H3_DNS_SERVER"),
+        !source.contains("DHTTP_NAME_SERVICE"),
         "endpoint factory should use dhttp defaults instead of reading DNS constants"
     );
 }

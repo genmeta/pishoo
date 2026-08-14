@@ -1,21 +1,20 @@
 [package.pishoo]
 manifest = "pishoo/Cargo.toml"
 
-[package.pishoo.build.env.DHTTP_ROOT_CA]
-env = "DHTTP_ROOT_CA"
-container_path = "/dhttp-bootstrap/root.crt"
+[package.pishoo.build.env.DHTTP_ROOT_CA_PEM]
+env = "DHTTP_ROOT_CA_PEM"
 
 [package.pishoo.build.env.DHTTP_BOOTSTRAP_URL]
 env = "DHTTP_BOOTSTRAP_URL"
 
-[package.pishoo.build.env.DHTTP_H3_DNS_SERVER]
-env = "DHTTP_H3_DNS_SERVER"
+[package.pishoo.build.env.DHTTP_NAME_SERVICE]
+env = "DHTTP_NAME_SERVICE"
 
-[package.pishoo.build.env.DHTTP_MDNS_SERVICE]
-env = "DHTTP_MDNS_SERVICE"
+[package.pishoo.build.env.DHTTP_MDNS_SERVICE_DOMAIN]
+env = "DHTTP_MDNS_SERVICE_DOMAIN"
 
-[package.pishoo.build.env.DHTTP_CERT_SERVER_URL]
-env = "DHTTP_CERT_SERVER_URL"
+[package.pishoo.build.env.DHTTP_CA_SERVICE]
+env = "DHTTP_CA_SERVICE"
 
 [package.pishoo.build.env.DHTTP_GLOBAL_HOME]
 env = "DHTTP_GLOBAL_HOME"
