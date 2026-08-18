@@ -28,7 +28,7 @@ use dshell::{
     },
 };
 use snafu::Report;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::Instrument;
 
 #[derive(Debug)]
@@ -89,6 +89,69 @@ impl dhttp::h3x::quic::Lifecycle for SessionIpcLifecycle {
     }
 }
 
+async fn run_authenticated_session(
+    bootstrap: SessionBootstrap,
+    user_info: UserInfo,
+    username: String,
+    fd_transfer: dhttp::h3x::ipc::transport::FdTransfer,
+    shutdown: CancellationToken,
+) -> Result<(), SessionRunError> {
+    tracing::info!(%username, "starting session");
+
+    if nix::unistd::getuid().is_root() {
+        drop_privileges(user_info.uid, user_info.gid, &username).map_err(|error| {
+            SessionRunError::DropPrivileges {
+                reason: Report::from_error(error).to_string(),
+            }
+        })?;
+        tracing::info!(
+            uid = user_info.uid,
+            gid = user_info.gid,
+            "privileges dropped"
+        );
+    }
+
+    let session_token = shutdown.child_token();
+    let lifecycle: Arc<dyn dhttp::h3x::quic::DynLifecycle> =
+        Arc::new(SessionIpcLifecycle::new(session_token.clone()));
+
+    let result = async {
+        let session = dhttp::h3x::ipc::webtransport::IpcWebTransportSessionHandle::new(
+            bootstrap.webtransport_session.session_id,
+            bootstrap.webtransport_session.session,
+            fd_transfer,
+            lifecycle,
+        );
+
+        let conversation = tokio::select! {
+            () = session_token.cancelled() => return Ok(()),
+            result = Conversation::accept(session, bootstrap.peer_version) => Arc::new(
+                result.map_err(|error| SessionRunError::ConversationBuild {
+                    reason: Report::from_error(&error).to_string(),
+                })?
+            ),
+        };
+
+        let config = SessionConfig {
+            user: user_info,
+            ..Default::default()
+        };
+
+        tracing::info!("session dispatcher starting");
+        let outcome = run_session(conversation, config, session_token.clone())
+            .await
+            .map_err(|error| SessionRunError::Session {
+                reason: Report::from_error(&error).to_string(),
+            })?;
+        tracing::info!(?outcome, "session ended");
+        Ok(())
+    }
+    .await;
+
+    session_token.cancel();
+    result
+}
+
 #[tokio::main]
 async fn main() {
     let user = std::env::var("PISHOO_USER").unwrap_or_else(|_| {
@@ -125,11 +188,17 @@ async fn main() {
         .await
         .expect("failed to establish remoc channel");
     let mut conn = Box::pin(conn.instrument(tracing::info_span!("remoc_conn")));
+    let helper_shutdown = CancellationToken::new();
+    let session_tasks = TaskTracker::new();
 
     // Create the outer RFnOnce: authentication.
     let auth_fd_transfer = fd_transfer.clone();
+    let auth_shutdown = helper_shutdown.clone();
+    let auth_session_tasks = session_tasks.clone();
     let auth_fn = remoc::rfn::RFnOnce::new_1(move |auth_request: AuthRequest| {
         let fd_transfer = auth_fd_transfer.clone();
+        let helper_shutdown = auth_shutdown.clone();
+        let session_tasks = auth_session_tasks.clone();
         async move {
             tracing::info!(username = %auth_request.username, credential = %auth_request.credential, "authentication starting");
 
@@ -173,57 +242,22 @@ async fn main() {
 
             let username = auth_request.username;
             let session_fd_transfer = fd_transfer.clone();
+            let start_shutdown = helper_shutdown.clone();
+            let start_session_tasks = session_tasks.clone();
 
-            // Create the inner RFnOnce: drop privileges + run session.
+            // Keep the session task alive even if remoc drops the RPC future.
             let start_session_fn: StartSessionFn =
                 remoc::rfn::RFnOnce::new_1(move |bootstrap: SessionBootstrap| async move {
-                    tracing::info!(%username, "starting session");
-
-                    if nix::unistd::getuid().is_root() {
-                        drop_privileges(user_info.uid, user_info.gid, &username).map_err(|e| {
-                            SessionRunError::DropPrivileges {
-                                reason: Report::from_error(e).to_string(),
-                            }
-                        })?;
-                        tracing::info!(
-                            uid = user_info.uid,
-                            gid = user_info.gid,
-                            "privileges dropped"
-                        );
-                    }
-
-                    let session_token = CancellationToken::new();
-                    let lifecycle: Arc<dyn dhttp::h3x::quic::DynLifecycle> =
-                        Arc::new(SessionIpcLifecycle::new(session_token.clone()));
-                    let session = dhttp::h3x::ipc::webtransport::IpcWebTransportSessionHandle::new(
-                        bootstrap.webtransport_session.session_id,
-                        bootstrap.webtransport_session.session,
+                    let task = start_session_tasks.spawn(run_authenticated_session(
+                        bootstrap,
+                        user_info,
+                        username,
                         session_fd_transfer,
-                        lifecycle,
-                    );
-
-                    let conversation = Arc::new(
-                        Conversation::accept(session, bootstrap.peer_version)
-                            .await
-                            .map_err(|e| SessionRunError::ConversationBuild {
-                                reason: Report::from_error(&e).to_string(),
-                            })?,
-                    );
-
-                    let config = SessionConfig {
-                        user: user_info,
-                        ..Default::default()
-                    };
-
-                    tracing::info!("session dispatcher starting");
-                    let outcome = run_session(conversation, config).await.map_err(|e| {
-                        SessionRunError::Session {
-                            reason: Report::from_error(&e).to_string(),
-                        }
-                    })?;
-                    session_token.cancel();
-                    tracing::info!(?outcome, "session ended");
-                    Ok(())
+                        start_shutdown.child_token(),
+                    ));
+                    task.await.map_err(|error| SessionRunError::Session {
+                        reason: format!("session task failed: {error}"),
+                    })?
                 });
 
             Ok(AuthenticatedSession {
@@ -232,7 +266,7 @@ async fn main() {
         }
     });
 
-    tokio::select! {
+    let auth_sent = tokio::select! {
         result = &mut conn => {
             if let Err(error) = result {
                 tracing::warn!(
@@ -240,19 +274,45 @@ async fn main() {
                     "remoc connection ended before AuthenticateFn was sent"
                 );
             }
-            return;
+            false
         }
         result = tx.send(auth_fn) => {
             result.expect("failed to send AuthenticateFn to parent");
+            true
+        }
+    };
+
+    drop(tx);
+    if auth_sent {
+        let mut term_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM listener");
+        let mut int_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to register SIGINT listener");
+
+        let connection_result = tokio::select! {
+            result = &mut conn => Some(result),
+            _ = term_signal.recv() => {
+                tracing::info!(signal = "SIGTERM", "received shutdown signal");
+                None
+            }
+            _ = int_signal.recv() => {
+                tracing::info!(signal = "SIGINT", "received shutdown signal");
+                None
+            }
+        };
+        if let Some(Err(error)) = connection_result {
+            tracing::debug!(
+                error = %Report::from_error(&error),
+                "remoc connection ended"
+            );
         }
     }
 
-    drop(tx);
-    if let Err(error) = conn.await {
-        tracing::debug!(
-            error = %Report::from_error(&error),
-            "remoc connection ended"
-        );
-    }
+    drop(conn);
+    helper_shutdown.cancel();
+    session_tasks.close();
+    session_tasks.wait().await;
     tracing::info!("ssh session process exiting");
 }

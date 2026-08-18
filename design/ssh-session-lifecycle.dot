@@ -1,0 +1,46 @@
+digraph ssh_session_lifecycle {
+  graph [
+    layout=neato,
+    overlap=false,
+    splines=ortho,
+    bgcolor="white",
+    pad=0.35,
+    outputorder=edgesfirst
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=12,
+    color="#4b5563",
+    fillcolor="#f8fafc",
+    margin="0.16,0.10"
+  ];
+  edge [
+    fontname="PingFang SC",
+    fontsize=10,
+    color="#64748b",
+    fontcolor="#334155",
+    arrowsize=0.7
+  ];
+
+  client [label="genmeta ssh\n客户端", pos="0,4!"];
+  transport [label="h3x WebTransportSession\nclosed() 是真实关闭信号", fillcolor="#e0f2fe", pos="3.5,4!"];
+  gateway [label="pishoo gateway\nSSH session supervisor", fillcolor="#dcfce7", pos="7.5,4!"];
+  remoc [label="remoc + IPC WebTransport\n子进程控制面", pos="11.5,4!"];
+  helper [label="pishoo-ssh-session\nhelper supervisor", fillcolor="#fef3c7", pos="16.5,4!"];
+  dispatcher [label="dssh run_session\nchannel dispatcher", pos="16.5,1.8!"];
+  owner [label="SessionProcess\n进程组唯一 owner", fillcolor="#fee2e2", pos="11,1.8!"];
+  shell [label="login shell / command\nPTY process group", pos="5,1.8!"];
+  reaper [label="pishoo root reaper\nTERM / KILL 最后兜底", fillcolor="#f3e8ff", pos="16.5,-0.4!"];
+
+  client -> transport [label="connect"];
+  transport -> gateway [label="closed"];
+  gateway -> remoc [label="cancel"];
+  remoc -> helper [label="EOF"];
+  helper -> dispatcher [label="token"];
+  dispatcher -> owner [label="child token"];
+  owner -> shell [label="owns PGID; wait / reap\nshutdown: HUP / TERM / KILL", color="#b91c1c", fontcolor="#991b1b"];
+  helper -> gateway [label="session result", constraint=false];
+  reaper -> helper [color="#7c3aed"];
+}

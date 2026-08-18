@@ -60,7 +60,7 @@ remoc = { version = "0.18", default-features = false, features = [
 ] }
 
 # --- DShell ---
-dshell = { version = "0.6.1" }
+dshell = { git = "https://github.com/genmeta/dssh.git", rev = "0ff189402ea5abfe4cd3b62c1ee38202a1e4b733" }
 
 # --- Security & TLS ---
 getrandom = "0.4"
