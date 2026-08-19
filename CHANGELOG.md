@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.8.2-beta.1] - 2026-08-19
+
+### Fixed
+
+- Tear down SSH sessions and child processes when the transport closes.
+- Run PAM session setup on the process leader for `pam_loginuid` compatibility.
+
+### Dependencies
+
+- Restore crates.io dependencies on `dhttp` v0.6.2 and `dshell` v0.6.2.
+
+### Components
+
+- `pishoo` v0.8.2-beta.1
+- `gateway` v0.8.2-beta.1
+- `pishoo-common` v0.8.2-beta.1 (`0.8.2~beta.1-1` for DEB/RPM)
+
 ## [0.8.1] - 2026-08-12
 
 ### Changed

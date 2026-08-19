@@ -196,6 +196,14 @@ struct AcceptedSshSession {
 }
 
 #[derive(Debug)]
+enum SshSessionEnd {
+    SessionFinished,
+    TransportClosed(dhttp::h3x::webtransport::CloseReason),
+    WorkerShutdown,
+    RemocClosed,
+}
+
+#[derive(Debug)]
 struct SessionIpcLifecycle {
     token: CancellationToken,
     error: Mutex<Option<dhttp::h3x::quic::ConnectionError>>,
@@ -355,23 +363,23 @@ async fn run_ssh_session(
     };
 
     tracing::info!(%conversation_id, "calling StartSessionFn in child");
-    let session_call = authenticated.start_session.call(bootstrap);
-    tokio::pin!(session_call);
+    let mut session_call = Box::pin(authenticated.start_session.call(bootstrap));
 
-    let session_result = tokio::select! {
-        () = token.cancelled() => CancelledSnafu.fail(),
-        result = &mut conn => {
-            result.context(RemocConnectionSnafu)?;
-            RemocClosedSnafu.fail()
-        }
-        result = &mut session_call => result.context(SessionFailedSnafu),
+    let session_end = tokio::select! {
+        () = token.cancelled() => Ok(SshSessionEnd::WorkerShutdown),
+        reason = session.closed() => Ok(SshSessionEnd::TransportClosed(reason)),
+        result = &mut conn => result
+            .context(RemocConnectionSnafu)
+            .map(|()| SshSessionEnd::RemocClosed),
+        result = &mut session_call => result
+            .context(SessionFailedSnafu)
+            .map(|()| SshSessionEnd::SessionFinished),
     };
 
-    // Session is done — tear down the remoc connection so the child sees
-    // transport EOF on the socketpair and exits cleanly. Without this the
-    // child's remoc connection future would hang forever and the
-    // `pishoo-ssh-session` process would linger after the SSH session ends.
+    // Every end path tears down the bridges before returning so the child
+    // observes transport EOF and can clean up its local session resources.
     session_shutdown.cancel();
+    drop(session_call);
     drop(tx);
     drop(rx);
     drop(conn);
@@ -385,9 +393,18 @@ async fn run_ssh_session(
         }
     }
 
-    session_result?;
-    tracing::info!(%conversation_id, "session ended");
-    Ok(())
+    match session_end? {
+        SshSessionEnd::SessionFinished => {
+            tracing::info!(%conversation_id, "session ended");
+            Ok(())
+        }
+        SshSessionEnd::TransportClosed(reason) => {
+            tracing::info!(%conversation_id, ?reason, "ssh transport closed");
+            Ok(())
+        }
+        SshSessionEnd::WorkerShutdown => CancelledSnafu.fail(),
+        SshSessionEnd::RemocClosed => RemocClosedSnafu.fail(),
+    }
 }
 
 #[cfg(test)]

@@ -389,13 +389,16 @@ async fn reap_session_child(child_pid: Pid, token: CancellationToken) {
 
 #[cfg(feature = "sshd")]
 async fn terminate_session_child(child_pid: Pid) {
-    const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+    const INITIAL_GRACE: Duration = Duration::from_secs(2);
+    // Allow the helper's HUP/TERM process-group cleanup to finish before
+    // falling back to SIGKILL on the helper itself.
+    const TERMINATE_GRACE: Duration = Duration::from_secs(4);
 
     if poll_session_child(child_pid) {
         return;
     }
 
-    if wait_session_child_for(child_pid, TERMINATE_GRACE).await {
+    if wait_session_child_for(child_pid, INITIAL_GRACE).await {
         return;
     }
 
