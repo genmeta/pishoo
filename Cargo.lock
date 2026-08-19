@@ -1040,6 +1040,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "custom_debug"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da7d1ad9567b3e11e877f1d7a0fa0360f04162f94965fc4448fbed41a65298e"
+dependencies = [
+ "custom_debug_derive",
+]
+
+[[package]]
+name = "custom_debug_derive"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a707ceda8652f6c7624f2be725652e9524c815bf3b9d55a0b2320be2303f9c11"
+dependencies = [
+ "darling 0.20.11",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1473,7 +1495,7 @@ dependencies = [
  "libc",
  "nix 0.31.3",
  "pam-client2",
- "remoc",
+ "remoc 0.18.3",
  "serde",
  "snafu",
  "tokio",
@@ -1795,7 +1817,7 @@ dependencies = [
  "percent-encoding",
  "pnet",
  "regex",
- "remoc",
+ "remoc 0.19.1",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -1958,7 +1980,7 @@ dependencies = [
  "nix 0.31.3",
  "peg",
  "pin-project-lite",
- "remoc",
+ "remoc 0.18.3",
  "ring",
  "rustls",
  "serde",
@@ -3368,7 +3390,7 @@ dependencies = [
  "nix 0.31.3",
  "notify",
  "rcgen",
- "remoc",
+ "remoc 0.19.1",
  "rustls",
  "rustls-pemfile",
  "sea-orm",
@@ -4073,7 +4095,26 @@ dependencies = [
  "bytes",
  "futures",
  "rand 0.9.5",
- "remoc_macro",
+ "remoc_macro 0.18.3",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "remoc"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658fca7f569e44daa1c9aabe59b969192c9318a45fa1672deb7fdfa3449ce8fe"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "bytes",
+ "custom_debug",
+ "futures",
+ "remoc_macro 0.19.1",
  "serde",
  "tokio",
  "tokio-util",
@@ -4090,6 +4131,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "remoc_macro"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbed2188a24eeb215f38c217885c0405c75c5c9319562a9d902ffa61f40d0bde"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]

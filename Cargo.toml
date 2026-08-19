@@ -51,7 +51,7 @@ tower-service = "0.3"
 h3x = "0.6.1"
 
 # --- IPC / RPC ---
-remoc = { version = "0.18", default-features = false, features = [
+remoc = { version = "0.19", default-features = false, features = [
     "remoc_macro",
     "rfn",
     "rtc",
