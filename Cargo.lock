@@ -1249,8 +1249,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.6.1"
-source = "git+https://github.com/genmeta/dhttp.git?rev=52c6c00d59234c616ac055ed3ee8b52333031dcf#52c6c00d59234c616ac055ed3ee8b52333031dcf"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e7ec8d76899946d118b757cc1b65be11baa4645d3a8725f49785ce1007b6f4a"
 dependencies = [
  "bon",
  "bytes",
@@ -1276,8 +1277,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp-access"
-version = "0.4.1"
-source = "git+https://github.com/genmeta/dhttp.git?rev=52c6c00d59234c616ac055ed3ee8b52333031dcf#52c6c00d59234c616ac055ed3ee8b52333031dcf"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3594fecd340a187f37f572480732e47a284e79043748bf230a35cc2cbf0d729"
 dependencies = [
  "chrono",
  "derive_more",
@@ -1298,7 +1300,8 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0"
-source = "git+https://github.com/genmeta/dhttp.git?rev=52c6c00d59234c616ac055ed3ee8b52333031dcf#52c6c00d59234c616ac055ed3ee8b52333031dcf"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04592cad425e1275fde3a6d680a7ce5bebbb84579c727e50493adfaf75c4ebfc"
 dependencies = [
  "dhttp-identity",
  "dirs",
@@ -1330,7 +1333,8 @@ dependencies = [
 [[package]]
 name = "dhttp-log"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/dhttp.git?rev=52c6c00d59234c616ac055ed3ee8b52333031dcf#52c6c00d59234c616ac055ed3ee8b52333031dcf"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6a859582ea3f520c0645a685c1348a467e67497744827ab30af74229f7e7876"
 dependencies = [
  "chrono",
  "dhttp-identity",
@@ -1455,9 +1459,9 @@ dependencies = [
 
 [[package]]
 name = "dshell"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "100a22eb90aedae7c68bb50999158b4708c6007ffbe47d46a14b67f7fee5036d"
+checksum = "f8c4237afad992aaad8f5d43d0d847d8fa66e6ba2474df5e50be69a70efddab5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1485,8 +1489,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dyns"
-version = "0.7.1"
-source = "git+https://github.com/genmeta/ddns.git?rev=332cf51093572a28364226ef7682e0d95812a6ef#332cf51093572a28364226ef7682e0d95812a6ef"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d354e080e21efb1079435c302b246b5242c7e3ef886c50fd99a2e2e4e90b0fb"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1766,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.1"
+version = "0.8.2-beta.1"
 dependencies = [
  "async-compression",
  "axum",
@@ -3348,7 +3353,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pishoo"
-version = "0.8.1"
+version = "0.8.2-beta.1"
 dependencies = [
  "axum",
  "clap",
