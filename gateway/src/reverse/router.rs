@@ -39,12 +39,13 @@ pub struct RouterState {
 /// Matches incoming requests against configured location blocks using nginx's
 /// priority rules (exact > prefix > regex > normal-prefix > common), injects
 /// `LocationMatch` as a request extension, and dispatches to the appropriate
-/// handler (proxy, file, or sshd).
+/// handler. When enabled, the built-in SSH service owns `/shell`.
 #[derive(Clone)]
 pub struct NginxRouter {
     locations: Vec<Arc<ConfiguredLocation>>,
     server_access_log: ActiveAccessLog,
     state: RouterState,
+    sshd_enabled: bool,
 }
 
 impl NginxRouter {
@@ -57,7 +58,13 @@ impl NginxRouter {
             locations,
             server_access_log,
             state,
+            sshd_enabled: false,
         }
+    }
+
+    pub fn with_sshd(mut self, enabled: bool) -> Self {
+        self.sshd_enabled = enabled;
+        self
     }
 }
 
@@ -74,11 +81,26 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
         let locations = self.locations.clone();
         let server_access_log = self.server_access_log.clone();
         let state = self.state.clone();
+        let sshd_enabled = self.sshd_enabled;
 
         Box::pin(async move {
             let normalized = super::request_uri::normalize_request_uri(request.uri())
                 .expect("request uri should always normalize");
             let public_origin = super::request_uri::request_public_origin(&request);
+
+            #[cfg(feature = "sshd")]
+            if sshd_enabled {
+                if let Some(route) = super::sshd::SshRoute::from_path(&normalized.path) {
+                    request.extensions_mut().insert(route);
+                    let mut response =
+                        Handler::call(super::sshd::sshd_handle, request, state).await;
+                    response.extensions_mut().insert(server_access_log);
+                    return Ok(response);
+                }
+            }
+
+            #[cfg(not(feature = "sshd"))]
+            let _ = sshd_enabled;
 
             let loc_match = match match_location(&locations, &normalized.path) {
                 Some(m) => m,
@@ -114,13 +136,6 @@ impl tower_service::Service<http::Request<Body>> for NginxRouter {
             } else if location.root().is_some() || location.alias().is_some() {
                 Handler::call(super::file::file_handle, request, state).await
             } else {
-                #[cfg(feature = "sshd")]
-                if location.ssh_login().is_some() {
-                    let mut response =
-                        Handler::call(super::sshd::sshd_handle, request, state).await;
-                    response.extensions_mut().insert(active_access_log);
-                    return Ok(response);
-                }
                 StatusCode::NOT_FOUND.into_response()
             };
 

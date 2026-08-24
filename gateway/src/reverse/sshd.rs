@@ -16,10 +16,40 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::{
-    control_plane::DynSpawnSession,
-    reverse::{location::LocationMatch, router::RouterState},
-};
+use crate::{control_plane::DynSpawnSession, reverse::router::RouterState};
+
+#[derive(Clone, Debug)]
+pub(crate) struct SshRoute {
+    username: String,
+}
+
+impl SshRoute {
+    pub(crate) fn from_path(path: &str) -> Option<Self> {
+        let remaining = path.strip_prefix("/shell")?;
+        if !remaining.is_empty() && !remaining.starts_with('/') {
+            return None;
+        }
+        Some(Self {
+            username: remaining.trim_matches('/').to_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::SshRoute;
+
+    #[test]
+    fn route_only_matches_shell_path_boundary() {
+        assert_eq!(
+            SshRoute::from_path("/shell/alice").unwrap().username,
+            "alice"
+        );
+        assert!(SshRoute::from_path("/shell").unwrap().username.is_empty());
+        assert!(SshRoute::from_path("/shellfish").is_none());
+        assert!(SshRoute::from_path("/ssh/alice").is_none());
+    }
+}
 
 /// Errors from [`run_ssh_session`].
 #[derive(Debug, Snafu)]
@@ -90,35 +120,26 @@ fn accept_server_session_error_status(
 
 /// Axum-style handler for DShell WebTransport CONNECT sessions.
 ///
-/// Extracts the username from `LocationMatch.remaining` (e.g. for `/ssh/yiyue`,
-/// remaining is `"yiyue"`). Spawns the SSH session in a background task and
-/// returns 200 OK with `ssh-version` header to complete the WebTransport
-/// Extended CONNECT handshake.
-pub async fn sshd_handle(
-    Extension(loc): Extension<LocationMatch>,
+/// Spawns the SSH session in a background task and returns 200 OK with
+/// `ssh-version` header to complete the WebTransport Extended CONNECT handshake.
+pub(crate) async fn sshd_handle(
+    Extension(route): Extension<SshRoute>,
     Extension(stream_id): Extension<StreamId>,
     State(state): State<RouterState>,
     req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
-    let username = loc.remaining.trim_matches('/');
-    if username.is_empty() {
+    if route.username.is_empty() {
         tracing::warn!("missing username in SSH path");
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let ssh_deny = loc
-        .location
-        .ssh_deny()
-        .map(|value| value.0.clone())
-        .unwrap_or_default();
-
-    if ssh_deny.iter().any(|d| d == username) {
-        tracing::warn!(%username, "user denied by ssh_deny");
+    if route.username == "root" {
+        tracing::warn!(username = %route.username, "root login is disabled");
         return StatusCode::FORBIDDEN.into_response();
     }
 
     let conversation_id = stream_id;
-    let username = username.to_owned();
+    let username = route.username;
 
     if !is_webtransport_request(&req) {
         tracing::warn!("dshell request is not webtransport extended connect");
