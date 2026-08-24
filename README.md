@@ -92,11 +92,14 @@ pishoo {
 }
 ```
 
-Put the service configuration in your identity directory. Pishoo derives the service identity and TLS material from that directory, while the following example serves a static site and proxies `/app` to a local application:
+Put the service configuration in your identity directory. Pishoo derives the service identity and TLS material from that directory. The following example enables SSH, serves a static site, and proxies `/app` to a local application:
 
 ```nginx
 # ~/.dhttp/your.name/server.conf
 server {
+    # SSH is disabled unless it is enabled at server scope.
+    sshd on;
+
     location / {
         root  templates;
         index index.html;
@@ -107,6 +110,10 @@ server {
     }
 }
 ```
+
+When enabled, SSH clients connect to `/shell/<username>`. Requests pass through
+the server's `access_rules` before reaching the SSH service, and root login is
+always rejected.
 
 ### Run
 
