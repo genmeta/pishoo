@@ -86,7 +86,8 @@ impl ServerService {
             locations,
             server_access_log.clone(),
             self.router_state.clone(),
-        );
+        )
+        .with_sshd(self.server_config.sshd().is_some_and(|value| value.0));
         let access_state = AccessControlState::new(
             self.access_rules.clone(),
             Arc::from(self.server_name.as_full()),

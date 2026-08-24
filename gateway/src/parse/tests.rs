@@ -157,6 +157,26 @@ fn concrete_tree_computes_full_lineage_during_construction() {
 }
 
 #[test]
+fn sshd_is_server_scoped_and_disabled_by_default() {
+    assert!(parse_direct_server("").unwrap().sshd().is_none());
+    assert!(parse_direct_server("sshd on;").unwrap().sshd().unwrap().0);
+    assert!(!parse_direct_server("sshd off;").unwrap().sshd().unwrap().0);
+
+    let error = parse_root("pishoo { sshd on; }").unwrap_err();
+    assert!(
+        snafu::Report::from_error(&error)
+            .to_string()
+            .contains("unknown directive `sshd` in pishoo")
+    );
+}
+
+#[test]
+fn legacy_location_ssh_directives_are_rejected() {
+    let error = parse_direct_server("location /shell { ssh_login ssl; }").unwrap_err();
+    assert!(error.contains("unknown directive `ssh_login` in location"));
+}
+
+#[test]
 fn lineage_points_to_the_explicit_directive() {
     let parsed = TypedConfigParser::new()
         .parse_root(

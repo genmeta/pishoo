@@ -239,18 +239,6 @@ impl MimeTypes {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SshLoginMethods(pub Vec<String>);
-
-#[derive(Debug, Clone)]
-pub struct SshSslUser {
-    pub name: String,
-    pub user: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SshSslUsers(pub Vec<SshSslUser>);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StunBindConfigValue {
     pub bind: std::net::SocketAddr,

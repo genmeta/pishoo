@@ -9,8 +9,8 @@ use super::{
     source::{SourceMap, SourceSpan},
     types::{
         AccessRulesUri, BoolConfig, DefaultType, GzipCompLevel, GzipMinLength, HeaderRules,
-        ListenConfig, MimeTypes, ProxyPass, ResolverConfig, ReturnResponse, SshLoginMethods,
-        SshSslUsers, StringList, StunServerConfigValue,
+        ListenConfig, MimeTypes, ProxyPass, ResolverConfig, ReturnResponse, StringList,
+        StunServerConfigValue,
     },
 };
 
@@ -417,6 +417,7 @@ pub struct ServerConfig {
     names: Box<[DhttpName<'static>]>,
     listens: Box<[ListenConfig]>,
     resolver: Option<ResolverConfig>,
+    sshd: Option<BoolConfig>,
     http: EffectiveHttpConfig,
     relay: Option<BoolConfig>,
     stun: Option<BoolConfig>,
@@ -432,6 +433,7 @@ impl ServerConfig {
         names: Box<[DhttpName<'static>]>,
         listens: Box<[ListenConfig]>,
         resolver: Option<ResolverConfig>,
+        sshd: Option<BoolConfig>,
         http: EffectiveHttpConfig,
         relay: Option<BoolConfig>,
         stun: Option<BoolConfig>,
@@ -444,6 +446,7 @@ impl ServerConfig {
             names,
             listens,
             resolver,
+            sshd,
             http,
             relay,
             stun,
@@ -465,6 +468,9 @@ impl ServerConfig {
     }
     pub fn resolver(&self) -> Option<&ResolverConfig> {
         self.resolver.as_ref()
+    }
+    pub fn sshd(&self) -> Option<&BoolConfig> {
+        self.sshd.as_ref()
     }
     pub fn http(&self) -> &EffectiveHttpConfig {
         &self.http
@@ -525,9 +531,6 @@ pub struct LocationConfig {
     proxy_pass: Option<ProxyPass>,
     return_response: Option<ReturnResponse>,
     proxy_tls: Option<PreparedProxyTlsPaths>,
-    ssh_login: Option<SshLoginMethods>,
-    ssh_users: Box<[SshSslUsers]>,
-    ssh_deny: Option<StringList>,
 }
 impl LocationConfig {
     #[allow(clippy::too_many_arguments)]
@@ -543,9 +546,6 @@ impl LocationConfig {
         proxy_pass: Option<ProxyPass>,
         return_response: Option<ReturnResponse>,
         proxy_tls: Option<PreparedProxyTlsPaths>,
-        ssh_login: Option<SshLoginMethods>,
-        ssh_users: Box<[SshSslUsers]>,
-        ssh_deny: Option<StringList>,
     ) -> Self {
         Self {
             source,
@@ -559,9 +559,6 @@ impl LocationConfig {
             proxy_pass,
             return_response,
             proxy_tls,
-            ssh_login,
-            ssh_users,
-            ssh_deny,
         }
     }
     pub const fn source(&self) -> ConfigSourceSpan {
@@ -596,14 +593,5 @@ impl LocationConfig {
     }
     pub fn proxy_tls(&self) -> Option<&PreparedProxyTlsPaths> {
         self.proxy_tls.as_ref()
-    }
-    pub fn ssh_login(&self) -> Option<&SshLoginMethods> {
-        self.ssh_login.as_ref()
-    }
-    pub fn ssh_users(&self) -> &[SshSslUsers] {
-        &self.ssh_users
-    }
-    pub fn ssh_deny(&self) -> Option<&StringList> {
-        self.ssh_deny.as_ref()
     }
 }

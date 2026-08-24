@@ -440,7 +440,7 @@ fn reject_duplicate(
 ) -> Result<(), BuildTypedConfigError> {
     if matches!(
         directive.name.value.as_str(),
-        "listen" | "location" | "stun_server" | "add_header" | "proxy_set_header" | "ssh_ssl_user"
+        "listen" | "location" | "stun_server" | "add_header" | "proxy_set_header"
     ) {
         return Ok(());
     }
@@ -637,6 +637,7 @@ fn build_server(
     let mut listens = Vec::new();
     let mut names = None;
     let mut resolver = None;
+    let mut sshd = None;
     let mut cert = None;
     let mut key = None;
     let mut relay = None;
@@ -650,6 +651,7 @@ fn build_server(
             "listen" => listens.push(parse(x, ConfigContext::Server, s)?),
             "server_name" => names = Some(parse::<ServerNames>(x, ConfigContext::Server, s)?),
             "dns" => resolver = Some(parse(x, ConfigContext::Server, s)?),
+            "sshd" => sshd = Some(parse(x, ConfigContext::Server, s)?),
             "ssl_certificate" => cert = Some(parse(x, ConfigContext::Server, s)?),
             "ssl_certificate_key" => key = Some(parse(x, ConfigContext::Server, s)?),
             "relay" => relay = Some(parse(x, ConfigContext::Server, s)?),
@@ -733,6 +735,7 @@ fn build_server(
         names,
         listens.into_boxed_slice(),
         resolver,
+        sshd,
         effective,
         relay,
         stun,
@@ -765,9 +768,6 @@ fn build_location(
     let mut cert = None;
     let mut key = None;
     let mut trusted = None;
-    let mut login = None;
-    let mut users = Vec::new();
-    let mut deny = None;
     let mut http = LocalHttp::default();
     for x in children {
         reject_duplicate(&mut seen, x)?;
@@ -784,9 +784,6 @@ fn build_location(
             "proxy_ssl_trusted_certificate" => {
                 trusted = Some(parse(x, ConfigContext::Location, s)?)
             }
-            "ssh_login" => login = Some(parse(x, ConfigContext::Location, s)?),
-            "ssh_ssl_user" => users.push(parse(x, ConfigContext::Location, s)?),
-            "ssh_deny" => deny = Some(parse(x, ConfigContext::Location, s)?),
             name if parse_http(name, x, ConfigContext::Location, s, &mut http)? => {}
             name => {
                 return Err(BuildTypedConfigError::UnknownDirective {
@@ -829,8 +826,5 @@ fn build_location(
         pass,
         return_response,
         proxy_tls,
-        login,
-        users.into_boxed_slice(),
-        deny,
     ))
 }
