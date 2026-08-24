@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## [0.8.2-beta.2] - 2026-08-24
+
+### Added
+
+- Add the server-scoped `sshd on;` directive and reserve `/shell/<username>`
+  for SSH sessions when it is enabled.
+
+### Changed
+
+- Keep SSH disabled by default and remove the legacy location-scoped
+  `ssh_login`, `ssh_ssl_user`, and `ssh_deny` directives.
+- Route SSH requests through the server's existing `access_rules` policy and
+  always reject root login.
+- Split the global `pishoo.conf` example from the per-identity `server.conf`
+  example.
+
+### Dependencies
+
+- Require stable `dhttp` v0.6.2, `dshell` v0.6.2, and `h3x` v0.6.2.
+
+### Components
+
+- `pishoo` v0.8.2-beta.2
+- `gateway` v0.8.2-beta.2
+- `pishoo-common` v0.8.2-beta.2 (`0.8.2~beta.2-1` for DEB/RPM)
+
 ## [0.8.2-beta.1] - 2026-08-19
 
 ### Fixed
