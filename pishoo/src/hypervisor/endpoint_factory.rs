@@ -16,7 +16,9 @@ use dhttp::{
 use http::Uri;
 use snafu::{ResultExt, Snafu};
 
-const PISHOO_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const PISHOO_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(2 * 60);
+const PISHOO_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const PISHOO_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Snafu)]
 #[snafu(module)]
@@ -26,10 +28,11 @@ pub enum BuildRegisteredEndpointError {
 }
 
 fn server_quic_config() -> ServerQuicConfig {
-    let mut config = dhttp::trust::default_server_quic_config();
+    let mut config = dhttp::trust::default_server_quic_config()
+        .keep_alive(PISHOO_KEEP_ALIVE_DURATION, PISHOO_HEARTBEAT_INTERVAL);
     config
         .parameters
-        .set(ParameterId::MaxIdleTimeout, PISHOO_IDLE_TIMEOUT)
+        .set(ParameterId::MaxIdleTimeout, PISHOO_MAX_IDLE_TIMEOUT)
         .expect("maximum idle timeout is a valid QUIC transport parameter");
     config
 }
@@ -66,14 +69,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pishoo_server_uses_two_minute_idle_timeout() {
+    fn pishoo_server_uses_two_minute_keep_alive_with_safe_idle_margin() {
         let config = server_quic_config();
 
+        assert_eq!(config.defer_idle_timeout, PISHOO_KEEP_ALIVE_DURATION);
+        assert_eq!(config.heartbeat_interval, PISHOO_HEARTBEAT_INTERVAL);
         assert_eq!(
             config
                 .parameters
                 .get::<Duration>(ParameterId::MaxIdleTimeout),
-            Some(PISHOO_IDLE_TIMEOUT)
+            Some(PISHOO_MAX_IDLE_TIMEOUT)
         );
     }
 }
