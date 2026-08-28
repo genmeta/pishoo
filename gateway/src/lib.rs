@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod command;
 pub mod control_plane;
 pub mod error;

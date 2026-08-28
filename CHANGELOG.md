@@ -17,7 +17,8 @@
   always reject root login.
 - Split the global `pishoo.conf` example from the per-identity `server.conf`
   example.
-- Use a two-minute QUIC idle timeout for Pishoo connections so idle SSH
+- Keep Pishoo connections alive for two minutes after effective traffic, using
+  20-second heartbeat PINGs and a 60-second QUIC idle timeout so idle SSH
   sessions are not disconnected prematurely.
 
 ### Dependencies
