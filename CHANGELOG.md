@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## [0.8.2] - 2026-08-31
+
+### Added
+
+- Add the server-scoped `sshd on;` directive and reserve
+  `/shell/<username>` for SSH sessions when it is enabled.
+
+### Changed
+
+- Promote gateway, pishoo, and pishoo-common to stable 0.8.2 releases.
+- Keep SSH disabled by default, route SSH requests through the server's
+  existing `access_rules` policy, and always reject root login.
+- Keep Pishoo connections alive for two minutes after effective traffic, using
+  20-second heartbeat PINGs and a 60-second QUIC idle timeout.
+- Split the global `pishoo.conf` example from the per-identity `server.conf`
+  example.
+
+### Fixed
+
+- Tear down SSH sessions and child processes when the transport closes.
+- Run PAM session setup on the process leader for `pam_loginuid`
+  compatibility.
+
+### Dependencies
+
+- Require stable `dhttp` v0.6.2, `dshell` v0.6.2, and `h3x` v0.6.2.
+
+### Components
+
+- `pishoo` v0.8.2
+- `gateway` v0.8.2
+- `pishoo-common` v0.8.2 (`0.8.2-1` for DEB/RPM)
+
 ## [0.8.2-beta.2] - 2026-08-24
 
 ### Added
