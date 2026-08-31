@@ -62,7 +62,7 @@ tracing-appender = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 
 # --- Platform Specific Dependencies ---
 [target.'cfg(any(target_os = "android", target_env = "ohos"))'.dependencies]
