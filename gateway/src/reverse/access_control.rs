@@ -19,6 +19,7 @@ use dhttp::{
         policy::{LocationRuleDecisionError, LocationRuleEvaluator, LocationRuleRequest},
     },
     h3x::{connection::ConnectionState, quic},
+    identity::RemoteAuthorityCertificateExt,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use snafu::Report;
@@ -26,8 +27,30 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::{info, warn};
 
 type DynConnectionState = ConnectionState<dyn quic::DynConnection>;
-type ClientNameCell = Arc<OnceCell<Option<String>>>;
+type ClientNameCell = Arc<OnceCell<Option<ClientName>>>;
 type ClientNameCache = Vec<(Weak<DynConnectionState>, ClientNameCell)>;
+
+/// Authenticated identity attributes exposed by the DHTTP transport.
+///
+/// The name and owner hash are read from the peer authority that completed the
+/// mutual-TLS handshake. They are deliberately not derived from HTTP headers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientName {
+    name: String,
+    owner_hash: Option<String>,
+}
+
+impl ClientName {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the DHTTP certificate owner hash when the peer certificate has
+    /// a valid DHTTP subject-key identifier.
+    pub fn owner_hash(&self) -> Option<&str> {
+        self.owner_hash.as_deref()
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ClientNameResolver {
@@ -45,11 +68,31 @@ impl ClientNameResolver {
             .cloned();
         async move {
             let connection = connection?;
+            self.resolve_connection(&connection)
+                .await
+                .map(|identity| identity.name)
+        }
+    }
+
+    /// Resolves verified peer identity attributes for an incoming request.
+    pub fn resolve_identity<'a>(
+        &'a self,
+        request: &Request,
+    ) -> impl Future<Output = Option<ClientName>> + Send + 'a {
+        let connection = request
+            .extensions()
+            .get::<Arc<DynConnectionState>>()
+            .cloned();
+        async move {
+            let connection = connection?;
             self.resolve_connection(&connection).await
         }
     }
 
-    async fn resolve_connection(&self, connection: &Arc<DynConnectionState>) -> Option<String> {
+    async fn resolve_connection(
+        &self,
+        connection: &Arc<DynConnectionState>,
+    ) -> Option<ClientName> {
         let candidate = Arc::downgrade(connection);
         let client_name = {
             let mut cache = self.client_names.lock().await;
@@ -69,10 +112,26 @@ impl ClientNameResolver {
 
         match client_name
             .get_or_try_init(|| async {
-                connection
-                    .remote_authority()
-                    .await
-                    .map(|authority| authority.map(|authority| authority.name().to_owned()))
+                connection.remote_authority().await.map(|authority| {
+                    authority.map(|authority| {
+                        let owner_hash = authority
+                            .dhttp_subject_key_identifier()
+                            .map(|identifier| identifier.owner_hash().to_string())
+                            .map_err(|error| {
+                                tracing::debug!(
+                                    error = %Report::from_error(&error),
+                                    peer_name = authority.name(),
+                                    "peer certificate has no usable DHTTP subject key identifier"
+                                );
+                                error
+                            })
+                            .ok();
+                        ClientName {
+                            name: authority.name().to_owned(),
+                            owner_hash,
+                        }
+                    })
+                })
             })
             .await
         {
