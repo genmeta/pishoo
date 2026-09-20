@@ -1,6 +1,6 @@
 use std::{future::Future, sync::Arc};
 
-use axum::middleware::from_fn_with_state;
+use axum::{Router, middleware::from_fn_with_state};
 use dhttp::h3x::{
     connection::ConnectionBuilder, dhttp::settings::Settings, endpoint::H3Endpoint,
     hyper::TowerService, quic,
@@ -17,11 +17,22 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tracing::Instrument;
 
-use super::resource::AccessLogResources;
+use super::{
+    daccess::{DaccessAuthState, DaccessService, authorize, management_app},
+    resource::AccessLogResources,
+    workspace::WorkspaceAssets,
+};
+
+pub enum ServerAccess {
+    /// Direct-certificate server configuration has no profile-local daccess
+    /// database. Retain its existing location-rule evaluator.
+    Legacy(Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>),
+    Daccess(Arc<DaccessService>),
+}
 
 pub struct PreparedServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
+    pub access: ServerAccess,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_config: Arc<gateway::parse::config::ServerConfig>,
     pub server_name: dhttp::name::DhttpName<'static>,
@@ -31,7 +42,7 @@ impl PreparedServerService {
     pub fn activate(self, access_logs: AccessLogResources) -> ServerService {
         ServerService {
             h3_settings: self.h3_settings,
-            access_rules: self.access_rules,
+            access: self.access,
             router_state: self.router_state,
             server_config: self.server_config,
             server_name: self.server_name,
@@ -42,7 +53,7 @@ impl PreparedServerService {
 
 pub struct ServerService {
     pub h3_settings: Arc<Settings>,
-    pub access_rules: Arc<dyn dhttp::access::policy::LocationRuleEvaluator + Send + Sync>,
+    pub access: ServerAccess,
     pub router_state: gateway::reverse::router::RouterState,
     pub server_config: Arc<gateway::parse::config::ServerConfig>,
     pub server_name: dhttp::name::DhttpName<'static>,
@@ -88,20 +99,44 @@ impl ServerService {
             self.router_state.clone(),
         )
         .with_sshd(self.server_config.sshd().is_some_and(|value| value.0));
-        let access_state = AccessControlState::new(
-            self.access_rules.clone(),
-            Arc::from(self.server_name.as_full()),
-        );
+        let (app, client_names): (Router, _) = match &self.access {
+            ServerAccess::Legacy(access_rules) => {
+                let access_state = AccessControlState::new(
+                    access_rules.clone(),
+                    Arc::from(self.server_name.as_full()),
+                );
+                let client_names = access_state.client_names();
+                (
+                    Router::new()
+                        .fallback_service(nginx_router)
+                        .layer(from_fn_with_state(access_state, access_control)),
+                    client_names,
+                )
+            }
+            ServerAccess::Daccess(access) => {
+                let access_state = DaccessAuthState::new(access.service.clone());
+                let client_names = access_state.client_names();
+                (
+                    Router::new()
+                        .route_service("/workspace", WorkspaceAssets)
+                        .route_service("/workspace/", WorkspaceAssets)
+                        .route_service("/workspace/{*path}", WorkspaceAssets)
+                        .merge(management_app(access))
+                        .fallback_service(nginx_router)
+                        .layer(from_fn_with_state(access_state, authorize)),
+                    client_names,
+                )
+            }
+        };
         let access_log_state = AccessLogState {
             server: server_access_log,
-            client_names: access_state.client_names(),
+            client_names,
         };
 
         let service_stack = ServiceBuilder::new()
             .layer(BodyAdapterLayer)
             .layer(from_fn_with_state(access_log_state, access_log))
-            .layer(from_fn_with_state(access_state, access_control))
-            .service(nginx_router);
+            .service(app);
 
         let builder = ConnectionBuilder::new(self.h3_settings.clone());
         #[cfg(feature = "sshd")]
@@ -165,7 +200,9 @@ impl ServerService {
     pub(crate) fn fake() -> PreparedServerService {
         PreparedServerService {
             h3_settings: Arc::new(Settings::default()),
-            access_rules: Arc::new(dhttp::access::matcher::LocationRulesMatcher::default()),
+            access: ServerAccess::Legacy(Arc::new(
+                dhttp::access::matcher::LocationRulesMatcher::default(),
+            )),
             router_state: {
                 #[cfg(feature = "sshd")]
                 struct DummySpawner;

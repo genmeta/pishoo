@@ -1,0 +1,77 @@
+import { expect, test } from '@playwright/test'
+
+test.describe.configure({ mode: 'serial' })
+test.beforeEach(({}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Mutating workflows run once')
+})
+
+test('review decisions update the pending queue', async ({ page }) => {
+  await page.goto('./access/reviews')
+  const firstRow = page.locator('tbody tr').first()
+  await expect(firstRow).toBeVisible()
+  await firstRow.getByRole('button', { name: 'Allow' }).click()
+  await page.getByRole('button', { name: 'Allow request' }).click()
+  await expect(page.getByText('Request allowed', { exact: true })).toBeVisible()
+  const secondRow = page.locator('tbody tr').first()
+  await expect(secondRow).toBeVisible()
+  await secondRow.getByRole('button', { name: 'Deny' }).click()
+  await page.getByRole('button', { name: 'Deny request' }).click()
+  await expect(page.getByText('Request denied', { exact: true })).toBeVisible()
+})
+
+test('contact editing and status actions can be restored', async ({ page }) => {
+  await page.goto('./access/contacts')
+  await page.getByRole('button', { name: /Alice Chen/ }).click()
+  const alias = page.getByLabel('Local alias')
+  await alias.fill('Alice QA')
+  await page.getByRole('button', { name: 'Save alias' }).click()
+  await expect(page.getByText('Alias updated', { exact: true })).toBeVisible()
+  await alias.fill('Alice Chen')
+  await page.getByRole('button', { name: 'Save alias' }).click()
+  await page.getByRole('button', { name: 'Close contact details' }).click()
+
+  await page.getByRole('button', { name: /Build Bot/ }).click()
+  await page.getByRole('button', { name: 'Restore' }).click()
+  await expect(page.getByText('Contact restored', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Block' }).click()
+  await expect(page.getByText('Contact blocked', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close contact details' }).click()
+
+  await page.locator('.contact-link').filter({ hasText: 'carol.example' }).click()
+  await page.getByRole('button', { name: 'Approve' }).click()
+  await expect(page.getByText('Contact approved', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close contact details' }).click()
+
+  await page.locator('.contact-link').filter({ hasText: 'legacy-agent.example' }).click()
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  const deleteDialog = page.getByRole('dialog', { name: 'Delete contacts (1)' })
+  await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(page.getByText('1 contact deleted', { exact: true })).toBeVisible()
+  await expect(page.locator('.contact-link').filter({ hasText: 'legacy-agent.example' })).toHaveCount(0)
+})
+
+test('rules can be added and deleted while lockout protection is surfaced', async ({ page }) => {
+  await page.goto('./access/policies')
+  await page.getByRole('button', { name: 'Add rule' }).first().click()
+  await page.getByLabel('API path').fill('/qa/e2e')
+  await page.getByLabel('Method').selectOption('GET')
+  await page.getByLabel('Effect').selectOption('allow')
+  await page.getByLabel('Grantee').fill('alice.example')
+  await page.getByRole('button', { name: 'Save rule' }).click()
+  await expect(page.getByText('Access rule saved', { exact: true })).toBeVisible()
+
+  const disposableRule = page.locator('tbody tr').filter({ hasText: 'alice.example' }).first()
+  await expect(disposableRule).toContainText('GET')
+  await disposableRule.getByRole('button', { name: 'Delete' }).click()
+  await page.getByRole('button', { name: 'Delete rule' }).click()
+  await expect(page.getByText('Access rule deleted', { exact: true })).toBeVisible()
+
+  await page.locator('.master-list-items > button').filter({ hasText: '/acl' }).click()
+  const ownerRule = page.locator('tbody tr').filter({ hasText: 'owner.local' }).first()
+  await ownerRule.getByRole('button', { name: 'Edit' }).click()
+  await page.getByLabel('Effect').selectOption('deny')
+  await page.getByRole('button', { name: 'Save rule' }).click()
+  await expect(page.getByRole('alert')).toContainText('must keep at least one')
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await expect(page.getByRole('heading', { name: 'Access rules' })).toBeVisible()
+})

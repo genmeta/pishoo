@@ -3,6 +3,10 @@
 debug/
 target/
 xtask/target/
+pishoo/workspace/node_modules/
+pishoo/workspace/dist/
+pishoo/workspace/playwright-report/
+pishoo/workspace/test-results/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html

@@ -7,6 +7,7 @@ homepage = "https://www.dhttp.net"
 version = "0.8.2"
 edition = "2024"
 license = "Apache-2.0"
+build = "build.rs"
 
 [[bin]]
 name = "pishoo"
@@ -24,6 +25,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
+access_control = { path = "../../../daccess/daccess" }
 dhttp = { workspace = true, features = ["access-orm"] }
 h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
@@ -70,6 +72,7 @@ libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 sha2 = "0.11"
 notify = "8"
+include_dir = "0.7"
 
 [features]
 default = ["sqlx-sqlite"]

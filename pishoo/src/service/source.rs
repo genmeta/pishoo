@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,8 +15,13 @@ use gateway::{
     reverse::router::RouterState,
 };
 use snafu::{ResultExt, Snafu};
+use tokio::sync::OnceCell;
 
-use super::{resource::AccessLogResourcePlan, snapshot::PreparedServerService};
+use super::{
+    daccess,
+    resource::AccessLogResourcePlan,
+    snapshot::{PreparedServerService, ServerAccess},
+};
 
 const SSL_STAGE_DIR_PREFIX: &str = ".ssl-stage-";
 const SSL_BACKUP_DIR_PREFIX: &str = ".ssl-backup-";
@@ -53,11 +59,20 @@ pub struct PreparedServerUpdate {
 pub enum PrepareServerUpdateError {
     #[snafu(display("failed to load server identity"))]
     Identity { source: BuildTypedServerSourceError },
-    #[snafu(display("failed to load access policy for server `{name}`"))]
+    #[snafu(display("failed to load legacy access policy for server `{name}`"))]
     Policy {
         name: String,
         source: crate::policy::PolicyError,
     },
+    #[snafu(display("failed to prepare daccess for profile server `{name}`"))]
+    Daccess {
+        name: String,
+        source: daccess::DaccessLoadError,
+    },
+    #[snafu(display(
+        "profile server `{name}` cannot use legacy access_rules; migrate to daccess db/access.db first"
+    ))]
+    LegacyProfileAccessRules { name: String },
     #[snafu(display("failed to materialize access log configuration for server `{name}`"))]
     AccessLog {
         name: String,
@@ -81,6 +96,18 @@ pub struct TypedServerSource {
     bind: Vec<Listens>,
     dns_resolver_url: Option<http::Uri>,
     server_config: Arc<ServerConfig>,
+    access_backend: AccessBackend,
+}
+
+type DaccessCell = Arc<OnceCell<Arc<daccess::DaccessService>>>;
+
+#[derive(Clone)]
+enum AccessBackend {
+    Daccess {
+        profile: dhttp::home::identity::IdentityProfile,
+        cell: DaccessCell,
+    },
+    Legacy,
 }
 
 #[derive(Clone, Debug)]
@@ -272,7 +299,20 @@ impl TypedServerSource {
     ) -> (Vec<ServerSource>, PrepareContext) {
         let mut sources = Vec::new();
         let mut names = std::collections::HashSet::new();
-        let loads = configs.into_iter().map(Self::load_config);
+        let mut daccess_cells = HashMap::new();
+        let loads = configs.into_iter().map(|config| {
+            let access_backend = match config.identity() {
+                ServerIdentity::Profile(profile) => AccessBackend::Daccess {
+                    profile: profile.clone(),
+                    cell: daccess_cells
+                        .entry(profile.path().to_owned())
+                        .or_insert_with(|| Arc::new(OnceCell::new()))
+                        .clone(),
+                },
+                ServerIdentity::Direct { .. } => AccessBackend::Legacy,
+            };
+            Self::load_config(config, access_backend)
+        });
         for result in futures::future::join_all(loads).await {
             match result {
                 Ok(config_sources) => {
@@ -295,6 +335,7 @@ impl TypedServerSource {
 
     async fn load_config(
         config: Arc<ServerConfig>,
+        access_backend: AccessBackend,
     ) -> Result<Vec<Self>, BuildTypedServerSourceError> {
         let bind = config
             .listens()
@@ -332,6 +373,7 @@ impl TypedServerSource {
                 bind: bind.clone(),
                 dns_resolver_url: resolver.clone(),
                 server_config: config.clone(),
+                access_backend: access_backend.clone(),
             })
             .collect())
     }
@@ -345,22 +387,48 @@ impl TypedServerSource {
             .load()
             .await
             .context(prepare_server_update_error::IdentitySnafu)?;
-        let access_rules_uri = self
-            .server_config
-            .http()
-            .access_rules()
-            .effective()
-            .as_ref()
-            .map(|uri| uri.0.as_str());
-        let identity_profile = match self.server_config.identity() {
-            ServerIdentity::Profile(profile) => Some(profile),
-            ServerIdentity::Direct { .. } => None,
+        let access = match &self.access_backend {
+            AccessBackend::Daccess { profile, cell } => {
+                if self
+                    .server_config
+                    .http()
+                    .access_rules()
+                    .effective()
+                    .is_some()
+                {
+                    return Err(PrepareServerUpdateError::LegacyProfileAccessRules {
+                        name: self.name.to_string(),
+                    });
+                }
+                let daccess = cell
+                    .get_or_try_init(|| async {
+                        let database_uri = daccess::profile_database_uri(profile)?;
+                        daccess::load(identity.clone(), profile, database_uri)
+                            .await
+                            .map(Arc::new)
+                    })
+                    .await
+                    .context(prepare_server_update_error::DaccessSnafu {
+                        name: self.name.to_string(),
+                    })?;
+                ServerAccess::Daccess(daccess.clone())
+            }
+            AccessBackend::Legacy => {
+                let access_rules_uri = self
+                    .server_config
+                    .http()
+                    .access_rules()
+                    .effective()
+                    .as_ref()
+                    .map(|uri| uri.0.as_str());
+                let policy = crate::policy::load_policy_bundle(access_rules_uri, None)
+                    .await
+                    .context(prepare_server_update_error::PolicySnafu {
+                        name: self.name.to_string(),
+                    })?;
+                ServerAccess::Legacy(policy.location_rules)
+            }
         };
-        let policy = crate::policy::load_policy_bundle(access_rules_uri, identity_profile)
-            .await
-            .context(prepare_server_update_error::PolicySnafu {
-                name: self.name.to_string(),
-            })?;
         let listen_request = ListenRequest {
             identity: identity.clone(),
             bind: self.bind.clone(),
@@ -402,7 +470,7 @@ impl TypedServerSource {
         };
         let service = PreparedServerService {
             h3_settings: context.h3_settings.clone(),
-            access_rules: policy.location_rules,
+            access,
             router_state: context.router_state.clone(),
             server_config: self.server_config.clone(),
             server_name: self.name.clone(),
