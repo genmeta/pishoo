@@ -1,0 +1,27 @@
+package pishoo:identity@0.1.0;
+
+/// Host operations on DHTTP identity signatures. The signing identity is
+/// selected by the host from the current Server, never by the guest.
+interface signatures {
+    variant sign-error {
+        denied,
+        input-too-large,
+        unavailable,
+        failed,
+    }
+
+    variant verify-error {
+        invalid-identity,
+        unknown-identity,
+        no-trusted-certificate,
+        input-too-large,
+        unavailable,
+        failed,
+    }
+
+    /// Sign exactly the supplied bytes with the current Server identity.
+    sign: func(data: list<u8>) -> result<list<u8>, sign-error>;
+
+    /// A valid signature returns true; a mismatched signature returns false.
+    verify: func(signature: list<u8>, data: list<u8>, identity: string) -> result<bool, verify-error>;
+}

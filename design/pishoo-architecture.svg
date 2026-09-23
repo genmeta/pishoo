@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" viewBox="0 0 1000 480" role="img" aria-labelledby="title desc">
+  <title id="title">Pishoo 多身份架构</title>
+  <desc id="desc">一个宿主进程共享 DhttpNetwork。Alice 和 Bob 各有自己的 Endpoint、Router、daccess、原生服务和 WASM 沙盒；每个沙盒包含独立的 App。</desc>
+  <style>
+    text { font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #172033; }
+    .heading { font-size: 20px; font-weight: 700; }
+    .identity { font-size: 18px; font-weight: 700; }
+    .component { font-size: 15px; font-weight: 650; }
+    .small { font-size: 12px; fill: #576579; }
+    .detail { font-size: 13px; fill: #42526a; }
+    .app { font-size: 14px; font-weight: 700; }
+  </style>
+
+  <rect width="1000" height="480" fill="#ffffff"/>
+  <rect x="20" y="20" width="960" height="440" rx="18" fill="#f8fafc" stroke="#718096" stroke-width="2"/>
+  <text x="42" y="52" class="heading">Pishoo 宿主进程</text>
+  <text x="958" y="51" class="small" text-anchor="end">一个进程 · 多个身份</text>
+
+  <rect x="40" y="70" width="920" height="54" rx="11" fill="#e8edf4" stroke="#a9b6c8" stroke-width="1.5"/>
+  <text x="60" y="104" class="component">共享 DhttpNetwork</text>
+  <text x="940" y="103" class="detail" text-anchor="end">socket · 连接池 · 网络变化监听</text>
+
+  <rect x="40" y="140" width="448" height="300" rx="14" fill="#ffffff" stroke="#6c9ce4" stroke-width="2"/>
+  <path d="M54 140h420a14 14 0 0 1 14 14v38H40v-38a14 14 0 0 1 14-14z" fill="#eaf2ff"/>
+  <text x="58" y="172" class="identity">身份 Alice</text>
+  <text x="470" y="170" class="small" text-anchor="end">servers/alice/</text>
+  <rect x="56" y="208" width="126" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="119" y="235" class="component" text-anchor="middle">Endpoint</text>
+  <rect x="194" y="208" width="142" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="265" y="235" class="component" text-anchor="middle">Axum Router</text>
+  <rect x="348" y="208" width="124" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="410" y="227" class="component" text-anchor="middle">daccess</text>
+  <text x="410" y="243" class="small" text-anchor="middle">逐 API 授权</text>
+
+  <rect x="56" y="266" width="176" height="156" rx="10" fill="#eff6ff" stroke="#6c9ce4" stroke-width="1.5"/>
+  <text x="72" y="291" class="component">原生服务</text>
+  <text x="72" y="326" class="detail">代理</text>
+  <text x="72" y="355" class="detail">静态</text>
+  <text x="72" y="384" class="detail">内置 handler</text>
+
+  <rect x="244" y="266" width="228" height="156" rx="10" fill="#f5f3ff" stroke="#9974d3" stroke-width="1.5"/>
+  <text x="260" y="291" class="component">WASM 沙盒</text>
+  <text x="456" y="290" class="small" text-anchor="end">共享能力与预算</text>
+  <rect x="258" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
+  <text x="306" y="338" class="app" text-anchor="middle">App A</text>
+  <text x="306" y="360" class="small" text-anchor="middle">WasmApp</text>
+  <text x="306" y="383" class="small" text-anchor="middle">私有 data/</text>
+  <rect x="362" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
+  <text x="410" y="338" class="app" text-anchor="middle">App B</text>
+  <text x="410" y="360" class="small" text-anchor="middle">WasmApp</text>
+  <text x="410" y="383" class="small" text-anchor="middle">私有 data/</text>
+
+  <rect x="512" y="140" width="448" height="300" rx="14" fill="#ffffff" stroke="#6c9ce4" stroke-width="2"/>
+  <path d="M526 140h420a14 14 0 0 1 14 14v38H512v-38a14 14 0 0 1 14-14z" fill="#eaf2ff"/>
+  <text x="530" y="172" class="identity">身份 Bob</text>
+  <text x="942" y="170" class="small" text-anchor="end">servers/bob/</text>
+  <rect x="528" y="208" width="126" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="591" y="235" class="component" text-anchor="middle">Endpoint</text>
+  <rect x="666" y="208" width="142" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="737" y="235" class="component" text-anchor="middle">Axum Router</text>
+  <rect x="820" y="208" width="124" height="42" rx="8" fill="#f8fafc" stroke="#c0cbd9"/>
+  <text x="882" y="227" class="component" text-anchor="middle">daccess</text>
+  <text x="882" y="243" class="small" text-anchor="middle">逐 API 授权</text>
+
+  <rect x="528" y="266" width="176" height="156" rx="10" fill="#eff6ff" stroke="#6c9ce4" stroke-width="1.5"/>
+  <text x="544" y="291" class="component">原生服务</text>
+  <text x="544" y="326" class="detail">代理</text>
+  <text x="544" y="355" class="detail">静态</text>
+  <text x="544" y="384" class="detail">内置 handler</text>
+
+  <rect x="716" y="266" width="228" height="156" rx="10" fill="#f5f3ff" stroke="#9974d3" stroke-width="1.5"/>
+  <text x="732" y="291" class="component">WASM 沙盒</text>
+  <text x="928" y="290" class="small" text-anchor="end">共享能力与预算</text>
+  <rect x="730" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
+  <text x="778" y="338" class="app" text-anchor="middle">App C</text>
+  <text x="778" y="360" class="small" text-anchor="middle">WasmApp</text>
+  <text x="778" y="383" class="small" text-anchor="middle">私有 data/</text>
+  <rect x="834" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
+  <text x="882" y="338" class="app" text-anchor="middle">App D</text>
+  <text x="882" y="360" class="small" text-anchor="middle">WasmApp</text>
+  <text x="882" y="383" class="small" text-anchor="middle">私有 data/</text>
+</svg>
