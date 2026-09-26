@@ -8,23 +8,44 @@ license = "Apache-2.0"
 autobins = false
 
 [dependencies]
-gateway = { path = "../gateway" }
 dhttp = { path = "../../dhttp/dhttp" }
 dhttp-home = { path = "../../dhttp/home" }
+dhttp-identity = { path = "../../dhttp/identity" }
+access_control = { path = "../../daccess" }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
+sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+toml = "0.9"
+sha2 = "0.10"
+scopeguard = "1"
+tower = { version = "0.5", features = ["util"] }
+fs2 = "0.4"
+cap-std = "4"
+percent-encoding = "2"
+mime_guess = "2"
 wasmparser = "0.259.0"
 
 bytes = "1"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-h3x = { path = "../../h3x" }
-qrecovery = "0.6.2"
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time", "io-util"] }
-tokio-util = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "fs", "signal"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
 wasmtime = "47.0.4"
 wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
 wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = ["p2"] }
 oas3 = { version = "0.22.0", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"
+qtls = { path = "../../dquic/qtls" }
+rcgen = "0.14"
+wat = "1"
+
+[[bin]]
+name = "pishoo"
+path = "src/main.rs"

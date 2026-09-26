@@ -25,6 +25,11 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 
 ## Getting started
 
+The current development branch is implementing the [v1 contract](design/README.md).
+Its TOML/SQLite configuration, completed work, test commands, and remaining
+transport/terminal work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
+The packaged-release installation instructions below describe the earlier release.
+
 ### Install Pishoo
 
 Pishoo supports mainstream Linux distributions and macOS on both Arm and x86 architectures. For a quick deployment, we recommend installing the `gmutils` operations toolkit alongside Pishoo.

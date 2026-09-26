@@ -36,13 +36,15 @@ struct ServerConfig {
 }
 struct ProxyLocation {
     location: String,
-    proxy_pass: http::Uri,
+    proxy_pass: http::uri::Parts,
 }
 ```
 
 DaemonConfig 从实例 `pishoo.toml` 读取，拒绝未知字段；state_dir 与启动时 DHTTP_HOME 指向同一实例目录，不在运行中修改进程环境。终端默认 disabled、管理员空集合。身份仍通过 dhttp-home 发现，Endpoint 使用相同身份目录。
 
 config.db 保持 schema v1：settings(listen) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者。proxy_pass 必须按 dhttp 目标规则校验；没有传输类型字段或数据库列。没有 lib_policies、policy_imports、默认策略来源账本或自动 schema v2 迁移。
+
+2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。先校验完整 URI，再以 `path_and_query: None` 保留原始配置未写路径的事实；显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。
 
 这些运行限制是实现常量，不是配置字段：WASM 每次执行期限30秒、4个执行槽、总预留内存256MiB、在途fuel总额400_000_000；单次WASM内存64MiB、fuel100_000_000、每10_000 fuel让出；Store最多32 instances、32 memories、64 tables、100_000 table elements；每次最多16个出站；WASI输出1块、每块16KiB；签名输入1MiB、签名8KiB。扫描间隔2秒，本层退出等待上限15秒。终端使用终端清单自己的固定限制。
 
