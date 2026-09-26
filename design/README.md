@@ -1,6 +1,6 @@
 # 三仓第一版设计清单
 
-日期：2026-09-26。状态：按本轮反馈收敛的接口基线，尚未实施。
+日期：2026-09-26。状态：按用户确认持续维护的冻结接口基线；实现及验收进度见[实施记录](../IMPLEMENTATION.md)。
 
 ## 设计准则
 
@@ -38,7 +38,7 @@
 7. 没有在结构清单中列出的能力不通过预留字段进入代码。终端平台支持情况是实施验收结果，不能通过不受限的执行路径补齐。
 8. 这份基线冻结的是设计，不代表实现已经编译、联网或通过隔离测试。结构实现与行为验收分别检查。
 
-## 保持不变的边界
+## 当前边界
 
 - h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 不持 Network、QUIC endpoint 或连接。
@@ -50,11 +50,13 @@
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
 - 身份直接复用 qtls 的 HandshakeSummary、LocalAuthority、RemoteAuthority，范围复用 qconn 的 Scope/Scopes。没有 RequestInfo 或 Peer 包装。
 - 一个 WASM 文件统一称为 Lib，不另设 App；代码类型使用 Lib、LibResponseBody 和通用 Body/Error。
-- Lib 执行准入直接使用现成 Semaphore，不为它增加 Sandbox 包装；隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
+- 每个 Server 持有一个 Sandbox，直接拥有该身份 Lib 共用的 Semaphore 与任务跟踪器，负责执行准入和任务回收。准入仍直接使用标准 Semaphore；Sandbox 不新增取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
 - WASM 执行归 Pishoo；h3x 和 dhttp 不依赖 Pishoo 或 Wasmtime。
 - daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批在当前请求中等待库返回的结果，不新增审批状态结构、后台等待任务或默认规则导入系统。
 - 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 和终端各自管理实际执行资源。
 - 第一版串行加载/重载，Server 直接持有 Router 和 Lib；不建立 ServerState、Release 或 begin_build 发布流程。
+
+2026-09-26 用户确认拆出 Sandbox：仅将 Server 的 `lib_slots`、`tasks` 迁入新类型，Server 改持 `Arc<Sandbox>`，并新增 `Sandbox::new/close/wait`；`build_router` 的两个资源参数合为 `Arc<Sandbox>`。字段和方法的完整签名见 [Pishoo 清单](pishoo-interfaces.md)。Server 保留身份取消、Endpoint、Router、Lib 集合和 Runtime，Invocation 与 Store 的成员及调用签名不变。
 
 ## 文档清理
 

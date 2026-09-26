@@ -14,6 +14,8 @@
 
 文件整理前的实现检查点：Pishoo `58fafc0`、dhttp `502ad17`、h3x `592989b`。
 
+Sandbox 拆分前的 Pishoo 文件整理检查点：`a6a19be`。
+
 ## 文件组织
 
 测试代码统一放在各 crate 的 `tests/` 下：`unit/` 存放需要访问私有实现的单元测试，`support/` 存放内存流等测试工具，`cases/` 存放较长集成测试的分组。`src/` 仅保留测试模块挂载声明，不为测试扩大生产 API 的可见性。
@@ -26,10 +28,15 @@ Pishoo 的 daemon、routes、setup、terminal、wasm 按职责拆分到同名目
 - dhttp：独立 Endpoint、可 await 的标准请求、全局 Network、标准 Service 接入、原生流与标准 Body 适配、证书接缝、同名永久关闭、临时停止和重新监听。
 - Pishoo：实例锁与 TOML 配置、schema v1 数据库读取、身份扫描、直接 Server/Router/Lib 所有权、串行重载、坏候选保留、删除时取消旧版本、按身份故障隔离。
 - 路由：受目录能力约束的流式静态文件、精确/最长前缀代理、DHTTP 唯一出站、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API 和最小 Workspace 查看/审批界面。
-- WASM：单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、4 个 Semaphore 执行槽、30 秒独立监督任务、流式响应、提前丢弃取消、身份签名与受限出站。
+- WASM：每身份一个 Sandbox，持有4个 Semaphore 执行槽和 WASM 任务跟踪器；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、30 秒独立监督任务、流式响应、提前丢弃取消、身份签名与受限出站。
 - 终端：配置、管理员准入、固定二进制帧编解码、输入半关闭、撤权与关闭流程。**没有执行后端**；默认关闭，启用且身份检查通过后返回 501。
 
-用户确认的唯一字段变更：`ProxyLocation.proxy_pass` 改为 `http::uri::Parts`，保留未写路径和显式 `/` 的差异；已记录在冻结清单中。
+用户明确确认的契约变更均已记录在冻结清单中：
+
+- `ProxyLocation.proxy_pass` 改为 `http::uri::Parts`，保留未写路径和显式 `/` 的差异。
+- 新增 `Sandbox { lib_slots: Arc<Semaphore>, tasks: TaskTracker }`，以及 `new() -> Self`、同步 `close(&self)`、异步 `wait(&self) -> Result<()>`。Server 原有的两个资源字段替换为 `sandbox: Arc<Sandbox>`，`build_router` 的两个资源参数合为 `Arc<Sandbox>`。
+
+Sandbox 的关闭分为停止准入和等待任务回收；身份取消仍由 Server 的根 token 负责。Server 继续直接持有 Endpoint、Router、Lib 集合与 Runtime，Invocation/Store 的字段和构造签名保持不变，permit 仍由实际 Store 持有。不新增取消信号、派生计数或通用策略容器，也不把 Sandbox 描述为操作系统进程或容器隔离。
 
 ## 本地配置
 
@@ -59,6 +66,8 @@ listen 的 0/1/2/3 分别代表关闭/内网/外网/两者；改变监听范围�
 ## 验证
 
 首批实现验证结果：Pishoo 47 项、dhttp 27 项、h3x 149 项通过。
+
+Sandbox 拆分后：Pishoo 50 项测试通过，覆盖不同身份的执行槽隔离、重载沿用同一 Sandbox、等待实际任务/permit 回收，以及关闭超时仍保留未完成任务的资源所有权。
 
 文件整理后保持上述测试通过，并复验 dhttp 子库：home 31 项、identity 112 项、access 启用 migration/http 时 49 项及 20 项文档测试、log 12 项单元测试及 25 项集成测试。
 

@@ -23,16 +23,14 @@ impl Server {
         );
         let cancel = CancellationToken::new();
         let libs = load_libs(&profile, &runtime, &BTreeMap::new(), &cancel)?;
-        let lib_slots = Arc::new(Semaphore::new(4));
-        let tasks = TaskTracker::new();
+        let sandbox = Arc::new(Sandbox::new());
         let router = build_router(
             endpoint.clone(),
             access.clone(),
             &libs,
             &config,
             &profile,
-            lib_slots.clone(),
-            tasks.clone(),
+            sandbox.clone(),
         )?;
         Ok(Self {
             profile,
@@ -42,9 +40,8 @@ impl Server {
             router: Arc::new(RwLock::new(router)),
             libs,
             runtime,
-            lib_slots,
+            sandbox,
             terminal,
-            tasks,
             cancel,
         })
     }
@@ -66,8 +63,7 @@ impl Server {
             &libs,
             &config,
             &self.profile,
-            self.lib_slots.clone(),
-            self.tasks.clone(),
+            self.sandbox.clone(),
         )?;
         if !self.profile.path().symlink_metadata()?.is_dir() {
             return Err(Error::InvalidIdentity(
@@ -151,7 +147,7 @@ impl Server {
 
     async fn close(&mut self) -> Result<()> {
         self.cancel.cancel();
-        self.lib_slots.close();
+        self.sandbox.close();
         let result = if dhttp::DhttpNetwork::global().is_ok() {
             self.endpoint.close().map_err(Error::from)
         } else {
@@ -159,10 +155,7 @@ impl Server {
         };
         *self.router.write().unwrap() = axum::Router::new();
         self.libs.clear();
-        self.tasks.close();
-        tokio::time::timeout(Duration::from_secs(15), self.tasks.wait())
-            .await
-            .map_err(|_| Error::ShutdownDeadline)?;
+        self.sandbox.wait().await?;
         result
     }
 }

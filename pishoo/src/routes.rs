@@ -9,10 +9,11 @@ use axum::{
 };
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use tokio_util::{io::ReaderStream, task::TaskTracker};
+use tokio_util::io::ReaderStream;
 
 use crate::{
     Body, Error, Result,
+    sandbox::Sandbox,
     setup::{ProxyLocation, ServerConfig},
     wasm::{Invocation, Lib},
 };

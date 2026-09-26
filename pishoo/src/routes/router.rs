@@ -4,21 +4,19 @@ pub(crate) fn build_router(
     libs: &BTreeMap<String, Arc<Lib>>,
     config: &ServerConfig,
     profile: &dhttp_home::identity::IdentityProfile,
-    lib_slots: Arc<tokio::sync::Semaphore>,
-    tasks: TaskTracker,
+    sandbox: Arc<Sandbox>,
 ) -> Result<Router> {
     let libs = libs.clone();
     let proxies = config.proxy_locations.clone();
     let root = profile.join("file");
     let app = management_router(access.clone(), profile.name(), endpoint.name())
         .fallback(any(move |request: Request<AxumBody>| {
-            let (endpoint, libs, proxies, root, slots, tasks) = (
+            let (endpoint, libs, proxies, root, sandbox) = (
                 endpoint.clone(),
                 libs.clone(),
                 proxies.clone(),
                 root.clone(),
-                lib_slots.clone(),
-                tasks.clone(),
+                sandbox.clone(),
             );
             async move {
                 let result: Result<Response> = async {
@@ -48,12 +46,22 @@ pub(crate) fn build_router(
                         {
                             return Err(Error::MethodNotAllowed);
                         }
-                        let permit = slots.try_acquire_owned().map_err(|_| Error::Capacity)?;
+                        let permit = sandbox
+                            .lib_slots
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| Error::Capacity)?;
                         let handshake = request
                             .extensions()
                             .get::<dhttp::HandshakeSummary>()
                             .ok_or(Error::MissingHandshake)?;
-                        let invocation = Invocation::new(lib, permit, endpoint, handshake, tasks)?;
+                        let invocation = Invocation::new(
+                            lib,
+                            permit,
+                            endpoint,
+                            handshake,
+                            sandbox.tasks.clone(),
+                        )?;
                         let mut request = request.map(|b| b.map_err(Into::into).boxed_unsync());
                         let mut parts = request.uri().clone().into_parts();
                         let path = match request.uri().query() {

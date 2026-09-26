@@ -47,8 +47,7 @@ async fn server(root: &std::path::Path) -> Server {
     );
     let cancel = CancellationToken::new();
     let libs = load_libs(&profile, &runtime, &BTreeMap::new(), &cancel).unwrap();
-    let lib_slots = Arc::new(Semaphore::new(4));
-    let tasks = TaskTracker::new();
+    let sandbox = Arc::new(Sandbox::new());
     let router = Arc::new(RwLock::new(
         build_router(
             endpoint.clone(),
@@ -56,8 +55,7 @@ async fn server(root: &std::path::Path) -> Server {
             &libs,
             &config,
             &profile,
-            lib_slots.clone(),
-            tasks.clone(),
+            sandbox.clone(),
         )
         .unwrap(),
     ));
@@ -69,9 +67,8 @@ async fn server(root: &std::path::Path) -> Server {
         router,
         libs,
         runtime,
-        lib_slots,
+        sandbox,
         terminal,
-        tasks,
         cancel,
     }
 }
@@ -81,7 +78,11 @@ async fn reload_reuses_valid_versions_retains_bad_candidates_and_cancels_deleted
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
     let old = server.libs["echo"].clone();
+    let sandbox = server.sandbox.clone();
+    let permit = sandbox.lib_slots.clone().try_acquire_owned().unwrap();
     server.reload().await.unwrap();
+    assert!(Arc::ptr_eq(&sandbox, &server.sandbox));
+    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
     assert!(Arc::ptr_eq(&old, &server.libs["echo"]));
     std::fs::write(
         server.profile.join("lib/echo/lib.wasm"),
@@ -96,15 +97,15 @@ async fn reload_reuses_valid_versions_retains_bad_candidates_and_cancels_deleted
     let new = server.libs["echo"].clone();
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(!old.cancel.is_cancelled());
-    let permit = server.lib_slots.clone().try_acquire_owned().unwrap();
-    assert_eq!(server.lib_slots.available_permits(), 3);
+    assert!(Arc::ptr_eq(&sandbox, &server.sandbox));
+    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
     std::fs::remove_file(server.profile.join("lib/echo/lib.wasm")).unwrap();
     server.reload().await.unwrap();
     assert!(server.libs.is_empty());
     assert!(old.cancel.is_cancelled() && new.cancel.is_cancelled());
-    assert_eq!(server.lib_slots.available_permits(), 3);
+    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
     drop(permit);
-    assert_eq!(server.lib_slots.available_permits(), 4);
+    assert_eq!(server.sandbox.lib_slots.available_permits(), 4);
 }
 
 #[tokio::test]
@@ -122,8 +123,8 @@ async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
     assert!(Arc::ptr_eq(&old, &server.libs["echo"]));
     server.close().await.unwrap();
     assert!(old.cancel.is_cancelled());
-    assert!(server.cancel.is_cancelled() && server.lib_slots.is_closed());
-    assert!(server.libs.is_empty() && server.tasks.is_closed());
+    assert!(server.cancel.is_cancelled() && server.sandbox.lib_slots.is_closed());
+    assert!(server.libs.is_empty() && server.sandbox.tasks.is_closed());
     server.close().await.unwrap();
 }
 
