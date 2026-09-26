@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pishoo Workspace</title>
+<style>
+body{margin:0;background:#f4f5f1;color:#202722;font:16px system-ui}
+main{max-width:1050px;margin:64px auto;padding:24px}
+h1{font-size:42px;letter-spacing:-2px}
+nav{display:flex;gap:12px;flex-wrap:wrap}
+button,select,textarea{font:inherit;padding:10px;border:1px solid #abb6aa;border-radius:6px}
+button{background:white;cursor:pointer}
+button:hover{background:#dae9d8}
+section{background:white;padding:24px;margin-top:24px;border:1px solid #d3dbd0;border-radius:8px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto}
+textarea{width:95%;min-height:130px}
+#status{color:#845009}
+label{display:block;margin:12px 0}
+small{color:#54654f}
+
+</style>
+<main>
+<small>PISHOO / WORKSPACE</small>
+<h1>身份与访问管理</h1>
+<p id="identity">载入当前身份…</p>
+<nav id="nav">
+<button data-url="/contacts">联系人</button>
+<button data-url="/acl/access">访问规则</button>
+<button data-url="/acl/reviews/live">实时审批</button>
+<button data-url="/acl/reviews/persistent">持久审批</button>
+</nav>
+<p id="status" role="status">
+</p>
+<section>
+<h2 id="heading">联系人</h2>
+<button id="refresh">刷新</button>
+<pre id="records">
+</pre>
+</section>
+<section>
+<h2>处理审批</h2>
+<p>查看上方当前审批记录，选择对应目标并提交决定。实时审批只在原请求仍等待时有效。</p>
+<label>目标 <select id="kind">
+<option value="live">实时审批</option>
+<option value="persistent">持久审批</option>
+</select>
+</label>
+<label>记录 ID <input id="review-id" inputmode="numeric">
+</label>
+<label>持久决定到期时间 <input id="expires" type="datetime-local">
+</label>
+<button id="allow">允许</button> <button id="deny">拒绝</button>
+</section>
+</main>
+<script>
+let current='/contacts';
+const status=document.querySelector('#status');
+async function api(path,options){const response=await fetch(path,options);
+const text=await response.text();
+if(!response.ok)throw Error(`${response.status} ${text||response.statusText}`);
+return text?JSON.parse(text):null}async function refresh(){status.textContent='加载中…';
+try{const data=await api(current);
+document.querySelector('#records').textContent=JSON.stringify(data,null,2);
+status.textContent='已更新'}catch(error){status.textContent=error.message}}document.querySelector('#nav').onclick=e=>{if(!e.target.dataset.url)return;
+current=e.target.dataset.url;
+document.querySelector('#heading').textContent=e.target.textContent;
+refresh()};
+document.querySelector('#refresh').onclick=refresh;
+async function decide(action){const id=Number(document.querySelector('#review-id').value);
+if(!Number.isSafeInteger(id)||id<1){status.textContent='请输入有效记录 ID';
+return}const kind=document.querySelector('#kind').value;
+try{await api('/acl/review',{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({kind,id,action,...(kind==='persistent'?{expired_after:new Date(document.querySelector('#expires').value).toISOString()}:{})})});
+await refresh()}catch(error){status.textContent=error.message}}document.querySelector('#allow').onclick=()=>decide('allow');
+document.querySelector('#deny').onclick=()=>decide('deny');
+api('/workspace-api/context').then(c=>document.querySelector('#identity').textContent=`${c.owner_name} · ${c.profile} · v${c.version}`).catch(e=>status.textContent=e.message);
+refresh();
+
+</script></html>

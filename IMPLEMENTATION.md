@@ -12,6 +12,14 @@
 
 实现已在基线之后单独保存阶段提交，后续文件整理与功能实现分开审阅。h3x 保持结构、字段和接口，只修复读取消息头期间取消 future 的原生流清理。
 
+文件整理前的实现检查点：Pishoo `58fafc0`、dhttp `502ad17`、h3x `592989b`。
+
+## 文件组织
+
+测试代码统一放在各 crate 的 `tests/` 下：`unit/` 存放需要访问私有实现的单元测试，`support/` 存放内存流等测试工具，`cases/` 存放较长集成测试的分组。`src/` 仅保留测试模块挂载声明，不为测试扩大生产 API 的可见性。
+
+Pishoo 的 daemon、routes、setup、terminal、wasm 按职责拆分到同名目录。实现片段通过 `include!` 保持冻结的 Rust 模块边界，避免增加跨模块 helper API；Workspace 页面放在 `pishoo/assets/`。
+
 ## 当前实现
 
 - h3x：既有消息读取方法在等待 HEADERS 前后保留明确的取消所有权；裸流 Drop、正常 EOF 和半关闭约定保持原样。
@@ -52,6 +60,8 @@ listen 的 0/1/2/3 分别代表关闭/内网/外网/两者；改变监听范围�
 
 首批实现验证结果：Pishoo 47 项、dhttp 27 项、h3x 149 项通过。
 
+文件整理后保持上述测试通过，并复验 dhttp 子库：home 31 项、identity 112 项、access 启用 migration/http 时 49 项及 20 项文档测试、log 12 项单元测试及 25 项集成测试。
+
 在各仓库执行：
 
 ```sh
@@ -59,6 +69,8 @@ listen 的 0/1/2/3 分别代表关闭/内网/外网/两者；改变监听范围�
 cargo test --locked --offline --workspace
 cargo check --locked --offline --workspace --all-targets
 cargo fmt -p pishoo --check
+# 同模块 include! 片段也需要直接格式检查
+rg --files pishoo/src pishoo/tests/unit | rg '\.rs$' | xargs rustfmt --edition 2024 --check
 
 # dhttp：h3x 内存双向流与监听生命周期测试
 cargo test --locked --offline -p dhttp --lib --tests
