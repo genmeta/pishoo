@@ -68,9 +68,8 @@ struct Server {
     router: std::sync::Arc<std::sync::RwLock<axum::Router>>,
     libs: std::collections::BTreeMap<String, std::sync::Arc<Lib>>,
     runtime: std::sync::Arc<Runtime>,
-    lib_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    sandbox: std::sync::Arc<Sandbox>,
     terminal: std::sync::Arc<TerminalManager>,
-    tasks: tokio_util::task::TaskTracker,
     cancel: tokio_util::sync::CancellationToken,
 }
 ```
@@ -98,7 +97,7 @@ impl Server {
 fn build_router(endpoint: dhttp::Endpoint, access: std::sync::Arc<access_control::AccessService>,
     libs: &std::collections::BTreeMap<String, std::sync::Arc<Lib>>,
     config: &ServerConfig, profile: &dhttp_home::identity::IdentityProfile,
-    lib_slots: std::sync::Arc<tokio::sync::Semaphore>, tasks: tokio_util::task::TaskTracker) -> Result<axum::Router>;
+    sandbox: std::sync::Arc<Sandbox>) -> Result<axum::Router>;
 ```
 
 Daemon单一循环串行处理扫描、Server加载/重载和删除。Server.listen在返回future前克隆Endpoint、router、信号和所需共享对象，不借用Server；因此监听运行期间actor仍可 `reload(&mut self)`。
@@ -152,11 +151,27 @@ Workspace 保留 `/workspace`、`/workspace/`、`/workspace/{*path}`；`/workspa
 
 Workspace、管理 API、静态/代理/Lib 入口统一套 authorize。Lib 在剥离 `/api/<LibId>` 前按完整对外路径授权。`/workspace` 返回 307 到 `/workspace/`；无扩展名深链回 index.html，缺失 asset 返回 404；没有 `/admin` 兼容路径。
 
-## 5. Lib 执行准入与隔离
+## 5. Sandbox、Lib 执行准入与隔离
 
-一个 Server 的所有 Lib 共用现成 `Arc<Semaphore>`，固定4个执行槽，不再定义 Sandbox 包装及其 new/admit/active 方法。这个信号量只限制 Lib 执行，静态、代理和终端不占它的名额。
+```rust
+struct Sandbox {
+    lib_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    tasks: tokio_util::task::TaskTracker,
+}
+impl Sandbox {
+    fn new() -> Self;
+    fn close(&self);
+    async fn wait(&self) -> Result<()>;
+}
+```
 
-请求先匹配 Lib API 并通过 daccess 授权，再通过 `try_acquire_owned()` 取得现成 OwnedSemaphorePermit；满额返回429。permit 传入 Invocation，随后由实际 Store 持有，Store 回收即归还。重载复用同一份 lib_slots，旧版本执行仍占原来的槽。Server 或 Lib 已取消时不得从旧 Router 启动新执行。
+每个 Server 持有一个 Sandbox，该身份所有 Lib 共享它的执行槽与任务跟踪器。`new` 创建固定4槽的标准 Semaphore 和空 TaskTracker；准入仍直接调用 Semaphore，不新增 admit、active、租约或自定义 Guard。静态、代理和终端不占这些槽，也不登记到该 TaskTracker。
+
+`close` 同步关闭 Semaphore 和 TaskTracker，停止执行准入；它不发出取消，也不等待任务。`wait` 在固定15秒内等待已关闭的 TaskTracker，超时返回 ShutdownDeadline。调用方 Server 先取消身份根 token，调用 `close` 并立即关闭 Endpoint，再调用 `wait` 回收 WASM 任务。Sandbox 不持有自己的取消信号、身份、Endpoint、Lib 集合、Runtime、策略或派生计数；它不是独立的操作系统进程或容器。
+
+2026-09-26 用户明确确认本次成员级变更：新增上述 Sandbox 的两个字段与 `new/close/wait` 三个方法；Server 删除原 `lib_slots`、`tasks` 字段，新增 `sandbox: Arc<Sandbox>`；`build_router` 将原 `lib_slots: Arc<Semaphore>`、`tasks: TaskTracker` 两个参数合为 `sandbox: Arc<Sandbox>`。Server 的 `cancel`、`endpoint`、`router`、`libs`、`runtime` 保留，Invocation 和 StoreData 的字段以及 Invocation 的构造/执行签名保持不变。
+
+请求先匹配 Lib API 并通过 daccess 授权，再通过 Sandbox 内 Semaphore 的 `try_acquire_owned()` 取得现成 OwnedSemaphorePermit；满额返回429。permit 与任务跟踪器 clone 传入 Invocation，随后由实际 Store 持有 permit，Store 回收即归还。重载复用同一个 Sandbox，旧版本执行仍占原来的槽。Server 或 Lib 已取消时不得从旧 Router 启动新执行。
 
 这只负责资源准入，不代表隔离。隔离由每次执行的独立 Store/Instance、受限 WasiCtx、Lib 私有 `/data`、实际内存 limiter、fuel 和宿主能力控制完成。每次内存上限64MiB、fuel100_000_000，4个槽对应原有256MiB内存及400_000_000 fuel预留，不另存派生计数或租约结构，也不等待传输FIN/ACK。
 
@@ -295,7 +310,7 @@ proxy 完成路径/query、authority 和转发头处理后，直接调用当前 
 
 入口先验证Server身份；终端保留路径在普通pishoo-*清洗之前交TerminalManager，使其读取协议版本头。终端只按实例管理员名单授权，不因访问者等于Server而自动放行；其结构和固定平台行为见[终端清单](terminal-interfaces.md)。
 
-Server.close立即取消自己的token、同步调用Endpoint.close()，然后等待本方tasks；Daemon收回listener，不先排空新子请求。临停同步调用stop_listening，可在同名未close时重新监听；已经close的名称在本进程不能重新打开。Daemon退出先关闭所有Server、回收本方任务/终端，最后对已初始化的全局Network同步调用shutdown()；Network不接deadline、不返回额外关闭报告。Daemon.run直接等待进程退出信号，不另存daemon cancellation token。
+Server.close立即取消自己的token、同步调用Sandbox.close()和Endpoint.close()，清除Router和Lib集合后调用Sandbox.wait()回收WASM任务；Daemon收回listener，不先排空新子请求。Server.cancel同时取消HTTP、审批、Lib和终端的身份范围，Sandbox不建立独立取消域。临停同步调用stop_listening，可在同名未close时重新监听；已经close的名称在本进程不能重新打开。Daemon退出先取消所有Server并关闭各自Sandbox准入与Endpoint，再回收本方任务/终端，最后对已初始化的全局Network同步调用shutdown()；Network不接deadline、不返回额外关闭报告。Daemon.run直接等待进程退出信号，不另存daemon cancellation token。
 
 Pishoo自身等待使用固定15秒上限，终端清理使用其约定；超时明确返回ShutdownDeadline，不谎称任务已join。编译同步执行不可由Tokio abort中断，v1串行重载期间停机可能等当前编译返回；不为解决这一点暗加后台编译框架。
 

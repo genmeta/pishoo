@@ -10,13 +10,14 @@ use dhttp_home::{DhttpHome, identity::IdentityProfile};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::{sync::Semaphore, task::JoinSet};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result, TerminalPolicy,
     routes::build_router,
+    sandbox::Sandbox,
     setup::{ServerConfig, load_server_config, network_config},
     terminal::TerminalManager,
     wasm::{Lib, LibPolicy, Runtime},
@@ -44,9 +45,8 @@ struct Server {
     router: Arc<RwLock<axum::Router>>,
     libs: BTreeMap<String, Arc<Lib>>,
     runtime: Arc<Runtime>,
-    lib_slots: Arc<Semaphore>,
+    sandbox: Arc<Sandbox>,
     terminal: Arc<TerminalManager>,
-    tasks: TaskTracker,
     cancel: CancellationToken,
 }
 

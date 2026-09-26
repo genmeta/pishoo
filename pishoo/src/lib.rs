@@ -2,6 +2,7 @@
 mod daemon;
 mod error;
 mod routes;
+mod sandbox;
 mod setup;
 mod terminal;
 mod wasm;

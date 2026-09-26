@@ -140,7 +140,7 @@ impl Daemon {
                     result = Err(e.into());
                 }
             }
-            server.tasks.close();
+            server.sandbox.close();
         }
         let own = async {
             let mut outcome = Ok(());

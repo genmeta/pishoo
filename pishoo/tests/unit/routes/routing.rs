@@ -147,8 +147,7 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
                 .collect(),
         },
         &profile,
-        Arc::new(tokio::sync::Semaphore::new(4)),
-        TaskTracker::new(),
+        Arc::new(Sandbox::new()),
     )
     .unwrap();
     let mut request = anonymous_request();

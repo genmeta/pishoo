@@ -1,6 +1,6 @@
 # h3x、dhttp、Pishoo：第一版架构
 
-日期：2026-09-26。状态：设计清单，尚未实施。本轮按用户要求收敛到最少必要接口；全部结构成员以[清单入口](README.md)列出的三个文件为准。
+日期：2026-09-26。状态：冻结设计的架构说明；实现及验收进度见[实施记录](../IMPLEMENTATION.md)。全部结构成员以[清单入口](README.md)列出的三个文件为准。
 
 ## 1. 三个仓库的职责
 
@@ -123,6 +123,8 @@ DHTTP_HOME/<name>/
 
 Server 直接持有当前 Router 及已加载的 Lib。组件加载和重载串行进行，Runtime 只保留 Engine 和 Linker；不增加 compile_slots、compile_tasks、编译取消对象。
 
+按用户确认，每个 Server 另持有一个 Sandbox，接收原有的 Lib 执行 Semaphore 与任务跟踪器。Sandbox 负责该身份的4槽 WASM 准入和任务回收；身份取消、Endpoint、Router、Lib 集合与共享 Runtime 仍由 Server 持有。Sandbox 不另存取消信号、计数、身份或策略，不是操作系统进程或容器；具体字段和 `new/close/wait` 方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
+
 一次重载直接完成：读取配置/组件 → 校验并编译候选 → 构造 Router → 替换当前 Router。失败保留当前可用内容；在途请求持有自己已取得的 Router/Lib 引用。没有 ServerState、Release、begin_build、发布编号或后台构建队列。
 
 同步编译不会因为丢弃等待 future 就自动停止。第一版不承诺可强行中断编译；不为这项尚不需要的能力扩展运行时成员。
@@ -146,6 +148,8 @@ Endpoint.listen
 ## 8. 流与任务各自收尾
 
 Pishoo 跟踪 guest、宿主 I/O 和应用 producer；dhttp 持有自己的读写和连接任务。应用 EOF 与传输写完可能不同，各层按自己的操作结果释放资源，不设 finished/ExchangeControl。
+
+Server 关闭时先取消身份根 token，使 HTTP、审批、Lib 和终端同时收到取消，再同步关闭 Sandbox 执行准入和 Endpoint。Sandbox 的任务跟踪器只回收 WASM supervisor；`close` 不等待，`wait` 沿用15秒上限。每次调用仍通过 Invocation 把现成 permit 交给实际 Store，Store 回收时归还，Sandbox 不替代执行隔离或传输所有权。
 
 原 body 被替换或 HEAD/204/304 抑制时，只结束旧 producer，不能让它取消最终合法响应。正常 EOF 后 Drop 不重复取消；超时和失败通过错误/取消表达，不伪装成正常 EOF。
 
@@ -193,4 +197,4 @@ let response = endpoint.from_request(request).await?;
 
 重点检查：上传与响应并发、trailers 多值、提前 Drop、body 替换、HEAD/204/304、guest 取消、同名 close 影响全部句柄、其他身份不受影响、stop_listening 后可再监听、daccess 允许/拒绝/审批结果、审批等待取消后的清理及管理界面对当前库 API 的适配。
 
-本轮只做设计、历史代码核对和文档一致性检查，不宣称当前三个仓库已经可端到端运行。
+设计约束与实现验收分别记录；内存流和本地执行验证不代表真实跨端联网或终端平台隔离已经完成。
