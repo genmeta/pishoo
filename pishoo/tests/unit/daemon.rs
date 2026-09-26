@@ -1,8 +1,7 @@
 use super::*;
 
 fn component(version: &str) -> Vec<u8> {
-    let mut bytes =
-        include_bytes!("../../tests/fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
+    let mut bytes = include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
     fn leb(mut n: usize, out: &mut Vec<u8>) {
         loop {
             let byte = (n & 127) as u8;
