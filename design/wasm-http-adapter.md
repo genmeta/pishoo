@@ -2,7 +2,7 @@
 
 日期：2026-09-22。状态：实现设计，未实现。依据当前 [h3x WASI HTTP 测试](../../h3x/tests/wasmtime_wasi_http.rs) 与 guest fixtures；宿主测试依赖 Wasmtime 47（Cargo.lock 为 47.0.4），guest 使用 wasip2 1.0.4。下文真实 API 名来自测试，其余内部结构及流程是拟议伪代码，不是可直接编译或已冻结的 dhttp 接口。
 
-本设计遵循 [身份沙盒与 OpenAPI](wasm-sandbox-design.md)：一个身份一个沙盒、多个 WASM 共享身份账户、每个 WASM 独享 data、每请求新 Store。普通 OpenAPI 静态注册路由，不要求 guest 导出私有 metadata；权限管理由前端直接对接 daccess，guest 不具备 ACL 修改能力。
+本设计遵循 [身份沙盒与 OpenAPI](wasm-sandbox-design.md)：一个身份一个沙盒、多个 WASM 共享身份账户、每个 WASM 独享 data、每请求新 Store。组件内嵌的标准 OpenAPI 静态注册路由，不要求 guest 导出私有 metadata；权限管理由前端直接对接 daccess，guest 不具备 ACL 修改能力。
 
 ## 1. 适配层分成两层
 
@@ -37,13 +37,13 @@ h3x 测试中的 `serve` 是 A 的原型，`handle_wasm` 是 B 的原型，`fixt
 | --- | --- | --- |
 | Engine / Linker | 进程级运行设施 | 编译配置、宿主接口定义；不捕获某个身份的权限 |
 | WasmApp | 不可变代码版本，可 clone | Engine、已编译 Component；可选缓存预实例化结果 |
-| 身份沙盒账户 | Pishoo 按 Server 持有 | 按 App 选择的私有目录能力、身份总预算、身份取消信号、固定 Endpoint |
+| 身份沙盒账户 | Pishoo 按 Server 持有 | 按 Lib 选择的私有目录能力、身份总预算、身份取消信号、固定 Endpoint |
 | StoreData | 单次 Store 持有 | ResourceTable、WasiCtx、WasiHttpCtx、请求能力、limiter、出站 hook、取消信号 |
 | 执行记录 ExecutionRecord | 既有任务跟踪器持有至回收 | guest 任务结果、host 子任务、deadline、额度 lease、输入/输出终态 |
 | 跟踪 Body 包装 | 每个请求/响应 body | 原始 Body、字节计数、EOF/error/drop 通知；不持有可并发访问的 Store |
 | 传输完成句柄 | A 层持有 | 本次输出正常发送/失败/被替换的结果；与 guest Body 的终态分开 |
 
-上述名字仅说明内部职责，优先用现成任务集合、取消令牌及 RAII guard 实现，不增加公共 Runtime/Registry 框架。配额总账户按身份归属，持久数据按 App 隔离；AppId 用于选择代码及私有目录、日志和取消某组件任务。
+上述名字仅说明内部职责，优先用现成任务集合、取消令牌及 RAII guard 实现，不增加公共 Runtime/Registry 框架。配额总账户按身份归属，持久数据按 Lib 隔离；LibId 用于选择代码及私有目录、日志和取消某组件任务。
 
 ### 2.1 单次 Store 状态
 
@@ -70,7 +70,7 @@ Store、Instance 只由 guest 执行任务驱动，不把 `&mut Store` 交给网
 
 ### 2.2 编译缓存与宿主环境
 
-组件在发布准备阶段有界编译并验证，不在每次请求中编译。Linker 注册通用接口，实际目录、出站与额度从 StoreData 取得；目录由宿主按已验证的 Server/AppId 选择，仅预打开 `apps/<AppId>/data/` 为 `/data`，App 根目录中的 app.wasm/openapi.json 仅供宿主加载，不授予父目录或其他 App 的句柄；不可缓存带身份权限的实例。imports 超出支持范围时拒绝加载，不能补一个无限权限默认实现。
+组件在发布准备阶段有界编译并验证，不在每次请求中编译。Linker 注册通用接口，实际目录、出站与额度从 StoreData 取得；目录由宿主按已验证的 Server/LibId 选择，仅预打开 `lib/<LibId>/data/` 为 `/data`，Lib 根目录中的 lib.wasm 仅供宿主加载，不授予父目录或其他 Lib 的句柄；不可缓存带身份权限的实例。imports 超出支持范围时拒绝加载，不能补一个无限权限默认实现。
 
 测试使用 `Engine::default()`、空 WasiCtx、默认 HTTP hooks，这些仅验证通路。生产必须启用实际 limiter、fuel/epoch 中断及宿主 I/O deadline，且在实例化前生效；初始化也可能执行 guest。目录能力、磁盘/handle/log/host buffer 计额不是 Store 内存 limiter 自动提供的。
 
@@ -107,7 +107,7 @@ Done
 
 ### 3.2 标准 HTTP → WASI HTTP resource
 
-Pishoo 在此之前已完成路由、daccess 授权、`/api/<AppId>` 挂载前缀剥离及保留头清洗。B 层将标准 Body 的错误映射为 WASI HTTP ErrorCode，再调用测试中的真实接口：
+Pishoo 在此之前已完成路由、daccess 授权、`/api/<LibId>` 挂载前缀剥离及保留头清洗。B 层将标准 Body 的错误映射为 WASI HTTP ErrorCode，再调用测试中的真实接口：
 
 ```rust
 let incoming = store.data_mut().http().new_incoming_request(
@@ -128,15 +128,15 @@ scheme 由可信传输决定，不能读取客户端伪造头切换。authority 
 
 ```rust
 // 伪代码：跟踪器必须在启动前登记 owner、额度及取消关系。
-async fn call(app, request, prepared_host, execution_tracker) {
+async fn call(lib, request, prepared_host, execution_tracker) {
     let record = execution_tracker.register(prepared_host.lease, deadline);
     let (response_tx, response_rx) = oneshot::channel();
 
     record.spawn_owned(async move {
         let state = build_store_data(prepared_host);
-        let mut store = Store::new(&app.engine, state);
+        let mut store = Store::new(&lib.engine, state);
         configure_limits_and_interrupts(&mut store); // 先于 instantiate
-        let proxy = Proxy::instantiate_async(&mut store, &app.component, &linker).await?;
+        let proxy = Proxy::instantiate_async(&mut store, &lib.component, &linker).await?;
         let incoming = register_request_resource(&mut store, request)?;
         let outparam = register_response_outparam(&mut store, response_tx)?;
         proxy.wasi_http_incoming_handler()
@@ -221,7 +221,7 @@ supervise_pair(writing, forwarding, cancellation).await
 
 原 body 被主动抑制/替换导致的预期 guest 写失败，应归类为回收结果，不污染已决定的最终响应。若此时仍需 guest 读取上传，协调器应明确保留该输入阶段并设置 deadline，不能在 body wrapper 的 Drop 中无条件杀掉整个请求。
 
-错误分类至少区分取消、超时、准入/配额、guest trap、WASI 协议错误、输入/输出传输错误和宿主内部错误。日志记录细节，对外不回传完整内部路径或 trap 字符串。计量记录 Server/App/API、各阶段耗时、字节数和终止原因，不记录 body。
+错误分类至少区分取消、超时、准入/配额、guest trap、WASI 协议错误、输入/输出传输错误和宿主内部错误。日志记录细节，对外不回传完整内部路径或 trap 字符串。计量记录 Server/Lib/API、各阶段耗时、字节数和终止原因，不记录 body。
 
 ## 6. 出站 hook 与策略接缝
 
@@ -237,7 +237,7 @@ DhttpHooks.发送(request, 本次调用上下文):
     # guest 只能给出普通 HTTP request，不能填写或修改这三个可信字段。
     检查 caller == server                 # 当前首版策略：Bob 调用时拒绝出站
     解析并规范化 scheme、authority、path     # 不接受 guest 选择源 Endpoint/证书
-    检查 App 能力、目标/method allowlist、管理目标禁区及额度
+    检查 Lib 能力、目标/method allowlist、管理目标禁区及额度
     删除 guest 伪造的 pishoo-* 等保留身份头
     dreq = Alice 的 Endpoint 创建请求(method, 目标 URI, headers)
     # 若准许发送，远端看到的 DHTTP 源身份始终是 Alice，不会变成 Bob。
@@ -289,8 +289,8 @@ Pishoo 提供策略，B 层确保 guest 的所有网络 imports 经受控实现�
 - 大上传/下载使用逐块 guest fixture，慢消费者情况下峰值缓冲受配置约束。
 - headers 前/后 trap、deadline、CPU 死循环、host I/O 等待及调用 future 被丢弃均回收任务与额度。
 - HEAD/204/304、middleware 替换 body、早响应继续上传不死锁、不误 reset 最终响应。
-- 同身份多组件及旧新版本共用配额；同身份不同 App 的 data 不互通，不同身份的 data/上下文不串用。
-- 未授权请求不实例化 guest；伪造保留头无效；宿主配置的 App 只读/出站限制及 guest 禁止管理 ACL 生效。
+- 同身份多组件及旧新版本共用配额；同身份不同 Lib 的 data 不互通，不同身份的 data/上下文不串用。
+- 未授权请求不实例化 guest；伪造保留头无效；宿主配置的 Lib 只读/出站限制及 guest 禁止管理 ACL 生效。
 - 所有完成路径的 guest 任务、输入/输出、子请求、句柄和额度计数归零，单流失败不影响同连接其他流。
 
 本次仅据代码编写文档并做链接/格式检查，没有修改 h3x 或 dhttp，也没有重新运行上述测试。上游公共签名与完成通知仍需按 [接入说明](dhttp-integration-contract.md) 对齐。
