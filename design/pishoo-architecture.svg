@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" viewBox="0 0 1000 480" role="img" aria-labelledby="title desc">
   <title id="title">Pishoo 多身份架构</title>
-  <desc id="desc">一个宿主进程共享 DhttpNetwork。Alice 和 Bob 各有自己的 Endpoint、Router、daccess、原生服务和 WASM 沙盒；每个沙盒包含独立的 App。</desc>
+  <desc id="desc">一个宿主进程共享 DhttpNetwork。Alice 和 Bob 各有自己的 Endpoint、Router、daccess、原生服务和 WASM 沙盒；每个沙盒包含独立的 Lib。</desc>
   <style>
     text { font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", sans-serif; fill: #172033; }
     .heading { font-size: 20px; font-weight: 700; }
@@ -8,7 +8,7 @@
     .component { font-size: 15px; font-weight: 650; }
     .small { font-size: 12px; fill: #576579; }
     .detail { font-size: 13px; fill: #42526a; }
-    .app { font-size: 14px; font-weight: 700; }
+    .lib { font-size: 14px; font-weight: 700; }
   </style>
 
   <rect width="1000" height="480" fill="#ffffff"/>
@@ -42,11 +42,11 @@
   <text x="260" y="291" class="component">WASM 沙盒</text>
   <text x="456" y="290" class="small" text-anchor="end">共享能力与预算</text>
   <rect x="258" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
-  <text x="306" y="338" class="app" text-anchor="middle">App A</text>
+  <text x="306" y="338" class="lib" text-anchor="middle">Lib A</text>
   <text x="306" y="360" class="small" text-anchor="middle">WasmApp</text>
   <text x="306" y="383" class="small" text-anchor="middle">私有 data/</text>
   <rect x="362" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
-  <text x="410" y="338" class="app" text-anchor="middle">App B</text>
+  <text x="410" y="338" class="lib" text-anchor="middle">Lib B</text>
   <text x="410" y="360" class="small" text-anchor="middle">WasmApp</text>
   <text x="410" y="383" class="small" text-anchor="middle">私有 data/</text>
 
@@ -72,11 +72,11 @@
   <text x="732" y="291" class="component">WASM 沙盒</text>
   <text x="928" y="290" class="small" text-anchor="end">共享能力与预算</text>
   <rect x="730" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
-  <text x="778" y="338" class="app" text-anchor="middle">App C</text>
+  <text x="778" y="338" class="lib" text-anchor="middle">Lib C</text>
   <text x="778" y="360" class="small" text-anchor="middle">WasmApp</text>
   <text x="778" y="383" class="small" text-anchor="middle">私有 data/</text>
   <rect x="834" y="310" width="96" height="98" rx="8" fill="#ffffff" stroke="#a78bfa"/>
-  <text x="882" y="338" class="app" text-anchor="middle">App D</text>
+  <text x="882" y="338" class="lib" text-anchor="middle">Lib D</text>
   <text x="882" y="360" class="small" text-anchor="middle">WasmApp</text>
   <text x="882" y="383" class="small" text-anchor="middle">私有 data/</text>
 </svg>
