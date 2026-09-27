@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn proxy_preserves_absent_path_and_replaces_explicit_path() {
     let uri = "https://alice.dhttp.net/prefix/path?x=1".parse().unwrap();
@@ -132,9 +134,10 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
     let app = build_router(
         dhttp::Endpoint::load("owner").await.unwrap(),
         access,
-        &BTreeMap::new(),
+        Router::new(),
         &ServerConfig {
             listen: 0,
+            ssh: false,
             proxy_locations: ["/", "/docs/"]
                 .into_iter()
                 .map(|location| ProxyLocation {
@@ -147,7 +150,6 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
                 .collect(),
         },
         &profile,
-        Arc::new(Sandbox::new()),
     )
     .unwrap();
     let mut request = anonymous_request();
@@ -155,4 +157,61 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
     assert_eq!(response.headers()[header::LOCATION], "/docs/?x=1");
+}
+
+#[tokio::test]
+async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
+    use tower::ServiceExt;
+    let (access, _) = authorization_app(access_control::Effect::Allow).await;
+    for path in ["/api", "/api/", "/api/missing"] {
+        access
+            .set_policy(
+                access_control::Method::Unspecified,
+                path,
+                access_control::Effect::Allow,
+                access_control::Grantee::Anony,
+            )
+            .await
+            .unwrap();
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let home = dhttp_home::DhttpHome::new(directory.path().to_path_buf());
+    let profile = home.identity_profile("owner").unwrap();
+    let api_directory = profile.join("file/api");
+    std::fs::create_dir_all(&api_directory).unwrap();
+    std::fs::write(api_directory.join("index.html"), "private static content").unwrap();
+    std::fs::write(api_directory.join("missing"), "private static content").unwrap();
+    let endpoint = dhttp::Endpoint::load("owner").await.unwrap();
+    for proxy_locations in [
+        Vec::new(),
+        vec![ProxyLocation {
+            location: "/".into(),
+            proxy_pass: "https://upstream.dhttp.net/"
+                .parse::<http::Uri>()
+                .unwrap()
+                .into_parts(),
+        }],
+    ] {
+        let app = build_router(
+            endpoint.clone(),
+            access.clone(),
+            Router::new(),
+            &ServerConfig {
+                listen: 0,
+                ssh: false,
+                proxy_locations,
+            },
+            &profile,
+        )
+        .unwrap();
+        for path in ["/api", "/api/", "/api/missing"] {
+            for method in [Method::GET, Method::HEAD, Method::POST, Method::OPTIONS] {
+                let mut request = anonymous_request();
+                *request.uri_mut() = format!("https://owner.dhttp.net{path}").parse().unwrap();
+                *request.method_mut() = method;
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            }
+        }
+    }
 }

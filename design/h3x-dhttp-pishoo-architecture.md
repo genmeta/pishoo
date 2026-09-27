@@ -8,12 +8,12 @@
 | --- | --- | --- |
 | h3x | HTTP/3 消息、QPACK、流式读写、协议错误与取消 | dhttp 调用既定连接与消息接口 |
 | dhttp | 身份 Endpoint、全局网络、连接复用、应用接入和通信关闭 | Pishoo 交付 Service，通过 Endpoint 发请求 |
-| Pishoo | 路由、静态文件、反代、daccess、WASM 和终端 | 组合已有 Router、组件与宿主能力 |
+| Pishoo | 路由、静态文件、反代、daccess、WASM 和 exec | 组合已有 Router、组件与宿主能力 |
 
 ```mermaid
 flowchart TB
-    P["Pishoo：Router、daccess、WASM、终端"]
-    E["独立 Endpoint：get / request / listen / close"]
+    P["Pishoo：Router、daccess、WASM、exec"]
+    E["独立 Endpoint：get / request / listen / stop_listening"]
     N["全局 Network：连接、监听、流驱动"]
     H["h3x：固定 HTTP/3 接口"]
     Q["dquic：QUIC / TLS / UDP"]
@@ -23,7 +23,7 @@ flowchart TB
     H --> Q
 ```
 
-Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store 或终端进程。反代和Lib统一通过当前身份的dhttp Endpoint出站。
+Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store 或 exec 子进程。反代和Lib统一通过当前身份的dhttp Endpoint出站。
 
 ## 2. h3x 接口保持不变
 
@@ -43,7 +43,7 @@ h3x Request/Response 已有流式读写、trailers 和 stop/cancel。dhttp 封�
 
 ## 3. Endpoint 与 Network
 
-Endpoint 只持规范化名称，通过 `Endpoint::load(name)` 独立构造，不通过 Network 工厂创建。Network 全局初始化一次，同名句柄使用同一逻辑身份和连接资源。
+Endpoint 只持规范化名称，通过 `Endpoint::load(name)` 独立构造，不通过 Network 工厂创建。Network 全局初始化一次，同名句柄从同一本端身份连接池取得连接；每个池按远端 Authority 复用。
 
 ```rust
 let endpoint = Endpoint::load("alice").await?;
@@ -55,25 +55,22 @@ let response = endpoint.get(uri)
 
 URL/header 在调用处解析；Request 只保存 Endpoint 和有效消息，不保存待报错字段。出站发送和响应读取并发推进，响应头可以先于上传完成返回。错误通过 Result、读写或任务结果直接传播。
 
-NetworkConfig 第一版只配置监听规则。连接超时、操作超时和单流窗口采用模块内部默认值；不配置全局或逐 Endpoint 的连接、交换、总字节配额。
+Network 无初始化配置；每次 `Endpoint.listen` 直接交付该 Server 的监听范围。连接超时、操作超时和单流窗口采用模块内部默认值；不配置全局或逐 Endpoint 的连接、交换、总字节配额。
 
 每个 Server 的允许来源与 Network 实际入口同时生效；共享网络不能让只允许 Internal 的身份因其他身份允许 External 而被放开。Scope/Scopes 复用 qconn 已有定义。
 
-### 关闭选用第二种：立即关闭
+### 监听停止与进程生命周期
 
 ```rust
 endpoint.stop_listening()?; // 停止新入站，可再次 listen，仍可出站
-endpoint.close()?;          // 立即取消该身份通信并关闭已建立连接
-network.shutdown()?;       // 立即关闭全部身份和共享网络
 ```
 
-- close 按名称作用于所有同名句柄，其他名称不受影响。
-- 不等待优雅排空，不带 deadline，不生成 ShutdownReport 或累计关闭计数。
-- 为保持第一版简单，close 后该名称在本进程中保持关闭；临时停服务使用 stop_listening，同名重新启用发生在进程重启后。
-- 返回表示取消已发出、当前连接和登记已处理，不表示所有后台任务或远端操作已结束。
-- 尚在建立的连接不能在关闭后重新接入；迟到结果须关闭并丢弃。底层 qconn 建连任务能否随等待者取消而立即停止，取决于其已有取消契约，不能用文档替代实现。
+- Endpoint 不提供 close。stop_listening 只撤本次监听，同名句柄仍可出站，服务可以再次 listen。
+- Pishoo Server 关闭时停止其监听并取消其应用任务，不关闭连接池中的共享连接。
+- Network 属于进程生命周期，不提供全局 shutdown。Pishoo 退出时停止自己的全部监听并等待应用任务；连接池、已建立连接和网络维护任务留到进程退出，不宣称 Pishoo `run` 返回时它们已被主动关闭。
+- 尚在建立的连接受其请求 future 和底层 qconn 契约约束；不能用文档宣称取消等待者必然立即停止底层建连任务。
 
-按身份拥有的连接记录只需要取消信号和活动连接集合。监听记录只保存实际应用、独立停止信号和底层登记句柄。没有 OwnerKey、阶段包装、配额或报告缓存；详见 [dhttp 清单](dhttp-interfaces.md)。
+Network 按本端与远端名称保存 h3x 复用池；入站匿名连接由实际接入 driver 持有。监听记录保存实际应用、一次性的停止 sender、底层登记句柄与监听范围。没有逐身份关闭记录、OwnerKey、阶段包装、配额或报告缓存；详见 [dhttp 清单](dhttp-interfaces.md)。
 
 ## 4. 可信身份直接复用 dquic
 
@@ -99,37 +96,33 @@ Allowed 进入业务，Denied 返回 403；`Reviewing(id, state, registry)` 在�
 
 ## 6. Pishoo 第一版配置
 
-用户配置只保留：
+用户配置只保留每个 Server 的监听范围、`ssh` 开关和代理路由。实例目录由 DHTTP_HOME 决定，没有实例配置文件或数据库。
 
-- 实例的状态目录。
-- 终端是否启用、管理员身份名单。
-- 每个 Server 已有的监听范围和代理路由。
-
-第一版不设置 Server 级统一请求并发限额，静态和代理不经过通用应用租约；Lib 执行和终端分别保留自己的限制。内存、fuel、I/O 期限和有界队列使用明确的内部默认值，不把每项实现参数都做成用户配置。保留必要的执行约束，不新增配置 v2、Lib 策略 JSON、策略交集或默认导入账本。具体字段见 [Pishoo 清单](pishoo-interfaces.md)。
+第一版不设置 Server 级统一请求并发限额，静态和代理不经过通用应用租约；Lib 不限制并发数，保留单次执行约束；exec 单独限制在途命令数。内存、fuel、I/O 期限和有界队列使用明确的内部默认值，不把每项实现参数都做成用户配置。保留必要的执行约束，不新增配置 v2、Lib 策略 JSON、策略交集或默认导入账本。具体字段见 [Pishoo 清单](pishoo-interfaces.md)。
 
 ```text
 DHTTP_HOME/<name>/
   ssl/                         身份材料，仅宿主使用
-  db/config.db                 settings + proxy_locations
+  db/config.db                 settings(listen,ssh) + proxy_locations
   db/access.db                 原 daccess 权限数据
   file/                        静态文件
   lib/<LibId>/lib.wasm          组件和内嵌 OpenAPI
   lib/<LibId>/data/             Lib 私有数据
 ```
 
-沿用现有 config.db schema：settings 必须只有一行，listen 为 0=off、1=Internal、2=External、3=both；proxy_locations 保存 location 与 proxy_pass。监听范围改变重启生效。实例锁由 run 持有，不再创建锁管理结构。
+config.db 的 v1 settings 必须只有一行，listen 为 0=off、1=Internal、2=External、3=both，ssh 为 0/1；proxy_locations 保存 location 与 proxy_pass。listen 或 ssh 改变重启生效。实例锁由 run 持有，不再创建锁管理结构。
 
-## 7. 直接装配 Server、Router 和 Lib
+## 7. 直接装配 Server、Router 和 Sandbox
 
-Server 直接持有当前 Router 及已加载的 Lib。组件加载和重载串行进行，Runtime 只保留 Engine 和 Linker；不增加 compile_slots、compile_tasks、编译取消对象。
+Server 直接持有当前 Router 和该身份的 Sandbox；Sandbox 集中持有 Lib 集合、共享 Runtime 引用与任务跟踪器。`run` 以局部变量持有跨身份共享的 Runtime，其内部只保留 Engine 和 Linker；组件加载和重载串行进行，不增加 compile_slots、compile_tasks、编译取消对象。
 
-按用户确认，每个 Server 另持有一个 Sandbox，接收原有的 Lib 执行 Semaphore 与任务跟踪器。Sandbox 负责该身份的4槽 WASM 准入和任务回收；身份取消、Endpoint、Router、Lib 集合与共享 Runtime 仍由 Server 持有。Sandbox 不另存取消信号、计数、身份或策略，不是操作系统进程或容器；具体字段和 `new/close/wait` 方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
+按用户确认，组件扫描、manifest 验证、版本替换、API 路由与执行、Store、响应体及 WASI 宿主能力全部集中在 sandbox 逻辑模块，按职责分文件。Server 保留身份取消、Endpoint、daccess、整体 Router 和 exec 任务资源。Sandbox 负责该身份的 WASM 执行和任务回收，不限制并发数，不另存内部锁、取消信号、计数、身份或策略，不是操作系统进程或容器；完整字段和方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
 
-一次重载直接完成：读取配置/组件 → 校验并编译候选 → 构造 Router → 替换当前 Router。失败保留当前可用内容；在途请求持有自己已取得的 Router/Lib 引用。没有 ServerState、Release、begin_build、发布编号或后台构建队列。
+一次重载直接完成：读取配置 → Sandbox 扫描并编译局部候选 → 构造 Lib Router 和完整 Router → Sandbox 复核目录与组件摘要 → Server 替换完整 Router → Sandbox 替换 Lib 集合并取消删除项 → Server 更新配置。所有可失败检查先完成，提交步骤之间没有 await；失败保留旧 Router、Lib、配置及取消状态。在途请求持有自己已取得的 Router/Lib 引用，各版本继续共享原有任务跟踪器。候选使用局部 BTreeMap，没有 ServerState、Release、begin_build、发布编号或后台构建队列。
 
 同步编译不会因为丢弃等待 future 就自动停止。第一版不承诺可强行中断编译；不为这项尚不需要的能力扩展运行时成员。
 
-一个 WASM 文件就是一个 Lib；每次调用创建独立 Store/Instance。编译组件可以共享，权限上下文和可变 guest 内存不共享。并发准入直接使用现成 Semaphore，隔离由实际 Store、WasiCtx、limiter/fuel 和宿主能力实现；执行取消必须能到达 guest 和宿主 I/O，不能只依赖外层 timeout。
+一个 WASM 文件就是一个 Lib；每次调用创建独立 Store/Instance。编译组件可以共享，权限上下文和可变 guest 内存不共享。Lib 不设置并发执行槽或 permit，隔离由实际 Store、WasiCtx、limiter/fuel 和宿主能力实现；执行取消必须能到达 guest 和宿主 I/O，不能只依赖外层 timeout。
 
 ### 调用关系
 
@@ -138,18 +131,18 @@ Endpoint.listen
   → 标准 HTTP 请求 + HandshakeSummary
   → Pishoo 本端绑定检查
   → daccess 授权与审批结果
-  → Router 的静态 / 代理 / WASM 分支
+  → Router 的静态 / 代理 / Sandbox Lib API / exec 分支
   → 标准响应
   → dhttp 调用 h3x writer
 ```
 
-终端保留路径由 TerminalManager 执行额外的实例管理员准入。终端协议版本头在普通 guest 保留头清洗之前读取；它不参与身份认证，也不转给 guest。
+`POST /exec` 与 Lib 路由合并在同一 Router，先经过 daccess 授权，再检查同名已验证远端身份；它使用标准 HTTP JSON，不涉及终端帧或 h3x 内部流。
 
 ## 8. 流与任务各自收尾
 
 Pishoo 跟踪 guest、宿主 I/O 和应用 producer；dhttp 持有自己的读写和连接任务。应用 EOF 与传输写完可能不同，各层按自己的操作结果释放资源，不设 finished/ExchangeControl。
 
-Server 关闭时先取消身份根 token，使 HTTP、审批、Lib 和终端同时收到取消，再同步关闭 Sandbox 执行准入和 Endpoint。Sandbox 的任务跟踪器只回收 WASM supervisor；`close` 不等待，`wait` 沿用15秒上限。每次调用仍通过 Invocation 把现成 permit 交给实际 Store，Store 回收时归还，Sandbox 不替代执行隔离或传输所有权。
+Server 关闭时先取消身份根 token，使 HTTP、审批、Lib 和 exec 同时收到取消，再停止 Endpoint 监听并同步调用 Sandbox.close、关闭 exec 准入。Sandbox.close 关闭执行准入和任务跟踪器，取消 Lib 的既有 token 并清空集合；它不等待，`wait` 沿用15秒上限。Sandbox 的任务跟踪器只回收 WASM supervisor，Server 自己的 exec 跟踪器回收 Child。每次调用的 guest 任务直接持有 Store，supervisor 等待 guest 与出站子任务回收；执行和传输资源沿用各自的所有权。
 
 原 body 被替换或 HEAD/204/304 抑制时，只结束旧 producer，不能让它取消最终合法响应。正常 EOF 后 Drop 不重复取消；超时和失败通过错误/取消表达，不伪装成正常 EOF。
 
@@ -170,7 +163,7 @@ let response = endpoint.from_request(request).await?;
 ## 10. 保留的路由和组件规则
 
 - `/api/<LibId>` 专供 WASM，包括 `/api/index`；未声明路径 404，方法不匹配 405，业务 HEAD/OPTIONS 必须显式声明。
-- `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/context` 为管理前端保留；`/.pishoo/`、`/shell` 继续保留，不能由代理或 Lib 遮盖。
+- `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/context` 为管理前端保留；`/.pishoo/`、`/exec` 继续保留，不能由代理或 Lib 遮盖。
 - 静态只接受 GET/HEAD，目录只尝试 index.html，不列目录。workspace 自身保留原管理前端的深链接 fallback，不能与普通静态站点规则混用。
 - 代理先精确 `= /path`，再最长字符串前缀；query 不参与。proxy_pass 无 URI 路径时保留原路径，有 URI 时替换命中部分，不自动补斜杠。保持已有尾斜杠重定向规则。
 - 组件顶层恰有一个 `pishoo:openapi` 段，内容为有界 UTF-8 OpenAPI 3.1.x JSON；不运行 guest 获取 API 清单。
@@ -180,21 +173,19 @@ let response = endpoint.from_request(request).await?;
 - 组件及其 OpenAPI 使用同一文件快照，部署用临时文件加原子 rename。静态按每请求打开的文件句柄读取，不承诺整个静态目录的事务快照。
 - 坏 Server 不影响其他身份；坏 Lib 首次启动跳过，更新失败保留旧 Lib。确认删除的 Lib 撤入口并取消对应执行；数据目录保留。
 
-## 11. 终端也纳入本版
+## 11. 单命令 exec
 
-终端的两个配置字段、全部资源成员、固定线协议和平台后端见[终端清单](terminal-interfaces.md)。管理员名单为空不能启用；Server 自身身份不会自动获得终端权限。
+exec 由每个 Server 的 `settings.ssh` 控制，只允许同名已验证远端身份。一次请求只运行一个宿主程序；直接使用服务账号权限，不承诺文件或网络隔离。接口和限额见[exec 清单](exec-interfaces.md)。
 
-一个 CONNECT 对应一个会话。先返回 200 确认 HTTP 隧道，再收 OPEN，进程准备成功后发 READY；输入结束是半关闭，输出及退出信息可以继续。
-
-一个 TerminalSession 从准入开始持有启动、运行和清理资源，不另设 LaunchGuard。Linux 原生命令须处于独立 OS 隔离边界；macOS 第一版采用纯 WASI helper。平台探测或隔离验收不通过就拒绝该模式，不能回退到宿主 shell。当前均未实施或完成平台验收。
+请求读取有界 JSON 后运行程序，捕获有界 stdout/stderr，进程结束并回收后返回 JSON。无 PTY、会话帧、WASM shell 或平台 helper。请求取消与 Server 关闭取消进程任务；进程组回收不保证覆盖主动脱离的后代。
 
 ## 12. 实施和验收顺序
 
-1. dhttp 用既定 h3x 接口完成 Endpoint 收发、标准 Service 接入及立即关闭；h3x 无接口改造。
+1. dhttp 用既定 h3x 接口完成 Endpoint 收发、共享连接复用、标准 Service 接入及监听停止；h3x 无接口改造。
 2. Pishoo 直接装配 Router 和 Lib，接入当前 daccess 库，复用旧分支中兼容的身份、数据库和管理路由装配。
 3. Lib 和反代统一通过 Endpoint 收发，移除直接 QPACK/H3 流参数。
-4. 终端按已定协议和平台方案实现，单独完成隔离与资源回收验收。
+4. exec 按固定请求和资源上限实现，验证身份、取消与直接子进程回收，并记录未提供 OS 沙箱的能力边界。
 
-重点检查：上传与响应并发、trailers 多值、提前 Drop、body 替换、HEAD/204/304、guest 取消、同名 close 影响全部句柄、其他身份不受影响、stop_listening 后可再监听、daccess 允许/拒绝/审批结果、审批等待取消后的清理及管理界面对当前库 API 的适配。
+重点检查：上传与响应并发、trailers 多值、提前 Drop、body 替换、HEAD/204/304、guest 取消、同名 load 复用连接、不同本端身份不共池、stop_listening 后可再监听且仍可出站、daccess 允许/拒绝/审批结果、审批等待取消后的清理及管理界面对当前库 API 的适配。
 
-设计约束与实现验收分别记录；内存流和本地执行验证不代表真实跨端联网或终端平台隔离已经完成。
+设计约束与实现验收分别记录；内存流和本地执行验证不代表真实跨端联网或完整进程树回收已经完成。

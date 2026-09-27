@@ -1,14 +1,16 @@
 # dhttp 第一版结构与接口清单
 
-本轮只更新设计，不实施代码；遵循[清单约束](README.md)。h3x 的既定接口、结构和协议行为保持不变。DHTTP 只封装 Endpoint、共享网络、应用接入与流适配，不增加传输配额、交换控制、完成订阅或错误缓存。
+本清单定义当前设计；遵循[清单约束](README.md)。h3x 的既定接口、结构和协议行为保持不变。DHTTP 只封装 Endpoint、共享网络、连接复用、应用接入与流适配，不增加传输配额、交换控制、完成订阅或错误缓存。
+
+2026-09-26 按用户要求合并过碎实现并使用普通 `mod`：库根为 `src/dhttp.rs`，`endpoint.rs` 保留原资源声明并集中 Endpoint/连接/服务接入，`endpoint/network.rs` 集中 Network 生命周期与接口绑定，`endpoint/messages.rs` 集中请求和 Body 适配。子模块私有，既有无状态 helper 按调用需要使用 `pub(super)`；公开重导出路径、类型字段和调用行为保持不变。build.rs 生成的配置常量继续通过生成文件导入，不承担手写实现的模块拆分。
 
 ## 1. 边界与现成类型
 
 - Endpoint 只持规范化名称；独立 load 不访问 Network。
-- 同规范化名称代表同一逻辑 Endpoint。所有同名句柄共享关闭效果，不区分 load 次数。
+- 同规范化名称代表同一逻辑 Endpoint。同名句柄不区分 load 次数，经 Network 使用同一个本端身份连接池。
 - Network 在进程内初始化一次；负责实际连接、监听登记和后台任务。
-- close 是立即关闭：禁止新操作、发出取消、关闭已建立连接，不等待排空或回收报告。
-- close 后该名称在本进程中保持关闭，必须重启进程才可恢复。临时停服使用 stop_listening，随后可以重新 listen。
+- Endpoint 不提供 close；stop_listening 仅停止当前监听，随后可以重新 listen，同名出站请求继续复用连接。
+- Network 属于进程生命周期，不提供 shutdown；应用退出时逐个停止其 Endpoint 监听并回收自己的任务。
 - Pishoo 反代和 Lib 的出站只通过当前身份的 Endpoint；不增加其他 HTTP 传输或失败降级路径。
 - Pishoo 只等待自己的应用任务；DHTTP 不提供 finished、ExchangeControl、RequestInfo 或 Peer。
 
@@ -28,7 +30,6 @@ type ErasedService = tower::util::BoxCloneService<
     http::Request<Body>, http::Response<Body>, BoxError,
 >;
 type ConnectionKey = (Arc<str>, Arc<str>); // 本端规范化名称、远端规范化名称
-type H3 = h3x::H3Connection<QuicTransport>;
 static NETWORK: tokio::sync::OnceCell<DhttpNetwork> = tokio::sync::OnceCell::const_new();
 ```
 
@@ -60,7 +61,6 @@ impl Endpoint {
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<BoxError>;
     pub fn stop_listening(&self) -> Result<()>;
-    pub fn close(&self) -> Result<()>;
 }
 
 pub struct Request<B> {
@@ -94,36 +94,20 @@ let response = endpoint.get(uri)
 
 上传与响应读取并发进行，返回响应头不等待完整上传。from_request 与 fluent 请求走相同内部驱动；没有额外公开 execute/send。
 
-## 3. Network：配置与全部实际资源
+## 3. Network：全部实际资源
 
 ```rust
-#[derive(Clone)]
-pub struct NetworkConfig { pub listen: Vec<ListenConfig> }
-#[derive(Clone)]
-pub enum ListenConfig {
-    Scope(Scopes),
-    Interface { device: String, scopes: Scopes },
-}
-
 pub struct DhttpNetwork {
-    config: NetworkConfig,
-    endpoints: Mutex<HashMap<Arc<str>, Arc<EndpointConnections>>>,
-    listeners: Mutex<HashMap<Arc<str>, Arc<ListenerRegistration>>>,
+    listeners: Mutex<HashMap<Arc<str>, ListenerEntry>>,
     pool: h3x::Pool<ConnectionKey, QuicTransport, Error>,
     bindings: Mutex<HashMap<(String, IpAddr), Binding>>,
     addresses: qprotocol::AddressBook,
-    stop: CancellationToken,
 }
 impl DhttpNetwork {
-    pub async fn init(config: NetworkConfig) -> Result<&'static Self>;
+    pub async fn init() -> Result<&'static Self>;
     pub fn global() -> Result<&'static Self>;
-    pub fn shutdown(&self) -> Result<()>;
 }
 
-struct EndpointConnections {
-    stop: CancellationToken,
-    connections: Mutex<Vec<H3>>,
-}
 struct Binding {
     socket: Arc<qprotocol::UdpSocket>,
     scopes: Scopes,
@@ -131,56 +115,57 @@ struct Binding {
 }
 ```
 
-EndpointConnections 只表示该身份持有的连接和取消信号，不是状态机；没有额外方法，只用结构字面量构造。stop.is_cancelled 就是关闭标记；connections 包含该名称的全部活动连接，包括匿名对端、未放入复用池的连接以及正在结束的连接。h3x::Pool 仅用于复用，不能代替完整活动连接集合。Vec 通过现有连接 Arc 的指针判断是否为同一连接，无连接 ID 或世代字段。
+Network 持有现成的 h3x Pool，按本端与远端规范化名称组成的键复用连接。同名 Endpoint 的请求在 await 时访问同一个池，不在 Endpoint 或 Request 中另存连接池。连接供不同请求并发开启独立双向流；不可复用的连接由 h3x Pool 按既有规则替换。入站匿名连接不进入复用池，其接入 driver 持有实际连接并负责退出时释放。
 
-Network 不保存 TaskTracker，因为立即关闭不等待任务计数或生成回收报告。listen 自己等待其 supervisor 的 JoinHandle；读写 driver 持有实际连接/原生流，在各自退出分支释放资源。确需等待并发子任务时，由该操作的局部 JoinSet 负责，不建立全局任务账本。Network.stop 标识整体关闭；shutdown 后不能再次 init。已关闭名称的 EndpointConnections 留在表内，避免旧句柄重新打开。
+Network 不保存 TaskTracker 或全局取消 token。listen 自己等待其 supervisor 的 JoinHandle；读写 driver 持有实际连接/原生流，在各自退出分支释放资源。确需等待并发子任务时，由该操作的局部 JoinSet 负责，不建立全局任务账本。Network 只初始化一次，保持到进程退出；Pishoo `run` 返回不表示池与后台维护任务已关闭。
 
-Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。网络维护任务在同一次更新中显式撤销 AddressBook/协议/Dock 登记后释放 socket；shutdown 也走这条实际清理路径。设备和地址变化只重新应用原 listen 规则，配置更新需要重启。
+Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。网络维护任务根据当前监听更新 AddressBook/协议/Dock 登记；当没有监听范围时撤销对应绑定。设备和地址变化重新应用当前有效监听登记的范围。
 
-超时和队列容量使用模块内部常量，不放进 NetworkConfig：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES、ACCEPT_QUEUE_CAPACITY。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与终端的业务期限仍由 Pishoo 决定。
+超时和队列容量使用模块内部常量：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES、ACCEPT_QUEUE_CAPACITY。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
 
 ## 4. 应用服务接入
 
 ```rust
-struct ListenerRegistration {
+struct ListenerEntry {
     service: Mutex<ErasedService>,
-    stop: CancellationToken,
-    qconn_owner: Arc<qconn::Server>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    owner: Arc<qconn::Server>,
+    scopes: Scopes,
 }
 ```
 
-没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。name 已是 Network 表键；scopes 使用 qconn::Server 的已有字段，不重复存储。
+没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。name 已是 Network 表键；scopes 用于当前接口绑定的范围并集，shutdown sender 的存在表示本次监听仍有效。
 
 为了让同一服务表接收不同具体类型的 Router/handler，直接组合现成 Tower 工具：map_err 把 S::Error 转为 BoxError，map_response 把响应 body 装箱，boxed_clone 得到 ErasedService。每请求克隆实例后通过现成 oneshot 或 ready+call 驱动同一个实例，不把 readiness 和 call 分给不同克隆。
 
 监听提交顺序：
 
 1. 先异步读取并验证凭据，期间尚未占用监听名称；随后创建供本次监听使用的局部 oneshot 通道。
-2. 取得该名称 EndpointConnections，按固定顺序锁 connections，再锁 listeners；检查 Network/Endpoint 未关闭且名称尚未监听。
-3. 持锁调用同步 qconn.listen，取得实际 Arc<qconn::Server> 后构造完整 ListenerRegistration 并插入表，再启动本次 supervisor。锁本身保证同名登记互斥，不创建占位或空 OnceLock。
+2. 锁住 listeners，检查名称尚未监听且 qconn 注册表没有同名登记。
+3. 持锁调用同步 qconn.listen，取得实际 Arc<qconn::Server> 后构造完整 ListenerEntry 并插入表，再启动本次 supervisor。锁本身保证同名登记互斥，不创建占位或空 OnceLock。
 4. 提交临界区中没有 await。同步失败立即返回错误；已取得的底层登记在返回前撤销。不留下 Preparing 状态或半完成的登记。
 5. listen future 局部持一个 oneshot Sender；supervisor 持 Receiver。Sender 的生存期明确跨越整个监听等待，future 被丢弃时通道关闭，supervisor 据此停止并撤登记。
 6. 公共 listen 等待本次 supervisor 的 JoinHandle 返回 Result<()>；错误直接沿返回链交付，不缓存到登记字段。
 
-取消按 Network.stop → EndpointConnections.stop → ListenerRegistration.stop 的 child_token 关系派生。supervisor 只观察本次监听 token 和局部 oneshot，不重复订阅祖先；这些用于主动停止，不是流终态通知。它的真实 qconn 撤销和任务退出负责取消路径收尾，不能把必须执行的清理只写在 public listen future 的正常返回路径。
+ListenerEntry.shutdown 是本次监听的一次性停止 sender；supervisor 观察对应 receiver 和调用方 future 的局部 oneshot。它的真实 qconn 撤销和任务退出负责取消路径收尾，不能把必须执行的清理只写在 public listen future 的正常返回路径。
 
-stop_listening 按当前登记取消 stop，并在 listeners 锁内按 qconn_owner 的 Arc 指针撤销真实 qconn 登记、移除本次表项；不等待旧任务结束。supervisor 的重复清理必须比对当前表项/实际 Server Arc，不能删除后来重新 listen 的登记。
+stop_listening 取走当前登记的 shutdown sender 并发送停止信号，在 listeners 锁内按 owner 的 Arc 指针撤销真实 qconn 登记；当前无登记时返回 Ok(())。supervisor 随后移除旧表项并回收已接受连接。stop_listening 不等待旧任务结束，也不关闭连接池中的出站连接。
 
-qconn 接收回调在同步登记前捕获当时的 EndpointConnections、本次监听 token 和名称。接受结果经固定有界交接队列交 supervisor；队列满或接收方消失时立即关闭该连接。接入任务在相同锁序下检查捕获的 token 未取消且名称仍有当前登记；stop_listening 先取消旧 token 再移除登记，所以旧回调不能接到新登记。迟到结果直接关闭。supervisor 清理时再比较其持有的实际 Server Arc。
+qconn 接收回调捕获本次监听名称。接受结果经固定有界交接队列交 supervisor；队列满或接收方消失时立即关闭该连接。回调在 listeners 锁下要求 shutdown sender 仍存在；stop_listening 先取走 sender，使旧回调不能接到新登记。迟到结果直接关闭。supervisor 清理本次 qconn owner。
 
-## 5. 立即关闭的并发规则
+## 5. 连接复用与进程生命周期
 
-close 取得该名称的 EndpointConnections；尚无活动状态时建立并取消它，保证后续同名请求也被拒绝。所有同名句柄操作相同表项。
+请求从 Network 的 Pool 按本端与远端名称复用或建立连接。同名 Endpoint 不保存独立的池、关闭状态或连接集合。Network 没有全局关闭阶段；已取得的连接由请求或接入 driver 持有，服务停止监听不取消现有出站通信。
 
-connections 的锁同时承担该名称的准入同步：启动任务或登记连接时，在锁内检查 Network.stop 与 Endpoint.stop。close 在同一把锁内执行 Endpoint.stop.cancel() 并取走全部连接，然后撤销监听，锁外逐条关闭已建立连接。不得先在锁外检查 token，再把连接插入已经清空的集合。
+Pishoo 退出时调用各 Endpoint 的 stop_listening，并取消和等待自己的应用任务。Network 的复用池、其他在途通信与周期性接口维护任务仍属进程范围，直至进程退出；`run` 返回不保证这些资源已结束。
 
-锁顺序固定：先短暂取得 endpoints 表项并释放表锁；需要同时操作时依次锁 EndpointConnections.connections、Network.listeners。禁止反向加锁，锁内不 await、不调用应用 Service。
+listeners 锁内不 await、不调用应用 Service；停止的监听不得再接收新交换。
 
-已登记连接关闭时，使用现有 pool.remove_connection(key, &connection) 精确撤销对应复用条目。尚在建连的请求持有当时的 EndpointConnections；关闭信号停止本层等待或后续接入，迟到的已建立结果必须关闭并移除。因为同名终态不重开，不需要 generation 或 OwnerKey。
+连接失效或收到 GOAWAY 时，h3x Pool 按自身复用规则换连接。请求 future 被放弃后的底层建连任务能否立即停止取决于 qconn 的既有取消契约；不能把应用 future 的丢弃等同于全局传输关闭。没有逐身份终态，不需要 generation 或 OwnerKey。
 
-close/shutdown 必须尝试处理全部已取得的连接和登记，不能因第一项失败就跳过其余资源；失败沿本次 Result 返回，不缓存。返回仅表示取消已发出、当前已建立连接和登记已处理，不表示所有任务、对端流或应用执行已经结束。driver 继续在本操作的所有权下回收自己的资源；不增加独立的结束或失败订阅。当前 qconn.connect 的底层任务是否能随等待 future 丢弃而立刻结束，取决于其既有取消契约；本清单不宣称本地尚未提供的能力已经实现，也不为此增加旁路状态结构。
+各次 stop_listening 按本次 Result 交付错误，不缓存全局关闭报告。driver 在自身操作的所有权下回收资源，不增加独立的结束或失败订阅。
 
-stop_listening 不取消 EndpointConnections.stop。停止监听后可重新 listen，也仍能主动发请求；已接入交换可以继续。服务删除若调用 close，则本进程内不能同名重新接入；临时撤服务和组件更新必须使用 stop_listening/Router 更新。
+stop_listening 只撤销当前监听，不清空池或取消出站请求。停止监听后可重新 listen，也仍能主动发请求；已接入交换可以继续。服务删除和组件更新使用 stop_listening/Router 更新，同名服务可重新接入。
 
 ## 6. 原生传输适配
 
@@ -197,7 +182,7 @@ struct SendStream(qtransport::StreamWriter);
 
 保留已有 Transport/AsyncRead/AsyncWrite/StopSending/CancelStream/TransportError 实现；不增加自定义关联方法、成员或 Drop 行为。这些既有 trait 的方法签名保持原样。QuicTransport 直接转发 native 开流、接流和 close；Recv/Send 直接转发 I/O 与取消，不增加广播、统计或完成状态。
 
-DHTTP 对每条已建立连接只启动一次请求接入循环；入站和出站连接都由 Network 跟踪。连接接受请求时取得当前名称的监听 Service，没有有效监听则拒绝本次请求，不关闭仍用于其他请求的连接。
+DHTTP 对每条已建立连接只启动一次请求接入循环；可复用的出站连接由 Network 的池持有，入站连接由接入 driver 持有。连接接受请求时取得当前名称的监听 Service，没有有效监听则拒绝本次请求，不关闭仍用于其他请求的连接。
 
 ## 7. Body 适配没有补建协议能力
 
@@ -210,7 +195,7 @@ Body 只是标准 UnsyncBoxBody 别名，没有成员、方法、错误缓存或
 
 适配所需的纯模块内函数、闭包和 async 局部变量属于方法实现，不列成另一套冻结公共函数。标准适配不会反向要求 h3x 增加新的消息类型或生命周期接口。
 
-操作超时只作用于当前可观察的等待阶段，不声称观察到 h3x 未公开的 native 进度；不能给整个长流 writer future 套短总时长限制。终端适用足够长的底层操作期限，自己的建立/空闲/会话期限由终端模块落实。
+操作超时只作用于当前可观察的等待阶段，不声称观察到 h3x 未公开的 native 进度；不能给整个长流 writer future 套短总时长限制。exec 的固定执行期限由 Pishoo 自己落实。
 
 ## 8. 身份与签名接缝
 
@@ -231,6 +216,6 @@ pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::Rem
 2. Request.await → global Network → 检查名称状态 → Pool 取得连接 → open_bi → 并发 write_request/read_response。
 3. Endpoint.listen → 准备凭据 → 原子登记 → supervisor → accept_bi → read_request → 标准 Service → write_response。
 4. Service/代理/WASI 使用标准 Body；适配器只桥接数据、trailers 与原有流结束语义。
-5. stop_listening → 撤当前监听；close → 取消同名全部网络操作并关闭连接；shutdown → 关闭所有名称及共享网络。
+5. stop_listening → 撤当前监听，保留连接复用；剩余全局资源随进程退出结束。
 
-没有 OwnerKey、自定义 ConnectionKey 结构、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留的自有结构只有 Endpoint、Request、NetworkConfig、ListenConfig、DhttpNetwork、EndpointConnections、ListenerRegistration、Binding、QuicTransport、RecvStream、SendStream；Error 沿用现有类型。
+没有 OwnerKey、自定义 ConnectionKey 结构、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留的自有结构只有 Endpoint、Request、DhttpNetwork、ListenerEntry、Binding、QuicTransport、RecvStream、SendStream；Error 沿用现有类型。

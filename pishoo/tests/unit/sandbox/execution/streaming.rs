@@ -1,10 +1,11 @@
+use super::*;
+
 #[tokio::test]
 async fn upload_and_response_stream_with_repeated_trailers() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(READ, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let invocation = invoke(lib, &slots, &tasks).await;
+    let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
     let producer = async move {
         tx.send(Ok(Frame::data(Bytes::from_static(
@@ -35,16 +36,15 @@ async fn upload_and_response_stream_with_repeated_trailers() {
         ["preserved", "also-preserved"]
     );
     assert_eq!(collected.to_bytes(), b"world-world-".repeat(64));
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }
 
 #[tokio::test]
 async fn response_headers_arrive_before_upload_eof() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(EARLY, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let invocation = invoke(lib, &slots, &tasks).await;
+    let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
     let response = tokio::time::timeout(
         Duration::from_secs(5),
@@ -57,7 +57,7 @@ async fn response_headers_arrive_before_upload_eof() {
         response.headers()["x-handler-mode"],
         "respond-then-read-request"
     );
-    assert_eq!(slots.available_permits(), 3);
+    assert_eq!(tasks.len(), 1);
     let producer = async move {
         tx.send(Ok(Frame::data(Bytes::from_static(b"streamed upload"))))
             .await
@@ -73,17 +73,16 @@ async fn response_headers_arrive_before_upload_eof() {
         "request-consumed"
     );
     assert_eq!(collected.to_bytes(), "streamed upload");
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }
 
 #[tokio::test]
-async fn upload_error_becomes_one_body_error_and_releases_permit() {
+async fn upload_error_becomes_one_body_error_and_reaps_guest() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(EARLY, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
     let (tx, body) = upload();
-    let mut response = invoke(lib, &slots, &tasks)
+    let mut response = invoke(lib, &tasks)
         .await
         .execute(request("/early", body))
         .await
@@ -98,7 +97,7 @@ async fn upload_error_becomes_one_body_error_and_releases_permit() {
         }
     }
     assert!(response.body_mut().frame().await.is_none());
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }
 
 #[tokio::test]

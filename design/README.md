@@ -23,40 +23,52 @@
 | 文件 | 内容 |
 | --- | --- |
 | [三仓架构](h3x-dhttp-pishoo-architecture.md) | 仓库职责、数据路径、应用约束和实施次序 |
-| [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、应用接入与立即关闭 |
-| [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Lib、daccess 接入与 WASM |
-| [终端结构](terminal-interfaces.md) | 会话、线协议、子进程和平台隔离后端 |
+| [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、连接复用与应用接入 |
+| [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Sandbox/Lib、daccess 接入与 WASM |
+| [exec 结构](exec-interfaces.md) | 单命令宿主执行、身份准入与子进程回收 |
 
 ## 冻结规则
 
-1. 冻结范围覆盖 HTTP 网关、WASM 及远程终端。每个自定义有状态结构的私有成员也在范围内。
+1. 冻结范围覆盖 HTTP 网关、WASM 及单命令 exec。每个自定义有状态结构的私有成员也在范围内。
 2. 清单列出的结构名、字段名及类型、枚举变体及载荷、方法签名、跨模块函数签名和调用归属，后续实现不得自行增加、删除或修改。
 3. 方法体、局部变量、闭包及编译器生成的 async 状态可以按实现需要编写。模块内部的无状态辅助函数可拆分算法；它们不能新增跨模块接口或持久状态。
 4. 不允许用 `Any`、通用属性包、未限定的 extensions、占位成员或匿名集合隐藏清单之外的状态。清单中的集合只能存其明确列出的业务内容。
 5. 已复用的第三方类型按所选依赖版本使用，不复制新模型。后续依赖升级若改变冻结接口，按接口变更处理。
 6. 发现清单无法满足实现时，先列出具体冲突、受影响调用和最小变更，取得用户明确同意后再修改清单及代码。不得在“顺手重构”中扩展结构。
-7. 没有在结构清单中列出的能力不通过预留字段进入代码。终端平台支持情况是实施验收结果，不能通过不受限的执行路径补齐。
+7. 没有在结构清单中列出的能力不通过预留字段进入代码。exec 的 OS 权限和后代回收限制必须如实报告，不能用文档替代实现验收。
 8. 这份基线冻结的是设计，不代表实现已经编译、联网或通过隔离测试。结构实现与行为验收分别检查。
 
 ## 当前边界
 
 - h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 不持 Network、QUIC endpoint 或连接。
-- 同规范化名称代表同一逻辑 Endpoint；close 立即取消并关闭该名称的通信，不排空、不生成精细关闭报告。临时停服使用 stop_listening。
-- 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、超时、Lib 执行和终端会话限制。
+- 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close；stop_listening 只停止接入。Network 属于进程生命周期，不提供 shutdown。
+- 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、超时、Lib 执行和 exec 专用并发限制。
 - 反代和 Lib 只允许 dhttp 出站：直接使用当前身份的 Endpoint，不增加 UpstreamKind、普通 HTTP 客户端或其他传输分支。
 - 出站保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。标准 HTTP Request 通过同一请求驱动发送。
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
 - 身份直接复用 qtls 的 HandshakeSummary、LocalAuthority、RemoteAuthority，范围复用 qconn 的 Scope/Scopes。没有 RequestInfo 或 Peer 包装。
 - 一个 WASM 文件统一称为 Lib，不另设 App；代码类型使用 Lib、LibResponseBody 和通用 Body/Error。
-- 每个 Server 持有一个 Sandbox，直接拥有该身份 Lib 共用的 Semaphore 与任务跟踪器，负责执行准入和任务回收。准入仍直接使用标准 Semaphore；Sandbox 不新增取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
+- 每个 Server 直接持有一个 Sandbox，集中拥有该身份的 Lib 集合、共享 Runtime 引用与任务跟踪器；组件扫描、校验、版本替换、API 执行和 WASI 宿主能力均归 sandbox 模块。Lib 执行不限制并发数，不设置执行槽或 permit；Sandbox 不新增内部锁、取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
 - WASM 执行归 Pishoo；h3x 和 dhttp 不依赖 Pishoo 或 Wasmtime。
 - daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批在当前请求中等待库返回的结果，不新增审批状态结构、后台等待任务或默认规则导入系统。
-- 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 和终端各自管理实际执行资源。
-- 第一版串行加载/重载，Server 直接持有 Router 和 Lib；不建立 ServerState、Release 或 begin_build 发布流程。
+- 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 和 exec 各自管理实际执行资源。
+- 第一版串行加载/重载，Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；候选 Lib 只存于重载局部变量，不建立 ServerState、Release 或 begin_build 发布流程。
 
-2026-09-26 用户确认拆出 Sandbox：仅将 Server 的 `lib_slots`、`tasks` 迁入新类型，Server 改持 `Arc<Sandbox>`，并新增 `Sandbox::new/close/wait`；`build_router` 的两个资源参数合为 `Arc<Sandbox>`。字段和方法的完整签名见 [Pishoo 清单](pishoo-interfaces.md)。Server 保留身份取消、Endpoint、Router、Lib 集合和 Runtime，Invocation 与 Store 的成员及调用签名不变。
+2026-09-26 用户确认将 WASM 职责集中到 Sandbox：在已有 `lib_slots`、`tasks` 基础上迁入 Server 的 `libs`、`runtime`，Server 改为直接持有 `Sandbox`；新增组件加载、提交前复核、版本替换和 API Router 构造方法，`build_router` 接收已构造的 Lib Router。运行入口保留跨身份共享的 Runtime，Server 保留身份取消、Endpoint、授权和整体 Router 发布。当次迁移保持 Invocation 与 Store 的成员及调用签名，`validate_lib` 的根级公开导出不变。字段和方法的完整签名见 [Pishoo 清单](pishoo-interfaces.md)。
+
+2026-09-27 用户要求移除 DaemonConfig 与 Daemon 结构：`run` 以局部变量持有实例目录、Server、listener 和 Runtime，保留串行重载及关闭顺序。随后用户取消实例配置文件和 TerminalPolicy：每个 Server 的 schema v1 settings 单行增加 `ssh` 0/1。用户又将第一版交互终端收缩为单命令宿主 exec：保留 `ssh` 数据库列与同名身份准入，删除终端会话、WASM shell 和平台隔离后端，Server 直接持有 exec 任务跟踪器与专用名额。接口以 [Pishoo 清单](pishoo-interfaces.md) 和 [exec 清单](exec-interfaces.md) 为准。
+
+2026-09-27 用户确认同步当前 dhttp 无参数 Network 初始化：移除 NetworkConfig、ListenConfig 和 Pishoo 的 `network_config` 接缝，`DhttpNetwork::init()` 无参数；各 Server 在 `Endpoint.listen` 时交付自己的范围。完整接口以 [dhttp 清单](dhttp-interfaces.md) 为准。
+
+2026-09-27 用户确认移除 Network.shutdown：Pishoo 退出先停止各 Server 监听、取消并等待自己的应用任务；全局 Network 与连接池保持到进程退出，不再承诺运行中主动关闭全部传输。接口以 [dhttp 清单](dhttp-interfaces.md) 为准。
+
+2026-09-26 用户要求取消 Lib 并发限制：删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数和 `Error::Capacity`；保留单次执行的内存、fuel、出站次数及超时限制。完整签名与行为见 [Pishoo 清单](pishoo-interfaces.md)。
+
+2026-09-26 用户要求改用普通 `mod` 和同名 `.rs` 文件，并合并过碎的 Sandbox 文件。Pishoo 工作区库入口使用 `pishoo.rs`、`gateway.rs`，由 Cargo `[lib].path` 指定；测试同样使用普通模块。该文件组织调整允许现有成员和无状态函数在原职责范围内使用必要的 `pub(super)` 及显式导入；类型字段、函数参数和运行行为保持不变。Sandbox 的四文件划分见 [Pishoo 清单](pishoo-interfaces.md)。
+
+2026-09-26 用户将同一整理要求扩展到 h3x 和 dhttp：合并同一类型或同一职责的实现片段，手写实现使用普通模块，库入口使用 crate 同名文件。h3x 的帧载荷、QPACK 编码和流读取实现收拢；dhttp 的 Endpoint、名称、身份、SSL 和访问策略实现按职责收拢。公开导出、结构字段、枚举载荷和方法签名保持不变；模块内部按现有调用关系调整导入和必要的父模块可见性。
 
 ## 文档清理
 

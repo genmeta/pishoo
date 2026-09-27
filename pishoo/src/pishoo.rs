@@ -1,16 +1,14 @@
 //! Identity-bound HTTP services, components and management routes.
 mod daemon;
 mod error;
+mod exec;
 mod routes;
 mod sandbox;
 mod setup;
-mod terminal;
-mod wasm;
 
-pub use daemon::{DaemonConfig, run};
+pub use daemon::run;
 pub use error::Error;
-pub use setup::validate_lib;
-pub use terminal::TerminalPolicy;
+pub use sandbox::validate_lib;
 
 type Body = dhttp::Body;
 type Result<T> = std::result::Result<T, Error>;

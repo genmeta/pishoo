@@ -1,4 +1,5 @@
 use super::*;
+use crate::{Error, routes::build_router, setup::load_server_config};
 
 fn component(version: &str) -> Vec<u8> {
     let mut bytes = include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
@@ -30,10 +31,9 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
     std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, ssh INTEGER); INSERT INTO settings VALUES(0,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
     let runtime = Arc::new(Runtime::new().unwrap());
-    let terminal = Arc::new(TerminalManager::new(TerminalPolicy::default(), root).unwrap());
     let endpoint = dhttp::Endpoint::load(profile.name()).await.unwrap();
     let config = load_server_config(&profile).unwrap();
     let access = Arc::new(
@@ -46,29 +46,29 @@ async fn server(root: &std::path::Path) -> Server {
         .unwrap(),
     );
     let cancel = CancellationToken::new();
-    let libs = load_libs(&profile, &runtime, &BTreeMap::new(), &cancel).unwrap();
-    let sandbox = Arc::new(Sandbox::new());
+    let mut sandbox = Sandbox::new(runtime);
+    let libs = sandbox.load_libs(&profile, &cancel).unwrap();
     let router = Arc::new(RwLock::new(
         build_router(
             endpoint.clone(),
             access.clone(),
-            &libs,
+            sandbox.api_router(endpoint.clone(), &libs),
             &config,
             &profile,
-            sandbox.clone(),
         )
         .unwrap(),
     ));
+    sandbox.verify_libs(&profile, &libs).unwrap();
+    sandbox.replace_libs(libs);
     Server {
         profile,
         endpoint,
         config,
         access,
         router,
-        libs,
-        runtime,
         sandbox,
-        terminal,
+        exec_tasks: TaskTracker::new(),
+        exec_slots: Arc::new(Semaphore::new(4)),
         cancel,
     }
 }
@@ -77,42 +77,39 @@ async fn server(root: &std::path::Path) -> Server {
 async fn reload_reuses_valid_versions_retains_bad_candidates_and_cancels_deleted_versions() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
-    let old = server.libs["echo"].clone();
-    let sandbox = server.sandbox.clone();
-    let permit = sandbox.lib_slots.clone().try_acquire_owned().unwrap();
+    let old = server.sandbox.libs["echo"].clone();
+    let task = server.sandbox.tasks.token();
     server.reload().await.unwrap();
-    assert!(Arc::ptr_eq(&sandbox, &server.sandbox));
-    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
-    assert!(Arc::ptr_eq(&old, &server.libs["echo"]));
+    assert_eq!(server.sandbox.tasks.len(), 1);
+    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
     std::fs::write(
         server.profile.join("lib/echo/lib.wasm"),
         b"broken component",
     )
     .unwrap();
     server.reload().await.unwrap();
-    assert!(Arc::ptr_eq(&old, &server.libs["echo"]));
+    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
     assert!(!old.cancel.is_cancelled());
     std::fs::write(server.profile.join("lib/echo/lib.wasm"), component("2")).unwrap();
     server.reload().await.unwrap();
-    let new = server.libs["echo"].clone();
+    let new = server.sandbox.libs["echo"].clone();
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(!old.cancel.is_cancelled());
-    assert!(Arc::ptr_eq(&sandbox, &server.sandbox));
-    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
+    assert_eq!(server.sandbox.tasks.len(), 1);
     std::fs::remove_file(server.profile.join("lib/echo/lib.wasm")).unwrap();
     server.reload().await.unwrap();
-    assert!(server.libs.is_empty());
+    assert!(server.sandbox.libs.is_empty());
     assert!(old.cancel.is_cancelled() && new.cancel.is_cancelled());
-    assert_eq!(server.sandbox.lib_slots.available_permits(), 3);
-    drop(permit);
-    assert_eq!(server.sandbox.lib_slots.available_permits(), 4);
+    assert_eq!(server.sandbox.tasks.len(), 1);
+    drop(task);
+    assert!(server.sandbox.tasks.is_empty());
 }
 
 #[tokio::test]
 async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
-    let old = server.libs["echo"].clone();
+    let old = server.sandbox.libs["echo"].clone();
     let db = rusqlite::Connection::open(server.profile.db_dir().join("config.db")).unwrap();
     db.execute("UPDATE settings SET listen=3", []).unwrap();
     assert!(matches!(
@@ -120,11 +117,18 @@ async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
         Err(Error::InvalidConfig(_))
     ));
     assert_eq!(server.config.listen, 0);
-    assert!(Arc::ptr_eq(&old, &server.libs["echo"]));
+    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
+    db.execute("UPDATE settings SET listen=0, ssh=1", [])
+        .unwrap();
+    assert!(matches!(
+        server.reload().await,
+        Err(Error::InvalidConfig(_))
+    ));
+    assert!(!server.config.ssh);
     server.close().await.unwrap();
     assert!(old.cancel.is_cancelled());
-    assert!(server.cancel.is_cancelled() && server.sandbox.lib_slots.is_closed());
-    assert!(server.libs.is_empty() && server.sandbox.tasks.is_closed());
+    assert!(server.cancel.is_cancelled());
+    assert!(server.sandbox.libs.is_empty() && server.sandbox.tasks.is_closed());
     server.close().await.unwrap();
 }
 
@@ -137,12 +141,9 @@ async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
     assert!(
-        load_libs(
-            &server.profile,
-            &server.runtime,
-            &server.libs,
-            &server.cancel
-        )
-        .is_err()
+        server
+            .sandbox
+            .load_libs(&server.profile, &server.cancel)
+            .is_err()
     );
 }

@@ -26,8 +26,8 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 ## Getting started
 
 The current development branch is implementing the [v1 contract](design/README.md).
-Its TOML/SQLite configuration, completed work, test commands, and remaining
-transport/terminal work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
+Its SQLite configuration, completed work, test commands, and remaining
+transport/exec work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 The packaged-release installation instructions below describe the earlier release.
 
 ### Install Pishoo
@@ -68,73 +68,13 @@ You can purchase a name and certificate, then place them in the appropriate loca
 genmeta identity apply
 ```
 
-### Configuration files
+### Current development configuration
 
-- Linux global configuration: `/etc/dhttp/pishoo.conf`
-- macOS global configuration: `$(brew --prefix)/etc/dhttp/pishoo.conf`
-- Per-identity service configuration: `<DHTTP home>/<identity>/server.conf`, for example `~/.dhttp/your.name/server.conf`
-
-Pishoo loads the global configuration and then discovers `server.conf` files for users in the platform worker group: `dhttp` on Linux and `_www` on macOS. The identity directory also contains the generated certificate and private key under `ssl/`; do not rename or manually change their permissions.
-
-Add the account that owns the identity to the worker group:
-
-```sh
-# Linux
-sudo usermod -aG dhttp "$USER"
-
-# macOS
-sudo dseditgroup -o edit -a "$USER" -t user _www
-```
-
-### Configuration example
-
-The global file can remain minimal. The packaged default configuration only needs a PID file when the platform default worker group should be discovered automatically:
-
-```nginx
-# /etc/dhttp/pishoo.conf on Linux
-pishoo {
-    pid /var/run/pishoo.pid;
-}
-```
-
-Put the service configuration in your identity directory. Pishoo derives the service identity and TLS material from that directory. The following example enables SSH, serves a static site, and proxies `/app` to a local application:
-
-```nginx
-# ~/.dhttp/your.name/server.conf
-server {
-    # SSH is disabled unless it is enabled at server scope.
-    sshd on;
-
-    location / {
-        root  templates;
-        index index.html;
-    }
-
-    location /app {
-        proxy_pass http://127.0.0.1:8081;
-    }
-}
-```
-
-When enabled, SSH clients connect to `/shell/<username>`. Requests pass through
-the server's `access_rules` before reaching the SSH service, and root login is
-always rejected.
+Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, ssh)` row and a `proxy_locations(location, proxy_pass)` table. `ssh=1` enables `POST /exec` for the same verified identity; it runs one host command with the Pishoo service account's permissions. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema and current behavior.
 
 ### Run
 
-Validate and start (or reload) Pishoo after changing its configuration:
-
-```sh
-# Linux
-sudo pishoo -t
-sudo systemctl start pishoo
-sudo systemctl reload pishoo
-
-# macOS
-sudo pishoo -t
-sudo brew services start pishoo
-sudo brew services reload pishoo
-```
+Start the development build with `DHTTP_HOME` pointing to the instance directory. Changes to `listen` or `ssh` require a restart; proxy routes and Libs reload during the running process.
 
 ### Access
 
