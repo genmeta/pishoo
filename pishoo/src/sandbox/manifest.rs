@@ -1,3 +1,9 @@
+use std::collections::HashSet;
+
+use wasmparser::{Encoding, Parser, Payload};
+
+use crate::{Error, Result};
+
 pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
     let invalid = |s: &str| Error::InvalidComponent(s.into());
     if bytes.len() > 64 * 1024 * 1024 {
@@ -79,7 +85,7 @@ fn reserved(path: &str) -> bool {
         "/workspace",
         "/workspace-api",
         "/.pishoo",
-        "/shell",
+        "/exec",
     ]
     .iter()
     .any(|prefix| {

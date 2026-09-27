@@ -1,16 +1,17 @@
+use super::*;
+
 #[tokio::test]
 async fn outgoing_fixture_is_denied_by_default() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(OUTGOING, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
     let mut request = request("/absent/small/normal?probe=1", empty());
     request
         .headers_mut()
         .insert("pishoo-client-identity", "alice.dhttp.net".parse().unwrap());
-    let result = invoke(lib, &slots, &tasks).await.execute(request).await;
+    let result = invoke(lib, &tasks).await.execute(request).await;
     assert!(result.is_err());
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }
 
 #[test]
@@ -77,7 +78,6 @@ fn target_rules_reject_management_aliases_and_prefix_confusion() {
 #[tokio::test]
 async fn identity_signatures_require_capabilities_and_enforce_bounds() {
     use identity::pishoo::identity::signatures::{Host, SignError, VerifyError};
-    let slots = Arc::new(Semaphore::new(4));
     let mut store = StoreData {
         table: ResourceTable::new(),
         wasi: WasiCtx::builder().build(),
@@ -97,7 +97,6 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
         local: authority("alice.dhttp.net"),
         remote: None,
         policy: LibPolicy::default(),
-        permit: slots.clone().try_acquire_owned().unwrap(),
     };
     assert!(matches!(
         store.sign(b"message".to_vec()).await,
@@ -149,7 +148,6 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
         Err(VerifyError::Unavailable)
     ));
     drop(store);
-    assert_eq!(slots.available_permits(), 4);
 }
 
 #[tokio::test]

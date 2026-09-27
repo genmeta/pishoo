@@ -1,9 +1,69 @@
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
+
+use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any};
+use dhttp_home::identity::IdentityProfile;
+use http::Request;
+use http_body_util::BodyExt;
+use tokio::sync::Semaphore;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tower::ServiceExt;
+
+use super::Server;
+use crate::{
+    Body, Error, Result, exec,
+    routes::build_router,
+    sandbox::{Runtime, Sandbox},
+    setup::load_server_config,
+};
+
+#[cfg(test)]
+#[path = "../../tests/unit/daemon/exec_route.rs"]
+mod tests;
+
+fn exec_router(
+    enabled: bool,
+    name: String,
+    cwd: PathBuf,
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+    slots: Arc<Semaphore>,
+) -> Router {
+    Router::new().route(
+        "/exec",
+        any(move |request: Request<AxumBody>| {
+            let (name, cwd, cancel, tasks, slots) = (
+                name.clone(),
+                cwd.clone(),
+                cancel.clone(),
+                tasks.clone(),
+                slots.clone(),
+            );
+            async move {
+                let request = request.map(|body| body.map_err(Into::into).boxed_unsync());
+                match exec::execute(enabled, &name, &cwd, cancel, tasks, slots, request).await {
+                    Ok(response) => response.map(AxumBody::new).into_response(),
+                    Err(error) => {
+                        let status = error.status();
+                        if status.is_server_error() {
+                            eprintln!("exec request for {name}: {error}");
+                        }
+                        (
+                            status,
+                            status.canonical_reason().unwrap_or("request failed"),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        }),
+    )
+}
+
 impl Server {
-    async fn load(
-        profile: IdentityProfile,
-        runtime: Arc<Runtime>,
-        terminal: Arc<TerminalManager>,
-    ) -> Result<Self> {
+    pub(super) async fn load(profile: IdentityProfile, runtime: Arc<Runtime>) -> Result<Self> {
         let identity = profile
             .load_identity()
             .await
@@ -22,85 +82,85 @@ impl Server {
             access_control::AccessService::load_from_db(&uri, &identity.name, &subject).await?,
         );
         let cancel = CancellationToken::new();
-        let libs = load_libs(&profile, &runtime, &BTreeMap::new(), &cancel)?;
-        let sandbox = Arc::new(Sandbox::new());
+        let exec_tasks = TaskTracker::new();
+        let exec_slots = Arc::new(Semaphore::new(4));
+        let mut sandbox = Sandbox::new(runtime);
+        let libs = sandbox.load_libs(&profile, &cancel)?;
+        let app_router = sandbox
+            .api_router(endpoint.clone(), &libs)
+            .merge(exec_router(
+                config.ssh,
+                endpoint.name().to_owned(),
+                profile.path().to_path_buf(),
+                cancel.clone(),
+                exec_tasks.clone(),
+                exec_slots.clone(),
+            ));
         let router = build_router(
             endpoint.clone(),
             access.clone(),
-            &libs,
+            app_router,
             &config,
             &profile,
-            sandbox.clone(),
         )?;
+        sandbox.verify_libs(&profile, &libs)?;
+        sandbox.replace_libs(libs);
         Ok(Self {
             profile,
             endpoint,
             config,
             access,
             router: Arc::new(RwLock::new(router)),
-            libs,
-            runtime,
             sandbox,
-            terminal,
+            exec_tasks,
+            exec_slots,
             cancel,
         })
     }
-    fn name(&self) -> &str {
+    pub(super) fn name(&self) -> &str {
         self.endpoint.name()
     }
 
-    async fn reload(&mut self) -> Result<()> {
+    pub(super) async fn reload(&mut self) -> Result<()> {
         let config = load_server_config(&self.profile)?;
-        if config.listen != self.config.listen {
+        if config.listen != self.config.listen || config.ssh != self.config.ssh {
             return Err(Error::InvalidConfig(
-                "listen changes require restarting the instance".into(),
+                "listen and ssh changes require restarting the instance".into(),
             ));
         }
-        let libs = load_libs(&self.profile, &self.runtime, &self.libs, &self.cancel)?;
+        let libs = self.sandbox.load_libs(&self.profile, &self.cancel)?;
+        let app_router = self
+            .sandbox
+            .api_router(self.endpoint.clone(), &libs)
+            .merge(exec_router(
+                config.ssh,
+                self.endpoint.name().to_owned(),
+                self.profile.path().to_path_buf(),
+                self.cancel.clone(),
+                self.exec_tasks.clone(),
+                self.exec_slots.clone(),
+            ));
         let router = build_router(
             self.endpoint.clone(),
             self.access.clone(),
-            &libs,
+            app_router,
             &config,
             &self.profile,
-            self.sandbox.clone(),
         )?;
-        if !self.profile.path().symlink_metadata()?.is_dir() {
-            return Err(Error::InvalidIdentity(
-                "identity directory disappeared".into(),
-            ));
-        }
-        for (id, lib) in &libs {
-            if self.libs.get(id).is_some_and(|old| Arc::ptr_eq(old, lib)) {
-                continue;
-            }
-            let path = self.profile.join("lib").join(id).join("lib.wasm");
-            let bytes = std::fs::read(path)?;
-            if <[u8; 32]>::from(Sha256::digest(bytes)) != lib.digest {
-                return Err(Error::InvalidComponent(
-                    "component changed during reload".into(),
-                ));
-            }
-        }
+        self.sandbox.verify_libs(&self.profile, &libs)?;
         *self.router.write().unwrap() = router;
-        for (id, old) in &self.libs {
-            if !libs.contains_key(id) {
-                old.cancel.cancel();
-            }
-        }
-        self.libs = libs;
+        self.sandbox.replace_libs(libs);
         self.config = config;
         Ok(())
     }
 
-    fn listen(
+    pub(super) fn listen(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
-        let (endpoint, router, cancel, terminal, listen) = (
+        let (endpoint, router, cancel, listen) = (
             self.endpoint.clone(),
             self.router.clone(),
             self.cancel.clone(),
-            self.terminal.clone(),
             self.config.listen,
         );
         Box::pin(async move {
@@ -112,7 +172,7 @@ impl Server {
             };
             let name = endpoint.name().to_owned();
             endpoint.listen(scopes, tower::service_fn(move |mut request: http::Request<Body>| {
-                let (router, cancel, terminal, name) = (router.clone(), cancel.clone(), terminal.clone(), name.clone());
+                let (router, cancel, name) = (router.clone(), cancel.clone(), name.clone());
                 async move {
                     let result: Result<http::Response<Body>> = async {
                         if cancel.is_cancelled() { return Err(Error::Closed); }
@@ -122,9 +182,6 @@ impl Server {
                         *request.uri_mut() = identity.expand_uri(request.uri().clone()).map_err(|_| Error::IdentityMismatch)?;
                         let authority = request.uri().authority().ok_or(Error::IdentityMismatch)?;
                         if authority.as_str().contains('@') || dhttp_home::normalize_name(authority.host()).as_deref() != Some(name.as_str()) { return Err(Error::IdentityMismatch); }
-                        if matches!(request.uri().path(), "/shell" | "/.pishoo/terminal") || request.uri().path().starts_with("/shell/") {
-                            return terminal.handle(&name, cancel, request).await;
-                        }
                         let names = request.headers().keys().filter(|n| n.as_str().starts_with("pishoo-")).cloned().collect::<Vec<_>>();
                         for name in names { request.headers_mut().remove(name); }
                         let app = router.read().unwrap().clone();
@@ -145,17 +202,23 @@ impl Server {
         })
     }
 
-    async fn close(&mut self) -> Result<()> {
+    pub(super) async fn close(&mut self) -> Result<()> {
         self.cancel.cancel();
         self.sandbox.close();
+        self.exec_tasks.close();
+        self.exec_slots.close();
         let result = if dhttp::DhttpNetwork::global().is_ok() {
-            self.endpoint.close().map_err(Error::from)
+            self.endpoint.stop_listening().map_err(Error::from)
         } else {
             Ok(())
         };
         *self.router.write().unwrap() = axum::Router::new();
-        self.libs.clear();
-        self.sandbox.wait().await?;
-        result
+        let cleanup = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let (sandbox, ()) = tokio::join!(self.sandbox.wait(), self.exec_tasks.wait());
+            sandbox
+        })
+        .await
+        .map_err(|_| Error::ShutdownDeadline)?;
+        result.and(cleanup)
     }
 }

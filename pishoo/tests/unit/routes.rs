@@ -1,4 +1,19 @@
-use super::*;
+use std::sync::Arc;
+
+use access_control::{AccessService, Action, SubjectId, Visitor};
+use axum::{Router, body::Body as AxumBody};
+use http::{Method, Request, StatusCode, header};
+use http_body_util::BodyExt;
+
+use super::{
+    access::{authorize, workspace},
+    proxy::{clean_hop_headers, proxy_uri},
+    static_file, *,
+};
+use crate::{
+    Error,
+    setup::{ProxyLocation, ServerConfig},
+};
 
 fn anonymous_request() -> Request<AxumBody> {
     let name = "owner.dhttp.net";
@@ -85,5 +100,7 @@ async fn pending_review(access: &AccessService) -> u64 {
     .expect("authorization must register its live review")
 }
 
-include!("routing.rs");
-include!("authorization.rs");
+#[path = "routes/authorization.rs"]
+mod authorization;
+#[path = "routes/routing.rs"]
+mod routing;

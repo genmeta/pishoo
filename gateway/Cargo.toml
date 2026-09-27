@@ -3,3 +3,6 @@ name = "gateway"
 version = "0.8.2"
 edition = "2024"
 license = "Apache-2.0"
+
+[lib]
+path = "src/gateway.rs"

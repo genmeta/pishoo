@@ -1,11 +1,11 @@
 # Pishoo 第一版结构与接口清单
 
-本清单遵循[设计准则和接口约束](README.md)。范围是 HTTP 网关、WASM、既有 daccess 集成及[终端接缝](terminal-interfaces.md)。这是设计，不表示实现已完成。
+本清单遵循[设计准则和接口约束](README.md)。范围是 HTTP 网关、WASM、既有 daccess 集成及[exec 接缝](exec-interfaces.md)。这是设计，不表示实现已完成。
 
 ## 1. 第一版边界
 
 - Pishoo 只使用 dhttp Endpoint、标准 HTTP/Body、Tower/Axum；不持 QPACK、H3 writer 或 QUIC connection。
-- Endpoint 独立 load；同名 Endpoint 共享通信状态。close 立即关闭该名称，终态保持到进程退出；临时停止接入使用 stop_listening。
+- Endpoint 独立 load；同名 Endpoint 经全局 Network 的同一本端身份池复用连接。Endpoint 不提供 close；stop_listening 只停止接入。Network 属于进程生命周期，不提供 shutdown。
 - Server 串行加载和重载。没有 ServerState、Release、revision、构建队列或后台发布任务。
 - Runtime 只保存 Engine/Linker。编译按当前调用顺序执行，不建立编译任务注册表或并发槽。
 - 反代和 Lib 只允许通过当前身份的 dhttp Endpoint 出站；没有其他传输分支或普通 HTTP 客户端。
@@ -16,22 +16,27 @@ type Body = dhttp::Body;
 type Result<T> = std::result::Result<T, Error>;
 ```
 
-除 DaemonConfig、TerminalPolicy、run、validate_lib、Error 外，下文自有类型和模块接口均为 crate 内部；成员只在本crate所需模块间可见，不作为仓外API。字段列表完整，不增加通用状态map或预留成员。错误沿调用结果、Body或现成任务结果通道传播；互斥结果使用enum/Result，不在有效资源旁重复保存错误标记。
+除 run、validate_lib、Error 外，下文自有类型和模块接口均为 crate 内部；成员只在本crate所需模块间可见，不作为仓外API。字段列表完整，不增加通用状态map或预留成员。错误沿调用结果、Body或现成任务结果通道传播；互斥结果使用enum/Result，不在有效资源旁重复保存错误标记。
+
+### Rust 文件组织
+
+2026-09-26 用户要求使用普通 `mod` 声明和同名 `.rs` 文件，合并过碎的 Sandbox 实现。库根文件为 `src/pishoo.rs`；Sandbox 保留四个文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `sandbox.rs` | 已冻结结构、组件加载与重载、关闭和 API 路由 |
+| `sandbox/runtime.rs` | Runtime/Lib 构造、Store 限制、Invocation 执行和响应体生命周期 |
+| `sandbox/host.rs` | WASI 出站 HTTP 和 identity WIT 宿主能力 |
+| `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
+
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace`、`outgoing_allowed` 的可见范围限定在各自所属的 routes/sandbox 内，签名和行为保持原样。exec 模块接口见[exec 清单](exec-interfaces.md)。
 
 ## 2. 配置和固定默认值
 
 ```rust
-pub struct DaemonConfig {
-    pub state_dir: std::path::PathBuf,
-    pub terminal: TerminalPolicy,
-}
-// TerminalPolicy的唯一两个公开配置字段，完整定义归终端清单。
-pub struct TerminalPolicy {
-    pub enabled: bool,
-    pub administrators: std::collections::HashSet<std::sync::Arc<str>>,
-}
 struct ServerConfig {
     listen: u8,
+    ssh: bool,
     proxy_locations: Vec<ProxyLocation>,
 }
 struct ProxyLocation {
@@ -40,75 +45,58 @@ struct ProxyLocation {
 }
 ```
 
-DaemonConfig 从实例 `pishoo.toml` 读取，拒绝未知字段；state_dir 与启动时 DHTTP_HOME 指向同一实例目录，不在运行中修改进程环境。终端默认 disabled、管理员空集合。身份仍通过 dhttp-home 发现，Endpoint 使用相同身份目录。
+没有实例配置文件或实例数据库。`run` 从启动时的 DHTTP_HOME 取得实例目录，不在运行中修改进程环境。身份通过 dhttp-home 发现，Endpoint 使用相同身份目录。每个 Server 从自己的 `db/config.db` 读取配置；不定义实例配置结构。单命令 exec 由本 Server 的 `ssh` 开关控制，`ssh=0` 禁用；`ssh=1` 时只允许同名已验证远端身份。字段名沿用用户先前确认的 v1 数据库列，不表示使用 SSH 协议。
 
-config.db 保持 schema v1：settings(listen) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者。proxy_pass 必须按 dhttp 目标规则校验；没有传输类型字段或数据库列。没有 lib_policies、policy_imports、默认策略来源账本或自动 schema v2 迁移。
+config.db 的 schema v1 为 settings(listen,ssh) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者，ssh 只能是整数0/1。proxy_pass 必须按 dhttp 目标规则校验；没有传输类型字段或数据库列。第一版尚未上线，直接修订 v1 建表定义，不添加 schema v2 或自动迁移。没有 lib_policies、policy_imports、默认策略来源账本。
 
 2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。先校验完整 URI，再以 `path_and_query: None` 保留原始配置未写路径的事实；显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。
 
-这些运行限制是实现常量，不是配置字段：WASM 每次执行期限30秒、4个执行槽、总预留内存256MiB、在途fuel总额400_000_000；单次WASM内存64MiB、fuel100_000_000、每10_000 fuel让出；Store最多32 instances、32 memories、64 tables、100_000 table elements；每次最多16个出站；WASI输出1块、每块16KiB；签名输入1MiB、签名8KiB。扫描间隔2秒，本层退出等待上限15秒。终端使用终端清单自己的固定限制。
+这些运行限制是实现常量，不是配置字段：WASM 每次执行期限30秒；单次WASM内存64MiB、fuel100_000_000、每10_000 fuel让出；Store最多32 instances、32 memories、64 tables、100_000 table elements；每次最多16个出站；WASI输出1块、每块16KiB；签名输入1MiB、签名8KiB。扫描间隔2秒，本层退出等待上限15秒。exec 使用[exec 清单](exec-interfaces.md)的固定限制。
 
-全局Network的监听配置由已验证Server的listen并集生成：`NetworkConfig { listen: vec![ListenConfig::Scope(scopes)] }`；没有额外配置字段。运行中新增身份所需范围超出启动并集时报告需重启。listen变化同样重启生效；Lib和路由重载不修改全局Network。
+全局 Network 无初始化配置，直接调用 `DhttpNetwork::init()`。每个 Server 的 listen 范围在 `Endpoint.listen` 时交给 dhttp，Network 根据当前监听登记管理接口绑定。Pishoo 的 listen 配置变化仍在重启后生效；Lib 和路由重载不改变监听。
 
-## 3. Daemon 和 Server
+## 3. 运行循环和 Server
 
 ```rust
-struct Daemon {
-    home: dhttp_home::DhttpHome,
-    servers: std::collections::BTreeMap<String, Server>,
-    listeners: tokio::task::JoinSet<(String, Result<()>)>,
-    runtime: std::sync::Arc<Runtime>,
-    terminal: std::sync::Arc<TerminalManager>,
-}
 struct Server {
     profile: dhttp_home::identity::IdentityProfile,
     endpoint: dhttp::Endpoint,
     config: ServerConfig,
     access: std::sync::Arc<access_control::AccessService>,
     router: std::sync::Arc<std::sync::RwLock<axum::Router>>,
-    libs: std::collections::BTreeMap<String, std::sync::Arc<Lib>>,
-    runtime: std::sync::Arc<Runtime>,
-    sandbox: std::sync::Arc<Sandbox>,
-    terminal: std::sync::Arc<TerminalManager>,
+    sandbox: Sandbox,
+    exec_tasks: tokio_util::task::TaskTracker,
+    exec_slots: std::sync::Arc<tokio::sync::Semaphore>,
     cancel: tokio_util::sync::CancellationToken,
 }
 ```
 
 ```rust
-pub async fn run(config: DaemonConfig) -> Result<()>;
+pub async fn run() -> Result<()>;
 pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec>;
-fn load_config(path: &std::path::Path) -> Result<DaemonConfig>;
 fn load_server_config(profile: &dhttp_home::identity::IdentityProfile) -> Result<ServerConfig>;
-fn network_config(servers: &[ServerConfig]) -> Result<Option<dhttp::NetworkConfig>>;
-impl Daemon {
-    async fn load(config: DaemonConfig) -> Result<Self>;
-    async fn run(&mut self) -> Result<()>;
-    async fn reload(&mut self) -> Result<()>;
-    async fn shutdown(&mut self) -> Result<()>;
-}
 impl Server {
     async fn load(profile: dhttp_home::identity::IdentityProfile,
-        runtime: std::sync::Arc<Runtime>, terminal: std::sync::Arc<TerminalManager>) -> Result<Self>;
+        runtime: std::sync::Arc<Runtime>) -> Result<Self>;
     fn name(&self) -> &str;
     async fn reload(&mut self) -> Result<()>;
     fn listen(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<()>> + Send + 'static>>;
     async fn close(&mut self) -> Result<()>;
 }
 fn build_router(endpoint: dhttp::Endpoint, access: std::sync::Arc<access_control::AccessService>,
-    libs: &std::collections::BTreeMap<String, std::sync::Arc<Lib>>,
-    config: &ServerConfig, profile: &dhttp_home::identity::IdentityProfile,
-    sandbox: std::sync::Arc<Sandbox>) -> Result<axum::Router>;
+    app_router: axum::Router, config: &ServerConfig,
+    profile: &dhttp_home::identity::IdentityProfile) -> Result<axum::Router>;
 ```
 
-Daemon单一循环串行处理扫描、Server加载/重载和删除。Server.listen在返回future前克隆Endpoint、router、信号和所需共享对象，不借用Server；因此监听运行期间actor仍可 `reload(&mut self)`。
+`run` 以局部变量持有 home、Server 集合、listener 集合和共享 Runtime，在单一循环中串行处理扫描、Server 加载/重载和删除，退出时关闭并回收资源。每个 Server 直接持有 exec 任务和名额资源；`ssh` 与 listen 的变更在重启后生效。Server.listen在返回future前克隆Endpoint、router、信号和所需共享对象，不借用Server；因此监听运行期间仍可 `reload(&mut self)`。
 
-每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。handler捕获本路由的Arc<Lib>和必要对象，不捕获Server。旧请求保有旧Router/Lib，不需要另一个发布对象。
+每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
-reload在局部变量中读取候选配置/组件、逐个串行编译和构造Router。全部Router装配成功后取得write-lock，一次replace；随后更新Server.config/libs。单Lib坏候选保留原Arc；整体Router失败保留旧Router。没有部分挂入路由的中间状态。
+reload 先读取候选配置，再调用 Sandbox.load_libs 取得局部候选集合，由 Sandbox.api_router 构造候选 Lib Router，与 exec Router 合并后交给 build_router 装配完整 Router。Sandbox.verify_libs 复核成功后取得 Router write-lock，一次替换；随后调用无失败返回的 Sandbox.replace_libs，并更新 Server.config。这几个提交步骤之间没有 await 或可失败操作。单 Lib 坏候选保留原 Arc；完整 Router 构造或提交前复核失败时保留旧 Router、Lib 集合、配置与取消状态。没有部分挂入路由的中间状态。
 
-组件一次读出的bytes同时用于OpenAPI、摘要和编译。重载提交前重查身份目录仍存在、输入文件摘要仍匹配；输入已变则丢弃本次候选，下轮重读。没有后台编译结果，也没有跨任务revision检查。删除与替换只由该actor执行。
+组件一次读出的bytes同时用于OpenAPI、摘要和编译。Sandbox.verify_libs 在重载提交前重查身份目录仍存在、新编译的输入文件摘要仍匹配；沿用旧 Arc 的坏候选不要求磁盘内容匹配旧版本。输入已变则丢弃本次候选，下轮重读。没有后台编译结果，也没有跨任务revision检查。删除与替换只由该actor执行。
 
-新版本复用该Lib现有取消token，新Lib保存本版本目录权限；删除Lib取消这个共享token并移除路由。旧请求仍持有的旧版本会收到相同取消。重新出现的Lib建立新token。删除Server调用close；同名Endpoint已关闭，本进程不自动复活该Server。
+新版本复用该Lib现有取消token，新Lib保存本版本目录权限；删除Lib取消这个共享token并移除路由。旧请求仍持有的旧版本会收到相同取消。重新出现的Lib建立新token。删除 Server 调用 Server.close 并在旧 listener 退出后移除该 Server；同名身份重新出现时可重新 load、listen，继续使用 Network 中的身份连接池。
 
 静态文件每请求固定已打开句柄。部署用临时文件+原子rename，不原地改写正在读取的文件；此为部署约束，不宣称整个file目录是不可变发布快照。
 
@@ -151,29 +139,43 @@ Workspace 保留 `/workspace`、`/workspace/`、`/workspace/{*path}`；`/workspa
 
 Workspace、管理 API、静态/代理/Lib 入口统一套 authorize。Lib 在剥离 `/api/<LibId>` 前按完整对外路径授权。`/workspace` 返回 307 到 `/workspace/`；无扩展名深链回 index.html，缺失 asset 返回 404；没有 `/admin` 兼容路径。
 
-## 5. Sandbox、Lib 执行准入与隔离
+## 5. Sandbox、组件管理与执行隔离
 
 ```rust
 struct Sandbox {
-    lib_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    libs: std::collections::BTreeMap<String, std::sync::Arc<Lib>>,
+    runtime: std::sync::Arc<Runtime>,
     tasks: tokio_util::task::TaskTracker,
 }
 impl Sandbox {
-    fn new() -> Self;
-    fn close(&self);
+    fn new(runtime: std::sync::Arc<Runtime>) -> Self;
+    fn load_libs(&self, profile: &dhttp_home::identity::IdentityProfile,
+        cancel: &tokio_util::sync::CancellationToken)
+        -> Result<std::collections::BTreeMap<String, std::sync::Arc<Lib>>>;
+    fn verify_libs(&self, profile: &dhttp_home::identity::IdentityProfile,
+        libs: &std::collections::BTreeMap<String, std::sync::Arc<Lib>>) -> Result<()>;
+    fn replace_libs(&mut self,
+        libs: std::collections::BTreeMap<String, std::sync::Arc<Lib>>);
+    fn api_router(&self, endpoint: dhttp::Endpoint,
+        libs: &std::collections::BTreeMap<String, std::sync::Arc<Lib>>) -> axum::Router;
+    fn close(&mut self);
     async fn wait(&self) -> Result<()>;
 }
 ```
 
-每个 Server 持有一个 Sandbox，该身份所有 Lib 共享它的执行槽与任务跟踪器。`new` 创建固定4槽的标准 Semaphore 和空 TaskTracker；准入仍直接调用 Semaphore，不新增 admit、active、租约或自定义 Guard。静态、代理和终端不占这些槽，也不登记到该 TaskTracker。
+每个 Server 直接持有一个 Sandbox，集中管理该身份的 Lib 集合、共享 Runtime 引用与任务跟踪器。`new` 接收 `run` 创建并跨身份共享的 Runtime，创建空 Lib 集合和空 TaskTracker。重载在原 Sandbox 上串行进行，不需要内部锁。Lib 执行不限制并发数，不设置执行槽或 permit。静态、代理和 exec 不登记到该 TaskTracker；exec 使用 Server 自己的 TaskTracker。
 
-`close` 同步关闭 Semaphore 和 TaskTracker，停止执行准入；它不发出取消，也不等待任务。`wait` 在固定15秒内等待已关闭的 TaskTracker，超时返回 ShutdownDeadline。调用方 Server 先取消身份根 token，调用 `close` 并立即关闭 Endpoint，再调用 `wait` 回收 WASM 任务。Sandbox 不持有自己的取消信号、身份、Endpoint、Lib 集合、Runtime、策略或派生计数；它不是独立的操作系统进程或容器。
+`load_libs` 扫描并串行编译候选，摘要未变时复用原 Arc，坏候选保留已加载的版本；它不修改当前 Lib 集合。`verify_libs` 只做提交前复核，不取消或替换当前版本。`replace_libs` 在所有检查成功后取消被删除 Lib 的现有 token，并直接接收候选集合，不再执行可能失败的 I/O 或编译。候选只是调用栈中的标准 BTreeMap，不引入构建会话、候选容器或发布状态。
 
-2026-09-26 用户明确确认本次成员级变更：新增上述 Sandbox 的两个字段与 `new/close/wait` 三个方法；Server 删除原 `lib_slots`、`tasks` 字段，新增 `sandbox: Arc<Sandbox>`；`build_router` 将原 `lib_slots: Arc<Semaphore>`、`tasks: TaskTracker` 两个参数合为 `sandbox: Arc<Sandbox>`。Server 的 `cancel`、`endpoint`、`router`、`libs`、`runtime` 保留，Invocation 和 StoreData 的字段以及 Invocation 的构造/执行签名保持不变。
+`api_router` 根据候选集合构造 `/api` 分支，负责 Lib 查找、声明路径与方法验证、取消检查、请求 URI 处理和 Invocation 执行。它只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权仍由 build_router 统一添加，Server 保留完整 Router 的发布权。
 
-请求先匹配 Lib API 并通过 daccess 授权，再通过 Sandbox 内 Semaphore 的 `try_acquire_owned()` 取得现成 OwnedSemaphorePermit；满额返回429。permit 与任务跟踪器 clone 传入 Invocation，随后由实际 Store 持有 permit，Store 回收即归还。重载复用同一个 Sandbox，旧版本执行仍占原来的槽。Server 或 Lib 已取消时不得从旧 Router 启动新执行。
+`close` 同步关闭 TaskTracker，取消当前 Lib 的已有 token 并清空集合，不等待任务。`wait` 在固定15秒内等待已关闭的 TaskTracker，超时返回 ShutdownDeadline。调用方 Server 先取消身份根 token，停止监听并调用 Sandbox.close，再调用 `wait` 回收 WASM 任务。Sandbox 不持有自己的取消信号、身份、Endpoint、策略或派生计数；它不是独立的操作系统进程或容器。
 
-这只负责资源准入，不代表隔离。隔离由每次执行的独立 Store/Instance、受限 WasiCtx、Lib 私有 `/data`、实际内存 limiter、fuel 和宿主能力控制完成。每次内存上限64MiB、fuel100_000_000，4个槽对应原有256MiB内存及400_000_000 fuel预留，不另存派生计数或租约结构，也不等待传输FIN/ACK。
+2026-09-26 用户明确确认将 WASM 职责集中到 Sandbox：Server 的 `libs`、`runtime` 迁入已有 Sandbox，`sandbox` 改为直接所有；新增上述组件加载、复核、替换和 API Router 方法，构造与关闭签名相应调整。`build_router` 接收标准 axum::Router，不再接收 Lib 集合或 Sandbox。共享 Runtime 由运行入口持有，Server 保留身份根 `cancel`、Endpoint、授权、整体 Router 和终端；当次迁移保持 Invocation 和 StoreData 的字段及调用签名；随后取消 Lib 并发限制的变更见下文。
+
+2026-09-26 用户要求取消 Lib 并发限制：删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及仅用于满额拒绝的 `Error::Capacity`。请求通过 daccess 授权、Lib API 匹配和可信身份校验后直接执行，不因在途执行数返回429。重载复用同一个 Sandbox，旧版本执行仍由同一个 TaskTracker 跟踪。Server 或 Lib 已取消、TaskTracker 已关闭时不得从旧 Router 启动新执行。
+
+隔离由每次执行的独立 Store/Instance、受限 WasiCtx、Lib 私有 `/data`、实际内存 limiter、fuel 和宿主能力控制完成。每次内存上限64MiB、fuel100_000_000；没有按并发槽推导的总内存或总 fuel 预留，不另存派生计数或租约结构，也不等待传输FIN/ACK。
 
 Pishoo流缓冲使用固定大小，outgoing总次数按invocation限制；不引入另一套通用BufferLease账本。Store内存限额不代表Wasmtime全部宿主分配或磁盘已受总字节硬配额，不作这一保证。
 
@@ -205,7 +207,6 @@ struct StoreData {
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
     policy: LibPolicy,
-    permit: tokio::sync::OwnedSemaphorePermit,
 }
 struct MemoryLimits { base: wasmtime::StoreLimits, used: usize, pending: usize }
 ```
@@ -228,7 +229,7 @@ Runtime直接编译，启动/重载串行调用；不另存compile_slots、compi
 
 LibPolicy是内部宿主能力值，不是第二套配置。v1部署默认data_write=true，outgoing空，sign=false，verify=false；测试/宿主明确传入授权值才可开放对应能力。guest声明本身不授予权限。不增加逐Lib策略表、上限交集或权限热更新框架。
 
-Runtime/Lib/StoreData/Invocation/HostOutgoing同属Lib执行模块，构造用完整字段，出站复用当前身份的Endpoint。StoreData实现现成WasiView、WasiHttpView及identity WIT host；MemoryLimits实现ResourceLimiter，保留实际多memory求和used与失败回滚pending，直接比较固定64MiB，不再保存一份ceiling。Store在instantiate前安装limiter、fuel和fuel_async_yield_interval；deadline/取消由独立supervisor观察并终止、await guest，不能仅靠Body下一次poll发现超时。
+Sandbox、Runtime、Lib、StoreData、MemoryLimits、Invocation、HostOutgoing 和 LibResponseBody 同属 sandbox 逻辑模块，组件扫描、manifest 验证、WASI 执行及身份宿主能力实现均在该模块内按文件拆分；移除原 wasm 模块，不新增执行包装层。`validate_lib` 的公开根级导出保持不变。构造用完整字段，出站复用当前身份的 Endpoint。StoreData实现现成WasiView、WasiHttpView及identity WIT host；MemoryLimits实现ResourceLimiter，保留实际多memory求和used与失败回滚pending，直接比较固定64MiB，不再保存一份ceiling。Store在instantiate前安装limiter、fuel和fuel_async_yield_interval；deadline/取消由独立supervisor观察并终止、await guest，不能仅靠Body下一次poll发现超时。
 
 ## 7. Lib 执行与响应体
 
@@ -239,7 +240,6 @@ struct Invocation {
     remote: Option<dhttp::RemoteAuthority>,
     endpoint: dhttp::Endpoint,
     producer_cancel: tokio_util::sync::CancellationToken,
-    permit: tokio::sync::OwnedSemaphorePermit,
     tasks: tokio_util::task::TaskTracker,
 }
 enum LibResponseBody {
@@ -256,7 +256,7 @@ enum LibResponseBody {
     Ended,
 }
 impl Invocation {
-    fn new(lib: std::sync::Arc<Lib>, permit: tokio::sync::OwnedSemaphorePermit,
+    fn new(lib: std::sync::Arc<Lib>,
         endpoint: dhttp::Endpoint,
         handshake: &dhttp::HandshakeSummary,
         tasks: tokio_util::task::TaskTracker) -> Result<Self>;
@@ -268,7 +268,7 @@ LibResponseBody 实现标准 http_body::Body，直接用 enum 分支持有有效
 
 Lib 首次加载时从 Server.cancel 派生取消 token，重载版本复用该 Lib token；每次 Invocation 从 Lib token 派生 producer_cancel。因此 Server 关闭、Lib 删除、单次 producer 被放弃分别作用于各自范围，无需额外应用租约。
 
-supervisor 在执行开始时用局部变量计算固定30秒 deadline，从实例化起覆盖 guest 和其出站工作。到期直接取消 producer、终止 guest 并回收子任务，不新增 watchdog、deadline 成员或通知接口。Store 实际回收后才归还 Lib 执行 permit，不能因发出取消就提前归还；出站子任务继续由既有 children 跟踪并收尾。
+supervisor 在执行开始时用局部变量计算固定30秒 deadline，从实例化起覆盖 guest 和其出站工作。到期直接取消 producer、终止 guest 并回收子任务，不新增 watchdog、deadline 成员或通知接口。guest 任务直接持有 Store，终止后等待其实际回收；出站子任务继续由既有 children 跟踪并收尾。
 
 调用开始取得现成 `producer_cancel.clone().drop_guard()`，随后登记并启动 supervisor；收到 outparam 后将这个既有取消所有权直接移动进 LibResponseBody::Reading，构造完整响应后返回。Reading/Waiting 转换移动同一个所有权，不新增布尔标记；正常完成时 disarm 再转为 Ended，错误或提前丢弃则由既有工具发出主动取消。
 
@@ -304,21 +304,21 @@ proxy 完成路径/query、authority 和转发头处理后，直接调用当前 
 
 已有 `pishoo:identity/signatures@0.1.0` 的sign/verify保留。StoreData检查能力、固定输入上限和现有HostOutgoing.cancel；异步身份解析直接在该取消指令与操作返回之间select，不新增取消成员；sign调用dhttp::certificate::sign(&local,data)，由helper选择规范SignatureScheme。verify优先用已验证local/remote公钥，否则在出站准入后resolve_remote；使用verify_signature，不能调用不存在的RemoteAuthority.verify。缺权限映射既有WIT错误，不把私钥/authority交guest；不承诺离线历史证书查询。
 
-## 9. 启停、终端与错误
+## 9. 启停、exec 与错误
 
-启动顺序：读实例和profile配置 → 串行加载有效身份/AccessService/组件 → 初始化一次全局Network → 每Server启动受跟踪的listen。单坏Lib保留或跳过，单坏身份不影响其他身份；静态身份没有代理行也可启动。
+启动顺序：读各 Server 的数据库配置 → 串行加载有效身份/AccessService/组件 → 初始化一次全局Network → 每Server启动受跟踪的listen。单坏Lib保留或跳过，单坏身份不影响其他身份；静态身份没有代理行也可启动。
 
-入口先验证Server身份；终端保留路径在普通pishoo-*清洗之前交TerminalManager，使其读取协议版本头。终端只按实例管理员名单授权，不因访问者等于Server而自动放行；其结构和固定平台行为见[终端清单](terminal-interfaces.md)。
+入口先验证 Server 身份；`/exec` 与 Lib 路由一并装入 Server 的 Router，经过统一 daccess 授权层后由 exec 模块额外检查同名已验证远端身份，并按[exec 清单](exec-interfaces.md)执行。Server.listen 不特殊分派 `/exec`。不存在交互终端、终端协议版本头或 TerminalManager。
 
-Server.close立即取消自己的token、同步调用Sandbox.close()和Endpoint.close()，清除Router和Lib集合后调用Sandbox.wait()回收WASM任务；Daemon收回listener，不先排空新子请求。Server.cancel同时取消HTTP、审批、Lib和终端的身份范围，Sandbox不建立独立取消域。临停同步调用stop_listening，可在同名未close时重新监听；已经close的名称在本进程不能重新打开。Daemon退出先取消所有Server并关闭各自Sandbox准入与Endpoint，再回收本方任务/终端，最后对已初始化的全局Network同步调用shutdown()；Network不接deadline、不返回额外关闭报告。Daemon.run直接等待进程退出信号，不另存daemon cancellation token。
+Server.close 立即取消自己的 token，调用 Endpoint.stop_listening() 并同步调用 Sandbox.close()、关闭 exec 名额和任务登记；Sandbox.close 取消并清空自己的 Lib 集合，Server 清除 Router 后分别等待 Sandbox 与 exec 任务回收。`run` 收回 listener，不先排空新子请求。Server.cancel 同时取消 HTTP、审批、Lib 和 exec 的身份范围，Sandbox 不建立独立取消域。停止监听不关闭 Network 池中的连接，同名新 Server 可再次 load 和 listen。`run` 退出先取消所有 Server、停止监听并关闭各自执行准入，再回收本方任务。全局 Network 不提供 shutdown；其连接池和后台维护随进程退出结束。`run` 直接等待进程退出信号，不另存取消 token。
 
-Pishoo自身等待使用固定15秒上限，终端清理使用其约定；超时明确返回ShutdownDeadline，不谎称任务已join。编译同步执行不可由Tokio abort中断，v1串行重载期间停机可能等当前编译返回；不为解决这一点暗加后台编译框架。
+Pishoo自身等待使用固定15秒上限，exec 任务在取消后仍持有 Child 直到回收；超时明确返回ShutdownDeadline，不谎称任务已join。编译同步执行不可由Tokio abort中断，v1串行重载期间停机可能等当前编译返回；不为解决这一点暗加后台编译框架。
 
 ```rust
 pub enum Error {
     BadRequest(String), BackendUnavailable(String), InvalidConfig(String),
     InvalidComponent(String), InvalidIdentity(String), IdentityMismatch, MissingHandshake,
-    RouteNotFound, MethodNotAllowed, Denied, Capacity, Cancelled, Deadline, Closed,
+    RouteNotFound, MethodNotAllowed, Denied, Cancelled, Deadline, Closed,
     GuestExitedWithoutResponse,
     GuestRejectedResponse(wasmtime_wasi_http::p2::bindings::http::types::ErrorCode),
     Guest(wasmtime::Error), Io(std::io::Error), Database(sea_orm::DbErr),
@@ -328,14 +328,14 @@ pub enum Error {
 impl Error { fn status(&self) -> http::StatusCode; fn body_error(self) -> dhttp::BoxError; }
 ```
 
-Error实现Display/Error。业务拒绝在headers前生成HTTP响应；headers后只返回body error。Daemon/Server/Runtime/Invocation不同时保存正常资源和独立error标记；整体可用/失败结果可以直接用Result表达。terminal建立后错误沿其ERROR/EXIT协议或body error返回。
+Error实现Display/Error。业务拒绝在headers前生成HTTP响应；headers后只返回body error。Server/Runtime/Invocation不同时保存正常资源和独立error标记；整体可用/失败结果可以直接用Result表达。exec 在生成响应前完成并回收子进程。
 
 ## 10. 验收边界
 
 - 从Endpoint进入标准Service；Pishoo生产代码和测试驱动不传QPACK/H3写流。
 - 串行reload一次换Router；失败保留旧Router；旧请求持旧Lib，删除Lib取消其所有在途版本。
 - 按当前 daccess 库验证允许、拒绝、审批批准/否决/取消及 live 登记清理；管理 API 在根路径挂载并经过授权，管理界面与当前库一致。旧分支兼容不作为阻塞条件。
-- WASM提前响应继续上传、多值trailers、CPU取消、body替换、HEAD/204/304和Lib执行槽归还。
+- WASM提前响应继续上传、多值trailers、CPU取消、body替换、HEAD/204/304、超过4次并发执行及任务回收。
 - 反代与Lib仅经当前身份的Endpoint出站；目标不符合dhttp规则或连接失败时直接报错，不启用其他传输。
-- 同名Endpoint共享；close立即终止且不重开，stop_listening仅临停；单Server关闭不误关其他名称。
-- 终端按终端清单验证；设计文档不替代平台隔离验收。
+- 同名 Endpoint 共享本端身份连接池；Server.close 停止监听后同名 Server 可重新加载，其他身份和在途出站连接不因服务关闭而中断。
+- exec 验证同名身份、输入输出限制、超时取消与子进程回收；本版不宣称文件或网络隔离。

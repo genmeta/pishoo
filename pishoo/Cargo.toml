@@ -7,6 +7,9 @@ edition = "2024"
 license = "Apache-2.0"
 autobins = false
 
+[lib]
+path = "src/pishoo.rs"
+
 [dependencies]
 dhttp = { path = "../../dhttp/dhttp" }
 dhttp-home = { path = "../../dhttp/home" }
@@ -17,7 +20,7 @@ sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-toml = "0.9"
+base64 = "0.22"
 sha2 = "0.10"
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
@@ -32,8 +35,9 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "fs", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "fs", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
+nix = { version = "0.31", features = ["user", "signal", "process"] }
 wasmtime = "47.0.4"
 wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
 wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = ["p2"] }

@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn memory_limit_counts_all_memories_and_rolls_back_failed_growth() {
     let mut limit = MemoryLimits {

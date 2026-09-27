@@ -1,7 +1,6 @@
-// Private unit tests live under tests/ while retaining access to the frozen
-// execution module. Each included file groups one set of behaviors.
+// Shared fixtures for the execution behavior tests.
 use http_body_util::{Empty, Full};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 
 use super::*;
 
@@ -60,10 +59,9 @@ fn load(bytes: &[u8], directory: &Path, cancel: CancellationToken) -> Arc<Lib> {
     )
 }
 
-async fn invoke(lib: Arc<Lib>, slots: &Arc<Semaphore>, tasks: &TaskTracker) -> Invocation {
+async fn invoke(lib: Arc<Lib>, tasks: &TaskTracker) -> Invocation {
     Invocation::new(
         lib,
-        slots.clone().try_acquire_owned().unwrap(),
         dhttp::Endpoint::load("alice.dhttp.net").await.unwrap(),
         &dhttp::HandshakeSummary {
             alpn: None,
@@ -98,15 +96,18 @@ fn empty() -> Body {
         .boxed_unsync()
 }
 
-async fn reaped(tasks: &TaskTracker, slots: &Semaphore) {
+async fn reaped(tasks: &TaskTracker) {
     tasks.close();
     tokio::time::timeout(Duration::from_secs(5), tasks.wait())
         .await
         .unwrap();
-    assert_eq!(slots.available_permits(), 4);
 }
 
-include!("streaming.rs");
-include!("lifecycle.rs");
-include!("policy.rs");
-include!("isolation.rs");
+#[path = "execution/isolation.rs"]
+mod isolation;
+#[path = "execution/lifecycle.rs"]
+mod lifecycle;
+#[path = "execution/policy.rs"]
+mod policy;
+#[path = "execution/streaming.rs"]
+mod streaming;

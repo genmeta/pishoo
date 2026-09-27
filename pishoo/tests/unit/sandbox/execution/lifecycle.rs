@@ -1,16 +1,17 @@
+use super::*;
+
 #[tokio::test]
 async fn replacing_an_unpolled_body_reaps_only_its_producer() {
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
     let lib = load(STREAM, directory.path(), cancel.clone());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let response = invoke(lib.clone(), &slots, &tasks)
+    let response = invoke(lib.clone(), &tasks)
         .await
         .execute(request("/cancel", empty()))
         .await
         .unwrap();
-    let mut other = invoke(lib, &slots, &tasks)
+    let mut other = invoke(lib, &tasks)
         .await
         .execute(request("/cancel", empty()))
         .await
@@ -20,7 +21,7 @@ async fn replacing_an_unpolled_body_reaps_only_its_producer() {
         Full::new(Bytes::from_static(b"replacement"))
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        while slots.available_permits() != 3 {
+        while tasks.len() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -33,22 +34,21 @@ async fn replacing_an_unpolled_body_reaps_only_its_producer() {
         "replacement"
     );
     drop(other);
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }
 
 #[tokio::test]
-async fn dropping_pending_execute_releases_upload_and_permit() {
+async fn dropping_pending_execute_releases_upload_and_reaps_guest() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(READ, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let invocation = invoke(lib, &slots, &tasks).await;
+    let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
     let execute = tokio::spawn(invocation.execute(request("/read", body)));
     tokio::task::yield_now().await;
     execute.abort();
     assert!(execute.await.unwrap_err().is_cancelled());
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
     assert!(tx.is_closed());
 }
 
@@ -56,16 +56,15 @@ async fn dropping_pending_execute_releases_upload_and_permit() {
 async fn unpolled_response_has_an_independent_deadline() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(STREAM, directory.path(), CancellationToken::new());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let mut response = invoke(lib, &slots, &tasks)
+    let mut response = invoke(lib, &tasks)
         .await
         .execute(request("/cancel", empty()))
         .await
         .unwrap();
-    assert_eq!(slots.available_permits(), 3);
+    assert_eq!(tasks.len(), 1);
     tokio::time::advance(Duration::from_secs(31)).await;
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
     let error = response.body_mut().frame().await.unwrap().unwrap_err();
     assert!(matches!(
         error.downcast_ref::<Error>(),
@@ -75,7 +74,7 @@ async fn unpolled_response_has_an_independent_deadline() {
 }
 
 #[tokio::test]
-async fn four_slots_survive_version_replacement_and_cancel_together() {
+async fn executions_survive_version_replacement_and_cancel_together() {
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
     let old = load(STREAM, directory.path(), cancel.clone());
@@ -90,28 +89,32 @@ async fn four_slots_survive_version_replacement_and_cancel_together() {
         )
         .unwrap(),
     );
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
     let mut responses = Vec::new();
-    for lib in [old.clone(), new.clone(), old, new.clone()] {
+    for lib in [
+        old.clone(),
+        new.clone(),
+        old.clone(),
+        new.clone(),
+        old,
+        new.clone(),
+    ] {
         responses.push(
-            invoke(lib, &slots, &tasks)
+            invoke(lib, &tasks)
                 .await
                 .execute(request("/cancel", empty()))
                 .await
                 .unwrap(),
         );
     }
-    assert_eq!(slots.available_permits(), 0);
-    assert!(slots.clone().try_acquire_owned().is_err());
+    assert_eq!(tasks.len(), 6);
     cancel.cancel();
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
     for mut response in responses {
         assert!(response.body_mut().frame().await.unwrap().is_err());
     }
     let result = Invocation::new(
         new,
-        slots.try_acquire_owned().unwrap(),
         dhttp::Endpoint::load("alice").await.unwrap(),
         &dhttp::HandshakeSummary {
             alpn: None,
@@ -171,9 +174,8 @@ async fn cpu_only_guest_yields_for_cancellation_and_is_reaped() {
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
     let lib = load(&bytes, directory.path(), cancel.clone());
-    let slots = Arc::new(Semaphore::new(4));
     let tasks = TaskTracker::new();
-    let invocation = invoke(lib.clone(), &slots, &tasks).await;
+    let invocation = invoke(lib.clone(), &tasks).await;
     let cancelling = async {
         tokio::time::sleep(Duration::from_millis(1)).await;
         cancel.cancel();
@@ -184,5 +186,5 @@ async fn cpu_only_guest_yields_for_cancellation_and_is_reaped() {
     .await
     .unwrap();
     assert!(matches!(result, Err(Error::Cancelled)));
-    reaped(&tasks, &slots).await;
+    reaped(&tasks).await;
 }

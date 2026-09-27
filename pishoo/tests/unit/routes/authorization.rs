@@ -1,3 +1,5 @@
+use super::*;
+
 #[tokio::test]
 async fn authorization_uses_current_library_allow_and_deny_results() {
     use tower::ServiceExt;

@@ -1,3 +1,9 @@
+use std::sync::Arc;
+
+use http::{Request, header};
+
+use crate::{Body, Error, Result, setup::ProxyLocation};
+
 pub(crate) async fn proxy(
     endpoint: dhttp::Endpoint,
     route: ProxyLocation,
@@ -47,7 +53,7 @@ pub(crate) async fn proxy(
     Ok(response)
 }
 
-fn proxy_uri(route: &ProxyLocation, uri: &http::Uri) -> Result<http::Uri> {
+pub(super) fn proxy_uri(route: &ProxyLocation, uri: &http::Uri) -> Result<http::Uri> {
     let mut parts = http::uri::Parts::default();
     parts.scheme = route.proxy_pass.scheme.clone();
     parts.authority = route.proxy_pass.authority.clone();
@@ -74,7 +80,8 @@ fn proxy_uri(route: &ProxyLocation, uri: &http::Uri) -> Result<http::Uri> {
     );
     http::Uri::from_parts(parts).map_err(|_| Error::BadRequest("invalid upstream URI".into()))
 }
-fn clean_hop_headers(headers: &mut http::HeaderMap) {
+
+pub(super) fn clean_hop_headers(headers: &mut http::HeaderMap) {
     let named = headers
         .get_all(header::CONNECTION)
         .iter()
