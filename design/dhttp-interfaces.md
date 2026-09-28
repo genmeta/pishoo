@@ -9,9 +9,9 @@
 - Endpoint 只持规范化名称；独立 load 不访问 Network。
 - 同规范化名称代表同一逻辑 Endpoint。同名句柄不区分 load 次数，经 Network 使用同一个本端身份连接池。
 - Network 在进程内初始化一次；负责实际连接、监听登记和后台任务。
-- Endpoint 不提供 close；stop_listening 仅停止当前监听，随后可以重新 listen，同名出站请求继续复用连接。
-- Network 属于进程生命周期，不提供 shutdown；应用退出时逐个停止其 Endpoint 监听并回收自己的任务。
-- Pishoo 反代和 Lib 的出站只通过当前身份的 Endpoint；不增加其他 HTTP 传输或失败降级路径。
+- Endpoint 不提供 close 或 stop_listening；同名出站请求继续复用连接。
+- Network 属于进程生命周期，不提供 shutdown；应用退出时回收自己的任务，监听 future 随运行时退出而结束。
+- Pishoo 的 Lib 出站只通过当前身份的 Endpoint；反代直接连接本机 HTTP/TCP 服务，不调用 dhttp Endpoint，也不在两条路径之间回退。
 - 用户批准 `tcp-mock` 编译特性和 Network 泛型化：默认后端为 QuicTransport；测试后端为 TcpTransport，通过单条回环 TCP 连接复用 h3x 的双向请求流与单向控制/QPACK 流。独立进程的客户端仍调用 Endpoint，标准 HTTP 请求与响应继续经过 h3x。TCP mock 不验证 QUIC、TLS 对端认证或路径发现。
 - Pishoo 只等待自己的应用任务；DHTTP 不提供 finished、ExchangeControl、RequestInfo 或 Peer。
 
@@ -61,7 +61,6 @@ impl Endpoint {
         S::Error: Into<BoxError>,
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<BoxError>;
-    pub fn stop_listening(&self) -> Result<()>;
 }
 
 pub struct Request<B> {
@@ -127,63 +126,42 @@ mod tcp { struct BackendState; } // 监听 socket 由 listen future 持有
 
 泛型 Network 持有现成的 h3x Pool，按本端与远端规范化名称组成的键复用连接。同名 Endpoint 的请求在 await 时访问同一个池，不在 Endpoint 或 Request 中另存连接池。每次构建只选择一种后端，不能在一次请求失败后降级到另一种后端。默认 QUIC 连接供不同请求并发开启独立双向流；测试后端在 TCP 帧上分发相同的 h3x 流 ID 和关闭信号。入站匿名连接不进入复用池，其接入 driver 持有实际连接并负责退出时释放。
 
-Network 不保存 TaskTracker 或全局取消 token。listen 自己等待其 supervisor 的 JoinHandle；读写 driver 持有实际连接/原生流，在各自退出分支释放资源。确需等待并发子任务时，由该操作的局部 JoinSet 负责，不建立全局任务账本。Network 只初始化一次，保持到进程退出；Pishoo `run` 返回不表示池与后台维护任务已关闭。
+Network 不保存 TaskTracker 或全局取消 token。listen future 持有本次监听；读写 driver 持有实际连接/原生流，在各自退出分支释放资源。确需等待并发子任务时，由该操作的局部 JoinSet 负责，不建立全局任务账本。Network 只初始化一次，保持到进程退出；Pishoo `run` 返回不表示监听、池与后台维护任务已关闭。
 
 QUIC BackendState 的 Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。QUIC 网络维护任务根据当前监听更新 AddressBook/协议/Dock 登记；当没有监听范围时撤销对应绑定。TCP 后端只绑定 `DHTTP_TCP_MOCK_PORTS` 显式指定的回环端口。
 
-超时和队列容量使用模块内部常量：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES、ACCEPT_QUEUE_CAPACITY。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
+超时和流缓冲使用模块内部常量：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
 
 ## 4. 应用服务接入
 
 ```rust
 struct ListenerEntry {
-    service: Mutex<BoxService>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    owner: Arc<qconn::Server>,
+    service: BoxService,
     scopes: Scopes,
 }
 // tcp-mock 构建在 network/tcp.rs 中使用：
-type ListenerEntry = Arc<TcpListenerData>;
-struct TcpListenerData {
-    service: Mutex<BoxService>,
-    shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
+type ListenerEntry = BoxService;
 ```
 
-上方第一个 ListenerEntry 属于默认 QUIC 后端；scopes 用于当前接口绑定的范围并集，owner 指向 qconn 登记。tcp-mock 的 ListenerEntry 使用 Arc 使旧监听的清理不会移除同名新监听，关闭 sender 的存在表示本次监听仍有效。没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。
+上方第一个 ListenerEntry 属于默认 QUIC 后端；scopes 用于当前接口绑定的范围并集。tcp-mock 直接登记 BoxService。没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。
 
 为了让同一服务表接收不同具体类型的 Router/handler，直接组合现成 Tower 工具：map_err 把 S::Error 转为 BoxError，map_response 把响应 body 装箱，boxed_clone 得到 BoxService。每请求克隆实例后通过现成 oneshot 或 ready+call 驱动同一个实例，不把 readiness 和 call 分给不同克隆。
 
-默认 QUIC 后端的监听提交顺序：
+默认 QUIC 后端先异步读取凭据，再锁住 listeners 检查名称未被占用；持锁调用同步 qconn.listen 并登记 Service。listen future 接收连接并服务请求，局部 scopeguard 在 future 结束或被丢弃时撤销登记。错误直接由 listen 的 Result 交付，不缓存结束状态。
 
-1. 先异步读取并验证凭据，期间尚未占用监听名称；随后创建供本次监听使用的局部 oneshot 通道。
-2. 锁住 listeners，检查名称尚未监听且 qconn 注册表没有同名登记。
-3. 持锁调用同步 qconn.listen，取得实际 Arc<qconn::Server> 后构造完整 ListenerEntry 并插入表，再启动本次 supervisor。锁本身保证同名登记互斥，不创建占位或空 OnceLock。
-4. 提交临界区中没有 await。同步失败立即返回错误；已取得的底层登记在返回前撤销。不留下 Preparing 状态或半完成的登记。
-5. listen future 局部持一个 oneshot Sender；supervisor 持 Receiver。Sender 的生存期明确跨越整个监听等待，future 被丢弃时通道关闭，supervisor 据此停止并撤登记。
-6. 公共 listen 等待本次 supervisor 的 JoinHandle 返回 Result<()>；错误直接沿返回链交付，不缓存到登记字段。
-
-ListenerEntry.shutdown 是本次监听的一次性停止 sender；supervisor 观察对应 receiver 和调用方 future 的局部 oneshot。它的真实 qconn 撤销和任务退出负责取消路径收尾，不能把必须执行的清理只写在 public listen future 的正常返回路径。
-
-stop_listening 取走当前登记的 shutdown sender 并发送停止信号，在 listeners 锁内按 owner 的 Arc 指针撤销真实 qconn 登记；当前无登记时返回 Ok(())。supervisor 随后移除旧表项并回收已接受连接。stop_listening 不等待旧任务结束，也不关闭连接池中的出站连接。
-
-qconn 接收回调捕获本次监听名称。接受结果经固定有界交接队列交 supervisor；队列满或接收方消失时立即关闭该连接。回调在 listeners 锁下要求 shutdown sender 仍存在；stop_listening 先取走 sender，使旧回调不能接到新登记。迟到结果直接关闭。supervisor 清理本次 qconn owner。
-
-tcp-mock 后端先绑定 `DHTTP_TCP_MOCK_PORTS` 中本名称对应的回环端口，再登记 Service；每个被接受的 TCP 连接构造一个 TcpTransport 与 H3Connection，随后使用相同的 serve_connection/serve_exchange。停止监听发送 shutdown 并撤销本次登记，不改变其他同名 Endpoint 句柄。
+tcp-mock 后端先绑定 `DHTTP_TCP_MOCK_PORTS` 中本名称对应的回环端口，再登记 Service；每个被接受的 TCP 连接构造一个 TcpTransport 与 H3Connection，随后使用相同的 serve_connection/serve_exchange。监听 future 结束或被丢弃时撤销登记，不改变其他同名 Endpoint 句柄。
 
 ## 5. 连接复用与进程生命周期
 
-请求从 Network 的 Pool 按本端与远端名称复用或建立连接。同名 Endpoint 不保存独立的池、关闭状态或连接集合。Network 没有全局关闭阶段；已取得的连接由请求或接入 driver 持有，服务停止监听不取消现有出站通信。
+请求从 Network 的 Pool 按本端与远端名称复用或建立连接。同名 Endpoint 不保存独立的池、关闭状态或连接集合。Network 没有全局关闭阶段；已取得的连接由请求或接入 driver 持有，监听 future 结束不取消现有出站通信。
 
-Pishoo 退出时调用各 Endpoint 的 stop_listening，并取消和等待自己的应用任务。Network 的复用池、其他在途通信与周期性接口维护任务仍属进程范围，直至进程退出；`run` 返回不保证这些资源已结束。
+Pishoo 退出时关闭并等待自己的应用任务。监听 future、Network 复用池、其他在途通信与周期性接口维护任务仍属进程范围，直至进程退出；`run` 返回不保证这些资源已结束。
 
-listeners 锁内不 await、不调用应用 Service；停止的监听不得再接收新交换。
+listeners 锁内不 await、不调用应用 Service。
 
 连接失效或收到 GOAWAY 时，h3x Pool 按自身复用规则换连接。请求 future 被放弃后的底层建连任务能否立即停止取决于 qconn 的既有取消契约；不能把应用 future 的丢弃等同于全局传输关闭。没有逐身份终态，不需要 generation 或 OwnerKey。
 
-各次 stop_listening 按本次 Result 交付错误，不缓存全局关闭报告。driver 在自身操作的所有权下回收资源，不增加独立的结束或失败订阅。
-
-stop_listening 只撤销当前监听，不清空池或取消出站请求。停止监听后可重新 listen，也仍能主动发请求；已接入交换可以继续。服务删除和组件更新使用 stop_listening/Router 更新，同名服务可重新接入。
+listen 按本次 Result 交付错误，不缓存全局关闭报告。driver 在自身操作的所有权下回收资源，不增加独立的结束或失败订阅。监听 future 的结束不会清空连接池或取消出站请求。
 
 ## 6. 原生传输适配
 
@@ -234,7 +212,7 @@ Body 只是标准 UnsyncBoxBody 别名，没有成员、方法、错误缓存或
 - 接收：在局部 StreamBody/async stream 中读原生数据，产生 Frame::data；数据 EOF 后交付已有 trailers。错误直接返回，之后不伪造 trailers。
 - 提前放弃：进入生成器前建立现成 scopeguard，持有原生接收方向；正常 EOF 后解除 guard，提前 Drop 调用已有 stop。无需自定义 Guard 类型。
 - 发送：标准 Body 的 DATA/trailers 写入原有 h3x 可写消息；正常 EOF 调用 shutdown，失败调用既有 cancel；与固定 h3x writer future 并发推进。
-- HEAD/204/304 等消息语义沿用 h3x。DHTTP 处理被抑制的应用 producer，Pishoo 回收自己的应用任务。
+- HEAD/204/304 等消息语义沿用 h3x。DHTTP 丢弃被抑制的应用 Body；Pishoo 的 guest 不因 Body 丢弃而被单独取消，后续 I/O 错误或 Lib 关闭决定其退出。
 
 适配所需的纯模块内函数、闭包和 async 局部变量属于方法实现，不列成另一套冻结公共函数。标准适配不会反向要求 h3x 增加新的消息类型或生命周期接口。
 
@@ -251,7 +229,7 @@ pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::Rem
 
 这四个 certificate 函数是 Pishoo 的跨仓接缝，保留冻结。subject_id 沿现有 DHTTP SKI owner_hash 文本字节规范；sign/verify 复用既有规范算法；resolve_remote 取得实际握手验证的对端，不承诺离线或历史证书查询。凭据读取和信任装配继续复用现有 home/trust 内部代码，不新建身份结构。
 
-成功入站把实际 HandshakeSummary 放入 request extensions；缺少摘要是接入错误，remote=None 才表示匿名。LocalAuthority 的签名能力留在可信宿主，guest 只经 Pishoo 授权的接口使用。出站忽略转带的可信身份 extensions，使用当前 Endpoint 的身份。
+成功入站先依据握手本端身份展开 URI authority 简写，并核对规范化 authority 的 host 与该身份一致；缺少本端身份、authority 或身份不匹配时直接返回 421，不调用应用 Service。authority 可带 `:序号` 后缀，作为将来与本端证书 DHTTP SKI 中 chain sequence 核对的地址信息；本版保留原值，不将它用作传输端口，也暂不校验该序号。随后把实际 HandshakeSummary 放入 request extensions；缺少摘要是接入错误，remote=None 才表示匿名。LocalAuthority 的签名能力留在可信宿主，guest 只经 Pishoo 授权的接口使用。出站忽略转带的可信身份 extensions，使用当前 Endpoint 的身份。
 
 ## 9. 固定调用关系
 
@@ -259,6 +237,6 @@ pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::Rem
 2. Request.await → global Network → 检查名称状态 → Pool 取得连接 → open_bi → 并发 write_request/read_response。
 3. Endpoint.listen → 准备凭据 → 原子登记 → supervisor → accept_bi → read_request → 标准 Service → write_response。
 4. Service/代理/WASI 使用标准 Body；适配器只桥接数据、trailers 与原有流结束语义。
-5. stop_listening → 撤当前监听，保留连接复用；剩余全局资源随进程退出结束。
+5. listen future 结束时撤销本次监听登记；剩余全局资源随进程退出结束。
 
 没有 OwnerKey、自定义 ConnectionKey 结构、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。默认后端保留 Endpoint、Request、DhttpNetwork、泛型 Network、ListenerEntry、BackendState、Binding、QuicTransport、RecvStream、SendStream；tcp-mock 额外使用上列 TcpTransport、TcpReader、TcpWriter、WireFrame 与本后端 ListenerEntry。Error 沿用现有类型。

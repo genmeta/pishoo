@@ -42,40 +42,21 @@ fn profile(root: &Path) -> IdentityProfile {
 }
 
 #[test]
-fn candidates_and_failed_verification_do_not_change_published_libs() {
+fn successful_load_replaces_libs_and_cancels_removed_versions() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime.clone());
-    let initial = sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.is_empty());
-    sandbox.verify_libs(&profile, &initial).unwrap();
-    sandbox.replace_libs(initial);
+    sandbox.load_libs(&profile).unwrap();
     let alpha = sandbox.libs["alpha"].clone();
     let beta = sandbox.libs["beta"].clone();
     let task = sandbox.tasks.token();
 
-    std::fs::remove_file(profile.join("lib/beta/lib.wasm")).unwrap();
+    std::fs::remove_dir_all(profile.join("lib/beta")).unwrap();
     std::fs::write(profile.join("lib/alpha/lib.wasm"), component("2")).unwrap();
-    let candidate = sandbox.load_libs(&profile).unwrap();
-    assert!(!candidate.contains_key("beta"));
-    assert!(!Arc::ptr_eq(&alpha, &candidate["alpha"]));
-    assert!(Arc::ptr_eq(&alpha, &sandbox.libs["alpha"]));
-    assert!(!beta.cancel.is_cancelled());
-
-    std::fs::write(profile.join("lib/alpha/lib.wasm"), component("3")).unwrap();
-    assert!(matches!(
-        sandbox.verify_libs(&profile, &candidate),
-        Err(Error::InvalidComponent(_))
-    ));
-    assert!(Arc::ptr_eq(&alpha, &sandbox.libs["alpha"]));
-    assert!(Arc::ptr_eq(&beta, &sandbox.libs["beta"]));
-    assert!(!alpha.cancel.is_cancelled() && !beta.cancel.is_cancelled());
-
-    std::fs::write(profile.join("lib/alpha/lib.wasm"), component("2")).unwrap();
-    sandbox.verify_libs(&profile, &candidate).unwrap();
-    sandbox.replace_libs(candidate);
+    sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
+    assert!(!Arc::ptr_eq(&alpha, &replacement));
     assert!(beta.cancel.is_cancelled());
     assert!(!alpha.cancel.is_cancelled());
     assert!(Arc::ptr_eq(&runtime, &sandbox.runtime));
@@ -92,17 +73,30 @@ fn candidates_and_failed_verification_do_not_change_published_libs() {
 }
 
 #[test]
-fn invalid_candidate_retains_the_published_version() {
+fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
-    let initial = sandbox.load_libs(&profile).unwrap();
-    sandbox.replace_libs(initial);
+    sandbox.load_libs(&profile).unwrap();
     let original = sandbox.libs["alpha"].clone();
     std::fs::write(profile.join("lib/alpha/lib.wasm"), b"invalid wasm").unwrap();
-    let candidate = sandbox.load_libs(&profile).unwrap();
-    sandbox.verify_libs(&profile, &candidate).unwrap();
-    sandbox.replace_libs(candidate);
+    assert!(matches!(
+        sandbox.load_libs(&profile),
+        Err(Error::InvalidComponent(_))
+    ));
     assert!(Arc::ptr_eq(&original, &sandbox.libs["alpha"]));
     assert!(!original.cancel.is_cancelled());
+}
+
+#[test]
+fn removing_lib_root_cancels_all_loaded_libs() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = profile(directory.path());
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.load_libs(&profile).unwrap();
+    let alpha = sandbox.libs["alpha"].clone();
+    std::fs::remove_dir_all(profile.join("lib")).unwrap();
+    sandbox.load_libs(&profile).unwrap();
+    assert!(sandbox.libs.is_empty());
+    assert!(alpha.cancel.is_cancelled());
 }

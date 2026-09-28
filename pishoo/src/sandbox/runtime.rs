@@ -247,16 +247,11 @@ impl Invocation {
         if local.name() != endpoint.name() {
             return Err(Error::IdentityMismatch);
         }
-        if lib.cancel.is_cancelled() || tasks.is_closed() {
-            return Err(Error::Cancelled);
-        }
-        let producer_cancel = lib.cancel.child_token();
         Ok(Self {
             lib,
             local: local.clone(),
             remote: handshake.remote.clone(),
             endpoint,
-            producer_cancel,
             tasks,
         })
     }
@@ -267,13 +262,8 @@ impl Invocation {
             local,
             remote,
             endpoint,
-            producer_cancel,
             tasks,
         } = self;
-        let cancel_on_drop = producer_cancel.clone().drop_guard();
-        if producer_cancel.is_cancelled() || tasks.is_closed() {
-            return Err(Error::Cancelled);
-        }
         let scheme = match request.uri().scheme_str() {
             Some("http") => types::Scheme::Http,
             Some("https") => types::Scheme::Https,
@@ -284,14 +274,14 @@ impl Invocation {
             }
         };
         let children = TaskTracker::new();
-        let outgoing_cancel = producer_cancel.child_token();
+        let outgoing_cancel = lib.cancel.child_token();
+        let lib_cancel = lib.cancel.clone();
         let outgoing = HostOutgoing {
             endpoint: remote
                 .as_ref()
                 .filter(|caller| caller.name() == local.name())
                 .map(|_| endpoint),
             policy: copy_policy(&lib.policy),
-            remaining_requests: 16,
             children: children.clone(),
             cancel: outgoing_cancel.clone(),
         };
@@ -353,7 +343,7 @@ impl Invocation {
             });
             let outcome = tokio::select! {
                 biased;
-                _ = producer_cancel.cancelled() => {
+                _ = lib_cancel.cancelled() => {
                     guest.abort();
                     let _ = guest.await;
                     Err(Error::Cancelled)
@@ -395,18 +385,14 @@ impl Invocation {
         let (parts, inner) = response.into_parts();
         Ok(Response::from_parts(
             parts,
-            LibResponseBody::Reading {
-                inner,
-                guest,
-                cancel_on_drop,
-            }
-            .map_err(Error::body_error)
-            .boxed_unsync(),
+            LibResponseBody::Reading { inner, guest }
+                .map_err(Error::body_error)
+                .boxed_unsync(),
         ))
     }
 }
 
-// Response frames retain cancellation ownership until normal completion.
+// Response frames retain the guest result until normal completion.
 
 impl HttpBody for LibResponseBody {
     type Data = Bytes;
@@ -421,15 +407,14 @@ impl HttpBody for LibResponseBody {
             match this {
                 Self::Ended => return Poll::Ready(None),
                 Self::Reading { inner, guest, .. } => {
-                    if let Some(task) = guest {
-                        if let Poll::Ready(outcome) = Pin::new(task).poll(cx) {
-                            *guest = None;
-                            if let Err(error) =
-                                outcome.map_err(Error::Task).and_then(|outcome| outcome)
-                            {
-                                *this = Self::Ended;
-                                return Poll::Ready(Some(Err(error)));
-                            }
+                    if let Some(task) = guest
+                        && let Poll::Ready(outcome) = Pin::new(task).poll(cx)
+                    {
+                        *guest = None;
+                        if let Err(error) = outcome.map_err(Error::Task).and_then(|outcome| outcome)
+                        {
+                            *this = Self::Ended;
+                            return Poll::Ready(Some(Err(error)));
                         }
                     }
                     let trailers = match Pin::new(inner).poll_frame(cx) {
@@ -444,24 +429,12 @@ impl HttpBody for LibResponseBody {
                         }
                         Poll::Ready(None) => None,
                     };
-                    let Self::Reading {
-                        guest,
-                        cancel_on_drop,
-                        ..
-                    } = std::mem::replace(this, Self::Ended)
-                    else {
+                    let Self::Reading { guest, .. } = std::mem::replace(this, Self::Ended) else {
                         unreachable!()
                     };
                     match guest {
-                        Some(guest) => {
-                            *this = Self::Waiting {
-                                guest,
-                                trailers,
-                                cancel_on_drop,
-                            }
-                        }
+                        Some(guest) => *this = Self::Waiting { guest, trailers },
                         None => {
-                            cancel_on_drop.disarm();
                             return Poll::Ready(
                                 trailers.map(|headers| Ok(Frame::trailers(headers))),
                             );
@@ -475,17 +448,12 @@ impl HttpBody for LibResponseBody {
                             outcome.map_err(Error::Task).and_then(|outcome| outcome)
                         }
                     };
-                    let Self::Waiting {
-                        trailers,
-                        cancel_on_drop,
-                        ..
-                    } = std::mem::replace(this, Self::Ended)
+                    let Self::Waiting { trailers, .. } = std::mem::replace(this, Self::Ended)
                     else {
                         unreachable!()
                     };
                     match outcome {
                         Ok(()) => {
-                            cancel_on_drop.disarm();
                             return Poll::Ready(
                                 trailers.map(|headers| Ok(Frame::trailers(headers))),
                             );

@@ -1,6 +1,5 @@
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use access_control::AccessService;
 use axum::{
     Router,
     body::Body as AxumBody,
@@ -11,14 +10,13 @@ use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tokio_util::io::ReaderStream;
 
-use self::{
-    access::{authorize, management_router},
-    proxy::proxy,
-};
-use crate::{Error, Result, setup::ServerConfig};
+use self::proxy::proxy;
+use crate::{Error, Result, setup::ProxyLocation};
 mod access;
 
 mod proxy;
+
+pub(crate) use access::{authorize, worksapce};
 
 fn reserved(path: &str) -> bool {
     [
@@ -46,77 +44,88 @@ fn reject(error: Error) -> Response {
         .into_response()
 }
 
-pub(crate) fn build_router(
-    endpoint: dhttp::Endpoint,
-    access: Arc<AccessService>,
-    app_router: Router,
-    config: &ServerConfig,
-    profile: &dhttp_home::identity::IdentityProfile,
-) -> Result<Router> {
-    let proxies = config.proxy_locations.clone();
-    let root = profile.join("file");
-    let app = management_router(access.clone(), profile.name(), endpoint.name())
-        .merge(app_router)
-        .fallback(any(move |request: Request<AxumBody>| {
-            let (endpoint, proxies, root) = (endpoint.clone(), proxies.clone(), root.clone());
-            async move {
-                let result: Result<Response> = async {
-                    let path = request.uri().path();
-                    if reserved(path) {
-                        return Err(Error::RouteNotFound);
-                    }
-                    let exact = proxies
-                        .iter()
-                        .find(|p| p.location.strip_prefix("= ") == Some(path));
-                    if exact.is_none() {
-                        if let Some(route) = proxies.iter().find(|p| {
-                            p.location.starts_with('/')
-                                && p.location.ends_with('/')
-                                && p.location.trim_end_matches('/') == path
-                        }) {
-                            let location = match request.uri().query() {
-                                Some(q) => format!("{}?{q}", route.location),
-                                None => route.location.clone(),
-                            };
-                            return Ok((
-                                StatusCode::MOVED_PERMANENTLY,
-                                [(header::LOCATION, location)],
-                            )
-                                .into_response());
-                        }
-                    }
-                    let route = exact.or_else(|| {
-                        proxies
-                            .iter()
-                            .filter(|p| {
-                                p.location.starts_with('/') && path.starts_with(&p.location)
-                            })
-                            .max_by_key(|p| p.location.len())
-                    });
-                    if let Some(route) = route {
-                        return proxy(
-                            endpoint,
-                            route.clone(),
-                            request.map(|b| b.map_err(Into::into).boxed_unsync()),
-                        )
-                        .await
-                        .map(|r| r.map(AxumBody::new));
-                    }
-                    static_file(&root, request).await
-                }
-                .await;
-                result.unwrap_or_else(reject)
-            }
-        }))
-        .layer(axum::middleware::from_fn_with_state(access, authorize));
-    Ok(app)
+pub(crate) fn file_router(root: PathBuf) -> Router {
+    Router::new()
+        .route("/file", any(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/file/{*path}",
+            any(move |request: Request<AxumBody>| {
+                let root = root.clone();
+                async move { static_file(&root, request).await.unwrap_or_else(reject) }
+            }),
+        )
+}
+
+pub(crate) async fn proxy_pass(
+    proxies: Vec<ProxyLocation>,
+    request: Request<AxumBody>,
+) -> Response {
+    let result: Result<Response> = async {
+        let path = request.uri().path();
+        if reserved(path) || path == "/file" || path.starts_with("/file/") {
+            return Err(Error::RouteNotFound);
+        }
+        let exact = proxies
+            .iter()
+            .find(|p| p.location.strip_prefix("= ") == Some(path));
+        if exact.is_none()
+            && let Some(route) = proxies
+                .iter()
+                .find(|p| p.location.ends_with('/') && p.location.trim_end_matches('/') == path)
+        {
+            let location = match request.uri().query() {
+                Some(q) => format!("{}?{q}", route.location),
+                None => route.location.clone(),
+            };
+            return Ok((
+                StatusCode::MOVED_PERMANENTLY,
+                [(header::LOCATION, location)],
+            )
+                .into_response());
+        }
+        let route = exact.or_else(|| {
+            proxies
+                .iter()
+                .filter(|p| {
+                    p.location.starts_with('/')
+                        && (p.location == "/"
+                            || path == p.location.trim_end_matches('/')
+                            || path.starts_with(&format!("{}/", p.location.trim_end_matches('/'))))
+                })
+                .max_by_key(|p| p.location.len())
+        });
+        let route = route.ok_or(Error::RouteNotFound)?;
+        proxy(
+            route.clone(),
+            request.map(|b| b.map_err(Into::into).boxed_unsync()),
+        )
+        .await
+        .map(|r| r.map(AxumBody::new))
+    }
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(Error::Io(error)) => {
+            eprintln!("local proxy upstream failed: {error}");
+            StatusCode::BAD_GATEWAY.into_response()
+        }
+        Err(error) => reject(error),
+    }
 }
 
 async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Result<Response> {
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return Err(Error::MethodNotAllowed);
     }
-    let decoded = percent_encoding::percent_decode_str(request.uri().path())
+    let path = request
+        .uri()
+        .path()
+        .strip_prefix("/file/")
+        .ok_or(Error::RouteNotFound)?;
+    if path.is_empty() {
+        return Err(Error::RouteNotFound);
+    }
+    let decoded = percent_encoding::percent_decode_str(path)
         .decode_utf8()
         .map_err(|_| Error::BadRequest("invalid path encoding".into()))?;
     if decoded.contains(['\\', '\0']) || decoded.split('/').any(|p| p == ".." || p == ".") {

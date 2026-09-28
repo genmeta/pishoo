@@ -7,10 +7,7 @@ use http::{Method, Uri};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
-use tokio_util::{
-    sync::{CancellationToken, DropGuard},
-    task::TaskTracker,
-};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use wasmtime::{
     Engine, StoreLimits,
     component::{Component, Linker, ResourceTable},
@@ -83,7 +80,6 @@ pub(crate) struct Invocation {
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
     endpoint: dhttp::Endpoint,
-    producer_cancel: CancellationToken,
     tasks: TaskTracker,
 }
 
@@ -91,12 +87,10 @@ enum LibResponseBody {
     Reading {
         inner: HyperOutgoingBody,
         guest: Option<JoinHandle<Result<()>>>,
-        cancel_on_drop: DropGuard,
     },
     Waiting {
         guest: JoinHandle<Result<()>>,
         trailers: Option<http::HeaderMap>,
-        cancel_on_drop: DropGuard,
     },
     Ended,
 }
@@ -104,7 +98,6 @@ enum LibResponseBody {
 struct HostOutgoing {
     endpoint: Option<dhttp::Endpoint>,
     policy: LibPolicy,
-    remaining_requests: usize,
     children: TaskTracker,
     cancel: CancellationToken,
 }
@@ -118,8 +111,8 @@ impl Sandbox {
         }
     }
 
-    /// Close WASM admission and cancel every retained version through Lib tokens.
-    /// Server separately closes HTTP admission and exec task registration.
+    /// Close WASM task tracking and cancel every retained version through Lib tokens.
+    /// Server separately clears the HTTP router and closes exec task tracking.
     pub(crate) fn close(&mut self) {
         self.tasks.close();
         for lib in self.libs.values() {
@@ -135,7 +128,7 @@ impl Sandbox {
             .map_err(|_| Error::ShutdownDeadline)
     }
 
-    pub(crate) fn load_libs(&self, profile: &IdentityProfile) -> Result<BTreeMap<String, Arc<Lib>>> {
+    pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
         let root = profile.join("lib");
         let mut candidates = BTreeMap::new();
         match root.symlink_metadata() {
@@ -144,24 +137,27 @@ impl Sandbox {
                     "lib root must be a directory, not a symlink".into(),
                 ));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                for lib in self.libs.values() {
+                    lib.cancel.cancel();
+                }
+                self.libs.clear();
+                return Ok(());
+            }
             Err(e) => return Err(e.into()),
             _ => {}
         }
-        let entries = match std::fs::read_dir(&root) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
-            Err(e) => return Err(e.into()),
-        };
+        let entries = std::fs::read_dir(&root)?;
         let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
-            let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
+            let id = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
             if id.is_empty()
                 || id.len() > 63
                 || !id.as_bytes()[0].is_ascii_lowercase()
@@ -169,94 +165,44 @@ impl Sandbox {
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
             {
-                continue;
+                return Err(Error::InvalidComponent("invalid Lib id".into()));
             }
             let path = entry.path().join("lib.wasm");
-            let metadata = match path.symlink_metadata() {
-                Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            };
-            let result = (|| -> Result<Arc<Lib>> {
-                if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
-                    return Err(Error::InvalidComponent("invalid component file".into()));
-                }
-                let bytes = std::fs::read(&path)?;
-                let digest: [u8; 32] = Sha256::digest(&bytes).into();
-                if let Some(lib) = self.libs.get(&id).filter(|lib| lib.digest == digest) {
-                    return Ok(lib.clone());
-                }
-                let token = self
-                    .libs
-                    .get(&id)
-                    .map_or_else(CancellationToken::new, |lib| lib.cancel.clone());
-                let lib = Lib::load(
-                    self.runtime.clone(),
-                    id.clone(),
-                    &bytes,
-                    &entry.path().join("data"),
-                    LibPolicy::default(),
-                    token,
-                )?;
-                Ok(Arc::new(lib))
-            })();
-            match result {
-                Ok(lib) => {
-                    candidates.insert(id, lib);
-                }
-                Err(e) => {
-                    eprintln!("keeping/skipping lib {id}: {e}");
-                    if let Some(lib) = self.libs.get(&id) {
-                        candidates.insert(id, lib.clone());
-                    }
-                }
+            let metadata = path.symlink_metadata()?;
+            if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
+                return Err(Error::InvalidComponent("invalid component file".into()));
             }
-        }
-        Ok(candidates)
-    }
-
-    /// Complete all fallible input checks before Server publishes the Router.
-    pub(crate) fn verify_libs(
-        &self,
-        profile: &IdentityProfile,
-        libs: &BTreeMap<String, Arc<Lib>>,
-    ) -> Result<()> {
-        if !profile.path().symlink_metadata()?.is_dir() {
-            return Err(Error::InvalidIdentity(
-                "identity directory disappeared".into(),
-            ));
-        }
-        for (id, lib) in libs {
-            if self.libs.get(id).is_some_and(|old| Arc::ptr_eq(old, lib)) {
+            let bytes = std::fs::read(&path)?;
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            if let Some(lib) = self.libs.get(&id).filter(|lib| lib.digest == digest) {
+                candidates.insert(id, lib.clone());
                 continue;
             }
-            let path = profile.join("lib").join(id).join("lib.wasm");
-            let bytes = std::fs::read(path)?;
-            if <[u8; 32]>::from(Sha256::digest(bytes)) != lib.digest {
-                return Err(Error::InvalidComponent(
-                    "component changed during reload".into(),
-                ));
-            }
+            let token = self
+                .libs
+                .get(&id)
+                .map_or_else(CancellationToken::new, |lib| lib.cancel.clone());
+            let lib = Lib::load(
+                self.runtime.clone(),
+                id,
+                &bytes,
+                &entry.path().join("data"),
+                LibPolicy::default(),
+                token,
+            )?;
+            candidates.insert(lib.id.clone(), Arc::new(lib));
         }
-        Ok(())
-    }
-
-    /// The caller has validated candidates and installed their complete Router.
-    pub(crate) fn replace_libs(&mut self, libs: BTreeMap<String, Arc<Lib>>) {
         for (id, old) in &self.libs {
-            if !libs.contains_key(id) {
+            if !candidates.contains_key(id) {
                 old.cancel.cancel();
             }
         }
-        self.libs = libs;
+        self.libs = candidates;
+        Ok(())
     }
 
-    pub(crate) fn api_router(
-        &self,
-        endpoint: dhttp::Endpoint,
-        libs: &std::collections::BTreeMap<String, Arc<Lib>>,
-    ) -> axum::Router {
-        let libs = libs.clone();
+    pub(crate) fn api_router(&self, endpoint: dhttp::Endpoint) -> axum::Router {
+        let libs = self.libs.clone();
         let tasks = self.tasks.clone();
         let api = axum::routing::any(move |request: http::Request<axum::body::Body>| {
             let (endpoint, libs, tasks) = (endpoint.clone(), libs.clone(), tasks.clone());
@@ -271,12 +217,6 @@ impl Sandbox {
                         .split_once('/')
                         .map_or((tail, "/".to_string()), |(id, p)| (id, format!("/{p}")));
                     let lib = libs.get(id).ok_or(Error::RouteNotFound)?.clone();
-                    if lib.id != id {
-                        return Err(Error::RouteNotFound);
-                    }
-                    if lib.cancel.is_cancelled() {
-                        return Err(Error::Cancelled);
-                    }
                     let item = lib
                         .openapi
                         .paths

@@ -18,13 +18,9 @@ async fn fragmented_memory_body_executes_and_returns_json() {
         .body(StreamBody::new(frames).boxed_unsync())
         .unwrap();
     let tasks = TaskTracker::new();
-    let response = execute_authorized(
-        cwd.path(),
-        tasks.clone(),
-        request,
-    )
-    .await
-    .unwrap();
+    let response = execute_authorized(cwd.path(), tasks.clone(), request)
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -57,6 +53,31 @@ async fn closed_task_tracker_rejects_a_pending_memory_body() {
     .await
     .unwrap();
     assert!(matches!(result, Err(Error::Closed)));
+}
+
+#[tokio::test]
+async fn more_than_four_exec_requests_run_concurrently() {
+    let cwd = tempfile::tempdir().unwrap();
+    let tasks = TaskTracker::new();
+    let executions = (0..5).map(|_| {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/exec")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(
+                Full::new(Bytes::from_static(
+                    br#"{"program":"/bin/sleep","args":["1"]}"#,
+                ))
+                .map_err(|error| match error {})
+                .boxed_unsync(),
+            )
+            .unwrap();
+        execute_authorized(cwd.path(), tasks.clone(), request)
+    });
+    for result in futures::future::join_all(executions).await {
+        assert_eq!(result.unwrap().status(), StatusCode::OK);
+    }
+    assert!(tasks.is_empty());
 }
 
 #[tokio::test]

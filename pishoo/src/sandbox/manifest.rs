@@ -59,10 +59,10 @@ pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
             return Err(invalid("path-level references are unsupported"));
         }
         for (_, operation) in item.methods() {
-            if let Some(id) = &operation.operation_id {
-                if !ids.insert(id) {
-                    return Err(invalid("duplicate operationId"));
-                }
+            if let Some(id) = &operation.operation_id
+                && !ids.insert(id)
+            {
+                return Err(invalid("duplicate operationId"));
             }
         }
     }
@@ -76,6 +76,8 @@ fn valid_path(path: &str) -> bool {
         && !path.split('/').any(|p| p == "." || p == "..")
         && !path.chars().any(|c| c.is_whitespace() || c.is_control())
 }
+
+//TODO: 这里保留 /std /workspace？
 fn reserved(path: &str) -> bool {
     [
         "/api",

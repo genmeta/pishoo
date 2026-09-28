@@ -1,56 +1,70 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, time::Duration};
 
-use http::{Request, header};
+use http::{Request, Version, header};
+use http_body_util::BodyExt;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
 
 use crate::{Body, Error, Result, setup::ProxyLocation};
 
 pub(crate) async fn proxy(
-    endpoint: dhttp::Endpoint,
     route: ProxyLocation,
     mut request: Request<Body>,
 ) -> Result<http::Response<Body>> {
-    let original_host = request.uri().authority().map(|a| a.as_str().to_owned());
-    let original_scheme = request.uri().scheme_str().unwrap_or("https").to_owned();
     *request.uri_mut() = proxy_uri(&route, request.uri())?;
-    clean_hop_headers(request.headers_mut());
-    let protocol = request.extensions_mut().remove::<Arc<str>>();
-    request.extensions_mut().clear();
-    if let Some(protocol) = protocol {
-        request.extensions_mut().insert(protocol);
-    }
-    request.headers_mut().remove(header::HOST);
-    let host = request
+    let authority = request
         .uri()
         .authority()
-        .expect("validated proxy authority")
+        .ok_or_else(|| Error::BadRequest("invalid proxy authority".into()))?;
+    let address = authority
+        .as_str()
+        .parse::<SocketAddr>()
+        .map_err(|_| Error::BadRequest("invalid proxy address".into()))?;
+    if request.uri().scheme_str() != Some("http") || !address.ip().is_loopback() {
+        return Err(Error::BadRequest(
+            "proxy target must be local HTTP/TCP".into(),
+        ));
+    }
+    let host = authority
         .as_str()
         .parse()
-        .map_err(|_| Error::BadRequest("invalid authority".into()))?;
+        .map_err(|_| Error::BadRequest("invalid proxy authority".into()))?;
+    let path = request
+        .uri()
+        .path_and_query()
+        .map(|path| path.as_str())
+        .unwrap_or("/")
+        .parse()
+        .map_err(|_| Error::BadRequest("invalid upstream path".into()))?;
+    *request.uri_mut() = path;
+    *request.version_mut() = Version::HTTP_11;
+    clean_hop_headers(request.headers_mut());
+    request.extensions_mut().clear();
     request.headers_mut().insert(header::HOST, host);
-    for name in [
-        "forwarded",
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-forwarded-proto",
-    ] {
-        request.headers_mut().remove(name);
-    }
-    if let Some(host) = original_host {
-        request.headers_mut().insert(
-            "x-forwarded-host",
-            host.parse()
-                .map_err(|_| Error::BadRequest("invalid forwarding authority".into()))?,
-        );
-    }
-    request.headers_mut().insert(
-        "x-forwarded-proto",
-        original_scheme
-            .parse()
-            .map_err(|_| Error::BadRequest("invalid scheme".into()))?,
-    );
-    let mut response = endpoint.from_request(request).await?;
+
+    let timeout = Duration::from_secs(30);
+    let stream = tokio::time::timeout(timeout, TcpStream::connect(address))
+        .await
+        .map_err(|_| Error::Deadline)??;
+    let (mut sender, connection) = tokio::time::timeout(
+        timeout,
+        hyper::client::conn::http1::Builder::new().handshake(TokioIo::new(stream)),
+    )
+    .await
+    .map_err(|_| Error::Deadline)?
+    .map_err(|error| Error::Io(std::io::Error::other(error)))?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut response = tokio::time::timeout(timeout, sender.send_request(request))
+        .await
+        .map_err(|_| Error::Deadline)?
+        .map_err(|error| Error::Io(std::io::Error::other(error)))?;
     clean_hop_headers(response.headers_mut());
-    Ok(response)
+    Ok(response.map(|body| {
+        body.map_err(|error| Box::new(error) as dhttp::BoxError)
+            .boxed_unsync()
+    }))
 }
 
 pub(super) fn proxy_uri(route: &ProxyLocation, uri: &http::Uri) -> Result<http::Uri> {
@@ -102,14 +116,6 @@ pub(super) fn clean_hop_headers(headers: &mut http::HeaderMap) {
         "transfer-encoding",
         "upgrade",
     ] {
-        headers.remove(name);
-    }
-    let reserved = headers
-        .keys()
-        .filter(|n| n.as_str().starts_with("pishoo-"))
-        .cloned()
-        .collect::<Vec<_>>();
-    for name in reserved {
         headers.remove(name);
     }
 }

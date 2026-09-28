@@ -101,8 +101,7 @@ async fn upload_error_becomes_one_body_error_and_reaps_guest() {
 }
 
 #[tokio::test]
-async fn response_body_waits_for_guest_before_final_trailers_and_disarms_on_eof() {
-    let cancel = CancellationToken::new();
+async fn response_body_waits_for_guest_before_final_trailers() {
     let (tx, rx) = oneshot::channel();
     let guest = tokio::spawn(async {
         rx.await.unwrap();
@@ -118,7 +117,6 @@ async fn response_body_waits_for_guest_before_final_trailers_and_disarms_on_eof(
     let mut body = LibResponseBody::Reading {
         inner: StreamBody::new(frames).boxed_unsync(),
         guest: Some(guest),
-        cancel_on_drop: cancel.clone().drop_guard(),
     };
     assert_eq!(
         body.frame().await.unwrap().unwrap().into_data().unwrap(),
@@ -141,5 +139,4 @@ async fn response_body_waits_for_guest_before_final_trailers_and_disarms_on_eof(
     );
     assert!(body.frame().await.is_none());
     drop(body);
-    assert!(!cancel.is_cancelled());
 }
