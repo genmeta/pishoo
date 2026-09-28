@@ -29,9 +29,7 @@ async fn exec_route_is_mounted_inside_the_application_router() {
         true,
         endpoint.name().to_owned(),
         profile.path().to_path_buf(),
-        CancellationToken::new(),
         TaskTracker::new(),
-        Arc::new(Semaphore::new(4)),
     );
     let app = build_router(
         endpoint,

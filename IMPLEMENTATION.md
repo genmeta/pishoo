@@ -32,9 +32,9 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 
 - h3x：既有消息读取方法在等待 HEADERS 前后保留明确的取消所有权；裸流 Drop、正常 EOF 和半关闭约定保持原样。
 - dhttp：全局 Network 持有以本端、远端规范化名称为键的 h3x 连接池；Endpoint 只持名称，不提供 close。同名 load 复用连接，stop_listening 仅撤销当前监听。Network 没有 shutdown，进程退出时结束其剩余传输与维护任务。
-- Pishoo：实例锁与 schema v1 数据库读取、身份扫描、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、坏候选保留、删除时取消旧版本、按身份故障隔离。
+- Pishoo：实例锁与 schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、坏候选保留、删除时取消旧版本、按身份故障隔离。
 - 路由：受目录能力约束的流式静态文件、精确/最长前缀代理、DHTTP 唯一出站、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API 和最小 Workspace 查看/审批界面。
-- WASM：每身份一个 Sandbox，持有 Lib 集合、共享 Runtime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、30 秒独立监督任务、流式响应、提前丢弃取消、身份签名与受限出站。
+- WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的独立监督任务、流式响应、提前丢弃取消、身份签名与受限出站。
 - exec：每 Server 的 `settings.ssh`、与 Lib 合并的 `POST /exec` Router 分支、daccess 加同名身份准入、直接 argv、固定并发与输入输出限制、受跟踪的 Child 取消和回收。程序使用 Pishoo 当前非 root 服务账号权限，没有文件或网络隔离。
 
 原交互终端的安装布局探测、WASM shell WIT、帧协议和平台 helper 方案已按用户的新 v1 决定移除。单命令 exec 的标准输入输出采用有界 JSON/base64；不使用 PTY、shell 解释或子进程 IPC。
@@ -42,13 +42,13 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 用户明确确认的契约变更均已记录在冻结清单中：
 
 - `ProxyLocation.proxy_pass` 改为 `http::uri::Parts`，保留未写路径和显式 `/` 的差异。
-- Sandbox 集中持有 `libs: BTreeMap<String, Arc<Lib>>`、`runtime: Arc<Runtime>`、`tasks: TaskTracker`；Server 删除独立的 Lib 集合和 Runtime 引用，直接持有 `sandbox: Sandbox`。`run` 直接创建并共享 Runtime。
+- Sandbox 集中持有 `libs: BTreeMap<String, Arc<Lib>>`、`runtime: Arc<WasmRuntime>`、`tasks: TaskTracker`；Server 删除独立的 Lib 集合和 WasmRuntime 引用，直接持有 `sandbox: Sandbox`。`run` 直接创建并共享 WasmRuntime。
 - 移除 DaemonConfig、Daemon、TerminalPolicy 和实例配置文件；`run` 的局部变量负责身份扫描、监听、串行重载与关闭，每个 Server 直接读取自己的 `db/config.db` 并持有 exec 任务跟踪器和专用名额。
-- Sandbox 构造接收 Runtime，新增 `load_libs/verify_libs/replace_libs/api_router`，同步 `close(&mut self)` 关闭准入、取消并清空 Lib；`wait(&self) -> Result<()>` 保持不变。`build_router` 接收已构造的标准 Lib Router，WASM 内部类型和 manifest 验证统一归 sandbox，`validate_lib` 的根级公开导出不变。
+- Sandbox 构造接收 WasmRuntime，新增 `load_libs/verify_libs/replace_libs/api_router`，同步 `close(&mut self)` 关闭准入、取消并清空 Lib；`wait(&self) -> Result<()>` 保持不变。`build_router` 接收已构造的标准 Lib Router，WASM 内部类型和 manifest 验证统一归 sandbox，`validate_lib` 的根级公开导出不变。
 
-Sandbox 的关闭分为停止准入、清除 Lib 与等待任务回收；身份取消仍由 Server 的根 token 负责。Server 继续直接持有 Endpoint、授权、完整 Router 与 exec 资源，Lib 不限制并发数，删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及 `Error::Capacity`；保留单次执行的内存、fuel、出站次数和超时限制。不新增内部锁、取消信号、派生计数或通用策略容器，也不把 Sandbox 描述为操作系统进程或容器隔离。
+Sandbox 的关闭分为停止准入、清除 Lib 与等待任务回收；身份取消仍由 Server 的根 token 负责。Server 继续直接持有 Endpoint、授权、完整 Router 与 exec 资源，Lib 不限制并发数，删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及 `Error::Capacity`；保留单次执行的内存、fuel、出站次数和出站 I/O 超时，不设 WASM 总执行期限。不新增内部锁、取消信号、派生计数或通用策略容器，也不把 Sandbox 描述为操作系统进程或容器隔离。
 
-重载先在局部加载候选，由 Sandbox 构造 Lib Router，再装配完整 Router；目录和组件摘要全部复核成功后，同步替换完整 Router、Sandbox 的 Lib 集合与配置。Router 装配或复核失败均保留旧版本，也不会提前取消待删除 Lib。
+重载先在局部加载候选，由 Sandbox 构造 Lib Router，再装配完整 Router；目录和组件摘要全部复核成功后，同步替换完整 Router、Sandbox 的 Lib 集合与配置。Router 装配或复核失败均保留旧版本，也不会提前取消待删除 Lib。提交前将候选 Lib 声明的完整对外路径与方法登记到 daccess：无同路径同方法或通配方法规则时调用现有 `set_policy` 写 `Deny/All`，有规则时保留管理员配置；不随 Lib 删除清理 ACL 规则。
 
 ## 本地配置
 
@@ -68,6 +68,20 @@ CREATE TABLE proxy_locations (location TEXT NOT NULL, proxy_pass TEXT NOT NULL);
 listen 的 0/1/2/3 分别代表关闭/内网/外网/两者；ssh 只能为 0/1，作为本 Server 单命令 exec 的开关，只开放给同名已验证远端身份。改变 listen 或 ssh 需要重启。代理支持 `https://bob~/...` 和完整 DHTTP 名称。未写路径的上游保留原路径，显式写 `/` 的上游按匹配前缀替换路径。
 
 ## 验证
+
+取消 WASM 总执行期限后：Pishoo 49 项库测试通过。模拟时间推进 31 秒的未轮询流式响应仍在执行，随后取消可回收；无限循环 guest 可被取消，未取消时因 fuel 耗尽而退出。`cargo fmt -p pishoo --check` 与 `git diff --check` 通过。
+
+2026-09-27 TCP mock 端到端验收：先前的 HTTP/1 curl 原型已由跨进程 h3x/TCP 后端替换。dhttp 的泛型 Network 在测试构建选择 TcpTransport，以单条回环 TCP 连接承载双向请求流和单向控制/QPACK 流；默认构建仍选择 QuicTransport。Pishoo 的 `Server.listen` 仍只调用 Endpoint.listen。`./pishoo/tests/h3x-tcp-smoke.sh` 分别启动 Pishoo 服务端进程和原生 dhttp Endpoint 客户端进程；客户端确认静态文件、前缀/精确代理、三个实际 WASM Lib、八个并发流、256 KiB Echo、POST Echo、请求 trailers、多值响应 trailers、双向流式 Echo 及提前丢弃响应后继续请求均成功，HTTP 响应版本为 HTTP/3，两个 Echo 数据块分别在下一块输入和上传 EOF 前到达。此验证不覆盖 QUIC、TLS 对端认证、QUIC RESET 语义或路径发现。
+
+Lib API 默认拒绝登记后：Pishoo 50 项库测试通过，新增测试确认首次重载写入 `Deny/All`、管理员改为匿名允许后再次重载不会覆盖。h3x/TCP 集成脚本重新通过，演示环境显式放行的三个 Lib API、静态文件与两种代理均成功。
+
+TCP 样例不再写根路径的匿名 Allow，只精确放行测试使用的 GET 静态/代理路径和从 WASM 清单解析出的 Lib 方法与路径；新增跨进程请求确认 `GET` 和带请求体的 `POST /unlisted` 均返回 403。TCP mock 的 StopSending 只释放本端读取方向，避免把双向流的响应方向误当作 request reset；它仍不模拟完整 QUIC STOP_SENDING 错误码传播。
+
+交互示例 `pishoo/examples/echo-interactive.py` 在 TCP 模式自动启动独立服务端与 `pishoo-client`，单个双向流 POST 接收多行输入并逐行回显；QUIC 模式连接已有身份与地址。Echo 组件按 4 KiB 块读取并逐块 flush 响应。
+
+`tcp-mock` 构建的 `pishoo` 主入口与默认构建相同，从现有 `DHTTP_HOME` 加载身份、配置及 Lib。固定演示身份、WASM 和匿名规则改由独立 `setup-tcp-demo` example 创建；演示放行路径与方法从写入后的 `lib.wasm` OpenAPI 清单解析，不在服务入口硬编码。
+
+示例目录只保留交互入口和 WASM 编写示例；h3x/TCP 回归脚本与其 Rust 客户端、样例环境初始化移到 `pishoo/tests/`，打包与重建工具移到 `pishoo/tools/`。交互入口复用该客户端，编译期选择默认 QUIC 或 `tcp-mock`，对单个 POST 长连接持续上传和回显。TCP 模式逐行验收确认首行在发送第二行前返回，第二行在上传 EOF 前返回；QUIC 模式已完成编译链接，真实连接依赖外部身份与路径环境，未在本地样例中验收。
 
 首批实现验证结果：Pishoo 47 项、dhttp 27 项、h3x 149 项通过。
 

@@ -28,11 +28,11 @@ pub use manifest::validate_lib;
 
 pub(crate) struct Sandbox {
     pub(crate) libs: BTreeMap<String, Arc<Lib>>,
-    pub(crate) runtime: Arc<Runtime>,
+    pub(crate) runtime: Arc<WasmRuntime>,
     pub(crate) tasks: TaskTracker,
 }
 
-pub(crate) struct Runtime {
+pub(crate) struct WasmRuntime {
     engine: Engine,
     linker: Linker<StoreData>,
 }
@@ -42,7 +42,7 @@ pub(crate) struct Lib {
     pub(crate) digest: [u8; 32],
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
-    runtime: Arc<Runtime>,
+    runtime: Arc<WasmRuntime>,
     filesystem: WasiFilesystemCtx,
     policy: LibPolicy,
     pub(crate) cancel: CancellationToken,
@@ -110,7 +110,7 @@ struct HostOutgoing {
 }
 
 impl Sandbox {
-    pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
+    pub(crate) fn new(runtime: Arc<WasmRuntime>) -> Self {
         Self {
             libs: BTreeMap::new(),
             runtime,
@@ -119,7 +119,7 @@ impl Sandbox {
     }
 
     /// Close WASM admission and cancel every retained version through Lib tokens.
-    /// Server separately owns cancellation of HTTP, approval, and exec work.
+    /// Server separately closes HTTP admission and exec task registration.
     pub(crate) fn close(&mut self) {
         self.tasks.close();
         for lib in self.libs.values() {
@@ -135,11 +135,7 @@ impl Sandbox {
             .map_err(|_| Error::ShutdownDeadline)
     }
 
-    pub(crate) fn load_libs(
-        &self,
-        profile: &IdentityProfile,
-        cancel: &CancellationToken,
-    ) -> Result<BTreeMap<String, Arc<Lib>>> {
+    pub(crate) fn load_libs(&self, profile: &IdentityProfile) -> Result<BTreeMap<String, Arc<Lib>>> {
         let root = profile.join("lib");
         let mut candidates = BTreeMap::new();
         match root.symlink_metadata() {
@@ -193,7 +189,7 @@ impl Sandbox {
                 let token = self
                     .libs
                     .get(&id)
-                    .map_or_else(|| cancel.child_token(), |lib| lib.cancel.clone());
+                    .map_or_else(CancellationToken::new, |lib| lib.cancel.clone());
                 let lib = Lib::load(
                     self.runtime.clone(),
                     id.clone(),

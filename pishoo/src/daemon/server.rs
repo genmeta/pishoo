@@ -1,21 +1,23 @@
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
 
+use access_control::{AccessService, Effect, Grantee};
 use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any};
 use dhttp_home::identity::IdentityProfile;
 use http::Request;
 use http_body_util::BodyExt;
-use tokio::sync::Semaphore;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
 use super::Server;
 use crate::{
     Body, Error, Result, exec,
     routes::build_router,
-    sandbox::{Runtime, Sandbox},
+    sandbox::{Lib, Sandbox, WasmRuntime},
     setup::load_server_config,
 };
 
@@ -27,23 +29,15 @@ fn exec_router(
     enabled: bool,
     name: String,
     cwd: PathBuf,
-    cancel: CancellationToken,
     tasks: TaskTracker,
-    slots: Arc<Semaphore>,
 ) -> Router {
     Router::new().route(
         "/exec",
         any(move |request: Request<AxumBody>| {
-            let (name, cwd, cancel, tasks, slots) = (
-                name.clone(),
-                cwd.clone(),
-                cancel.clone(),
-                tasks.clone(),
-                slots.clone(),
-            );
+            let (name, cwd, tasks) = (name.clone(), cwd.clone(), tasks.clone());
             async move {
                 let request = request.map(|body| body.map_err(Into::into).boxed_unsync());
-                match exec::execute(enabled, &name, &cwd, cancel, tasks, slots, request).await {
+                match exec::execute(enabled, &name, &cwd, tasks, request).await {
                     Ok(response) => response.map(AxumBody::new).into_response(),
                     Err(error) => {
                         let status = error.status();
@@ -62,8 +56,44 @@ fn exec_router(
     )
 }
 
+async fn register_lib_apis(
+    access: &AccessService,
+    libs: &BTreeMap<String, Arc<Lib>>,
+) -> Result<()> {
+    for lib in libs.values() {
+        if let Some(paths) = &lib.openapi.paths {
+            for (path, item) in paths {
+                let api = format!("/api/{}{}", lib.id, path);
+                let api = api.trim_end_matches('/');
+                for (method, _) in item.methods() {
+                    let exists = access
+                        .database()
+                        .query_one_raw(Statement::from_sql_and_values(
+                            DatabaseBackend::Sqlite,
+                            "SELECT 1 FROM access_rules WHERE api = ? AND method IN (?, '*') LIMIT 1",
+                            [api.into(), method.as_str().into()],
+                        ))
+                        .await?
+                        .is_some();
+                    if !exists {
+                        access
+                            .set_policy(
+                                access_control::Method::Specified(method),
+                                api,
+                                Effect::Deny,
+                                Grantee::All,
+                            )
+                            .await?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Server {
-    pub(super) async fn load(profile: IdentityProfile, runtime: Arc<Runtime>) -> Result<Self> {
+    pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
         let identity = profile
             .load_identity()
             .await
@@ -81,20 +111,16 @@ impl Server {
         let access = Arc::new(
             access_control::AccessService::load_from_db(&uri, &identity.name, &subject).await?,
         );
-        let cancel = CancellationToken::new();
         let exec_tasks = TaskTracker::new();
-        let exec_slots = Arc::new(Semaphore::new(4));
         let mut sandbox = Sandbox::new(runtime);
-        let libs = sandbox.load_libs(&profile, &cancel)?;
+        let libs = sandbox.load_libs(&profile)?;
         let app_router = sandbox
             .api_router(endpoint.clone(), &libs)
             .merge(exec_router(
                 config.ssh,
                 endpoint.name().to_owned(),
                 profile.path().to_path_buf(),
-                cancel.clone(),
                 exec_tasks.clone(),
-                exec_slots.clone(),
             ));
         let router = build_router(
             endpoint.clone(),
@@ -104,6 +130,7 @@ impl Server {
             &profile,
         )?;
         sandbox.verify_libs(&profile, &libs)?;
+        register_lib_apis(&access, &libs).await?;
         sandbox.replace_libs(libs);
         Ok(Self {
             profile,
@@ -113,8 +140,6 @@ impl Server {
             router: Arc::new(RwLock::new(router)),
             sandbox,
             exec_tasks,
-            exec_slots,
-            cancel,
         })
     }
     pub(super) fn name(&self) -> &str {
@@ -128,7 +153,7 @@ impl Server {
                 "listen and ssh changes require restarting the instance".into(),
             ));
         }
-        let libs = self.sandbox.load_libs(&self.profile, &self.cancel)?;
+        let libs = self.sandbox.load_libs(&self.profile)?;
         let app_router = self
             .sandbox
             .api_router(self.endpoint.clone(), &libs)
@@ -136,9 +161,7 @@ impl Server {
                 config.ssh,
                 self.endpoint.name().to_owned(),
                 self.profile.path().to_path_buf(),
-                self.cancel.clone(),
                 self.exec_tasks.clone(),
-                self.exec_slots.clone(),
             ));
         let router = build_router(
             self.endpoint.clone(),
@@ -148,6 +171,7 @@ impl Server {
             &self.profile,
         )?;
         self.sandbox.verify_libs(&self.profile, &libs)?;
+        register_lib_apis(&self.access, &libs).await?;
         *self.router.write().unwrap() = router;
         self.sandbox.replace_libs(libs);
         self.config = config;
@@ -157,10 +181,9 @@ impl Server {
     pub(super) fn listen(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
-        let (endpoint, router, cancel, listen) = (
+        let (endpoint, router, listen) = (
             self.endpoint.clone(),
             self.router.clone(),
-            self.cancel.clone(),
             self.config.listen,
         );
         Box::pin(async move {
@@ -171,11 +194,10 @@ impl Server {
                 _ => dhttp::Scope::Internal | dhttp::Scope::External,
             };
             let name = endpoint.name().to_owned();
-            endpoint.listen(scopes, tower::service_fn(move |mut request: http::Request<Body>| {
-                let (router, cancel, name) = (router.clone(), cancel.clone(), name.clone());
+            let service = tower::service_fn(move |mut request: http::Request<Body>| {
+                let (router, name) = (router.clone(), name.clone());
                 async move {
                     let result: Result<http::Response<Body>> = async {
-                        if cancel.is_cancelled() { return Err(Error::Closed); }
                         let summary = request.extensions().get::<dhttp::HandshakeSummary>().ok_or(Error::MissingHandshake)?;
                         if summary.local.as_ref().is_none_or(|l| l.name() != name) { return Err(Error::IdentityMismatch); }
                         let identity = dhttp_identity::name::DhttpName::try_from(name.clone()).map_err(|_| Error::IdentityMismatch)?;
@@ -185,28 +207,31 @@ impl Server {
                         let names = request.headers().keys().filter(|n| n.as_str().starts_with("pishoo-")).cloned().collect::<Vec<_>>();
                         for name in names { request.headers_mut().remove(name); }
                         let app = router.read().unwrap().clone();
-                        let response = tokio::select! {
-                            _ = cancel.cancelled() => return Err(Error::Closed),
-                            response = app.oneshot(request.map(axum::body::Body::new)) => response.expect("Router is infallible"),
-                        };
+                        let response = app.oneshot(request.map(axum::body::Body::new)).await.expect("Router is infallible");
                         Ok(response.map(|b| b.map_err(Into::into).boxed_unsync()))
                     }.await;
                     let response = result.unwrap_or_else(|error| {
                         let status = error.status();
-                        if status.is_server_error() { eprintln!("request for {name}: {error}"); }
-                        (status, status.canonical_reason().unwrap_or("request failed")).into_response().map(|b| b.map_err(Into::into).boxed_unsync())
+                        if status.is_server_error() {
+                            eprintln!("request for {name}: {error}");
+                        }
+                        (
+                            status,
+                            status.canonical_reason().unwrap_or("request failed"),
+                        )
+                            .into_response()
+                            .map(|b| b.map_err(Into::into).boxed_unsync())
                     });
                     Ok::<_, std::convert::Infallible>(response)
                 }
-            })).await.map_err(Into::into)
+            });
+            endpoint.listen(scopes, service).await.map_err(Into::into)
         })
     }
 
     pub(super) async fn close(&mut self) -> Result<()> {
-        self.cancel.cancel();
         self.sandbox.close();
         self.exec_tasks.close();
-        self.exec_slots.close();
         let result = if dhttp::DhttpNetwork::global().is_ok() {
             self.endpoint.stop_listening().map_err(Error::from)
         } else {

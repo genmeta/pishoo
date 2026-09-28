@@ -1,0 +1,9 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "trailers", "version": "1" },
+  "paths": {
+    "/read": {
+      "post": { "responses": { "201": { "description": "ok" } } }
+    }
+  }
+}

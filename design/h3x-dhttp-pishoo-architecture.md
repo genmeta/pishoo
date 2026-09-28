@@ -114,11 +114,11 @@ config.db 的 v1 settings 必须只有一行，listen 为 0=off、1=Internal、2
 
 ## 7. 直接装配 Server、Router 和 Sandbox
 
-Server 直接持有当前 Router 和该身份的 Sandbox；Sandbox 集中持有 Lib 集合、共享 Runtime 引用与任务跟踪器。`run` 以局部变量持有跨身份共享的 Runtime，其内部只保留 Engine 和 Linker；组件加载和重载串行进行，不增加 compile_slots、compile_tasks、编译取消对象。
+Server 直接持有当前 Router 和该身份的 Sandbox；Sandbox 集中持有 Lib 集合、共享 WasmRuntime 引用与任务跟踪器。`run` 以局部变量持有跨身份共享的 WasmRuntime，其内部只保留 Engine 和 Linker；组件加载和重载串行进行，不增加 compile_slots、compile_tasks、编译取消对象。
 
 按用户确认，组件扫描、manifest 验证、版本替换、API 路由与执行、Store、响应体及 WASI 宿主能力全部集中在 sandbox 逻辑模块，按职责分文件。Server 保留身份取消、Endpoint、daccess、整体 Router 和 exec 任务资源。Sandbox 负责该身份的 WASM 执行和任务回收，不限制并发数，不另存内部锁、取消信号、计数、身份或策略，不是操作系统进程或容器；完整字段和方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
 
-一次重载直接完成：读取配置 → Sandbox 扫描并编译局部候选 → 构造 Lib Router 和完整 Router → Sandbox 复核目录与组件摘要 → Server 替换完整 Router → Sandbox 替换 Lib 集合并取消删除项 → Server 更新配置。所有可失败检查先完成，提交步骤之间没有 await；失败保留旧 Router、Lib、配置及取消状态。在途请求持有自己已取得的 Router/Lib 引用，各版本继续共享原有任务跟踪器。候选使用局部 BTreeMap，没有 ServerState、Release、begin_build、发布编号或后台构建队列。
+启动时加载一次，运行中由 SIGHUP 显式触发身份、配置和 Lib 重载，不定时扫描。一次重载直接完成：读取配置 → Sandbox 扫描并编译局部候选 → 构造 Lib Router 和完整 Router → Sandbox 复核目录与组件摘要 → Server 替换完整 Router → Sandbox 替换 Lib 集合并取消删除项 → Server 更新配置。所有可失败检查先完成，提交步骤之间没有 await；失败保留旧 Router、Lib、配置及取消状态。在途请求持有自己已取得的 Router/Lib 引用，各版本继续共享原有任务跟踪器。候选使用局部 BTreeMap，没有 ServerState、Release、begin_build、发布编号或后台构建队列。
 
 同步编译不会因为丢弃等待 future 就自动停止。第一版不承诺可强行中断编译；不为这项尚不需要的能力扩展运行时成员。
 

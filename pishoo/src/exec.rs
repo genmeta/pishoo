@@ -1,8 +1,6 @@
 //! One bounded, non-interactive host command per authorized request.
 
-use std::{
-    os::unix::process::ExitStatusExt, path::Path, process::Stdio, sync::Arc, time::Duration,
-};
+use std::{os::unix::process::ExitStatusExt, path::Path, process::Stdio, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -15,7 +13,7 @@ use nix::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
-    sync::{Semaphore, oneshot},
+    sync::oneshot,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -31,9 +29,7 @@ pub(crate) async fn execute(
     enabled: bool,
     server_name: &str,
     cwd: &Path,
-    server_cancel: CancellationToken,
     tasks: TaskTracker,
-    slots: Arc<Semaphore>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     if !enabled {
@@ -51,14 +47,12 @@ pub(crate) async fn execute(
     if caller != server_name {
         return Err(Error::Denied);
     }
-    execute_authorized(cwd, server_cancel, tasks, slots, request).await
+    execute_authorized(cwd, tasks, request).await
 }
 
 async fn execute_authorized(
     cwd: &Path,
-    server_cancel: CancellationToken,
     tasks: TaskTracker,
-    slots: Arc<Semaphore>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     if request.method() != Method::POST {
@@ -81,16 +75,13 @@ async fn execute_authorized(
             "exec refuses to run under a root service account".into(),
         ));
     }
-    if server_cancel.is_cancelled() || tasks.is_closed() || slots.is_closed() {
+    if tasks.is_closed() {
         return Err(Error::Closed);
     }
 
     let mut body = request.into_body();
     let mut bytes = Vec::new();
-    while let Some(frame) = tokio::select! {
-        _ = server_cancel.cancelled() => return Err(Error::Closed),
-        frame = body.frame() => frame,
-    } {
+    while let Some(frame) = body.frame().await {
         let data = frame
             .map_err(|error| Error::Io(std::io::Error::other(error)))?
             .into_data()
@@ -143,12 +134,7 @@ async fn execute_authorized(
         return Err(Error::BadRequest("invalid exec arguments or stdin".into()));
     }
 
-    let permit = match slots.try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) if server_cancel.is_cancelled() || tasks.is_closed() => return Err(Error::Closed),
-        Err(_) => return Ok(empty(StatusCode::TOO_MANY_REQUESTS)),
-    };
-    if server_cancel.is_cancelled() || tasks.is_closed() {
+    if tasks.is_closed() {
         return Err(Error::Closed);
     }
     let mut command = Command::new(program);
@@ -171,11 +157,10 @@ async fn execute_authorized(
             Error::Io(error)
         }
     })?;
-    let cancel = server_cancel.child_token();
+    let cancel = CancellationToken::new();
     let cancel_on_drop = cancel.clone().drop_guard();
     let (tx, rx) = oneshot::channel();
     tasks.spawn(async move {
-        let _permit = permit;
         let result = run_command(child, stdin, cancel).await;
         let _ = tx.send(result);
     });
