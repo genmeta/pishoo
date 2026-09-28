@@ -247,13 +247,13 @@ impl Server {
             let service = tower::service_fn(move |request: http::Request<Body>| {
                 let (router, name) = (router.clone(), name.clone());
                 async move {
-                    let result: Result<http::Response<Body>> = async {
+                    let result: Result<http::Response<AxumBody>> = async {
                         let app = router.read().unwrap().clone();
                         let response = app
                             .oneshot(request.map(axum::body::Body::new))
                             .await
                             .expect("Router is infallible");
-                        Ok(response.map(|b| b.map_err(Into::into).boxed_unsync()))
+                        Ok(response)
                     }
                     .await;
                     let response = result.unwrap_or_else(|error| {
@@ -266,7 +266,6 @@ impl Server {
                             status.canonical_reason().unwrap_or("request failed"),
                         )
                             .into_response()
-                            .map(|b| b.map_err(Into::into).boxed_unsync())
                     });
                     Ok::<_, std::convert::Infallible>(response)
                 }

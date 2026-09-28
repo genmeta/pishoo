@@ -1,22 +1,14 @@
 //! Component loading, Store isolation, invocation execution, and response lifecycle.
 
-use std::{
-    future::Future,
-    path::Path,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{path::Path, sync::Arc};
 
-use bytes::Bytes;
 use http::{Request, Response};
-use http_body::{Body as HttpBody, Frame};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store, StoreLimitsBuilder,
+    Config, Engine, Store, StoreLimits,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -28,24 +20,10 @@ use wasmtime_wasi_http::{
     },
 };
 
-use super::{
-    HostOutgoing, Invocation, Lib, LibPolicy, LibResponseBody, MemoryLimits, OutgoingRule,
-    StoreData, WasmRuntime, host::identity, validate_lib,
-};
+use super::{DenyOutgoing, Invocation, Lib, StoreData, WasmRuntime, host::identity, validate_lib};
 use crate::{Body, Error, Result};
 
 // Component compilation, per-version filesystem grants, and Store limits.
-
-impl Default for LibPolicy {
-    fn default() -> Self {
-        Self {
-            data_write: true,
-            outgoing: Vec::new(),
-            sign: false,
-            verify: false,
-        }
-    }
-}
 
 impl WasmRuntime {
     pub(crate) fn new() -> Result<Self> {
@@ -83,8 +61,6 @@ impl Lib {
         id: String,
         bytes: &[u8],
         data_dir: &Path,
-        policy: LibPolicy,
-        cancel: CancellationToken,
     ) -> Result<Self> {
         if id.len() > 63
             || !id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
@@ -126,30 +102,21 @@ impl Lib {
             ));
         }
         let mut builder = WasiCtx::builder();
-        let (directories, files) = if policy.data_write {
-            (
+        builder
+            .preopened_dir(
+                data,
+                "/data",
                 wasmtime_wasi::DirPerms::all(),
                 wasmtime_wasi::FilePerms::all(),
             )
-        } else {
-            (
-                wasmtime_wasi::DirPerms::READ,
-                wasmtime_wasi::FilePerms::READ,
-            )
-        };
-        builder
-            .preopened_dir(data, "/data", directories, files)
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
-            id,
             digest,
             openapi,
             component,
             runtime,
             filesystem,
-            policy,
-            cancel,
         })
     }
 }
@@ -168,73 +135,12 @@ impl WasiHttpView for StoreData {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.outgoing,
+            hooks: &mut self.deny_outgoing,
         }
     }
 }
 
-impl ResourceLimiter for MemoryLimits {
-    fn memory_growing(
-        &mut self,
-        current: usize,
-        desired: usize,
-        maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.pending = 0;
-        let delta = desired.saturating_sub(current);
-        if delta > (64usize << 20).saturating_sub(self.used)
-            || !self.base.memory_growing(current, desired, maximum)?
-        {
-            return Ok(false);
-        }
-        self.used += delta;
-        self.pending = delta;
-        Ok(true)
-    }
-
-    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
-        self.used -= self.pending;
-        self.pending = 0;
-        self.base.memory_grow_failed(error)
-    }
-
-    fn table_growing(
-        &mut self,
-        current: usize,
-        desired: usize,
-        maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.base.table_growing(current, desired, maximum)
-    }
-    fn instances(&self) -> usize {
-        self.base.instances()
-    }
-    fn memories(&self) -> usize {
-        self.base.memories()
-    }
-    fn tables(&self) -> usize {
-        self.base.tables()
-    }
-}
-
-fn copy_policy(policy: &LibPolicy) -> LibPolicy {
-    LibPolicy {
-        data_write: policy.data_write,
-        outgoing: policy
-            .outgoing
-            .iter()
-            .map(|rule| OutgoingRule {
-                methods: rule.methods.clone(),
-                origin: rule.origin.clone(),
-                path_prefix: rule.path_prefix.clone(),
-            })
-            .collect(),
-        sign: policy.sign,
-        verify: policy.verify,
-    }
-}
-
-// One invocation owns its Store and supervises guest and outgoing work.
+// One invocation owns its Store and tracked guest task.
 
 impl Invocation {
     pub(crate) fn new(
@@ -251,7 +157,6 @@ impl Invocation {
             lib,
             local: local.clone(),
             remote: handshake.remote.clone(),
-            endpoint,
             tasks,
         })
     }
@@ -261,211 +166,82 @@ impl Invocation {
             lib,
             local,
             remote,
-            endpoint,
             tasks,
         } = self;
-        let scheme = match request.uri().scheme_str() {
-            Some("http") => types::Scheme::Http,
-            Some("https") => types::Scheme::Https,
-            _ => {
-                return Err(Error::BadRequest(
-                    "Lib request requires an HTTP scheme".into(),
-                ));
-            }
-        };
-        let children = TaskTracker::new();
-        let outgoing_cancel = lib.cancel.child_token();
-        let lib_cancel = lib.cancel.clone();
-        let outgoing = HostOutgoing {
-            endpoint: remote
-                .as_ref()
-                .filter(|caller| caller.name() == local.name())
-                .map(|_| endpoint),
-            policy: copy_policy(&lib.policy),
-            children: children.clone(),
-            cancel: outgoing_cancel.clone(),
-        };
+
+        // Each invocation owns its WASI state.
         let mut wasi = WasiCtx::builder().build();
         *wasi.filesystem() = lib.filesystem.clone();
         let store_data = StoreData {
             table: ResourceTable::new(),
             wasi,
             http: WasiHttpCtx::new(),
-            memory: MemoryLimits {
-                base: StoreLimitsBuilder::new()
-                    .memory_size(64 << 20)
-                    .instances(32)
-                    .memories(32)
-                    .tables(64)
-                    .table_elements(100_000)
-                    .build(),
-                used: 0,
-                pending: 0,
-            },
-            outgoing,
+            // Per invocation Store: Wasmtime defaults allow 10,000 instances,
+            // memories, and tables, with no extra per-memory byte or per-table
+            // element ceiling. Use StoreLimitsBuilder for explicit ceilings.
+            memory: StoreLimits::default(),
+            deny_outgoing: DenyOutgoing,
             local,
             remote,
-            policy: copy_policy(&lib.policy),
         };
-        let request = request.map(|body| {
-            body.map_err(|error| types::ErrorCode::InternalError(Some(error.to_string())))
-        });
-        let (response_tx, mut response_rx) = oneshot::channel();
-        // The supervisor owns and reaps the actual guest task even if nobody
-        // polls the HTTP response body again after receiving its headers.
-        let mut supervisor = tasks.spawn(async move {
-            let mut guest = tokio::spawn(async move {
-                let mut store = Store::new(&lib.runtime.engine, store_data);
-                store.limiter(|state| &mut state.memory);
-                store.set_fuel(100_000_000).map_err(Error::Guest)?;
-                store
-                    .fuel_async_yield_interval(Some(10_000))
-                    .map_err(Error::Guest)?;
-                let proxy =
-                    Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)
-                        .await
-                        .map_err(Error::Guest)?;
-                let incoming = store
-                    .data_mut()
-                    .http()
-                    .new_incoming_request(scheme, request)
-                    .map_err(Error::Guest)?;
-                let outparam = store
-                    .data_mut()
-                    .http()
-                    .new_response_outparam(response_tx)
-                    .map_err(Error::Guest)?;
-                proxy
-                    .wasi_http_incoming_handler()
-                    .call_handle(&mut store, incoming, outparam)
-                    .await
-                    .map_err(Error::Guest)
-            });
-            let outcome = tokio::select! {
-                biased;
-                _ = lib_cancel.cancelled() => {
-                    guest.abort();
-                    let _ = guest.await;
-                    Err(Error::Cancelled)
-                }
-                outcome = &mut guest => outcome.map_err(Error::Task).and_then(|outcome| outcome),
+
+        // Keep execution tracked after execute returns or is dropped.
+        let (response_tx, response_rx) = oneshot::channel();
+        let execution_task = tasks.spawn(async move {
+            let mut store = Store::new(&lib.runtime.engine, store_data);
+            store.limiter(|state| &mut state.memory);
+            store.set_fuel(100_000_000).map_err(Error::Guest)?;
+            store
+                .fuel_async_yield_interval(Some(10_000))
+                .map_err(Error::Guest)?;
+            let proxy = Proxy::instantiate_async(&mut store, &lib.component, &lib.runtime.linker)
+                .await
+                .map_err(Error::Guest)?;
+            let scheme = match request
+                .uri()
+                .scheme_str()
+                .expect("dhttp requests have a :scheme")
+            {
+                "http" => types::Scheme::Http,
+                "https" => types::Scheme::Https,
+                other => types::Scheme::Other(other.to_owned()),
             };
-            outgoing_cancel.cancel();
-            children.close();
-            children.wait().await;
-            outcome
+            let request = request.map(|body| {
+                body.map_err(|error| types::ErrorCode::InternalError(Some(error.to_string())))
+            });
+            let incoming = store
+                .data_mut()
+                .http()
+                .new_incoming_request(scheme, request)
+                .map_err(Error::Guest)?;
+            let outparam = store
+                .data_mut()
+                .http()
+                .new_response_outparam(response_tx)
+                .map_err(Error::Guest)?;
+            proxy
+                .wasi_http_incoming_handler()
+                .call_handle(&mut store, incoming, outparam)
+                .await
+                .map_err(Error::Guest)
         });
 
-        let (response, guest) = tokio::select! {
-            biased;
-            // Read the result, rather than is_finished(), so an error cannot
-            // race a successful response-head submission unnoticed.
-            outcome = &mut supervisor => {
-                outcome.map_err(Error::Task)??;
-                let response = response_rx.try_recv().map_err(|_| Error::GuestExitedWithoutResponse)?
-                    .map_err(Error::GuestRejectedResponse)?;
-                (response, None)
-            }
-            response = &mut response_rx => {
-                let response = match response {
-                    Ok(response) => response.map_err(Error::GuestRejectedResponse)?,
-                    Err(_) => {
-                        supervisor.await.map_err(Error::Task)??;
-                        return Err(Error::GuestExitedWithoutResponse);
-                    }
-                };
-                // If both became ready during this poll, consume the task
-                // result now. Pending leaves its wake registration intact.
-                match futures::poll!(&mut supervisor) {
-                    Poll::Ready(outcome) => { outcome.map_err(Error::Task)??; (response, None) }
-                    Poll::Pending => (response, Some(supervisor)),
-                }
-            }
-        };
-        let (parts, inner) = response.into_parts();
-        Ok(Response::from_parts(
-            parts,
-            LibResponseBody::Reading { inner, guest }
-                .map_err(Error::body_error)
-                .boxed_unsync(),
-        ))
-    }
-}
-
-// Response frames retain the guest result until normal completion.
-
-impl HttpBody for LibResponseBody {
-    type Data = Bytes;
-    type Error = Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>>>> {
-        let this = self.get_mut();
-        loop {
-            match this {
-                Self::Ended => return Poll::Ready(None),
-                Self::Reading { inner, guest, .. } => {
-                    if let Some(task) = guest
-                        && let Poll::Ready(outcome) = Pin::new(task).poll(cx)
-                    {
-                        *guest = None;
-                        if let Err(error) = outcome.map_err(Error::Task).and_then(|outcome| outcome)
-                        {
-                            *this = Self::Ended;
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                    }
-                    let trailers = match Pin::new(inner).poll_frame(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Some(Ok(frame))) if frame.is_data() => {
-                            return Poll::Ready(Some(Ok(frame)));
-                        }
-                        Poll::Ready(Some(Ok(frame))) => frame.into_trailers().ok(),
-                        Poll::Ready(Some(Err(error))) => {
-                            *this = Self::Ended;
-                            return Poll::Ready(Some(Err(Error::GuestRejectedResponse(error))));
-                        }
-                        Poll::Ready(None) => None,
-                    };
-                    let Self::Reading { guest, .. } = std::mem::replace(this, Self::Ended) else {
-                        unreachable!()
-                    };
-                    match guest {
-                        Some(guest) => *this = Self::Waiting { guest, trailers },
-                        None => {
-                            return Poll::Ready(
-                                trailers.map(|headers| Ok(Frame::trailers(headers))),
-                            );
-                        }
-                    }
-                }
-                Self::Waiting { guest, .. } => {
-                    let outcome = match Pin::new(guest).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(outcome) => {
-                            outcome.map_err(Error::Task).and_then(|outcome| outcome)
-                        }
-                    };
-                    let Self::Waiting { trailers, .. } = std::mem::replace(this, Self::Ended)
-                    else {
-                        unreachable!()
-                    };
-                    match outcome {
-                        Ok(()) => {
-                            return Poll::Ready(
-                                trailers.map(|headers| Ok(Frame::trailers(headers))),
-                            );
-                        }
-                        Err(error) => return Poll::Ready(Some(Err(error))),
-                    }
-                }
+        // The task owns the sender, directly or through its Store. Exiting
+        // without a response drops it and wakes the receiver.
+        let response = match response_rx.await {
+            Ok(response) => response,
+            Err(_) => {
+                execution_task.await.map_err(Error::Task)??;
+                return Err(Error::GuestExitedWithoutResponse);
             }
         }
-    }
+        .map_err(Error::GuestRejectedResponse)?;
 
-    fn is_end_stream(&self) -> bool {
-        matches!(self, Self::Ended)
+        // Dropping the JoinHandle detaches the guest; TaskTracker still owns
+        // its lifecycle. The existing WASI body supplies frames and errors.
+        Ok(response.map(|body| {
+            body.map_err(|error| Error::GuestRejectedResponse(error).body_error())
+                .boxed_unsync()
+        }))
     }
 }

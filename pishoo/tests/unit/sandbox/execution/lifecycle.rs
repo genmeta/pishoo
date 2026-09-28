@@ -3,8 +3,7 @@ use super::*;
 #[tokio::test]
 async fn replacing_an_unpolled_body_keeps_other_execution_running() {
     let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let lib = load(STREAM, directory.path(), cancel.clone());
+    let lib = load(STREAM, directory.path());
     let tasks = TaskTracker::new();
     let response = invoke(lib.clone(), &tasks)
         .await
@@ -20,22 +19,18 @@ async fn replacing_an_unpolled_body_keeps_other_execution_running() {
         drop(body);
         Full::new(Bytes::from_static(b"replacement"))
     });
-    assert!(!cancel.is_cancelled());
     assert!(other.body_mut().frame().await.unwrap().unwrap().is_data());
     assert_eq!(
         replacement.into_body().collect().await.unwrap().to_bytes(),
         "replacement"
     );
     drop(other);
-    cancel.cancel();
-    reaped(&tasks).await;
 }
 
 #[tokio::test]
-async fn dropping_pending_execute_leaves_guest_owned_until_lib_cancel() {
+async fn dropping_pending_execute_leaves_guest_owned_until_upload_ends() {
     let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let lib = load(READ, directory.path(), cancel.clone());
+    let lib = load(READ, directory.path());
     let tasks = TaskTracker::new();
     let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
@@ -43,18 +38,16 @@ async fn dropping_pending_execute_leaves_guest_owned_until_lib_cancel() {
     tokio::task::yield_now().await;
     execute.abort();
     assert!(execute.await.unwrap_err().is_cancelled());
-    cancel.cancel();
+    drop(tx);
     reaped(&tasks).await;
-    assert!(tx.is_closed());
 }
 
 #[tokio::test(start_paused = true)]
-async fn unpolled_response_survives_thirty_seconds_until_cancelled() {
+async fn unpolled_response_survives_thirty_seconds() {
     let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let lib = load(STREAM, directory.path(), cancel.clone());
+    let lib = load(STREAM, directory.path());
     let tasks = TaskTracker::new();
-    let mut response = invoke(lib, &tasks)
+    let response = invoke(lib, &tasks)
         .await
         .execute(request("/cancel", empty()))
         .await
@@ -62,85 +55,11 @@ async fn unpolled_response_survives_thirty_seconds_until_cancelled() {
     assert_eq!(tasks.len(), 1);
     tokio::time::advance(Duration::from_secs(31)).await;
     assert_eq!(tasks.len(), 1);
-    assert!(!cancel.is_cancelled());
-    cancel.cancel();
-    reaped(&tasks).await;
-    assert!(response.body_mut().frame().await.unwrap().is_err());
-    assert!(response.body_mut().frame().await.is_none());
+    drop(response);
 }
 
 #[tokio::test]
-async fn executions_survive_version_replacement_and_cancel_together() {
-    let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let old = load(STREAM, directory.path(), cancel.clone());
-    let new = Arc::new(
-        Lib::load(
-            old.runtime.clone(),
-            "test".into(),
-            &component(STREAM),
-            directory.path(),
-            LibPolicy::default(),
-            cancel.clone(),
-        )
-        .unwrap(),
-    );
-    let tasks = TaskTracker::new();
-    let mut responses = Vec::new();
-    for lib in [
-        old.clone(),
-        new.clone(),
-        old.clone(),
-        new.clone(),
-        old,
-        new.clone(),
-    ] {
-        responses.push(
-            invoke(lib, &tasks)
-                .await
-                .execute(request("/cancel", empty()))
-                .await
-                .unwrap(),
-        );
-    }
-    assert_eq!(tasks.len(), 6);
-    cancel.cancel();
-    reaped(&tasks).await;
-    for mut response in responses {
-        assert!(response.body_mut().frame().await.unwrap().is_err());
-    }
-    let result = Invocation::new(
-        new,
-        dhttp::Endpoint::load("alice").await.unwrap(),
-        &dhttp::HandshakeSummary {
-            alpn: None,
-            local: Some(authority("alice.dhttp.net")),
-            remote: None,
-        },
-        TaskTracker::new(),
-    );
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn guest_join_failure_is_reported_once() {
-    let guest = tokio::spawn(async {
-        panic!("guest task panic");
-        #[allow(unreachable_code)]
-        Ok(())
-    });
-    let mut body = LibResponseBody::Reading {
-        inner: Empty::<Bytes>::new()
-            .map_err(|never| match never {})
-            .boxed_unsync(),
-        guest: Some(guest),
-    };
-    assert!(matches!(body.frame().await.unwrap(), Err(Error::Task(_))));
-    assert!(body.frame().await.is_none());
-}
-
-#[tokio::test]
-async fn cpu_only_guest_yields_for_cancellation_and_exhausts_fuel() {
+async fn cpu_only_guest_exhausts_fuel() {
     let bytes = wat::parse_str(
         r#"
         (component
@@ -165,23 +84,7 @@ async fn cpu_only_guest_yields_for_cancellation_and_exhausts_fuel() {
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let lib = load(&bytes, directory.path(), cancel.clone());
-    let tasks = TaskTracker::new();
-    let invocation = invoke(lib.clone(), &tasks).await;
-    let cancelling = async {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-        cancel.cancel();
-    };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(invocation.execute(request("/read", empty())), cancelling)
-    })
-    .await
-    .unwrap();
-    assert!(matches!(result, Err(Error::Cancelled)));
-    reaped(&tasks).await;
-
-    let lib = load(&bytes, directory.path(), CancellationToken::new());
+    let lib = load(&bytes, directory.path());
     let tasks = TaskTracker::new();
     let result = tokio::time::timeout(
         Duration::from_secs(5),

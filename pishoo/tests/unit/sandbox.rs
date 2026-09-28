@@ -4,14 +4,9 @@ use bytes::Bytes;
 use http::Request;
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
-use tokio::sync::oneshot;
-use wasmtime::{ResourceLimiter, Store, StoreLimitsBuilder};
-use wasmtime_wasi_http::p2::{WasiHttpHooks, types::OutgoingRequestConfig};
+use wasmtime::StoreLimits;
 
-use super::{
-    host::{identity, outgoing_allowed},
-    *,
-};
+use super::{host::identity, *};
 use crate::Body;
 
 #[path = "sandbox/api.rs"]

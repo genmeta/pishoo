@@ -18,19 +18,17 @@ mod proxy;
 
 pub(crate) use access::{authorize, worksapce};
 
-fn reserved(path: &str) -> bool {
+pub(crate) fn reserved(path: &str, additional: &[&str]) -> bool {
     [
-        "/api",
         "/contact",
         "/contacts",
         "/acl",
         "/workspace",
         "/workspace-api",
-        "/.pishoo",
-        "/exec",
     ]
-    .iter()
-    .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+    .into_iter()
+    .chain(additional.iter().copied())
+    .any(|p| path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
 fn reject(error: Error) -> Response {
     let status = error.status();
@@ -62,7 +60,7 @@ pub(crate) async fn proxy_pass(
 ) -> Response {
     let result: Result<Response> = async {
         let path = request.uri().path();
-        if reserved(path) || path == "/file" || path.starts_with("/file/") {
+        if reserved(path, &["/api", "/.pishoo", "/exec", "/file"]) {
             return Err(Error::RouteNotFound);
         }
         let exact = proxies

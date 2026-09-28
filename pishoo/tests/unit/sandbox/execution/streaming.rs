@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn upload_and_response_stream_with_repeated_trailers() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(READ, directory.path(), CancellationToken::new());
+    let lib = load(READ, directory.path());
     let tasks = TaskTracker::new();
     let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
@@ -42,7 +42,7 @@ async fn upload_and_response_stream_with_repeated_trailers() {
 #[tokio::test]
 async fn response_headers_arrive_before_upload_eof() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(EARLY, directory.path(), CancellationToken::new());
+    let lib = load(EARLY, directory.path());
     let tasks = TaskTracker::new();
     let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
@@ -77,12 +77,12 @@ async fn response_headers_arrive_before_upload_eof() {
 }
 
 #[tokio::test]
-async fn upload_error_becomes_one_body_error_and_reaps_guest() {
+async fn upload_error_ends_native_body_and_reaps_guest() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(EARLY, directory.path(), CancellationToken::new());
+    let lib = load(EARLY, directory.path());
     let tasks = TaskTracker::new();
     let (tx, body) = upload();
-    let mut response = invoke(lib, &tasks)
+    let response = invoke(lib, &tasks)
         .await
         .execute(request("/early", body))
         .await
@@ -91,52 +91,9 @@ async fn upload_error_becomes_one_body_error_and_reaps_guest() {
         .await
         .unwrap();
     drop(tx);
-    loop {
-        if response.body_mut().frame().await.unwrap().is_err() {
-            break;
-        }
-    }
-    assert!(response.body_mut().frame().await.is_none());
+    tokio::time::timeout(Duration::from_secs(5), response.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap();
     reaped(&tasks).await;
-}
-
-#[tokio::test]
-async fn response_body_waits_for_guest_before_final_trailers() {
-    let (tx, rx) = oneshot::channel();
-    let guest = tokio::spawn(async {
-        rx.await.unwrap();
-        Ok(())
-    });
-    let mut trailers = http::HeaderMap::new();
-    trailers.append("x-end", "first".parse().unwrap());
-    trailers.append("x-end", "second".parse().unwrap());
-    let frames = futures::stream::iter([
-        Ok(Frame::data(Bytes::from_static(b"data"))),
-        Ok(Frame::trailers(trailers)),
-    ]);
-    let mut body = LibResponseBody::Reading {
-        inner: StreamBody::new(frames).boxed_unsync(),
-        guest: Some(guest),
-    };
-    assert_eq!(
-        body.frame().await.unwrap().unwrap().into_data().unwrap(),
-        "data"
-    );
-    assert!(futures::poll!(body.frame()).is_pending());
-    assert!(matches!(body, LibResponseBody::Waiting { .. }));
-    tx.send(()).unwrap();
-    assert_eq!(
-        body.frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_trailers()
-            .unwrap()
-            .get_all("x-end")
-            .iter()
-            .collect::<Vec<_>>(),
-        ["first", "second"]
-    );
-    assert!(body.frame().await.is_none());
-    drop(body);
 }

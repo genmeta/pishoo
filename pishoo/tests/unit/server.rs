@@ -72,7 +72,7 @@ async fn server(root: &std::path::Path) -> Server {
 }
 
 #[tokio::test]
-async fn reload_reuses_valid_versions_rejects_bad_candidates_and_cancels_deleted_versions() {
+async fn reload_reuses_valid_versions_and_rejects_bad_candidates() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
     let old = server.sandbox.libs["echo"].clone();
@@ -87,17 +87,14 @@ async fn reload_reuses_valid_versions_rejects_bad_candidates_and_cancels_deleted
     .unwrap();
     assert!(server.reload().await.is_err());
     assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
-    assert!(!old.cancel.is_cancelled());
     std::fs::write(server.profile.join("lib/echo/lib.wasm"), component("2")).unwrap();
     server.reload().await.unwrap();
     let new = server.sandbox.libs["echo"].clone();
     assert!(!Arc::ptr_eq(&old, &new));
-    assert!(!old.cancel.is_cancelled());
     assert_eq!(server.sandbox.tasks.len(), 1);
     std::fs::remove_dir_all(server.profile.join("lib/echo")).unwrap();
     server.reload().await.unwrap();
     assert!(server.sandbox.libs.is_empty());
-    assert!(old.cancel.is_cancelled() && new.cancel.is_cancelled());
     assert_eq!(server.sandbox.tasks.len(), 1);
     drop(task);
     assert!(server.sandbox.tasks.is_empty());
@@ -192,7 +189,6 @@ async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
     ));
     assert!(!server.config.exec);
     server.close().await.unwrap();
-    assert!(old.cancel.is_cancelled());
     assert!(server.exec_tasks.is_closed());
     assert!(server.sandbox.libs.is_empty() && server.sandbox.tasks.is_closed());
     server.close().await.unwrap();

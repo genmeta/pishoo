@@ -1,10 +1,11 @@
 use ::http::StatusCode;
 use axum::{Router, body::Body as AxumBody};
+use http::Method;
 use tower::ServiceExt;
 
 use super::*;
 
-fn load(sandbox: &Sandbox, directory: &Path, paths: &str, cancel: CancellationToken) -> Arc<Lib> {
+fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
     fn leb(mut n: usize, output: &mut Vec<u8>) {
         loop {
             let byte = (n & 127) as u8;
@@ -26,17 +27,7 @@ fn load(sandbox: &Sandbox, directory: &Path, paths: &str, cancel: CancellationTo
     bytes.push(0);
     leb(section.len(), &mut bytes);
     bytes.extend(section);
-    Arc::new(
-        Lib::load(
-            sandbox.runtime.clone(),
-            "test".into(),
-            &bytes,
-            directory,
-            LibPolicy::default(),
-            cancel,
-        )
-        .unwrap(),
-    )
+    Arc::new(Lib::load(sandbox.runtime.clone(), "test".into(), &bytes, directory).unwrap())
 }
 
 fn request(method: Method, path: &str) -> Request<AxumBody> {
@@ -64,7 +55,6 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         &sandbox,
         directory.path(),
         r#"{"/run":{"get":{},"post":{}},"/explicit":{"head":{},"options":{}}}"#,
-        CancellationToken::new(),
     );
     sandbox.libs.insert("test".into(), lib);
     let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
@@ -111,25 +101,14 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
 }
 
 #[tokio::test]
-async fn routers_keep_their_lib_snapshot_and_cancel_deleted_versions() {
+async fn routers_keep_their_lib_snapshot() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let old = load(
-        &sandbox,
-        directory.path(),
-        r#"{"/old":{"post":{}}}"#,
-        cancel.clone(),
-    );
+    let old = load(&sandbox, directory.path(), r#"{"/old":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), old);
     let endpoint = dhttp::Endpoint::load("alice").await.unwrap();
     let old_router = sandbox.api_router(endpoint.clone());
-    let new = load(
-        &sandbox,
-        directory.path(),
-        r#"{"/new":{"post":{}}}"#,
-        cancel.clone(),
-    );
+    let new = load(&sandbox, directory.path(), r#"{"/new":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), new);
     let new_router = sandbox.api_router(endpoint);
     for (router, present, absent) in [
@@ -145,21 +124,15 @@ async fn routers_keep_their_lib_snapshot_and_cancel_deleted_versions() {
             StatusCode::NOT_FOUND
         );
     }
-    assert!(!cancel.is_cancelled());
     sandbox.close();
-    assert!(cancel.is_cancelled());
+    assert!(sandbox.libs.is_empty());
 }
 
 #[tokio::test]
-async fn routed_executions_exceed_four_concurrent_requests_and_close_reaps_them() {
+async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(
-        &sandbox,
-        directory.path(),
-        r#"{"/run":{"post":{}}}"#,
-        CancellationToken::new(),
-    );
+    let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), lib);
     let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
     assert_eq!(
@@ -191,7 +164,6 @@ async fn routed_executions_exceed_four_concurrent_requests_and_close_reaps_them(
     }
     assert_eq!(sandbox.tasks.len(), 8);
     sandbox.close();
-    sandbox.wait().await.unwrap();
-    assert!(sandbox.tasks.is_empty());
+    assert_eq!(sandbox.tasks.len(), 8);
     drop(responses);
 }

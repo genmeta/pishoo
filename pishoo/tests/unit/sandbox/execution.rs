@@ -45,15 +45,13 @@ fn authority(name: &str) -> dhttp::LocalAuthority {
     .unwrap()
 }
 
-fn load(bytes: &[u8], directory: &Path, cancel: CancellationToken) -> Arc<Lib> {
+fn load(bytes: &[u8], directory: &Path) -> Arc<Lib> {
     Arc::new(
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
             "test".into(),
             &component(bytes),
             directory,
-            LibPolicy::default(),
-            cancel,
         )
         .unwrap(),
     )

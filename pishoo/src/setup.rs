@@ -4,7 +4,7 @@ use std::{collections::HashSet, net::SocketAddr};
 use dhttp_home::identity::IdentityProfile;
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 
-use crate::{Error, Result};
+use crate::{Error, Result, routes::reserved};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServerConfig {
@@ -88,7 +88,10 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
     let mut seen = HashSet::new();
     for (location, upstream) in values {
         let path = location.strip_prefix("= ").unwrap_or(&location);
-        if !valid_path(path) || !seen.insert(location.clone()) || reserved(path) {
+        if !valid_path(path)
+            || !seen.insert(location.clone())
+            || reserved(path, &["/api", "/.pishoo", "/exec", "/file"])
+        {
             return Err(Error::InvalidConfig(format!(
                 "invalid or reserved proxy location: {location}"
             )));
@@ -139,24 +142,4 @@ fn valid_path(path: &str) -> bool {
         && !path.contains(['?', '#', '%', '\\'])
         && !path.split('/').any(|p| p == "." || p == "..")
         && !path.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-fn reserved(path: &str) -> bool {
-    [
-        "/api",
-        "/contact",
-        "/contacts",
-        "/acl",
-        "/workspace",
-        "/workspace-api",
-        "/.pishoo",
-        "/exec",
-        "/file",
-    ]
-    .iter()
-    .any(|prefix| {
-        path == *prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
 }
