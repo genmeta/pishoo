@@ -7,6 +7,9 @@ edition = "2024"
 license = "Apache-2.0"
 autobins = false
 
+[features]
+tcp-mock = ["dhttp/tcp-mock"]
+
 [lib]
 path = "src/pishoo.rs"
 
@@ -35,7 +38,7 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "fs", "signal", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 nix = { version = "0.31", features = ["user", "signal", "process"] }
 wasmtime = "47.0.4"
@@ -53,3 +56,16 @@ wat = "1"
 [[bin]]
 name = "pishoo"
 path = "src/main.rs"
+
+[[example]]
+name = "setup-tcp-demo"
+path = "tests/support/setup-tcp-demo.rs"
+required-features = ["tcp-mock"]
+
+[[example]]
+name = "check-lib"
+path = "tools/check-lib.rs"
+
+[[example]]
+name = "pishoo-client"
+path = "tests/support/client.rs"

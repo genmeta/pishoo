@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn identities_share_runtime_and_close_only_their_own_tasks() {
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut alice = Sandbox::new(runtime.clone());
     let alice_tasks = alice.tasks.clone();
     let bob = Sandbox::new(runtime);
@@ -16,7 +16,7 @@ fn identities_share_runtime_and_close_only_their_own_tasks() {
 
 #[tokio::test]
 async fn wait_finishes_only_after_the_execution_returns() {
-    let mut sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     sandbox.tasks.spawn(async move {
         let _ = released.await;
@@ -32,7 +32,7 @@ async fn wait_finishes_only_after_the_execution_returns() {
 
 #[tokio::test(start_paused = true)]
 async fn a_shutdown_deadline_preserves_unfinished_execution_ownership() {
-    let mut sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let (finished, completion) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     sandbox.tasks.spawn(async move {

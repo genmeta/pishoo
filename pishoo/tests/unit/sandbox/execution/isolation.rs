@@ -39,7 +39,7 @@ async fn filesystem_grants_are_private_read_only_and_hold_the_open_directory() {
         root.path().join("first/link"),
     )
     .unwrap();
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let lib = Lib::load(
         runtime,
         "test".into(),
@@ -124,7 +124,7 @@ fn real_store_cannot_allocate_more_than_the_combined_memory_limit() {
 #[test]
 fn lib_ids_follow_the_deployment_grammar() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     for id in [
         "",
         "Upper",
@@ -151,7 +151,7 @@ fn lib_ids_follow_the_deployment_grammar() {
 #[test]
 fn data_directory_symlinks_cannot_grant_sibling_or_identity_files() {
     let root = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let bytes = component(READ);
     for target in ["ssl", "db", "sibling"] {
         let target = root.path().join(target);

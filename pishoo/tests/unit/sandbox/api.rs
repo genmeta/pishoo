@@ -58,7 +58,7 @@ async fn status(router: &Router, method: Method, path: &str) -> StatusCode {
 
 #[tokio::test]
 async fn api_methods_require_manifest_entries_and_namespace_never_falls_through() {
-    let sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
+    let sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
         &sandbox,
@@ -114,7 +114,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
 
 #[tokio::test]
 async fn routers_keep_their_candidate_snapshot_and_cancel_deleted_versions() {
-    let mut sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
     let old = load(
@@ -165,7 +165,7 @@ async fn routers_keep_their_candidate_snapshot_and_cancel_deleted_versions() {
 
 #[tokio::test]
 async fn routed_executions_exceed_four_concurrent_requests_and_close_reaps_them() {
-    let mut sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
         &sandbox,

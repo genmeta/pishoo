@@ -48,7 +48,7 @@ fn authority(name: &str) -> dhttp::LocalAuthority {
 fn load(bytes: &[u8], directory: &Path, cancel: CancellationToken) -> Arc<Lib> {
     Arc::new(
         Lib::load(
-            Arc::new(Runtime::new().unwrap()),
+            Arc::new(WasmRuntime::new().unwrap()),
             "test".into(),
             &component(bytes),
             directory,

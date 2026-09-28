@@ -6,7 +6,6 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
 };
 
 use bytes::Bytes;
@@ -30,8 +29,8 @@ use wasmtime_wasi_http::{
 };
 
 use super::{
-    HostOutgoing, Invocation, Lib, LibPolicy, LibResponseBody, MemoryLimits, OutgoingRule, Runtime,
-    StoreData, host::identity, validate_lib,
+    HostOutgoing, Invocation, Lib, LibPolicy, LibResponseBody, MemoryLimits, OutgoingRule,
+    StoreData, WasmRuntime, host::identity, validate_lib,
 };
 use crate::{Body, Error, Result};
 
@@ -48,7 +47,7 @@ impl Default for LibPolicy {
     }
 }
 
-impl Runtime {
+impl WasmRuntime {
     pub(crate) fn new() -> Result<Self> {
         let mut config = Config::new();
         config
@@ -80,7 +79,7 @@ impl Runtime {
 
 impl Lib {
     pub(crate) fn load(
-        runtime: Arc<Runtime>,
+        runtime: Arc<WasmRuntime>,
         id: String,
         bytes: &[u8],
         data_dir: &Path,
@@ -322,7 +321,6 @@ impl Invocation {
             body.map_err(|error| types::ErrorCode::InternalError(Some(error.to_string())))
         });
         let (response_tx, mut response_rx) = oneshot::channel();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         // The supervisor owns and reaps the actual guest task even if nobody
         // polls the HTTP response body again after receiving its headers.
         let mut supervisor = tasks.spawn(async move {
@@ -359,12 +357,6 @@ impl Invocation {
                     guest.abort();
                     let _ = guest.await;
                     Err(Error::Cancelled)
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    producer_cancel.cancel();
-                    guest.abort();
-                    let _ = guest.await;
-                    Err(Error::Deadline)
                 }
                 outcome = &mut guest => outcome.map_err(Error::Task).and_then(|outcome| outcome),
             };

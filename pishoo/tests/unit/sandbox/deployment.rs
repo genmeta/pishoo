@@ -45,10 +45,9 @@ fn profile(root: &Path) -> IdentityProfile {
 fn candidates_and_failed_verification_do_not_change_published_libs() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime.clone());
-    let cancel = CancellationToken::new();
-    let initial = sandbox.load_libs(&profile, &cancel).unwrap();
+    let initial = sandbox.load_libs(&profile).unwrap();
     assert!(sandbox.libs.is_empty());
     sandbox.verify_libs(&profile, &initial).unwrap();
     sandbox.replace_libs(initial);
@@ -58,7 +57,7 @@ fn candidates_and_failed_verification_do_not_change_published_libs() {
 
     std::fs::remove_file(profile.join("lib/beta/lib.wasm")).unwrap();
     std::fs::write(profile.join("lib/alpha/lib.wasm"), component("2")).unwrap();
-    let candidate = sandbox.load_libs(&profile, &cancel).unwrap();
+    let candidate = sandbox.load_libs(&profile).unwrap();
     assert!(!candidate.contains_key("beta"));
     assert!(!Arc::ptr_eq(&alpha, &candidate["alpha"]));
     assert!(Arc::ptr_eq(&alpha, &sandbox.libs["alpha"]));
@@ -96,13 +95,12 @@ fn candidates_and_failed_verification_do_not_change_published_libs() {
 fn invalid_candidate_retains_the_published_version() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
-    let mut sandbox = Sandbox::new(Arc::new(Runtime::new().unwrap()));
-    let cancel = CancellationToken::new();
-    let initial = sandbox.load_libs(&profile, &cancel).unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let initial = sandbox.load_libs(&profile).unwrap();
     sandbox.replace_libs(initial);
     let original = sandbox.libs["alpha"].clone();
     std::fs::write(profile.join("lib/alpha/lib.wasm"), b"invalid wasm").unwrap();
-    let candidate = sandbox.load_libs(&profile, &cancel).unwrap();
+    let candidate = sandbox.load_libs(&profile).unwrap();
     sandbox.verify_libs(&profile, &candidate).unwrap();
     sandbox.replace_libs(candidate);
     assert!(Arc::ptr_eq(&original, &sandbox.libs["alpha"]));

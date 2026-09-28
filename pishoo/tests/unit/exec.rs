@@ -20,9 +20,7 @@ async fn fragmented_memory_body_executes_and_returns_json() {
     let tasks = TaskTracker::new();
     let response = execute_authorized(
         cwd.path(),
-        CancellationToken::new(),
         tasks.clone(),
-        Arc::new(Semaphore::new(4)),
         request,
     )
     .await
@@ -41,7 +39,7 @@ async fn fragmented_memory_body_executes_and_returns_json() {
 }
 
 #[tokio::test]
-async fn cancellation_interrupts_a_pending_memory_body() {
+async fn closed_task_tracker_rejects_a_pending_memory_body() {
     let cwd = tempfile::tempdir().unwrap();
     let frames = futures::stream::pending::<std::result::Result<Frame<Bytes>, dhttp::BoxError>>();
     let request = Request::builder()
@@ -50,21 +48,11 @@ async fn cancellation_interrupts_a_pending_memory_body() {
         .header(header::CONTENT_TYPE, "application/json")
         .body(StreamBody::new(frames).boxed_unsync())
         .unwrap();
-    let cancel = CancellationToken::new();
-    let cancelling = cancel.clone();
-    tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        cancelling.cancel();
-    });
+    let tasks = TaskTracker::new();
+    tasks.close();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        execute_authorized(
-            cwd.path(),
-            cancel,
-            TaskTracker::new(),
-            Arc::new(Semaphore::new(4)),
-            request,
-        ),
+        execute_authorized(cwd.path(), tasks, request),
     )
     .await
     .unwrap();

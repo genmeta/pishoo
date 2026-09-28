@@ -46,10 +46,6 @@ fn reject(error: Error) -> Response {
         .into_response()
 }
 
-#[cfg(test)]
-#[path = "../tests/unit/routes.rs"]
-mod tests;
-
 pub(crate) fn build_router(
     endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
@@ -164,3 +160,7 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
     );
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/routes.rs"]
+mod tests;

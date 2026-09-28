@@ -53,9 +53,10 @@ async fn dropping_pending_execute_releases_upload_and_reaps_guest() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn unpolled_response_has_an_independent_deadline() {
+async fn unpolled_response_survives_thirty_seconds_until_cancelled() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(STREAM, directory.path(), CancellationToken::new());
+    let cancel = CancellationToken::new();
+    let lib = load(STREAM, directory.path(), cancel.clone());
     let tasks = TaskTracker::new();
     let mut response = invoke(lib, &tasks)
         .await
@@ -64,12 +65,11 @@ async fn unpolled_response_has_an_independent_deadline() {
         .unwrap();
     assert_eq!(tasks.len(), 1);
     tokio::time::advance(Duration::from_secs(31)).await;
+    assert_eq!(tasks.len(), 1);
+    assert!(!cancel.is_cancelled());
+    cancel.cancel();
     reaped(&tasks).await;
-    let error = response.body_mut().frame().await.unwrap().unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::Deadline)
-    ));
+    assert!(response.body_mut().frame().await.unwrap().is_err());
     assert!(response.body_mut().frame().await.is_none());
 }
 
@@ -147,7 +147,7 @@ async fn guest_join_failure_is_reported_once_and_cancels_producer() {
 }
 
 #[tokio::test]
-async fn cpu_only_guest_yields_for_cancellation_and_is_reaped() {
+async fn cpu_only_guest_yields_for_cancellation_and_exhausts_fuel() {
     let bytes = wat::parse_str(
         r#"
         (component
@@ -186,5 +186,16 @@ async fn cpu_only_guest_yields_for_cancellation_and_is_reaped() {
     .await
     .unwrap();
     assert!(matches!(result, Err(Error::Cancelled)));
+    reaped(&tasks).await;
+
+    let lib = load(&bytes, directory.path(), CancellationToken::new());
+    let tasks = TaskTracker::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        invoke(lib, &tasks).await.execute(request("/read", empty())),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(Error::Guest(error)) if format!("{error:#}").contains("fuel")));
     reaped(&tasks).await;
 }

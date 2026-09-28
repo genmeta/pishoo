@@ -74,7 +74,45 @@ Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. Changes to `listen` or `ssh` require a restart; proxy routes and Libs reload during the running process.
+Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen` or `ssh` require a restart.
+
+For an interactive Echo over the TCP stream backend, run:
+
+```sh
+./pishoo/examples/echo-interactive.py --transport tcp
+```
+
+This builds the native client, creates temporary sample identities, starts Pishoo, and opens **one full-duplex POST**. Type lines and see each `echo>` reply without ending the upload. Ctrl-D finishes the request; Ctrl-C exits and stops the temporary server.
+
+The same example can use QUIC with an already running Pishoo endpoint and a configured local DHTTP identity:
+
+```sh
+DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
+  --transport quic --identity client.dhttp.net \
+  --url https://server.dhttp.net/api/echo/echo
+```
+
+The QUIC endpoint must already be reachable, and daccess must allow that source identity to call the Echo API. To connect to an existing TCP mock server, supply `DHTTP_HOME`, `DHTTP_TCP_MOCK_PORTS`, `--transport tcp`, `--identity`, and `--url`.
+
+The `tcp-mock` build runs the normal `pishoo` binary against any existing `DHTTP_HOME` profile. `DHTTP_TCP_MOCK_PORTS` maps each identity name to a loopback port. The sample setup is separate from the server: it explicitly allows anonymous access to the static/proxy paths used by the demo and reads the final `lib.wasm` OpenAPI sections to allow the demo Lib routes. Other anonymous paths remain denied; TCP transport does not grant access.
+
+The TCP adapter carries h3x bidirectional request streams and unidirectional control/QPACK streams over loopback TCP. It exercises dhttp's H3 request/response and Body adapters, Pishoo routes, and WASM execution. It does not exercise QUIC, TLS peer authentication, or path discovery. The automated TCP test is in [tests/h3x-tcp-smoke.sh](pishoo/tests/h3x-tcp-smoke.sh).
+
+The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are included; to rebuild them, run `./pishoo/tools/build-wasm-demo.sh` with `wasm-tools` and the Rust `wasm32-unknown-unknown` target installed.
+
+### Build your own Lib
+
+1. Write a WASI HTTP component exporting `wasi:http/incoming-handler@0.2.12#handle`. The [Echo source](pishoo/examples/wasm-demo/echo/src/lib.rs) is a working Rust example. Build it for `wasm32-unknown-unknown`, then turn the core WASM into a component with `wasm-tools component new` as shown in [build-wasm-demo.sh](pishoo/tools/build-wasm-demo.sh).
+2. Write an OpenAPI 3.1 JSON document declaring the paths and HTTP methods the Lib accepts. See [echo/openapi.json](pishoo/examples/wasm-demo/echo/openapi.json). The handler's actual response statuses should match the document.
+3. Attach that JSON to the component, check it with Pishoo, and place the result in the identity profile's `lib/<id>/lib.wasm`:
+
+```sh
+./pishoo/tools/package-lib.py component.wasm openapi.json /path/to/identity/lib/echo/lib.wasm
+wasm-tools validate /path/to/identity/lib/echo/lib.wasm
+cargo run --locked -p pishoo --example check-lib -- /path/to/identity/lib/echo/lib.wasm
+```
+
+The file must be one WASM component with exactly one top-level `pishoo:openapi` custom section. Pishoo reads this section without executing the guest. It routes `POST /api/echo/echo` to Lib `echo` only when its manifest declares `POST /echo`. On load, Pishoo registers each declared method and public path in daccess with a default deny rule if that method and path have no rule yet. Grant access through daccess; the OpenAPI declaration itself does not grant access.
 
 ### Access
 

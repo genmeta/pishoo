@@ -1,0 +1,9 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "info", "version": "1" },
+  "paths": {
+    "/info": {
+      "get": { "responses": { "200": { "description": "ok" } } }
+    }
+  }
+}

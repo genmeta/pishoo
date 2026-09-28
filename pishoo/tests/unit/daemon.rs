@@ -33,7 +33,7 @@ async fn server(root: &std::path::Path) -> Server {
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, ssh INTEGER); INSERT INTO settings VALUES(0,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
-    let runtime = Arc::new(Runtime::new().unwrap());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = dhttp::Endpoint::load(profile.name()).await.unwrap();
     let config = load_server_config(&profile).unwrap();
     let access = Arc::new(
@@ -45,9 +45,8 @@ async fn server(root: &std::path::Path) -> Server {
         .await
         .unwrap(),
     );
-    let cancel = CancellationToken::new();
     let mut sandbox = Sandbox::new(runtime);
-    let libs = sandbox.load_libs(&profile, &cancel).unwrap();
+    let libs = sandbox.load_libs(&profile).unwrap();
     let router = Arc::new(RwLock::new(
         build_router(
             endpoint.clone(),
@@ -68,8 +67,6 @@ async fn server(root: &std::path::Path) -> Server {
         router,
         sandbox,
         exec_tasks: TaskTracker::new(),
-        exec_slots: Arc::new(Semaphore::new(4)),
-        cancel,
     }
 }
 
@@ -106,6 +103,53 @@ async fn reload_reuses_valid_versions_retains_bad_candidates_and_cancels_deleted
 }
 
 #[tokio::test]
+async fn reload_registers_default_deny_without_replacing_an_admin_rule() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TryGetable};
+
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    server.reload().await.unwrap();
+
+    let rule = server
+        .access
+        .database()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT effect, grantee FROM access_rules WHERE method = 'POST' AND api = '/api/echo/upload'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(String::try_get(&rule, "", "effect").unwrap(), "deny");
+    assert_eq!(String::try_get(&rule, "", "grantee").unwrap(), "*?");
+
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(http::Method::POST),
+            "/api/echo/upload",
+            access_control::Effect::Allow,
+            access_control::Grantee::Anony,
+        )
+        .await
+        .unwrap();
+    server.reload().await.unwrap();
+
+    let rule = server
+        .access
+        .database()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT effect, grantee FROM access_rules WHERE method = 'POST' AND api = '/api/echo/upload'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(String::try_get(&rule, "", "effect").unwrap(), "allow");
+    assert_eq!(String::try_get(&rule, "", "grantee").unwrap(), "?");
+}
+
+#[tokio::test]
 async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
@@ -127,7 +171,7 @@ async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
     assert!(!server.config.ssh);
     server.close().await.unwrap();
     assert!(old.cancel.is_cancelled());
-    assert!(server.cancel.is_cancelled());
+    assert!(server.exec_tasks.is_closed());
     assert!(server.sandbox.libs.is_empty() && server.sandbox.tasks.is_closed());
     server.close().await.unwrap();
 }
@@ -143,7 +187,7 @@ async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     assert!(
         server
             .sandbox
-            .load_libs(&server.profile, &server.cancel)
+            .load_libs(&server.profile)
             .is_err()
     );
 }

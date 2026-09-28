@@ -5,12 +5,12 @@ use std::{
 };
 
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
-use tokio::{sync::Semaphore, task::JoinSet};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio::task::JoinSet;
+use tokio_util::task::TaskTracker;
 
 use crate::{
     Error, Result,
-    sandbox::{Runtime, Sandbox},
+    sandbox::{Sandbox, WasmRuntime},
     setup::ServerConfig,
 };
 
@@ -24,8 +24,6 @@ struct Server {
     router: Arc<RwLock<axum::Router>>,
     sandbox: Sandbox,
     exec_tasks: TaskTracker,
-    exec_slots: Arc<Semaphore>,
-    cancel: CancellationToken,
 }
 
 pub async fn run() -> Result<()> {
@@ -41,7 +39,9 @@ pub async fn run() -> Result<()> {
         .open(state_dir.join("pishoo.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| Error::InvalidConfig(format!("instance is already running: {e}")))?;
-    let runtime = Arc::new(Runtime::new()?);
+    #[cfg(unix)]
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let runtime = Arc::new(WasmRuntime::new()?);
     let mut servers = BTreeMap::new();
     for profile in home.discover_identity_profiles()? {
         match Server::load(profile.clone(), runtime.clone()).await {
@@ -58,9 +58,6 @@ pub async fn run() -> Result<()> {
         listeners.spawn(async move { (name, listener.await) });
     }
     let result = async {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         #[cfg(unix)]
@@ -70,13 +67,13 @@ pub async fn run() -> Result<()> {
             tokio::select! {
                 result = &mut interrupt => { result?; return Ok(()); }
                 _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
-                _ = interval.tick() => {
+                _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
                     let reload = async {
                         let profiles = home.discover_identity_profiles()?;
                         let present = profiles.iter().map(|p| p.name()).collect::<HashSet<_>>();
                         let mut stopped_without_listener = Vec::new();
                         for (name, server) in &mut servers {
-                            if !present.contains(name.as_str()) && !server.cancel.is_cancelled() {
+                            if !present.contains(name.as_str()) && !server.exec_tasks.is_closed() {
                                 if let Err(e) = server.close().await {
                                     eprintln!("closing removed server {name}: {e}");
                                 }
@@ -90,7 +87,7 @@ pub async fn run() -> Result<()> {
                         }
                         for profile in profiles {
                             if let Some(server) = servers.get_mut(profile.name()) {
-                                if !server.cancel.is_cancelled() {
+                                if !server.exec_tasks.is_closed() {
                                     if let Err(e) = server.reload().await {
                                         eprintln!("keeping server {}: {e}", server.name());
                                     }
@@ -123,7 +120,7 @@ pub async fn run() -> Result<()> {
                             Ok((name, outcome)) => {
                                 if let Err(e) = outcome { eprintln!("listener {name} ended: {e}"); }
                                 if let Some(server) = servers.get_mut(&name) {
-                                    if !server.cancel.is_cancelled() {
+                                    if !server.exec_tasks.is_closed() {
                                         if let Err(e) = server.close().await { eprintln!("closing {name}: {e}"); }
                                     }
                                 }
@@ -139,9 +136,8 @@ pub async fn run() -> Result<()> {
     let shutdown = async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut result = Ok(());
-        // Cancel every identity before waiting for any application execution.
+        // Stop admission for every identity before waiting for application execution.
         for server in servers.values_mut() {
-            server.cancel.cancel();
             if dhttp::DhttpNetwork::global().is_ok() {
                 if let Err(e) = server.endpoint.stop_listening() {
                     result = Err(e.into());
@@ -149,7 +145,6 @@ pub async fn run() -> Result<()> {
             }
             server.sandbox.close();
             server.exec_tasks.close();
-            server.exec_slots.close();
         }
         let own = async {
             let mut outcome = Ok(());

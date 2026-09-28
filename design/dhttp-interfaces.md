@@ -2,7 +2,7 @@
 
 本清单定义当前设计；遵循[清单约束](README.md)。h3x 的既定接口、结构和协议行为保持不变。DHTTP 只封装 Endpoint、共享网络、连接复用、应用接入与流适配，不增加传输配额、交换控制、完成订阅或错误缓存。
 
-2026-09-26 按用户要求合并过碎实现并使用普通 `mod`：库根为 `src/dhttp.rs`，`endpoint.rs` 保留原资源声明并集中 Endpoint/连接/服务接入，`endpoint/network.rs` 集中 Network 生命周期与接口绑定，`endpoint/messages.rs` 集中请求和 Body 适配。子模块私有，既有无状态 helper 按调用需要使用 `pub(super)`；公开重导出路径、类型字段和调用行为保持不变。build.rs 生成的配置常量继续通过生成文件导入，不承担手写实现的模块拆分。
+2026-09-26 按用户要求合并过碎实现并使用普通 `mod`：库根为 `src/dhttp.rs`，`endpoint.rs` 保留 Endpoint/服务接入，`endpoint/messages.rs` 集中请求和 Body 适配。2026-09-27 用户进一步批准可替换的泛型 Network：`network.rs` 只保留通用池和服务驱动，`network/quic.rs` 与 `network/tcp.rs` 分别负责后端；`transport/quic.rs` 与 `transport/tcp.rs` 分别适配 h3x 的流接口。条件编译仅选择后端模块。build.rs 生成的配置常量继续通过生成文件导入。
 
 ## 1. 边界与现成类型
 
@@ -12,6 +12,7 @@
 - Endpoint 不提供 close；stop_listening 仅停止当前监听，随后可以重新 listen，同名出站请求继续复用连接。
 - Network 属于进程生命周期，不提供 shutdown；应用退出时逐个停止其 Endpoint 监听并回收自己的任务。
 - Pishoo 反代和 Lib 的出站只通过当前身份的 Endpoint；不增加其他 HTTP 传输或失败降级路径。
+- 用户批准 `tcp-mock` 编译特性和 Network 泛型化：默认后端为 QuicTransport；测试后端为 TcpTransport，通过单条回环 TCP 连接复用 h3x 的双向请求流与单向控制/QPACK 流。独立进程的客户端仍调用 Endpoint，标准 HTTP 请求与响应继续经过 h3x。TCP mock 不验证 QUIC、TLS 对端认证或路径发现。
 - Pishoo 只等待自己的应用任务；DHTTP 不提供 finished、ExchangeControl、RequestInfo 或 Peer。
 
 直接复用 http/http-body、http-body-util、Tower、Tokio、tokio-util、async-stream 和 scopeguard。以下签名省略这些现成类型的 use 声明。
@@ -26,7 +27,7 @@ pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
 pub type RequestFuture = Pin<Box<
     dyn Future<Output = Result<http::Response<Body>>> + Send + 'static,
 >>;
-type ErasedService = tower::util::BoxCloneService<
+type BoxService = tower::util::BoxCloneService<
     http::Request<Body>, http::Response<Body>, BoxError,
 >;
 type ConnectionKey = (Arc<str>, Arc<str>); // 本端规范化名称、远端规范化名称
@@ -98,28 +99,37 @@ let response = endpoint.get(uri)
 
 ```rust
 pub struct DhttpNetwork {
-    listeners: Mutex<HashMap<Arc<str>, ListenerEntry>>,
-    pool: h3x::Pool<ConnectionKey, QuicTransport, Error>,
-    bindings: Mutex<HashMap<(String, IpAddr), Binding>>,
-    addresses: qprotocol::AddressBook,
+    network: Network<ActiveTransport>,
+}
+struct Network<T: h3x::Transport> {
+    listeners: Mutex<HashMap<Arc<str>, active::ListenerEntry>>,
+    pool: h3x::Pool<ConnectionKey, T, Error>,
+    backend: active::BackendState,
 }
 impl DhttpNetwork {
     pub async fn init() -> Result<&'static Self>;
     pub fn global() -> Result<&'static Self>;
 }
 
-struct Binding {
-    socket: Arc<qprotocol::UdpSocket>,
-    scopes: Scopes,
-    device_index: u32,
+mod quic {
+    struct BackendState {
+        bindings: Mutex<HashMap<(String, IpAddr), Binding>>,
+        addresses: qprotocol::AddressBook,
+    }
+    struct Binding {
+        socket: Arc<qprotocol::UdpSocket>,
+        scopes: Scopes,
+        device_index: u32,
+    }
 }
+mod tcp { struct BackendState; } // 监听 socket 由 listen future 持有
 ```
 
-Network 持有现成的 h3x Pool，按本端与远端规范化名称组成的键复用连接。同名 Endpoint 的请求在 await 时访问同一个池，不在 Endpoint 或 Request 中另存连接池。连接供不同请求并发开启独立双向流；不可复用的连接由 h3x Pool 按既有规则替换。入站匿名连接不进入复用池，其接入 driver 持有实际连接并负责退出时释放。
+泛型 Network 持有现成的 h3x Pool，按本端与远端规范化名称组成的键复用连接。同名 Endpoint 的请求在 await 时访问同一个池，不在 Endpoint 或 Request 中另存连接池。每次构建只选择一种后端，不能在一次请求失败后降级到另一种后端。默认 QUIC 连接供不同请求并发开启独立双向流；测试后端在 TCP 帧上分发相同的 h3x 流 ID 和关闭信号。入站匿名连接不进入复用池，其接入 driver 持有实际连接并负责退出时释放。
 
 Network 不保存 TaskTracker 或全局取消 token。listen 自己等待其 supervisor 的 JoinHandle；读写 driver 持有实际连接/原生流，在各自退出分支释放资源。确需等待并发子任务时，由该操作的局部 JoinSet 负责，不建立全局任务账本。Network 只初始化一次，保持到进程退出；Pishoo `run` 返回不表示池与后台维护任务已关闭。
 
-Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。网络维护任务根据当前监听更新 AddressBook/协议/Dock 登记；当没有监听范围时撤销对应绑定。设备和地址变化重新应用当前有效监听登记的范围。
+QUIC BackendState 的 Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。QUIC 网络维护任务根据当前监听更新 AddressBook/协议/Dock 登记；当没有监听范围时撤销对应绑定。TCP 后端只绑定 `DHTTP_TCP_MOCK_PORTS` 显式指定的回环端口。
 
 超时和队列容量使用模块内部常量：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES、ACCEPT_QUEUE_CAPACITY。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
 
@@ -127,18 +137,24 @@ Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.loca
 
 ```rust
 struct ListenerEntry {
-    service: Mutex<ErasedService>,
+    service: Mutex<BoxService>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     owner: Arc<qconn::Server>,
     scopes: Scopes,
 }
+// tcp-mock 构建在 network/tcp.rs 中使用：
+type ListenerEntry = Arc<TcpListenerData>;
+struct TcpListenerData {
+    service: Mutex<BoxService>,
+    shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
 ```
 
-没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。name 已是 Network 表键；scopes 用于当前接口绑定的范围并集，shutdown sender 的存在表示本次监听仍有效。
+上方第一个 ListenerEntry 属于默认 QUIC 后端；scopes 用于当前接口绑定的范围并集，owner 指向 qconn 登记。tcp-mock 的 ListenerEntry 使用 Arc 使旧监听的清理不会移除同名新监听，关闭 sender 的存在表示本次监听仍有效。没有 ListenerPhase、ListenGuard、ServiceAdapter 或监听专用状态机。
 
-为了让同一服务表接收不同具体类型的 Router/handler，直接组合现成 Tower 工具：map_err 把 S::Error 转为 BoxError，map_response 把响应 body 装箱，boxed_clone 得到 ErasedService。每请求克隆实例后通过现成 oneshot 或 ready+call 驱动同一个实例，不把 readiness 和 call 分给不同克隆。
+为了让同一服务表接收不同具体类型的 Router/handler，直接组合现成 Tower 工具：map_err 把 S::Error 转为 BoxError，map_response 把响应 body 装箱，boxed_clone 得到 BoxService。每请求克隆实例后通过现成 oneshot 或 ready+call 驱动同一个实例，不把 readiness 和 call 分给不同克隆。
 
-监听提交顺序：
+默认 QUIC 后端的监听提交顺序：
 
 1. 先异步读取并验证凭据，期间尚未占用监听名称；随后创建供本次监听使用的局部 oneshot 通道。
 2. 锁住 listeners，检查名称尚未监听且 qconn 注册表没有同名登记。
@@ -152,6 +168,8 @@ ListenerEntry.shutdown 是本次监听的一次性停止 sender；supervisor 观
 stop_listening 取走当前登记的 shutdown sender 并发送停止信号，在 listeners 锁内按 owner 的 Arc 指针撤销真实 qconn 登记；当前无登记时返回 Ok(())。supervisor 随后移除旧表项并回收已接受连接。stop_listening 不等待旧任务结束，也不关闭连接池中的出站连接。
 
 qconn 接收回调捕获本次监听名称。接受结果经固定有界交接队列交 supervisor；队列满或接收方消失时立即关闭该连接。回调在 listeners 锁下要求 shutdown sender 仍存在；stop_listening 先取走 sender，使旧回调不能接到新登记。迟到结果直接关闭。supervisor 清理本次 qconn owner。
+
+tcp-mock 后端先绑定 `DHTTP_TCP_MOCK_PORTS` 中本名称对应的回环端口，再登记 Service；每个被接受的 TCP 连接构造一个 TcpTransport 与 H3Connection，随后使用相同的 serve_connection/serve_exchange。停止监听发送 shutdown 并撤销本次登记，不改变其他同名 Endpoint 句柄。
 
 ## 5. 连接复用与进程生命周期
 
@@ -178,9 +196,34 @@ struct QuicTransport {
 }
 struct RecvStream(qtransport::StreamReader);
 struct SendStream(qtransport::StreamWriter);
+// 仅 tcp-mock：
+type BiStream = (u64, (TcpReader, TcpWriter));
+type UniStream = (u64, TcpReader);
+struct TcpTransport {
+    handshake: Arc<qtls::HandshakeSummary>,
+    role: h3x::Role,
+    next_bi: AtomicU64,
+    next_uni: AtomicU64,
+    outgoing: mpsc::Sender<WireFrame>,
+    register: mpsc::UnboundedSender<(u64, DuplexStream)>,
+    incoming_bi: Mutex<mpsc::UnboundedReceiver<BiStream>>,
+    incoming_uni: Mutex<mpsc::UnboundedReceiver<UniStream>>,
+    closed: watch::Sender<bool>,
+}
+impl TcpTransport {
+    fn new(socket: tokio::net::TcpStream, role: h3x::Role,
+        handshake: Arc<qtls::HandshakeSummary>) -> Self;
+}
+struct TcpReader { io: Option<DuplexStream>, id: u64, outgoing: mpsc::Sender<WireFrame> }
+struct TcpWriter { io: Option<DuplexStream>, id: u64, outgoing: mpsc::Sender<WireFrame> }
+enum WireFrame { OpenBi(u64), OpenUni(u64), Data(u64, Bytes), Fin(u64), Reset(u64), Close }
 ```
 
 保留已有 Transport/AsyncRead/AsyncWrite/StopSending/CancelStream/TransportError 实现；不增加自定义关联方法、成员或 Drop 行为。这些既有 trait 的方法签名保持原样。QuicTransport 直接转发 native 开流、接流和 close；Recv/Send 直接转发 I/O 与取消，不增加广播、统计或完成状态。
+
+TcpTransport 仅测试构建启用。一条 TCP socket 上以类型、h3x 流 ID、长度分帧；有界通道把每个逻辑流的字节送入 h3x 所需的双向或单向 AsyncRead/AsyncWrite。客户端与服务端在不同进程，不共享流句柄或监听登记。它模拟流开启、DATA、FIN、取消及关闭，不能代表 QUIC 的拥塞控制、RESET 错误码、TLS 验证或路径发现。测试 HandshakeSummary 使用本端证书能力且 remote=None。
+
+TCP mock 的 `TcpReader::stop` 仅关闭本端读取方向。单个 `Reset(stream_id)` 帧指向对端接收方向，不能拿它表示 STOP_SENDING，否则拒绝请求体时会误断同一双向流的响应；完整的对端停止发送和错误码传播仍属于本 mock 未覆盖的 QUIC 语义。
 
 DHTTP 对每条已建立连接只启动一次请求接入循环；可复用的出站连接由 Network 的池持有，入站连接由接入 driver 持有。连接接受请求时取得当前名称的监听 Service，没有有效监听则拒绝本次请求，不关闭仍用于其他请求的连接。
 
@@ -218,4 +261,4 @@ pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::Rem
 4. Service/代理/WASI 使用标准 Body；适配器只桥接数据、trailers 与原有流结束语义。
 5. stop_listening → 撤当前监听，保留连接复用；剩余全局资源随进程退出结束。
 
-没有 OwnerKey、自定义 ConnectionKey 结构、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留的自有结构只有 Endpoint、Request、DhttpNetwork、ListenerEntry、Binding、QuicTransport、RecvStream、SendStream；Error 沿用现有类型。
+没有 OwnerKey、自定义 ConnectionKey 结构、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。默认后端保留 Endpoint、Request、DhttpNetwork、泛型 Network、ListenerEntry、BackendState、Binding、QuicTransport、RecvStream、SendStream；tcp-mock 额外使用上列 TcpTransport、TcpReader、TcpWriter、WireFrame 与本后端 ListenerEntry。Error 沿用现有类型。
