@@ -17,7 +17,7 @@ use super::{HostOutgoing, LibPolicy, StoreData};
 impl WasiHttpHooks for HostOutgoing {
     fn send_request(
         &mut self,
-        mut request: Request<HyperOutgoingBody>,
+        request: Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
         let endpoint = self
@@ -26,20 +26,9 @@ impl WasiHttpHooks for HostOutgoing {
             .ok_or(types::ErrorCode::HttpRequestDenied)?
             .clone();
         if self.cancel.is_cancelled()
-            || self.remaining_requests == 0
             || !outgoing_allowed(&self.policy, request.method(), request.uri())
         {
             return Err(types::ErrorCode::HttpRequestDenied.into());
-        }
-        self.remaining_requests -= 1;
-        let reserved: Vec<_> = request
-            .headers()
-            .keys()
-            .filter(|name| name.as_str().starts_with("pishoo-"))
-            .cloned()
-            .collect();
-        for name in reserved {
-            request.headers_mut().remove(name);
         }
         let cancel = self.cancel.clone();
         let children = self.children.clone();
@@ -244,15 +233,15 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
             )
             .map_err(|_| VerifyError::Failed);
         }
-        if let Some(remote) = &self.remote {
-            if name == remote.name() {
-                return dhttp::certificate::verify_signature(
-                    remote.public_key().as_ref(),
-                    &data,
-                    &signature,
-                )
-                .map_err(|_| VerifyError::Failed);
-            }
+        if let Some(remote) = &self.remote
+            && name == remote.name()
+        {
+            return dhttp::certificate::verify_signature(
+                remote.public_key().as_ref(),
+                &data,
+                &signature,
+            )
+            .map_err(|_| VerifyError::Failed);
         }
         let endpoint = self
             .outgoing
@@ -262,12 +251,9 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         let uri = format!("https://{name}/")
             .parse()
             .map_err(|_| VerifyError::InvalidIdentity)?;
-        if self.outgoing.remaining_requests == 0
-            || !outgoing_allowed(&self.outgoing.policy, &Method::GET, &uri)
-        {
+        if !outgoing_allowed(&self.outgoing.policy, &Method::GET, &uri) {
             return Err(VerifyError::Unavailable);
         }
-        self.outgoing.remaining_requests -= 1;
         let remote = tokio::select! {
             biased;
             _ = self.outgoing.cancel.cancelled() => return Err(VerifyError::Unavailable),

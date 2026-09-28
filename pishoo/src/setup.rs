@@ -1,5 +1,5 @@
 //! Read and validate identity service configuration.
-use std::collections::HashSet;
+use std::{collections::HashSet, net::SocketAddr};
 
 use dhttp_home::identity::IdentityProfile;
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
@@ -9,7 +9,7 @@ use crate::{Error, Result};
 #[derive(Clone, Debug)]
 pub(crate) struct ServerConfig {
     pub(crate) listen: u8,
-    pub(crate) ssh: bool,
+    pub(crate) exec: bool,
     pub(crate) proxy_locations: Vec<ProxyLocation>,
 }
 #[derive(Debug)]
@@ -50,7 +50,7 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
             "unsupported schema {version}"
         )));
     }
-    let mut stmt = tx.prepare("SELECT listen, ssh FROM settings")?;
+    let mut stmt = tx.prepare("SELECT listen, exec FROM settings")?;
     let mut rows = stmt.query([])?;
     let Some(row) = rows.next()? else {
         return Err(Error::InvalidConfig(
@@ -65,10 +65,10 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
             ));
         }
     };
-    let ssh = match row.get_ref(1)? {
+    let exec = match row.get_ref(1)? {
         ValueRef::Integer(0) => false,
         ValueRef::Integer(1) => true,
-        _ => return Err(Error::InvalidConfig("ssh must be 0 or 1".into())),
+        _ => return Err(Error::InvalidConfig("exec must be 0 or 1".into())),
     };
     if rows.next()?.is_some() {
         return Err(Error::InvalidConfig(
@@ -93,32 +93,29 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
                 "invalid or reserved proxy location: {location}"
             )));
         }
-        let proxy_pass: http::Uri = upstream
+        let bare_address = upstream.parse::<SocketAddr>().ok();
+        let uri = bare_address
+            .map(|address| format!("http://{address}"))
+            .unwrap_or_else(|| upstream.clone());
+        let proxy_pass: http::Uri = uri
             .parse()
             .map_err(|_| Error::InvalidConfig("invalid proxy URI".into()))?;
-        let name = dhttp_identity::name::DhttpName::try_from(profile.name().to_owned())
-            .map_err(|e| Error::InvalidConfig(e.to_string()))?;
-        let proxy_pass = name
-            .expand_uri(proxy_pass)
-            .map_err(|e| Error::InvalidConfig(e.to_string()))?;
-        let host = proxy_pass.host().unwrap_or_default();
-        let canonical = dhttp_home::normalize_name(host);
-        if !matches!(proxy_pass.scheme_str(), Some("http" | "https"))
-            || !host.ends_with(".dhttp.net")
-            || canonical.is_none()
-            || proxy_pass
-                .authority()
-                .is_none_or(|a| a.as_str().contains('@'))
+        let address = proxy_pass
+            .authority()
+            .and_then(|authority| authority.as_str().parse::<SocketAddr>().ok());
+        if proxy_pass.scheme_str() != Some("http")
+            || address.is_none_or(|address| !address.ip().is_loopback() || address.port() == 0)
             || upstream.contains(['?', '#', '$'])
         {
             return Err(Error::InvalidConfig(
-                "proxy_pass must identify a DHTTP endpoint".into(),
+                "proxy_pass must identify a local HTTP/TCP endpoint".into(),
             ));
         }
         let mut proxy_pass = proxy_pass.into_parts();
-        if upstream
-            .split_once("://")
-            .is_some_and(|(_, rest)| !rest.contains('/'))
+        if bare_address.is_some()
+            || uri
+                .split_once("://")
+                .is_some_and(|(_, rest)| !rest.contains('/'))
         {
             proxy_pass.path_and_query = None;
         }
@@ -131,7 +128,7 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
     tx.commit()?;
     Ok(ServerConfig {
         listen,
-        ssh,
+        exec,
         proxy_locations,
     })
 }
@@ -153,6 +150,7 @@ fn reserved(path: &str) -> bool {
         "/workspace-api",
         "/.pishoo",
         "/exec",
+        "/file",
     ]
     .iter()
     .any(|prefix| {

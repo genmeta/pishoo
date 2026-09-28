@@ -16,7 +16,7 @@ CLIENT = ROOT / "target/debug/examples/pishoo-client"
 SERVER = ROOT / "target/debug/pishoo"
 SETUP = ROOT / "target/debug/examples/setup-tcp-demo"
 DEMO_URL = "https://demo.dhttp.net/api/echo/echo"
-DEMO_PORTS = "demo.dhttp.net=18472,upstream.dhttp.net=18473"
+DEMO_PORTS = "demo.dhttp.net=18472"
 
 
 def build(transport: str, local_demo: bool) -> None:
@@ -45,7 +45,7 @@ def local_tcp_demo(env: dict[str, str]) -> None:
                     raise RuntimeError(f"Pishoo exited with status {server.returncode}")
                 try:
                     ready = subprocess.run(
-                        [CLIENT, "get", "/hello.txt"],
+                        [CLIENT, "get", "/file/hello.txt"],
                         cwd=ROOT,
                         env=env,
                         stdout=subprocess.DEVNULL,

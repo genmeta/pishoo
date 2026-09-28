@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn replacing_an_unpolled_body_reaps_only_its_producer() {
+async fn replacing_an_unpolled_body_keeps_other_execution_running() {
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
     let lib = load(STREAM, directory.path(), cancel.clone());
@@ -20,13 +20,6 @@ async fn replacing_an_unpolled_body_reaps_only_its_producer() {
         drop(body);
         Full::new(Bytes::from_static(b"replacement"))
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while tasks.len() != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
     assert!(!cancel.is_cancelled());
     assert!(other.body_mut().frame().await.unwrap().unwrap().is_data());
     assert_eq!(
@@ -34,13 +27,15 @@ async fn replacing_an_unpolled_body_reaps_only_its_producer() {
         "replacement"
     );
     drop(other);
+    cancel.cancel();
     reaped(&tasks).await;
 }
 
 #[tokio::test]
-async fn dropping_pending_execute_releases_upload_and_reaps_guest() {
+async fn dropping_pending_execute_leaves_guest_owned_until_lib_cancel() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(READ, directory.path(), CancellationToken::new());
+    let cancel = CancellationToken::new();
+    let lib = load(READ, directory.path(), cancel.clone());
     let tasks = TaskTracker::new();
     let invocation = invoke(lib, &tasks).await;
     let (tx, body) = upload();
@@ -48,6 +43,7 @@ async fn dropping_pending_execute_releases_upload_and_reaps_guest() {
     tokio::task::yield_now().await;
     execute.abort();
     assert!(execute.await.unwrap_err().is_cancelled());
+    cancel.cancel();
     reaped(&tasks).await;
     assert!(tx.is_closed());
 }
@@ -123,12 +119,11 @@ async fn executions_survive_version_replacement_and_cancel_together() {
         },
         TaskTracker::new(),
     );
-    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
-async fn guest_join_failure_is_reported_once_and_cancels_producer() {
-    let cancel = CancellationToken::new();
+async fn guest_join_failure_is_reported_once() {
     let guest = tokio::spawn(async {
         panic!("guest task panic");
         #[allow(unreachable_code)]
@@ -139,11 +134,9 @@ async fn guest_join_failure_is_reported_once_and_cancels_producer() {
             .map_err(|never| match never {})
             .boxed_unsync(),
         guest: Some(guest),
-        cancel_on_drop: cancel.clone().drop_guard(),
     };
     assert!(matches!(body.frame().await.unwrap(), Err(Error::Task(_))));
     assert!(body.frame().await.is_none());
-    assert!(cancel.is_cancelled());
 }
 
 #[tokio::test]

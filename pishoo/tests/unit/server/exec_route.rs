@@ -1,5 +1,5 @@
 use super::*;
-use crate::{routes::build_router, setup::ServerConfig};
+use crate::routes::{authorize, file_router, proxy_pass, worksapce};
 
 #[tokio::test]
 async fn exec_route_is_mounted_inside_the_application_router() {
@@ -25,24 +25,20 @@ async fn exec_route_is_mounted_inside_the_application_router() {
         )
         .await
         .unwrap();
-    let exec = exec_router(
+    let exec = exec(
         true,
         endpoint.name().to_owned(),
         profile.path().to_path_buf(),
         TaskTracker::new(),
     );
-    let app = build_router(
-        endpoint,
-        access,
-        exec,
-        &ServerConfig {
-            listen: 0,
-            ssh: true,
-            proxy_locations: vec![],
-        },
-        &profile,
-    )
-    .unwrap();
+    let app = Router::new()
+        .merge(worksapce(access.clone(), profile.name(), endpoint.name()))
+        .merge(exec)
+        .merge(file_router(profile.join("file")))
+        .fallback(any(move |request: Request<AxumBody>| {
+            proxy_pass(vec![], request)
+        }))
+        .layer(axum::middleware::from_fn_with_state(access, authorize));
     let certificate = rcgen::generate_simple_self_signed(vec!["alice.dhttp.net".into()]).unwrap();
     let local = dhttp::LocalAuthority::new(
         &qtls::default_provider(),

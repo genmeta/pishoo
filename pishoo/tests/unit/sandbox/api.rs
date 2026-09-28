@@ -58,7 +58,7 @@ async fn status(router: &Router, method: Method, path: &str) -> StatusCode {
 
 #[tokio::test]
 async fn api_methods_require_manifest_entries_and_namespace_never_falls_through() {
-    let sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
         &sandbox,
@@ -66,10 +66,8 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         r#"{"/run":{"get":{},"post":{}},"/explicit":{"head":{},"options":{}}}"#,
         CancellationToken::new(),
     );
-    let router = sandbox.api_router(
-        dhttp::Endpoint::load("alice").await.unwrap(),
-        &BTreeMap::from([("test".into(), lib)]),
-    );
+    sandbox.libs.insert("test".into(), lib);
+    let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
     for (method, path, expected) in [
         (
             Method::GET,
@@ -113,7 +111,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
 }
 
 #[tokio::test]
-async fn routers_keep_their_candidate_snapshot_and_cancel_deleted_versions() {
+async fn routers_keep_their_lib_snapshot_and_cancel_deleted_versions() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
@@ -123,19 +121,17 @@ async fn routers_keep_their_candidate_snapshot_and_cancel_deleted_versions() {
         r#"{"/old":{"post":{}}}"#,
         cancel.clone(),
     );
-    let candidate = BTreeMap::from([("test".into(), old)]);
+    sandbox.libs.insert("test".into(), old);
     let endpoint = dhttp::Endpoint::load("alice").await.unwrap();
-    let old_router = sandbox.api_router(endpoint.clone(), &candidate);
-    sandbox.replace_libs(candidate);
+    let old_router = sandbox.api_router(endpoint.clone());
     let new = load(
         &sandbox,
         directory.path(),
         r#"{"/new":{"post":{}}}"#,
         cancel.clone(),
     );
-    let candidate = BTreeMap::from([("test".into(), new)]);
-    let new_router = sandbox.api_router(endpoint, &candidate);
-    sandbox.replace_libs(candidate);
+    sandbox.libs.insert("test".into(), new);
+    let new_router = sandbox.api_router(endpoint);
     for (router, present, absent) in [
         (&old_router, "/api/test/old", "/api/test/new"),
         (&new_router, "/api/test/new", "/api/test/old"),
@@ -150,17 +146,8 @@ async fn routers_keep_their_candidate_snapshot_and_cancel_deleted_versions() {
         );
     }
     assert!(!cancel.is_cancelled());
-    sandbox.replace_libs(BTreeMap::new());
+    sandbox.close();
     assert!(cancel.is_cancelled());
-    for (router, path) in [
-        (&old_router, "/api/test/old"),
-        (&new_router, "/api/test/new"),
-    ] {
-        assert_eq!(
-            status(router, Method::POST, path).await,
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-    }
 }
 
 #[tokio::test]
@@ -173,8 +160,8 @@ async fn routed_executions_exceed_four_concurrent_requests_and_close_reaps_them(
         r#"{"/run":{"post":{}}}"#,
         CancellationToken::new(),
     );
-    sandbox.replace_libs(BTreeMap::from([("test".into(), lib)]));
-    let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap(), &sandbox.libs);
+    sandbox.libs.insert("test".into(), lib);
+    let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
     assert_eq!(
         status(&router, Method::POST, "/api/test/run").await,
         StatusCode::INTERNAL_SERVER_ERROR
@@ -206,9 +193,5 @@ async fn routed_executions_exceed_four_concurrent_requests_and_close_reaps_them(
     sandbox.close();
     sandbox.wait().await.unwrap();
     assert!(sandbox.tasks.is_empty());
-    assert_eq!(
-        status(&router, Method::POST, "/api/test/run").await,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
     drop(responses);
 }

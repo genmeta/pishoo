@@ -26,7 +26,7 @@ async fn run() -> Result<(), Failure> {
     match command.as_str() {
         "smoke" => {
             for (path, expected) in [
-                ("/hello.txt", "static from demo\n"),
+                ("/file/hello.txt", "static from demo\n"),
                 ("/proxy/hello.txt", "static from upstream\n"),
                 ("/exact", "static from upstream\n"),
                 ("/api/info/info", "info Lib handled /info\n"),
@@ -61,7 +61,7 @@ async fn run() -> Result<(), Failure> {
                 let endpoint = endpoint.clone();
                 async move {
                     let (path, expected) = if index % 2 == 0 {
-                        ("/hello.txt", "static from demo\n")
+                        ("/file/hello.txt", "static from demo\n")
                     } else {
                         ("/proxy/hello.txt", "static from upstream\n")
                     };
@@ -178,6 +178,48 @@ async fn run() -> Result<(), Failure> {
             response.into_body().collect().await?;
             println!("h3x/TCP duplex Echo: each chunk arrived before upload EOF");
 
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let frames = futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|frame| (frame, rx))
+            });
+            let body = StreamBody::new(Box::pin(frames)).boxed_unsync();
+            let duplex_uri: http::Uri = "https://demo.dhttp.net/duplex".parse()?;
+            let mut response =
+                tokio::time::timeout(Duration::from_secs(5), endpoint.post(duplex_uri).body(body))
+                    .await??;
+            if response.version() != http::Version::HTTP_3
+                || response.status() != http::StatusCode::OK
+            {
+                return Err(io::Error::other("local proxy duplex status failed").into());
+            }
+            for chunk in [b"proxy-first\n".as_slice(), b"proxy-second\n".as_slice()] {
+                tx.send(Ok::<_, dhttp::BoxError>(Frame::data(
+                    Bytes::copy_from_slice(chunk),
+                )))
+                .await
+                .map_err(|_| io::Error::other("local proxy upload stopped early"))?;
+                let mut echoed = Vec::new();
+                while echoed.len() < chunk.len() {
+                    let frame =
+                        tokio::time::timeout(Duration::from_secs(5), response.body_mut().frame())
+                            .await?
+                            .ok_or_else(|| {
+                                io::Error::other("local proxy response ended early")
+                            })??;
+                    echoed.extend_from_slice(
+                        &frame.into_data().map_err(|_| {
+                            io::Error::other("local proxy returned a non-data frame")
+                        })?,
+                    );
+                }
+                if echoed != chunk {
+                    return Err(io::Error::other("local proxy duplex chunk mismatch").into());
+                }
+            }
+            drop(tx);
+            tokio::time::timeout(Duration::from_secs(5), response.into_body().collect()).await??;
+            println!("h3x/TCP local proxy duplex: each chunk arrived before upload EOF");
+
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             let frames = futures::stream::unfold(rx, |mut rx| async move {
                 rx.recv().await.map(|frame| (frame, rx))
@@ -195,7 +237,7 @@ async fn run() -> Result<(), Failure> {
                 .ok_or_else(|| io::Error::other("cancel test response ended early"))??;
             drop(response);
             drop(tx);
-            let uri: http::Uri = "https://demo.dhttp.net/hello.txt".parse()?;
+            let uri: http::Uri = "https://demo.dhttp.net/file/hello.txt".parse()?;
             let follow_up =
                 tokio::time::timeout(Duration::from_secs(5), endpoint.get(uri)).await??;
             if follow_up.status() != http::StatusCode::OK

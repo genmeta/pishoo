@@ -70,11 +70,13 @@ genmeta identity apply
 
 ### Current development configuration
 
-Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, ssh)` row and a `proxy_locations(location, proxy_pass)` table. `ssh=1` enables `POST /exec` for the same verified identity; it runs one host command with the Pishoo service account's permissions. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema and current behavior.
+Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, exec)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. `exec=1` enables `POST /exec` for the same verified identity; it runs one host command with the Pishoo service account's permissions. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema and current behavior.
+
+Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/file/{path}`. The `/file` path itself is unavailable; configured proxy locations handle other matching paths.
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen` or `ssh` require a restart.
+Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen` or `exec` require a restart.
 
 For an interactive Echo over the TCP stream backend, run:
 
@@ -82,7 +84,7 @@ For an interactive Echo over the TCP stream backend, run:
 ./pishoo/examples/echo-interactive.py --transport tcp
 ```
 
-This builds the native client, creates temporary sample identities, starts Pishoo, and opens **one full-duplex POST**. Type lines and see each `echo>` reply without ending the upload. Ctrl-D finishes the request; Ctrl-C exits and stops the temporary server.
+This builds the native client, creates a temporary sample identity, starts Pishoo, and opens **one full-duplex POST**. Type lines and see each `echo>` reply without ending the upload. Ctrl-D finishes the request; Ctrl-C exits and stops the temporary server.
 
 The same example can use QUIC with an already running Pishoo endpoint and a configured local DHTTP identity:
 
@@ -94,9 +96,9 @@ DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
 
 The QUIC endpoint must already be reachable, and daccess must allow that source identity to call the Echo API. To connect to an existing TCP mock server, supply `DHTTP_HOME`, `DHTTP_TCP_MOCK_PORTS`, `--transport tcp`, `--identity`, and `--url`.
 
-The `tcp-mock` build runs the normal `pishoo` binary against any existing `DHTTP_HOME` profile. `DHTTP_TCP_MOCK_PORTS` maps each identity name to a loopback port. The sample setup is separate from the server: it explicitly allows anonymous access to the static/proxy paths used by the demo and reads the final `lib.wasm` OpenAPI sections to allow the demo Lib routes. Other anonymous paths remain denied; TCP transport does not grant access.
+The `tcp-mock` build runs the normal `pishoo` binary against any existing `DHTTP_HOME` profile. `DHTTP_TCP_MOCK_PORTS` maps each identity name to a loopback port. The sample setup is separate from the server: it explicitly allows anonymous access to the static/proxy paths used by the demo and reads the final `lib.wasm` OpenAPI sections to allow the demo Lib routes. The smoke script starts a local HTTP server for the proxy upstream. Other anonymous paths remain denied; TCP transport does not grant access.
 
-The TCP adapter carries h3x bidirectional request streams and unidirectional control/QPACK streams over loopback TCP. It exercises dhttp's H3 request/response and Body adapters, Pishoo routes, and WASM execution. It does not exercise QUIC, TLS peer authentication, or path discovery. The automated TCP test is in [tests/h3x-tcp-smoke.sh](pishoo/tests/h3x-tcp-smoke.sh).
+The TCP adapter carries h3x bidirectional request streams and unidirectional control/QPACK streams over loopback TCP. It exercises dhttp's H3 request/response and Body adapters, Pishoo routes, the local HTTP proxy with a duplex upload/response, and WASM execution. It does not exercise QUIC, TLS peer authentication, or path discovery. The automated TCP test is in [tests/h3x-tcp-smoke.sh](pishoo/tests/h3x-tcp-smoke.sh).
 
 The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are included; to rebuild them, run `./pishoo/tools/build-wasm-demo.sh` with `wasm-tools` and the Rust `wasm32-unknown-unknown` target installed.
 

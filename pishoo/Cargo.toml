@@ -27,7 +27,6 @@ base64 = "0.22"
 sha2 = "0.10"
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
-fs2 = "0.4"
 cap-std = "4"
 percent-encoding = "2"
 mime_guess = "2"
@@ -37,8 +36,10 @@ bytes = "1"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "process", "net"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 nix = { version = "0.31", features = ["user", "signal", "process"] }
 wasmtime = "47.0.4"
@@ -47,6 +48,7 @@ wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = 
 oas3 = { version = "0.22.0", default-features = false }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 qtls = { path = "../../dquic/qtls" }

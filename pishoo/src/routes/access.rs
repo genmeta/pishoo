@@ -75,11 +75,7 @@ pub(crate) async fn authorize(
     next.run(request).await
 }
 
-pub(crate) fn management_router(
-    access: Arc<AccessService>,
-    profile: &str,
-    owner_name: &str,
-) -> Router {
+pub(crate) fn worksapce(access: Arc<AccessService>, profile: &str, owner_name: &str) -> Router {
     let context = serde_json::json!({ "profile": profile, "owner_name": owner_name, "development_identity": false, "demo_data": false, "version": env!("CARGO_PKG_VERSION") });
     access_control::management_router(access)
         .route(

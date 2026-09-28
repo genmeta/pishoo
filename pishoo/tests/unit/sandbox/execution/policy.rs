@@ -5,10 +5,7 @@ async fn outgoing_fixture_is_denied_by_default() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(OUTGOING, directory.path(), CancellationToken::new());
     let tasks = TaskTracker::new();
-    let mut request = request("/absent/small/normal?probe=1", empty());
-    request
-        .headers_mut()
-        .insert("pishoo-client-identity", "alice.dhttp.net".parse().unwrap());
+    let request = request("/absent/small/normal?probe=1", empty());
     let result = invoke(lib, &tasks).await.execute(request).await;
     assert!(result.is_err());
     reaped(&tasks).await;
@@ -90,7 +87,6 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
         outgoing: HostOutgoing {
             endpoint: None,
             policy: LibPolicy::default(),
-            remaining_requests: 16,
             children: TaskTracker::new(),
             cancel: CancellationToken::new(),
         },
@@ -137,7 +133,6 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
         store.verify(vec![], vec![], "bob".into()).await,
         Err(VerifyError::Unavailable)
     ));
-    assert_eq!(store.outgoing.remaining_requests, 16);
     store.outgoing.cancel.cancel();
     assert!(matches!(
         store.sign(vec![]).await,
@@ -151,7 +146,7 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
 }
 
 #[tokio::test]
-async fn host_outgoing_requires_identity_and_retains_the_fixed_buffer_limits() {
+async fn host_outgoing_requires_identity_without_request_quota() {
     let mut host = HostOutgoing {
         endpoint: None,
         policy: LibPolicy {
@@ -162,7 +157,6 @@ async fn host_outgoing_requires_identity_and_retains_the_fixed_buffer_limits() {
             }],
             ..LibPolicy::default()
         },
-        remaining_requests: 16,
         children: TaskTracker::new(),
         cancel: CancellationToken::new(),
     };
@@ -182,15 +176,16 @@ async fn host_outgoing_requires_identity_and_retains_the_fixed_buffer_limits() {
         between_bytes_timeout: Duration::from_secs(1),
     };
     assert!(host.send_request(make_request(), config()).is_err());
-    assert_eq!(host.remaining_requests, 16);
     host.endpoint = Some(dhttp::Endpoint::load("alice").await.unwrap());
-    host.remaining_requests = 0;
-    assert!(host.send_request(make_request(), config()).is_err());
-    host.remaining_requests = 16;
+    for _ in 0..17 {
+        assert!(host.send_request(make_request(), config()).is_ok());
+    }
     host.cancel.cancel();
     assert!(host.send_request(make_request(), config()).is_err());
-    assert_eq!(host.remaining_requests, 16);
-    assert!(host.children.is_empty());
+    host.children.close();
+    tokio::time::timeout(Duration::from_secs(5), host.children.wait())
+        .await
+        .unwrap();
     assert_eq!(host.outgoing_body_buffer_chunks(), 1);
     assert_eq!(host.outgoing_body_chunk_size(), 16 * 1024);
 }
