@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use wasmparser::{Encoding, Parser, Payload};
 
-use crate::{Error, Result};
+use crate::{Error, Result, routes::reserved};
 
 pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
     let invalid = |s: &str| Error::InvalidComponent(s.into());
@@ -52,7 +52,10 @@ pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         .ok_or_else(|| invalid("missing OpenAPI paths"))?;
     let mut ids = HashSet::new();
     for (path, item) in paths {
-        if !valid_path(path) || path.contains(['{', '}']) || reserved(path) {
+        if !valid_path(path)
+            || path.contains(['{', '}'])
+            || reserved(path, &["/api", "/.pishoo", "/exec"])
+        {
             return Err(invalid("unsupported or reserved API path"));
         }
         if item.reference.is_some() {
@@ -77,26 +80,6 @@ fn valid_path(path: &str) -> bool {
         && !path.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-//TODO: 这里保留 /std /workspace？
-fn reserved(path: &str) -> bool {
-    [
-        "/api",
-        "/contact",
-        "/contacts",
-        "/acl",
-        "/workspace",
-        "/workspace-api",
-        "/.pishoo",
-        "/exec",
-    ]
-    .iter()
-    .any(|prefix| {
-        path == *prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
 fn check_refs(value: &serde_json::Value) -> Result<()> {
     match value {
         serde_json::Value::Object(values) => {

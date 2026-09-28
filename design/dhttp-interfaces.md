@@ -11,7 +11,7 @@
 - Network 在进程内初始化一次；负责实际连接、监听登记和后台任务。
 - Endpoint 不提供 close 或 stop_listening；同名出站请求继续复用连接。
 - Network 属于进程生命周期，不提供 shutdown；应用退出时回收自己的任务，监听 future 随运行时退出而结束。
-- Pishoo 的 Lib 出站只通过当前身份的 Endpoint；反代直接连接本机 HTTP/TCP 服务，不调用 dhttp Endpoint，也不在两条路径之间回退。
+- Pishoo 暂不提供 Lib 出站；反代直接连接本机 HTTP/TCP 服务，不调用 dhttp Endpoint。
 - 用户批准 `tcp-mock` 编译特性和 Network 泛型化：默认后端为 QuicTransport；测试后端为 TcpTransport，通过单条回环 TCP 连接复用 h3x 的双向请求流与单向控制/QPACK 流。独立进程的客户端仍调用 Endpoint，标准 HTTP 请求与响应继续经过 h3x。TCP mock 不验证 QUIC、TLS 对端认证或路径发现。
 - Pishoo 只等待自己的应用任务；DHTTP 不提供 finished、ExchangeControl、RequestInfo 或 Peer。
 
@@ -130,7 +130,7 @@ Network 不保存 TaskTracker 或全局取消 token。listen future 持有本次
 
 QUIC BackendState 的 Binding 没有额外方法或 Drop 机制，实际地址直接读取 socket.local_addr()，不另存副本。QUIC 网络维护任务根据当前监听更新 AddressBook/协议/Dock 登记；当没有监听范围时撤销对应绑定。TCP 后端只绑定 `DHTTP_TCP_MOCK_PORTS` 显式指定的回环端口。
 
-超时和流缓冲使用模块内部常量：CONNECT_TIMEOUT、OPERATION_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES。它们只规定单次操作或局部缓冲，不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
+连接超时和流缓冲使用模块内部常量：CONNECT_TIMEOUT、BODY_WINDOW_BYTES、BODY_READ_CHUNK_BYTES。dhttp 不设置开流、消息头或 Body 读写的单次操作超时；上层按需要取消请求 future 或丢弃 Body。连接超时和局部缓冲不构成全局/逐 Endpoint 配额。普通请求与 exec 的业务期限仍由 Pishoo 决定。
 
 ## 4. 应用服务接入
 
@@ -212,11 +212,12 @@ Body 只是标准 UnsyncBoxBody 别名，没有成员、方法、错误缓存或
 - 接收：在局部 StreamBody/async stream 中读原生数据，产生 Frame::data；数据 EOF 后交付已有 trailers。错误直接返回，之后不伪造 trailers。
 - 提前放弃：进入生成器前建立现成 scopeguard，持有原生接收方向；正常 EOF 后解除 guard，提前 Drop 调用已有 stop。无需自定义 Guard 类型。
 - 发送：标准 Body 的 DATA/trailers 写入原有 h3x 可写消息；正常 EOF 调用 shutdown，失败调用既有 cancel；与固定 h3x writer future 并发推进。
-- HEAD/204/304 等消息语义沿用 h3x。DHTTP 丢弃被抑制的应用 Body；Pishoo 的 guest 不因 Body 丢弃而被单独取消，后续 I/O 错误或 Lib 关闭决定其退出。
+- 出站上传：已启动的上传任务由现成 scopeguard 持有；调用方提前放弃请求 future 或响应 Body 时中止该任务，正常读完响应 Body 后允许仍在进行的上传自然完成。
+- HEAD/204/304 等消息语义沿用 h3x。DHTTP 丢弃被抑制的应用 Body；Pishoo 的 guest 不因 Body 丢弃而被单独取消，后续 I/O 结果或 guest 自身执行决定其退出。
 
 适配所需的纯模块内函数、闭包和 async 局部变量属于方法实现，不列成另一套冻结公共函数。标准适配不会反向要求 h3x 增加新的消息类型或生命周期接口。
 
-操作超时只作用于当前可观察的等待阶段，不声称观察到 h3x 未公开的 native 进度；不能给整个长流 writer future 套短总时长限制。exec 的固定执行期限由 Pishoo 自己落实。
+dhttp 的读写等待由流背压、EOF、错误和取消推进，不给开流、消息头、Body frame 或原生读写额外套定时器。调用方可取消所持有的请求 future 或丢弃 Body；exec 的固定执行期限由 Pishoo 自己落实。
 
 ## 8. 身份与签名接缝
 
@@ -227,7 +228,7 @@ pub fn verify_signature(spki: &[u8], data: &[u8], signature: &[u8]) -> Result<bo
 pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::RemoteAuthority>;
 ```
 
-这四个 certificate 函数是 Pishoo 的跨仓接缝，保留冻结。subject_id 沿现有 DHTTP SKI owner_hash 文本字节规范；sign/verify 复用既有规范算法；resolve_remote 取得实际握手验证的对端，不承诺离线或历史证书查询。凭据读取和信任装配继续复用现有 home/trust 内部代码，不新建身份结构。
+这四个 certificate 函数保留冻结。Pishoo 当前使用 subject_id、sign 和 verify_signature；subject_id 沿现有 DHTTP SKI owner_hash 文本字节规范，sign/verify 复用既有规范算法。resolve_remote 仍是 dhttp 接口，当前 Lib 宿主不调用它；它取得实际握手验证的对端，不承诺离线或历史证书查询。凭据读取和信任装配继续复用现有 home/trust 内部代码，不新建身份结构。
 
 成功入站先依据握手本端身份展开 URI authority 简写，并核对规范化 authority 的 host 与该身份一致；缺少本端身份、authority 或身份不匹配时直接返回 421，不调用应用 Service。authority 可带 `:序号` 后缀，作为将来与本端证书 DHTTP SKI 中 chain sequence 核对的地址信息；本版保留原值，不将它用作传输端口，也暂不校验该序号。随后把实际 HandshakeSummary 放入 request extensions；缺少摘要是接入错误，remote=None 才表示匿名。LocalAuthority 的签名能力留在可信宿主，guest 只经 Pishoo 授权的接口使用。出站忽略转带的可信身份 extensions，使用当前 Endpoint 的身份。
 

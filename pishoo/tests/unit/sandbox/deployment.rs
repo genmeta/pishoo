@@ -42,14 +42,13 @@ fn profile(root: &Path) -> IdentityProfile {
 }
 
 #[test]
-fn successful_load_replaces_libs_and_cancels_removed_versions() {
+fn successful_load_replaces_libs_and_removes_missing_versions() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     let alpha = sandbox.libs["alpha"].clone();
-    let beta = sandbox.libs["beta"].clone();
     let task = sandbox.tasks.token();
 
     std::fs::remove_dir_all(profile.join("lib/beta")).unwrap();
@@ -57,15 +56,13 @@ fn successful_load_replaces_libs_and_cancels_removed_versions() {
     sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
     assert!(!Arc::ptr_eq(&alpha, &replacement));
-    assert!(beta.cancel.is_cancelled());
-    assert!(!alpha.cancel.is_cancelled());
+    assert!(!sandbox.libs.contains_key("beta"));
     assert!(Arc::ptr_eq(&runtime, &sandbox.runtime));
     assert_eq!(sandbox.tasks.len(), 1);
 
     sandbox.close();
     sandbox.close();
     assert!(sandbox.libs.is_empty());
-    assert!(alpha.cancel.is_cancelled() && replacement.cancel.is_cancelled());
     assert!(sandbox.tasks.is_closed());
     assert_eq!(sandbox.tasks.len(), 1);
     drop(task);
@@ -85,18 +82,15 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
         Err(Error::InvalidComponent(_))
     ));
     assert!(Arc::ptr_eq(&original, &sandbox.libs["alpha"]));
-    assert!(!original.cancel.is_cancelled());
 }
 
 #[test]
-fn removing_lib_root_cancels_all_loaded_libs() {
+fn removing_lib_root_removes_all_loaded_libs() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
-    let alpha = sandbox.libs["alpha"].clone();
     std::fs::remove_dir_all(profile.join("lib")).unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert!(sandbox.libs.is_empty());
-    assert!(alpha.cancel.is_cancelled());
 }

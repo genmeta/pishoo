@@ -22,7 +22,7 @@ WASM 职责集中到 Sandbox 前的 Pishoo 检查点：`bc30231`，保存上一�
 
 测试代码统一放在各 crate 的 `tests/` 下：`unit/` 存放需要访问私有实现的单元测试，`support/` 存放内存流等测试工具，`cases/` 存放较长集成测试的分组。`src/` 仅保留测试模块挂载声明，不为测试扩大生产 API 的可见性。
 
-Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 合并为四个文件：`sandbox.rs` 负责组件管理和 API 路由，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责出站和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 页面放在 `pishoo/assets/`。
+Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 合并为四个文件：`sandbox.rs` 负责组件管理和 API 路由，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责 WASI HTTP 出站拒绝接缝和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 页面放在 `pishoo/assets/`。
 
 Pishoo 的其他实现按同样原则合并：`server.rs` 集中运行循环和单身份服务；`routes.rs` 集中分发与静态文件，`routes/access.rs` 负责授权和管理入口，`routes/proxy.rs` 负责反代；配置归 `setup.rs`，单命令宿主执行归 `exec.rs`。
 
@@ -32,9 +32,10 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 
 - h3x：既有消息读取方法在等待 HEADERS 前后保留明确的取消所有权；裸流 Drop、正常 EOF 和半关闭约定保持原样。
 - dhttp：全局 Network 持有以本端、远端规范化名称为键的 h3x 连接池；Endpoint 只持名称，不提供 close 或 stop_listening。同名 load 复用连接。Network 没有 shutdown，进程退出时结束其剩余传输与维护任务。
-- Pishoo：schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、加载失败直接返回、删除时取消旧版本。监听任务不保留句柄。
-- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API 和最小 Workspace 查看/审批界面。Lib 出站仍仅使用 DHTTP。
-- WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的独立监督任务、流式响应、身份签名与受限出站。
+- dhttp 操作等待：删除 `OPERATION_TIMEOUT` 及开流、消息头和 Body 读写的单次超时；保留连接超时与流背压。出站请求 future 或响应 Body 提前丢弃时，现成 scopeguard 中止尚未结束的上传任务。
+- Pishoo：schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、加载失败直接返回、删除时撤销入口。监听任务不保留句柄。
+- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API 和最小 Workspace 查看/审批界面。Lib 的 WASI HTTP 出站暂不实现。
+- WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的受跟踪 guest 任务、流式响应、身份签名与出站拒绝 hook。
 - exec：每 Server 的 `settings.exec`、与 Lib 合并的 `POST /exec` Router 分支、daccess 加同名身份准入、直接 argv、输入输出和单次执行限制、受跟踪的 Child 取消和回收。程序使用 Pishoo 当前非 root 服务账号权限，没有文件或网络隔离。
 
 原交互终端的安装布局探测、WASM shell WIT、帧协议和平台 helper 方案已按用户的新 v1 决定移除。单命令 exec 的标准输入输出采用有界 JSON/base64；不使用 PTY、shell 解释或子进程 IPC。
@@ -42,11 +43,11 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 用户明确确认的契约变更均已记录在冻结清单中：
 
 - `ProxyLocation.proxy_pass` 改为 `http::uri::Parts`，保留未写路径和显式 `/` 的差异。
-- Sandbox 集中持有 `libs: BTreeMap<String, Arc<Lib>>`、`runtime: Arc<WasmRuntime>`、`tasks: TaskTracker`；Server 删除独立的 Lib 集合和 WasmRuntime 引用，直接持有 `sandbox: Sandbox`。`run` 直接创建并共享 WasmRuntime。
+- Sandbox 集中持有 `libs: HashMap<String, Arc<Lib>>`、`runtime: Arc<WasmRuntime>`、`tasks: TaskTracker`；Server 删除独立的 Lib 集合和 WasmRuntime 引用，直接持有 `sandbox: Sandbox`。`run` 直接创建并共享 WasmRuntime。
 - 移除 DaemonConfig、Daemon、TerminalPolicy 和实例配置文件；`run` 的局部变量负责身份扫描、监听、串行重载与关闭，每个 Server 直接读取自己的 `db/config.db` 并持有 exec 任务跟踪器。
-- Sandbox 构造接收 WasmRuntime，`load_libs(&mut self)` 扫描成功后直接更新集合，`api_router` 从当前集合构建路由；同步 `close(&mut self)` 关闭准入、取消并清空 Lib；`wait(&self) -> Result<()>` 保持不变。Server 显式合并管理、Lib API、exec 和 `/file/{*path}` 静态路由，设置代理 fallback 与统一授权层；WASM 内部类型和 manifest 验证统一归 sandbox，`validate_lib` 的根级公开导出不变。
+- Sandbox 构造接收 WasmRuntime，`load_libs(&mut self)` 扫描成功后直接更新集合，`api_router` 从当前集合构建路由；同步 `close(&mut self)` 关闭任务登记并清空 Lib；`wait(&self) -> Result<()>` 保持不变。Server 显式合并管理、Lib API、exec 和 `/file/{*path}` 静态路由，设置代理 fallback 与统一授权层；WASM 内部类型和 manifest 验证统一归 sandbox，`validate_lib` 的根级公开导出不变。
 
-Sandbox 的关闭分为停止准入、清除 Lib 与等待任务回收；各 Lib 自己的 token 负责取消其执行。Server 继续直接持有 Endpoint、授权、完整 Router 与 exec 任务跟踪器，Lib 和 exec 都不限制并发数，删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及 `Error::Capacity`；保留单次执行的内存、fuel 和出站 I/O 超时，不设 WASM 总执行期限或出站次数上限。不新增内部锁、取消信号、派生计数或通用策略容器，也不把 Sandbox 描述为操作系统进程或容器隔离。
+Sandbox 的关闭分为停止准入、清除 Lib 与等待任务回收；在途 Lib 执行继续运行直到自行结束；关闭等待仍有15秒上限。Server 继续直接持有 Endpoint、授权、完整 Router 与 exec 任务跟踪器，Lib 和 exec 都不限制并发数，删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及 `Error::Capacity`；保留单次执行的内存和 fuel 限制，不设 WASM 总执行期限。不新增内部锁、取消信号、派生计数或通用策略容器，也不把 Sandbox 描述为操作系统进程或容器隔离。
 
 启动和重载都先让 Sandbox 扫描并加载 Lib，再构造 Lib Router 与完整 Router；扫描或编译失败直接返回，保留旧集合和路由。成功后同步替换完整 Router 与配置。Lib API 不自动写 daccess 规则；未匹配时使用 daccess 的默认策略，已有管理员规则保持原样。
 
@@ -75,7 +76,7 @@ listen 的 0/1/2/3 分别代表关闭/内网/外网/两者；exec 只能为 0/1�
 
 Lib API 默认拒绝登记后：Pishoo 50 项库测试通过，新增测试确认首次重载写入 `Deny/All`、管理员改为匿名允许后再次重载不会覆盖。h3x/TCP 集成脚本重新通过，演示环境显式放行的三个 Lib API、静态文件与两种代理均成功。
 
-2026-09-28 简化 Lib 加载与重载后：移除上述自动登记；`load_libs` 直接更新 Sandbox，`api_router` 从当前集合建路由。Pishoo 52 项库测试通过，覆盖加载失败保留旧版本、删除 Lib 或整个 lib 根目录后的取消、重载不写 ACL、未匹配规则的非 owner 拒绝与 owner 允许。
+2026-09-28 简化 Lib 加载与重载后：移除上述自动登记；`load_libs` 直接更新 Sandbox，`api_router` 从当前集合建路由。Pishoo 52 项库测试通过，覆盖加载失败保留旧版本、删除 Lib 或整个 lib 根目录后的入口撤销、重载不写 ACL、未匹配规则的非 owner 拒绝与 owner 允许。
 
 TCP 样例不再写根路径的匿名 Allow，只精确放行测试使用的 GET 静态/代理路径和从 WASM 清单解析出的 Lib 方法与路径；新增跨进程请求确认 `GET` 和带请求体的 `POST /unlisted` 均返回 403。TCP mock 的 StopSending 只释放本端读取方向，避免把双向流的响应方向误当作 request reset；它仍不模拟完整 QUIC STOP_SENDING 错误码传播。
 
@@ -93,7 +94,7 @@ Sandbox 拆分后：Pishoo 50 项测试通过，覆盖不同身份的执行槽�
 
 WASM 职责集中到 Sandbox 后：Pishoo 56 项测试通过，编译与格式检查通过。新增验证覆盖候选摘要改变时保留旧版本与取消状态、Router 快照共享执行额度、HEAD/OPTIONS 显式声明、API 命名空间隔离，以及通过实际 WASM 执行验证 Sandbox 关闭回收。
 
-取消 Lib 并发限制后：Pishoo 56 项测试通过，覆盖8个同时在途的实际 WASM 请求、跨版本6个在途执行的共同取消、关闭后旧 Router 拒绝执行，以及任务回收、内存/fuel 和超时约束。
+取消 Lib 并发限制后：Pishoo 56 项测试通过，覆盖8个同时在途的实际 WASM 请求、关闭后旧 Router 拒绝执行，以及任务回收、内存/fuel 和超时约束。
 
 改用普通 `mod`、库根文件改名及 Sandbox 四文件合并后：Pishoo 56 项测试、工作区全部目标编译检查和 `cargo fmt --all --check` 通过。
 
@@ -105,9 +106,17 @@ WASM 职责集中到 Sandbox 后：Pishoo 56 项测试通过，编译与格式�
 
 2026-09-28 全 Pishoo 精简后：移除实例锁、listener JoinSet、整体停机期限及 `Sandbox::verify_libs`；身份或 Lib 加载失败直接返回。运行入口与单身份服务合入 `server.rs`。51 项库测试通过，h3x/TCP 跨进程 smoke 脚本通过；该脚本需允许本机回环端口绑定。
 
-随后按用户明确决定移除 `Invocation.producer_cancel` 与 `LibResponseBody` 的两个 `cancel_on_drop` 字段。Body 丢弃不另行取消 guest；Lib 删除或关闭仍经 Lib token 取消。没有后续 I/O 的 guest 可能继续运行，直到自行结束或 Lib 关闭。
+随后按用户明确决定移除 `Invocation.producer_cancel` 与 `LibResponseBody` 的两个 `cancel_on_drop` 字段。Body 丢弃不另行取消 guest；Lib 删除或关闭不再主动取消在途执行。没有后续 I/O 的 guest 可能继续运行，直到自行结束。
 
 随后按用户要求删除 Server.close 的停止监听调用。Pishoo 不保留 listener 句柄，删除身份时关闭应用 Router 与任务，原监听持续到进程退出；同名身份恢复需要重启进程。当前 Pishoo 51 项库测试与 h3x/TCP smoke 脚本通过。
+
+随后按用户要求删除 dhttp 的 `OPERATION_TIMEOUT` 及全部使用点。dhttp 库测试 17 项通过，新增测试覆盖请求 future 和响应 Body 提前丢弃时上传任务的取消；`cargo fmt -p dhttp --check` 与两仓 `git diff --check` 通过。
+
+随后用户批准暂缓 Lib 出站：删除 `HostOutgoing`、`StoreData.outgoing` 和 `Invocation.endpoint`，移除出站子任务与取消链。`StoreData.deny_outgoing` 是 Wasmtime 所需的无状态 hook，始终拒绝 guest HTTP 出站；身份验证仅支持本端与当前握手对端。TaskTracker 直接跟踪 guest，反代本机 HTTP/TCP 保持独立。Pishoo 53 项库测试（含需要本机回环的代理测试）及所有 target 编译检查通过。
+
+随后用户批准删除 `LibResponseBody`：收到 outparam 后直接适配 Wasmtime 原生响应 Body，成功响应不再保存 guest JoinHandle 或等待其结果；TaskTracker 继续跟踪 guest。无响应时仍等待任务以报告错误。删除两项只验证旧包装行为的测试，并将上传错误测试调整为验证原生 Body 结束和任务回收。Pishoo 51 项库测试、所有 target 编译检查、格式及 diff 检查通过；其中两项本机 TCP 代理测试在允许回环绑定的环境下通过。
+
+随后用户批准不改 h3x、仅修正 dhttp 响应 Body 失败路径：转发 Body 返回错误时，先通过现有 `Response<Write>::cancel(H3_REQUEST_CANCELLED)` 取消响应流，再结束并发写入。内存 H3 测试现验证客户端收到部分数据后，继续读取会得到 `H3_REQUEST_CANCELLED`，而不只检查服务端错误。dhttp 的 17 项库测试及 8 项集成测试、格式和 diff 检查通过；未改 h3x 结构或接口。
 
 在各仓库执行：
 

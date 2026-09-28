@@ -1,109 +1,30 @@
 use super::*;
 
 #[tokio::test]
-async fn outgoing_fixture_is_denied_by_default() {
+async fn guest_http_outgoing_is_denied() {
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(OUTGOING, directory.path(), CancellationToken::new());
+    let lib = load(OUTGOING, directory.path());
     let tasks = TaskTracker::new();
-    let request = request("/absent/small/normal?probe=1", empty());
-    let result = invoke(lib, &tasks).await.execute(request).await;
+    let result = invoke(lib, &tasks)
+        .await
+        .execute(request("/absent/small/normal?probe=1", empty()))
+        .await;
     assert!(result.is_err());
     reaped(&tasks).await;
 }
 
-#[test]
-fn target_rules_reject_management_aliases_and_prefix_confusion() {
-    let policy = LibPolicy {
-        outgoing: vec![OutgoingRule {
-            methods: vec![Method::GET],
-            origin: "https://bob.dhttp.net".parse().unwrap(),
-            path_prefix: "/".into(),
-        }],
-        ..LibPolicy::default()
-    };
-    assert!(outgoing_allowed(
-        &policy,
-        &Method::GET,
-        &"https://bob.dhttp.net/api/weather?x=1".parse().unwrap()
-    ));
-    for path in [
-        "/acl",
-        "/acl/reviews/live",
-        "/contact",
-        "/contacts",
-        "/%61cl/review",
-        "/api/../acl",
-        "/api/%2e%2e/acl",
-        "/api%2facl",
-        "/%2561cl",
-        "/workspace-api/context",
-    ] {
-        assert!(
-            !outgoing_allowed(
-                &policy,
-                &Method::GET,
-                &format!("https://bob.dhttp.net{path}").parse().unwrap()
-            ),
-            "{path}"
-        );
-    }
-    assert!(!outgoing_allowed(
-        &policy,
-        &Method::POST,
-        &"https://bob.dhttp.net/api/weather".parse().unwrap()
-    ));
-    assert!(!outgoing_allowed(
-        &policy,
-        &Method::GET,
-        &"https://carol.dhttp.net/api/weather".parse().unwrap()
-    ));
-    let policy = LibPolicy {
-        outgoing: vec![OutgoingRule {
-            methods: vec![Method::GET],
-            origin: "https://bob.dhttp.net".parse().unwrap(),
-            path_prefix: "/api".into(),
-        }],
-        ..LibPolicy::default()
-    };
-    assert!(!outgoing_allowed(
-        &policy,
-        &Method::GET,
-        &"https://bob.dhttp.net/apiculture".parse().unwrap()
-    ));
-}
-
 #[tokio::test]
-async fn identity_signatures_require_capabilities_and_enforce_bounds() {
+async fn identity_signatures_enforce_bounds_and_handshake_scope() {
     use identity::pishoo::identity::signatures::{Host, SignError, VerifyError};
     let mut store = StoreData {
         table: ResourceTable::new(),
         wasi: WasiCtx::builder().build(),
         http: WasiHttpCtx::new(),
-        memory: MemoryLimits {
-            base: StoreLimitsBuilder::new().build(),
-            used: 0,
-            pending: 0,
-        },
-        outgoing: HostOutgoing {
-            endpoint: None,
-            policy: LibPolicy::default(),
-            children: TaskTracker::new(),
-            cancel: CancellationToken::new(),
-        },
+        memory: StoreLimits::default(),
+        deny_outgoing: DenyOutgoing,
         local: authority("alice.dhttp.net"),
         remote: None,
-        policy: LibPolicy::default(),
     };
-    assert!(matches!(
-        store.sign(b"message".to_vec()).await,
-        Err(SignError::Denied)
-    ));
-    assert!(matches!(
-        store.verify(vec![], vec![], "alice".into()).await,
-        Err(VerifyError::Unavailable)
-    ));
-    store.policy.sign = true;
-    store.policy.verify = true;
     let signature = store.sign(b"message".to_vec()).await.unwrap();
     assert!(
         store
@@ -133,59 +54,4 @@ async fn identity_signatures_require_capabilities_and_enforce_bounds() {
         store.verify(vec![], vec![], "bob".into()).await,
         Err(VerifyError::Unavailable)
     ));
-    store.outgoing.cancel.cancel();
-    assert!(matches!(
-        store.sign(vec![]).await,
-        Err(SignError::Unavailable)
-    ));
-    assert!(matches!(
-        store.verify(vec![], vec![], "alice".into()).await,
-        Err(VerifyError::Unavailable)
-    ));
-    drop(store);
-}
-
-#[tokio::test]
-async fn host_outgoing_requires_identity_without_request_quota() {
-    let mut host = HostOutgoing {
-        endpoint: None,
-        policy: LibPolicy {
-            outgoing: vec![OutgoingRule {
-                methods: vec![Method::GET],
-                origin: "https://bob.dhttp.net".parse().unwrap(),
-                path_prefix: "/api".into(),
-            }],
-            ..LibPolicy::default()
-        },
-        children: TaskTracker::new(),
-        cancel: CancellationToken::new(),
-    };
-    let make_request = || {
-        Request::get("https://bob.dhttp.net/api/data")
-            .body(
-                Empty::<Bytes>::new()
-                    .map_err(|never| match never {})
-                    .boxed_unsync(),
-            )
-            .unwrap()
-    };
-    let config = || OutgoingRequestConfig {
-        use_tls: true,
-        connect_timeout: Duration::from_secs(1),
-        first_byte_timeout: Duration::from_secs(1),
-        between_bytes_timeout: Duration::from_secs(1),
-    };
-    assert!(host.send_request(make_request(), config()).is_err());
-    host.endpoint = Some(dhttp::Endpoint::load("alice").await.unwrap());
-    for _ in 0..17 {
-        assert!(host.send_request(make_request(), config()).is_ok());
-    }
-    host.cancel.cancel();
-    assert!(host.send_request(make_request(), config()).is_err());
-    host.children.close();
-    tokio::time::timeout(Duration::from_secs(5), host.children.wait())
-        .await
-        .unwrap();
-    assert_eq!(host.outgoing_body_buffer_chunks(), 1);
-    assert_eq!(host.outgoing_body_chunk_size(), 16 * 1024);
 }

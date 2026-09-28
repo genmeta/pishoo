@@ -1,19 +1,17 @@
 //! Per-identity WASM components, host capabilities, and execution resources.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use dhttp_home::identity::IdentityProfile;
-use http::{Method, Uri};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
-use tokio::task::JoinHandle;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 use wasmtime::{
     Engine, StoreLimits,
     component::{Component, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, filesystem::WasiFilesystemCtx};
-use wasmtime_wasi_http::{WasiHttpCtx, p2::body::HyperOutgoingBody};
+use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::{Error, Result};
 
@@ -24,7 +22,7 @@ mod runtime;
 pub use manifest::validate_lib;
 
 pub(crate) struct Sandbox {
-    pub(crate) libs: BTreeMap<String, Arc<Lib>>,
+    pub(crate) libs: HashMap<String, Arc<Lib>>,
     pub(crate) runtime: Arc<WasmRuntime>,
     pub(crate) tasks: TaskTracker,
 }
@@ -35,89 +33,45 @@ pub(crate) struct WasmRuntime {
 }
 
 pub(crate) struct Lib {
-    pub(crate) id: String,
     pub(crate) digest: [u8; 32],
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
     runtime: Arc<WasmRuntime>,
     filesystem: WasiFilesystemCtx,
-    policy: LibPolicy,
-    pub(crate) cancel: CancellationToken,
-}
-
-pub(crate) struct LibPolicy {
-    pub(crate) data_write: bool,
-    pub(crate) outgoing: Vec<OutgoingRule>,
-    pub(crate) sign: bool,
-    pub(crate) verify: bool,
-}
-
-pub(crate) struct OutgoingRule {
-    pub(crate) methods: Vec<Method>,
-    pub(crate) origin: Uri,
-    pub(crate) path_prefix: String,
 }
 
 struct StoreData {
     table: ResourceTable,
     wasi: WasiCtx,
     http: WasiHttpCtx,
-    memory: MemoryLimits,
-    outgoing: HostOutgoing,
+    memory: StoreLimits,
+    deny_outgoing: DenyOutgoing,
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
-    policy: LibPolicy,
-}
-
-struct MemoryLimits {
-    base: StoreLimits,
-    used: usize,
-    pending: usize,
 }
 
 pub(crate) struct Invocation {
     lib: Arc<Lib>,
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
-    endpoint: dhttp::Endpoint,
     tasks: TaskTracker,
 }
 
-enum LibResponseBody {
-    Reading {
-        inner: HyperOutgoingBody,
-        guest: Option<JoinHandle<Result<()>>>,
-    },
-    Waiting {
-        guest: JoinHandle<Result<()>>,
-        trailers: Option<http::HeaderMap>,
-    },
-    Ended,
-}
-
-struct HostOutgoing {
-    endpoint: Option<dhttp::Endpoint>,
-    policy: LibPolicy,
-    children: TaskTracker,
-    cancel: CancellationToken,
-}
+struct DenyOutgoing;
 
 impl Sandbox {
     pub(crate) fn new(runtime: Arc<WasmRuntime>) -> Self {
         Self {
-            libs: BTreeMap::new(),
+            libs: HashMap::new(),
             runtime,
             tasks: TaskTracker::new(),
         }
     }
 
-    /// Close WASM task tracking and cancel every retained version through Lib tokens.
+    /// Close WASM task tracking and discard the published Lib set.
     /// Server separately clears the HTTP router and closes exec task tracking.
     pub(crate) fn close(&mut self) {
         self.tasks.close();
-        for lib in self.libs.values() {
-            lib.cancel.cancel();
-        }
         self.libs.clear();
     }
 
@@ -130,7 +84,7 @@ impl Sandbox {
 
     pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
         let root = profile.join("lib");
-        let mut candidates = BTreeMap::new();
+        let mut candidates = HashMap::new();
         match root.symlink_metadata() {
             Ok(metadata) if !metadata.file_type().is_dir() => {
                 return Err(Error::InvalidComponent(
@@ -138,9 +92,6 @@ impl Sandbox {
                 ));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                for lib in self.libs.values() {
-                    lib.cancel.cancel();
-                }
                 self.libs.clear();
                 return Ok(());
             }
@@ -178,24 +129,13 @@ impl Sandbox {
                 candidates.insert(id, lib.clone());
                 continue;
             }
-            let token = self
-                .libs
-                .get(&id)
-                .map_or_else(CancellationToken::new, |lib| lib.cancel.clone());
             let lib = Lib::load(
                 self.runtime.clone(),
-                id,
+                id.clone(),
                 &bytes,
                 &entry.path().join("data"),
-                LibPolicy::default(),
-                token,
             )?;
-            candidates.insert(lib.id.clone(), Arc::new(lib));
-        }
-        for (id, old) in &self.libs {
-            if !candidates.contains_key(id) {
-                old.cancel.cancel();
-            }
+            candidates.insert(id, Arc::new(lib));
         }
         self.libs = candidates;
         Ok(())
