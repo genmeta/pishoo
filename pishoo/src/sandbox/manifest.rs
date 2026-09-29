@@ -36,13 +36,8 @@ pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         return Err(invalid("lib.wasm must be a component"));
     }
     let document = document.ok_or_else(|| invalid("missing pishoo:openapi section"))?;
-    // Parsing first bounds recursion and validates JSON before the duplicate-key walk.
-    let value: serde_json::Value =
-        serde_json::from_slice(document).map_err(|e| Error::InvalidComponent(e.to_string()))?;
-    check_json_keys(document, &mut 0)?;
-    check_refs(&value)?;
     let openapi: oas3::OpenApiV3Spec =
-        serde_json::from_value(value).map_err(|e| Error::InvalidComponent(e.to_string()))?;
+        serde_json::from_slice(document).map_err(|e| Error::InvalidComponent(e.to_string()))?;
     if !openapi.openapi.starts_with("3.1.") {
         return Err(invalid("only OpenAPI 3.1.x is supported"));
     }
@@ -78,102 +73,4 @@ fn valid_path(path: &str) -> bool {
         && !path.contains(['?', '#', '%', '\\'])
         && !path.split('/').any(|p| p == "." || p == "..")
         && !path.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
-fn check_refs(value: &serde_json::Value) -> Result<()> {
-    match value {
-        serde_json::Value::Object(values) => {
-            if values
-                .get("$ref")
-                .is_some_and(|v| v.as_str().is_none_or(|s| !s.starts_with("#/")))
-            {
-                return Err(Error::InvalidComponent(
-                    "external references are unsupported".into(),
-                ));
-            }
-            for value in values.values() {
-                check_refs(value)?;
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                check_refs(value)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-// This walks already validated JSON. Key strings are decoded before comparison.
-fn check_json_keys(bytes: &[u8], index: &mut usize) -> Result<()> {
-    skip_space(bytes, index);
-    match bytes[*index] {
-        b'{' => {
-            *index += 1;
-            let mut keys = HashSet::new();
-            loop {
-                skip_space(bytes, index);
-                if bytes[*index] == b'}' {
-                    *index += 1;
-                    break;
-                }
-                let start = *index;
-                skip_string(bytes, index);
-                let key: String =
-                    serde_json::from_slice(&bytes[start..*index]).expect("validated JSON string");
-                if !keys.insert(key) {
-                    return Err(Error::InvalidComponent("duplicate JSON key".into()));
-                }
-                skip_space(bytes, index);
-                *index += 1; // colon
-                check_json_keys(bytes, index)?;
-                skip_space(bytes, index);
-                if bytes[*index] == b',' {
-                    *index += 1;
-                }
-            }
-        }
-        b'[' => {
-            *index += 1;
-            loop {
-                skip_space(bytes, index);
-                if bytes[*index] == b']' {
-                    *index += 1;
-                    break;
-                }
-                check_json_keys(bytes, index)?;
-                skip_space(bytes, index);
-                if bytes[*index] == b',' {
-                    *index += 1;
-                }
-            }
-        }
-        b'"' => skip_string(bytes, index),
-        _ => {
-            while *index < bytes.len()
-                && !matches!(
-                    bytes[*index],
-                    b',' | b']' | b'}' | b' ' | b'\n' | b'\r' | b'\t'
-                )
-            {
-                *index += 1;
-            }
-        }
-    }
-    Ok(())
-}
-fn skip_space(bytes: &[u8], index: &mut usize) {
-    while *index < bytes.len() && bytes[*index].is_ascii_whitespace() {
-        *index += 1;
-    }
-}
-fn skip_string(bytes: &[u8], index: &mut usize) {
-    *index += 1;
-    while bytes[*index] != b'"' {
-        if bytes[*index] == b'\\' {
-            *index += 1;
-        }
-        *index += 1;
-    }
-    *index += 1;
 }

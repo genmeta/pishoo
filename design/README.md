@@ -108,6 +108,8 @@
 
 2026-09-28 用户批准暂缓 Lib 出站并删除相关状态：移除 `StoreData.outgoing`、`HostOutgoing` 和 `Invocation.endpoint`，以 `StoreData.deny_outgoing: DenyOutgoing` 的无状态 WASI hook 明确拒绝所有 guest HTTP 出站。`Invocation::new` 仍接收 Endpoint 以核对握手本端身份。guest 直接由 TaskTracker 跟踪，不再创建出站子任务或取消信号；签名验证仅使用本端或当前握手对端的公钥。反代本机 HTTP/TCP 不受此变更影响。
 
+2026-09-28 用户要求 OpenAPI JSON 以 oas3 反序列化成功为准，删除额外的重复键与外部引用扫描；路径级引用因无法提供路由方法仍拒绝。`validate_lib` 签名及其他路径、版本和组件校验不变。
+
 ## 文档清理
 
 本仓此前的接入稿、Pishoo API 草案、数据库重设计、WASM HTTP 适配、身份沙盒、终端旧稿及旧架构图由本组文档替代。仍有效的应用规则已归入架构说明和结构清单。

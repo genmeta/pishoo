@@ -35,7 +35,7 @@ impl Clone for ProxyLocation {
 mod tests;
 
 pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
-    let db = profile.db_dir().join("config.db");
+    let db = profile.config_db_path();
     if !db.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
             "config.db must be a regular file".into(),

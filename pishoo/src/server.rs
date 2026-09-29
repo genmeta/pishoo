@@ -141,22 +141,20 @@ fn exec(enabled: bool, name: String, cwd: PathBuf, tasks: TaskTracker) -> Router
 
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
-        let identity = profile
-            .load_identity()
+        let certs = profile
+            .load_certs()
             .await
             .map_err(|e| Error::InvalidIdentity(e.to_string()))?;
-        if identity.name != profile.name() {
-            return Err(Error::IdentityMismatch);
-        }
         let endpoint = dhttp::Endpoint::load(profile.name()).await?;
         let config = load_server_config(&profile)?;
-        let subject =
-            access_control::SubjectId::new(dhttp::certificate::subject_id(&identity.certs)?)
-                .map_err(|_| Error::InvalidIdentity("invalid certificate subject".into()))?;
+        let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certs)
+            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
+        let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
+            .map_err(|_| Error::InvalidIdentity("invalid certificate subject".into()))?;
         std::fs::create_dir_all(profile.db_dir())?;
         let uri = format!("sqlite://{}?mode=rwc", profile.access_db_path().display());
         let access = Arc::new(
-            access_control::AccessService::load_from_db(&uri, &identity.name, &subject).await?,
+            access_control::AccessService::load_from_db(&uri, profile.name(), &subject).await?,
         );
         let exec_tasks = TaskTracker::new();
         let mut sandbox = Sandbox::new(runtime);

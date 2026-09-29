@@ -8,7 +8,7 @@ use super::*;
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
-    let db = Connection::open(profile.db_dir().join("config.db")).unwrap();
+    let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(1,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
@@ -18,7 +18,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
     let profile = profile(root.path());
     assert_eq!(load_server_config(&profile).unwrap().listen, 1);
     assert!(!load_server_config(&profile).unwrap().exec);
-    let db = Connection::open(profile.db_dir().join("config.db")).unwrap();
+    let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute(
         "INSERT INTO proxy_locations VALUES('/plain/','http://127.0.0.1:8080')",
         [],
@@ -114,7 +114,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
 fn exec_is_a_strict_server_setting() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.db_dir().join("config.db")).unwrap();
+    let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute("UPDATE settings SET exec=1", []).unwrap();
     assert!(load_server_config(&profile).unwrap().exec);
     db.execute("UPDATE settings SET exec=2", []).unwrap();
@@ -133,7 +133,7 @@ fn exec_is_a_strict_server_setting() {
 fn file_namespace_cannot_be_proxied() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.db_dir().join("config.db")).unwrap();
+    let db = Connection::open(profile.config_db_path()).unwrap();
     for location in ["/file", "/file/", "= /file/a"] {
         db.execute("DELETE FROM proxy_locations", []).unwrap();
         db.execute(
