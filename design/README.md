@@ -44,7 +44,7 @@
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 不持 Network、QUIC endpoint 或连接。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 与 exec 都不设并发名额。
-- 反代只允许本机 HTTP/TCP 上游；Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
+- 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{target}` 前缀，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
 - 2026-09-27 用户批准 `tcp-mock` 构建例外及泛型 Network：默认后端仍用 QUIC；测试后端把 h3x 的双向请求流和单向控制/QPACK 流复用在回环 TCP 上。测试客户端是独立进程中的 dhttp Endpoint，不经过 HTTP/1 桥；Pishoo 在测试连接上注入匿名远端摘要。已批准的 Network/后端成员变更见 dhttp 清单；h3x 接口不变，此验证不代表 QUIC、TLS 对端认证或路径发现通过。
 - dhttp 保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。Lib 暂不调用该出站接口。
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
@@ -55,7 +55,7 @@
 - 每个 Server 直接持有一个 Sandbox，集中拥有该身份的 Lib 集合、共享 WasmRuntime 引用与任务跟踪器；组件扫描、校验、版本替换、API 执行和 WASI 宿主能力均归 sandbox 模块。Lib 执行不限制并发数，不设置执行槽或 permit；Sandbox 不新增内部锁、取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
 - WASM 执行归 Pishoo；h3x 和 dhttp 不依赖 Pishoo 或 Wasmtime。
 - WASM 不设总执行时长期限；每次调用仍受 Store 中逐 linear memory 的内存限制、fuel 和 WASI 宿主能力约束，guest 任务由 TaskTracker 跟踪。
-- daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批在当前请求中等待库返回的结果，不新增审批状态结构或后台等待任务。Lib API 不自动登记访问规则，不建立导入账本。
+- daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批在当前请求中等待库返回的结果，不新增审批状态结构或后台等待任务。联系人通知由 Pishoo 使用现有 Endpoint 实现 daccess 的 ContactNotifier。Lib API 不自动登记访问规则，不建立导入账本。
 - 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 和 exec 各自管理实际执行资源。
 - 第一版串行加载/重载，Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；Sandbox 扫描时使用局部候选集合，校验成功后更新自身 Lib，再由 Server 构建并替换 Router。不建立 ServerState、Release 或 begin_build 发布流程。
 - Pishoo 启动时加载身份与配置，运行中仅在收到 SIGHUP 时扫描并串行重载；不定时轮询。`listen` 和 `exec` 变化仍需重启。
@@ -109,6 +109,10 @@
 2026-09-28 用户批准暂缓 Lib 出站并删除相关状态：移除 `StoreData.outgoing`、`HostOutgoing` 和 `Invocation.endpoint`，以 `StoreData.deny_outgoing: DenyOutgoing` 的无状态 WASI hook 明确拒绝所有 guest HTTP 出站。`Invocation::new` 仍接收 Endpoint 以核对握手本端身份。guest 直接由 TaskTracker 跟踪，不再创建出站子任务或取消信号；签名验证仅使用本端或当前握手对端的公钥。反代本机 HTTP/TCP 不受此变更影响。
 
 2026-09-28 用户要求 OpenAPI JSON 以 oas3 反序列化成功为准，删除额外的重复键与外部引用扫描；路径级引用因无法提供路由方法仍拒绝。`validate_lib` 签名及其他路径、版本和组件校验不变。
+
+2026-09-29 用户批准在 Pishoo 实现 daccess 既有的 `ContactNotifier`，由本 Server 的 Endpoint 直接发送联系人授权更新，不修改 daccess。冻结新增 `DhttpContactNotifier { endpoint }` 及其 trait 方法，并为管理路由装配函数增加 Endpoint 参数；Server 与 dhttp 均不新增成员。通知失败由 daccess 保留 Syncing 供重试。
+
+2026-09-29 用户批准新增同名身份专用的 DHTTP 正向代理：`/.pishoo/dhttp/{target}` 及其子路径由 `routes::forward_dhttp(endpoint, request) -> Response` 处理，复用 Server 已有 Endpoint，不增加成员或替换本机 HTTP/TCP 代理。请求先经过 daccess 授权，再核对握手来访者与本 Server 同名且 SKI owner_hash 相同；目标仅为 DHTTP 名称。Lib 的 WASI HTTP 出站仍拒绝。
 
 ## 文档清理
 

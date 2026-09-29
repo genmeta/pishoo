@@ -47,10 +47,7 @@ pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         .ok_or_else(|| invalid("missing OpenAPI paths"))?;
     let mut ids = HashSet::new();
     for (path, item) in paths {
-        if !valid_path(path)
-            || path.contains(['{', '}'])
-            || reserved(path, &["/api", "/.pishoo", "/exec"])
-        {
+        if !valid_path(path) || path.contains(['{', '}']) || reserved(path) {
             return Err(invalid("unsupported or reserved API path"));
         }
         if item.reference.is_some() {

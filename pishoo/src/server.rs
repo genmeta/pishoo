@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result, exec,
-    routes::{authorize, file_router, proxy_pass, worksapce},
+    routes::{access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, load_server_config},
 };
@@ -161,7 +161,12 @@ impl Server {
         sandbox.load_libs(&profile)?;
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
-            .merge(worksapce(access.clone(), profile.name(), endpoint.name()))
+            .merge(access_router(
+                access.clone(),
+                endpoint.clone(),
+                profile.name(),
+                endpoint.name(),
+            ))
             .merge(sandbox.api_router(endpoint.clone()))
             .merge(exec(
                 config.exec,
@@ -170,6 +175,20 @@ impl Server {
                 exec_tasks.clone(),
             ))
             .merge(file_router(profile.join("file")))
+            .route(
+                "/.pishoo/dhttp/{target}",
+                any({
+                    let endpoint = endpoint.clone();
+                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
+                }),
+            )
+            .route(
+                "/.pishoo/dhttp/{target}/{*path}",
+                any({
+                    let endpoint = endpoint.clone();
+                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
+                }),
+            )
             .fallback(any(move |request: Request<AxumBody>| {
                 proxy_pass(proxies.clone(), request)
             }))
@@ -201,8 +220,9 @@ impl Server {
         self.sandbox.load_libs(&self.profile)?;
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
-            .merge(worksapce(
+            .merge(access_router(
                 self.access.clone(),
+                self.endpoint.clone(),
                 self.profile.name(),
                 self.endpoint.name(),
             ))
@@ -214,6 +234,20 @@ impl Server {
                 self.exec_tasks.clone(),
             ))
             .merge(file_router(self.profile.join("file")))
+            .route(
+                "/.pishoo/dhttp/{target}",
+                any({
+                    let endpoint = self.endpoint.clone();
+                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
+                }),
+            )
+            .route(
+                "/.pishoo/dhttp/{target}/{*path}",
+                any({
+                    let endpoint = self.endpoint.clone();
+                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
+                }),
+            )
             .fallback(any(move |request: Request<AxumBody>| {
                 proxy_pass(proxies.clone(), request)
             }))

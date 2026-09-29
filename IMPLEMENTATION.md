@@ -34,7 +34,7 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 - dhttp：全局 Network 持有以本端、远端规范化名称为键的 h3x 连接池；Endpoint 只持名称，不提供 close 或 stop_listening。同名 load 复用连接。Network 没有 shutdown，进程退出时结束其剩余传输与维护任务。
 - dhttp 操作等待：删除 `OPERATION_TIMEOUT` 及开流、消息头和 Body 读写的单次超时；保留连接超时与流背压。出站请求 future 或响应 Body 提前丢弃时，现成 scopeguard 中止尚未结束的上传任务。
 - Pishoo：schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、加载失败直接返回、删除时撤销入口。监听任务不保留句柄。
-- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API 和最小 Workspace 查看/审批界面。Lib 的 WASI HTTP 出站暂不实现。
+- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、同名身份专用的固定前缀 DHTTP 正向代理、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API、使用本身份 Endpoint 的联系人批准通知，以及最小 Workspace 查看/审批界面。Lib 的 WASI HTTP 出站暂不实现。
 - WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的受跟踪 guest 任务、流式响应、身份签名与出站拒绝 hook。
 - exec：每 Server 的 `settings.exec`、与 Lib 合并的 `POST /exec` Router 分支、daccess 加同名身份准入、直接 argv、输入输出和单次执行限制、受跟踪的 Child 取消和回收。程序使用 Pishoo 当前非 root 服务账号权限，没有文件或网络隔离。
 
@@ -118,6 +118,8 @@ WASM 职责集中到 Sandbox 后：Pishoo 56 项测试通过，编译与格式�
 
 随后用户批准不改 h3x、仅修正 dhttp 响应 Body 失败路径：转发 Body 返回错误时，先通过现有 `Response<Write>::cancel(H3_REQUEST_CANCELLED)` 取消响应流，再结束并发写入。内存 H3 测试现验证客户端收到部分数据后，继续读取会得到 `H3_REQUEST_CANCELLED`，而不只检查服务端错误。dhttp 的 17 项库测试及 8 项集成测试、格式和 diff 检查通过；未改 h3x 结构或接口。
 
+2026-09-29 用户批准 `/.pishoo/dhttp/{target}` 固定前缀的 DHTTP 正向代理。Pishoo 复用当前 Server 的 Endpoint，要求握手来访者同名且 SKI owner_hash 相同，重写目标 URI 与 Host，清理逐跳头和入站可信 extensions，流式传递请求及响应；配置反代仍只使用回环 HTTP/TCP，Lib WASI HTTP 出站仍拒绝。针对性测试覆盖根路径、query、编码路径、证书序号目标、非法目标及匿名拒绝；Pishoo 55 项库测试通过，其中两项本机 TCP 代理测试在允许回环绑定的环境中运行。真实跨端成功路径仍受下述 qconn 路径发现缺口限制。
+
 在各仓库执行：
 
 ```sh
@@ -137,6 +139,6 @@ cargo test --locked --offline --lib --test request_response --test stream_lifecy
 
 ## 尚未完成的验收
 
-- 当前 qconn 出站连接仍缺少实际路径发现；真实跨端请求尚不能据此宣称完成。这里保留其既有接口，以内存流验证上层通信行为。
+- 当前 qconn 出站连接仍缺少实际路径发现；真实跨端请求及联系人通知的成功路径尚不能据此宣称完成。ContactNotifier 已接入现有 Endpoint；无法建立对端连接时由 daccess 保留 Syncing 供重试。这里保留其既有接口，以内存流验证上层通信行为。
 - exec 使用服务账号权限，不提供 OS 沙箱。主动脱离本次进程组的后代不在本版回收保证内；不宣称支持交互终端或任意恶意命令的完整资源隔离。
 - Workspace 当前提供列表查看和审批操作；完整联系人/规则编辑交互仍待完善。管理 API 已直接使用当前 daccess 库。

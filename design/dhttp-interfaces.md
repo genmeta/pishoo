@@ -11,7 +11,7 @@
 - Network 在进程内初始化一次；负责实际连接、监听登记和后台任务。
 - Endpoint 不提供 close 或 stop_listening；同名出站请求继续复用连接。
 - Network 属于进程生命周期，不提供 shutdown；应用退出时回收自己的任务，监听 future 随运行时退出而结束。
-- Pishoo 暂不提供 Lib 出站；反代直接连接本机 HTTP/TCP 服务，不调用 dhttp Endpoint。
+- Pishoo 暂不提供 Lib 出站；配置反代直接连接本机 HTTP/TCP 服务，不调用 dhttp Endpoint。另有同名身份专用的固定前缀 DHTTP 正向代理，复用当前 Server 已有的 Endpoint，不改变 dhttp 接口。
 - 用户批准 `tcp-mock` 编译特性和 Network 泛型化：默认后端为 QuicTransport；测试后端为 TcpTransport，通过单条回环 TCP 连接复用 h3x 的双向请求流与单向控制/QPACK 流。独立进程的客户端仍调用 Endpoint，标准 HTTP 请求与响应继续经过 h3x。TCP mock 不验证 QUIC、TLS 对端认证或路径发现。
 - Pishoo 只等待自己的应用任务；DHTTP 不提供 finished、ExchangeControl、RequestInfo 或 Peer。
 

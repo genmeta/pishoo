@@ -8,7 +8,12 @@ fn test_router(
 ) -> Router {
     let proxies = config.proxy_locations.clone();
     Router::new()
-        .merge(worksapce(access.clone(), profile.name(), endpoint.name()))
+        .merge(access_router(
+            access.clone(),
+            endpoint.clone(),
+            profile.name(),
+            endpoint.name(),
+        ))
         .merge(file_router(profile.join("file")))
         .fallback(axum::routing::any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)

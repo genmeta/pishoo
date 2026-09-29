@@ -13,23 +13,29 @@ use tokio_util::io::ReaderStream;
 use self::proxy::proxy;
 use crate::{Error, Result, setup::ProxyLocation};
 mod access;
+mod outbound;
 
 mod proxy;
 
-pub(crate) use access::{authorize, worksapce};
+pub(crate) use access::{access_router, authorize};
+pub(crate) use outbound::forward_dhttp;
 
-pub(crate) fn reserved(path: &str, additional: &[&str]) -> bool {
+pub(crate) fn reserved(path: &str) -> bool {
     [
         "/contact",
         "/contacts",
         "/acl",
         "/workspace",
         "/workspace-api",
+        "/api",
+        "/.pishoo",
+        "/exec",
+        "/file",
     ]
     .into_iter()
-    .chain(additional.iter().copied())
     .any(|p| path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
+
 fn reject(error: Error) -> Response {
     let status = error.status();
     if status.is_server_error() {
@@ -60,7 +66,7 @@ pub(crate) async fn proxy_pass(
 ) -> Response {
     let result: Result<Response> = async {
         let path = request.uri().path();
-        if reserved(path, &["/api", "/.pishoo", "/exec", "/file"]) {
+        if reserved(path) {
             return Err(Error::RouteNotFound);
         }
         let exact = proxies

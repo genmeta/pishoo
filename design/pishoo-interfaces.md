@@ -8,7 +8,7 @@
 - Endpoint 独立 load；同名 Endpoint 经全局 Network 的同一本端身份池复用连接。Endpoint 不提供 close 或 stop_listening；Network 属于进程生命周期，不提供 shutdown。
 - Server 串行加载和重载。没有 ServerState、Release、revision、构建队列或后台发布任务。
 - WasmRuntime 只保存 Engine/Linker。编译按当前调用顺序执行，不建立编译任务注册表或并发槽。
-- 反代只连接本机 HTTP/TCP 上游；Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。没有 UpstreamKind、传输选择字段或失败回退。
+- 配置反代只连接本机 HTTP/TCP 上游；同名身份专用的 DHTTP 正向代理使用 Server 现有 Endpoint。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。没有 UpstreamKind、传输选择字段或失败回退。
 - `tcp-mock` 是用户批准的测试构建例外：Server.listen 仍调用 Endpoint.listen，独立进程中的测试客户端使用 Endpoint 请求；dhttp 后端用回环 TCP 流承载 h3x 双向与单向流。测试客户端经过 dhttp/h3x，反代上游使用普通本机 HTTP/TCP。此路径不验证 QUIC、TLS 对端认证或路径发现。
 - 一个 `.wasm` component 文件就是一个 Lib，不另设 App 概念。接收和响应复用下述标准 Body 别名。局部流转换不是新的模块接口。
 
@@ -30,7 +30,7 @@ type Result<T> = std::result::Result<T, Error>;
 | `sandbox/host.rs` | WASI HTTP 出站拒绝接缝和 identity WIT 宿主能力 |
 | `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
 
-子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str, additional: &[&str]) -> bool` 统一检查管理路径段前缀，并按调用场景检查额外保留路径。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。exec 模块接口见[exec 清单](exec-interfaces.md)。
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/api`、`/.pishoo`、`/exec`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。exec 模块接口见[exec 清单](exec-interfaces.md)。
 
 ## 2. 配置和固定默认值
 
@@ -85,6 +85,8 @@ impl Server {
 fn file_router(root: std::path::PathBuf) -> axum::Router;
 async fn proxy_pass(proxies: Vec<ProxyLocation>,
     request: http::Request<axum::body::Body>) -> axum::response::Response;
+async fn forward_dhttp(endpoint: dhttp::Endpoint,
+    request: http::Request<axum::body::Body>) -> axum::response::Response;
 ```
 
 `run` 以局部变量持有 home、Server 集合和共享 WasmRuntime。启动时加载一次；Unix 上收到 SIGHUP 后才扫描身份并串行处理 Server 加载、重载和删除，不定时轮询。监听任务启动后不保留 JoinHandle；监听错误仅记录日志，不自动关闭或移除 Server。退出时逐个关闭并回收 Server。每个 Server 直接持有 exec 任务跟踪器；`exec` 与 listen 的变更在重启后生效。Server.listen在返回future前克隆Endpoint和router，不借用Server；因此监听运行期间仍可 `reload(&mut self)`。
@@ -92,6 +94,8 @@ async fn proxy_pass(proxies: Vec<ProxyLocation>,
 每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
 reload 先读取配置，再调用 Sandbox.load_libs 扫描并更新 Lib 集合。Server 中显式合并管理、Lib API、exec 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败时直接返回错误，保留旧 Router、Lib 集合和配置。加载成功后构建完整 Router，一次替换，并更新 Server.config；其间没有 await 或可失败操作。没有部分挂入路由的中间状态。
+
+`/.pishoo/dhttp/{target}` 和 `/.pishoo/dhttp/{target}/{*path}` 在代理 fallback 之前挂载。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
 
 组件一次读出的bytes同时用于OpenAPI、摘要和编译，不在提交前重读文件。没有后台编译结果，也没有跨任务revision检查。删除与替换只由该actor执行。
 
@@ -111,8 +115,14 @@ async fn authorize(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response;
-fn management_router(access: std::sync::Arc<access_control::AccessService>,
-    profile: &str, owner_name: &str) -> axum::Router;
+struct DhttpContactNotifier { endpoint: dhttp::Endpoint }
+impl access_control::ContactNotifier for DhttpContactNotifier {
+    fn granted_update<'a>(&'a self, contact: &'a str, modified_since: i64, body: Vec<u8>)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output =
+            std::result::Result<(), access_control::NotifyError>> + Send + 'a>>;
+}
+fn access_router(access: std::sync::Arc<access_control::AccessService>,
+    endpoint: dhttp::Endpoint, profile: &str, owner_name: &str) -> axum::Router;
 ```
 
 可信身份使用 request extensions 中既有 HandshakeSummary；dhttp 已在交付 Service 前核对 local 与请求 authority。remote.name 及 certificates 构造库已有的 Visitor。summary 缺失是接入错误，存在且 remote=None 才是匿名；无效 SKI 拒绝。清除旧 Visitor 后注入新 Visitor；不用 ClientNameResolver、连接缓存或新身份 Context。
@@ -130,13 +140,13 @@ fn management_router(access: std::sync::Arc<access_control::AccessService>,
 
 当前库同时支持实时审批和带 RequestId 的持久审批；第一版 Pishoo 只使用 `request_id: None`，不定义 RequestId 的 HTTP 传输方式，也不替请求自动生成 ID。数据库中的既有持久记录继续由库的管理 API 处理。旧分支的 202 响应、status_url、状态路径识别函数及 `/contact/self` 专用协议不纳入本版接口。
 
-管理路由直接调用 `access_control::management_router(access)` 并 merge 在根，复用库当前的 `/contact`、`/contacts`、`/contact/{name}`、`/acl/*`；审批管理为 `GET /acl/reviews/live`、`GET /acl/reviews/persistent` 和 `PATCH /acl/review`。具体请求体、响应体与行归属校验交给库。所有管理路由同样通过 authorize，不保留旧状态查询的 ACL 豁免。Pishoo 不新增 notifier、出站审批连接器或重试队列。
+管理路由直接调用 `access_control::management_router_with_notifier(access, Some(notifier))` 并 merge 在根，复用库当前的 `/contact`、`/contacts`、`/contact/{name}`、`/acl/*`；审批管理为 `GET /acl/reviews/live`、`GET /acl/reviews/persistent` 和 `PATCH /acl/review`。具体请求体、响应体与行归属校验交给库。所有管理路由同样通过 authorize，不保留旧状态查询的 ACL 豁免。notifier 只持有本 Server 现有 Endpoint 的克隆，不增加身份、连接池、出站队列或重试状态。
 
 2026-09-28 用户要求 Lib API 不自动登记访问规则。未匹配规则时由 daccess 的默认策略处理：非 owner 拒绝，owner 允许。管理员可以通过现有管理 API 配置规则；Lib 加载、重载或删除不修改已有 ACL 规则。不增加 daccess 接口、Pishoo 策略状态或导入账本。
 
-此挂载未提供 ContactNotifier；需要远端通知的联系人 Syncing 操作按库返回 503，不能显示为同步完成。本版不承诺完成这条跨端同步流程。
+联系人 Syncing 操作由 daccess 向 `ContactNotifier` 提供目标名称、保存的更新时间和 JSON 字节；Pishoo 校验目标名称，把时间戳转换为 HTTP 日期，经本身份 Endpoint 发送 `PATCH https://{contact}/contact`，附带 `Content-Type: application/json` 与 `If-Modified-Since`。无法表示的时间戳返回错误。通知最多等待30秒，仅对端返回204并完成响应 Body 才报告成功；失败交回 daccess，由其保留 Syncing 供管理员再次发起批准。此出站属于管理操作，不开放 Lib 的 WASI HTTP 出站。
 
-Workspace 保留 `/workspace`、`/workspace/`、`/workspace/{*path}`；`/workspace-api/context` 返回已有 profile、owner_name、development_identity=false、demo_data=false、version 字段。此处 management_router 负责把这些 Pishoo 路由与库的管理路由组合；旧分支对应函数名为 management_app。管理前端按当前库 API 适配，不要求旧前端未经修改即可使用。
+Workspace 保留 `/workspace`、`/workspace/`、`/workspace/{*path}`；`/workspace-api/context` 返回已有 profile、owner_name、development_identity=false、demo_data=false、version 字段。此处 access_router 负责把这些 Pishoo 路由与库的管理路由组合；旧分支对应函数名为 management_app。管理前端按当前库 API 适配，不要求旧前端未经修改即可使用。
 
 Workspace、管理 API、静态/代理/Lib 入口统一套 authorize。Lib 在剥离 `/api/<LibId>` 前按完整对外路径授权。`/workspace` 返回 307 到 `/workspace/`；无扩展名深链回 index.html，缺失 asset 返回 404；没有 `/admin` 兼容路径。
 
@@ -250,7 +260,7 @@ TaskTracker 直接登记持有 Store 的 guest 任务，不设置 WASM 总执行
 
 静态和代理直接使用现成 Body；文件、上传源和上游响应由各自的流对象持有，提前 Drop 沿既有适配停止对应 I/O。上传自然 EOF 不取消响应方向。HEAD/204/304、middleware 替换 body 时丢弃旧 Body，不另行取消 guest；最终合法响应由 dhttp 继续发送。不需要通用租约 Body。
 
-## 8. 反代、Lib 出站拒绝与身份签名
+## 8. 本机反代、DHTTP 正向代理、Lib 出站拒绝与身份签名
 
 ```rust
 async fn proxy(route: ProxyLocation,
@@ -260,6 +270,8 @@ async fn proxy(route: ProxyLocation,
 WASI HTTP 的入站处理仍需 WasiHttpHooks；当前依赖关闭了默认网络发送器。StoreData 持有无状态 DenyOutgoing，send_request 一律返回 HttpRequestDenied，不创建连接、子任务或取消信号。Lib 出站能力留待单独设计。
 
 proxy 完成路径/query 与 authority 转换后，以 Hyper HTTP/1.1 客户端连接配置中的回环 TCP 地址；每个请求建立一条连接，不增加连接池状态。转发前按上游 authority 设置 Host、清理逐跳头，不自动生成 `X-Forwarded-*`。响应也清理逐跳头，Body 保持流式背压和错误传播；连接和响应头各有30秒期限，连接或响应头失败返回网关错误。
+
+DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations，不接受本机 HTTP/TCP 目标，也不回退到配置反代。它使用本 Server Endpoint 的凭据；对端看到的是影子身份的证书，不是调用手机的证书。其请求和响应 Body 复用标准适配与流背压，不增加自有传输状态。
 
 已有 `pishoo:identity/signatures@0.1.0` 的 sign/verify 保留。StoreData 检查固定输入上限；sign 直接使用 qtls::LocalAuthority 选择 DHTTP 规范签名算法。verify 只使用已验证的 local 或当前握手 remote 公钥；其他身份返回 Unavailable，不发起远端解析。使用 dhttp-home 的 verify_signature，不把私钥或 authority 交给 guest。
 
@@ -295,6 +307,6 @@ Error实现Display/Error。业务拒绝在headers前生成HTTP响应；headers�
 - 串行reload一次换Router；失败保留旧Router；旧请求持旧Lib，删除 Lib 不取消在途执行。
 - 按当前 daccess 库验证允许、拒绝、审批批准/否决/取消及 live 登记清理；管理 API 在根路径挂载并经过授权，管理界面与当前库一致。旧分支兼容不作为阻塞条件。
 - WASM提前响应继续上传、多值trailers、body替换、HEAD/204/304、超过4次并发执行及任务回收；Body丢弃不单独取消guest。
-- 反代仅连接回环 HTTP/TCP 服务；Lib 的 WASI HTTP 出站一律拒绝。验证代理响应分块在上传 EOF 前到达，上传保持打开且模拟空闲31秒后仍可双向传输。
+- 配置反代仅连接回环 HTTP/TCP 服务；同名身份的固定前缀 DHTTP 正向代理使用现有 Endpoint；Lib 的 WASI HTTP 出站一律拒绝。验证本机代理响应分块在上传 EOF 前到达，上传保持打开且模拟空闲31秒后仍可双向传输。
 - 同名 Endpoint 共享本端身份连接池；Server.close 清空应用 Router，但不停止监听，同名 Server 恢复需重启进程；其他身份不因服务关闭而中断。
 - exec 验证同名身份、输入输出限制、超时取消与子进程回收；本版不宣称文件或网络隔离。

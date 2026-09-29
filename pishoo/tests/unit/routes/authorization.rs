@@ -68,3 +68,50 @@ async fn abandoning_a_review_removes_its_live_registration() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn contact_approval_uses_notifier_and_keeps_syncing_after_failure() {
+    use access_control::NewContact;
+    use tower::ServiceExt;
+
+    let owner = "owner.dhttp.net";
+    let contact = "peer.dhttp.net";
+    let owner_subject = SubjectId::new([1]).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", owner, &owner_subject)
+            .await
+            .unwrap(),
+    );
+    access
+        .create_contact(NewContact {
+            name: contact.into(),
+            subject_id: SubjectId::new([2]).unwrap(),
+            class: String::new(),
+            description: String::new(),
+            requested_access: Default::default(),
+            offers: Default::default(),
+            created_at: i64::MAX - 1,
+            updated_at: i64::MAX - 1,
+            expired_after: i64::MAX,
+        })
+        .await
+        .unwrap();
+    let endpoint = dhttp::Endpoint::load(owner).await.unwrap();
+    let app = access_router(access.clone(), endpoint, owner, owner);
+    let mut request = Request::builder()
+        .method(Method::PATCH)
+        .uri(format!("/contact/{contact}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(AxumBody::from(r#"{"status":"syncing"}"#))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(Visitor::new(owner, owner_subject));
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        access.find_contact_by_name(contact).await.unwrap().status,
+        1
+    );
+}

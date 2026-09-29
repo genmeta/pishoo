@@ -33,6 +33,7 @@ mime_guess = "2"
 wasmparser = "0.259.0"
 
 bytes = "1"
+chrono = "0.4"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

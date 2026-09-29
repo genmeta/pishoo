@@ -28,6 +28,7 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
     assert!(validate_lib(&valid).is_ok());
     for broken in [
         document.replace("/echo", "/workspace"),
+        document.replace("/echo", "/file/a"),
         document.replace("/echo", "/{id}"),
         document.replace(
             "\"get\":",
