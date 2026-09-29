@@ -1,16 +1,66 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use access_control::{AccessService, Action, AuthResult, Headers, SubjectId, Visitor};
+use access_control::{
+    AccessService, Action, AuthResult, ContactNotifier, Headers, NotifyError, SubjectId, Visitor,
+};
 use axum::{
     Router,
     body::Body as AxumBody,
     response::{IntoResponse, Response},
     routing::any,
 };
-use http::{Method, Request, StatusCode, header};
+use bytes::Bytes;
+use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
+use http_body_util::{BodyExt, Full};
 
 use super::reject;
 use crate::Error;
+
+// Pishoo owns neither ContactNotifier nor Endpoint, so the trait needs a local type.
+struct DhttpContactNotifier {
+    endpoint: dhttp::Endpoint,
+}
+
+impl ContactNotifier for DhttpContactNotifier {
+    fn granted_update<'a>(
+        &'a self,
+        contact: &'a str,
+        modified_since: i64,
+        body: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), NotifyError>> + Send + 'a>> {
+        Box::pin(async move {
+            dhttp_home::validate_name(contact)?;
+            let uri: Uri = format!("https://{contact}/contact").parse()?;
+            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp(modified_since, 0)
+                .ok_or_else(|| std::io::Error::other("contact timestamp is not representable"))?;
+            let date =
+                HeaderValue::from_str(&timestamp.format("%a, %d %b %Y %H:%M:%S GMT").to_string())?;
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                let response = self
+                    .endpoint
+                    .patch(uri)
+                    .header(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )
+                    .header(header::IF_MODIFIED_SINCE, date)
+                    .body(Full::new(Bytes::from(body)))
+                    .await?;
+                if response.status() != StatusCode::NO_CONTENT {
+                    return Err(std::io::Error::other(format!(
+                        "contact notification returned {}",
+                        response.status()
+                    ))
+                    .into());
+                }
+                response.into_body().collect().await?;
+                Ok::<(), NotifyError>(())
+            })
+            .await?;
+            result
+        })
+    }
+}
 
 pub(crate) async fn authorize(
     axum::extract::State(access): axum::extract::State<Arc<AccessService>>,
@@ -77,27 +127,35 @@ pub(crate) async fn authorize(
     next.run(request).await
 }
 
-pub(crate) fn worksapce(access: Arc<AccessService>, profile: &str, owner_name: &str) -> Router {
+pub(crate) fn access_router(
+    access: Arc<AccessService>,
+    endpoint: dhttp::Endpoint,
+    profile: &str,
+    owner_name: &str,
+) -> Router {
     let context = serde_json::json!({ "profile": profile, "owner_name": owner_name, "development_identity": false, "demo_data": false, "version": env!("CARGO_PKG_VERSION") });
-    access_control::management_router(access)
-        .route(
-            "/workspace-api/context",
-            axum::routing::get(move || {
-                let context = context.clone();
-                async move { axum::Json(context) }
-            }),
-        )
-        .route(
-            "/workspace",
-            any(|| async {
-                (
-                    StatusCode::TEMPORARY_REDIRECT,
-                    [(header::LOCATION, "/workspace/")],
-                )
-            }),
-        )
-        .route("/workspace/", any(workspace))
-        .route("/workspace/{*path}", any(workspace))
+    access_control::management_router_with_notifier(
+        access,
+        Some(Arc::new(DhttpContactNotifier { endpoint })),
+    )
+    .route(
+        "/workspace-api/context",
+        axum::routing::get(move || {
+            let context = context.clone();
+            async move { axum::Json(context) }
+        }),
+    )
+    .route(
+        "/workspace",
+        any(|| async {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [(header::LOCATION, "/workspace/")],
+            )
+        }),
+    )
+    .route("/workspace/", any(workspace))
+    .route("/workspace/{*path}", any(workspace))
 }
 
 pub(super) async fn workspace(request: Request<AxumBody>) -> Response {

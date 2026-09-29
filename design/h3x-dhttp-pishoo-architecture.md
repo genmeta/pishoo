@@ -25,7 +25,7 @@ flowchart TB
     H --> Q
 ```
 
-Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store 或 exec 子进程。反代连接本机 HTTP/TCP 服务；Lib 的 WASI HTTP 出站暂不实现。
+Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store 或 exec 子进程。配置反代连接本机 HTTP/TCP 服务；同名身份专用的 DHTTP 正向代理在固定 `/.pishoo/dhttp/` 前缀使用 Server 的 Endpoint；Lib 的 WASI HTTP 出站暂不实现。
 
 ## 2. h3x 接口保持不变
 
@@ -90,7 +90,7 @@ Allowed 进入业务，Denied 返回 403；`Reviewing(id, state, registry)` 在�
 
 第一版填写 `Headers.request_id = None`，采用当前请求内审批。库已有绑定 RequestId 的持久审批能力，但本版不新增 RequestId 传输协议。旧分支的 202 响应和状态轮询不作为兼容要求。
 
-管理路由直接使用 `access_control::management_router`，包括 `/contact`、`/contacts`、`/acl/*`，在根路径挂载并通过同一授权层。具体路径、请求体和响应体以库为准；保留 `/workspace` 和 `/workspace-api/context` 的装配方式，管理前端按当前 API 适配。不保留旧状态查询的 ACL 豁免，不新增默认规则导入器或跨库账本。
+管理路由使用 `access_control::management_router_with_notifier`，包括 `/contact`、`/contacts`、`/acl/*`，在根路径挂载并通过同一授权层。Pishoo 的 ContactNotifier 复用本身份 Endpoint 向对端发送联系人授权更新，失败由库保留 Syncing 供重试。具体路径、请求体和响应体以库为准；保留 `/workspace` 和 `/workspace-api/context` 的装配方式，管理前端按当前 API 适配。不保留旧状态查询的 ACL 豁免，不新增默认规则导入器或跨库账本。
 
 ## 6. Pishoo 第一版配置
 
@@ -129,7 +129,7 @@ Endpoint.listen
   → 标准 HTTP 请求 + HandshakeSummary
   → Pishoo 本端绑定检查
   → daccess 授权与审批结果
-  → Router 的静态 / 代理 / Sandbox Lib API / exec 分支
+  → Router 的静态 / 本机代理 / DHTTP 正向代理 / Sandbox Lib API / exec 分支
   → 标准响应
   → dhttp 调用 h3x writer
 ```
@@ -146,9 +146,11 @@ Server 关闭时清空 Router、同步调用 Sandbox.close，并关闭 exec 任�
 
 WASM 产生响应头后可以继续读上传或写响应。响应使用 Wasmtime 原生 Body 的现成适配，guest 由 Sandbox 的 TaskTracker 跟踪；Body 不持有任务句柄，也不增加丢弃取消句柄或 XxxGuard 类型。
 
-## 9. 反代本机 HTTP，Lib 出站暂缓
+## 9. 本机反代与 DHTTP 正向代理，Lib 出站暂缓
 
 代理负责路由和路径转换，用 HTTP/1.1 客户端连接回环 TCP 地址；配置支持带路径的 `http://127.0.0.1:8080` 和裸 `127.0.0.1:8080`。代理清理 HTTP/3 与 HTTP/1.1 之间的逐跳头，按上游 authority 设置 Host，不自动生成 `X-Forwarded-*`。
+
+同名身份专用的 DHTTP 正向代理在 `/.pishoo/dhttp/{target}` 及其子路径接收请求。Pishoo 核对已验证来访者与本 Server 的名称和 SKI owner_hash，按路径中的目标名称构造 DHTTP URI，使用本 Server 的 Endpoint 转发并流式交付响应；不会继承来访者的可信身份 extensions，也不使用配置反代或 Lib 出站 hook。
 
 Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 hook 对 guest 发起的 HTTP 出站返回 HttpRequestDenied，不调用 Wasmtime 默认网络发送器。身份签名验证只读取本端或当前握手对端的已验证公钥。
 

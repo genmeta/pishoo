@@ -1,5 +1,5 @@
 use super::*;
-use crate::routes::{authorize, file_router, proxy_pass, worksapce};
+use crate::routes::{access_router, authorize, file_router, proxy_pass};
 
 #[tokio::test]
 async fn exec_route_is_mounted_inside_the_application_router() {
@@ -32,7 +32,12 @@ async fn exec_route_is_mounted_inside_the_application_router() {
         TaskTracker::new(),
     );
     let app = Router::new()
-        .merge(worksapce(access.clone(), profile.name(), endpoint.name()))
+        .merge(access_router(
+            access.clone(),
+            endpoint.clone(),
+            profile.name(),
+            endpoint.name(),
+        ))
         .merge(exec)
         .merge(file_router(profile.join("file")))
         .fallback(any(move |request: Request<AxumBody>| {

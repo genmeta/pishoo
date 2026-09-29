@@ -49,7 +49,12 @@ async fn server(root: &std::path::Path) -> Server {
     sandbox.load_libs(&profile).unwrap();
     let proxies = config.proxy_locations.clone();
     let router = Router::new()
-        .merge(worksapce(access.clone(), profile.name(), endpoint.name()))
+        .merge(access_router(
+            access.clone(),
+            endpoint.clone(),
+            profile.name(),
+            endpoint.name(),
+        ))
         .merge(sandbox.api_router(endpoint.clone()))
         .merge(file_router(profile.join("file")))
         .fallback(any(move |request: Request<AxumBody>| {

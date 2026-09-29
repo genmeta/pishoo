@@ -88,10 +88,7 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
     let mut seen = HashSet::new();
     for (location, upstream) in values {
         let path = location.strip_prefix("= ").unwrap_or(&location);
-        if !valid_path(path)
-            || !seen.insert(location.clone())
-            || reserved(path, &["/api", "/.pishoo", "/exec", "/file"])
-        {
+        if !valid_path(path) || !seen.insert(location.clone()) || reserved(path) {
             return Err(Error::InvalidConfig(format!(
                 "invalid or reserved proxy location: {location}"
             )));

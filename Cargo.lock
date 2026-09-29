@@ -1230,7 +1230,7 @@ dependencies = [
  "http-body-util",
  "netdev",
  "qbase",
- "qconn",
+ "qconnection",
  "qprotocol",
  "qrecovery",
  "qtls",
@@ -2987,6 +2987,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cap-std",
+ "chrono",
  "dhttp",
  "dhttp-home",
  "futures",
@@ -3247,7 +3248,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qconn"
+name = "qconnection"
 version = "0.6.1"
 dependencies = [
  "bytes",
@@ -6023,20 +6024,12 @@ name = "dhttp-log"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "dquic"
-version = "0.7.2"
-
-[[patch.unused]]
 name = "dshell"
 version = "0.6.2"
 
 [[patch.unused]]
 name = "dyns"
 version = "0.7.2"
-
-[[patch.unused]]
-name = "qconnection"
-version = "0.8.2"
 
 [[patch.unused]]
 name = "qdatagram"
