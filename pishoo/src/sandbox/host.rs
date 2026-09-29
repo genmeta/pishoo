@@ -39,8 +39,23 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         if data.len() > 1024 * 1024 {
             return Err(SignError::InputTooLarge);
         }
-        let signature =
-            dhttp::certificate::sign(&self.local, &data).map_err(|_| SignError::Failed)?;
+        let mut signature = None;
+        for scheme in [
+            qtls::SignatureScheme::RSA_PSS_SHA512,
+            qtls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            qtls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            qtls::SignatureScheme::ED25519,
+        ] {
+            match self.local.sign(scheme, &data) {
+                Ok(value) => {
+                    signature = Some(value);
+                    break;
+                }
+                Err(qtls::SignError::UnsupportedScheme { .. }) => {}
+                Err(_) => return Err(SignError::Failed),
+            }
+        }
+        let signature = signature.ok_or(SignError::Failed)?;
         if signature.len() > 8192 {
             return Err(SignError::Failed);
         }
@@ -59,7 +74,7 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         }
         let name = dhttp_home::normalize_name(&name).ok_or(VerifyError::InvalidIdentity)?;
         if name == self.local.name() {
-            return dhttp::certificate::verify_signature(
+            return dhttp_home::certificate::verify_signature(
                 self.local.public_key().as_ref(),
                 &data,
                 &signature,
@@ -69,7 +84,7 @@ impl identity::pishoo::identity::signatures::Host for StoreData {
         if let Some(remote) = &self.remote
             && name == remote.name()
         {
-            return dhttp::certificate::verify_signature(
+            return dhttp_home::certificate::verify_signature(
                 remote.public_key().as_ref(),
                 &data,
                 &signature,

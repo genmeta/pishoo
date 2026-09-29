@@ -261,7 +261,7 @@ WASI HTTP 的入站处理仍需 WasiHttpHooks；当前依赖关闭了默认网�
 
 proxy 完成路径/query 与 authority 转换后，以 Hyper HTTP/1.1 客户端连接配置中的回环 TCP 地址；每个请求建立一条连接，不增加连接池状态。转发前按上游 authority 设置 Host、清理逐跳头，不自动生成 `X-Forwarded-*`。响应也清理逐跳头，Body 保持流式背压和错误传播；连接和响应头各有30秒期限，连接或响应头失败返回网关错误。
 
-已有 `pishoo:identity/signatures@0.1.0` 的 sign/verify 保留。StoreData 检查固定输入上限；sign 调用 dhttp::certificate::sign(&local,data)。verify 只使用已验证的 local 或当前握手 remote 公钥；其他身份返回 Unavailable，不发起远端解析。使用 verify_signature，不把私钥或 authority 交给 guest。
+已有 `pishoo:identity/signatures@0.1.0` 的 sign/verify 保留。StoreData 检查固定输入上限；sign 直接使用 qtls::LocalAuthority 选择 DHTTP 规范签名算法。verify 只使用已验证的 local 或当前握手 remote 公钥；其他身份返回 Unavailable，不发起远端解析。使用 dhttp-home 的 verify_signature，不把私钥或 authority 交给 guest。
 
 ## 9. 启停、exec 与错误
 

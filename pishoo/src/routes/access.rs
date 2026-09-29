@@ -25,9 +25,11 @@ pub(crate) async fn authorize(
         return reject(Error::MissingHandshake);
     }
     let visitor = match &handshake.remote {
-        Some(remote) => match dhttp::certificate::subject_id(remote.certificates())
-            .ok()
-            .and_then(|s| SubjectId::new(s).ok())
+        Some(remote) => match dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+            remote.certificates(),
+        )
+        .ok()
+        .and_then(|ski| SubjectId::new(ski.owner_hash().as_str().as_bytes()).ok())
         {
             Some(subject) => Some(Visitor::new(remote.name(), subject)),
             None => return reject(Error::Denied),

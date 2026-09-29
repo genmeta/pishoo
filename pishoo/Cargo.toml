@@ -16,7 +16,7 @@ path = "src/pishoo.rs"
 [dependencies]
 dhttp = { path = "../../dhttp/dhttp" }
 dhttp-home = { path = "../../dhttp/home" }
-dhttp-identity = { path = "../../dhttp/identity" }
+qtls = { path = "../../dquic/qtls" }
 access_control = { path = "../../daccess" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
@@ -51,7 +51,6 @@ oas3 = { version = "0.22.0", default-features = false }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
-qtls = { path = "../../dquic/qtls" }
 rcgen = "0.14"
 wat = "1"
 

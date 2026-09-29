@@ -222,13 +222,10 @@ dhttp 的读写等待由流背压、EOF、错误和取消推进，不给开流�
 ## 8. 身份与签名接缝
 
 ```rust
-pub fn subject_id(certificates: &[qtls::CertificateDer<'_>]) -> Result<Vec<u8>>;
-pub fn sign(local: &qtls::LocalAuthority, data: &[u8]) -> Result<Vec<u8>>;
-pub fn verify_signature(spki: &[u8], data: &[u8], signature: &[u8]) -> Result<bool>;
 pub async fn resolve_remote(endpoint: &Endpoint, name: &str) -> Result<qtls::RemoteAuthority>;
 ```
 
-这四个 certificate 函数保留冻结。Pishoo 当前使用 subject_id、sign 和 verify_signature；subject_id 沿现有 DHTTP SKI owner_hash 文本字节规范，sign/verify 复用既有规范算法。resolve_remote 仍是 dhttp 接口，当前 Lib 宿主不调用它；它取得实际握手验证的对端，不承诺离线或历史证书查询。凭据读取和信任装配继续复用现有 home/trust 内部代码，不新建身份结构。
+dhttp 不另设 certificate 模块。Pishoo 从 dhttp-home 的证书规则提取 DHTTP SKI owner_hash 文本字节，并用 qtls::LocalAuthority 选择规范签名算法；验签直接使用 dhttp-home 的规则。resolve_remote 仍是 dhttp 接口，当前 Lib 宿主不调用它；它取得实际握手验证的对端，不承诺离线或历史证书查询。凭据读取和信任装配继续复用现有 home/trust 内部代码，不新建身份结构。
 
 成功入站先依据握手本端身份展开 URI authority 简写，并核对规范化 authority 的 host 与该身份一致；缺少本端身份、authority 或身份不匹配时直接返回 421，不调用应用 Service。authority 可带 `:序号` 后缀，作为将来与本端证书 DHTTP SKI 中 chain sequence 核对的地址信息；本版保留原值，不将它用作传输端口，也暂不校验该序号。随后把实际 HandshakeSummary 放入 request extensions；缺少摘要是接入错误，remote=None 才表示匿名。LocalAuthority 的签名能力留在可信宿主，guest 只经 Pishoo 授权的接口使用。出站忽略转带的可信身份 extensions，使用当前 Endpoint 的身份。
 
