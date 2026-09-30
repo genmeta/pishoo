@@ -20,8 +20,11 @@ pishoo service 中。
 - 调用方以同一已验证身份轮询 `status_url`。状态为 `allowed` 后重试相同业务请求，
   该一次性 allow/deny 决定才会被消费。状态查询绕过常规业务 ACL，但 handler 按
   `Visitor` 对 record 做行级校验。
-- 联系人批准立即写入本地数据库。申请方以已验证身份调用 `GET /contact/self` 拉取
-  自己的状态和当前授权；pishoo 不创建联系人 notifier、出站 connector 或重试队列。
+- 联系人请求本身不需要独立的“关系批准”。请求中的内置 capability 由 profile owner
+  逐项授予或撤销；Chat 授予只写入该联系人的精确 `POST /std/message` 规则。
+- 联系人申请使用稳定的 `application_id` 和本地持久投递队列；接收方从实际收到时间起设定 7 天有效期。申请方以已验证身份调用 `GET /contact/self?application_id=...` 拉取该申请状态和当前授权。Chat 消息的
+  远端投递由独立 Chat worker 通过 `POST /std/message` 完成，消息历史始终从本地
+  `chat.db` 读取。
 
 ## Workspace
 
@@ -31,9 +34,17 @@ pishoo service 中。
 
 - `/workspace` 临时重定向到 `/workspace/`；
 - `/workspace/` 返回 Workspace shell；
-- `/workspace/access/<section>` 回退到 `index.html`，支持浏览器直接刷新深链；
+- `/workspace/contacts/<name>`、`/workspace/approvals` 和
+  `/workspace/settings/access` 等路由回退到 `index.html`，支持浏览器直接刷新深链；
 - 带 hash 的 `/workspace/assets/*` 返回长期缓存响应；
-- `/workspace-api/context` 返回当前 profile 的显示上下文；
+- owner-only 的 `/workspace-api/context` 返回当前 profile 上下文和准确的待审批数；
+- profile-local 的 `db/workspace.db` 保存 Workspace 数据，与 daccess 的
+  `db/access.db` 分离；owner-only 设置 API 提供公开显示名称、头像和内置 capability
+  目录，不开放浏览器自定义路径、method 或 effect；
+- 联系人申请分别保存 requested/offered capability。联系人详情中的 grant/revoke 只
+  更新对应内置 capability 的固定精确规则，保留其他规则和分组策略；
+- `GET /std/profile` 和 `GET /std/profile/avatar` 是最小公开资料端点，有意绕过普通业务
+  ACL；其余 profile 设置与联系人资料代理仍要求 owner；
 - `/admin` 和 `/admin/*` 不提供兼容路由或重定向；
 - 非 Workspace 路径仍委托给 daccess API 或原有 `NginxRouter`。
 
@@ -47,6 +58,17 @@ PISHOO_WORKSPACE_BACKEND=http://127.0.0.1:3000 bun run dev
 
 前端继续调用 daccess 的 `/acl/*`、`/contacts` 和 `/contact/*` API；这些路径不因
 Workspace 迁移而改变，也继续使用同一个 profile-scoped 授权 middleware。
+
+## 内置能力授权矩阵
+
+| 能力 | 可见性 | 请求方向 | 生效规则 | owner 动作 | 消息读取 |
+| --- | --- | --- | --- | --- | --- |
+| `public_profile` | 公开 | 不需要联系人申请 | `GET /std/profile`、`GET /std/profile/avatar` | 不审批 | 公开端点读取资料 |
+| `chat` | 联系人 | 请求方申请 `POST /std/message`；接收方单独提供 Chat | 对应主体的精确 `POST /std/message` allow | grant/revoke Chat；联系人关系不单独审批 | 只读本地 `chat.db`，不读取远端消息 |
+| daccess 访问审批 | 按访问规则 | visitor + method + API | 一次性或持久的 ACL 决定 | 在“访问审批”中处理 | 不改变 capability 状态 |
+
+因此，授予联系人 Chat 只允许对方向当前 profile 投递消息；它不会授予当前 profile
+读取对方消息，也不会替代另一方向的 Chat 授权。
 
 ## 迁移旧策略
 
