@@ -1,7 +1,20 @@
 import type { JSX } from 'solid-js'
-import { Show, createEffect, onCleanup, onMount } from 'solid-js'
+import { Show, createEffect, createSignal, on, onCleanup, onMount } from 'solid-js'
 
 import { statusLabel, useI18n } from '../i18n'
+import { initials } from '../lib/format'
+
+export function Avatar(props: { name: string; src?: string | null; large?: boolean }) {
+  const [failed, setFailed] = createSignal(false)
+  createEffect(on(() => props.src, () => setFailed(false)))
+  return (
+    <span class="avatar" classList={{ 'avatar-large': props.large }} aria-hidden="true">
+      <Show when={props.src && !failed()} fallback={initials(props.name)}>
+        <img src={props.src!} alt="" onError={() => setFailed(true)} />
+      </Show>
+    </span>
+  )
+}
 
 export function StatusBadge(props: { value: string }) {
   const { t } = useI18n()
@@ -86,6 +99,7 @@ export function Dialog(props: {
   title: string
   children: JSX.Element
   onClose: () => void
+  wide?: boolean
 }) {
   const { t } = useI18n()
   let dialog: HTMLElement | undefined
@@ -138,6 +152,7 @@ export function Dialog(props: {
         <section
           ref={dialog}
           class="dialog"
+          classList={{ 'dialog-wide': props.wide }}
           role="dialog"
           aria-modal="true"
           aria-label={props.title}

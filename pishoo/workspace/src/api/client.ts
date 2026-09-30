@@ -1,9 +1,14 @@
 import type {
   ApiSummary,
+  Approval,
+  CapabilityDescriptor,
   Contact,
-  Effect,
+  DirectoryEntry,
+  OutboundContactInput,
+  OutboundContactRequest,
   Page,
-  Review,
+  ProfileSettings,
+  PublicProfile,
   RuntimeContext,
   RulesByApi,
   RulesByGrantee,
@@ -19,7 +24,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   if (init?.body && !headers.has('content-type')) {
     headers.set('content-type', 'application/json')
@@ -36,28 +41,65 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-function query(values: Record<string, string | number>): string {
+export function query(values: Record<string, string | number>): string {
   return new URLSearchParams(
     Object.entries(values).map(([key, value]) => [key, String(value)]),
   ).toString()
 }
 
-function apiTarget(api: string): string {
-  return api
-    .replace(/^\/+/, '')
-    .split('/')
-    .filter(Boolean)
-    .map(encodeURIComponent)
-    .join('/')
-}
-
 export const api = {
   context: () => request<RuntimeContext>('/workspace-api/context'),
 
-  reviews: (page: number, signal?: AbortSignal) =>
-    request<Page<Review[]>>(`/acl/reviews?${query({ page, page_size: 20 })}`, {
-      signal,
+  capabilities: (signal?: AbortSignal) =>
+    request<CapabilityDescriptor[]>('/workspace-api/capabilities', { signal }),
+
+  approvals: (status: 'pending' | 'expired', page: number, signal?: AbortSignal) =>
+    request<Page<Approval[]>>(`/workspace-api/approvals?${query({ status, page, page_size: 20 })}`, { signal }),
+
+  deleteExpiredApproval: (approval: Approval) => {
+    const id = approval.kind === 'capability' ? approval.request_id : approval.id
+    return request<void>(`/workspace-api/approvals/${approval.kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+
+  outboundRequests: (page: number, signal?: AbortSignal) =>
+    request<Page<OutboundContactRequest[]>>(`/workspace-api/contact-requests?${query({ page, page_size: 20 })}`, { signal }),
+
+  outboundRequest: (id: number, signal?: AbortSignal) =>
+    request<OutboundContactRequest>(`/workspace-api/contact-requests/${encodeURIComponent(id)}`, { signal }),
+
+  sendContactRequest: (value: OutboundContactInput) =>
+    request<OutboundContactRequest>('/workspace-api/contact-requests', { method: 'POST', body: JSON.stringify(value) }),
+
+  refreshOutboundRequest: (id: number) =>
+    request<OutboundContactRequest>(`/workspace-api/contact-requests/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+
+  deleteOutboundRequest: (id: number) =>
+    request<void>(`/workspace-api/contact-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  profileSettings: (signal?: AbortSignal) =>
+    request<ProfileSettings>('/workspace-api/settings/profile', { signal }),
+
+  saveProfile: (displayName: string) =>
+    request<ProfileSettings>('/workspace-api/settings/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ display_name: displayName }),
     }),
+
+  saveAvatar: (file: File) =>
+    request<ProfileSettings>('/workspace-api/settings/profile/avatar', {
+      method: 'PUT',
+      headers: { 'content-type': file.type },
+      body: file,
+    }),
+
+  deleteAvatar: () =>
+    request<ProfileSettings>('/workspace-api/settings/profile/avatar', { method: 'DELETE' }),
+
+  publicProfile: (name: string, signal?: AbortSignal) => {
+    const deadline = AbortSignal.timeout(2500)
+    const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
+    return request<PublicProfile>(`/workspace-api/profiles/${encodeURIComponent(name)}`, { signal: requestSignal })
+  },
 
   decideReview: (
     reviewId: number,
@@ -73,11 +115,31 @@ export const api = {
       }),
     }),
 
-  contacts: (page: number, sort: string, order: string, signal?: AbortSignal) =>
+  contacts: (page: number, sort: string, order: string, signal?: AbortSignal, pageSize = 20) =>
     request<Page<Contact[]>>(
-      `/contacts?${query({ page, page_size: 20, sort, order })}`,
+      `/contacts?${query({ page, page_size: pageSize, sort, order })}`,
       { signal },
     ),
+
+  allContacts: async (sort: string, order: string, signal?: AbortSignal): Promise<Contact[]> => {
+    const items: Contact[] = []
+    let page = 1
+    while (true) {
+      const result = await api.contacts(page, sort, order, signal, 100)
+      items.push(...result.items)
+      if (items.length >= result.total || result.items.length === 0) return items
+      page += 1
+    }
+  },
+
+  contactDirectory: (signal?: AbortSignal) =>
+    request<DirectoryEntry[]>('/workspace-api/contact-directory', { signal }),
+
+  saveContactIdentity: (name: string) =>
+    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'PUT' }),
+
+  unsaveContactIdentity: (name: string) =>
+    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'DELETE' }),
 
   contact: (name: string, signal?: AbortSignal) =>
     request<Contact>(`/contact/${encodeURIComponent(name)}`, { signal }),
@@ -107,20 +169,4 @@ export const api = {
 
   rulesByGrantee: (signal?: AbortSignal) =>
     request<RulesByGrantee>('/acl/allow', { signal }),
-
-  setRule: (rule: { api: string; method: string; effect: Effect; grantee: string }) =>
-    request<void>(`/acl/access/${apiTarget(rule.api)}`, {
-      method: 'POST',
-      body: JSON.stringify({
-        method: rule.method,
-        effect: rule.effect,
-        grantee: rule.grantee,
-      }),
-    }),
-
-  deleteRule: (rule: { api: string; method: string; grantee: string }) =>
-    request<void>(`/acl/allow/${encodeURIComponent(rule.grantee)}`, {
-      method: 'DELETE',
-      body: JSON.stringify({ method: rule.method, api: rule.api }),
-    }),
 }
