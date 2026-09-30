@@ -25,7 +25,7 @@ required-features = ["sshd"]
 [dependencies]
 # --- Workspace Member ---
 gateway = { workspace = true }
-access_control = { path = "../../../daccess/daccess" }
+access_control = { git = "https://github.com/genmeta/daccess.git", branch = "feat/fit-pishoo" }
 dhttp = { workspace = true, features = ["access-orm"] }
 h3x = { workspace = true, features = ["ipc"] }
 rustls = { workspace = true }
