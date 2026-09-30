@@ -1,6 +1,6 @@
 # pishoo Workspace 实施方案
 
-更新时间：2026-09-20
+更新时间：2026-09-21
 
 ## 1. 背景与纠偏
 
@@ -25,19 +25,19 @@ daccess。后续必须改为“pishoo Workspace shell + 多个领域能力”，
 1. 建立正确的 Workspace shell、侧边栏和稳定深链。
 2. 完成联系人主流程：添加联系人、收到的申请、已发送申请、联系人列表和联系人详情。
 3. 完成审批请求主流程，并支持“记住当前选择”。
-4. 完成快捷设置：我的信息、权限集合模板和快捷导航。
+4. 完成快捷设置：我的信息与内置能力目录。
 5. 为 API 扩展和应用管理建立侧边栏入口与真实占位页面。
+6. 通过固定的标准端点公开显示名称和头像，并在已建立联系人界面展示对方资料。
 
 ### 2.2 本阶段不实现
 
 - Wasm 扩展运行时、扩展签名和沙箱权限；
 - 模块市场、应用市场、下载、安装、升级和卸载；
-- 消息、日历、日记、项目管理等具体模块；
-- 联系人聊天界面；
-- 对外公开个人资料的标准 API；
-- `/admin` 兼容路由。
+- 日历、日记、项目管理等后续具体模块；
+- `/admin` 路由。
 
-占位页面不得提供看似可用但实际无效的安装、启用或聊天按钮。
+占位页面不得提供看似可用但实际无效的安装或启用按钮；聊天属于独立 Chat module，Workspace
+只负责静态查看和入口编排。
 
 ## 3. 当前能力基线
 
@@ -53,8 +53,8 @@ daccess。后续必须改为“pishoo Workspace shell + 多个领域能力”，
 | 通用访问规则管理 | 已有 | 从一级导航移到上下文入口/高级设置 |
 | 出站 QUIC connector，支持携带 profile identity | 控制面已有 | 联系人申请复用 |
 | 静态文件、反向代理和配置 reload | 已有 | 后续扩展/应用生命周期可复用 |
-| profile 昵称、头像、性别等资料模型 | 未实现 | Workspace 数据库新增 |
-| 权限集合模板、快捷导航 | 未实现 | Workspace 数据库新增 |
+| profile 显示名称与头像 | 已实现 | Workspace 数据库和 profile 资源目录 |
+| 内置能力目录 | 已实现 | Workspace 只读展示由服务端注册的能力 descriptor |
 | 扩展注册表、Wasm 运行时 | 未实现 | 本阶段仅占位 |
 | 应用清单、应用 UI 挂载和市场 | 未实现 | 本阶段仅占位 |
 
@@ -74,7 +74,7 @@ daccess。后续必须改为“pishoo Workspace shell + 多个领域能力”，
 pishoo Workspace
 ├── Workspace shell、导航、profile context
 ├── 联系人出站申请与已发送申请状态
-├── 我的信息、权限模板、快捷导航
+├── 我的信息、内置能力目录
 ├── API 扩展/应用注册表（后续）
 └── 聚合各领域页面
         │
@@ -115,7 +115,7 @@ API 维度的权限未来进入扩展详情，完整规则表保留为快捷设�
 
 | 路径 | 页面 | 阶段 |
 | --- | --- | --- |
-| `/workspace/` | 首页：profile 摘要、待办摘要、快捷导航 | 本阶段 |
+| `/workspace/` | 首页：profile 摘要、待办摘要 | 本阶段 |
 | `/workspace/contacts` | 联系人列表 | 本阶段 |
 | `/workspace/contacts/new` | 添加联系人 | 本阶段 |
 | `/workspace/contacts/requests` | 收到/发出的联系人申请 | 本阶段 |
@@ -124,8 +124,7 @@ API 维度的权限未来进入扩展详情，完整规则表保留为快捷设�
 | `/workspace/apps` | 应用管理占位 | 本阶段占位 |
 | `/workspace/approvals` | 审批请求 | 本阶段 |
 | `/workspace/settings/profile` | 我的信息 | 本阶段 |
-| `/workspace/settings/permissions` | 权限集合模板 | 本阶段 |
-| `/workspace/settings/shortcuts` | 快捷导航 | 本阶段 |
+| `/workspace/settings/capabilities` | 内置能力目录 | 本阶段 |
 | `/workspace/settings/access` | 高级访问控制 | 迁移现有规则页 |
 
 当前 `/workspace/access/reviews|contacts|policies` 是错误粒度下的临时路径；在尚未发布的
@@ -134,7 +133,7 @@ API 维度的权限未来进入扩展详情，完整规则表保留为快捷设�
 ### 5.3 Shell 交互原则
 
 - 桌面使用稳定侧边栏，内容区根据功能决定单栏、主从双栏或表格布局；
-- 联系人可以采用参考图中的“列表 + 详情”结构，但没有消息模块时只显示详情，不伪造聊天；
+- 联系人可以采用参考图中的“列表 + 详情”结构，聊天入口只在联系人已启用 Chat 能力时显示；
 - 移动端五个一级入口可使用带文字标签的底部导航或抽屉，触控目标不小于 44px；
 - 当前路由必须有明确激活状态，浏览器前进/后退和深链刷新必须保持可用；
 - 徽标同时提供数字/文本语义，不只依赖颜色；
@@ -163,44 +162,46 @@ API 维度的权限未来进入扩展详情，完整规则表保留为快捷设�
 
 - 对方 DHTTP 名称；
 - 简介；
-- 申请有效期，默认 3 天且不超过协议建议的 7 天；
-- 请求的权限，可从权限集合模板选择后微调；
-- 向对方声明的 `offers`，可为空。
+- 从服务端能力目录中手动勾选联系人能力（可全部不选，仅建立联系人关系）；每项能力展示用途、审批方式和标准端点；
+- 不允许浏览器直接输入 API path、HTTP method 或 effect，服务端根据能力 descriptor 生成申请内容。
 
-提交期间按钮不可重复触发；名称、过期时间和权限错误必须显示在对应字段附近。
+提交期间按钮不可重复触发；名称和能力错误必须显示在对应字段附近。发送方不填写、也不发送申请有效期；接收方从实际收到时间起设定 7 天期限。
 
 #### 联系人申请
 
 - “收到的”与“已发送的”分栏；
-- 收到的申请支持查看详情、配置联系人维度权限后批准、删除；
-- 已发送申请显示 pending/active/expired/error、最后检查时间和手动刷新；
-- 第一阶段不建立无限后台重试，状态更新由页面刷新或显式“检查状态”触发；
+- 收到的申请支持查看能力详情、批准或删除；批准只应用申请中选择的内置能力；
+- 已发送申请显示 queued/pending/active/denied/expired/failed/revoked、投递或申请截止时间、最后检查时间；
+- 本地持久队列由后台 worker 投递和查询状态，页面“检查状态”只唤醒 worker，不直接等待远端；
 - 过期申请保留审计信息，不伪装成有效联系人。
 
 #### 联系人列表与详情
 
 - 展示名称、别名、类型、状态、添加/更新时间和有效期；
 - 类型沿用并规范化为 Human、Agent、Robot、Service、Admin；未知值按原文展示；
-- 没有头像时使用稳定的名称首字母占位，不远程抓取不可信图片；
-- 详情展示 requested access、当前 granted access 和 offers；
-- 联系人维度的访问规则在详情中编辑，底层仍写入 daccess `access_rules`；
-- 消息模块未安装时不进入空白聊天页，显示“消息功能未安装”或“无消息权限”；安装后
-  再由应用能力把联系人动作路由到消息应用。
+- 已建立或已拉黑联系人通过固定的 `/std/profile` 端点读取对方显示名称和头像；
+- 只代理远端资料声明的固定 `/std/profile/avatar`，不接受任意远端图片 URL；
+- 不在 pishoo 中主动缓存联系人资料，由浏览器依据 HTTP 缓存头复用响应；读取失败时继续
+  使用 identity 简称和稳定的首字母头像；
+- 详情展示已申请、已批准和未申请的内置能力状态及固定端点；
+- 联系人维度的精确规则仍由 daccess 管理，但 Workspace 不再提供自定义路径/effect 编辑器；
+- Chat 能力未申请或未批准时不显示可用的聊天操作。
 
 ### 6.3 出站联系人请求链路
 
 ```text
 Workspace POST /workspace-api/contact-requests
     -> 校验当前 actor 是 profile owner
-    -> 载入当前 profile Identity
-    -> ProvideConnector(identity = current profile)
-    -> 对目标名称发送已认证 POST /contact
-    -> 成功后写入 workspace.db/outbound_contact_requests
-    -> 返回本地 request id 与状态
+    -> 生成稳定 application_id，连同发送方 SubjectId 写入 workspace.db/outbound_contact_requests
+    -> 立即返回 202 与 queued 状态
 
-Workspace 手动刷新
-    -> 使用同一 profile Identity 调用远端 GET /contact/self
-    -> 更新 active/pending/expired/error 与 last_checked_at
+后台 worker
+    -> 使用当前 profile Identity 和 ProvideConnector 投递已认证 POST /contact
+    -> 网络故障退避重试；本地投递期限为 7 天
+    -> 接收方按实际收到时间设定 7 天申请有效期并以 application_id 去重
+    -> 没有申请任何能力时直接建立联系人关系；有能力请求时等待对应审批
+    -> 使用 GET /contact/self?application_id=... 自动查询并同步远端状态
+    -> worker 重启后恢复未完成记录；所有重试保留同一 application_id
 ```
 
 需要为 root in-process 和 worker IPC 两种运行模式提供同一 connector factory 抽象；不得
@@ -216,7 +217,7 @@ POST   /workspace-api/contact-requests/{id}/refresh
 DELETE /workspace-api/contact-requests/{id}
 ```
 
-现有 daccess `/contacts`、`/contact/{name}` 和 `/contact/self` 协议保持不变。
+daccess `POST /contact` 接受申请编号而不接受发送方时间字段；`GET /contact/self?application_id=...` 返回该申请的状态。
 
 ## 7. 审批请求设计
 
@@ -265,46 +266,47 @@ API 建议把决定范围设计为枚举，避免以后继续增加布尔字段�
 
 ## 8. 快捷设置设计
 
-快捷设置是 pishoo Workspace 的 profile-local 数据，不进入 daccess 数据库。
+我的信息是 pishoo Workspace 的 profile-local 数据，不进入 daccess 数据库；高级访问控制
+由 daccess 和内置能力 descriptor 管理。
 
 ### 8.1 我的信息
 
 - identity name：来自证书/profile，只读；
-- 显示名称、头像、性别或自定义称谓：Workspace 本地资料；
-- 头像限制 MIME、尺寸和文件大小，使用随机/固定内部文件名原子替换；
-- 第一阶段这些资料只用于本地 Workspace 展示，不自动公开给联系人；
-- 对外公开资料以后由标准 profile API 扩展显式提供，避免“修改本地头像”等同于公开数据。
+- 显示名称和头像：Workspace 本地资料，同时通过公开的 `GET /std/profile` 与
+  `GET /std/profile/avatar` 提供给联系人；设置页明确提示其公开属性；
+- 头像只接受 JPEG、PNG、WebP，最大 1 MiB、最长边不超过 2048 px；服务端同时校验
+  Content-Type、文件签名和图片尺寸，使用内容哈希文件名及临时文件替换；
+- 联系人资料经 owner-only 同源代理读取，代理只允许固定标准端点，不提供任意 URL 转发；
+- profile JSON 和头像返回浏览器缓存头，头像 URL 使用 `updated_at` 版本参数；pishoo 不建
+  联系人资料缓存或资料同步表，浏览器缓存失效后的请求会重新访问远端；
+- 远端资料缺失、无效或不可达时，界面回退为 identity 简称和首字母头像。
 
-### 8.2 自定义权限集合
+### 8.2 内置能力
 
-权限集合是添加联系人时使用的模板，不是已经生效的访问规则。一个模板包含：
+第一阶段不开放用户自定义权限集合。联系人申请携带身份、简介、有效期和用户手动勾选的
+能力 ID；能力目录始终从当前 profile 的提供方视角描述能力：公开能力直接对外开放，联系人能力
+由当前 profile 按能力逐项授予或保留待处理。Chat 能力由内置 descriptor 声明，授予 Chat 时由服务端
+根据 descriptor 增量写入固定的 `/std/message` daccess 规则。未来新增能力也必须由内置
+descriptor 注册，浏览器不能提交任意 API path、HTTP method 或 effect。
 
-- 名称和说明；
-- `requested_access`：API + methods；
-- `offers`：API + effect + methods；
-- 创建和更新时间。
+不提供可自定义快捷导航。首页只展示当前身份和待处理审批；如未来应用/扩展显著增多，
+再另行设计导航方式。
 
-应用模板后允许在提交联系人申请前微调，修改后的内容不反向覆盖模板。
-
-### 8.3 快捷导航
-
-- 保存入口类型、目标 id、显示名称、顺序和启用状态；
-- 第一阶段只允许选择真实存在的 Workspace 内部页面；
-- API 扩展/应用注册表落地后，再允许选择已启用的应用；
-- 首页在宽屏右侧或下方展示快捷入口，移动端按内容优先级折叠；
-- 删除目标功能时必须清理或标记失效快捷项，不能留下死链接。
-
-### 8.4 Workspace API 草案
+### 8.3 Workspace API 草案
 
 ```text
 GET/PATCH /workspace-api/settings/profile
-GET/POST  /workspace-api/settings/permission-sets
-PATCH/DELETE /workspace-api/settings/permission-sets/{id}
-GET/PUT   /workspace-api/settings/shortcuts
+GET/PUT/DELETE /workspace-api/settings/profile/avatar
+GET        /workspace-api/profiles/{name}
+GET        /workspace-api/profiles/{name}/avatar
+GET        /workspace-api/capabilities
+GET        /std/profile
+GET        /std/profile/avatar
 ```
 
-这些 API 默认仅允许当前 profile owner；未来如需委托管理员，必须引入单独能力而不是
-复用普通联系人访问规则。
+`/workspace-api/*` 默认仅允许当前 profile owner；未来如需委托管理员，必须引入单独能力
+而不是复用普通联系人访问规则。两个 `/std/profile*` GET 是有意公开的最小资料端点，
+不返回 identity 私钥、SubjectId、权限或其他设置。
 
 ## 9. Workspace 数据库
 
@@ -314,10 +316,6 @@ GET/PUT   /workspace-api/settings/shortcuts
 ```text
 module_versions
 profile_preferences
-permission_sets
-permission_set_requests
-permission_set_offers
-workspace_shortcuts
 outbound_contact_requests
 ```
 
@@ -325,10 +323,15 @@ outbound_contact_requests
 
 - 每个 profile 单独连接，禁止跨 profile 共享；
 - 时间统一为 UTC Unix 秒；
-- 权限 API 路径和 method 使用 daccess 相同的规范化与校验规则；
 - `outbound_contact_requests` 对 target name + 当前未终结申请建立约束，避免重复发送；
 - 敏感写入使用事务和原子文件替换；
 - 数据库迁移由 pishoo Workspace store 自己管理，不复用 daccess schema version。
+
+头像文件保存在 `<profile>/assets/profile/`，数据库只保存经过校验的内部文件名；联系人远端
+资料不写入数据库或本地文件。
+
+数据库当前直接按新的 Workspace schema 创建，不保留旧快捷设置、权限集合或联系人模板表；
+版本不匹配时由部署流程重建 profile 数据库，不在应用代码中保留兼容迁移。
 
 ## 10. API 扩展与应用管理占位
 
@@ -352,7 +355,7 @@ Wasm 组件；展示“当前尚未启用扩展运行时”，不显示虚假的
 
 - 应用 manifest、静态资源和前端隔离方式；
 - 依赖的 API 扩展及版本约束；
-- Workspace 路由、导航注册和快捷入口；
+- Workspace 路由和导航注册；
 - 安装来源、签名、CSP、升级、禁用和卸载；
 - 应用只拥有用户已授予的本地 API capability。
 
@@ -364,7 +367,9 @@ pishoo/src/workspace/
   actor.rs            # owner/admin 身份边界
   context.rs          # profile context、功能状态和徽标
   contacts.rs         # 出站申请编排
-  settings.rs         # profile、权限模板、快捷导航 API
+  profile.rs          # 公开资料、头像存储与远端资料同源代理
+  capabilities.rs     # 内置能力 descriptor 与只读目录
+  settings.rs         # profile 设置 API
   store.rs            # workspace.db 与 migration
   outbound.rs         # profile-authenticated DHTTP client abstraction
 
@@ -407,32 +412,51 @@ client；daccess 与 Workspace API 类型分模块维护，不在组件中直接
 ### M0：Shell 与路由纠偏
 
 - [ ] 建立五个一级侧边栏入口、profile header、徽标位置和移动端导航；
-- [ ] 新增 Workspace 首页；
-- [ ] 将联系人、审批、规则页面迁到新路由；
-- [ ] 新增 API 扩展和应用管理占位页；
+- [x] 新增 Workspace 首页；
+- [x] 将联系人、审批、规则页面迁到新路由；
+- [x] 新增 API 扩展和应用管理占位页；
 - [ ] 保证深链、前进/后退、键盘导航和 375/768/1440px 布局。
 
 ### M1：Workspace store 与 owner API
 
 - [ ] 新增 profile-scoped `workspace.db` 和 migration；
 - [ ] 建立严格 owner actor；
-- [ ] 实现 profile preferences、permission sets 和 shortcuts CRUD；
-- [ ] 扩展 context/bootstrap 响应，提供 profile 信息、功能状态和徽标计数。
+- [x] 建立 profile preferences 和 owner-only profile API；
+- [x] 提供内置能力 descriptor 的只读目录，不开放 permission sets CRUD；
+- [x] 扩展 context/bootstrap 响应，提供 profile 信息、功能状态和徽标计数。
+
+进行中：已编写独立数据库的初始迁移、名称与主体标识双重校验的 owner actor、
+显示名称 GET/PATCH、头像上传/读取/删除和能力目录 GET；context 提供访问审批数和当前
+待处理能力请求数，并与审批中心列表使用同一筛选逻辑。设置页已接入上述 API，完成公开显示名称、头像和
+内置能力目录展示。
 
 ### M2：联系人已有能力重组
 
-- [ ] 将 daccess 联系人列表拆为联系人/收到申请视图；
-- [ ] 完成联系人详情与联系人维度权限入口；
-- [ ] 增加类型、头像 fallback、时间和状态展示；
-- [ ] 保留批准、拉黑、恢复、删除和并发错误反馈。
+- [x] 将 daccess 联系人列表拆为联系人/收到申请视图；
+- [x] 完成联系人详情与联系人维度权限入口；
+- [x] 增加类型、头像 fallback、时间和状态展示；
+- [x] 保留批准、拉黑、恢复、删除和并发错误反馈。
+
+当前按 daccess 的状态分组：`pending`、`transfered` 和 `expired` 属于收到的申请，
+`active` 和 `blocked` 属于已建立联系人；发出的申请独立存储，不从入站数据
+推断。由于 daccess `GET /contacts` 尚无服务端状态筛选，为保证分组的数量与分页准确，
+前端暂以每页 100 条拉取全部分页后在本地筛选；联系人数量增长时应先补服务端筛选，
+再替换这一过渡实现。
 
 ### M3：主动添加联系人
 
-- [ ] 为 root/worker 模式提供统一 profile connector factory；
-- [ ] 实现出站申请表和 `/workspace-api/contact-requests`；
-- [ ] 实现模板选择、发送、已发送列表和手动状态刷新；
-- [ ] 增加远端失败、超时、重复提交和过期测试；
-- [ ] 使用真实 DHTTP/mTLS listener 做双 profile 端到端测试。
+- [x] 为 root/worker 模式提供统一 profile connector factory；
+- [x] 实现出站申请表和 `/workspace-api/contact-requests`；
+- [x] 实现能力目录加载、手动勾选、发送、已发送列表和手动状态刷新；
+- [x] 增加远端失败、超时、重复提交和过期测试；
+- [x] 使用真实 DHTTP/mTLS listener 做双 profile 端到端测试。
+
+当前实现：owner-only `/workspace-api/contact-requests` 先持久化申请编号、发送方身份和
+7 天投递期限，再返回 `202 queued`。后台 worker 使用 profile identity 投递、退避重试、
+校验证书身份并按申请编号查询；重启后继续处理本地队列。远端收到申请后另起 7 天审批期限，
+本地状态区分 queued、pending、active、denied、expired、failed、revoked。添加联系人表单
+从能力目录手动选择能力，不允许自定义路径、声明规则或填写有效期。前端“检查状态”唤醒
+worker，不阻塞浏览器等待远端。数据库只接受当前 schema，旧版本由部署流程重建 profile 数据库。
 
 ### M4：审批“记住选择”
 
@@ -444,11 +468,17 @@ client；daccess 与 Workspace API 类型分模块维护，不在组件中直接
 
 ### M5：快捷设置与首页
 
-- [ ] 完成我的信息、头像上传及本地展示；
-- [ ] 完成权限集合模板编辑与添加联系人联动；
-- [ ] 完成快捷导航排序、启停和首页呈现；
-- [ ] 保留高级访问控制入口；
+- [x] 完成我的信息、头像上传及本地展示；
+- [x] 完成内置能力目录，并在添加联系人时手动选择能力；
+- [x] 在联系人能力授予和联系人详情中展示内置能力状态；
+- [x] 公开显示名称和头像，并在联系人界面读取展示；
+- [x] 首页展示当前身份与待处理审批，不提供可自定义快捷导航；
+- [x] 保留高级访问控制入口；
 - [ ] 完成中英文、无障碍和响应式验收。
+
+阶段性验证：已完成显示名称和头像的设置、公开读取、联系人同源代理、浏览器缓存响应头、
+远端失败 fallback，以及真实 DHTTP/mTLS 资料读取测试。设置与联系人页面的
+375/768/1440px 模拟 API 流程已通过；完整键盘/无障碍验收仍待完成。
 
 ### M6：占位边界验收
 
@@ -462,6 +492,11 @@ client；daccess 与 Workspace API 类型分模块维护，不在组件中直接
 - 所有身份来自 pishoo 已验证的 DHTTP/mTLS connection，不接受浏览器声明的身份；
 - 添加联系人使用当前 profile 私钥只发生在 pishoo 控制面，不把密钥交给 Workspace；
 - profile settings、扩展/应用生命周期默认为 owner-only；
+- 能力目录和联系人能力选择均为 owner-only；服务端只根据内置 descriptor 写入精确规则，
+  保留其他 daccess 分组规则，并继续经过 daccess 的管理员存续校验；
+- 公开资料仅包含显示名称、头像路径和更新时间；公开头像使用 `nosniff`、受限 MIME/尺寸、
+  内容哈希文件名和条件请求；
+- 联系人资料代理只允许当前 owner 调用固定标准路径，不允许成为通用 DHTTP/URL 代理；
 - 联系人和审批管理继续遵守 daccess ACL、默认 deny 和最后一位管理员保护；
 - remember 规则的范围必须在 UI 与数据库中完全一致，禁止隐藏扩大到通配 API；
 - 头像和未来应用静态资源必须防止路径穿越、MIME 欺骗和无限大小上传；
@@ -476,6 +511,8 @@ client；daccess 与 Workspace API 类型分模块维护，不在组件中直接
 | Workspace shell | 深链、back/forward、active state、键盘、375/768/1440px |
 | 联系人接收 | daccess 定向测试 + Workspace E2E |
 | 联系人发送 | 两个隔离 profile 的真实 DHTTP/mTLS E2E |
+| 公开资料 | owner 隔离、头像格式/尺寸、ETag、浏览器缓存头、无服务端缓存和远端失败 fallback |
+| 内置能力目录 | owner-only、公开资料/Chat 元数据、手动选择、未知能力拒绝、无自定义路径/effect |
 | 审批一次性决定 | pending/status/retry/consume 定向测试 |
 | 审批 remember | 原子规则写入、并发、过期、SubjectId change 测试 |
 | 快捷设置 | migration、owner 隔离、CRUD、头像校验测试 |
@@ -487,11 +524,13 @@ client；daccess 与 Workspace API 类型分模块维护，不在组件中直接
 ## 16. 待确认但不阻塞 M0 的问题
 
 1. “我的信息”中的性别字段是否采用自由文本、枚举还是完全可选的自定义称谓？
-2. 本地个人资料未来由哪个标准 API 扩展对外公开，公开字段是否逐项授权？
-3. 联系人关系是否要求双方都 active 才进入统一联系人列表，还是单向批准即可？
-4. 发出申请成功后是否需要后台低频轮询，还是长期保持手动刷新？
-5. API 扩展的 Wasm 目标采用 WASI Preview 2/Component Model 还是其他 ABI？
-6. 应用 UI 采用同 bundle 编译、动态模块还是 iframe/独立 origin 隔离？
+2. 联系人关系是否要求双方都 active 才进入统一联系人列表，还是单向批准即可？
+3. 发出申请成功后是否需要后台低频轮询，还是长期保持手动刷新？
+4. API 扩展的 Wasm 目标采用 WASI Preview 2/Component Model 还是其他 ABI？
+5. 应用 UI 采用同 bundle 编译、动态模块还是 iframe/独立 origin 隔离？
+
+公开资料的当前决策已经确定：标准端点为 `/std/profile` 和 `/std/profile/avatar`，公开字段
+仅为显示名称、头像路径和更新时间；联系人侧不主动持久化或缓存，交由浏览器 HTTP 缓存。
 
 M0 到 M2 可以在这些问题未定时推进；M3 需要确认联系人关系语义，扩展和应用的正式
 施工必须先完成各自 RFC。
