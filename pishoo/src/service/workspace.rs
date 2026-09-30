@@ -114,7 +114,7 @@ mod tests {
         let response = WorkspaceAssets
             .oneshot(
                 http::Request::builder()
-                    .uri("/workspace/access/reviews")
+                    .uri("/workspace/settings/access")
                     .body(axum::body::Body::empty())
                     .expect("request should build"),
             )
