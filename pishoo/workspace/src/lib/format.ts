@@ -1,4 +1,4 @@
-import type { ContactStatus } from '../api/types'
+import type { ContactStatus, PublicProfile } from '../api/types'
 
 const DHTTP_NAME_SUFFIX = '.dhttp.net'
 
@@ -27,6 +27,18 @@ export function displayIdentityName(value: string): string {
   return value.endsWith(DHTTP_NAME_SUFFIX)
     ? value.slice(0, -DHTTP_NAME_SUFFIX.length)
     : value
+}
+
+export function contactDisplayName(name: string, alias?: string | null, remoteName?: string | null): string {
+  return alias || remoteName || displayIdentityName(name)
+}
+
+export function profileAvatarUrl(profile: PublicProfile | null | undefined): string | null {
+  if (!profile?.avatar_url) return null
+  const [path, search] = profile.avatar_url.split('?')
+  const params = new URLSearchParams(search)
+  params.set('v', String(profile.updated_at))
+  return `${path}?${params}`
 }
 
 export function errorMessage(error: unknown, fallback: string): string {
