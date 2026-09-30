@@ -114,7 +114,8 @@ impl ServerService {
                 )
             }
             ServerAccess::Daccess(access) => {
-                let access_state = DaccessAuthState::new(access.service.clone());
+                let access_state =
+                    DaccessAuthState::new(access.service.clone(), access.workspace.clone());
                 let client_names = access_state.client_names();
                 (
                     Router::new()

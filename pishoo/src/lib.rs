@@ -7,8 +7,10 @@ pub mod service;
 pub mod tracing_init;
 pub mod worker;
 
+mod chat;
 pub mod config;
 pub mod listen;
 pub mod naming;
 pub mod policy;
 pub mod tls;
+mod workspace;

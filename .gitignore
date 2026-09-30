@@ -31,6 +31,9 @@ tarpaulin-report.html
 .env.*.local
 !.env.example
 
+# Local profile keys and certificates
+/keychain/
+
 # Agent instructions
 AGENTS.md
 libstun.rlib

@@ -46,6 +46,8 @@ tokio-util = { workspace = true, features = ["rt"] }
 
 # --- HTTP ---
 http = { workspace = true }
+bytes = { workspace = true }
+http-body-util = { workspace = true }
 axum = { workspace = true }
 
 # --- Tower ---
@@ -71,6 +73,8 @@ console-subscriber = { workspace = true, optional = true }
 libc = { workspace = true }
 nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
 sha2 = "0.11"
+getrandom = { workspace = true }
+imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
 notify = "8"
 include_dir = "0.7"
 
