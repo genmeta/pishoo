@@ -5,7 +5,7 @@ use std::{
 
 use dhttp::{h3x::quic::Listen as _, name::DhttpName};
 use gateway::control_plane::{
-    ControlPlane, ProvideListener, UpdateListenerIdentity, UpdateListenerIdentityOutcome,
+    ControlPlane, ProvideConnector, ProvideListener, UpdateListenerIdentity, UpdateListenerIdentityOutcome,
     UpdateListenerIdentityRequest,
 };
 use snafu::{Report, ResultExt};
@@ -36,7 +36,9 @@ where
 
 impl<P> RuntimeRegistry<P>
 where
-    P: ProvideListener + UpdateListenerIdentity + Send + Sync + 'static,
+    P: ProvideConnector + ProvideListener + UpdateListenerIdentity + Send + Sync + 'static,
+    P::Connector: 'static,
+    <P::Connector as dhttp::h3x::quic::Connect>::Connection: 'static,
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
@@ -92,6 +94,19 @@ where
                 return;
             }
         };
+
+        if let super::snapshot::ServerAccess::Daccess(access) = &prepared.service.access {
+            access.workspace.configure_outbound(Arc::new(
+                crate::workspace::outbound::PlaneOutbound::new(
+                    self.plane.clone(), prepared.listen_request.identity.clone(),
+                ),
+            )).await;
+            access.chat.configure_outbound(Arc::new(
+                crate::chat::outbound::PlaneOutbound::new(
+                    self.plane.clone(), prepared.listen_request.identity.clone(),
+                ),
+            )).await;
+        }
 
         let access_logs = match self.resources.acquire_access_logs(prepared.access_logs) {
             Ok(access_logs) => access_logs,
@@ -215,25 +230,51 @@ where
             return;
         }
 
+        let outbound_identity = identity.clone();
         match self
             .plane
             .update_listener_identity(UpdateListenerIdentityRequest { identity })
             .await
         {
-            Ok(UpdateListenerIdentityOutcome::Updated) => {
+            Ok(outcome) => {
                 self.resources
                     .servers
                     .get_mut(name)
                     .expect("identity update keeps the listener resource")
                     .update_identity_fingerprint(fingerprint);
-                tracing::info!(server_name = %name, "TLS identity reloaded");
-            }
-            Ok(UpdateListenerIdentityOutcome::Unchanged) => {
-                self.resources
+                if let Some(workspace) = self
+                    .services
                     .servers
-                    .get_mut(name)
-                    .expect("identity update keeps the listener resource")
-                    .update_identity_fingerprint(fingerprint);
+                    .get(name)
+                    .and_then(ServerServiceHandle::workspace)
+                {
+                    workspace
+                        .configure_outbound(Arc::new(
+                            crate::workspace::outbound::PlaneOutbound::new(
+                                self.plane.clone(),
+                                outbound_identity.clone(),
+                            ),
+                        ))
+                        .await;
+                }
+                if let Some(chat) = self
+                    .services
+                    .servers
+                    .get(name)
+                    .and_then(ServerServiceHandle::chat)
+                {
+                    chat
+                        .configure_outbound(Arc::new(
+                            crate::chat::outbound::PlaneOutbound::new(
+                                self.plane.clone(),
+                                outbound_identity,
+                            ),
+                        ))
+                        .await;
+                }
+                if matches!(outcome, UpdateListenerIdentityOutcome::Updated) {
+                    tracing::info!(server_name = %name, "TLS identity reloaded");
+                }
             }
             Err(error) => {
                 tracing::warn!(server_name = %name, error = %Report::from_error(&error), "TLS identity control-plane update failed; keeping current identity");
@@ -312,6 +353,8 @@ where
 impl<P> WorkerRuntime<P>
 where
     P: ControlPlane + ProvideListener + UpdateListenerIdentity + Send + Sync + 'static,
+    P::Connector: 'static,
+    <P::Connector as dhttp::h3x::quic::Connect>::Connection: 'static,
     P::Listener: dhttp::h3x::quic::Listen + Send + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Error: std::error::Error + Send + Sync + 'static,
     <P::Listener as dhttp::h3x::quic::Listen>::Connection: Send + 'static,
@@ -416,6 +459,18 @@ mod tests {
         {
             self.operations.lock().unwrap().push("update");
             Ok(gateway::control_plane::UpdateListenerIdentityOutcome::Updated)
+        }
+    }
+
+    impl gateway::control_plane::ProvideConnector for FakePlane {
+        type Connector = Arc<dhttp::endpoint::Endpoint>;
+        type ConnectError = FakeListenerError;
+
+        async fn connector(
+            &self,
+            _request: gateway::control_plane::ConnectorRequest,
+        ) -> Result<Self::Connector, Self::ConnectError> {
+            Err(FakeListenerError)
         }
     }
 

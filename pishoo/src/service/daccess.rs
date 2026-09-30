@@ -9,29 +9,34 @@ use axum::{
     extract::{Request, State},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::get,
 };
 use dhttp::identity::Identity;
-use serde::Serialize;
 use snafu::{ResultExt, Snafu};
+
+use crate::{
+    chat::{self, ChatState, store::StoreError as ChatStoreError},
+    workspace::{self, WorkspaceState, store::StoreError as WorkspaceStoreError},
+};
 
 /// The profile-local daccess resources used by one pishoo server.
 pub struct DaccessService {
     pub service: Arc<AccessService>,
-    pub profile: String,
-    pub owner_name: String,
+    pub workspace: Arc<WorkspaceState>,
+    pub(crate) chat: Arc<ChatState>,
 }
 
 #[derive(Clone)]
 pub struct DaccessAuthState {
     service: Arc<AccessService>,
+    workspace: Arc<WorkspaceState>,
     client_names: gateway::reverse::access_control::ClientNameResolver,
 }
 
 impl DaccessAuthState {
-    pub fn new(service: Arc<AccessService>) -> Self {
+    pub fn new(service: Arc<AccessService>, workspace: Arc<WorkspaceState>) -> Self {
         Self {
             service,
+            workspace,
             client_names: Default::default(),
         }
     }
@@ -67,6 +72,7 @@ pub async fn authorize(
     }
     if is_review_status_path(request.method(), request.uri().path())
         || is_contact_status_path(request.method(), request.uri().path())
+        || is_public_profile_path(request.method(), request.uri().path())
     {
         return next.run(request).await;
     }
@@ -89,7 +95,36 @@ pub async fn authorize(
         )
         .await
     {
-        Ok(AuthResult::Allowed) => next.run(request).await,
+        Ok(AuthResult::Allowed) => {
+            if request.method() == http::Method::POST && request.uri().path() == "/std/message" {
+                let Some(visitor) = visitor.as_ref() else {
+                    return (
+                        http::StatusCode::FORBIDDEN,
+                        "verified Chat contact required",
+                    )
+                        .into_response();
+                };
+                match workspace::directory::approved_chat_grant(&state.workspace, visitor).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return (
+                            http::StatusCode::FORBIDDEN,
+                            "Chat capability is not granted",
+                        )
+                            .into_response();
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "Chat capability authorization failed");
+                        return (
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            "Chat capability authorization failed",
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            next.run(request).await
+        }
         Ok(AuthResult::Denied) => (http::StatusCode::FORBIDDEN, "access denied").into_response(),
         Ok(AuthResult::Reviewing(review)) => (
             http::StatusCode::ACCEPTED,
@@ -107,31 +142,13 @@ pub async fn authorize(
     }
 }
 
-#[derive(Clone, Serialize)]
-struct RuntimeContext {
-    profile: String,
-    owner_name: String,
-    development_identity: bool,
-    demo_data: bool,
-    version: &'static str,
+fn is_public_profile_path(method: &http::Method, path: &str) -> bool {
+    crate::workspace::capabilities::BuiltInCapability::public_endpoint(method, path)
 }
 
 pub fn management_app(access: &DaccessService) -> Router {
-    let context = RuntimeContext {
-        profile: access.profile.clone(),
-        owner_name: access.owner_name.clone(),
-        development_identity: false,
-        demo_data: false,
-        version: env!("CARGO_PKG_VERSION"),
-    };
-    Router::new()
-        .route(
-            "/workspace-api/context",
-            get(move || {
-                let context = context.clone();
-                async move { Json(context) }
-            }),
-        )
+    workspace::router(access.workspace.clone())
+        .merge(chat::router(access.chat.clone()))
         .merge(management_router(access.service.clone()))
 }
 
@@ -154,6 +171,10 @@ pub enum DaccessLoadError {
         database_uri: String,
         source: sea_orm::DbErr,
     },
+    #[snafu(display("failed to load profile Workspace store"))]
+    Workspace { source: WorkspaceStoreError },
+    #[snafu(display("failed to load profile Chat store"))]
+    Chat { source: ChatStoreError },
 }
 
 pub async fn load(
@@ -174,10 +195,32 @@ pub async fn load(
         .context(daccess_load_error::ServiceSnafu {
             database_uri: database_uri.clone(),
         })?;
-    Ok(DaccessService {
-        service: Arc::new(service),
-        profile: profile.name().as_full().to_owned(),
+    let service = Arc::new(service);
+    let store = workspace::store::WorkspaceStore::open(profile)
+        .await
+        .context(daccess_load_error::WorkspaceSnafu)?;
+    let workspace = Arc::new(WorkspaceState::new(
+        profile.name().as_full().to_owned(),
+        owner_name.clone(),
+        owner_subject_id.clone(),
+        store,
+        service.clone(),
+    ));
+    let chat_store = chat::store::ChatStore::open(profile)
+        .await
+        .context(daccess_load_error::ChatSnafu)?;
+    let chat = Arc::new(ChatState::new(
         owner_name,
+        owner_subject_id,
+        chat_store,
+        service.clone(),
+    ));
+    workspace.configure_chat(chat.clone()).await;
+    chat.start_worker();
+    Ok(DaccessService {
+        service,
+        workspace,
+        chat,
     })
 }
 

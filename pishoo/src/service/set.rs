@@ -104,6 +104,8 @@ impl ServiceCompletionToken {
 pub struct ServerServiceHandle<L> {
     accept: AcceptState<L>,
     completion: ServiceCompletionToken,
+    workspace: Option<Arc<crate::workspace::WorkspaceState>>,
+    chat: Option<Arc<crate::chat::ChatState>>,
 }
 
 impl<L> ServerServiceHandle<L>
@@ -125,12 +127,30 @@ where
     {
         let completion = ServiceCompletionToken::new(name);
         let task_completion = completion.clone();
+        let workspace = match &service.access {
+            super::snapshot::ServerAccess::Daccess(access) => Some(access.workspace.clone()),
+            super::snapshot::ServerAccess::Legacy(_) => None,
+        };
+        let chat = match &service.access {
+            super::snapshot::ServerAccess::Daccess(access) => Some(access.chat.clone()),
+            super::snapshot::ServerAccess::Legacy(_) => None,
+        };
         Self {
             accept: AcceptState::start(listener, service, move || {
                 let _ = completed.send(task_completion.completion());
             }),
             completion,
+            workspace,
+            chat,
         }
+    }
+
+    pub(crate) fn workspace(&self) -> Option<Arc<crate::workspace::WorkspaceState>> {
+        self.workspace.clone()
+    }
+
+    pub(crate) fn chat(&self) -> Option<Arc<crate::chat::ChatState>> {
+        self.chat.clone()
     }
 
     pub async fn drain(self) -> DrainOutcome<L> {
