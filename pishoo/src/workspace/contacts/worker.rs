@@ -13,7 +13,7 @@ use super::{
     RemoteApplication, RemoteStatus, now, reconcile_remote_contact, selected_access,
     sync_remote_chat_grant,
 };
-use crate::workspace::WorkspaceState;
+use crate::workspace::Workspace;
 
 const TICK: Duration = Duration::from_secs(3);
 const LEASE_SECONDS: i64 = 120;
@@ -34,7 +34,7 @@ struct Job {
 }
 
 pub(crate) fn spawn(
-    state: Weak<WorkspaceState>,
+    state: Weak<Workspace>,
     notify: Arc<Notify>,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
@@ -64,7 +64,7 @@ pub(crate) fn spawn(
     })
 }
 
-async fn claim(state: &WorkspaceState) -> Result<Option<Job>, String> {
+async fn claim(state: &Workspace) -> Result<Option<Job>, String> {
     let current = now().map_err(|error| error.1.to_owned())?;
     let transaction = state
         .store
@@ -147,7 +147,7 @@ async fn claim(state: &WorkspaceState) -> Result<Option<Job>, String> {
     }))
 }
 
-async fn process(state: &WorkspaceState, job: Job) {
+async fn process(state: &Workspace, job: Job) {
     let current = match now() {
         Ok(value) => value,
         Err(_) => return,
@@ -226,7 +226,7 @@ async fn process(state: &WorkspaceState, job: Job) {
     }
 }
 
-async fn finish_response(state: &WorkspaceState, job: &Job, remote: RemoteStatus, current: i64) {
+async fn finish_response(state: &Workspace, job: &Job, remote: RemoteStatus, current: i64) {
     let remote_lifetime = remote.expired_after.checked_sub(remote.received_at);
     if remote.application_id != job.application_id
         || remote.name != job.target
@@ -296,13 +296,7 @@ async fn finish_response(state: &WorkspaceState, job: &Job, remote: RemoteStatus
     }
 }
 
-async fn finish_error(
-    state: &WorkspaceState,
-    job: &Job,
-    transient: bool,
-    reason: &str,
-    current: i64,
-) {
+async fn finish_error(state: &Workspace, job: &Job, transient: bool, reason: &str, current: i64) {
     let deadline = job.expired_after;
     let terminal = !transient || (job.status != "active" && current >= deadline);
     let reason = if transient && terminal && job.status == "queued" {

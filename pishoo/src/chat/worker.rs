@@ -14,7 +14,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ChatState,
+    Chat,
     message::{MessageEnvelope, MessageSubmission},
     outbound::REMOTE_IDENTITY_CHANGED,
 };
@@ -32,7 +32,7 @@ struct Job {
 }
 
 pub(crate) fn spawn(
-    state: Weak<ChatState>,
+    state: Weak<Chat>,
     notify: Arc<Notify>,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
@@ -41,7 +41,7 @@ pub(crate) fn spawn(
     })
 }
 
-async fn run(state: Weak<ChatState>, notify: Arc<Notify>, shutdown: CancellationToken) {
+async fn run(state: Weak<Chat>, notify: Arc<Notify>, shutdown: CancellationToken) {
     loop {
         if shutdown.is_cancelled() {
             return;
@@ -82,7 +82,7 @@ async fn run(state: Weak<ChatState>, notify: Arc<Notify>, shutdown: Cancellation
     }
 }
 
-async fn next_wake_delay(state: &ChatState) -> Result<Option<Duration>, String> {
+async fn next_wake_delay(state: &Chat) -> Result<Option<Duration>, String> {
     let now = super::service::now().map_err(|error| error.1.to_owned())?;
     let row = state
         .store
@@ -103,7 +103,7 @@ async fn next_wake_delay(state: &ChatState) -> Result<Option<Duration>, String> 
     }))
 }
 
-async fn recover_expired_jobs(state: &ChatState) -> Result<(), String> {
+async fn recover_expired_jobs(state: &Chat) -> Result<(), String> {
     let now = super::service::now().map_err(|error| error.1.to_owned())?;
     state
         .store
@@ -128,7 +128,7 @@ async fn recover_expired_jobs(state: &ChatState) -> Result<(), String> {
     Ok(())
 }
 
-async fn claim_next_job(state: &ChatState) -> Result<Option<Job>, String> {
+async fn claim_next_job(state: &Chat) -> Result<Option<Job>, String> {
     let now = super::service::now().map_err(|error| error.1.to_owned())?;
     let transaction = state
         .store
@@ -200,14 +200,14 @@ async fn claim_next_job(state: &ChatState) -> Result<Option<Job>, String> {
     }))
 }
 
-async fn process_job(state: &ChatState, job: Job) {
+async fn process_job(state: &Chat, job: Job) {
     let result = process_send(state, &job).await;
     if let Err(error) = result {
         tracing::warn!(job_id = job.id, contact = %job.contact_name, %error, "Chat worker job failed");
     }
 }
 
-async fn process_send(state: &ChatState, job: &Job) -> Result<(), String> {
+async fn process_send(state: &Chat, job: &Job) -> Result<(), String> {
     let message_id = job
         .message_id
         .ok_or_else(|| String::from("send job has no message"))?;
@@ -362,11 +362,7 @@ async fn process_send(state: &ChatState, job: &Job) -> Result<(), String> {
     }
 }
 
-async fn clear_remote_grant(
-    state: &ChatState,
-    job: &Job,
-    subject_id: &access_control::SubjectId,
-) {
+async fn clear_remote_grant(state: &Chat, job: &Job, subject_id: &access_control::SubjectId) {
     if let Err(error) = state
         .update_remote_chat_grant(&job.contact_name, subject_id, &Default::default())
         .await
@@ -375,7 +371,7 @@ async fn clear_remote_grant(
     }
 }
 
-async fn mark_sending(state: &ChatState, job: &Job, message_id: i64) -> Result<(), String> {
+async fn mark_sending(state: &Chat, job: &Job, message_id: i64) -> Result<(), String> {
     let now = super::service::now().map_err(|error| error.1.to_owned())?;
     state.store.db().execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
@@ -386,12 +382,7 @@ async fn mark_sending(state: &ChatState, job: &Job, message_id: i64) -> Result<(
     Ok(())
 }
 
-async fn retry_job(
-    state: &ChatState,
-    job: &Job,
-    message_id: i64,
-    error: String,
-) -> Result<(), String> {
+async fn retry_job(state: &Chat, job: &Job, message_id: i64, error: String) -> Result<(), String> {
     let now = super::service::now().map_err(|error| error.1.to_owned())?;
     let delay = backoff(job.attempt_count);
     let available = now + delay;
@@ -419,7 +410,7 @@ async fn retry_job(
 }
 
 async fn finish_message(
-    state: &ChatState,
+    state: &Chat,
     job: &Job,
     message_id: i64,
     state_name: &str,

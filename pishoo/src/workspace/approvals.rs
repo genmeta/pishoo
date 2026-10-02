@@ -9,7 +9,7 @@ use http::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement};
 use serde::{Deserialize, Serialize};
 
-use super::{WorkspaceState, contacts, settings::require_owner};
+use super::{Workspace, contacts, settings::require_owner};
 
 type ApiError = (StatusCode, &'static str);
 
@@ -83,7 +83,7 @@ fn access_error(error: DbErr) -> ApiError {
 }
 
 pub(super) async fn list(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Query(query): Query<ApprovalQuery>,
 ) -> Result<Json<ApprovalPage>, ApiError> {
@@ -166,7 +166,7 @@ pub(super) async fn list(
 }
 
 pub(super) async fn delete(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path((kind, id)): Path<(String, i64)>,
 ) -> Result<StatusCode, ApiError> {
@@ -187,10 +187,7 @@ pub(super) async fn delete(
                 .await
                 .map_err(access_error)?;
             if deleted.rows_affected() == 0 {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    "expired access approval not found",
-                ));
+                return Err((StatusCode::NOT_FOUND, "expired access approval not found"));
             }
         }
         "capability" => {

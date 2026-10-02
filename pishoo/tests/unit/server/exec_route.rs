@@ -32,12 +32,7 @@ async fn exec_route_is_mounted_inside_the_application_router() {
         TaskTracker::new(),
     );
     let app = Router::new()
-        .merge(access_router(
-            access.clone(),
-            endpoint.clone(),
-            profile.name(),
-            endpoint.name(),
-        ))
+        .merge(access_router(access.clone()))
         .merge(exec)
         .merge(file_router(profile.join("file")))
         .fallback(any(move |request: Request<AxumBody>| {

@@ -25,12 +25,10 @@ impl ChatCapability {
     }
 
     pub(crate) const fn endpoints(self) -> &'static [CapabilityEndpoint] {
-        &[
-            CapabilityEndpoint {
-                method: "POST",
-                path: "/std/message",
-            },
-        ]
+        &[CapabilityEndpoint {
+            method: "POST",
+            path: "/std/message",
+        }]
     }
 
     pub(crate) fn requested_access(self) -> RequestedAccess {
@@ -44,9 +42,7 @@ impl ChatCapability {
         BTreeMap::from([(
             String::from("/std/message"),
             GrantedMethods {
-                allow: vec![
-                    AccessMethod::Specified(Method::POST),
-                ],
+                allow: vec![AccessMethod::Specified(Method::POST)],
                 review: Vec::new(),
                 deny: Vec::new(),
             },
@@ -54,13 +50,11 @@ impl ChatCapability {
     }
 
     pub(crate) fn fixed_rules(self) -> [(AccessMethod, &'static str, Effect); 1] {
-        [
-            (
-                AccessMethod::Specified(Method::POST),
-                "/std/message",
-                Effect::Allow,
-            ),
-        ]
+        [(
+            AccessMethod::Specified(Method::POST),
+            "/std/message",
+            Effect::Allow,
+        )]
     }
 
     #[allow(dead_code)]
@@ -75,7 +69,7 @@ impl ChatCapability {
 mod tests {
     use http::Method;
 
-    use super::ChatCapability;
+    use super::{AccessMethod, ChatCapability};
 
     #[test]
     fn chat_is_contact_scoped_and_uses_push_delivery_only() {
@@ -90,8 +84,14 @@ mod tests {
     fn chat_descriptor_exposes_fixed_request_offer_and_rules() {
         let chat = ChatCapability;
         let requested = chat.requested_access();
-        assert_eq!(requested["/std/message"], vec![AccessMethod::Specified(Method::POST)]);
-        assert_eq!(chat.offers()["/std/message"].allow, vec![AccessMethod::Specified(Method::POST)]);
+        assert_eq!(
+            requested["/std/message"],
+            vec![AccessMethod::Specified(Method::POST)]
+        );
+        assert_eq!(
+            chat.offers()["/std/message"].allow,
+            vec![AccessMethod::Specified(Method::POST)]
+        );
         assert!(chat.fixed_rules().iter().all(|(_, path, effect)| {
             *path == "/std/message" && *effect == access_control::Effect::Allow
         }));

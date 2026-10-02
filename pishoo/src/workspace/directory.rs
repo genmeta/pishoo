@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use access_control::{ContactStatus, Visitor};
 use axum::{
@@ -12,7 +9,7 @@ use http::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement};
 use serde::Serialize;
 
-use super::{WorkspaceState, settings::require_owner};
+use super::{Workspace, settings::require_owner};
 use crate::chat::CHAT_CAPABILITY;
 
 type ApiError = (StatusCode, &'static str);
@@ -34,7 +31,7 @@ fn storage_error(error: DbErr) -> ApiError {
 }
 
 pub(crate) async fn list(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<Vec<DirectoryEntry>>, ApiError> {
     require_owner(&state, visitor.as_ref().map(|extension| &extension.0))?;
@@ -150,7 +147,7 @@ pub(crate) async fn list(
 /// Confirm that a Chat rule still belongs to the currently verified contact
 /// record, rather than a previous identity that used the same name.
 pub(crate) async fn approved_chat_grant(
-    state: &WorkspaceState,
+    state: &Workspace,
     visitor: &Visitor,
 ) -> Result<bool, DbErr> {
     let row = state
@@ -193,7 +190,7 @@ pub(crate) async fn approved_chat_grant(
 }
 
 pub(crate) async fn save(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -239,7 +236,7 @@ pub(crate) async fn save(
 }
 
 pub(crate) async fn unsave(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {

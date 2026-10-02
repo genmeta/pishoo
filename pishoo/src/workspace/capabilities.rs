@@ -4,12 +4,11 @@ use std::sync::Arc;
 
 use access_control::{GrantedAccess, RequestedAccess};
 use axum::{Extension, Json, extract::State};
-use http::Method;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use serde::Serialize;
 
+use super::Workspace;
 use crate::chat::CHAT_CAPABILITY;
-use super::WorkspaceState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CapabilityVisibility {
@@ -129,7 +128,7 @@ pub(crate) fn offered_access_for(id: &str) -> Option<GrantedAccess> {
 }
 
 pub(crate) async fn list(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<access_control::Visitor>>,
 ) -> Result<Json<Vec<CapabilityDescriptor>>, StatusCode> {
     state
@@ -185,20 +184,26 @@ mod tests {
         assert_eq!(descriptors[1].id, "chat");
         assert_eq!(descriptors[0].visibility, "public");
         assert_eq!(descriptors[1].visibility, "contact");
-        assert!(descriptors[0]
-            .endpoints
-            .iter()
-            .all(|endpoint| endpoint.path.starts_with("/std/profile")));
+        assert!(
+            descriptors[0]
+                .endpoints
+                .iter()
+                .all(|endpoint| endpoint.path.starts_with("/std/profile"))
+        );
         assert_eq!(descriptors[1].endpoints.len(), 1);
         assert_eq!(descriptors[1].endpoints[0].method, "POST");
         assert_eq!(descriptors[1].endpoints[0].path, "/std/message");
         assert!(super::requested_access_for("public_profile").is_none());
         assert!(super::offered_access_for("public_profile").is_none());
-        assert!(super::requested_access_for("chat")
-            .expect("chat request mapping")
-            .contains_key("/std/message"));
-        assert!(super::offered_access_for("chat")
-            .expect("chat offer mapping")
-            .contains_key("/std/message"));
+        assert!(
+            super::requested_access_for("chat")
+                .expect("chat request mapping")
+                .contains_key("/std/message")
+        );
+        assert!(
+            super::offered_access_for("chat")
+                .expect("chat offer mapping")
+                .contains_key("/std/message")
+        );
     }
 }

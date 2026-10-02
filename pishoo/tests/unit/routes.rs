@@ -80,26 +80,6 @@ async fn authorization_app(effect: access_control::Effect) -> (Arc<AccessService
     (access, app)
 }
 
-async fn pending_review(access: &AccessService) -> u64 {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let (count, reviews) = access.pending_live_reviews(0, 10);
-            if count == 1 {
-                let access_control::ReviewRecord::Live { id, request } = &reviews[0] else {
-                    panic!("expected live review")
-                };
-                assert!(request.headers().request_id.is_none());
-                assert!(request.name().is_none());
-                assert_eq!(request.headers().path, "/protected?x=1");
-                return *id;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("authorization must register its live review")
-}
-
 #[path = "routes/authorization.rs"]
 mod authorization;
 #[path = "routes/routing.rs"]

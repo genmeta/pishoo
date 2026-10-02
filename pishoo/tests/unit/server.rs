@@ -45,16 +45,28 @@ async fn server(root: &std::path::Path) -> Server {
         .await
         .unwrap(),
     );
+    let subject = access_control::SubjectId::new(b"owner").unwrap();
+    let workspace = Arc::new(Workspace::new(
+        profile.name().to_owned(),
+        endpoint.name().to_owned(),
+        subject.clone(),
+        WorkspaceStore::open(&profile).await.unwrap(),
+        access.clone(),
+    ));
+    let chat = Arc::new(Chat::new(
+        endpoint.name().to_owned(),
+        subject,
+        ChatStore::open(&profile).await.unwrap(),
+        access.clone(),
+    ));
+    workspace.configure_chat(chat.clone()).await;
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
     let proxies = config.proxy_locations.clone();
     let router = Router::new()
-        .merge(access_router(
-            access.clone(),
-            endpoint.clone(),
-            profile.name(),
-            endpoint.name(),
-        ))
+        .merge(access_router(access.clone()))
+        .merge(workspace::router(workspace.clone()))
+        .merge(chat_router(chat.clone(), workspace.clone()))
         .merge(sandbox.api_router(endpoint.clone()))
         .merge(file_router(profile.join("file")))
         .fallback(any(move |request: Request<AxumBody>| {
@@ -70,6 +82,8 @@ async fn server(root: &std::path::Path) -> Server {
         endpoint,
         config,
         access,
+        workspace,
+        chat,
         router,
         sandbox,
         exec_tasks: TaskTracker::new(),
@@ -127,6 +141,8 @@ async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths()
 async fn reload_reuses_valid_versions_and_rejects_bad_candidates() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
+    let workspace = server.workspace.clone();
+    let chat = server.chat.clone();
     let old = server.sandbox.libs["echo"].clone();
     let task = server.sandbox.tasks.token();
     server.reload().await.unwrap();
@@ -150,6 +166,9 @@ async fn reload_reuses_valid_versions_and_rejects_bad_candidates() {
     assert_eq!(server.sandbox.tasks.len(), 1);
     drop(task);
     assert!(server.sandbox.tasks.is_empty());
+    assert!(Arc::ptr_eq(&workspace, &server.workspace));
+    assert!(Arc::ptr_eq(&chat, &server.chat));
+    server.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -174,7 +193,6 @@ async fn reload_does_not_write_access_rules_or_replace_admin_rules() {
         method: http::Method::POST,
         path: "/api/echo/upload".into(),
         fields: http::HeaderMap::new(),
-        request_id: None,
     };
     assert!(matches!(
         server

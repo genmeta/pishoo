@@ -6,7 +6,7 @@ use http::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceState;
+use super::Workspace;
 
 pub(super) type ApiError = (StatusCode, &'static str);
 
@@ -39,10 +39,7 @@ pub(super) fn storage_error(error: DbErr) -> ApiError {
     )
 }
 
-pub(super) fn require_owner(
-    state: &WorkspaceState,
-    visitor: Option<&Visitor>,
-) -> Result<(), ApiError> {
+pub(super) fn require_owner(state: &Workspace, visitor: Option<&Visitor>) -> Result<(), ApiError> {
     state
         .owner
         .ensure(visitor)
@@ -81,7 +78,7 @@ pub(super) fn profile_settings(identity_name: &str, stored: StoredProfile) -> Pr
 }
 
 pub async fn get_profile(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<ProfileSettings>, ApiError> {
     require_owner(&state, visitor.as_ref().map(|extension| &extension.0))?;
@@ -90,7 +87,7 @@ pub async fn get_profile(
 }
 
 pub async fn patch_profile(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Json(body): Json<ProfilePatch>,
 ) -> Result<Json<ProfileSettings>, ApiError> {

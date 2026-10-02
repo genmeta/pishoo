@@ -1,6 +1,6 @@
 # h3x、dhttp、Pishoo：第一版架构
 
-日期：2026-09-26。状态：冻结设计的架构说明；实现及验收进度见[实施记录](../IMPLEMENTATION.md)。全部结构成员以[清单入口](README.md)列出的三个文件为准。
+日期：2026-09-26。状态：冻结设计的架构说明；实现及验收进度见[实施记录](../IMPLEMENTATION.md)。全部结构成员以[清单入口](README.md)列出的接口文件为准。
 
 ## 1. 三个仓库的职责
 
@@ -80,19 +80,17 @@ dhttp 在入站请求交付 Service 前展开 authority 简写，核对它与握
 - 网络来源范围由通信层准入；不虚构一个现有连接结果里没有的逐请求 ingress_scope。
 - 转发出站时不继承入站宿主身份 extensions，认证身份由当前 Endpoint 决定。
 
-## 5. daccess 以当前库接口为准
+## 5. daccess、Workspace 与 Chat
 
-以当前 daccess 库的 `AccessService`、`AuthResult` 和 `management_router` 为依据，已核对核心接口所在提交为 `origin/main@1ec62d4`。尽量复用 [pishoo/feat/daccess](https://github.com/genmeta/pishoo/tree/feat/daccess) 的集成；不兼容处调整 Pishoo，不要求 daccess 恢复旧接口。
+2026-10-02 用户确认以远端目标分支作为审批和联系人协议基准，并先 rebase 适配，暂缓底层接口对齐。daccess 固定 cf8f72f，Pishoo 功能基线为 feat/daccess@9b733c5；完整接口以 [Pishoo 清单](pishoo-interfaces.md) 和 [Workspace/Chat 清单](workspace-chat-interfaces.md) 为准。
 
-每个身份使用自己的 `db/access.db` 和一个 AccessService，同进程挂载。SubjectId 沿用证书 SKI 中 owner_hash 的文本字节。可信身份取自 HandshakeSummary，并转换为库已有的 SubjectId 和 Visitor。
+每个 Server 拥有独立 AccessService、Workspace 和 Chat。可信身份仍来自 HandshakeSummary 的名称及证书 SKI owner_hash，不从普通 HTTP 头构造 Visitor。Allowed 进入业务，Denied 返回403，Reviewing 立即返回202及状态地址。审批记录由 daccess 持久管理，状态查询按 Visitor 的名称与 SubjectId 校验，获准后重试业务请求并消费决定。连接退出不删除审批。
 
-Allowed 进入业务，Denied 返回 403；`Reviewing(id, state, registry)` 在当前请求中等待 `state.await`，按库返回的 `Result<Action, RequestResetError>` 继续或拒绝。请求退出时取消未完成的审批并删除 live 登记，局部清理复用现成库工具。Pishoo 不新增审批状态结构、后台等待任务或结束通知。
+联系人通过 Workspace 的本地持久队列发送稳定 application_id，接收方记录申请并从接收时起计算7天期限，申请方查询 /contact/self 得到状态和精确授权。批准操作只更新接收方本地状态；ContactNotifier 与 Syncing 回调移除。首次 POST /contact 仍由接收方访问策略决定。
 
-第一版填写 `Headers.request_id = None`，采用当前请求内审批。库已有绑定 RequestId 的持久审批能力，但本版不新增 RequestId 传输协议。旧分支的 202 响应和状态轮询不作为兼容要求。
+Workspace 保留完整前端、资料设置、联系人目录和能力审批；Chat 只通过 POST /std/message 投递，消息历史来自本地 chat.db。Server 显式组装路由；本地管理操作核对 owner，公开资料仅放行精确 GET 路径，Chat 入站同时要求 daccess 允许和有效能力授予。
 
-管理路由使用 `access_control::management_router_with_notifier`，包括 `/contact`、`/contacts`、`/acl/*`，在根路径挂载并通过同一授权层。Pishoo 的 ContactNotifier 复用本身份 Endpoint 向对端发送联系人授权更新，失败由库保留 Syncing 供重试。具体路径、请求体和响应体以库为准；保留 `/workspace` 和 `/workspace-api/context` 的装配方式，管理前端按当前 API 适配。不保留旧状态查询的 ACL 豁免，不新增默认规则导入器或跨库账本。
-
-Alice 手机调用 Alice Pishoo 已挂载的 daccess `POST /contact/{bob}` 管理接口发起申请。daccess 校验申请后调用 Pishoo 的 ContactNotifier；Pishoo 用本身份 Endpoint 发送 Bob 的 `POST /contact`，从本次响应扩展取得已验证 Bob 证书并返回 SubjectId，随后 daccess 保存 Bob 与回调规则。Bob 自己的 daccess 策略决定是否接收首次 POST；Alice Pishoo 不代 Bob 放行。统一 DHTTP 正向代理仍只做流式转发。
+生产出站尚未绑定新 Endpoint；暂时保留分支现有 OutboundTransport 接口和可用的模拟实现测试。远端资料返回连接不可用，发送申请和聊天消息仍保存在各自队列中。实际连接的身份核对、证书更新与网络往返验收留待底层稳定后处理。
 
 ## 6. Pishoo 第一版配置
 
@@ -104,7 +102,9 @@ Alice 手机调用 Alice Pishoo 已挂载的 daccess `POST /contact/{bob}` 管�
 DHTTP_HOME/<name>/
   ssl/                         身份材料，仅宿主使用
   db/config.db                 settings(listen,exec) + proxy_locations
-  db/access.db                 原 daccess 权限数据
+  db/access.db                 daccess 权限与审批数据
+  db/workspace.db              资料、联系人申请与能力决定
+  db/chat.db                   消息、投递队列与远端授权观察
   file/                        静态文件
   lib/<LibId>/lib.wasm          组件和内嵌 OpenAPI
   lib/<LibId>/data/             Lib 私有数据
@@ -116,7 +116,7 @@ config.db 的 v1 settings 必须只有一行，listen 为 0=off、1=Internal、2
 
 Server 直接持有当前 Router 和该身份的 Sandbox；Sandbox 集中持有 Lib 集合、共享 WasmRuntime 引用与任务跟踪器。`run` 以局部变量持有跨身份共享的 WasmRuntime，其内部只保留 Engine 和 Linker；组件加载和重载串行进行，不增加 compile_slots、compile_tasks、编译取消对象。
 
-按用户确认，组件扫描、manifest 验证、版本替换、API 路由与执行、Store、响应体及 WASI 宿主能力全部集中在 sandbox 逻辑模块，按职责分文件。Server 保留 Endpoint、daccess、整体 Router 和 exec 任务资源。Sandbox 负责该身份的 WASM 执行和任务回收，不限制并发数，不另存内部锁、取消信号、计数、身份或策略，不是操作系统进程或容器；完整字段和方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
+按用户确认，组件扫描、manifest 验证、版本替换、API 路由与执行、Store、响应体及 WASI 宿主能力全部集中在 sandbox 逻辑模块，按职责分文件。Server 保留 Endpoint、daccess、Workspace、Chat、整体 Router 和 exec 任务资源。Sandbox 负责该身份的 WASM 执行和任务回收，不限制并发数，不另存内部锁、取消信号、计数、身份或策略，不是操作系统进程或容器；完整字段和方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
 
 启动时加载一次，运行中由 SIGHUP 显式触发身份、配置和 Lib 重载，不定时扫描。一次重载直接完成：读取配置 → Sandbox 扫描并编译局部候选，成功后更新 Lib 集合 → 构造 Lib Router 和完整 Router → Server 替换完整 Router 和配置。扫描与编译失败直接返回并保留旧 Router、Lib、配置及取消状态；更新 Lib 集合之后没有 await 或可失败操作。在途请求持有自己已取得的 Router/Lib 引用，各版本继续共享原有任务跟踪器。候选使用 Sandbox 方法中的局部 HashMap，没有 ServerState、Release、begin_build、发布编号或后台构建队列。
 
@@ -142,7 +142,7 @@ Endpoint.listen
 
 Pishoo 跟踪 guest、宿主 I/O 和应用 producer；dhttp 持有自己的读写和连接任务。应用 EOF 与传输写完可能不同，各层按自己的操作结果释放资源，不设 finished/ExchangeControl。
 
-Server 关闭时清空 Router、同步调用 Sandbox.close，并关闭 exec 任务登记；Endpoint 监听登记持续到进程退出。Sandbox.close 关闭任务跟踪器并清空集合；它不等待，`wait` 沿用15秒上限。关闭的 TaskTracker 仍允许旧 Router 登记新执行；在途 guest 继续执行直到自身结束；等待超过15秒返回 ShutdownDeadline。Server 不批量取消 HTTP、审批或已启动的 exec。Sandbox 的任务跟踪器直接跟踪持有 Store 的 guest 任务，Server 自己的 exec 跟踪器回收 Child；执行和传输资源沿用各自的所有权。
+Server 关闭时清空 Router、同步调用 Sandbox.close，并关闭 exec 任务登记；Endpoint 监听登记持续到进程退出。Sandbox.close 关闭任务跟踪器并清空集合；它不等待，`wait` 沿用15秒上限。关闭的 TaskTracker 仍允许旧 Router 登记新执行；在途 guest 继续执行直到自身结束；等待超过15秒返回 ShutdownDeadline。Server 不批量取消 HTTP 或已启动的 exec；审批记录由 daccess 持久保存。关闭还停止并等待 Workspace/Chat 的 worker，未完成投递保留在数据库供恢复。Sandbox 的任务跟踪器直接跟踪持有 Store 的 guest 任务，Server 自己的 exec 跟踪器回收 Child；执行和传输资源沿用各自的所有权。
 
 原 body 被替换或 HEAD/204/304 抑制时，旧 Body 直接丢弃，不另行取消 guest，也不影响最终合法响应。传输错误由读写操作返回；没有继续 I/O 的 guest 可能运行到自行结束。
 
@@ -159,7 +159,7 @@ Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 h
 ## 10. 保留的路由和组件规则
 
 - `/api/<LibId>` 专供 WASM，包括 `/api/index`；未声明路径 404，方法不匹配 405，业务 HEAD/OPTIONS 必须显式声明。
-- `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/context` 为管理前端保留；`/.pishoo/`、`/exec` 继续保留，不能由代理或 Lib 遮盖。
+- `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/*`、`/chat-api/*`、`/std/*` 为 Workspace/Chat 保留；`/.pishoo/`、`/exec` 继续保留，不能由代理或 Lib 遮盖。
 - 静态文件只在 `/file/{*path}` 提供，URL `/file/a` 映射身份目录的 `file/a`；`/file` 和 `/file/` 不提供文件。静态只接受 GET/HEAD，目录只尝试 index.html，不列目录。workspace 自身保留原管理前端的深链接 fallback，不能与普通静态站点规则混用。
 - 代理作为 fallback，先精确 `= /path`，再最长路径段前缀；query 不参与，`/foo` 不匹配 `/foobar`。`/file` 路径保留给静态文件；未命中代理配置返回 404。proxy_pass 无 URI 路径时保留原路径，有 URI 时替换命中部分，不自动补斜杠。保持已有尾斜杠重定向规则。
 - 组件顶层恰有一个 `pishoo:openapi` 段，内容为有界 UTF-8 OpenAPI 3.1.x JSON；不运行 guest 获取 API 清单。
@@ -182,6 +182,6 @@ exec 由每个 Server 的 `settings.exec` 控制，只允许同名已验证远�
 3. Lib 通过 Endpoint 收发，反代通过本机 HTTP/1.1 客户端收发；两者都不操作 QPACK/H3 流。
 4. exec 按固定请求和资源上限实现，验证身份、取消与直接子进程回收，并记录未提供 OS 沙箱的能力边界。
 
-重点检查：上传与响应并发、trailers 多值、提前 Drop、body 替换、HEAD/204/304、guest 取消、同名 load 复用连接、不同本端身份不共池、daccess 允许/拒绝/审批结果、审批等待取消后的清理及管理界面对当前库 API 的适配。
+重点检查：上传与响应并发、trailers 多值、提前 Drop、body 替换、HEAD/204/304、guest 取消、同名 load 复用连接、不同本端身份不共池、daccess 允许/拒绝/审批结果、审批状态查询归属和一次性决定消费及管理界面对当前库 API 的适配。
 
 设计约束与实现验收分别记录；内存流和本地执行验证不代表真实跨端联网或完整进程树回收已经完成。

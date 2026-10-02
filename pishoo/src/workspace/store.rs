@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use dhttp::home::identity::IdentityProfile;
+use dhttp_home::identity::IdentityProfile;
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement,
     TransactionTrait,
@@ -37,7 +37,7 @@ pub struct WorkspaceStore {
 
 impl WorkspaceStore {
     pub async fn open(profile: &IdentityProfile) -> Result<Self, StoreError> {
-        let path = profile.join(IdentityProfile::DB_DIR).join("workspace.db");
+        let path = profile.db_dir().join("workspace.db");
         let parent = path.parent().expect("Workspace database path has a parent");
         std::fs::create_dir_all(parent).context(DirectorySnafu {
             path: parent.to_path_buf(),
@@ -126,7 +126,7 @@ async fn migrate(db: &DatabaseConnection, path: &PathBuf) -> Result<(), StoreErr
 
 #[cfg(test)]
 mod tests {
-    use dhttp::home::identity::IdentityProfile;
+    use dhttp_home::identity::IdentityProfile;
     use sea_orm::{ConnectionTrait, Database, Statement};
 
     use super::{StoreError, WorkspaceStore};

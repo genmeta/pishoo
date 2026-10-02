@@ -11,13 +11,16 @@ use axum::{
     Extension, Json,
     extract::{Path, Query, State},
 };
-use sha2::{Digest, Sha256};
-use dhttp::name::DhttpName;
 use http::{Method, StatusCode};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use super::{WorkspaceState, capabilities::{offered_access_for, requested_access_for}, settings::require_owner};
+use super::{
+    Workspace,
+    capabilities::{offered_access_for, requested_access_for},
+    settings::require_owner,
+};
 use crate::chat::CHAT_CAPABILITY;
 
 pub(super) mod worker;
@@ -166,11 +169,9 @@ fn selected_access(
 }
 
 fn has_chat_access(requested: &RequestedAccess) -> bool {
-    requested
-        .get("/std/message")
-        .is_some_and(|methods| {
-            methods.as_slice() == [access_control::Method::Specified(Method::POST)]
-        })
+    requested.get("/std/message").is_some_and(|methods| {
+        methods.as_slice() == [access_control::Method::Specified(Method::POST)]
+    })
 }
 
 fn access_error(error: DbErr) -> ApiError {
@@ -184,7 +185,7 @@ fn access_error(error: DbErr) -> ApiError {
 }
 
 async fn capability_decision(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     capability: &str,
 ) -> Result<Option<(String, Vec<u8>, i64)>, ApiError> {
@@ -209,7 +210,7 @@ async fn capability_decision(
 }
 
 async fn record_capability_decision(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     capability: &str,
     decision: &str,
@@ -228,7 +229,9 @@ async fn record_capability_decision(
         .map_err(storage_error)?;
     if let Some(current) = current {
         let current_decision: String = current.try_get("", "decision").map_err(storage_error)?;
-        let current_version: String = current.try_get("", "descriptor_version").map_err(storage_error)?;
+        let current_version: String = current
+            .try_get("", "descriptor_version")
+            .map_err(storage_error)?;
         let current_subject: Vec<u8> = current.try_get("", "subject_id").map_err(storage_error)?;
         let current_request_id: i64 = current.try_get("", "request_id").map_err(storage_error)?;
         if current_decision == decision
@@ -279,7 +282,7 @@ async fn record_capability_decision(
 }
 
 async fn contact_record_id(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     subject_id: &SubjectId,
 ) -> Result<i64, ApiError> {
@@ -297,7 +300,7 @@ async fn contact_record_id(
     row.try_get("", "id").map_err(access_error)
 }
 
-pub(crate) async fn ensure_chat_access(state: &WorkspaceState, name: &str) -> Result<(), ApiError> {
+pub(crate) async fn ensure_chat_access(state: &Workspace, name: &str) -> Result<(), ApiError> {
     let grantee = Grantee::One(name.to_owned());
     for (method, api, effect) in CHAT_CAPABILITY.fixed_rules() {
         state
@@ -310,7 +313,7 @@ pub(crate) async fn ensure_chat_access(state: &WorkspaceState, name: &str) -> Re
 }
 
 pub(crate) async fn grant_capability(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     capability: &str,
     expected: Option<(i64, &str)>,
@@ -373,7 +376,7 @@ pub(crate) async fn grant_capability(
 }
 
 pub(crate) async fn revoke_capability(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     capability: &str,
 ) -> Result<(), ApiError> {
@@ -407,7 +410,7 @@ pub(crate) async fn revoke_capability(
 }
 
 pub(crate) async fn deny_capability(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: &str,
     capability: &str,
     expected_request_id: i64,
@@ -475,7 +478,7 @@ pub(crate) async fn deny_capability(
 }
 
 async fn reconcile_remote_contact(
-    state: &WorkspaceState,
+    state: &Workspace,
     target: &str,
     remote: &RemoteStatus,
     requested_capabilities: &[String],
@@ -488,19 +491,12 @@ async fn reconcile_remote_contact(
             "remote contact name does not match the requested target",
         ));
     }
-    let subject_id = SubjectId::new(remote.subject_id.as_bytes().to_vec()).map_err(|_| {
-        (
-            StatusCode::CONFLICT,
-            "remote contact subject_id is invalid",
-        )
-    })?;
+    let subject_id = SubjectId::new(remote.subject_id.as_bytes().to_vec())
+        .map_err(|_| (StatusCode::CONFLICT, "remote contact subject_id is invalid"))?;
     match state.access.find_contact_by_name(target).await {
         Ok(contact) => {
             if contact.subject_id != subject_id {
-                return Err((
-                    StatusCode::CONFLICT,
-                    "remote contact subject_id changed",
-                ));
+                return Err((StatusCode::CONFLICT, "remote contact subject_id changed"));
             }
             match ContactStatus::try_from(contact.status)
                 .map_err(|_| (StatusCode::CONFLICT, "contact has invalid status"))?
@@ -520,10 +516,7 @@ async fn reconcile_remote_contact(
                 }
                 ContactStatus::Active => {}
                 ContactStatus::Expired | ContactStatus::Blocked => {
-                    return Err((
-                        StatusCode::CONFLICT,
-                        "local contact cannot be reconciled",
-                    ));
+                    return Err((StatusCode::CONFLICT, "local contact cannot be reconciled"));
                 }
             }
         }
@@ -559,9 +552,16 @@ async fn reconcile_remote_contact(
         }
         Err(error) => return Err(access_error(error)),
     }
-    if offered_capabilities.iter().any(|capability| capability == CHAT_CAPABILITY.id()) {
+    if offered_capabilities
+        .iter()
+        .any(|capability| capability == CHAT_CAPABILITY.id())
+    {
         ensure_chat_access(state, target).await?;
-        let contact = state.access.find_contact_by_name(target).await.map_err(access_error)?;
+        let contact = state
+            .access
+            .find_contact_by_name(target)
+            .await
+            .map_err(access_error)?;
         record_capability_decision(
             state,
             target,
@@ -577,7 +577,7 @@ async fn reconcile_remote_contact(
 }
 
 async fn sync_remote_chat_grant(
-    state: &WorkspaceState,
+    state: &Workspace,
     target: &str,
     remote: &RemoteStatus,
 ) -> Result<(), ApiError> {
@@ -601,7 +601,7 @@ async fn sync_remote_chat_grant(
 }
 
 async fn capability_requests_by_status(
-    state: &WorkspaceState,
+    state: &Workspace,
     expired: bool,
 ) -> Result<Vec<CapabilityRequest>, ApiError> {
     let current = now()?;
@@ -615,8 +615,10 @@ async fn capability_requests_by_status(
         .database()
         .query_all_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            format!("SELECT id, name, subject_id, created_at, expired_after, requests FROM contacts \
-             WHERE {condition} ORDER BY created_at DESC, name ASC"),
+            format!(
+                "SELECT id, name, subject_id, created_at, expired_after, requests FROM contacts \
+             WHERE {condition} ORDER BY created_at DESC, name ASC"
+            ),
             [current.into()],
         ))
         .await
@@ -624,8 +626,7 @@ async fn capability_requests_by_status(
     let mut requests = Vec::new();
     for row in rows {
         let requested: RequestedAccess = serde_json::from_str(
-            &row
-                .try_get::<String>("", "requests")
+            &row.try_get::<String>("", "requests")
                 .map_err(access_error)?,
         )
         .map_err(|error| access_error(DbErr::Type(error.to_string())))?;
@@ -658,19 +659,19 @@ async fn capability_requests_by_status(
 }
 
 pub(super) async fn pending_capability_requests(
-    state: &WorkspaceState,
+    state: &Workspace,
 ) -> Result<Vec<CapabilityRequest>, ApiError> {
     capability_requests_by_status(state, false).await
 }
 
 pub(super) async fn expired_capability_requests(
-    state: &WorkspaceState,
+    state: &Workspace,
 ) -> Result<Vec<CapabilityRequest>, ApiError> {
     capability_requests_by_status(state, true).await
 }
 
 pub(crate) async fn capability_requests(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<Vec<CapabilityRequest>>, ApiError> {
     require_owner(&state, visitor.as_ref().map(|extension| &extension.0))?;
@@ -694,8 +695,12 @@ fn decode(row: sea_orm::QueryResult) -> Result<OutboundRequest, ApiError> {
             .map_err(|error| storage_error(DbErr::Type(error.to_string())))?,
         status: row.try_get("", "status").map_err(storage_error)?,
         expired_after: row.try_get("", "expired_after").map_err(storage_error)?,
-        delivery_deadline: row.try_get("", "delivery_deadline").map_err(storage_error)?,
-        remote_expired_after: row.try_get("", "remote_expired_after").map_err(storage_error)?,
+        delivery_deadline: row
+            .try_get("", "delivery_deadline")
+            .map_err(storage_error)?,
+        remote_expired_after: row
+            .try_get("", "remote_expired_after")
+            .map_err(storage_error)?,
         last_checked_at: row.try_get("", "last_checked_at").map_err(storage_error)?,
         error_message: row.try_get("", "error_message").map_err(storage_error)?,
         created_at: row.try_get("", "created_at").map_err(storage_error)?,
@@ -706,7 +711,7 @@ fn decode(row: sea_orm::QueryResult) -> Result<OutboundRequest, ApiError> {
 const SELECT: &str = "SELECT id, target_name, description, requested_capabilities, offered_capabilities, status, \
     expired_after, delivery_deadline, remote_expired_after, last_checked_at, error_message, created_at, updated_at FROM outbound_contact_requests";
 
-async fn find(state: &WorkspaceState, id: i64) -> Result<OutboundRequest, ApiError> {
+async fn find(state: &Workspace, id: i64) -> Result<OutboundRequest, ApiError> {
     let row = state
         .store
         .db()
@@ -721,7 +726,7 @@ async fn find(state: &WorkspaceState, id: i64) -> Result<OutboundRequest, ApiErr
     decode(row)
 }
 
-async fn expire(state: &WorkspaceState, current: i64) -> Result<(), ApiError> {
+async fn expire(state: &Workspace, current: i64) -> Result<(), ApiError> {
     state
         .store
         .db()
@@ -738,14 +743,14 @@ async fn expire(state: &WorkspaceState, current: i64) -> Result<(), ApiError> {
 }
 
 pub(crate) async fn create(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Json(body): Json<NewRequest>,
 ) -> Result<(StatusCode, Json<OutboundRequest>), ApiError> {
     require_owner(&state, visitor.as_ref().map(|extension| &extension.0))?;
-    let target_name = DhttpName::try_from(body.target_name.trim().to_owned())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid target name"))?;
-    let target = target_name.as_full();
+    let target_name = dhttp_home::normalize_name(body.target_name.trim())
+        .ok_or((StatusCode::BAD_REQUEST, "invalid target name"))?;
+    let target = target_name.as_str();
     if target == state.owner.name() {
         return Err((StatusCode::BAD_REQUEST, "cannot contact own identity"));
     }
@@ -767,15 +772,30 @@ pub(crate) async fn create(
         return Err((StatusCode::CONFLICT, "pending request already exists"));
     }
     let mut nonce = [0_u8; 32];
-    getrandom::fill(&mut nonce).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "random source unavailable"))?;
+    getrandom::fill(&mut nonce).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "random source unavailable",
+        )
+    })?;
     let application_id = Sha256::digest(nonce)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let requested_capabilities_json = serde_json::to_string(&body.requested_capabilities)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to encode requested capabilities"))?;
-    let offered_capabilities_json = serde_json::to_string(&body.offered_capabilities)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to encode offered capabilities"))?;
+    let requested_capabilities_json =
+        serde_json::to_string(&body.requested_capabilities).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode requested capabilities",
+            )
+        })?;
+    let offered_capabilities_json =
+        serde_json::to_string(&body.offered_capabilities).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode offered capabilities",
+            )
+        })?;
     let inserted = state.store.db().execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
         "INSERT INTO outbound_contact_requests (target_name, description, requested_capabilities, offered_capabilities, \
@@ -792,7 +812,7 @@ pub(crate) async fn create(
 }
 
 pub(crate) async fn grant(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path((name, capability)): Path<(String, String)>,
     Query(query): Query<CapabilityGrantQuery>,
@@ -801,7 +821,12 @@ pub(crate) async fn grant(
     let expected = match (query.request_id, query.capability_version.as_deref()) {
         (Some(request_id), Some(version)) => Some((request_id, version)),
         (None, None) => None,
-        _ => return Err((StatusCode::BAD_REQUEST, "incomplete capability request reference")),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "incomplete capability request reference",
+            ));
+        }
     };
     let _guard = state.contact_write.lock().await;
     grant_capability(&state, &name, &capability, expected).await?;
@@ -809,7 +834,7 @@ pub(crate) async fn grant(
 }
 
 pub(crate) async fn revoke(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path((name, capability)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
@@ -820,7 +845,7 @@ pub(crate) async fn revoke(
 }
 
 pub(crate) async fn deny(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path((name, capability)): Path<(String, String)>,
     Query(query): Query<CapabilityDecisionQuery>,
@@ -835,7 +860,7 @@ pub(crate) async fn deny(
 }
 
 pub(crate) async fn list(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<RequestPage>, ApiError> {
@@ -885,7 +910,7 @@ pub(crate) async fn list(
 }
 
 pub(crate) async fn get(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(id): Path<i64>,
 ) -> Result<Json<OutboundRequest>, ApiError> {
@@ -895,7 +920,7 @@ pub(crate) async fn get(
 }
 
 pub(crate) async fn refresh(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(id): Path<i64>,
 ) -> Result<Json<OutboundRequest>, ApiError> {
@@ -916,7 +941,7 @@ pub(crate) async fn refresh(
 }
 
 pub(crate) async fn delete(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
@@ -934,11 +959,16 @@ pub(crate) async fn delete(
         .await
         .map_err(storage_error)?;
     if deleted.rows_affected() == 0 {
-        let existing = state.store.db().query_one_raw(Statement::from_sql_and_values(
-            DatabaseBackend::Sqlite,
-            "SELECT id FROM outbound_contact_requests WHERE id = ?",
-            [id.into()],
-        )).await.map_err(storage_error)?;
+        let existing = state
+            .store
+            .db()
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT id FROM outbound_contact_requests WHERE id = ?",
+                [id.into()],
+            ))
+            .await
+            .map_err(storage_error)?;
         return Err(if existing.is_some() {
             (StatusCode::CONFLICT, "request is being delivered")
         } else {

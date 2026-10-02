@@ -12,7 +12,7 @@ use http::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement, TransactionTrait};
 
 use super::{
-    ChatState,
+    Chat,
     message::{MessageEnvelope, MessageSubmission},
 };
 
@@ -47,10 +47,7 @@ fn now() -> Result<i64, ApiError> {
     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid system clock"))
 }
 
-async fn require_chat_contact(
-    state: &ChatState,
-    visitor: Option<&Visitor>,
-) -> Result<String, ApiError> {
+async fn require_chat_contact(state: &Chat, visitor: Option<&Visitor>) -> Result<String, ApiError> {
     let visitor = visitor.ok_or((
         StatusCode::UNAUTHORIZED,
         "verified visitor identity is required",
@@ -102,7 +99,7 @@ async fn read_message(db: &impl ConnectionTrait, id: i64) -> Result<MessageEnvel
 }
 
 pub(crate) async fn post(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<Visitor>>,
     body: Result<Json<MessageSubmission>, JsonRejection>,
 ) -> Result<(StatusCode, Json<MessageEnvelope>), ApiError> {
