@@ -22,6 +22,55 @@ struct DhttpContactNotifier {
 }
 
 impl ContactNotifier for DhttpContactNotifier {
+    fn submit_application<'a>(
+        &'a self,
+        contact: &'a str,
+        body: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<SubjectId, NotifyError>> + Send + 'a>> {
+        Box::pin(async move {
+            dhttp_home::validate_name(contact)?;
+            let target = dhttp_home::normalize_name(contact)
+                .ok_or_else(|| std::io::Error::other("invalid contact target"))?;
+            let uri: Uri = format!("https://{target}/contact").parse()?;
+            let response = self
+                .endpoint
+                .post(uri)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )
+                .body(Full::new(Bytes::from(body)))
+                .await?;
+            if response.status() != StatusCode::CREATED {
+                return Err(std::io::Error::other(format!(
+                    "contact application returned {}",
+                    response.status()
+                ))
+                .into());
+            }
+            let subject = {
+                let peer = response
+                    .extensions()
+                    .get::<dhttp::RemoteAuthority>()
+                    .ok_or_else(|| {
+                        std::io::Error::other("contact response has no verified peer")
+                    })?;
+                if dhttp_home::normalize_name(peer.name()).as_deref() != Some(target.as_str()) {
+                    return Err(
+                        std::io::Error::other("contact response peer name mismatched").into(),
+                    );
+                }
+                let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                    peer.certificates(),
+                )?;
+                SubjectId::new(ski.owner_hash().as_str().as_bytes())
+                    .map_err(|_| std::io::Error::other("invalid contact owner hash"))?
+            };
+            response.into_body().collect().await?;
+            Ok(subject)
+        })
+    }
+
     fn granted_update<'a>(
         &'a self,
         contact: &'a str,
@@ -35,7 +84,8 @@ impl ContactNotifier for DhttpContactNotifier {
                 .ok_or_else(|| std::io::Error::other("contact timestamp is not representable"))?;
             let date =
                 HeaderValue::from_str(&timestamp.format("%a, %d %b %Y %H:%M:%S GMT").to_string())?;
-            let result = tokio::time::timeout(Duration::from_secs(30), async {
+
+            tokio::time::timeout(Duration::from_secs(30), async {
                 let response = self
                     .endpoint
                     .patch(uri)
@@ -56,8 +106,7 @@ impl ContactNotifier for DhttpContactNotifier {
                 response.into_body().collect().await?;
                 Ok::<(), NotifyError>(())
             })
-            .await?;
-            result
+            .await?
         })
     }
 }

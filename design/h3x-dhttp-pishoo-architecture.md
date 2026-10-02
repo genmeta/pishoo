@@ -92,6 +92,8 @@ Allowed 进入业务，Denied 返回 403；`Reviewing(id, state, registry)` 在�
 
 管理路由使用 `access_control::management_router_with_notifier`，包括 `/contact`、`/contacts`、`/acl/*`，在根路径挂载并通过同一授权层。Pishoo 的 ContactNotifier 复用本身份 Endpoint 向对端发送联系人授权更新，失败由库保留 Syncing 供重试。具体路径、请求体和响应体以库为准；保留 `/workspace` 和 `/workspace-api/context` 的装配方式，管理前端按当前 API 适配。不保留旧状态查询的 ACL 豁免，不新增默认规则导入器或跨库账本。
 
+Alice 手机调用 Alice Pishoo 已挂载的 daccess `POST /contact/{bob}` 管理接口发起申请。daccess 校验申请后调用 Pishoo 的 ContactNotifier；Pishoo 用本身份 Endpoint 发送 Bob 的 `POST /contact`，从本次响应扩展取得已验证 Bob 证书并返回 SubjectId，随后 daccess 保存 Bob 与回调规则。Bob 自己的 daccess 策略决定是否接收首次 POST；Alice Pishoo 不代 Bob 放行。统一 DHTTP 正向代理仍只做流式转发。
+
 ## 6. Pishoo 第一版配置
 
 用户配置只保留每个 Server 的监听范围、`exec` 开关和代理路由。实例目录由 DHTTP_HOME 决定，没有实例配置文件或数据库。
@@ -150,7 +152,7 @@ WASM 产生响应头后可以继续读上传或写响应。响应使用 Wasmtime
 
 代理负责路由和路径转换，用 HTTP/1.1 客户端连接回环 TCP 地址；配置支持带路径的 `http://127.0.0.1:8080` 和裸 `127.0.0.1:8080`。代理清理 HTTP/3 与 HTTP/1.1 之间的逐跳头，按上游 authority 设置 Host，不自动生成 `X-Forwarded-*`。
 
-同名身份专用的 DHTTP 正向代理在 `/.pishoo/dhttp/{target}` 及其子路径接收请求。Pishoo 核对已验证来访者与本 Server 的名称和 SKI owner_hash，按路径中的目标名称构造 DHTTP URI，使用本 Server 的 Endpoint 转发并流式交付响应；不会继承来访者的可信身份 extensions，也不使用配置反代或 Lib 出站 hook。
+同名身份专用的 DHTTP 正向代理在 `/.pishoo/dhttp/{*path}` 接收请求，包括带或不带末尾斜杠的目标根路径及其子路径。Pishoo 核对已验证来访者与本 Server 的名称和 SKI owner_hash，按路径中的目标名称构造 DHTTP URI，使用本 Server 的 Endpoint 转发并流式交付响应；不会继承来访者的可信身份 extensions，也不使用配置反代或 Lib 出站 hook。
 
 Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 hook 对 guest 发起的 HTTP 出站返回 HttpRequestDenied，不调用 Wasmtime 默认网络发送器。身份签名验证只读取本端或当前握手对端的已验证公钥。
 

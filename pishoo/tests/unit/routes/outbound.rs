@@ -8,6 +8,10 @@ fn outbound_prefix_preserves_target_path_and_query() {
             "https://bob.dhttp.net/",
         ),
         (
+            "https://alice.dhttp.net/.pishoo/dhttp/bob.dhttp.net/?x=1",
+            "https://bob.dhttp.net/?x=1",
+        ),
+        (
             "https://alice.dhttp.net/.pishoo/dhttp/bob~/contact?x=1",
             "https://bob.dhttp.net/contact?x=1",
         ),

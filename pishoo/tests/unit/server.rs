@@ -77,6 +77,53 @@ async fn server(root: &std::path::Path) -> Server {
 }
 
 #[tokio::test]
+async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    server.reload().await.unwrap();
+
+    let name = server.endpoint.name();
+    let cert = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
+    let local = dhttp::LocalAuthority::new(
+        &qtls::default_provider(),
+        Arc::from(name),
+        vec![cert.cert.der().clone()],
+        qtls::PrivateKeyDer::try_from(cert.signing_key.serialize_der()).unwrap(),
+        vec![1],
+    )
+    .unwrap();
+
+    for path in [
+        "/.pishoo/dhttp/bob.dhttp.net",
+        "/.pishoo/dhttp/bob.dhttp.net/",
+        "/.pishoo/dhttp/bob.dhttp.net/a/b",
+    ] {
+        server
+            .access
+            .set_policy(
+                access_control::Method::Specified(http::Method::GET),
+                path,
+                access_control::Effect::Allow,
+                access_control::Grantee::Anony,
+            )
+            .await
+            .unwrap();
+        let mut request = Request::builder()
+            .uri(path)
+            .body(AxumBody::empty())
+            .unwrap();
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(local.clone()),
+            remote: None,
+        });
+        let router = server.router.read().unwrap().clone();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn reload_reuses_valid_versions_and_rejects_bad_candidates() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;

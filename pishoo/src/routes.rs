@@ -17,6 +17,8 @@ mod outbound;
 
 mod proxy;
 
+pub(crate) const DHTTP_PREFIX: &str = "/.pishoo/dhttp/";
+
 pub(crate) use access::{access_router, authorize};
 pub(crate) use outbound::forward_dhttp;
 

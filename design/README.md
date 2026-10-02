@@ -44,12 +44,13 @@
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 不持 Network、QUIC endpoint 或连接。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 与 exec 都不设并发名额。
-- 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{target}` 前缀，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
+- 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
 - 2026-09-27 用户批准 `tcp-mock` 构建例外及泛型 Network：默认后端仍用 QUIC；测试后端把 h3x 的双向请求流和单向控制/QPACK 流复用在回环 TCP 上。测试客户端是独立进程中的 dhttp Endpoint，不经过 HTTP/1 桥；Pishoo 在测试连接上注入匿名远端摘要。已批准的 Network/后端成员变更见 dhttp 清单；h3x 接口不变，此验证不代表 QUIC、TLS 对端认证或路径发现通过。
 - dhttp 保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。Lib 暂不调用该出站接口。
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
 - 身份直接复用 qtls 的 HandshakeSummary、LocalAuthority、RemoteAuthority，范围复用 qconn 的 Scope/Scopes。没有 RequestInfo 或 Peer 包装。
+- dhttp 出站响应在进程内的 extensions 携带实际连接已验证的 RemoteAuthority；不恢复已删除的 resolve_remote。Pishoo 的统一 DHTTP 通配路由纯转发。联系人申请由 daccess 的 POST /contact/{name} 管理接口发起，Pishoo 通过既有 Endpoint 实现 ContactNotifier 的传输方法，daccess 收到 Bob 的已验证 SubjectId 后建档；Bob 的首次 POST /contact 由 Bob 自己的 daccess 规则授权。
 - 2026-09-28 用户确认入站 URI authority 简写展开及与握手本端身份的核对归 dhttp 的 `serve_exchange`，在交付应用 Service 前完成；Pishoo 的 `Server.listen` 不重复执行。缺少或不匹配的 authority 由 dhttp 返回 421。
 - 一个 WASM 文件统一称为 Lib，不另设 App；代码类型使用 Lib 和通用 Body/Error。
 - 每个 Server 直接持有一个 Sandbox，集中拥有该身份的 Lib 集合、共享 WasmRuntime 引用与任务跟踪器；组件扫描、校验、版本替换、API 执行和 WASI 宿主能力均归 sandbox 模块。Lib 执行不限制并发数，不设置执行槽或 permit；Sandbox 不新增内部锁、取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
@@ -112,7 +113,9 @@
 
 2026-09-29 用户批准在 Pishoo 实现 daccess 既有的 `ContactNotifier`，由本 Server 的 Endpoint 直接发送联系人授权更新，不修改 daccess。冻结新增 `DhttpContactNotifier { endpoint }` 及其 trait 方法，并为管理路由装配函数增加 Endpoint 参数；Server 与 dhttp 均不新增成员。通知失败由 daccess 保留 Syncing 供重试。
 
-2026-09-29 用户批准新增同名身份专用的 DHTTP 正向代理：`/.pishoo/dhttp/{target}` 及其子路径由 `routes::forward_dhttp(endpoint, request) -> Response` 处理，复用 Server 已有 Endpoint，不增加成员或替换本机 HTTP/TCP 代理。请求先经过 daccess 授权，再核对握手来访者与本 Server 同名且 SKI owner_hash 相同；目标仅为 DHTTP 名称。Lib 的 WASI HTTP 出站仍拒绝。
+2026-09-29 用户批准新增同名身份专用的 DHTTP 正向代理：`/.pishoo/dhttp/` 前缀由 `routes::forward_dhttp(endpoint, request) -> Response` 处理，复用 Server 已有 Endpoint，不增加成员或替换本机 HTTP/TCP 代理。请求先经过 daccess 授权，再核对握手来访者与本 Server 同名且 SKI owner_hash 相同；目标仅为 DHTTP 名称。Lib 的 WASI HTTP 出站仍拒绝。随后用户要求用单条 `/.pishoo/dhttp/{*path}` 路由覆盖带或不带末尾斜杠的目标根路径及其子路径。
+
+2026-09-29 用户批准联系人申请由 daccess 管理 API 发起：在现有 `/contact/{name}` 增加 POST，并给 `ContactNotifier` 增加 `submit_application(contact, body) -> Future<Result<SubjectId, NotifyError>>`。Pishoo 的 `DhttpContactNotifier` 使用已有 Endpoint 发送到 Bob，核对响应扩展中的已验证对端身份并返回 SubjectId；daccess 收到成功结果后调用现有 `create_contact`。统一 DHTTP outgoing 仍纯转发，不新增 Server 字段或运行时 handler 注册状态。
 
 ## 文档清理
 
