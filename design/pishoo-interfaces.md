@@ -95,7 +95,10 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
 
 reload 先读取配置，再调用 Sandbox.load_libs 扫描并更新 Lib 集合。Server 中显式合并管理、Lib API、exec 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败时直接返回错误，保留旧 Router、Lib 集合和配置。加载成功后构建完整 Router，一次替换，并更新 Server.config；其间没有 await 或可失败操作。没有部分挂入路由的中间状态。
 
-`/.pishoo/dhttp/{target}` 和 `/.pishoo/dhttp/{target}/{*path}` 在代理 fallback 之前挂载。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
+`/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
+
+
+统一 DHTTP 正向代理只有一条 Axum 通配路由，始终调用纯转发 `forward_dhttp`，不登记业务 handler 或修改本地联系人。联系人申请由 daccess 管理路由的 `POST /contact/{name}` 发起；daccess 校验 Alice 身份和请求体，调用 Pishoo 的 ContactNotifier 发送至 Bob，并在收到 201 和已验证的 Bob SubjectId 后调用现有 `create_contact`，保存 Bob 的 Pending 记录及精确 `PATCH /contact` 回调规则。本地提交成功后才向 Alice 返回 201。Bob 对首次 `POST /contact` 的准入由自己的 daccess 规则配置；没有允许或审批规则时仍按默认策略拒绝。Bob 已保存申请而 Alice 本地建档失败时，双方可能暂时不一致；Bob 抢先批准的回调失败并保持 Syncing，可用现有批准 API 重试。
 
 组件一次读出的bytes同时用于OpenAPI、摘要和编译，不在提交前重读文件。没有后台编译结果，也没有跨任务revision检查。删除与替换只由该actor执行。
 
@@ -117,6 +120,9 @@ async fn authorize(
 ) -> axum::response::Response;
 struct DhttpContactNotifier { endpoint: dhttp::Endpoint }
 impl access_control::ContactNotifier for DhttpContactNotifier {
+    fn submit_application<'a>(&'a self, contact: &'a str, body: Vec<u8>)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output =
+            std::result::Result<access_control::SubjectId, access_control::NotifyError>> + Send + 'a>>;
     fn granted_update<'a>(&'a self, contact: &'a str, modified_since: i64, body: Vec<u8>)
         -> std::pin::Pin<Box<dyn std::future::Future<Output =
             std::result::Result<(), access_control::NotifyError>> + Send + 'a>>;
@@ -140,11 +146,11 @@ fn access_router(access: std::sync::Arc<access_control::AccessService>,
 
 当前库同时支持实时审批和带 RequestId 的持久审批；第一版 Pishoo 只使用 `request_id: None`，不定义 RequestId 的 HTTP 传输方式，也不替请求自动生成 ID。数据库中的既有持久记录继续由库的管理 API 处理。旧分支的 202 响应、status_url、状态路径识别函数及 `/contact/self` 专用协议不纳入本版接口。
 
-管理路由直接调用 `access_control::management_router_with_notifier(access, Some(notifier))` 并 merge 在根，复用库当前的 `/contact`、`/contacts`、`/contact/{name}`、`/acl/*`；审批管理为 `GET /acl/reviews/live`、`GET /acl/reviews/persistent` 和 `PATCH /acl/review`。具体请求体、响应体与行归属校验交给库。所有管理路由同样通过 authorize，不保留旧状态查询的 ACL 豁免。notifier 只持有本 Server 现有 Endpoint 的克隆，不增加身份、连接池、出站队列或重试状态。
+管理路由直接调用 `access_control::management_router_with_notifier(access, Some(notifier))` 并 merge 在根，复用库当前的 `/contact`、`/contacts`、`/contact/{name}`、`/acl/*`；其中 `POST /contact/{name}` 是 Alice 本地发起申请入口，审批管理为 `GET /acl/reviews/live`、`GET /acl/reviews/persistent` 和 `PATCH /acl/review`。具体请求体、响应体与行归属校验交给库。所有管理路由同样通过 authorize，不保留旧状态查询的 ACL 豁免。notifier 只持有本 Server 现有 Endpoint 的克隆，不增加身份、连接池、出站队列或重试状态。
 
 2026-09-28 用户要求 Lib API 不自动登记访问规则。未匹配规则时由 daccess 的默认策略处理：非 owner 拒绝，owner 允许。管理员可以通过现有管理 API 配置规则；Lib 加载、重载或删除不修改已有 ACL 规则。不增加 daccess 接口、Pishoo 策略状态或导入账本。
 
-联系人 Syncing 操作由 daccess 向 `ContactNotifier` 提供目标名称、保存的更新时间和 JSON 字节；Pishoo 校验目标名称，把时间戳转换为 HTTP 日期，经本身份 Endpoint 发送 `PATCH https://{contact}/contact`，附带 `Content-Type: application/json` 与 `If-Modified-Since`。无法表示的时间戳返回错误。通知最多等待30秒，仅对端返回204并完成响应 Body 才报告成功；失败交回 daccess，由其保留 Syncing 供管理员再次发起批准。此出站属于管理操作，不开放 Lib 的 WASI HTTP 出站。
+联系人申请由 daccess 向 `ContactNotifier::submit_application` 提供目标名称与 JSON 字节；Pishoo 经本身份 Endpoint 发送 `POST https://{contact}/contact`，仅在对端返回201、响应 Body 完成且扩展中的已验证对端名称匹配目标时，从证书 SKI 提取 owner_hash 并返回 SubjectId。daccess 随后完成本地建档。联系人 Syncing 操作仍由 daccess 向 `ContactNotifier::granted_update` 提供目标名称、保存的更新时间和 JSON 字节；Pishoo 校验目标名称，把时间戳转换为 HTTP 日期，经本身份 Endpoint 发送 `PATCH https://{contact}/contact`，附带 `Content-Type: application/json` 与 `If-Modified-Since`。无法表示的时间戳返回错误。通知最多等待30秒，仅对端返回204并完成响应 Body 才报告成功；失败交回 daccess，由其保留 Syncing 供管理员再次发起批准。这些出站属于管理操作，不开放 Lib 的 WASI HTTP 出站。
 
 Workspace 保留 `/workspace`、`/workspace/`、`/workspace/{*path}`；`/workspace-api/context` 返回已有 profile、owner_name、development_identity=false、demo_data=false、version 字段。此处 access_router 负责把这些 Pishoo 路由与库的管理路由组合；旧分支对应函数名为 management_app。管理前端按当前库 API 适配，不要求旧前端未经修改即可使用。
 

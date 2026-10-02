@@ -2,10 +2,8 @@ use axum::{body::Body as AxumBody, response::Response};
 use http::{Request, Uri, header};
 use http_body_util::BodyExt;
 
-use super::{proxy::clean_hop_headers, reject};
+use super::{DHTTP_PREFIX, proxy::clean_hop_headers, reject};
 use crate::{Error, Result};
-
-const PREFIX: &str = "/.pishoo/dhttp/";
 
 pub(crate) async fn forward_dhttp(
     endpoint: dhttp::Endpoint,
@@ -60,7 +58,7 @@ pub(crate) async fn forward_dhttp(
 fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {
     let path = uri
         .path()
-        .strip_prefix(PREFIX)
+        .strip_prefix(DHTTP_PREFIX)
         .ok_or(Error::RouteNotFound)?;
     let (target, suffix) = path.split_once('/').unwrap_or((path, ""));
     let (name, sequence) = match target.split_once(':') {

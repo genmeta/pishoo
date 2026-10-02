@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result, exec,
-    routes::{access_router, authorize, file_router, forward_dhttp, proxy_pass},
+    routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, load_server_config},
 };
@@ -139,6 +139,13 @@ fn exec(enabled: bool, name: String, cwd: PathBuf, tasks: TaskTracker) -> Router
     )
 }
 
+fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
+    Router::new().route(
+        &format!("{DHTTP_PREFIX}{{*path}}"),
+        any(move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)),
+    )
+}
+
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
         let certs = profile
@@ -175,20 +182,7 @@ impl Server {
                 exec_tasks.clone(),
             ))
             .merge(file_router(profile.join("file")))
-            .route(
-                "/.pishoo/dhttp/{target}",
-                any({
-                    let endpoint = endpoint.clone();
-                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
-                }),
-            )
-            .route(
-                "/.pishoo/dhttp/{target}/{*path}",
-                any({
-                    let endpoint = endpoint.clone();
-                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
-                }),
-            )
+            .merge(dhttp_router(endpoint.clone()))
             .fallback(any(move |request: Request<AxumBody>| {
                 proxy_pass(proxies.clone(), request)
             }))
@@ -234,20 +228,7 @@ impl Server {
                 self.exec_tasks.clone(),
             ))
             .merge(file_router(self.profile.join("file")))
-            .route(
-                "/.pishoo/dhttp/{target}",
-                any({
-                    let endpoint = self.endpoint.clone();
-                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
-                }),
-            )
-            .route(
-                "/.pishoo/dhttp/{target}/{*path}",
-                any({
-                    let endpoint = self.endpoint.clone();
-                    move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)
-                }),
-            )
+            .merge(dhttp_router(self.endpoint.clone()))
             .fallback(any(move |request: Request<AxumBody>| {
                 proxy_pass(proxies.clone(), request)
             }))

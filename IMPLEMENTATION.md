@@ -120,6 +120,10 @@ WASM 职责集中到 Sandbox 后：Pishoo 56 项测试通过，编译与格式�
 
 2026-09-29 用户批准 `/.pishoo/dhttp/{target}` 固定前缀的 DHTTP 正向代理。Pishoo 复用当前 Server 的 Endpoint，要求握手来访者同名且 SKI owner_hash 相同，重写目标 URI 与 Host，清理逐跳头和入站可信 extensions，流式传递请求及响应；配置反代仍只使用回环 HTTP/TCP，Lib WASI HTTP 出站仍拒绝。针对性测试覆盖根路径、query、编码路径、证书序号目标、非法目标及匿名拒绝；Pishoo 55 项库测试通过，其中两项本机 TCP 代理测试在允许回环绑定的环境中运行。真实跨端成功路径仍受下述 qconn 路径发现缺口限制。
 
+随后按用户要求将该入口合并为单条 `/.pishoo/dhttp/{*path}` 路由，支持目标根路径有无末尾斜杠及子路径。路由级测试验证三种形式都进入 DHTTP 处理器，URI 测试验证带末尾斜杠与 query 转发为目标根路径；Pishoo 56 项库测试在允许回环绑定的环境中通过。
+
+按用户要求，统一 DHTTP 通配路由保持纯转发。联系人申请改由 daccess 的 `POST /contact/{name}` 管理路由发起：daccess 调用扩展后的 ContactNotifier trait，Pishoo 用本身份 Endpoint 发送申请并从出站响应的 RemoteAuthority 提取 Bob SubjectId，daccess 随后调用现有 `create_contact` 写入 Alice 本地 Pending 与精确回调规则。Bob 首次 `POST /contact` 仍需其 daccess 策略允许或审批，Pishoo 不绕过授权。Pishoo 库编译检查与 56 项库测试通过；其中 2 项本机 TCP 代理测试需允许回环绑定。daccess 的 68 项库测试使用相同源码和临时清单修正已删除的可选 dhttp-identity 路径后通过，dhttp 的 18 项库测试通过。tcp-mock 不提供已验证对端证书，真实跨端成功路径仍待 QUIC 路径发现完成后验收。
+
 在各仓库执行：
 
 ```sh
