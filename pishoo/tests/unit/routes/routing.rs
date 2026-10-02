@@ -1,19 +1,14 @@
 use super::*;
 
 fn test_router(
-    endpoint: dhttp::Endpoint,
+    _endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
     config: &ServerConfig,
     profile: &dhttp_home::identity::IdentityProfile,
 ) -> Router {
     let proxies = config.proxy_locations.clone();
     Router::new()
-        .merge(access_router(
-            access.clone(),
-            endpoint.clone(),
-            profile.name(),
-            endpoint.name(),
-        ))
+        .merge(access_router(access.clone()))
         .merge(file_router(profile.join("file")))
         .fallback(axum::routing::any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)

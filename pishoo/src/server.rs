@@ -12,10 +12,13 @@ use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
 use crate::{
-    Body, Error, Result, exec,
+    Body, Error, Result,
+    chat::{self, Chat, store::ChatStore},
+    exec,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, load_server_config},
+    workspace::{self, Workspace, store::WorkspaceStore},
 };
 
 struct Server {
@@ -23,6 +26,8 @@ struct Server {
     endpoint: dhttp::Endpoint,
     config: ServerConfig,
     access: Arc<access_control::AccessService>,
+    workspace: Arc<Workspace>,
+    chat: Arc<Chat>,
     router: Arc<RwLock<axum::Router>>,
     sandbox: Sandbox,
     exec_tasks: TaskTracker,
@@ -146,6 +151,32 @@ fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
     )
 }
 
+fn chat_router(chat: Arc<Chat>, workspace: Arc<Workspace>) -> Router {
+    chat::router(chat).layer(axum::middleware::from_fn(
+        move |request: Request<AxumBody>, next: axum::middleware::Next| {
+            let workspace = workspace.clone();
+            async move {
+                if request.method() == http::Method::POST && request.uri().path() == "/std/message"
+                {
+                    let Some(visitor) = request.extensions().get::<access_control::Visitor>()
+                    else {
+                        return http::StatusCode::FORBIDDEN.into_response();
+                    };
+                    match workspace::directory::approved_chat_grant(&workspace, visitor).await {
+                        Ok(true) => {}
+                        Ok(false) => return http::StatusCode::FORBIDDEN.into_response(),
+                        Err(error) => {
+                            eprintln!("Chat capability authorization failed: {error}");
+                            return http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                    }
+                }
+                next.run(request).await
+            }
+        },
+    ))
+}
+
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
         let certs = profile
@@ -163,17 +194,34 @@ impl Server {
         let access = Arc::new(
             access_control::AccessService::load_from_db(&uri, profile.name(), &subject).await?,
         );
+        let workspace_store = WorkspaceStore::open(&profile)
+            .await
+            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+        let chat_store = ChatStore::open(&profile)
+            .await
+            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+        let workspace = Arc::new(Workspace::new(
+            profile.name().to_owned(),
+            endpoint.name().to_owned(),
+            subject.clone(),
+            workspace_store,
+            access.clone(),
+        ));
+        let chat = Arc::new(Chat::new(
+            endpoint.name().to_owned(),
+            subject,
+            chat_store,
+            access.clone(),
+        ));
+        workspace.configure_chat(chat.clone()).await;
         let exec_tasks = TaskTracker::new();
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
-            .merge(access_router(
-                access.clone(),
-                endpoint.clone(),
-                profile.name(),
-                endpoint.name(),
-            ))
+            .merge(access_router(access.clone()))
+            .merge(workspace::router(workspace.clone()))
+            .merge(chat_router(chat.clone(), workspace.clone()))
             .merge(sandbox.api_router(endpoint.clone()))
             .merge(exec(
                 config.exec,
@@ -190,11 +238,14 @@ impl Server {
                 access.clone(),
                 authorize,
             ));
+        chat.start_worker();
         Ok(Self {
             profile,
             endpoint,
             config,
             access,
+            workspace,
+            chat,
             router: Arc::new(RwLock::new(router)),
             sandbox,
             exec_tasks,
@@ -214,12 +265,9 @@ impl Server {
         self.sandbox.load_libs(&self.profile)?;
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
-            .merge(access_router(
-                self.access.clone(),
-                self.endpoint.clone(),
-                self.profile.name(),
-                self.endpoint.name(),
-            ))
+            .merge(access_router(self.access.clone()))
+            .merge(workspace::router(self.workspace.clone()))
+            .merge(chat_router(self.chat.clone(), self.workspace.clone()))
             .merge(self.sandbox.api_router(self.endpoint.clone()))
             .merge(exec(
                 config.exec,
@@ -292,6 +340,7 @@ impl Server {
         self.exec_tasks.close();
         *self.router.write().unwrap() = axum::Router::new();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(self.workspace.shutdown(), self.chat.shutdown());
             let (sandbox, ()) = tokio::join!(self.sandbox.wait(), self.exec_tasks.wait());
             sandbox
         })

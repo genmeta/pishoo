@@ -8,7 +8,7 @@ use http::StatusCode;
 use serde::Deserialize;
 
 use super::{
-    ChatState,
+    Chat,
     service::{self, ConversationPage, ServiceError},
 };
 
@@ -26,7 +26,7 @@ pub(crate) struct SendMessage {
 }
 
 pub(crate) async fn get_messages(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<access_control::Visitor>>,
     Path(name): Path<String>,
     Query(query): Query<MessageQuery>,
@@ -39,7 +39,7 @@ pub(crate) async fn get_messages(
 }
 
 pub(crate) async fn post_message(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<access_control::Visitor>>,
     Path(name): Path<String>,
     body: Result<Json<SendMessage>, JsonRejection>,
@@ -54,7 +54,7 @@ pub(crate) async fn post_message(
 }
 
 pub(crate) async fn requeue_message(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<access_control::Visitor>>,
     Path((name, id)): Path<(String, String)>,
 ) -> Result<Json<service::LocalMessage>, ServiceError> {
@@ -64,7 +64,7 @@ pub(crate) async fn requeue_message(
 }
 
 pub(crate) async fn get_capability(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<access_control::Visitor>>,
     Path(name): Path<String>,
 ) -> Result<Json<service::CapabilityState>, ServiceError> {
@@ -88,7 +88,7 @@ mod tests {
         response::Response,
     };
     use bytes::Bytes;
-    use dhttp::home::identity::IdentityProfile;
+    use dhttp_home::identity::IdentityProfile;
     use futures::future::BoxFuture;
     use http::{Method, Request, StatusCode};
     use tokio::sync::Notify;
@@ -96,7 +96,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::chat::{
-        ChatState,
+        Chat,
         message::MessageEnvelope,
         outbound::{OutboundTransport, RemoteResponse},
         router,
@@ -144,7 +144,7 @@ mod tests {
     struct Fixture {
         root: std::path::PathBuf,
         app: axum::Router,
-        state: Arc<ChatState>,
+        state: Arc<Chat>,
         owner: Visitor,
         access: Arc<AccessService>,
         remote: Arc<Mutex<RemoteResponse>>,
@@ -190,7 +190,7 @@ mod tests {
             .await
             .expect("activate contact");
         let store = ChatStore::open(&profile).await.expect("Chat store");
-        let state = Arc::new(ChatState::new(
+        let state = Arc::new(Chat::new(
             String::from("owner.example"),
             subject.clone(),
             store,
@@ -502,7 +502,10 @@ mod tests {
             .await
             .expect("send response");
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(wait_for_state(&fixture, "blocked").await["items"][0]["state"], "blocked");
+        assert_eq!(
+            wait_for_state(&fixture, "blocked").await["items"][0]["state"],
+            "blocked"
+        );
 
         fixture.remote.lock().expect("remote").status = StatusCode::OK;
         fixture
@@ -514,7 +517,10 @@ mod tests {
             )
             .await
             .expect("remote Chat grant");
-        assert_eq!(wait_for_state(&fixture, "sent").await["items"][0]["state"], "sent");
+        assert_eq!(
+            wait_for_state(&fixture, "sent").await["items"][0]["state"],
+            "sent"
+        );
         drop(fixture.access);
         std::fs::remove_dir_all(fixture.root).expect("remove fixture");
     }
@@ -522,16 +528,7 @@ mod tests {
     #[tokio::test]
     async fn queued_message_and_cached_grant_do_not_follow_a_replaced_subject() {
         let fixture = fixture().await;
-        fixture.state.worker_shutdown.cancel();
-        let old_worker = fixture
-            .state
-            .worker_handle
-            .lock()
-            .expect("worker handle")
-            .take();
-        if let Some(old_worker) = old_worker {
-            old_worker.await.expect("stop original worker");
-        }
+        fixture.state.shutdown().await;
         let name = "friend.example.dhttp.net";
         let response = fixture
             .app
@@ -591,7 +588,10 @@ mod tests {
             ))
             .await
             .expect("replacement capability");
-        assert_eq!(json(capability).await["remote_grant"], serde_json::Value::Null);
+        assert_eq!(
+            json(capability).await["remote_grant"],
+            serde_json::Value::Null
+        );
         assert!(
             fixture
                 .state
@@ -632,11 +632,7 @@ mod tests {
         assert_eq!(retry.status(), StatusCode::CONFLICT);
         fixture
             .state
-            .update_remote_chat_grant(
-                name,
-                &new_subject,
-                &crate::chat::CHAT_CAPABILITY.offers(),
-            )
+            .update_remote_chat_grant(name, &new_subject, &crate::chat::CHAT_CAPABILITY.offers())
             .await
             .expect("new subject grant");
         let still_blocked = fixture

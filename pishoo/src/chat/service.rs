@@ -4,13 +4,12 @@ use std::{
 };
 
 use access_control::{ContactStatus, SubjectId, Visitor};
-use dhttp::name::DhttpName;
 use http::StatusCode;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, Statement, TransactionTrait};
 use serde::Serialize;
 
 use super::{
-    CHAT_CAPABILITY, ChatState,
+    CHAT_CAPABILITY, Chat,
     message::{MessageQuery, MessageSubmission},
 };
 
@@ -53,20 +52,14 @@ pub(crate) struct CapabilityState {
     pub(crate) endpoints: &'static [super::capabilities::CapabilityEndpoint],
 }
 
-pub(crate) fn require_owner(
-    state: &ChatState,
-    visitor: Option<&Visitor>,
-) -> Result<(), ServiceError> {
+pub(crate) fn require_owner(state: &Chat, visitor: Option<&Visitor>) -> Result<(), ServiceError> {
     state
         .owner
         .ensure(visitor)
         .map_err(|_| (StatusCode::FORBIDDEN, "verified owner identity is required"))
 }
 
-pub(crate) async fn resolve_target(
-    state: &ChatState,
-    raw_name: &str,
-) -> Result<String, ServiceError> {
+pub(crate) async fn resolve_target(state: &Chat, raw_name: &str) -> Result<String, ServiceError> {
     let (target, status) = resolve_contact(state, raw_name).await?;
     if status != ContactStatus::Active {
         return Err((StatusCode::FORBIDDEN, "contact is not active for Chat"));
@@ -75,12 +68,12 @@ pub(crate) async fn resolve_target(
 }
 
 async fn resolve_contact(
-    state: &ChatState,
+    state: &Chat,
     raw_name: &str,
 ) -> Result<(String, ContactStatus), ServiceError> {
-    let name = DhttpName::try_from(raw_name.trim().to_owned())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid conversation name"))?;
-    let target = name.as_full();
+    let name = dhttp_home::normalize_name(raw_name.trim())
+        .ok_or((StatusCode::BAD_REQUEST, "invalid conversation name"))?;
+    let target = name.as_str();
     if target == state.owner.name() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -107,7 +100,7 @@ async fn resolve_contact(
 }
 
 pub(crate) async fn capability_state(
-    state: &ChatState,
+    state: &Chat,
     raw_name: &str,
 ) -> Result<CapabilityState, ServiceError> {
     let (target, contact_status) = resolve_contact(state, raw_name).await?;
@@ -118,10 +111,10 @@ pub(crate) async fn capability_state(
         .map_err(storage_error)?;
     let remote_grant = remote_chat_granted(state, &target, &contact.subject_id).await?;
     let requested_chat = contact.requested_access.contains_key("/std/message");
-    let can_send = contact_status == ContactStatus::Active
-        && (requested_chat || remote_grant == Some(true));
-    let can_receive = contact_status == ContactStatus::Active
-        && has_local_chat_rule(state, &target).await?;
+    let can_send =
+        contact_status == ContactStatus::Active && (requested_chat || remote_grant == Some(true));
+    let can_receive =
+        contact_status == ContactStatus::Active && has_local_chat_rule(state, &target).await?;
     let status = match contact_status {
         ContactStatus::Active if can_send || can_receive => "available",
         ContactStatus::Blocked | ContactStatus::Expired => "blocked",
@@ -138,7 +131,7 @@ pub(crate) async fn capability_state(
     })
 }
 
-async fn has_local_chat_rule(state: &ChatState, target: &str) -> Result<bool, ServiceError> {
+async fn has_local_chat_rule(state: &Chat, target: &str) -> Result<bool, ServiceError> {
     let row = state
         .access
         .database()
@@ -158,7 +151,7 @@ async fn has_local_chat_rule(state: &ChatState, target: &str) -> Result<bool, Se
 }
 
 async fn remote_chat_granted(
-    state: &ChatState,
+    state: &Chat,
     target: &str,
     subject_id: &SubjectId,
 ) -> Result<Option<bool>, ServiceError> {
@@ -183,7 +176,7 @@ async fn remote_chat_granted(
 }
 
 pub(crate) async fn list_messages(
-    state: &ChatState,
+    state: &Chat,
     target: &str,
     after: Option<String>,
     limit: Option<u16>,
@@ -225,7 +218,7 @@ pub(crate) async fn list_messages(
 }
 
 pub(crate) async fn send_message(
-    state: &ChatState,
+    state: &Chat,
     target: &str,
     text: String,
 ) -> Result<LocalMessage, ServiceError> {
@@ -262,7 +255,7 @@ pub(crate) async fn send_message(
 }
 
 pub(crate) async fn requeue_message(
-    state: &ChatState,
+    state: &Chat,
     target: &str,
     raw_id: &str,
 ) -> Result<LocalMessage, ServiceError> {
@@ -306,7 +299,10 @@ pub(crate) async fn requeue_message(
         .try_get::<Option<Vec<u8>>>("", "recipient_subject_id")
         .map_err(storage_error)?;
     if stored_subject.as_deref() != Some(contact.subject_id.as_bytes()) {
-        return Err((StatusCode::CONFLICT, "contact identity changed since this message was queued"));
+        return Err((
+            StatusCode::CONFLICT,
+            "contact identity changed since this message was queued",
+        ));
     }
     let submission = MessageSubmission {
         client_message_id: message.client_message_id,
@@ -346,7 +342,7 @@ pub(crate) async fn requeue_message(
 }
 
 async fn insert_pending(
-    state: &ChatState,
+    state: &Chat,
     target: &str,
     subject_id: &SubjectId,
     submission: &MessageSubmission,
@@ -403,7 +399,7 @@ async fn insert_pending(
     Ok(id)
 }
 
-async fn read_local_message(state: &ChatState, id: i64) -> Result<LocalMessage, ServiceError> {
+async fn read_local_message(state: &Chat, id: i64) -> Result<LocalMessage, ServiceError> {
     let row = state
         .store
         .db()

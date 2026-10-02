@@ -22,6 +22,14 @@ test.beforeEach(async ({ page }) => {
   } }))
   await page.route('**/acl/access', (route) => route.fulfill({ json: {} }))
   await page.route('**/acl/allow', (route) => route.fulfill({ json: {} }))
+  await page.route('**/workspace-api/contact-directory', (route) => route.fulfill({ json: [{
+    name: 'alice.example', saved: false, chat_available: true, remote_chat_granted: true,
+  }] }))
+  await page.route('**/chat-api/conversations/alice.example/capability', (route) => route.fulfill({ json: {
+    capability: 'chat', status: 'available', contact_status: 'active',
+    can_send: true, can_receive: false, remote_grant: true,
+    endpoints: [{ method: 'POST', path: '/std/message' }],
+  } }))
   await page.route('**/contacts?*', (route) => route.fulfill({ json: {
     items: [{
       name: 'alice.example', subject_id: 'subject-alice', alias: null, class: 'Human',

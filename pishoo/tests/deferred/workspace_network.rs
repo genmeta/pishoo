@@ -46,13 +46,13 @@ use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use tower::{ServiceBuilder, ServiceExt};
 
 use super::{
-    WorkspaceState,
+    Workspace,
     outbound::{OutboundTransport, PlaneOutbound},
     router,
     store::WorkspaceStore,
 };
 use crate::{
-    chat::{self, ChatState, store::ChatStore},
+    chat::{self, Chat, store::ChatStore},
     service::daccess::{DaccessAuthState, authorize, profile_database_uri},
 };
 
@@ -158,7 +158,7 @@ async fn local_app(
     let store = WorkspaceStore::open(profile).await?;
     let db = Database::connect("sqlite::memory:").await?;
     let access = Arc::new(AccessService::new(db, &name));
-    let state = Arc::new(WorkspaceState::new(
+    let state = Arc::new(Workspace::new(
         name.clone(),
         name.clone(),
         subject_id.clone(),
@@ -166,7 +166,7 @@ async fn local_app(
         access.clone(),
     ));
     let chat_store = ChatStore::open(profile).await?;
-    let chat_state = Arc::new(ChatState::new(
+    let chat_state = Arc::new(Chat::new(
         name.clone(),
         subject_id.clone(),
         chat_store,
@@ -231,7 +231,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
             "UPDATE profile_preferences SET display_name = 'Receiver', updated_at = 1700000000 WHERE id = 1".to_owned(),
         ))
         .await?;
-    let server_workspace = Arc::new(WorkspaceState::new(
+    let server_workspace = Arc::new(Workspace::new(
         String::from("receiver.dhttp.net"),
         String::from("receiver.dhttp.net"),
         server_subject.clone(),
@@ -239,7 +239,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
         access.clone(),
     ));
     let auth_state = DaccessAuthState::new(access.clone(), server_workspace.clone());
-    let server_chat = Arc::new(ChatState::new(
+    let server_chat = Arc::new(Chat::new(
         String::from("receiver.dhttp.net"),
         server_subject,
         ChatStore::open(&server_profile).await?,

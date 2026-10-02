@@ -1,7 +1,7 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use access_control::{
-    AccessService, Action, AuthResult, ContactNotifier, Headers, NotifyError, SubjectId, Visitor,
+    AccessService, AuthResult, Headers, PendingReviewResponse, SubjectId, Visitor,
 };
 use axum::{
     Router,
@@ -9,107 +9,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use bytes::Bytes;
-use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
-use http_body_util::{BodyExt, Full};
+use http::{Method, Request, StatusCode, header};
+use include_dir::{Dir, include_dir};
 
 use super::reject;
 use crate::Error;
 
-// Pishoo owns neither ContactNotifier nor Endpoint, so the trait needs a local type.
-struct DhttpContactNotifier {
-    endpoint: dhttp::Endpoint,
-}
-
-impl ContactNotifier for DhttpContactNotifier {
-    fn submit_application<'a>(
-        &'a self,
-        contact: &'a str,
-        body: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<SubjectId, NotifyError>> + Send + 'a>> {
-        Box::pin(async move {
-            dhttp_home::validate_name(contact)?;
-            let target = dhttp_home::normalize_name(contact)
-                .ok_or_else(|| std::io::Error::other("invalid contact target"))?;
-            let uri: Uri = format!("https://{target}/contact").parse()?;
-            let response = self
-                .endpoint
-                .post(uri)
-                .header(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                )
-                .body(Full::new(Bytes::from(body)))
-                .await?;
-            if response.status() != StatusCode::CREATED {
-                return Err(std::io::Error::other(format!(
-                    "contact application returned {}",
-                    response.status()
-                ))
-                .into());
-            }
-            let subject = {
-                let peer = response
-                    .extensions()
-                    .get::<dhttp::RemoteAuthority>()
-                    .ok_or_else(|| {
-                        std::io::Error::other("contact response has no verified peer")
-                    })?;
-                if dhttp_home::normalize_name(peer.name()).as_deref() != Some(target.as_str()) {
-                    return Err(
-                        std::io::Error::other("contact response peer name mismatched").into(),
-                    );
-                }
-                let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
-                    peer.certificates(),
-                )?;
-                SubjectId::new(ski.owner_hash().as_str().as_bytes())
-                    .map_err(|_| std::io::Error::other("invalid contact owner hash"))?
-            };
-            response.into_body().collect().await?;
-            Ok(subject)
-        })
-    }
-
-    fn granted_update<'a>(
-        &'a self,
-        contact: &'a str,
-        modified_since: i64,
-        body: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), NotifyError>> + Send + 'a>> {
-        Box::pin(async move {
-            dhttp_home::validate_name(contact)?;
-            let uri: Uri = format!("https://{contact}/contact").parse()?;
-            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp(modified_since, 0)
-                .ok_or_else(|| std::io::Error::other("contact timestamp is not representable"))?;
-            let date =
-                HeaderValue::from_str(&timestamp.format("%a, %d %b %Y %H:%M:%S GMT").to_string())?;
-
-            tokio::time::timeout(Duration::from_secs(30), async {
-                let response = self
-                    .endpoint
-                    .patch(uri)
-                    .header(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    )
-                    .header(header::IF_MODIFIED_SINCE, date)
-                    .body(Full::new(Bytes::from(body)))
-                    .await?;
-                if response.status() != StatusCode::NO_CONTENT {
-                    return Err(std::io::Error::other(format!(
-                        "contact notification returned {}",
-                        response.status()
-                    ))
-                    .into());
-                }
-                response.into_body().collect().await?;
-                Ok::<(), NotifyError>(())
-            })
-            .await?
-        })
-    }
-}
+static WORKSPACE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/workspace/dist");
 
 pub(crate) async fn authorize(
     axum::extract::State(access): axum::extract::State<Arc<AccessService>>,
@@ -135,6 +41,18 @@ pub(crate) async fn authorize(
         },
         None => None,
     };
+    if let Some(visitor) = &visitor {
+        request.extensions_mut().insert(visitor.clone());
+    }
+    if access_control::is_review_status_path(request.method(), request.uri().path())
+        || access_control::is_contact_status_path(request.method(), request.uri().path())
+        || crate::workspace::capabilities::BuiltInCapability::public_endpoint(
+            request.method(),
+            request.uri().path(),
+        )
+    {
+        return next.run(request).await;
+    }
     let headers = Headers {
         method: request.method().clone(),
         path: request
@@ -143,7 +61,6 @@ pub(crate) async fn authorize(
             .map_or("/", |p| p.as_str())
             .to_string(),
         fields: request.headers().clone(),
-        request_id: None,
     };
     let allowed = match access
         .auth(
@@ -155,12 +72,12 @@ pub(crate) async fn authorize(
     {
         Ok(AuthResult::Allowed) => true,
         Ok(AuthResult::Denied) => false,
-        Ok(AuthResult::Reviewing(id, state, registry)) => {
-            let _cleanup = scopeguard::guard((state.clone(), registry), |(state, registry)| {
-                state.cancel();
-                registry.del(id);
-            });
-            matches!(state.await, Ok(Action::Allow))
+        Ok(AuthResult::Reviewing(review)) => {
+            return (
+                StatusCode::ACCEPTED,
+                axum::Json(PendingReviewResponse::from(review)),
+            )
+                .into_response();
         }
         Err(e) => {
             eprintln!("authorization failed: {e}");
@@ -170,41 +87,22 @@ pub(crate) async fn authorize(
     if !allowed {
         return reject(Error::Denied);
     }
-    if let Some(visitor) = visitor {
-        request.extensions_mut().insert(visitor);
-    }
     next.run(request).await
 }
 
-pub(crate) fn access_router(
-    access: Arc<AccessService>,
-    endpoint: dhttp::Endpoint,
-    profile: &str,
-    owner_name: &str,
-) -> Router {
-    let context = serde_json::json!({ "profile": profile, "owner_name": owner_name, "development_identity": false, "demo_data": false, "version": env!("CARGO_PKG_VERSION") });
-    access_control::management_router_with_notifier(
-        access,
-        Some(Arc::new(DhttpContactNotifier { endpoint })),
-    )
-    .route(
-        "/workspace-api/context",
-        axum::routing::get(move || {
-            let context = context.clone();
-            async move { axum::Json(context) }
-        }),
-    )
-    .route(
-        "/workspace",
-        any(|| async {
-            (
-                StatusCode::TEMPORARY_REDIRECT,
-                [(header::LOCATION, "/workspace/")],
-            )
-        }),
-    )
-    .route("/workspace/", any(workspace))
-    .route("/workspace/{*path}", any(workspace))
+pub(crate) fn access_router(access: Arc<AccessService>) -> Router {
+    access_control::management_router(access)
+        .route(
+            "/workspace",
+            any(|| async {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(header::LOCATION, "/workspace/")],
+                )
+            }),
+        )
+        .route("/workspace/", any(workspace))
+        .route("/workspace/{*path}", any(workspace))
 }
 
 pub(super) async fn workspace(request: Request<AxumBody>) -> Response {
@@ -216,16 +114,31 @@ pub(super) async fn workspace(request: Request<AxumBody>) -> Response {
         .path()
         .strip_prefix("/workspace/")
         .unwrap_or_default();
-    if path.split('/').any(|p| p == "..") || std::path::Path::new(path).extension().is_some() {
+    if path.split('/').any(|p| p == "..") {
         return reject(Error::RouteNotFound);
     }
-    let html = include_str!("../../assets/workspace.html");
+    let file = WORKSPACE_DIST.get_file(path).or_else(|| {
+        std::path::Path::new(path)
+            .extension()
+            .is_none()
+            .then(|| WORKSPACE_DIST.get_file("index.html"))
+            .flatten()
+    });
+    let Some(file) = file else {
+        return reject(Error::RouteNotFound);
+    };
+    let content_type = mime_guess::from_path(file.path()).first_or_octet_stream();
+    let cache = if file.path().starts_with("assets") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
     let mut response = (
         [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_TYPE, content_type.as_ref()),
+            (header::CACHE_CONTROL, cache),
         ],
-        html,
+        file.contents(),
     )
         .into_response();
     if request.method() == Method::HEAD {

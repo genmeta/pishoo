@@ -2,6 +2,25 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-02：rebase daccess 与 Workspace/Chat
+
+- 当前适配分支 `feat/rebase-daccess` 以 `origin/feat/daccess@9b733c5` 为基线，重放14个本地提交。重放前的完整工作保存在 `feat/pre-daccess-rebase-20261002@33f2d50`；原 main 保持原提交。range-diff 确认其余13个补丁相同，首个重构提交仅调整与远端旧架构文件的冲突。
+- daccess 固定 Git revision `cf8f72f4e6bedbd7c98648ffee31053cb509b395`。审批改为202、持久记录和按 Visitor 查询；联系人改为申请队列及 application_id 轮询，ContactNotifier 回调接缝删除。
+- 完整 Workspace 前端保留在 `pishoo/workspace`，应用页面源码、样式和锁文件与目标分支一致。`src/workspace/mod.rs`、`src/chat/mod.rs` 改名为普通 `workspace.rs`、`chat.rs`，旧占位 HTML 由 dist 资源替代。
+- Server 直接拥有 Workspace/Chat，重载复用资源，关闭时停止并等待现有 worker。保留本地 Sandbox、Lib、exec、配置和本机反代实现；上述生产文件与 rebase 前快照一致。
+- 修正目标分支已有的测试导入、身份 fixture、过期时间和计时精度问题；前端 E2E 补齐当前目录 API 的 mock，并按当前审批详情抽屉和 Allow 动作校准预期。
+
+验证：
+
+- Rust 集成编译通过。完整库测试92项首次90项通过，随后按目标库补齐审批 Visitor 及缺失身份的状态码预期，6项授权/联系人测试复测全部通过；其余86项无需变更。
+- 前端 `bun run build` 与 `bun run typecheck` 通过，验证使用临时 Bun 1.4.2。
+- 桌面 mock E2E：21项通过，1项移动端专用用例按配置跳过。浏览器使用独立临时配置下的本机 Chrome；不使用日常浏览器 profile。
+- `git diff --check` 与 Rust 格式检查通过。
+
+限制：Rust 检查使用临时清单，仅将 `tcp-mock = ["dhttp/tcp-mock"]` 改为空 feature，实际生产源码与其他依赖不变。正式清单仍保留这一已知底层 feature 冲突，等待用户要求的底层接口稳定后统一处理。当前 Workspace/Chat 的生产 OutboundTransport 尚未配置；远端资料返回503，申请与消息保留在数据库队列等待接入。原网络测试保存于 `pishoo/tests/deferred/workspace_network.rs`。本次未修改相邻 daccess、dhttp、h3x 的源码或日常 profile 数据库，不宣称真实跨端出站已验收。
+
+当前接口以 [Pishoo 清单](design/pishoo-interfaces.md) 和 [Workspace/Chat 清单](design/workspace-chat-interfaces.md) 为准。以下保留此前各轮的实施记录。
+
 ## 修改前的 Git 基线
 
 | 仓库 | 分支 | 基线提交 |
@@ -22,7 +41,7 @@ WASM 职责集中到 Sandbox 前的 Pishoo 检查点：`bc30231`，保存上一�
 
 测试代码统一放在各 crate 的 `tests/` 下：`unit/` 存放需要访问私有实现的单元测试，`support/` 存放内存流等测试工具，`cases/` 存放较长集成测试的分组。`src/` 仅保留测试模块挂载声明，不为测试扩大生产 API 的可见性。
 
-Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 合并为四个文件：`sandbox.rs` 负责组件管理和 API 路由，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责 WASI HTTP 出站拒绝接缝和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 页面放在 `pishoo/assets/`。
+Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 合并为四个文件：`sandbox.rs` 负责组件管理和 API 路由，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责 WASI HTTP 出站拒绝接缝和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 前端现位于 `pishoo/workspace/`，构建后内嵌 dist 资源。此次接入保留 Workspace/Chat 分支原有的业务测试布局。
 
 Pishoo 的其他实现按同样原则合并：`server.rs` 集中运行循环和单身份服务；`routes.rs` 集中分发与静态文件，`routes/access.rs` 负责授权和管理入口，`routes/proxy.rs` 负责反代；配置归 `setup.rs`，单命令宿主执行归 `exec.rs`。
 
@@ -34,7 +53,7 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 - dhttp：全局 Network 持有以本端、远端规范化名称为键的 h3x 连接池；Endpoint 只持名称，不提供 close 或 stop_listening。同名 load 复用连接。Network 没有 shutdown，进程退出时结束其剩余传输与维护任务。
 - dhttp 操作等待：删除 `OPERATION_TIMEOUT` 及开流、消息头和 Body 读写的单次超时；保留连接超时与流背压。出站请求 future 或响应 Body 提前丢弃时，现成 scopeguard 中止尚未结束的上传任务。
 - Pishoo：schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、加载失败直接返回、删除时撤销入口。监听任务不保留句柄。
-- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、同名身份专用的固定前缀 DHTTP 正向代理、WASM 显式方法路由、当前 daccess 授权与请求内审批、管理 API、使用本身份 Endpoint 的联系人批准通知，以及最小 Workspace 查看/审批界面。Lib 的 WASI HTTP 出站暂不实现。
+- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、同名身份专用的固定前缀 DHTTP 正向代理、WASM 显式方法路由、daccess 授权与202持久审批、管理 API、Workspace 联系人申请队列与轮询，以及完整 Workspace/Chat 界面。生产出站接缝暂缓。Lib 的 WASI HTTP 出站暂不实现。
 - WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的受跟踪 guest 任务、流式响应、身份签名与出站拒绝 hook。
 - exec：每 Server 的 `settings.exec`、与 Lib 合并的 `POST /exec` Router 分支、daccess 加同名身份准入、直接 argv、输入输出和单次执行限制、受跟踪的 Child 取消和回收。程序使用 Pishoo 当前非 root 服务账号权限，没有文件或网络隔离。
 

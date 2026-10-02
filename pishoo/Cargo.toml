@@ -17,7 +17,7 @@ path = "src/pishoo.rs"
 dhttp = { path = "../../dhttp/dhttp" }
 dhttp-home = { path = "../../dhttp/home" }
 qtls = { path = "../../dquic/qtls" }
-access_control = { path = "../../daccess" }
+access_control = { git = "https://github.com/genmeta/daccess.git", rev = "cf8f72f4e6bedbd7c98648ffee31053cb509b395" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
@@ -47,6 +47,11 @@ wasmtime = "47.0.4"
 wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
 wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = ["p2"] }
 oas3 = { version = "0.22.0", default-features = false }
+getrandom = "0.4"
+imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
+include_dir = "0.7"
+snafu = "0.9"
+tracing = "0.1"
 
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }

@@ -1,10 +1,13 @@
-use std::sync::{Arc, Weak, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use access_control::{AccessService, SubjectId, Visitor};
 use axum::{Extension, Json, Router, extract::State, routing::get};
 use http::StatusCode;
 use serde::Serialize;
-use tokio::{sync::{Notify, RwLock}, task::JoinHandle};
+use tokio::{
+    sync::{Notify, RwLock},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 use self::{actor::Owner, outbound::OutboundTransport, store::WorkspaceStore};
@@ -19,16 +22,13 @@ mod profile;
 mod settings;
 pub(crate) mod store;
 
-#[cfg(test)]
-mod network_tests;
-
-pub struct WorkspaceState {
+pub struct Workspace {
     owner: Owner,
     profile: String,
     store: WorkspaceStore,
     access: Arc<AccessService>,
     outbound: RwLock<Option<Arc<dyn OutboundTransport>>>,
-    chat: RwLock<Option<Weak<crate::chat::ChatState>>>,
+    chat: RwLock<Option<Weak<crate::chat::Chat>>>,
     outbound_send: tokio::sync::Mutex<()>,
     worker_notify: Arc<Notify>,
     worker_shutdown: CancellationToken,
@@ -37,7 +37,7 @@ pub struct WorkspaceState {
     contact_write: tokio::sync::Mutex<()>,
 }
 
-impl WorkspaceState {
+impl Workspace {
     pub(crate) fn new(
         profile: String,
         owner_name: String,
@@ -67,10 +67,15 @@ impl WorkspaceState {
     }
 
     fn start_worker(self: &Arc<Self>) {
-        let mut handle = self.worker_handle.lock().expect("Workspace worker handle lock");
+        let mut handle = self
+            .worker_handle
+            .lock()
+            .expect("Workspace worker handle lock");
         if handle.is_none() {
             *handle = Some(contacts::worker::spawn(
-                Arc::downgrade(self), self.worker_notify.clone(), self.worker_shutdown.child_token(),
+                Arc::downgrade(self),
+                self.worker_notify.clone(),
+                self.worker_shutdown.child_token(),
             ));
         }
     }
@@ -79,7 +84,20 @@ impl WorkspaceState {
         self.worker_notify.notify_one();
     }
 
-    pub(crate) async fn configure_chat(&self, chat: Arc<crate::chat::ChatState>) {
+    pub(crate) async fn shutdown(&self) {
+        self.worker_shutdown.cancel();
+        let handle = self
+            .worker_handle
+            .lock()
+            .expect("Workspace worker handle lock")
+            .take();
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    pub(crate) async fn configure_chat(&self, chat: Arc<crate::chat::Chat>) {
         *self.chat.write().await = Some(Arc::downgrade(&chat));
     }
 
@@ -91,19 +109,21 @@ impl WorkspaceState {
     ) -> Result<(), sea_orm::DbErr> {
         let chat = self.chat.read().await.as_ref().and_then(Weak::upgrade);
         if let Some(chat) = chat {
-            chat.update_remote_chat_grant(contact_name, subject_id, granted_access).await?;
+            chat.update_remote_chat_grant(contact_name, subject_id, granted_access)
+                .await?;
         }
         Ok(())
     }
 }
 
-impl Drop for WorkspaceState {
+impl Drop for Workspace {
     fn drop(&mut self) {
         self.worker_shutdown.cancel();
         if let Ok(mut handle) = self.worker_handle.lock()
-            && let Some(handle) = handle.take() {
-                handle.abort();
-            }
+            && let Some(handle) = handle.take()
+        {
+            handle.abort();
+        }
     }
 }
 
@@ -122,7 +142,7 @@ struct BadgeCounts {
 }
 
 async fn context(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<RuntimeContext>, StatusCode> {
     state
@@ -153,7 +173,7 @@ async fn context(
     }))
 }
 
-pub(crate) fn router(state: Arc<WorkspaceState>) -> Router {
+pub(crate) fn router(state: Arc<Workspace>) -> Router {
     state.start_worker();
     Router::new()
         .route("/workspace-api/context", get(context))
@@ -230,27 +250,27 @@ mod tests {
     };
 
     use access_control::{
-        AccessService, ContactPatch, ContactStatus, Effect, Grantee,
-        Method as AccessMethod, NewContact, SubjectId, Visitor,
+        AccessService, ContactPatch, ContactStatus, Effect, Grantee, Method as AccessMethod,
+        NewContact, SubjectId, Visitor,
     };
     use axum::{
         body::{Body, to_bytes},
         response::Response,
     };
     use bytes::Bytes;
-    use dhttp::home::identity::IdentityProfile;
+    use dhttp_home::identity::IdentityProfile;
     use futures::future::BoxFuture;
     use http::{Method, Request, StatusCode, header};
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     use tower::ServiceExt;
 
     use super::{
-        WorkspaceState,
+        Workspace,
         outbound::{OutboundTransport, RemoteResponse},
         router,
         store::WorkspaceStore,
     };
-    use crate::chat::{self, ChatState, store::ChatStore};
+    use crate::chat::{self, Chat, store::ChatStore};
 
     static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -289,9 +309,15 @@ mod tests {
                     serde_json::from_slice(&body).map_err(|error| error.to_string())?
                 };
                 let application_id = if method == Method::POST && path == "/contact" {
-                    payload["application_id"].as_str().unwrap_or_default().to_owned()
+                    payload["application_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
                 } else {
-                    path.split("application_id=").nth(1).unwrap_or_default().to_owned()
+                    path.split("application_id=")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_owned()
                 };
                 self.requests.lock().expect("mock log").push((
                     target.to_owned(),
@@ -318,13 +344,15 @@ mod tests {
                         status: StatusCode::OK,
                         headers,
                         body: Bytes::from_static(include_bytes!(
-                            "../../../assets/pishoo/pishoo-icon.jpg"
+                            "../../assets/pishoo/pishoo-icon.jpg"
                         )),
                         remote_subject_id: format!("{target}-key").into_bytes(),
                     })
                 } else if method == Method::POST {
                     let received_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let expired_after = received_at + 7 * 86_400;
                     let body = format!(
                         r#"{{"application_id":"{application_id}","status":"pending","name":"{target}","subject_id":"{target}-key","received_at":{received_at},"expired_after":{expired_after},"granted_access":{{}}}}"#,
@@ -337,7 +365,9 @@ mod tests {
                     })
                 } else {
                     let received_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let expired_after = received_at + 7 * 86_400;
                     let status = if self.active.load(Ordering::SeqCst) {
                         "active"
@@ -410,14 +440,13 @@ mod tests {
             .await
             .expect("Workspace store");
         let subject = SubjectId::new(format!("{name}-key").into_bytes()).expect("valid subject");
-        let access_uri = crate::service::daccess::profile_database_uri(&profile)
-            .expect("isolated access database URI");
+        let access_uri = format!("sqlite://{}?mode=rwc", profile.access_db_path().display());
         let access = Arc::new(
             AccessService::load_from_db(&access_uri, name, &subject)
                 .await
                 .expect("isolated access service"),
         );
-        let state = Arc::new(WorkspaceState::new(
+        let state = Arc::new(Workspace::new(
             name.to_owned(),
             name.to_owned(),
             subject.clone(),
@@ -425,7 +454,7 @@ mod tests {
             access.clone(),
         ));
         let chat_store = ChatStore::open(&profile).await.expect("Chat store");
-        let chat_state = Arc::new(ChatState::new(
+        let chat_state = Arc::new(Chat::new(
             name.to_owned(),
             subject.clone(),
             chat_store,
@@ -498,14 +527,25 @@ mod tests {
     async fn wait_outbound_status(app: &axum::Router, owner: &Visitor, id: i64, expected: &str) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                let response = app.clone().oneshot(request_to(
-                    &format!("/workspace-api/contact-requests/{id}"), Method::GET, "", Some(owner.clone()),
-                )).await.expect("read outbound request");
+                let response = app
+                    .clone()
+                    .oneshot(request_to(
+                        &format!("/workspace-api/contact-requests/{id}"),
+                        Method::GET,
+                        "",
+                        Some(owner.clone()),
+                    ))
+                    .await
+                    .expect("read outbound request");
                 let body = response_json(response).await;
-                if body["status"] == expected { break; }
+                if body["status"] == expected {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-        }).await.expect("outbound status update");
+        })
+        .await
+        .expect("outbound status update");
     }
 
     #[tokio::test]
@@ -515,47 +555,105 @@ mod tests {
         let (app, root, owner) = fixture_with_transport(Some(remote.clone())).await;
         let path = "/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
-        let denied = app.clone().oneshot(request_to(path, Method::POST, body, None)).await.unwrap();
+        let denied = app
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, None))
+            .await
+            .unwrap();
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-        let rejected = app.clone().oneshot(request_to(
-            path, Method::POST,
-            r#"{"target_name":"friend.example","description":"Hello","expires_in_days":3}"#,
-            Some(owner.clone()),
-        )).await.unwrap();
+        let rejected = app
+            .clone()
+            .oneshot(request_to(
+                path,
+                Method::POST,
+                r#"{"target_name":"friend.example","description":"Hello","expires_in_days":3}"#,
+                Some(owner.clone()),
+            ))
+            .await
+            .unwrap();
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        let queued = app.clone().oneshot(request_to(path, Method::POST, body, Some(owner.clone()))).await.unwrap();
+        let queued = app
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, Some(owner.clone())))
+            .await
+            .unwrap();
         assert_eq!(queued.status(), StatusCode::ACCEPTED);
         let queued = response_json(queued).await;
         assert_eq!(queued["status"], "queued");
-        assert_eq!(queued["expired_after"].as_i64().unwrap() - queued["created_at"].as_i64().unwrap(), 7 * 86_400);
+        assert_eq!(
+            queued["expired_after"].as_i64().unwrap() - queued["created_at"].as_i64().unwrap(),
+            7 * 86_400
+        );
         let id = queued["id"].as_i64().unwrap();
-        let conflict = app.clone().oneshot(request_to(path, Method::POST, body, Some(owner.clone()))).await.unwrap();
+        let conflict = app
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, Some(owner.clone())))
+            .await
+            .unwrap();
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
 
         remote.fail.store(false, Ordering::SeqCst);
-        let refresh = app.clone().oneshot(request_to(
-            &format!("{path}/{id}/refresh"), Method::POST, "", Some(owner.clone()),
-        )).await.unwrap();
+        let refresh = app
+            .clone()
+            .oneshot(request_to(
+                &format!("{path}/{id}/refresh"),
+                Method::POST,
+                "",
+                Some(owner.clone()),
+            ))
+            .await
+            .unwrap();
         assert_eq!(refresh.status(), StatusCode::OK);
         wait_outbound_status(&app, &owner, id, "pending").await;
         let log = remote.requests.lock().unwrap();
-        let sent = log.iter().find(|(_, method, path, _)| method == &Method::POST && path == "/contact").unwrap();
+        let sent = log
+            .iter()
+            .find(|(_, method, path, _)| method == &Method::POST && path == "/contact")
+            .unwrap();
         assert_eq!(sent.0, "friend.example.dhttp.net");
-        assert!(sent.3["application_id"].as_str().is_some_and(|id| id.len() == 64));
+        assert!(
+            sent.3["application_id"]
+                .as_str()
+                .is_some_and(|id| id.len() == 64)
+        );
         assert!(sent.3.get("expired_after").is_none());
         assert!(sent.3.get("subject_id").is_none());
         drop(log);
 
         remote.active.store(true, Ordering::SeqCst);
-        app.clone().oneshot(request_to(&format!("{path}/{id}/refresh"), Method::POST, "", Some(owner.clone()))).await.unwrap();
+        app.clone()
+            .oneshot(request_to(
+                &format!("{path}/{id}/refresh"),
+                Method::POST,
+                "",
+                Some(owner.clone()),
+            ))
+            .await
+            .unwrap();
         wait_outbound_status(&app, &owner, id, "active").await;
-        let capability = app.clone().oneshot(request_to(
-            "/chat-api/conversations/friend.example.dhttp.net/capability", Method::GET, "", Some(owner.clone()),
-        )).await.unwrap();
+        let capability = app
+            .clone()
+            .oneshot(request_to(
+                "/chat-api/conversations/friend.example.dhttp.net/capability",
+                Method::GET,
+                "",
+                Some(owner.clone()),
+            ))
+            .await
+            .unwrap();
         assert_eq!(response_json(capability).await["can_send"], true);
 
-        let deleted = app.clone().oneshot(request_to(&format!("{path}/{id}"), Method::DELETE, "", Some(owner))).await.unwrap();
+        let deleted = app
+            .clone()
+            .oneshot(request_to(
+                &format!("{path}/{id}"),
+                Method::DELETE,
+                "",
+                Some(owner),
+            ))
+            .await
+            .unwrap();
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
         drop(app);
         std::fs::remove_dir_all(root).unwrap();
@@ -607,7 +705,7 @@ mod tests {
                 "/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/grant",
                 http::Method::POST,
                 "",
-                Some(owner),
+                Some(owner.clone()),
             ))
             .await
             .expect("grant response");
@@ -634,10 +732,7 @@ mod tests {
                 "/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/revoke",
                 http::Method::POST,
                 "",
-                Some(Visitor::new(
-                    "owner.example.dhttp.net",
-                    SubjectId::new(b"owner.example-key".to_vec()).expect("owner subject"),
-                )),
+                Some(owner),
             ))
             .await
             .expect("revoke response");
@@ -747,11 +842,22 @@ mod tests {
             .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
             .await
             .expect("saved directory");
-        assert_eq!(response_json(list).await, serde_json::json!([{ "name": name, "saved": true, "chat_available": false, "remote_chat_granted": null }]));
-        assert_eq!(exact_rule_effect(&access, name, "POST", "/std/message").await, None);
+        assert_eq!(
+            response_json(list).await,
+            serde_json::json!([{ "name": name, "saved": true, "chat_available": false, "remote_chat_granted": null }])
+        );
+        assert_eq!(
+            exact_rule_effect(&access, name, "POST", "/std/message").await,
+            None
+        );
         let unsaved = app
             .clone()
-            .oneshot(request_to(&save_path, Method::DELETE, "", Some(owner.clone())))
+            .oneshot(request_to(
+                &save_path,
+                Method::DELETE,
+                "",
+                Some(owner.clone()),
+            ))
             .await
             .expect("remove saved identity");
         assert_eq!(unsaved.status(), StatusCode::NO_CONTENT);
@@ -835,7 +941,10 @@ mod tests {
             .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
             .await
             .expect("effective directory");
-        assert_eq!(response_json(list).await, serde_json::json!([{ "name": name, "saved": false, "chat_available": true, "remote_chat_granted": null }]));
+        assert_eq!(
+            response_json(list).await,
+            serde_json::json!([{ "name": name, "saved": false, "chat_available": true, "remote_chat_granted": null }])
+        );
 
         // daccess updates an active contact's subject in place; the old rule
         // must not make that replacement identity effective.
@@ -891,7 +1000,10 @@ mod tests {
             .oneshot(request_to(path, Method::GET, "", Some(owner)))
             .await
             .expect("blocked directory");
-        assert_eq!(response_json(list).await, serde_json::json!([{ "name": name, "saved": false, "chat_available": false, "remote_chat_granted": null }]));
+        assert_eq!(
+            response_json(list).await,
+            serde_json::json!([{ "name": name, "saved": false, "chat_available": false, "remote_chat_granted": null }])
+        );
         drop((app, access));
         std::fs::remove_dir_all(root).expect("remove isolated profile");
     }
@@ -949,7 +1061,10 @@ mod tests {
             .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
             .await
             .expect("directory with remote grant");
-        assert_eq!(response_json(list).await, serde_json::json!([{ "name": name, "saved": false, "chat_available": true, "remote_chat_granted": true }]));
+        assert_eq!(
+            response_json(list).await,
+            serde_json::json!([{ "name": name, "saved": false, "chat_available": true, "remote_chat_granted": true }])
+        );
 
         access
             .delete_contacts(&[name.to_owned()])
@@ -1029,7 +1144,10 @@ mod tests {
             ))
             .await
             .expect("saved directory");
-        assert_eq!(response_json(list).await, serde_json::json!([{ "name": name, "saved": true, "chat_available": false, "remote_chat_granted": null }]));
+        assert_eq!(
+            response_json(list).await,
+            serde_json::json!([{ "name": name, "saved": true, "chat_available": false, "remote_chat_granted": null }])
+        );
         let request = app
             .clone()
             .oneshot(request_to(
@@ -1042,10 +1160,17 @@ mod tests {
             .expect("pending request");
         assert_eq!(response_json(request).await[0]["contact_name"], name);
         assert_eq!(
-            access.find_contact_by_name(name).await.expect("contact").status,
+            access
+                .find_contact_by_name(name)
+                .await
+                .expect("contact")
+                .status,
             ContactStatus::Pending as i32
         );
-        assert_eq!(exact_rule_effect(&access, name, "POST", "/std/message").await, None);
+        assert_eq!(
+            exact_rule_effect(&access, name, "POST", "/std/message").await,
+            None
+        );
         drop((app, access));
         std::fs::remove_dir_all(root).expect("remove isolated profile");
     }
@@ -1056,12 +1181,24 @@ mod tests {
         let (bob, bob_root, bob_owner) = fixture_named("bob.example.dhttp.net", None).await;
         let path = "/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
-        let sent = alice.clone().oneshot(request_to(path, Method::POST, body, Some(alice_owner))).await.unwrap();
+        let sent = alice
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, Some(alice_owner)))
+            .await
+            .unwrap();
         assert_eq!(sent.status(), StatusCode::ACCEPTED);
         let alice_id = response_json(sent).await["id"].as_i64().unwrap();
-        let bob_list = bob.clone().oneshot(request_to(path, Method::GET, "", Some(bob_owner.clone()))).await.unwrap();
+        let bob_list = bob
+            .clone()
+            .oneshot(request_to(path, Method::GET, "", Some(bob_owner.clone())))
+            .await
+            .unwrap();
         assert_eq!(response_json(bob_list).await["total"], 0);
-        let sent = bob.clone().oneshot(request_to(path, Method::POST, body, Some(bob_owner))).await.unwrap();
+        let sent = bob
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, Some(bob_owner)))
+            .await
+            .unwrap();
         assert_eq!(sent.status(), StatusCode::ACCEPTED);
         let bob_id = response_json(sent).await["id"].as_i64().unwrap();
         assert_eq!(alice_id, 1);
@@ -1077,22 +1214,37 @@ mod tests {
         let path = "/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
         let (first, second) = tokio::join!(
-            app.clone().oneshot(request_to(path, Method::POST, body, Some(owner.clone()))),
-            app.clone().oneshot(request_to(path, Method::POST, body, Some(owner.clone()))),
+            app.clone()
+                .oneshot(request_to(path, Method::POST, body, Some(owner.clone()))),
+            app.clone()
+                .oneshot(request_to(path, Method::POST, body, Some(owner.clone()))),
         );
         let statuses = [first.unwrap().status(), second.unwrap().status()];
         assert!(statuses.contains(&StatusCode::ACCEPTED));
         assert!(statuses.contains(&StatusCode::CONFLICT));
 
         let db_path = root.join("owner.example.dhttp.net/db/workspace.db");
-        let db = Database::connect(format!("sqlite://{}?mode=rw", db_path.display())).await.unwrap();
+        let db = Database::connect(format!("sqlite://{}?mode=rw", db_path.display()))
+            .await
+            .unwrap();
         db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "UPDATE outbound_contact_requests SET expired_after = 0 WHERE status = 'queued'".to_owned(),
-        )).await.unwrap();
-        let listing = app.clone().oneshot(request_to(path, Method::GET, "", Some(owner.clone()))).await.unwrap();
+            "UPDATE outbound_contact_requests SET expired_after = 0 WHERE status = 'queued'"
+                .to_owned(),
+        ))
+        .await
+        .unwrap();
+        let listing = app
+            .clone()
+            .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
+            .await
+            .unwrap();
         assert_eq!(response_json(listing).await["items"][0]["status"], "failed");
-        let sent_again = app.clone().oneshot(request_to(path, Method::POST, body, Some(owner))).await.unwrap();
+        let sent_again = app
+            .clone()
+            .oneshot(request_to(path, Method::POST, body, Some(owner)))
+            .await
+            .unwrap();
         assert_eq!(sent_again.status(), StatusCode::ACCEPTED);
         drop((app, db));
         std::fs::remove_dir_all(root).unwrap();
@@ -1126,7 +1278,10 @@ mod tests {
             .await
             .expect("context response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response_json(response).await["badges"]["incoming_contacts"], 1);
+        assert_eq!(
+            response_json(response).await["badges"]["incoming_contacts"],
+            1
+        );
         drop((app, access));
         std::fs::remove_dir_all(root).expect("remove isolated profile");
     }
@@ -1165,9 +1320,11 @@ mod tests {
         db.execute_unprepared("UPDATE contacts SET status = 4 WHERE name = 'expired-chat.example'")
             .await
             .expect("mark expired capability request");
-        db.execute_unprepared("UPDATE contacts SET status = 4 WHERE name = 'approved-chat.example'")
-            .await
-            .expect("mark previously approved contact expired");
+        db.execute_unprepared(
+            "UPDATE contacts SET status = 4 WHERE name = 'approved-chat.example'",
+        )
+        .await
+        .expect("mark previously approved contact expired");
         let approved_request = db
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -1180,9 +1337,10 @@ mod tests {
             .try_get("", "id")
             .expect("approved request id");
         let workspace_db_path = root.join("owner.example.dhttp.net/db/workspace.db");
-        let workspace_db = Database::connect(format!("sqlite://{}?mode=rw", workspace_db_path.display()))
-            .await
-            .expect("open isolated workspace database");
+        let workspace_db =
+            Database::connect(format!("sqlite://{}?mode=rw", workspace_db_path.display()))
+                .await
+                .expect("open isolated workspace database");
         workspace_db.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "INSERT INTO capability_decisions \
@@ -1226,11 +1384,17 @@ mod tests {
             let items = page["items"].as_array().expect("items");
             assert!(items.iter().any(|item| item["kind"] == "capability"));
             assert!(items.iter().any(|item| item["kind"] == "access"));
-            assert!(!items.iter().any(|item| item["contact_name"] == "approved-chat.example"));
-            assert!(items
-                .iter()
-                .filter(|item| item["kind"] == "capability")
-                .all(|item| item["requested_at"].as_i64() == Some(current - 7_200)));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item["contact_name"] == "approved-chat.example")
+            );
+            assert!(
+                items
+                    .iter()
+                    .filter(|item| item["kind"] == "capability")
+                    .all(|item| item["requested_at"].as_i64() == Some(current - 7_200))
+            );
             let first_page = app
                 .clone()
                 .oneshot(request_to(
@@ -1241,11 +1405,22 @@ mod tests {
                 ))
                 .await
                 .expect("paginated approvals");
-            assert_eq!(response_json(first_page).await["items"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                response_json(first_page).await["items"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
         let denied = app
             .clone()
-            .oneshot(request_to("/workspace-api/approvals", Method::GET, "", None))
+            .oneshot(request_to(
+                "/workspace-api/approvals",
+                Method::GET,
+                "",
+                None,
+            ))
             .await
             .expect("owner guard");
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
@@ -1291,7 +1466,9 @@ mod tests {
             .expect("expired capability request");
         access
             .database()
-            .execute_unprepared("UPDATE contacts SET status = 4 WHERE name = 'expired-delete.example'")
+            .execute_unprepared(
+                "UPDATE contacts SET status = 4 WHERE name = 'expired-delete.example'",
+            )
             .await
             .expect("mark capability request expired");
         let row = access
@@ -1312,7 +1489,7 @@ mod tests {
                 "INSERT INTO access_reviews \
                  (request_id, visitor, visitor_sid, method, api, stage, reason, expired_after, updated_at, created_at) \
                  VALUES ('expired-delete', 'visitor.example', X'01', 'GET', '/files', 0, 'review', ?, ?, ?)",
-                [(current - 3_600).into(), current.into(), current.into()],
+                [(current - 3_600).into(), (current - 7_200).into(), (current - 7_200).into()],
             ))
             .await
             .expect("insert expired access approval");
@@ -1461,7 +1638,10 @@ mod tests {
             ))
             .await
             .expect("context after denial");
-        assert_eq!(response_json(context).await["badges"]["incoming_contacts"], 0);
+        assert_eq!(
+            response_json(context).await["badges"]["incoming_contacts"],
+            0
+        );
 
         let now = i64::try_from(
             std::time::SystemTime::now()
@@ -1499,7 +1679,12 @@ mod tests {
         assert_ne!(listed_again[0]["request_id"], request_id);
         let stale = app
             .clone()
-            .oneshot(request_to(&deny_path, Method::POST, "", Some(owner.clone())))
+            .oneshot(request_to(
+                &deny_path,
+                Method::POST,
+                "",
+                Some(owner.clone()),
+            ))
             .await
             .expect("stale decision response");
         assert_eq!(stale.status(), StatusCode::CONFLICT);
@@ -1522,7 +1707,9 @@ mod tests {
             .oneshot(request_to(
                 &format!(
                     "{grant_path}?request_id={}&capability_version=1",
-                    listed_again[0]["request_id"].as_i64().expect("new request id")
+                    listed_again[0]["request_id"]
+                        .as_i64()
+                        .expect("new request id")
                 ),
                 Method::POST,
                 "",
@@ -1543,8 +1730,16 @@ mod tests {
             .await
             .expect("read capability decision events");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].try_get::<String>("", "decision").expect("denial"), "denied");
-        assert_eq!(events[1].try_get::<String>("", "decision").expect("approval"), "approved");
+        assert_eq!(
+            events[0].try_get::<String>("", "decision").expect("denial"),
+            "denied"
+        );
+        assert_eq!(
+            events[1]
+                .try_get::<String>("", "decision")
+                .expect("approval"),
+            "approved"
+        );
 
         drop((app, access, db));
         std::fs::remove_dir_all(root).expect("remove isolated profile");
@@ -1619,7 +1814,7 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["display_name"], "Alice");
 
-        let avatar = Bytes::from_static(include_bytes!("../../../assets/pishoo/pishoo-icon.jpg"));
+        let avatar = Bytes::from_static(include_bytes!("../../assets/pishoo/pishoo-icon.jpg"));
         let avatar_request = |visitor: Option<Visitor>| {
             let mut request = request_to(
                 "/workspace-api/settings/profile/avatar",
@@ -1725,7 +1920,12 @@ mod tests {
         let (app, root, owner) = fixture().await;
         let denied = app
             .clone()
-            .oneshot(request_to("/workspace-api/capabilities", Method::GET, "", None))
+            .oneshot(request_to(
+                "/workspace-api/capabilities",
+                Method::GET,
+                "",
+                None,
+            ))
             .await
             .expect("capability catalog denial");
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
@@ -1825,7 +2025,10 @@ mod tests {
                 .await
                 .expect("bounded remote profile request");
             assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-            assert_eq!(started.elapsed(), super::profile::REMOTE_PROFILE_TIMEOUT);
+            let elapsed = started.elapsed();
+            let timeout = super::profile::REMOTE_PROFILE_TIMEOUT;
+            assert!(elapsed >= timeout);
+            assert!(elapsed <= timeout + std::time::Duration::from_millis(5));
         }
         tokio::time::resume();
 

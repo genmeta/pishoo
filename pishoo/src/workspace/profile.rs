@@ -13,14 +13,13 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use dhttp::name::DhttpName;
 use http::{HeaderMap, Method, StatusCode, header};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    WorkspaceState,
+    Workspace,
     settings::{ApiError, ProfileSettings, profile_settings, read_stored_profile, require_owner},
 };
 
@@ -178,7 +177,7 @@ fn bytes_response(
 }
 
 async fn stored_avatar(
-    state: &WorkspaceState,
+    state: &Workspace,
     request_headers: &HeaderMap,
     cache_control: &'static str,
 ) -> Result<Response, ApiError> {
@@ -200,7 +199,7 @@ async fn stored_avatar(
 }
 
 pub(crate) async fn get_public_profile(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<PublicProfile>), ApiError> {
     let stored = read_stored_profile(state.store.db()).await?;
     Ok((
@@ -216,14 +215,14 @@ pub(crate) async fn get_public_profile(
 }
 
 pub(crate) async fn get_public_avatar(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     stored_avatar(&state, &headers, PUBLIC_CACHE).await
 }
 
 pub(crate) async fn get_avatar(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -232,7 +231,7 @@ pub(crate) async fn get_avatar(
 }
 
 pub(crate) async fn put_avatar(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     headers: HeaderMap,
     body: Bytes,
@@ -305,7 +304,7 @@ pub(crate) async fn put_avatar(
 }
 
 pub(crate) async fn delete_avatar(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<ProfileSettings>, ApiError> {
     require_owner(&state, visitor.as_ref().map(|extension| &extension.0))?;
@@ -353,14 +352,12 @@ fn validate_remote_profile(profile: &RemotePublicProfile) -> Result<(), ApiError
 }
 
 async fn remote_request(
-    state: &WorkspaceState,
+    state: &Workspace,
     name: String,
     path: &'static str,
 ) -> Result<(String, super::outbound::RemoteResponse), ApiError> {
-    let target = DhttpName::try_from(name)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid profile name"))?
-        .as_full()
-        .to_owned();
+    let target = dhttp_home::normalize_name(&name)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid profile name"))?;
     let transport = state.outbound.read().await.clone().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "outbound connector unavailable",
@@ -387,7 +384,7 @@ async fn remote_request(
 }
 
 pub(crate) async fn get_remote_profile(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(name): Path<String>,
 ) -> Result<([(header::HeaderName, &'static str); 1], Json<PublicProfile>), ApiError> {
@@ -416,7 +413,7 @@ pub(crate) async fn get_remote_profile(
 }
 
 pub(crate) async fn get_remote_avatar(
-    State(state): State<Arc<WorkspaceState>>,
+    State(state): State<Arc<Workspace>>,
     visitor: Option<Extension<Visitor>>,
     Path(name): Path<String>,
     headers: HeaderMap,

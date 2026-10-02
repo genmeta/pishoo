@@ -38,6 +38,7 @@ filter will be needed for large directories.
 
 ## Development
 
+Use Bun 1.4.2 or a compatible version that reads the checked-in lockfile.
 Start an isolated pishoo profile backend, then run:
 
 ```sh
@@ -58,8 +59,8 @@ PISHOO_WORKSPACE_E2E_BACKEND=http://127.0.0.1:3100 bun run e2e
 The E2E backend must be an isolated profile fixture and must not use a daily
 development database. `e2e/navigation.spec.ts`, `e2e/settings.spec.ts` and
 `e2e/contacts-directory.spec.ts` and `e2e/outbound.spec.ts` mock their API requests and can be run without
-a live profile backend. Rust Workspace tests cover an isolated dual-profile
-DHTTP/mTLS listener using a test CA, remote daccess routes, and request/status
-checks. Runtime identity reload now updates outbound credentials too; deployed
-root/worker connectors and post-rotation outbound behavior still need separate
-verification.
+a live profile backend. The original dual-profile DHTTP/mTLS tests are preserved in
+`pishoo/tests/deferred/workspace_network.rs`. Production outbound wiring is
+pending the transport interface update; the current Rust application tests use
+injected transports. See [the integration notes](../DACCESS.md) for this rebase's
+scope and current limits.

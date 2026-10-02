@@ -29,7 +29,7 @@ mod worker;
 
 pub(crate) const CHAT_CAPABILITY: capabilities::ChatCapability = capabilities::ChatCapability;
 
-pub(crate) struct ChatState {
+pub(crate) struct Chat {
     owner: Owner,
     store: ChatStore,
     access: Arc<AccessService>,
@@ -39,7 +39,7 @@ pub(crate) struct ChatState {
     worker_handle: StdMutex<Option<JoinHandle<()>>>,
 }
 
-impl ChatState {
+impl Chat {
     pub(crate) fn new(
         owner_name: String,
         owner_subject_id: SubjectId,
@@ -70,6 +70,19 @@ impl ChatState {
 
     pub(crate) fn wake_worker(&self) {
         self.worker_notify.notify_one();
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.worker_shutdown.cancel();
+        let handle = self
+            .worker_handle
+            .lock()
+            .expect("Chat worker handle lock")
+            .take();
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 
     pub(crate) async fn remote_chat_grants(
@@ -112,14 +125,12 @@ impl ChatState {
                 "remote Chat grant does not match the contact subject_id",
             )));
         }
-        let granted = granted_access
-            .get("/std/message")
-            .is_some_and(|methods| {
-                methods
+        let granted = granted_access.get("/std/message").is_some_and(|methods| {
+            methods
                 .allow
                 .iter()
                 .any(|method| method == &access_control::Method::Specified(http::Method::POST))
-            });
+        });
         let updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| sea_orm::DbErr::Type(String::from("invalid system clock")))?
@@ -170,7 +181,7 @@ impl ChatState {
     }
 }
 
-impl Drop for ChatState {
+impl Drop for Chat {
     fn drop(&mut self) {
         self.worker_shutdown.cancel();
     }
@@ -184,7 +195,7 @@ struct ChatContext {
 }
 
 async fn context(
-    State(state): State<Arc<ChatState>>,
+    State(state): State<Arc<Chat>>,
     visitor: Option<Extension<Visitor>>,
 ) -> Result<Json<ChatContext>, StatusCode> {
     state
@@ -197,12 +208,11 @@ async fn context(
     }))
 }
 
-pub(crate) fn router(state: Arc<ChatState>) -> Router {
+pub(crate) fn router(state: Arc<Chat>) -> Router {
     Router::new()
         .route(
             "/std/message",
-            axum::routing::post(messages::post)
-                .layer(DefaultBodyLimit::max(64 * 1024)),
+            axum::routing::post(messages::post).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/chat-api/context", get(context))
         .route(
