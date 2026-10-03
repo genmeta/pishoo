@@ -1255,7 +1255,6 @@ dependencies = [
 name = "dhttp"
 version = "0.6.2"
 dependencies = [
- "async-stream",
  "bytes",
  "dhttp-home",
  "futures",
@@ -1880,7 +1879,6 @@ dependencies = [
  "http-body-util",
  "qbase",
  "qrecovery",
- "scopeguard",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -3197,6 +3195,7 @@ dependencies = [
  "nix 0.31.3",
  "oas3",
  "percent-encoding",
+ "qbase",
  "qtls",
  "rcgen",
  "rusqlite",

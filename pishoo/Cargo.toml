@@ -7,9 +7,6 @@ edition = "2024"
 license = "Apache-2.0"
 autobins = false
 
-[features]
-tcp-mock = ["dhttp/tcp-mock"]
-
 [lib]
 path = "src/pishoo.rs"
 
@@ -54,6 +51,7 @@ snafu = "0.9"
 tracing = "0.1"
 
 [dev-dependencies]
+qbase = { path = "../../dquic/qbase" }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
@@ -67,7 +65,6 @@ path = "src/main.rs"
 [[example]]
 name = "setup-tcp-demo"
 path = "tests/support/setup-tcp-demo.rs"
-required-features = ["tcp-mock"]
 
 [[example]]
 name = "check-lib"

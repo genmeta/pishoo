@@ -9,7 +9,6 @@
 - Server 串行加载和重载。没有 ServerState、Release、revision、构建队列或后台发布任务。
 - WasmRuntime 只保存 Engine/Linker。编译按当前调用顺序执行，不建立编译任务注册表或并发槽。
 - 配置反代只连接本机 HTTP/TCP 上游；同名身份专用的 DHTTP 正向代理使用 Server 现有 Endpoint。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。没有 UpstreamKind、传输选择字段或失败回退。
-- `tcp-mock` 是用户批准的测试构建例外：Server.listen 仍调用 Endpoint.listen，独立进程中的测试客户端使用 Endpoint 请求；dhttp 后端用回环 TCP 流承载 h3x 双向与单向流。测试客户端经过 dhttp/h3x，反代上游使用普通本机 HTTP/TCP。此路径不验证 QUIC、TLS 对端认证或路径发现。
 - 一个 `.wasm` component 文件就是一个 Lib，不另设 App 概念。接收和响应复用下述标准 Body 别名。局部流转换不是新的模块接口。
 
 ```rust
@@ -54,7 +53,7 @@ config.db 的 schema v1 为 settings(listen,exec) 与 proxy_locations(location,p
 
 以下运行约束不是配置字段：WASM 无总执行时长限制；每次调用 fuel100_000_000、每10_000 fuel让出。StoreLimits 使用 Wasmtime 47.0.4 默认值：每个 Store 最多10_000 instances、10_000 memories、10_000 tables，对每个 linear memory 的字节数和每张 table 的元素数不另设上限。WASI输出1块、每块16KiB；签名输入1MiB、签名8KiB。每个 Server 的退出等待上限15秒。exec 使用[exec 清单](exec-interfaces.md)的固定限制。
 
-全局 Network 无初始化配置，直接调用 `DhttpNetwork::init()`。每个 Server 的 listen 范围在 `Endpoint.listen` 时交给 dhttp，Network 根据当前监听登记管理接口绑定。Pishoo 的 listen 配置变化仍在重启后生效；Lib 和路由重载不改变监听。
+全局 Network 无初始化配置，直接调用 `DhttpNetwork::init()`。每个 Server 的 listen 范围在 `Endpoint.listen` 时交给 dhttp，Network 初始化全部可用网卡并监听系统事件维护绑定；监听范围由 qconn 按名称执行，停止监听保留 socket。Pishoo 的 listen 配置变化仍在重启后生效；Lib 和路由重载不改变监听。
 
 ## 3. 运行循环和 Server
 
@@ -98,6 +97,8 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
 reload 先读取配置，再调用 Sandbox.load_libs 扫描并更新 Lib 集合。Server 中显式合并管理、Lib API、exec 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败时直接返回错误，保留旧 Router、Lib 集合和配置。加载成功后构建完整 Router，一次替换，并更新 Server.config；其间没有 await 或可失败操作。没有部分挂入路由的中间状态。
 
 `/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
+
+2026-10-03 用户决定底层出站仅保留 Empty/WndBuf，并批准 Pishoo 本轮先适配字节流、不支持正向代理的请求 trailers。该入口将标准入站 Body 的 DATA 逐块写入现有 RequestWriter，以有界窗口提供背压，EOF 后显式 shutdown；不全量缓存请求。声明 Trailer 头的请求在转发前返回400；流中出现未声明 trailers 时返回上传错误、记录日志并丢弃未完成 writer 以取消上传，不静默丢弃 trailers。若响应已交付，不能追溯改变响应状态。响应继续使用原生 Body，保留响应 trailers。等待响应头时取消请求会中止本次上传；交付响应后上传独立继续，不以响应 Body 额外控制上传。没有新增有状态结构、字段或跨模块接口。
 
 
 统一 DHTTP 正向代理继续只转发请求。2026-10-02 用户确认审批和联系人以远端目标分支为准：联系人申请改由 Workspace 的 `/workspace-api/contact-requests` 入队，按 application_id 向对端 `/contact` 投递并查询 `/contact/self`。ContactNotifier 与本地 `POST /contact/{name}` 接缝删除。生产出站适配按用户要求暂缓，现阶段保留分支的 OutboundTransport trait 与业务队列，尚未装配实际传输实现。

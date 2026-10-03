@@ -60,7 +60,7 @@ fn load(bytes: &[u8], directory: &Path) -> Arc<Lib> {
 async fn invoke(lib: Arc<Lib>, tasks: &TaskTracker) -> Invocation {
     Invocation::new(
         lib,
-        dhttp::Endpoint::load("alice.dhttp.net").await.unwrap(),
+        crate::test_identity::endpoint("alice.dhttp.net"),
         &dhttp::HandshakeSummary {
             alpn: None,
             local: Some(authority("alice.dhttp.net")),

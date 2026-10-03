@@ -57,7 +57,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         r#"{"/run":{"get":{},"post":{}},"/explicit":{"head":{},"options":{}}}"#,
     );
     sandbox.libs.insert("test".into(), lib);
-    let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
+    let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
     for (method, path, expected) in [
         (
             Method::GET,
@@ -106,7 +106,7 @@ async fn routers_keep_their_lib_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let old = load(&sandbox, directory.path(), r#"{"/old":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), old);
-    let endpoint = dhttp::Endpoint::load("alice").await.unwrap();
+    let endpoint = crate::test_identity::endpoint("alice");
     let old_router = sandbox.api_router(endpoint.clone());
     let new = load(&sandbox, directory.path(), r#"{"/new":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), new);
@@ -134,7 +134,7 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), lib);
-    let router = sandbox.api_router(dhttp::Endpoint::load("alice").await.unwrap());
+    let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
     assert_eq!(
         status(&router, Method::POST, "/api/test/run").await,
         StatusCode::INTERNAL_SERVER_ERROR

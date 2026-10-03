@@ -8,6 +8,10 @@ mod server;
 mod setup;
 mod workspace;
 
+#[cfg(test)]
+#[path = "../tests/support/test_identity.rs"]
+mod test_identity;
+
 pub use error::Error;
 pub use sandbox::validate_lib;
 pub use server::run;

@@ -34,7 +34,7 @@ async fn server(root: &std::path::Path) -> Server {
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(0,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let endpoint = dhttp::Endpoint::load(profile.name()).await.unwrap();
+    let endpoint = crate::test_identity::endpoint(profile.name());
     let config = load_server_config(&profile).unwrap();
     let access = Arc::new(
         access_control::AccessService::load_from_db(

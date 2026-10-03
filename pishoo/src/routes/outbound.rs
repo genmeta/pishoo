@@ -1,6 +1,7 @@
 use axum::{body::Body as AxumBody, response::Response};
 use http::{Request, Uri, header};
 use http_body_util::BodyExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::{DHTTP_PREFIX, proxy::clean_hop_headers, reject};
 use crate::{Error, Result};
@@ -30,6 +31,11 @@ pub(crate) async fn forward_dhttp(
         if local_ski.owner_hash() != remote_ski.owner_hash() {
             return Err(Error::Denied);
         }
+        if request.headers().contains_key(header::TRAILER) {
+            return Err(Error::BadRequest(
+                "DHTTP request trailers are not supported".into(),
+            ));
+        }
 
         let (uri, authority) = outbound_uri(request.uri())?;
         let (mut parts, body) = request.into_parts();
@@ -42,17 +48,45 @@ pub(crate) async fn forward_dhttp(
                 .parse()
                 .map_err(|_| Error::BadRequest("invalid DHTTP target".into()))?,
         );
-        let outbound = Request::from_parts(
-            parts,
-            body.map_err(|error| Box::new(error) as dhttp::BoxError)
-                .boxed_unsync(),
+        let outbound = Request::from_parts(parts, dhttp::WndBuf::new(64 * 1024));
+        let (mut writer, response) = endpoint.from_request(outbound).await?;
+        let upload = scopeguard::guard(
+            tokio::spawn(async move {
+                if let Err(error) = upload_body(body, &mut writer).await {
+                    // Dropping the unfinished RequestWriter resets the upstream
+                    // request; do not treat unsupported trailers as a clean EOF.
+                    tracing::warn!(%error, "DHTTP proxy upload failed");
+                }
+            }),
+            |task| task.abort(),
         );
-        let mut response = endpoint.from_request(outbound).await?;
+        let mut response = response.await?;
+        // The two stream directions remain independent after response delivery.
+        drop(scopeguard::ScopeGuard::into_inner(upload));
         clean_hop_headers(response.headers_mut());
         Ok(response.map(AxumBody::new))
     }
     .await;
     result.unwrap_or_else(reject)
+}
+
+async fn upload_body(
+    mut body: AxumBody,
+    writer: &mut (impl AsyncWrite + Unpin + Send),
+) -> Result<()> {
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| Error::Io(std::io::Error::other(error)))?;
+        match frame.into_data() {
+            Ok(data) => writer.write_all(&data).await?,
+            Err(_) => {
+                return Err(Error::BadRequest(
+                    "DHTTP request trailers are not supported".into(),
+                ));
+            }
+        }
+    }
+    writer.shutdown().await?;
+    Ok(())
 }
 
 fn outbound_uri(uri: &Uri) -> Result<(Uri, String)> {

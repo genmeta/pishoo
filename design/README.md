@@ -46,7 +46,7 @@
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 与 exec 都不设并发名额。
 - 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
-- 2026-09-27 用户批准 `tcp-mock` 构建例外及泛型 Network：默认后端仍用 QUIC；测试后端把 h3x 的双向请求流和单向控制/QPACK 流复用在回环 TCP 上。测试客户端是独立进程中的 dhttp Endpoint，不经过 HTTP/1 桥；Pishoo 在测试连接上注入匿名远端摘要。已批准的 Network/后端成员变更见 dhttp 清单；h3x 接口不变，此验证不代表 QUIC、TLS 对端认证或路径发现通过。
+- 2026-10-02 按用户指定的 [Network 详细设计](../../dhttp/docs/design/network-detailed-design.md)统一为 QUIC。Network 只保存服务表和 H3 连接池；幂等 init 准备全部可用网卡，由 netwatcher 事件触发扫描，socket/地址登记及清理交给 dquic Dock。listener scopes 只限制名称来源；取消 listener 保留 socket。接入回调直接装配 H3，匿名出站由 Request::new 创建。池键用 Incoming、Outgoing 分别约束本端或远端身份必填；双方具名时按名称对跨方向复用，qconn 的本端 identity 可选。原泛型后端、TCP mock、BackendState、Binding 和 ListenerEntry 从当前清单移除。
 - dhttp 保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。Lib 暂不调用该出站接口。
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
