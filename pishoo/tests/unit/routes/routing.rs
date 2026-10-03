@@ -311,7 +311,7 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
     let home = dhttp_home::DhttpHome::new(directory.path().to_path_buf());
     let profile = home.identity_profile("owner").unwrap();
     let app = test_router(
-        dhttp::Endpoint::load("owner").await.unwrap(),
+        crate::test_identity::endpoint("owner"),
         access,
         &ServerConfig {
             listen: 0,
@@ -357,7 +357,7 @@ async fn file_route_is_separate_from_proxy_fallback() {
     let profile = home.identity_profile("owner").unwrap();
     std::fs::create_dir_all(profile.join("file")).unwrap();
     std::fs::write(profile.join("file/hello.txt"), "hello").unwrap();
-    let endpoint = dhttp::Endpoint::load("owner").await.unwrap();
+    let endpoint = crate::test_identity::endpoint("owner");
     let app = test_router(
         endpoint.clone(),
         access.clone(),
@@ -431,7 +431,7 @@ async fn proxy_prefix_matches_path_segments_only() {
     let home = dhttp_home::DhttpHome::new(directory.path().to_path_buf());
     let profile = home.identity_profile("owner").unwrap();
     let app = test_router(
-        dhttp::Endpoint::load("owner").await.unwrap(),
+        crate::test_identity::endpoint("owner"),
         access,
         &ServerConfig {
             listen: 0,
@@ -482,7 +482,7 @@ async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
     std::fs::create_dir_all(&api_directory).unwrap();
     std::fs::write(api_directory.join("index.html"), "private static content").unwrap();
     std::fs::write(api_directory.join("missing"), "private static content").unwrap();
-    let endpoint = dhttp::Endpoint::load("owner").await.unwrap();
+    let endpoint = crate::test_identity::endpoint("owner");
     for proxy_locations in [
         Vec::new(),
         vec![ProxyLocation {

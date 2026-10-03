@@ -45,7 +45,7 @@ h3x Request/Response 已有流式读写、trailers 和 stop/cancel。dhttp 封�
 
 ## 3. Endpoint 与 Network
 
-Endpoint 只持规范化名称，通过 `Endpoint::load(name)` 独立构造，不通过 Network 工厂创建。Network 全局初始化一次，同名句柄从同一本端身份连接池取得连接；每个池按远端 Authority 复用。
+Endpoint 只持规范化名称，通过 `Endpoint::load(name)` 独立构造，不通过 Network 工厂创建。Network 的 init 幂等并在进程内装配一次，同名句柄按本端、远端名称值复用连接。
 
 ```rust
 let endpoint = Endpoint::load("alice").await?;
@@ -57,9 +57,9 @@ let response = endpoint.get(uri)
 
 URL/header 在调用处解析；Request 只保存 Endpoint 和有效消息，不保存待报错字段。出站发送和响应读取并发推进，响应头可以先于上传完成返回。错误通过 Result、读写或任务结果直接传播。
 
-Network 无初始化配置；每次 `Endpoint.listen` 直接交付该 Server 的监听范围。连接超时和单流窗口采用模块内部默认值；dhttp 不设置单次开流、消息头或 Body 读写超时，也不配置全局或逐 Endpoint 的连接、交换、总字节配额。
+Network 无初始化配置；init 准备全部可用网卡，netwatcher 的初始事件和后续事件触发同一扫描。每次 `Endpoint.listen` 直接向 qconn 交付该 Server 的监听范围。连接超时和单流窗口采用模块内部默认值；dhttp 不设置单次开流、消息头或 Body 读写超时，也不配置全局或逐 Endpoint 的连接、交换、总字节配额。
 
-每个 Server 的允许来源与 Network 实际入口同时生效；共享网络不能让只允许 Internal 的身份因其他身份允许 External 而被放开。Scope/Scopes 复用 qconn 已有定义。
+qconn 按名称限制来源，覆盖握手及已建立连接的新路径；其他名称的 External 不扩大 Internal 名称的准入。全部 socket 供出站共用，Scope/Scopes 复用 qconn 已有定义。
 
 ### 监听与进程生命周期
 
@@ -68,7 +68,7 @@ Network 无初始化配置；每次 `Endpoint.listen` 直接交付该 Server 的
 - Network 属于进程生命周期，不提供全局 shutdown。Pishoo 退出时等待应用任务；监听任务、连接池、已建立连接和网络维护任务留到进程退出。删除身份后原监听仍登记，恢复同名身份须重启进程。
 - 尚在建立的连接受其请求 future 和底层 qconn 契约约束；不能用文档宣称取消等待者必然立即停止底层建连任务。
 
-Network 按本端与远端名称保存 h3x 复用池；入站匿名连接由实际接入 driver 持有。监听记录保存实际应用与监听范围，监听 future 持有其生命周期。没有逐身份关闭记录、OwnerKey、阶段包装、配额或报告缓存；详见 [dhttp 清单](dhttp-interfaces.md)。
+Network 按名称值保存 h3x 复用池，Incoming 的本端名称必填、远端可选；Outgoing 的远端名称必填、本端可选，不能同时缺少两端身份。Eq/Hash 统一比较本端和远端名称，双方具名且名称相同时，入站、出站键匹配同一池条目。匿名入站不用于按远端名称发起的新请求。Network 的监听表只保存 Service，qconn 保存 TLS、scopes 和接入回调；取消监听时一并撤销名称和 Service，socket 保留。没有逐身份关闭记录、OwnerKey、阶段包装、配额或报告缓存；详见 [dhttp 清单](dhttp-interfaces.md)。
 
 ## 4. 可信身份直接复用 dquic
 

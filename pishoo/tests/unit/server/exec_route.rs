@@ -6,7 +6,7 @@ async fn exec_route_is_mounted_inside_the_application_router() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.path()).unwrap();
-    let endpoint = dhttp::Endpoint::load(profile.name()).await.unwrap();
+    let endpoint = crate::test_identity::endpoint(profile.name());
     let access = Arc::new(
         access_control::AccessService::load_from_db(
             "sqlite::memory:",

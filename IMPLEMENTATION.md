@@ -2,6 +2,31 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-03：定位并修复 QUIC 测试的 Crypto(51)
+
+- 临时记录 qtls 的原始错误后确认，客户端收到的是 `InvalidCertificate(UnsupportedSignatureAlgorithmContext)`，证书签名算法 OID 为 `1.2.840.10045.4.1`（ECDSA/SHA-1），当前 provider 不支持；对外仅保留 TLS alert 51。此前的证书和私钥也是实际生成的材料，错误来自生成器依赖 OpenSSL 的默认签名算法，不是必须换成商业 CA 证书，也没有据此判定 QUIC 协议实现有错。
+- `dhttp/tests/support/credentials.rs` 明确以 named_curve P-256、SHA-256 生成自建 CA、叶证书、匹配私钥和真实 OCSP 签名。启动 QUIC 前验证私钥有效性、证书与私钥导出的公钥一致、CA 链和 hostname，以及 OCSP 响应签名。测试可用 `DHTTP_TEST_OPENSSL` 指定实际执行文件，避免子进程命中不兼容的 openssl 实现；此次指定本机 `/opt/homebrew/bin/openssl`。
+- 移除全部临时 TLS 诊断日志，没有修改 qtls、h3x 的生产接口或关闭证书、域名、OCSP 验证。临时身份目录仍由现有测试清理。
+- `DHTTP_TEST_OPENSSL=/opt/homebrew/bin/openssl cargo test --locked --offline -p dhttp --lib --tests -- --include-ignored` 全部50项通过：40项库测试、6项 bootstrap 配置测试和4项集成测试，包含真实 UDP/TLS/H3、具名与匿名请求、已验证对端身份、连接复用、反向请求及证书名称不匹配拒绝。两仓 diff 检查和修改测试文件的格式检查通过。
+- 下节记载的 Crypto(51) 阻塞已解决。这次验收覆盖 dhttp 底层；Pishoo 应用级两进程 QUIC smoke 与 Workspace/Chat 生产出站仍待后续。
+
+## 2026-10-03：适配现行 Empty/WndBuf 出站接口
+
+- 底层同期将 Endpoint 恢复为具名身份，`name()` 返回 `&str`。用户曾批准标准 Body await，随后在底层任务明确删除该分支；本轮以最终仅支持 Empty/WndBuf 的接口为准，不恢复 Request<Body>、send_body_request 或响应 Body 上传控制。
+- 用户批准正向代理本轮先做字节流转发，暂不支持请求 trailers。`forward_dhttp` 保留同名与 owner_hash 校验、URI/Host 重写和可信 extensions 清理；以现有 WndBuf/RequestWriter 流式转发 DATA，EOF 时 shutdown。声明 Trailer 头的请求返回400；未声明 trailers 或 Body 读取错误使上传失败，丢弃未完成 writer 以取消上游，不静默丢弃 trailers。响应已交付时不能追溯改变响应状态；响应 Body/trailers 保持原生传递。
+- 客户端改用 RequestWriter 写入和显式 shutdown，有限请求使用初始 Bytes 窗口，流式 Echo 使用同一个 writer 持续上传。smoke 的 trailers 项现在只验证响应 trailers。交互示例仅支持当前 QUIC 入口，README 不再指向已删除的 TCP mock 构建。
+- 单元测试通过内存证书构造现有 Endpoint，不再依赖日常 DHTTP_HOME 或修改进程环境。qbase 仅作为生成测试身份的 dev-dependency；没有新增生产有状态类型、字段或跨模块接口，h3x 未修改。
+- 使用临时 Bun 1.4.2：`cargo check --locked --offline -p pishoo --all-targets` 通过，`cargo test --locked --offline --workspace` 全部94项库测试通过（含本机回环代理）；新增测试覆盖有界写入的背压/EOF、请求 trailers 与 Body 错误拒绝。修改文件的 Rust 格式检查和两仓 `git diff --check` 通过，Python 交互入口的参数检查通过。
+- dhttp 当前38项库测试通过。真实 `quic_roundtrip --include-ignored` 复测先遇到临时 OpenSSL EC 私钥编码不被 provider 接受；测试 fixture 显式指定 named_curve 后已能加载凭据，但仍在首个 WndBuf 请求的 TLS 握手返回 `Crypto(51)`，尚未进入 Pishoo 应用链路。本轮不宣称真实 QUIC 端到端通过，Workspace/Chat 的生产出站仍待接入。
+
+## 2026-10-03：清理正式清单的 TCP mock 依赖
+
+- 删除 Pishoo 的 `tcp-mock = ["dhttp/tcp-mock"]` feature，以及 `setup-tcp-demo` example 对该 feature 的门槛。保留旧测试素材，后续 QUIC smoke 适配另行处理；这不恢复 TCP mock 传输。
+- 使用正式清单离线同步 `Cargo.lock`，仅删除 dhttp 的 `async-stream` 与 h3x 的 `scopeguard` 依赖边，未升级依赖版本。没有修改冻结接口或生产 Rust 代码。
+- `cargo metadata --locked --offline --no-deps --format-version 1` 与 `git diff --check` 通过。
+- 本机 Bun 1.2.16 无法读取现有前端锁文件；验证改用临时目录的 Bun 1.4.2，以 `--frozen-lockfile` 安装前端依赖，保持系统 Bun 和仓库前端锁文件不变。
+- 使用上述临时 Bun 执行 `cargo check --locked --offline -p pishoo --all-targets`：依赖解析与 Workspace 前端构建通过，随后 Pishoo 库报告10处编译错误，库测试报告18处编译错误。剩余错误涉及 `Endpoint::name()` 的 `Option<&str>` 返回值、DHTTP 正向代理的旧 Body 请求 await 接缝，以及测试身份构造的参数变化，归下一步底层 API 适配。本阶段不宣称完整构建或真实 QUIC 端到端通过。
+
 ## 2026-10-02：rebase daccess 与 Workspace/Chat
 
 - 当前适配分支 `feat/rebase-daccess` 以 `origin/feat/daccess@9b733c5` 为基线，重放14个本地提交。重放前的完整工作保存在 `feat/pre-daccess-rebase-20261002@33f2d50`；原 main 保持原提交。range-diff 确认其余13个补丁相同，首个重构提交仅调整与远端旧架构文件的冲突。
