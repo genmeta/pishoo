@@ -70,7 +70,7 @@ genmeta identity apply
 
 ### Current development configuration
 
-Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, exec)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. `exec=1` enables `POST /exec` for the same verified identity; it runs one host command with the Pishoo service account's permissions. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema and current behavior.
+Set `DHTTP_HOME` before starting Pishoo. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, exec)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. `exec=1` enables `POST /exec` for the same verified identity; it runs one host command with the Pishoo service account's permissions. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. Address changes and leases drive publication, and identity removal or shutdown withdraws records using the loaded credentials. Until the online DDNS upgrade, a successful response without `DHTTP-DNS-Lease-Millis` temporarily uses a 300-second renewal window (zero for withdrawal). This window is not a confirmed server lease. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema, verification results and current limits.
 
 Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/file/{path}`. The `/file` path itself is unavailable; configured proxy locations handle other matching paths.
 
@@ -78,7 +78,7 @@ The same-identity DHTTP forwarding route streams request bytes through the nativ
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen` or `exec` require a restart.
+Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen`, `exec`, or the identity certificate chain require a restart.
 
 For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
@@ -90,7 +90,20 @@ DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
 
 The endpoint must be reachable, and daccess must allow that source identity to call the Echo API. The example builds the native client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
 
-QUIC is the only DHTTP transport. The former TCP mock smoke fixtures remain under `pishoo/tests/` for adaptation; their old script is no longer a working test entry point. Pishoo's real QUIC end-to-end acceptance is still pending; see [IMPLEMENTATION.md](IMPLEMENTATION.md).
+QUIC is the only DHTTP transport. The former TCP mock smoke fixtures remain under `pishoo/tests/` for adaptation; their old script is no longer a working test entry point. Real QUIC/H3 acceptance has passed through online DDNS and a local HTTP upstream, including public relay bootstrap and direct punching between two processes behind the same RestrictedPort NAT. Different NATs and devices remain to be tested; see [IMPLEMENTATION.md](IMPLEMENTATION.md).
+
+Online acceptance lives in the existing `pishoo-client` example, outside unit tests. Set `DHTTP_HOME` and `PISHOO_CLIENT_IDENTITY` to a test identity. Its commands are `query [NAME]`, `publish [ADDRESS ...]`, `probe`, `serve`, and `nat-get URL`. Publication always uses the loaded identity. `serve` starts the real Pishoo application after mapping setup; `nat-get` checks HTTP/3 responses before and after punching. Both omit mDNS and withdraw LAN/loopback advertisements for acceptance. Ordinary Network startup does not yet perform this NAT setup automatically.
+
+```sh
+cargo run --locked -p pishoo --example pishoo-client -- probe
+# In separate processes, with a prepared test configuration and upstream:
+cargo run --locked -p pishoo --example pishoo-client -- serve
+cargo run --locked -p pishoo --example pishoo-client -- nat-get https://server.dhttp.net/path
+```
+
+`serve` follows the test identity's `listen` configuration and publishes/withdraws its online records. Use an isolated profile and restore any pre-existing records after acceptance. Unit tests only exercise local logic; none of these commands run automatically.
+
+For the current DDNS server without a staple, `DQUIC_DDNS_OCSP_FILE` may point to a freshly fetched DER OCSP response. Only missing staples for `ddns.genmeta.net` use it; certificate, signature, freshness and revocation checks remain enabled. Fetching and refreshing this file happens outside the TLS callback.
 
 The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are included; to rebuild them, run `./pishoo/tools/build-wasm-demo.sh` with `wasm-tools` and the Rust `wasm32-unknown-unknown` target installed.
 

@@ -6,15 +6,17 @@ use std::{
 
 use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any};
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use http::Request;
 use http_body_util::BodyExt;
+use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result,
     chat::{self, Chat, store::ChatStore},
-    exec,
+    dns, exec,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, load_server_config},
@@ -31,6 +33,7 @@ struct Server {
     router: Arc<RwLock<axum::Router>>,
     sandbox: Sandbox,
     exec_tasks: TaskTracker,
+    publisher: Option<Arc<ddns::H3Resolver>>,
 }
 
 pub async fn run() -> Result<()> {
@@ -39,73 +42,154 @@ pub async fn run() -> Result<()> {
     #[cfg(unix)]
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let runtime = Arc::new(WasmRuntime::new()?);
-    let mut servers = BTreeMap::new();
-    for profile in home.discover_identity_profiles()? {
-        let server = Server::load(profile, runtime.clone()).await?;
-        servers.insert(server.name().to_owned(), server);
-    }
-    dhttp::DhttpNetwork::init().await?;
-    for server in servers.values().filter(|s| s.config.listen != 0) {
-        let (name, listener) = (server.name().to_owned(), server.listen());
-        tokio::spawn(async move {
-            if let Err(e) = listener.await {
-                eprintln!("listener {name} ended: {e}");
-            }
-        });
-    }
+    let mdns = dns::install()?;
+    let addresses = qprotocol::AddressBook::global();
+    let mut inner_events = addresses.subscribe_punch(dhttp::Scope::Internal);
+    let mut outer = addresses.subscribe_ddns();
+    let mut servers = BTreeMap::<String, Server>::new();
+    let mut jobs = FuturesUnordered::<BoxFuture<'static, Option<Instant>>>::new();
+    // Startup failures share the same DNS and application cleanup path as shutdown.
     let result = async {
+        let loaded = async {
+            for profile in home.discover_identity_profiles()? {
+                let server = Server::load(profile, runtime.clone()).await?;
+                servers.insert(server.name().to_owned(), server);
+            }
+            dhttp::DhttpNetwork::init().await?;
+            Ok::<(), Error>(())
+        }.await;
+        if let Err(error) = loaded {
+            // Nothing has registered yet: do not send withdrawals for unused publishers.
+            for server in servers.values_mut() { server.publisher.take(); }
+            return Err(error);
+        }
+        let mut unregistered = servers.values_mut().filter(|s| s.config.listen != 0);
+        while let Some(server) = unregistered.next() {
+            match server.listen().await {
+                Ok(listener) => { tokio::spawn(listener); }
+                Err(error) => {
+                    server.publisher.take();
+                    for server in unregistered { server.publisher.take(); }
+                    return Err(error);
+                }
+            }
+        }
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         #[cfg(unix)]
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        loop {
-            tokio::select! {
-                result = &mut interrupt => { result?; return Ok(()); }
-                _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
-                _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
-                    let reload = async {
-                        let profiles = home.discover_identity_profiles()?;
-                        let present = profiles.iter().map(|p| p.name()).collect::<HashSet<_>>();
-                        for server in servers.values_mut() {
-                            if !present.contains(server.name()) && !server.exec_tasks.is_closed() {
-                                server.close().await?;
-                            }
-                        }
-                        for profile in profiles {
-                            if let Some(server) = servers.get_mut(profile.name()) {
-                                if server.exec_tasks.is_closed() {
-                                    return Err(Error::InvalidConfig(format!(
-                                        "server {} was removed; restart required",
-                                        server.name()
-                                    )));
-                                }
-                                server.reload().await?;
-                                continue;
-                            }
-                            let server = Server::load(profile, runtime.clone()).await?;
-                            if server.config.listen != 0 {
-                                let (name, listener) = (server.name().to_owned(), server.listen());
-                                tokio::spawn(async move {
-                                    if let Err(e) = listener.await {
-                                        eprintln!("listener {name} ended: {e}");
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut removed_bounds = Vec::new();
+        'maintenance: loop {
+            let endpoints = servers.values()
+                .filter(|s| !s.exec_tasks.is_closed() && s.config.listen & 1 != 0)
+                .map(|s| s.endpoint.clone()).collect::<Vec<_>>();
+            let mut next_due = match dns::sync_mdns(&mdns, &endpoints, &removed_bounds).await {
+                Ok(()) => None,
+                Err(error) => {
+                    eprintln!("DNS maintenance: {error}");
+                    Some(Instant::now() + std::time::Duration::from_secs(5))
+                }
+            };
+            removed_bounds.clear();
+            let snapshot = outer.borrow_and_update().clone();
+            for server in servers.values().filter(|s| !s.exec_tasks.is_closed()) {
+                if let Some(publisher) = &server.publisher {
+                    jobs.push(dns::publish(server.name().to_owned(), publisher.clone(), snapshot.clone()).boxed());
+                }
+            }
+            let mut timer = None;
+            loop {
+                if jobs.is_empty() && timer.is_none() {
+                    timer = next_due.take().map(|due| Box::pin(tokio::time::sleep_until(due)));
+                }
+                tokio::select! {
+                    result = &mut interrupt => { result?; return Ok(()); }
+                    _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
+                    _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
+                        // Each operation already has its own finite deadline; poll all remaining work.
+                        while jobs.next().await.is_some() {}
+                        let reload = async {
+                            let profiles = home.discover_identity_profiles()?;
+                            let present = profiles.iter().map(|p| p.name()).collect::<HashSet<_>>();
+                            for server in servers.values_mut() {
+                                if !present.contains(server.name()) && !server.exec_tasks.is_closed() {
+                                    if let Err(error) = dns::withdraw(&server.endpoint, server.publisher.as_deref(), &mdns).await {
+                                        eprintln!("{error}");
                                     }
-                                });
+                                    server.close().await?;
+                                }
                             }
-                            servers.insert(server.name().to_owned(), server);
+                            for profile in profiles {
+                                if let Some(server) = servers.get_mut(profile.name()) {
+                                    if server.exec_tasks.is_closed() {
+                                        return Err(Error::InvalidConfig(format!(
+                                            "server {} was removed; restart required", server.name())));
+                                    }
+                                    server.reload().await?;
+                                    continue;
+                                }
+                                let mut server = Server::load(profile, runtime.clone()).await?;
+                                if server.config.listen != 0 {
+                                    match server.listen().await {
+                                        Ok(listener) => { tokio::spawn(listener); }
+                                        Err(error) => {
+                                            if let Err(close) = server.close().await { eprintln!("new server cleanup: {close}"); }
+                                            return Err(error);
+                                        }
+                                    }
+                                }
+                                servers.insert(server.name().to_owned(), server);
+                            }
+                            Ok::<(), Error>(())
+                        }.await;
+                        if let Err(error) = reload { eprintln!("reload rejected: {error}"); }
+                        // Even a partially rejected reload must resume maintenance of live servers.
+                        continue 'maintenance;
+                    }
+                    result = jobs.next(), if !jobs.is_empty() => {
+                        if let Some(Some(due)) = result {
+                            next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
                         }
-                        Ok::<(), Error>(())
-                    }.await;
-                    if let Err(e) = reload { eprintln!("reload rejected: {e}"); }
-                },
+                    }
+                    event = inner_events.recv(), if jobs.is_empty() => {
+                        let event = event.ok_or_else(|| std::io::Error::other("DNS address subscription ended"))?;
+                        if let qprotocol::AddressEvent::BoundRemoved { bound } = event { removed_bounds.push(bound); }
+                        while let Ok(event) = inner_events.try_recv() {
+                            if let qprotocol::AddressEvent::BoundRemoved { bound } = event { removed_bounds.push(bound); }
+                        }
+                        break;
+                    }
+                    changed = outer.changed(), if jobs.is_empty() => { changed.map_err(std::io::Error::other)?; break; }
+                    _ = async { if let Some(timer) = &mut timer { timer.as_mut().await; } }, if jobs.is_empty() && timer.is_some() => { break; }
+                }
             }
         }
     }.await;
+    // No new batches after the run body exits, including failure during startup.
+    while jobs.next().await.is_some() {}
     let mut shutdown = Ok(());
-    for server in servers.values_mut() {
-        if let Err(e) = server.close().await {
-            shutdown = Err(e);
+    {
+        let mut withdrawals = servers
+            .values()
+            .filter(|s| !s.exec_tasks.is_closed())
+            .map(|s| dns::withdraw(&s.endpoint, s.publisher.as_deref(), &mdns))
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = withdrawals.next().await {
+            if let Err(error) = result {
+                eprintln!("{error}");
+                shutdown = Err(Error::Io(error));
+            }
         }
+    }
+    for server in servers.values_mut() {
+        if let Err(error) = server.close().await {
+            eprintln!("server {} shutdown: {error}", server.name());
+            shutdown = Err(error);
+        }
+    }
+    if let Err(error) = mdns.shutdown().await {
+        eprintln!("mDNS shutdown: {error}");
+        shutdown = Err(Error::Io(std::io::Error::other(error)));
     }
     result.and(shutdown)
 }
@@ -185,6 +269,14 @@ impl Server {
             .map_err(|e| Error::InvalidIdentity(e.to_string()))?;
         let endpoint = dhttp::Endpoint::load(profile.name()).await?;
         let config = load_server_config(&profile)?;
+        if config.listen != 0 {
+            dns::authority(&endpoint)?;
+        }
+        let publisher = if config.listen & 2 != 0 {
+            Some(dns::publisher(&endpoint)?)
+        } else {
+            None
+        };
         let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certs)
             .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
         let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
@@ -249,6 +341,7 @@ impl Server {
             router: Arc::new(RwLock::new(router)),
             sandbox,
             exec_tasks,
+            publisher,
         })
     }
     pub(super) fn name(&self) -> &str {
@@ -260,6 +353,16 @@ impl Server {
         if config.listen != self.config.listen || config.exec != self.config.exec {
             return Err(Error::InvalidConfig(
                 "listen and exec changes require restarting the instance".into(),
+            ));
+        }
+        let certs = self
+            .profile
+            .load_certs()
+            .await
+            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
+        if certs != self.endpoint.local_authority()?.certificates() {
+            return Err(Error::InvalidConfig(
+                "identity credentials changed; restart required".into(),
             ));
         }
         self.sandbox.load_libs(&self.profile)?;
@@ -289,53 +392,50 @@ impl Server {
         Ok(())
     }
 
-    pub(super) fn listen(
-        &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+    pub(super) async fn listen(&self) -> Result<dhttp::ListenFuture> {
         let (endpoint, router, listen) = (
             self.endpoint.clone(),
             self.router.clone(),
             self.config.listen,
         );
-        Box::pin(async move {
-            let scopes = match listen {
-                0 => return Ok(()),
-                1 => dhttp::Scope::Internal.into(),
-                2 => dhttp::Scope::External.into(),
-                _ => dhttp::Scope::Internal | dhttp::Scope::External,
-            };
-            let name = endpoint.name().to_owned();
-            let service = tower::service_fn(move |request: http::Request<Body>| {
-                let (router, name) = (router.clone(), name.clone());
-                async move {
-                    let result: Result<http::Response<AxumBody>> = async {
-                        let app = router.read().unwrap().clone();
-                        let response = app
-                            .oneshot(request.map(axum::body::Body::new))
-                            .await
-                            .expect("Router is infallible");
-                        Ok(response)
-                    }
-                    .await;
-                    let response = result.unwrap_or_else(|error| {
-                        let status = error.status();
-                        if status.is_server_error() {
-                            eprintln!("request for {name}: {error}");
-                        }
-                        (
-                            status,
-                            status.canonical_reason().unwrap_or("request failed"),
-                        )
-                            .into_response()
-                    });
-                    Ok::<_, std::convert::Infallible>(response)
+        let scopes = match listen {
+            0 => return Err(Error::InvalidConfig("listen is disabled".into())),
+            1 => dhttp::Scope::Internal.into(),
+            2 => dhttp::Scope::External.into(),
+            _ => dhttp::Scope::Internal | dhttp::Scope::External,
+        };
+        let name = endpoint.name().to_owned();
+        let service = tower::service_fn(move |request: http::Request<Body>| {
+            let (router, name) = (router.clone(), name.clone());
+            async move {
+                let result: Result<http::Response<AxumBody>> = async {
+                    let app = router.read().unwrap().clone();
+                    let response = app
+                        .oneshot(request.map(axum::body::Body::new))
+                        .await
+                        .expect("Router is infallible");
+                    Ok(response)
                 }
-            });
-            endpoint.listen(scopes, service).await.map_err(Into::into)
-        })
+                .await;
+                let response = result.unwrap_or_else(|error| {
+                    let status = error.status();
+                    if status.is_server_error() {
+                        eprintln!("request for {name}: {error}");
+                    }
+                    (
+                        status,
+                        status.canonical_reason().unwrap_or("request failed"),
+                    )
+                        .into_response()
+                });
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+        endpoint.listen(scopes, service).await.map_err(Into::into)
     }
 
     pub(super) async fn close(&mut self) -> Result<()> {
+        self.publisher.take();
         self.sandbox.close();
         self.exec_tasks.close();
         *self.router.write().unwrap() = axum::Router::new();

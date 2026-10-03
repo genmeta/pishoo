@@ -1,14 +1,14 @@
-# Pishoo DNS 解析与发布详细设计草案
+# Pishoo DNS 解析与发布详细设计
 
-日期：2026-10-03。状态：待审阅的具体接口提案，不属于已冻结基线。本文不授权修改既有接口清单或实现代码。
+日期：2026-10-03。状态：2026-10-03 用户明确批准全部六项接口与相邻仓库修改，已并入冻结基线；实现与验证进度见 [实施记录](../IMPLEMENTATION.md)。
 
-Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份地址，并在地址变化、记录续期、身份删除和退出时更新记录。协议编码、签名和缓存规则归 ddns；地址、socket、NAT 与连接池继续归 dhttp/dquic。本文逐项定义所需结构、成员、函数及伪代码，供批准后实施。
+Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份地址，并在地址变化、记录续期、身份删除和退出时更新记录。协议编码、签名和缓存规则归 ddns；地址、socket、NAT 与连接池继续归 dhttp/dquic。本文逐项定义所需结构、成员、函数及伪代码，按本次批准实施。
 
 ## 设计依据与实施前提
 
-依据本仓 [设计入口](README.md)、[dhttp 接口](dhttp-interfaces.md)、[Pishoo 接口](pishoo-interfaces.md)，以及本地 ddns、dquic 和 ddns-sever 当前代码。本文区分当前事实和拟议变化。
+依据本仓 [设计入口](README.md)、[dhttp 接口](dhttp-interfaces.md)、[Pishoo 接口](pishoo-interfaces.md)，以及本地 ddns、dquic 和 ddns-sever 当前代码。下表记录实施前的代码状况；本次批准后的接口以结构与签名章节为准。
 
-| 当前事实 | 对设计的影响 |
+| 实施前的代码事实 | 对设计的影响 |
 | --- | --- |
 | qresolve 全局注册表初始为空，System DNS 也是显式注册的源 | Pishoo 必须装配解析器，且不能让 DDNS 查询递归解析 DDNS 服务自身 |
 | AddressBook 有 subscribe_ddns、subscribe_mdns、subscribe_punch，保存绑定的网卡元数据 | 使用现有订阅，不新建 watcher 或地址状态表 |
@@ -20,7 +20,7 @@ Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份�
 | ddns 编码的 E 记录 TTL 当前固定 300 秒，服务端存储租期可与它不同 | 查询缓存不能直接把 300 秒当作动态记录剩余有效期 |
 | mDNS 的 remove_name 当前只删除本机应答记录 | 本版不承诺向已有查询者主动广播撤回，远端已有缓存按 TTL 过期 |
 
-冻结清单目前写 Endpoint 只有 name，而本地 dhttp 实现已经是 `quic: Arc<qconn::QuicEndpoint>`，并在 load 时保存凭据。本文以已加载的真实凭据作为签名来源；正式实施前必须确认该现行成员与冻结清单的差异。不能按本文默默追认现行实现，也不能在 Pishoo 添加另一份凭据容器绕开这一冲突。
+原冻结清单写 Endpoint 只有 name，而现行 dhttp 已使用 `quic: Arc<qconn::QuicEndpoint>` 并在 load 时保存凭据。本次用户明确批准确认此差异，并同步 dhttp 清单；签名使用同一组内存材料，Pishoo 不添加另一份凭据容器。
 
 ## 范围与不变量
 
@@ -87,7 +87,7 @@ pub struct H3Resolver {
 
 ### dhttp Endpoint 与 Network
 
-Endpoint 以当前实现的真实成员为待确认前提：
+Endpoint 的现行真实成员已由本次批准确认：
 
 ```rust
 pub struct Endpoint {
@@ -124,7 +124,7 @@ ListenFuture 是标准 future 的类型别名，不是新状态结构。其唯�
 
 ## 全部新增或修改的签名
 
-以下是具体待批准的接口差异，不是已冻结接口。
+以下为本次批准并冻结的具体接口差异。
 
 ### Pishoo
 
@@ -438,7 +438,7 @@ mDNS 查询资源不依赖本地身份是否监听，故即使 endpoints 为空�
 
 ### 发布响应
 
-拟议扩展既有 `/api/v2/publish`，不新建 API 路径或响应对象：
+本次扩展既有 `/api/v2/publish`，不新建 API 路径或响应对象：
 
 ```text
 非空发布成功：
@@ -454,7 +454,7 @@ mDNS 查询资源不依赖本地身份是否监听，故即使 endpoints 为空�
     Body: OK
 ```
 
-该头是本文提出的项目协议扩展，不是现有标准或现行能力。服务端使用与存储代码相同的毫秒转换，不能返回四舍五入后更长的租期。头缺失、重复、溢出或不合语义时客户端返回 InvalidLease，不猜测 30 秒。
+该头是本次批准的项目协议扩展，不是标准 DNS/HTTP 响应头。服务端使用与存储代码相同的毫秒转换，不能返回四舍五入后更长的租期。头缺失、重复、溢出或不合语义时客户端返回 InvalidLease，不猜测 30 秒。
 
 Pishoo 的固定运行值为 PUBLISH_TIMEOUT=3 秒、MAINTENANCE_RETRY=5 秒、MIN_PUBLISH_LEASE=30 秒，均为 dns 模块局部常量，不新增配置结构。
 
@@ -702,14 +702,14 @@ withdraw(endpoint, publisher, mdns):
 11. 退出在正在发布、重试、SIGHUP 失败时都不再创建后续批；mDNS 自有任务结束，共享传输不被主动关闭。
 12. NAT 验收分开：当前阶段只使用 AddressBook 已有可公布地址，公网直连通过后再验证底层提供的 NAT 映射。接上 DNS 不等于完成 NAT 探测或打洞。
 
-## 待批准的成员与接口变化汇总
+## 已批准的成员与接口变化汇总
 
 | 位置 | 具体变化 | 当前必需用途 |
 | --- | --- | --- |
 | Pishoo Server | 新增 publisher: Option<Arc<H3Resolver>> | 身份删除后仍能持原凭据撤回，并在进行中请求间共享协议资源 |
 | Pishoo dns 模块 | 新增 install、authority、publisher、sync_mdns、publish、withdraw 六个内部跨模块函数 | 装配、校验和维护本轮要求的解析发布能力 |
 | Pishoo Server.listen | 改为 async 并返回 Result<ListenFuture> | 登记成功后才首次发布 |
-| dhttp Endpoint | 确认现行 quic 成员与冻结 name 成员的差异；新增 local_authority | 从原加载材料签名，不重复读取已删除目录 |
+| dhttp Endpoint | 确认现行 quic 成员并替换冻结 name；新增 local_authority | 从原加载材料签名，不重复读取已删除目录 |
 | dhttp | 新增 ListenFuture 别名；Endpoint.listen、Network.listen 返回它 | 用实际监听 future 表达登记完成与存续，不加通知状态 |
 | qresolve SystemResolver | lookup 方法体跳过 DHTTP 命名空间，签名与成员不变 | 避免把证书序号当成普通传输端口 |
 | qprotocol AddressBook | 新增 inner_bindings 只读方法 | 按实际内网绑定建立/移除 mDNS 实例，合并同 IP 的不同 QUIC 端口 |
@@ -732,3 +732,7 @@ withdraw(endpoint, publisher, mdns):
 - [E 记录固定 TTL](../../ddns/src/core/parser/packet.rs)
 - [DDNS 服务端 handler](../../ddns-sever/src/router.rs)
 - [Server 启动重载与关闭](../pishoo/src/server.rs)
+
+## 2026-10-03 线上旧版临时兼容
+
+用户明确要求先跳过尚未上线的缺失租期头校验。publish_endpoints 签名保持不变：HTTP 200 缺 DHTTP-DNS-Lease-Millis 时，非空发布暂返回300秒续期窗口，空发布返回0；这是当前线上查询 TTL 的临时兼容值，不能视为服务端确认的租期。有该头时继续校验原有数值、重复和清空语义。部署完成后撤销此缺头兼容。此决定不放宽发布身份、证书或签名校验。

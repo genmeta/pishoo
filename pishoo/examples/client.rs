@@ -9,6 +9,11 @@ type Failure = Box<dyn Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     if let Err(error) = run().await {
         eprintln!("pishoo client: {error}");
         std::process::exit(1);
@@ -20,9 +25,180 @@ async fn run() -> Result<(), Failure> {
     let command = args.next().unwrap_or_else(|| "echo".to_owned());
     let identity =
         std::env::var("PISHOO_CLIENT_IDENTITY").unwrap_or_else(|_| "demo.dhttp.net".to_owned());
+    // A standalone client must explicitly install its name sources.
+    dhttp::resolve::Resolver::add(std::sync::Arc::new(dhttp::resolve::SystemResolver));
+    let h3_dns = std::sync::Arc::new(ddns::H3Resolver::anonymous(
+        ddns::resolvers::DHTTP_NAME_SERVICE.parse()?,
+    )?);
+    dhttp::resolve::Resolver::add(h3_dns.clone());
+    let mdns = ddns::mdns::MdnsResolverSet::new(ddns::resolvers::DHTTP_MDNS_SERVICE_DOMAIN);
+    let h3_only = matches!(
+        command.as_str(),
+        "probe" | "nat-get" | "serve" | "query" | "publish"
+    );
+    if !h3_only {
+        dhttp::resolve::Resolver::add(std::sync::Arc::new(mdns.clone()));
+    }
     dhttp::DhttpNetwork::init().await?;
+    for (bound, device) in dhttp::AddressBook::global()
+        .inner_bindings()
+        .into_iter()
+        .filter(|_| !h3_only)
+    {
+        if qprotocol::Dock::global().find_socket(bound).is_some() {
+            if let Err(error) = mdns
+                .upsert(ddns::mdns::MdnsBinding::new(device.name(), bound.ip()))
+                .await
+            {
+                eprintln!("client mDNS {} at {}: {error}", device.name(), bound.ip());
+            }
+        }
+    }
     let endpoint = dhttp::Endpoint::load(&identity).await?;
     match command.as_str() {
+        "probe" | "nat-get" | "serve" => {
+            use futures::StreamExt as _;
+            let target = if command == "nat-get" {
+                Some(
+                    args.next()
+                        .ok_or("usage: pishoo-client nat-get URL")?
+                        .parse::<http::Uri>()?,
+                )
+            } else {
+                None
+            };
+            let mut relays = Vec::new();
+            if let Some(uri) = &target {
+                let mut records = h3_dns
+                    .lookup(uri.host().ok_or("missing host")?, "443", None)
+                    .await?;
+                while let Some((source, address)) = records.next().await {
+                    eprintln!("{source}: {address}");
+                    if let dhttp::resolve::EndpointAddr::Mediate { agent, .. } = address {
+                        relays.push(agent);
+                    }
+                }
+            }
+            let servers = qprotocol::StunProtocol::stun_servers().await?;
+            eprintln!("STUN servers: {servers:?}");
+            let addresses = dhttp::AddressBook::global();
+            eprintln!(
+                "Network DDNS before probes: {:?}",
+                addresses.subscribe_ddns().borrow()
+            );
+            let dock = qprotocol::Dock::global();
+            let stun = dock.topology().stun();
+            for (bound, device) in addresses.inner_bindings() {
+                if !matches!(bound.ip(), std::net::IpAddr::V4(ip) if ip.is_private()) {
+                    continue;
+                }
+                let server = servers
+                    .iter()
+                    .find(|server| server.is_ipv4())
+                    .ok_or("no IPv4 STUN server")?;
+                // Classify once before contacting other discovery nodes. Prior traffic
+                // to changed-source nodes would invalidate filtering observations.
+                let nat =
+                    tokio::time::timeout(Duration::from_secs(20), stun.detect_nat(bound, *server))
+                        .await??;
+                eprintln!("{} {bound} via {server}: NAT {nat:?}", device.name());
+                if command != "probe" {
+                    addresses.set_nat(bound, nat);
+                }
+                let mut probes = servers.to_vec();
+                probes.extend(relays.iter().copied());
+                probes.sort_unstable();
+                probes.dedup();
+                for server in probes.into_iter().filter(|server| server.is_ipv4()) {
+                    let mapped = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        stun.detect_outer(bound, server),
+                    )
+                    .await??;
+                    eprintln!("{} {bound} via {server}: mapped {mapped:?}", device.name());
+                    if command != "probe" {
+                        let outer = mapped.ok_or("STUN mapping unanswered")?;
+                        let socket = dock.find_socket(bound).ok_or("socket disappeared")?;
+                        let direct = dhttp::resolve::EndpointAddr::direct(outer);
+                        if !addresses.subscribe_ddns().borrow().contains(&direct) {
+                            dock.topology().quic().register(direct, &socket)?;
+                            addresses.insert_outer(&socket, direct)?;
+                        }
+                        let mediated = dhttp::resolve::EndpointAddr::mediate(server, outer);
+                        dock.topology().quic().register(mediated, &socket)?;
+                    }
+                }
+            }
+            eprintln!(
+                "Network DDNS after probes: {:?}",
+                addresses.subscribe_ddns().borrow()
+            );
+            if command != "probe" {
+                if addresses.ddns_endpoints().is_empty() {
+                    return Err(io::Error::other("no public NAT mapping discovered").into());
+                }
+                // This acceptance mode advertises only public addresses; otherwise
+                // two local processes could finish punching over LAN or loopback.
+                let mut replay = addresses.subscribe_punch(dhttp::Scopes::ALL);
+                while let Ok(event) = replay.try_recv() {
+                    if let qprotocol::AddressEvent::Added { endpoint, .. } = event
+                        && endpoint.scope() != Some(dhttp::Scope::External)
+                    {
+                        addresses.remove(endpoint);
+                    }
+                }
+            }
+            if command == "serve" {
+                eprintln!("NAT server ready");
+                pishoo::run().await?;
+            }
+            if let Some(uri) = target {
+                let response = endpoint.get(uri.clone()).await?;
+                eprintln!("{:?} {}", response.version(), response.status());
+                if response.version() != http::Version::HTTP_3
+                    || response.status() != http::StatusCode::OK
+                {
+                    return Err(io::Error::other("NAT HTTP/3 request failed").into());
+                }
+                let body = response.into_body().collect().await?.to_bytes();
+                tokio::io::stdout().write_all(&body).await?;
+                tokio::io::stdout().flush().await?;
+                // Keep the authenticated connection alive while punch frames and
+                // path validation complete, then prove another HTTP exchange.
+                tokio::time::sleep(Duration::from_secs(8)).await;
+                let response = endpoint.get(uri).await?;
+                eprintln!(
+                    "after punching: {:?} {}",
+                    response.version(),
+                    response.status()
+                );
+                if response.version() != http::Version::HTTP_3
+                    || response.status() != http::StatusCode::OK
+                    || response.into_body().collect().await?.to_bytes() != body
+                {
+                    return Err(io::Error::other("HTTP/3 response changed after punching").into());
+                }
+            }
+        }
+        "query" => {
+            use futures::StreamExt as _;
+            let resolver =
+                ddns::H3Resolver::new(ddns::resolvers::DHTTP_NAME_SERVICE.parse()?, &endpoint)?;
+            let target = args.next().unwrap_or(identity);
+            let mut records = resolver.lookup(&target, "443", None).await?;
+            while let Some((source, address)) = records.next().await {
+                println!("{source}: {address}");
+            }
+        }
+        "publish" => {
+            let addresses = args
+                .map(|address| address.parse::<dhttp::resolve::EndpointAddr>())
+                .collect::<Result<Vec<_>, _>>()?;
+            let resolver =
+                ddns::H3Resolver::new(ddns::resolvers::DHTTP_NAME_SERVICE.parse()?, &endpoint)?;
+            let lease = resolver.publish_endpoints(&identity, addresses).await?;
+            println!("published {identity}: lease {lease:?}");
+        }
         "smoke" => {
             for (path, expected) in [
                 ("/file/hello.txt", "static from demo\n"),
@@ -223,7 +399,9 @@ async fn run() -> Result<(), Failure> {
             };
             eprintln!("{:?} {}", response.version(), response.status());
             let body = response.into_body().collect().await?.to_bytes();
-            tokio::io::AsyncWriteExt::write_all(&mut tokio::io::stdout(), &body).await?;
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(&body).await?;
+            stdout.flush().await?;
         }
         "echo" => {
             let target = args
@@ -268,7 +446,7 @@ async fn run() -> Result<(), Failure> {
                 (&mut *input).await??;
             }
         }
-        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|smoke]".into()),
+        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|smoke|probe|nat-get URL|serve|query [NAME]|publish [ADDRESS ...]]".into()),
     }
     Ok(())
 }

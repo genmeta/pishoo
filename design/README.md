@@ -26,6 +26,7 @@
 | [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、连接复用与应用接入 |
 | [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Sandbox/Lib、daccess 接入与 WASM |
 | [Workspace/Chat 接入](workspace-chat-interfaces.md) | 目标分支业务模型、Server 资源归属及暂缓的传输接缝 |
+| [DNS 解析与发布](pishoo-dns-detailed-design.md) | 全进程解析源、内存凭据发布、地址维护、租期和撤回 |
 | [exec 结构](exec-interfaces.md) | 单命令宿主执行、身份准入与子进程回收 |
 
 ## 冻结规则
@@ -42,7 +43,7 @@
 ## 当前边界
 
 - h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
-- Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 不持 Network、QUIC endpoint 或连接。
+- Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 持已加载的 `Arc<qconn::QuicEndpoint>`，不持 Network 或连接；DNS 签名与 TLS 共用同一组内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 与 exec 都不设并发名额。
 - 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
@@ -125,3 +126,7 @@
 本仓此前的接入稿、Pishoo API 草案、数据库重设计、WASM HTTP 适配、身份沙盒、终端旧稿及旧架构图由本组文档替代。仍有效的应用规则已归入架构说明和结构清单。
 
 README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担接口定义。其他仓库中的历史设计也不作为本轮三仓接口的实现依据。
+
+2026-10-03 用户明确批准 [DNS 详细设计](pishoo-dns-detailed-design.md) 的全部六项接口及相邻仓库变化：Server.publisher 与六个 dns 函数；确认现行 Endpoint.quic 并新增 local_authority/ListenFuture、修改监听登记返回值；AddressBook.inner_bindings；H3Resolver 直接持 Endpoint、发布返回 Duration 及错误变体调整；服务端租期头/no-store；同步本冻结清单。run 在 Network 初始化前注册 System/H3/mDNS 解析源并订阅地址簿；监听登记成功后维护发布批，SIGHUP、删除和退出先排空当前发布，再撤回及清理自己的 mDNS/应用资源。新旧服务端协议部署与公网/NAT 验收仍需分别确认，不改变共享传输的进程生命周期。
+
+2026-10-03 用户要求继续线上端到端验收并包含 NAT 探测与打洞，明确批准临时替换并恢复 code 身份的线上 DNS，随后要求先跳过线上尚未部署的租期头校验。旧发布响应缺头时暂按300秒续期窗口、空发布按0处理；已有租期头仍按原规则校验，签名和身份鉴权不变。qtls 的方法体允许仅为 ddns.genmeta.net 从 DQUIC_DDNS_OCSP_FILE 补充客户端预取的 OCSP，仍执行证书绑定、签名、时效和撤销验证。具名 qconn 出站从同一 LocalAuthority 填充已存在的 ClientName 传输参数，以兼容线上旧版身份识别；不新增类型、字段或方法。NAT 映射登记和仅公网地址的验收装配暂在独立端到端 example 中完成；单元测试不执行线上请求，普通 Network 启动尚不自动探测。

@@ -35,6 +35,19 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = crate::test_identity::endpoint(profile.name());
+    let certificates = endpoint.local_authority().unwrap();
+    let pem = certificates
+        .certificates()
+        .iter()
+        .map(|cert| {
+            use base64::Engine as _;
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                base64::engine::general_purpose::STANDARD.encode(cert.as_ref())
+            )
+        })
+        .collect::<String>();
+    std::fs::write(profile.cert_path(), pem).unwrap();
     let config = load_server_config(&profile).unwrap();
     let access = Arc::new(
         access_control::AccessService::load_from_db(
@@ -87,6 +100,7 @@ async fn server(root: &std::path::Path) -> Server {
         router,
         sandbox,
         exec_tasks: TaskTracker::new(),
+        publisher: None,
     }
 }
 
@@ -273,4 +287,31 @@ async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
     assert!(server.sandbox.load_libs(&server.profile).is_err());
+}
+
+#[tokio::test]
+async fn reload_rejects_replaced_credentials_and_preserves_loaded_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    let loaded = server.endpoint.local_authority().unwrap();
+    let changed = rcgen::generate_simple_self_signed(vec![server.name().to_owned()]).unwrap();
+    std::fs::write(server.profile.cert_path(), changed.cert.pem()).unwrap();
+    assert!(
+        matches!(server.reload().await, Err(Error::InvalidConfig(message)) if message.contains("restart"))
+    );
+    assert_eq!(
+        server.endpoint.local_authority().unwrap().certificates(),
+        loaded.certificates()
+    );
+}
+
+#[tokio::test]
+async fn disabled_listener_is_rejected_before_network_registration() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server(root.path()).await;
+    assert!(matches!(
+        server.listen().await,
+        Err(Error::InvalidConfig(_))
+    ));
+    assert!(server.publisher.is_none());
 }
