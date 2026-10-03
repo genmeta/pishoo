@@ -2,3 +2,12 @@
 resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
+
+# Keep the resolver registry and transport resources in one set of local crates.
+[patch.crates-io]
+dhttp = { path = "../dhttp/dhttp" }
+dhttp-home = { path = "../dhttp/home" }
+qtls = { path = "../dquic/qtls" }
+qresolve = { path = "../dquic/qresolve" }
+qbase = { path = "../dquic/qbase" }
+qprotocol = { path = "../dquic/qprotocol" }

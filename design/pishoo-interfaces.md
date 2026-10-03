@@ -68,6 +68,7 @@ struct Server {
     router: std::sync::Arc<std::sync::RwLock<axum::Router>>,
     sandbox: Sandbox,
     exec_tasks: tokio_util::task::TaskTracker,
+    publisher: Option<std::sync::Arc<ddns::H3Resolver>>,
 }
 ```
 
@@ -80,7 +81,7 @@ impl Server {
         runtime: std::sync::Arc<WasmRuntime>) -> Result<Self>;
     fn name(&self) -> &str;
     async fn reload(&mut self) -> Result<()>;
-    fn listen(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<()>> + Send + 'static>>;
+    async fn listen(&self) -> Result<dhttp::ListenFuture>;
     async fn close(&mut self) -> Result<()>;
 }
 fn file_router(root: std::path::PathBuf) -> axum::Router;
@@ -90,11 +91,11 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
     request: http::Request<axum::body::Body>) -> axum::response::Response;
 ```
 
-`run` 以局部变量持有 home、Server 集合和共享 WasmRuntime。启动时加载一次；Unix 上收到 SIGHUP 后才扫描身份并串行处理 Server 加载、重载和删除，不定时轮询。监听任务启动后不保留 JoinHandle；监听错误仅记录日志，不自动关闭或移除 Server。退出时逐个关闭并回收 Server。每个 Server 直接持有 exec 任务跟踪器；`exec` 与 listen 的变更在重启后生效。Server.listen在返回future前克隆Endpoint和router，不借用Server；因此监听运行期间仍可 `reload(&mut self)`。
+`run` 以局部变量持有 home、Server 集合和共享 WasmRuntime。启动时加载一次；Unix 上收到 SIGHUP 后才扫描身份并串行处理 Server 加载、重载和删除，不定时轮询。监听登记失败结束启动并统一收尾；登记成功交付 ListenFuture 后 spawn，不保留 JoinHandle。退出时逐个关闭并回收 Server。每个 Server 直接持有 exec 任务跟踪器；`exec` 与 listen 的变更在重启后生效。Server.listen 在登记阶段克隆 Endpoint 和 router，返回的 ListenFuture 不借用 Server；因此监听运行期间仍可 `reload(&mut self)`。
 
 每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
-reload 先读取配置，再调用 Sandbox.load_libs 扫描并更新 Lib 集合。Server 中显式合并管理、Lib API、exec 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败时直接返回错误，保留旧 Router、Lib 集合和配置。加载成功后构建完整 Router，一次替换，并更新 Server.config；其间没有 await 或可失败操作。没有部分挂入路由的中间状态。
+reload 先读取配置、核对磁盘证书链与 Endpoint 的内存链；listen/exec 或证书链变化均要求重启。随后调用 Sandbox.load_libs 扫描并更新 Lib 集合。Server 中显式合并管理、Lib API、exec 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败时直接返回错误，保留旧 Router、Lib 集合和配置。加载成功后构建完整 Router，一次替换，并更新 Server.config；其间没有 await 或可失败操作。没有部分挂入路由的中间状态。
 
 `/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
 
@@ -108,6 +109,29 @@ reload 先读取配置，再调用 Sandbox.load_libs 扫描并更新 Lib 集合�
 新版本保存本版本目录权限；删除 Lib 时移除路由。旧请求仍持有的旧版本继续执行，直到自身结束。删除 Server 时调用 Server.close 并保留已关闭的 Server 记录；没有监听停止接口，原监听仍使用其已清空的 Router。同名身份重新出现须重启进程。
 
 静态文件每请求固定已打开句柄。部署用临时文件+原子rename，不原地改写正在读取的文件；此为部署约束，不宣称整个file目录是不可变发布快照。
+
+
+### DNS 解析、发布与撤回
+
+2026-10-03 用户批准；详细行为和跨仓接口见 [DNS 设计](pishoo-dns-detailed-design.md)。新增普通 `dns.rs`，只提供下列内部函数，不新增管理结构或 ServerConfig 字段：
+
+```rust
+fn install() -> std::io::Result<ddns::mdns::MdnsResolverSet>;
+fn authority(endpoint: &dhttp::Endpoint) -> std::io::Result<qtls::LocalAuthority>;
+fn publisher(endpoint: &dhttp::Endpoint) -> std::io::Result<std::sync::Arc<ddns::H3Resolver>>;
+async fn sync_mdns(mdns: &ddns::mdns::MdnsResolverSet,
+    endpoints: &[dhttp::Endpoint], removed_bounds: &[std::net::SocketAddr]) -> std::io::Result<()>;
+async fn publish(name: String, publisher: std::sync::Arc<ddns::H3Resolver>,
+    addresses: std::sync::Arc<[dhttp::resolve::EndpointAddr]>) -> Option<tokio::time::Instant>;
+async fn withdraw(endpoint: &dhttp::Endpoint, publisher: Option<&ddns::H3Resolver>,
+    mdns: &ddns::mdns::MdnsResolverSet) -> std::io::Result<()>;
+```
+
+run 在任何出站及 Network.init 前各注册一次现成 SystemResolver、匿名 H3Resolver 和共享 MdnsResolverSet；先订阅内外地址事件再初始化网络。listen 为 0/1/2/3 时分别不发布/仅 mDNS/仅 H3/两者，解析不依赖监听。外网监听 Server 的 publisher 绑定原 Endpoint，其余无该资源。监听身份在加载时校验 ClientAndServer 发布凭据。
+
+run 仅用局部 FuturesUnordered 保存当前发布批，每个身份最多一个请求；每批读取地址簿的最新完整快照，批间消费地址事件与续期时刻。发布期限3秒，失败或非空租期短于30秒时5秒后重试，正常按请求开始时间加租期三分之一续期；清空成功不继续空续期。mDNS 从实际 Internal 绑定、Dock socket 和网卡元数据建立实例，同网卡/IP 的端口合并；没有监听身份也维护查询资源。
+
+SIGHUP、删除及退出先排空发布批；删除先撤回后关闭，撤回失败仍执行应用关闭。重载失败后恢复最终有效 Server 的 DNS 维护。退出并行尝试各身份撤回，再关闭应用、shutdown 自有 mDNS 资源；startup/Network.init/监听登记失败也进入同一路径。Server.close 在等待前 take publisher，避免等待超时保留资源。没有新的取消 token、身份状态表、后台发布管理器或传输关闭接口。
 
 ## 4. daccess、Workspace 与 Chat
 

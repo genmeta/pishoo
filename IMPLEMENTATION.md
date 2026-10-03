@@ -185,8 +185,54 @@ cargo test --locked --offline --lib --test request_response --test stream_lifecy
 
 流测试不要求真实 dquic 联网，覆盖提前响应、背压、多值 trailers、Body 读写结果和 HEAD/204/304。Pishoo 测试不持有 QPACK 或 H3 writer。
 
+
+## 2026-10-03 DNS 解析与发布
+
+用户明确批准 DNS 详细设计的六项具体接口与跨仓修改，并同步冻结清单。本轮实现：
+
+- Pishoo 新增普通 dns 模块，进程入口装配 System/H3/mDNS 三源并订阅实际地址簿；监听登记成功后按 listen 范围维护发布批。地址变化、续期、SIGHUP、删除和退出共用串行批次边界；失败重试5秒、单次发布/撤回期限3秒、非空租期至少30秒，按请求开始时间加租期三分之一续期。未完成监听登记的发布资源在失败收尾前释放，不向这些身份发送发布或撤回。
+- Server 仅新增 publisher 实际协议资源；证书链变更在 SIGHUP 时拒绝并要求重启。撤回使用已加载内存凭据，关闭等待前释放 publisher；无 DNS Manager、地址/发布镜像表、并发名额或新传输关闭接口。
+- dhttp 新增 local_authority 和 ListenFuture。await listen 完成登记后交付生命周期，未 poll 直接 Drop 仍清理登记；共享连接和 socket 不关闭。
+- qprotocol 新增只读 inner_bindings，SystemResolver 跳过 DHTTP 名称；ddns 的 H3Resolver 强持原 Endpoint，返回真实租期并检查缺失、重复、数值及清空语义。mDNS 标准查询按网卡流式返回，查询名规范化，同网卡/IP 的 QUIC 端口在发布时合并。
+- DDNS 服务端保持原路径、请求编码、签名、鉴权与按完整 SKI 撤回语义，仅发布响应增加 DHTTP-DNS-Lease-Millis 和 no-store，查询成功响应增加 no-store。ddns 遵守 no-store/no-cache，保留普通 DNS TTL/max-age/Age 行为。
+
+已完成验证：Pishoo 原96项库测试及新增3项 DNS 测试通过；全 workspace/all-targets 编译检查通过。ddns 87项库测试及7项接口测试、dhttp 40项库测试及8项集成测试、qprotocol 94项与qresolve 14项测试通过。另显式运行本机实际 QUIC/H3 的3项测试，验证 DNS origin 引导、监听与连接复用、真实租期、no-store 响应不进入包内 TTL 缓存、删除磁盘身份后继续发布及撤回；Pishoo 的实际 mDNS 测试通过，验证端口合并、同IP资源重建、名称/序号/Source、撤回和自有资源关闭。
+
+DDNS 服务端30项 router 测试通过，包括租期头、查询 no-store 和按完整 SKI 撤回。该服务端仍按其原 Cargo.lock 的发布依赖验证，HTTP API 无迁移；父目录的开发版 Cargo patch 会混入当前本地 Rust 底层接口，因此此项使用相同源码与测试的独立验证清单，未修改服务端传输源码、生产清单或锁文件。按用户要求验证后删除临时副本与构建产物，后续不再创建临时构建目录。缓存清理后的最终编译复查在原仓库使用兼容 Bun 完成，未修改前端锁文件。
+
+仍需上线服务端的租期响应头；未验收跨设备公网发布/访问、生产故障与续期的长期运行、真实 NAT 映射或打洞。mDNS 撤回是撤销本地应答，已有远端缓存按 TTL 过期；同一完整凭据多进程及超时请求晚写入的限制保持设计所述。
+
+
+### 2026-10-03 本地真实身份与线上 DDNS 验收
+
+按用户选择使用 `code.alice.smith.dhttp.net`。原证书与私钥只通过引用加载，原 `~/.dhttp` 配置、原数据库以及已运行的旧版 Pishoo 未改动。测试仅在现有 target 中保存小型配置与公开诊断，没有复制源码或创建临时构建目录。
+
+- 本地凭据：从 `https://api.genmeta.net/ocsp` 取得 code 身份的当前有效 OCSP，状态 good。原目录缺少 ocsp.der，因此响应仅提供给隔离测试环境。
+- 线上查询：匿名及具名 H3 查询 `code.alice.smith.dhttp.net` 均返回 `Crypto(113)` / TLS alert 113，尚未进入 lookup HTTP handler。
+- 线上发布：使用实际 Pishoo QUIC 绑定 `192.168.5.179:51914` 和原身份内存签名调用 publish；同样在 TLS 握手失败，未取得发布成功响应或租期，不能宣称记录已写入。本机无公网/NAT发布成功验收。
+- 阻塞证据：OpenSSL QUIC 探测默认 origin 及东京 `52.192.35.155`、欧洲 `63.186.89.109`、北美 `35.167.130.73`，均验证证书链和 ddns.genmeta.net hostname 成功、协商 h3，但均显示 `OCSP response: no OCSP response received`。这与客户端 code 证书的 OCSP 是两份独立的响应。
+- 进一步确认：从线上握手取得 ddns.genmeta.net 服务器证书，为该证书调用官方 OCSP API，得到 good，`Response verify OK`。其 This Update 为2026-10-03 16:06:58、Next Update 为19:06:58（Asia/Shanghai）。获取接口可用；线上 DDNS 未在 TLS 握手附带自己的状态响应。当前 qtls 要求此响应，因此拒绝连接；未放宽证书/OCSP校验或使用其他传输绕过。
+- 本地端到端成功：独立客户端进程通过 mDNS 解析和真实身份认证的 QUIC/H3 进入本次 Pishoo，再反代 `127.0.0.1:52155` 的 HTTP/1.1 上游。`/dns-live/probe.txt` 与 `/dns-live/%70robe.txt?probe=20261003`（URI authority 带证书序号0）均返回 HTTP/3.0 200，67字节正文逐字节符合上游；上游日志确认编码路径与 query 保留。该成功使用 mDNS，不能当作线上 DDNS 全链路通过。
+
+本次补齐既有 CLI 的 System/H3/mDNS 解析源装配和 stdout flush，并给 ddns 既有发布/查询示例增加日志及租期输出；未新增有状态结构或修改生产接口。原仓库的 Pishoo 服务及客户端构建通过。测试 Pishoo 正常 SIGTERM 退出、测试 HTTP 上游已停止，测试身份引用与数据库已清理；公开握手与验收结果保存在 `target/dns-live`。线上 DDNS 需要在 TLS 握手发送并及时刷新自身的有效 OCSP，之后再复测发布、查询和线上租期。
+
 ## 尚未完成的验收
 
-- 当前 qconn 出站连接仍缺少实际路径发现；真实跨端请求及联系人通知的成功路径尚不能据此宣称完成。ContactNotifier 已接入现有 Endpoint；无法建立对端连接时由 daccess 保留 Syncing 供重试。这里保留其既有接口，以内存流验证上层通信行为。
+- 本轮已通过本机真实 QUIC/H3 与 DNS 引导测试；跨设备公网、生产联系人投递与 NAT 成功路径仍待验收。Workspace/Chat 的生产出站接缝以当前冻结清单为准，仍按既有决定暂缓。
 - exec 使用服务账号权限，不提供 OS 沙箱。主动脱离本次进程组的后代不在本版回收保证内；不宣称支持交互终端或任意恶意命令的完整资源隔离。
 - Workspace 当前提供列表查看和审批操作；完整联系人/规则编辑交互仍待完善。管理 API 已直接使用当前 daccess 库。
+
+### 2026-10-03 线上 DNS、真实 NAT 与打洞端到端验收
+
+按用户要求继续线上验收，使用隔离的 code.alice.smith 身份引用、临时数据库与本机 HTTP 上游；线上 DNS 临时替换与恢复已经用户明确批准。未改原身份文件或已运行的旧 Pishoo。
+
+- 服务器缺 OCSP staple：客户端从官方接口取得当前 good 响应，qtls 仅对 ddns.genmeta.net 缺失 staple 的握手读取 DQUIC_DDNS_OCSP_FILE，沿用证书链/名称、证书绑定、签名、时效与撤销验证；未注入或注入损坏数据仍返回 alert113。没有新增结构或字段。
+- 发布身份兼容：TLS 证书确实发送，但线上旧 qconnection 还依赖现有 ClientName 传输参数。具名 connect 从同一 LocalAuthority 填入该参数后，线上发布从401变为200，日志确认本端为 code.alice.smith.dhttp.net；匿名查询仍匿名。
+- 用户要求先跳过未部署的租期头：仅缺头的HTTP200暂按300秒续期窗口（清空为0）成功，有头仍执行原校验；不宣称这是服务端确认的租期。发布、自动发布、退出撤回及恢复均成功。
+- 线上 DNS 路径：临时发布实际内网QUIC绑定，独立客户端只注册System/H3，线上查询得到本次地址；两个带普通/编码路径与query的Pishoo反代请求均HTTP/3 200，67字节正文逐字节一致。
+- NAT：先在新socket分类，后逐节点查询映射，避免前一次探测改变过滤条件。双方均为RestrictedPort，服务端192.168.5.179:65238映射到113.80.22.156:25303，客户端192.168.5.179:55748映射到113.80.22.156:25371。
+- 打洞：通过线上DDNS发布44.253.170.203:20002中介记录，两端仅广告公网地址，撤去AddressBook中的LAN/loopback广告且不注册mDNS。具名QUIC/H3首条路径经中介，随后双方分别记录active/passive punch completed。8秒后的已验证路径含服务端实际socket直连113.80.22.156:25371，第二次HTTP/3反代仍200且正文一致。
+- 范围：本次为同一真实RestrictedPort NAT后的两个独立进程，覆盖公网中介引导与NAT hairpin直接路径；尚未验证两个不同NAT、跨设备、Symmetric/Dynamic或长期映射保活。NAT装配在客户端example的serve/nat-get中执行，普通Network启动仍不自动启动探测，不把此验收算作生产自动NAT接入完成。
+- 清理：测试Pishoo正常退出、撤回完成，上游已停。停止发布进程后恢复原35.78.0.4:20002-113.80.22.156:21527记录，新的线上查询确认恢复。证据保存在target/dns-live/nat-server.log、nat-client-get.stderr、nat-e2e-result.json、nat-restored-query.stdout和proxy-h3-injected.json。
+
+按用户要求，线上验收移到唯一客户端examples/client.rs（pishoo-client example），提供query、publish、probe、serve、nat-get命令；单元测试只验证本地逻辑，不启动线上DNS、NAT探测或打洞。将客户端从tests/support移到examples，不再新增第二个验收example。example使用标准日志记录实际握手身份、打洞和已验证路径，响应正文与日志分开。生产结构、字段与接口保持不变。qtls 12项测试、qconnection真实连接回归和ddns租期兼容测试通过；构建与最终格式检查另见本次结果。

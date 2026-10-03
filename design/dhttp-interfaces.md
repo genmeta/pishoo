@@ -6,7 +6,7 @@
 
 ## 1. 边界与现成类型
 
-- Endpoint 只持规范化名称；独立 load 不访问 Network。
+- Endpoint 持已加载的 `Arc<qconn::QuicEndpoint>`，独立 load 不访问 Network；签名与 QUIC 共用内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint。同名句柄不区分 load 次数，经 Network 使用同一个本端身份连接池。
 - Network 通过幂等 init 在进程内装配一次；准备全部可用网卡并监听变化，负责连接复用与服务登记。
 - Endpoint 不提供 close 或 stop_listening；同名出站请求继续复用连接。
@@ -23,6 +23,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type Result<T> = std::result::Result<T, Error>;
 pub type EmptyBody = http_body_util::Empty<Bytes>;
 pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
+pub type ListenFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub type RequestFuture = Pin<Box<
     dyn Future<Output = Result<http::Response<Body>>> + Send + 'static,
 >>;
@@ -73,10 +74,11 @@ Error 复用现有错误类型；失败通过 Result、流错误或任务返回�
 
 ```rust
 #[derive(Clone)]
-pub struct Endpoint { name: Arc<str> }
+pub struct Endpoint { pub(crate) quic: Arc<qconn::QuicEndpoint> }
 impl Endpoint {
     pub async fn load(name: impl AsRef<str>) -> Result<Self>;
     pub fn name(&self) -> &str;
+    pub fn local_authority(&self) -> Result<qtls::LocalAuthority>;
     pub fn get(&self, uri: http::Uri) -> Request<EmptyBody>;
     pub fn head(&self, uri: http::Uri) -> Request<EmptyBody>;
     pub fn post(&self, uri: http::Uri) -> Request<dhttp::WndBuf>;
@@ -86,7 +88,7 @@ impl Endpoint {
     pub fn options(&self, uri: http::Uri) -> Request<EmptyBody>;
     pub fn request(&self, method: http::Method, uri: http::Uri) -> Request<dhttp::WndBuf>;
     pub fn from_request<B>(&self, request: http::Request<B>) -> Request<B>;
-    pub async fn listen<S, B>(&self, scopes: Scopes, service: S) -> Result<()>
+    pub async fn listen<S, B>(&self, scopes: Scopes, service: S) -> Result<ListenFuture>
     where
         S: tower_service::Service<http::Request<Body>, Response = http::Response<B>>
             + Clone + Send + 'static,
@@ -145,8 +147,8 @@ impl DhttpNetwork {
     pub fn global() -> Result<&'static Self>;
     pub(crate) async fn get_connection(&'static self, local: Option<Arc<str>>, remote: Arc<str>)
         -> Result<h3x::H3Connection<QuicTransport>>;
-    pub(crate) async fn listen(&'static self, name: Arc<str>, scopes: Scopes, service: BoxService)
-        -> Result<()>;
+    pub(crate) async fn listen(&'static self, endpoint: &Endpoint, scopes: Scopes, service: BoxService)
+        -> Result<ListenFuture>;
 }
 ```
 
@@ -162,9 +164,9 @@ Dock 持有 socket 登记、收包任务及配套 AddressBook 引用，负责直
 
 listeners 只存 BoxService。scopes 原样交给 qconn 的 ServerRegistry，逐名称限制来源，不决定全局 socket 集合。
 
-用 Tower 的 map_err、map_response 和 boxed_clone 统一 Service；每个请求克隆 Service 后由同一实例完成 readiness 和 call。listen 在锁外读取身份材料，在 listeners 锁内检查名称、登记 qconn 和 Service；scopeguard 在同一锁内撤销两张表。锁内不 await、不调用应用。
+用 Tower 的 map_err、map_response 和 boxed_clone 统一 Service；每个请求克隆 Service 后由同一实例完成 readiness 和 call。listen 使用 Endpoint 的已加载身份材料，在 listeners 锁内检查名称、登记 qconn 和 Service；scopeguard 在同一锁内撤销两张表。锁内不 await、不调用应用。
 
-接入回调直接装配 H3、入池并启动请求驱动，listen future 以 pending 等待取消，scopeguard 负责撤销名称和 Service。取消监听保留已有请求、出站连接和 socket；单次握手或 H3 装配失败只结束本次回调。入站使用 Incoming，出站按 Outgoing 查池；双方具名且名称相同时，Eq/Hash 让出站复用已有入站连接。匿名入站不能满足指定远端名称的请求。每条连接仅启动一个请求接入循环，退出时按 key 和实际连接移除。
+接入回调直接装配 H3、入池并启动请求驱动，登记阶段成功返回 ListenFuture，其以 pending 等待取消，scopeguard 负责撤销名称和 Service。guard 在构造 async future 前创建，未 poll 的 future 直接 Drop 也会撤销登记。取消监听保留已有请求、出站连接和 socket；单次握手或 H3 装配失败只结束本次回调。入站使用 Incoming，出站按 Outgoing 查池；双方具名且名称相同时，Eq/Hash 让出站复用已有入站连接。匿名入站不能满足指定远端名称的请求。每条连接仅启动一个请求接入循环，退出时按 key 和实际连接移除。
 
 ## 5. 连接复用与进程生命周期
 
@@ -230,3 +232,5 @@ dhttp 的读写等待由流背压、EOF、错误和取消推进，不给开流�
 5. listen future 结束时撤销本次监听登记；剩余全局资源随进程退出结束。
 
 没有 OwnerKey、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留 Endpoint、Request、ConnectionKey、DhttpNetwork、QuicTransport、RecvStream、SendStream。Error 沿用现有类型。
+
+2026-10-03 用户批准 DNS 接缝：确认上述现行 Endpoint.quic；local_authority 从它的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不缓存、不访问 Network。Endpoint.listen/Network.listen 返回已登记的 ListenFuture；调用方先 await 登记再 spawn 生命周期，登记失败不启动发布。Network 成员不变。相邻 qprotocol 的 AddressBook 新增 `pub fn inner_bindings(&self) -> Vec<(SocketAddr, qudp::BoundDevice)>`，只派生有有效 Internal 地址、端口和现有网卡元数据的实际绑定，按 bound 去重并排除 Loopback；不增加成员。完整跨仓 DNS 差异见 [DNS 设计](pishoo-dns-detailed-design.md)。

@@ -11,6 +11,8 @@ autobins = false
 path = "src/pishoo.rs"
 
 [dependencies]
+ddns = { package = "dyns", path = "../../ddns", features = ["h3", "mdns"] }
+qprotocol = { path = "../../dquic/qprotocol" }
 dhttp = { path = "../../dhttp/dhttp" }
 dhttp-home = { path = "../../dhttp/home" }
 qtls = { path = "../../dquic/qtls" }
@@ -51,6 +53,7 @@ snafu = "0.9"
 tracing = "0.1"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 qbase = { path = "../../dquic/qbase" }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
@@ -72,4 +75,4 @@ path = "tools/check-lib.rs"
 
 [[example]]
 name = "pishoo-client"
-path = "tests/support/client.rs"
+path = "examples/client.rs"
