@@ -693,6 +693,73 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
             format!("hello from {}", sender.name())
         );
 
+        // One application must confirm the receiver's reverse permission too;
+        // the receiver never submits a second friend application.
+        tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                let (status, capability) = owner_request(
+                    &receiver,
+                    Method::GET,
+                    &format!("/chat-api/conversations/{}/capability", sender.name()),
+                    serde_json::Value::Null,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{capability}");
+                if capability["remote_grant"] == true {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("incoming application should confirm the reverse grant");
+        let (status, directory) = owner_request(
+            &receiver,
+            Method::GET,
+            "/workspace-api/contact-directory",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = directory
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == sender.name())
+            .unwrap();
+        assert_eq!(entry["remote_chat_granted"], true);
+        assert_eq!(entry["chat_available"], true);
+        let (status, reply) = owner_request(
+            &receiver,
+            Method::POST,
+            &format!("/chat-api/conversations/{}/messages", sender.name()),
+            serde_json::json!({"text": "reply from receiver"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{reply}");
+        wait_message(
+            &receiver,
+            sender.name(),
+            reply["id"].as_str().unwrap(),
+            "sent",
+        )
+        .await;
+        let (status, page) = owner_request(
+            sender,
+            Method::GET,
+            "/chat-api/conversations/receiver.dhttp.net/messages",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["direction"] == "incoming"
+                    && message["text"] == "reply from receiver")
+        );
     }
     assert_eq!(messages.load(Ordering::SeqCst), 2);
     // Both Empty and WndBuf must reject a different owner before transmitting headers or bytes, including on a pooled connection.

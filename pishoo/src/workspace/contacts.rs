@@ -372,6 +372,7 @@ pub(crate) async fn grant_capability(
         request_id,
     )
     .await?;
+    state.wake_worker();
     Ok(())
 }
 
