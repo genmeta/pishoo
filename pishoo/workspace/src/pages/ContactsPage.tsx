@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { api } from '../api/client'
 import type { Contact, DirectoryEntry } from '../api/types'
@@ -122,6 +122,20 @@ export default function ContactsPage(props: {
   const visible = () => filtered().slice((page() - 1) * 20, page() * 20)
 
   const refresh = () => setRevision((value) => value + 1)
+  onMount(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden || submitting()) return
+      // Approval is reconciled asynchronously by both profiles. Keep the list
+      // and open detail current until the reverse permission is confirmed.
+      if (!contacts.loading && !contacts.error
+        && directoryContacts().some((contact) => followupReason(contact) !== null)) refresh()
+      if (selectedName() && !chatCapability.loading && !chatCapability.error
+        && chatCapability()?.contact_status === 'active' && chatCapability()?.remote_grant !== true) {
+        void chatCapabilityActions.refetch()
+      }
+    }, 3000)
+    onCleanup(() => window.clearInterval(timer))
+  })
   createEffect(() => {
     if (!contacts()) return
     const lastPage = Math.max(1, Math.ceil(filtered().length / 20))

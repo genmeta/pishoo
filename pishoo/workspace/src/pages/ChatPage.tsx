@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { api } from '../api/client'
 import type { ChatMessage } from '../api/types'
@@ -64,6 +64,15 @@ export default function ChatPage(props: {
   const [capability, capabilityActions] = createResource(() => contact()?.name ?? null, loadCapability)
   const canChat = () => capability()?.status === 'available'
   const canSend = () => capability()?.can_send === true
+  onMount(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden && !capability.loading && !capability.error
+        && capability()?.contact_status === 'active' && capability()?.remote_grant !== true) {
+        void capabilityActions.refetch()
+      }
+    }, 3000)
+    onCleanup(() => window.clearInterval(timer))
+  })
   const loadMessages = abortable((name: string, signal: AbortSignal) => chatApi.messages(name, null, 100, signal))
   const [messages, messageActions] = createResource(() => canChat() ? props.contactName : null, loadMessages)
 
