@@ -82,6 +82,8 @@ The same-identity DHTTP forwarding route streams request bytes through the nativ
 
 Start the development build with `DHTTP_HOME` pointing to the instance directory. To reload identities, proxy routes, and Libs in the running process, send `SIGHUP` to the Pishoo process (`kill -HUP <pishoo-pid>`). Changes to `listen`, `exec`, or the identity certificate chain require a restart.
 
+Startup and SIGHUP skip identities with invalid credentials, including expired certificates, and log the identity name and reason. Other identities continue loading. A skipped identity is retried on the next SIGHUP. Invalid configuration, database, or Lib errors still stop startup or the current reload; a credential read failure for an already loaded identity skips its reload and retains its loaded resources.
+
 For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
 ```sh
@@ -105,7 +107,7 @@ cargo run --locked -p pishoo --example pishoo-client -- nat-get https://server.d
 
 `serve` follows the test identity's `listen` configuration and publishes/withdraws its online records. Use an isolated profile and restore any pre-existing records after acceptance. Unit tests only exercise local logic; none of these commands run automatically.
 
-For the current DDNS server without a staple, `DQUIC_DDNS_OCSP_FILE` may point to a freshly fetched DER OCSP response. Only missing staples for `ddns.genmeta.net` use it; certificate, signature, freshness and revocation checks remain enabled. Fetching and refreshing this file happens outside the TLS callback.
+Peer OCSP staples are temporarily optional for all server domains. Certificate chain, hostname, validity and handshake signature checks remain enabled; supplied OCSP responses still require certificate binding, signature, freshness and good status. For `ddns.genmeta.net`, an explicitly configured `DQUIC_DDNS_OCSP_FILE` remains an optional fallback and must pass those same OCSP checks. Ordinary startup does not need this file.
 
 The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are included; to rebuild them, run `./pishoo/tools/build-wasm-demo.sh` with `wasm-tools` and the Rust `wasm32-unknown-unknown` target installed.
 

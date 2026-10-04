@@ -20,6 +20,13 @@ access_control = { git = "https://github.com/genmeta/daccess.git", rev = "cf8f72
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+der = "0.7"
+sha1 = "0.10"
+x509-cert = "0.2"
+x509-ocsp = "0.2"
+x509-parser = "0.18"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 base64 = "0.22"
@@ -57,7 +64,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 qbase = { path = "../../dquic/qbase" }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
-tempfile = "3"
 rcgen = "0.14"
 wat = "1"
 
