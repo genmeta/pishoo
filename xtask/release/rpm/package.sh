@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PISHOO_LIBEXEC_DIR=/usr/libexec/pishoo
-
 prepare_product_source() {
     local dest=$1
     rm -rf "$dest"
@@ -84,9 +82,8 @@ Summary:        Common files for pishoo
 License:        Apache-2.0
 URL:            https://www.dhttp.net
 Vendor:         Genmeta Tech Limited
-Source0:        pishoo.conf
-Source1:        mime.types
-Source2:        pishoo.service
+Source0:        mime.types
+Source1:        pishoo.service
 BuildArch:      noarch
 AutoReqProv:    no
 Requires(pre):  shadow-utils
@@ -104,13 +101,11 @@ Common configuration files and the systemd unit for the pishoo proxy engine.
 
 %install
 rm -rf %{buildroot}
-install -D -m 0644 %{SOURCE0} %{buildroot}/etc/dhttp/pishoo.conf
-install -D -m 0644 %{SOURCE1} %{buildroot}/etc/dhttp/mime.types
-install -D -m 0644 %{SOURCE2} %{buildroot}%{_unitdir}/pishoo.service
+install -D -m 0644 %{SOURCE0} %{buildroot}/etc/dhttp/mime.types
+install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/pishoo.service
 
 %files
 %dir /etc/dhttp
-%config(noreplace) /etc/dhttp/pishoo.conf
 /etc/dhttp/mime.types
 %{_unitdir}/pishoo.service
 
@@ -141,32 +136,16 @@ EOF_SPEC
 }
 
 write_binary_spec() {
-    local has_sshd=$1
-    local has_pam=$2
     local source_lines=''
     local install_lines=''
     local file_lines=''
-    local pam_req=''
     source_lines+='Source0:        pishoo
-'
-    source_lines+='Source1:        pishoo-worker
 '
     install_lines+='install -D -m 0755 %{SOURCE0} %{buildroot}/usr/bin/pishoo
 '
-    install_lines+="install -D -m 0755 %{SOURCE1} %{buildroot}${PISHOO_LIBEXEC_DIR}/pishoo-worker"$'\n'
     file_lines+='/usr/bin/pishoo
 '
-    file_lines+="${PISHOO_LIBEXEC_DIR}/pishoo-worker"$'\n'
-    if [ "$has_sshd" = true ]; then
-        source_lines+='Source2:        pishoo-ssh-session
-'
-        install_lines+="install -D -m 0755 %{SOURCE2} %{buildroot}${PISHOO_LIBEXEC_DIR}/pishoo-ssh-session"$'\n'
-        file_lines+="${PISHOO_LIBEXEC_DIR}/pishoo-ssh-session"$'\n'
-    fi
-    if [ "$has_pam" = true ]; then
-        pam_req='Requires:       pam'
-    fi
-    cat > "$3" <<EOF_SPEC
+    cat > "$1" <<EOF_SPEC
 Name:           pishoo
 Version:        ${RPM_VERSION}
 Release:        ${RPM_RELEASE}
@@ -177,7 +156,6 @@ Vendor:         Genmeta Tech Limited
 ${source_lines}AutoReqProv:    no
 ${RPM_REQUIRES_LINES:?}
 Requires:       glibc
-${pam_req}
 %description
 ${XTASK_RELEASE_DESCRIPTION:-Pishoo QUIC-powered, peer-to-peer web/proxy engine.}
 
@@ -215,7 +193,6 @@ run_common() {
     mkdir -p "$topdir"/{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}
     spec="$topdir/SPECS/pishoo-common.spec"
     write_common_spec "$spec"
-    install -D -m 0644 xtask/deb/common/etc/dhttp/pishoo.conf "$topdir/SOURCES/pishoo.conf"
     install -D -m 0644 xtask/deb/common/etc/dhttp/mime.types "$topdir/SOURCES/mime.types"
     install -D -m 0644 xtask/deb/pishoo-common.pishoo.service "$topdir/SOURCES/pishoo.service"
     rpmbuild -bb \
@@ -241,14 +218,6 @@ run_binary() {
     if [ -n "$features" ]; then
         feature_flag=(--features "$features")
     fi
-    local has_sshd=false
-    local has_pam=false
-    case ",$features," in
-        *,sshd,*|*,pam,*) has_sshd=true ;;
-    esac
-    case ",$features," in
-        *,pam,*) has_pam=true ;;
-    esac
 
     split_package_version
     export RPM_REQUIRES_LINES
@@ -263,10 +232,6 @@ run_binary() {
     export CARGO_HOME=/opt/cargo
     export PATH=/opt/cargo/bin:/usr/local/zig:$PATH
     export RUSTFLAGS="${RUSTFLAGS:-} -L /opt/sysroots/$arch/usr/$libdir"
-    export PISHOO_WORKER_BIN=${PISHOO_LIBEXEC_DIR}/pishoo-worker
-    if [ "$has_sshd" = true ]; then
-        export PISHOO_SSH_SESSION_BIN=${PISHOO_LIBEXEC_DIR}/pishoo-ssh-session
-    fi
     write_aarch64_zig_workaround
 
     cd "$product_source"
@@ -278,12 +243,8 @@ run_binary() {
     mkdir -p "$topdir"/{SPECS,BUILD,BUILDROOT,SOURCES,SRPMS,RPMS}
 
     local spec="$topdir/SPECS/pishoo.spec"
-    write_binary_spec "$has_sshd" "$has_pam" "$spec"
+    write_binary_spec "$spec"
     install -D -m 0755 "$release_dir/pishoo" "$topdir/SOURCES/pishoo"
-    install -D -m 0755 "$release_dir/pishoo-worker" "$topdir/SOURCES/pishoo-worker"
-    if [ "$has_sshd" = true ]; then
-        install -D -m 0755 "$release_dir/pishoo-ssh-session" "$topdir/SOURCES/pishoo-ssh-session"
-    fi
 
     rpmbuild -bb \
         --target="$arch" \

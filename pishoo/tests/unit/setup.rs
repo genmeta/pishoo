@@ -12,6 +12,18 @@ fn profile(root: &Path) -> IdentityProfile {
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(1,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
+
+#[test]
+fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    std::fs::remove_file(profile.config_db_path()).unwrap();
+    assert!(config_database(&profile, true, None).is_err());
+    assert!(!profile.config_db_path().exists());
+    std::fs::write(profile.config_db_path(), []).unwrap();
+    assert!(config_database(&profile, true, None).is_err());
+    assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
+}
 #[test]
 fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();

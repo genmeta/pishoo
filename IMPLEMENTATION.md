@@ -8,6 +8,15 @@
 - 已加载身份在 SIGHUP 读取证书失败时跳过本次重载并保留原有内存凭据和应用资源；证书链改变仍要求重启。未启动日常身份进程或修改其数据库/凭据。
 - 验证：隔离 OpenSSL 凭据回归显式通过，覆盖缺失/损坏/过期证书、坏私钥跳过、后续有效身份加载、修复身份再加载，以及配置/Lib 错误仍返回；普通重载回归覆盖损坏/缺失凭据保留资源与修复后重试。Pishoo 库测试118项通过、3项默认跳过；上述隔离测试另行执行通过。Rustfmt与git diff检查通过。验证使用现有临时 Bun 1.4.2；旧 PATH Bun 无法读取锁文件，未改依赖或锁文件。完整库测试需允许本机 HTTP 测试端口。
 
+## 2026-10-04：正常启动初始化与安装接入
+
+- 用户确认使用 home 下的身份，应用目录直接放在身份根级，不再使用 server.conf。正常 Server.load 在成功加载身份凭据后创建缺失的 db/file/lib/logs/repo/templates；Workspace 创建现有 assets/profile。默认 home 继续由 dhttp-home 的 User scope 解析，DHTTP_HOME 可覆盖。没有新增类型、字段、方法签名、跨模块接口、初始化状态或账本；辅助算法限定在所属模块内。
+- load_server_config 对缺失或完全空白、未声明版本的数据库事务创建 schema v1：settings 恰好一行 listen=3（内外网均监听）/exec=0，代理为空。已有库校验后读取。配置 API 的 GET 使用只读路径，已有 Server 的 reload 也不重建缺失/空库；SIGHUP 新发现身份仍走正常加载。未知版本、部分建表、损坏及路径符号链接拒绝，不覆盖既有数据。
+- 新 access 数据库通过当前 daccess API 在临时库建表、写入 POST /contact 的 Allow/Named（**）规则，再用 SQLite backup 生成独立完整快照、校验/同步后发布。原生 daccess v1只加载、不补已删除默认规则；原生v0先在副本验证，再保留 access-v0-backup-*.db（包含已提交WAL内容），由库自身事务在原文件上升级。旧0.8.2 location_rule_sets/location_rules、未知结构和不支持版本明确报错并保留原库，无旧格式自动重置。所有者权限仍由库派生；匿名申请拒绝，Chat独立审批。
+- Workspace/Chat 在各自既有 open/migrate 中检查完整性，空库事务创建现行schema8/4，已有库在任何DDL前校验版本及必要列，不自动修补缺失业务表。不导入示例关系或消息；重启保留资料、会话和投递数据。新Unix目录0700、数据库0600，已有权限不改。
+- 安装脚本继续不操作用户home。DEB/RPM/Homebrew仅打包现有主程序，移除已删除worker/SSH二进制的拷贝和旧实例配置安装；systemd删除不支持的-t/-s/PIDFile，用SIGHUP重载、默认SIGTERM退出，不以5秒超时打断应用退出。服务运行用户和DHTTP_HOME由部署者明确设置，Homebrew提示按当前用户启动。修正打包测试遗留的beta.2版本断言，保持现行稳定0.8.2版本不变；xtask锁文件仅同步未使用的本地patch元数据，未升级依赖版本。
+- 验证：新增9项初始化回归和2项配置读取/重载边界测试通过，覆盖默认权限、重复启动保留删除规则、空库与未发布临时数据恢复、未知/旧格式逐字节保持、原生v0升级含WAL备份、资料会话保留及符号链接拒绝。工作区完整回归通过：114项库测试与3项DNS测试；之后补充的2项边界测试单独通过。真实Workspace/Chat QUIC用例扩展为接收者无config.db启动，检查默认设置和具名申请能到达库处理器，再验证管理员拒绝规则及完整投递流程。all-targets检查、修改Rust文件格式检查、shell语法及diff检查通过。xtask的6项发布契约与6项安装hook测试通过。未构建跨平台发行包、安装系统服务、重启现有进程或修改日常home数据。
+
 ## 2026-10-03：H3 配置 API 第一版
 
 - 用户批准按资源拆为 `GET/PATCH /sys/settings` 和 `GET/PUT /sys/proxies`，启动与重载均挂载。仅新增已批准的 `setup::config_router(profile, endpoint)` 跨模块函数；复用现有配置结构、身份 Endpoint、daccess middleware 和 schema v1，不增加字段、数据库表或传输接口。

@@ -19,7 +19,7 @@ qtls = { path = "../../dquic/qtls" }
 access_control = { git = "https://github.com/genmeta/daccess.git", rev = "cf8f72f4e6bedbd7c98648ffee31053cb509b395" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 der = "0.7"

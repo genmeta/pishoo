@@ -6,6 +6,7 @@
 
 - Server 直接增加 `workspace: Arc<Workspace>`、`chat: Arc<Chat>`。原 `WorkspaceState`、`ChatState` 更名为对应业务名称，保持分支中的业务数据、持久队列和数据库模型。
 - 每个 profile 的 `db/workspace.db` 保存资料、联系人投递及能力决定；`db/chat.db` 保存聊天、投递作业和远端授权观察。SQL 与当前 schema 版本沿用目标分支。现有旧库版本或 Syncing 联系人不能假定自动兼容，迁移需单独验证。
+- 2026-10-04 用户要求启动初始化：WorkspaceStore/ChatStore 的既有 open/migrate 仅在完全空数据库事务建表与写入当前版本；已有库先校验版本和必要结构，不自动采用无版本业务库或创建缺失业务表。数据库及头像路径不变，新文件/目录使用私有权限。新数据不含示例联系人、能力批准或消息；重启保留资料、队列和消息。无新增类型、字段、方法或跨模块函数。
 - `access_router` 改为只接收 AccessService；Server 显式合并 Workspace/Chat Router。`authorize` 签名不变；202、查询归属与公开资料规则见 Pishoo 清单。
 - Workspace/Chat 各保留自己的 worker 句柄、唤醒和关闭信号。句柄保证每个资源实例只启动一个 worker；Notify 用于新任务/授权更新后唤醒；关闭信号结束等待。profile_write、contact_write 和 outbound_send 沿用分支的文件/数据库更新与申请操作串行约束，不是请求或传输并发配额。
 - 新增两个 `shutdown(&self)` 方法：发出关闭信号，取出并中止现有 worker，等待句柄结束。Server.close 在现有15秒退出等待内调用它们。reload 复用同一 Workspace/Chat。
