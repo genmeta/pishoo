@@ -2,6 +2,42 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-03：H3 配置 API 第一版
+
+- 用户批准按资源拆为 `GET/PATCH /sys/settings` 和 `GET/PUT /sys/proxies`，启动与重载均挂载。仅新增已批准的 `setup::config_router(profile, endpoint)` 跨模块函数；复用现有配置结构、身份 Endpoint、daccess middleware 和 schema v1，不增加字段、数据库表或传输接口。
+- settings PATCH 严格校验 listen 整数 0..3、exec 布尔值及未知字段；proxies PUT 校验完整数组、重复 location、保留路径和本机 HTTP/TCP 上游。共用磁盘配置的校验逻辑，保留未写路径与显式 `/` 的区别；SQLite 即时事务避免部分写入和并发 PATCH 丢失字段，数据库失败整体回滚。
+- 请求在 daccess 授权后复核已验证 Visitor 与 Endpoint 的名称及 owner_hash；响应支持 v1 的 Accept-Versions 协商并禁止缓存。`/sys` 纳入既有保留路径检查。接口未限制本地网络来源；当前握手摘要不提供该信息。
+- 写成功仅表示数据库保存，代理通过 SIGHUP 重载，listen/exec 需重启。原生 `pishoo-client` 增加 put/patch JSON 命令，使用现有 H3 RequestWriter。参数和调用示例见 [配置 API](pishoo/docs/config-api.md)。
+- `cargo check --locked --offline -p pishoo --all-targets` 通过；允许本机 socket 后 `cargo test --locked --offline --workspace` 通过（105项 Pishoo 库测试、3项 DNS 测试，真实网络与组播用例默认跳过）。修改文件格式检查和 `git diff --check` 通过。
+- `DHTTP_TEST_OPENSSL=/opt/homebrew/bin/openssl cargo test --locked --offline -p pishoo --lib config_api_real_h3_persistence_authorization_and_reload -- --include-ignored --test-threads=1` 显式通过：临时证书及本机真实 QUIC/H3 验证配置读写、持久化、生效边界、重载后路由保留、非法规则不落库、其他及匿名身份拒绝、daccess 对具名 owner 的拒绝规则。该用例需要 socket 权限并独占全进程测试 TLS/DNS/home，不修改日常身份或线上 DNS。
+
+## 2026-10-03：本机双 Workspace 与 AnySee 客户端 OCSP 兼容
+
+- 用户要求启动两个 Workspace，随后明确要求取消客户端必须携带 OCSP 的限制。qtls ClientVerifier 仍执行证书链、有效期及握手签名验证，未带客户端 OCSP 时接受经验证的证书；带了 OCSP 时仍验证签名、时效、撤销状态和证书绑定。服务端 OCSP 要求不变；没有新增配置、结构、成员或 HTTP/3 帧格式。
+- qtls 全部23项测试通过，新增用例覆盖无 staple 的认证与 RemoteAuthority、错误/不匹配 staple 拒绝、无 staple 时证书签名和有效期仍检查。Pishoo/原生客户端重新构建通过；Workspace/Chat 的真实 QUIC 业务及发送前身份校验用例复测通过。
+- 在 `target/workspace-dual` 启动 alice.smith 与 code.alice.smith 两个身份，使用现有证书和私钥引用、官方预取并验证的 OCSP，配置 listen=1/exec=0，独立创建 config/access/workspace/chat 数据库。未修改日常身份、默认身份、原服务或线上 DNS。
+- 测试 daccess 只允许这两个具名身份互相 POST /contact，Chat 仍需用户在界面审批。后台进程信息保存在 `target/workspace-dual/pishoo.pid`，输出保存在 pishoo.log；进程持续运行供用户测试。
+- 本机旧版 genmeta curl 原先收到 TLS alert113，改动后两个 Workspace 首页、同名身份 context 与联系人申请规则查询均成功，HTML/JS/CSS 可通过实际 mDNS/QUIC 读取。浏览器本身由用户手动验证，不通过 computer use 操作。
+- `target/workspace-dual/open-workspaces.command` 可由用户手动运行，启动两个独立 AnySee user-data-dir；各自使用 `target/workspace-dual-clients/alice` 与 `code` 的 DHTTP_HOME/default identity，避免两个普通标签页共享全局默认身份。
+
+## 2026-10-03：接通 Workspace/Chat Endpoint 出站
+
+- Server.load 为 Workspace 与 Chat 的既有 OutboundTransport 装配当前具名 Endpoint；两个 trait 均直接由 dhttp::Endpoint 实现。没有新增 Pishoo 生产结构、字段、连接池、身份缓存或后台协调器。重载复用既有 Workspace/Chat，Lib 的 WASI HTTP 出站仍拒绝。
+- Workspace 使用当前 Endpoint 的内存 LocalAuthority 派生 sender_subject_id，借助 Empty/WndBuf 接缝中的 WndBuf/RequestWriter 发送有限请求、显式 shutdown，并从响应扩展中的已验证 RemoteAuthority 提取 remote_subject_id。保留 JSON 请求、响应头、15秒总期限与1MiB响应上限；远端资料已有的2秒期限仍优先生效。
+- 用户明确批准 dhttp::Request 增加 expected_remote_owner_hash 与 expect_remote_owner_hash，以及无载荷 Error::RemoteIdentityChanged。校验使用 Network 返回的实际 H3 连接，发生在 open_bi 与任何 HTTP 头/Body 发送之前；复用的连接也逐请求核对 owner_hash。body/write 保留期望身份。Chat 将已保存 SubjectId 解析为 OwnerHash，身份不匹配交给既有 worker 阻止投递并清除远端授权观察。
+- 新增显式真实网络验收 `pishoo/tests/unit/server/workspace_network.rs`，由临时 OpenSSL CA、SHA-256叶证书、DHTTP SKI、匹配私钥和签名 OCSP 驱动真实 UDP/TLS/H3；不关闭 TLS 身份、名称或 OCSP 验证。三个临时 Server 的管理请求也通过具名 QUIC，使用临时 profile/数据库，不读取或改写日常身份数据。测试独占进程级 TLS/DNS/DHTTP_HOME，故默认 ignored，须单独运行。
+- 真实验收通过：Alice/Bob 两个独立身份读取 Receiver 资料，投递联系人申请，接收者激活并授权 Chat，发送者通过 /contact/self 轮询观察授权，然后由各自生产 Chat worker 完成消息投递并在接收者数据库读取。daccess 未允许 /contact 时仍返回403；验收显式配置临时接收者的申请权限。错误 owner_hash 的 Empty/WndBuf 请求不会到达应用，过期联系人 pin 的真实 Chat 作业变为 blocked 并清除授权观察。
+
+验证（Bun 1.4.2；网络测试使用 `/opt/homebrew/bin/openssl`）：
+
+- `cargo check --locked --offline -p pishoo --all-targets` 通过。
+- `cargo test --locked --offline --workspace` 通过：99项 Pishoo 库测试与3项 DNS 测试；新真实网络用例默认跳过，另行显式运行通过。既有 mDNS 组播用例仍默认跳过。
+- `DHTTP_TEST_OPENSSL=/opt/homebrew/bin/openssl cargo test --locked --offline -p pishoo --lib workspace_chat_real_quic_delivery_and_pre_send_identity_check -- --include-ignored` 通过。
+- 相邻 dhttp 的 `DHTTP_TEST_OPENSSL=/opt/homebrew/bin/openssl cargo test --locked --offline -p dhttp --lib --tests -- --include-ignored` 全部50项通过，包含真实 QUIC、身份验证与连接复用回归。
+- 修改 Rust 文件格式检查与两仓 `git diff --check` 通过。冻结成员变更已记录于 [dhttp 清单](design/dhttp-interfaces.md)；业务接缝见 [Workspace/Chat 清单](design/workspace-chat-interfaces.md)。
+
+边界：本轮验证本机真实 QUIC 和完整业务链路；跨设备公网、NAT 与应用级两进程 smoke 尚未验收。联系人是否允许申请、是否授权 Chat 仍由当前 daccess 及能力决定控制。
+
 ## 2026-10-03：定位并修复 QUIC 测试的 Crypto(51)
 
 - 临时记录 qtls 的原始错误后确认，客户端收到的是 `InvalidCertificate(UnsupportedSignatureAlgorithmContext)`，证书签名算法 OID 为 `1.2.840.10045.4.1`（ECDSA/SHA-1），当前 provider 不支持；对外仅保留 TLS alert 51。此前的证书和私钥也是实际生成的材料，错误来自生成器依赖 OpenSSL 的默认签名算法，不是必须换成商业 CA 证书，也没有据此判定 QUIC 协议实现有错。
@@ -78,7 +114,7 @@ h3x 同样合并同类型实现：帧载荷收拢为 `frame/payload.rs`，SETTIN
 - dhttp：全局 Network 持有以本端、远端规范化名称为键的 h3x 连接池；Endpoint 只持名称，不提供 close 或 stop_listening。同名 load 复用连接。Network 没有 shutdown，进程退出时结束其剩余传输与维护任务。
 - dhttp 操作等待：删除 `OPERATION_TIMEOUT` 及开流、消息头和 Body 读写的单次超时；保留连接超时与流背压。出站请求 future 或响应 Body 提前丢弃时，现成 scopeguard 中止尚未结束的上传任务。
 - Pishoo：schema v1 数据库读取、启动时扫描身份及 SIGHUP 显式重载、Server 直接持有 Router 与 Sandbox、Sandbox 直接持有 Lib、串行重载、加载失败直接返回、删除时撤销入口。监听任务不保留句柄。
-- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、同名身份专用的固定前缀 DHTTP 正向代理、WASM 显式方法路由、daccess 授权与202持久审批、管理 API、Workspace 联系人申请队列与轮询，以及完整 Workspace/Chat 界面。生产出站接缝暂缓。Lib 的 WASI HTTP 出站暂不实现。
+- 路由：受目录能力约束的流式静态文件、精确/最长前缀本机 HTTP/TCP 代理、同名身份专用的固定前缀 DHTTP 正向代理、WASM 显式方法路由、daccess 授权与202持久审批、管理 API、Workspace 联系人申请队列与轮询，以及完整 Workspace/Chat 界面。Workspace/Chat 生产出站已接到现有 Endpoint，并通过本机真实 QUIC 业务验收。Lib 的 WASI HTTP 出站暂不实现。
 - WASM：每身份一个 Sandbox，持有 Lib 集合、共享 WasmRuntime 引用和 WASM 任务跟踪器，集中组件与执行管理；单 Lib 的 `/data` 权限、实际 Store 内存/fuel 限制、无总时长上限的受跟踪 guest 任务、流式响应、身份签名与出站拒绝 hook。
 - exec：每 Server 的 `settings.exec`、与 Lib 合并的 `POST /exec` Router 分支、daccess 加同名身份准入、直接 argv、输入输出和单次执行限制、受跟踪的 Child 取消和回收。程序使用 Pishoo 当前非 root 服务账号权限，没有文件或网络隔离。
 
@@ -236,3 +272,23 @@ DDNS 服务端30项 router 测试通过，包括租期头、查询 no-store 和�
 - 清理：测试Pishoo正常退出、撤回完成，上游已停。停止发布进程后恢复原35.78.0.4:20002-113.80.22.156:21527记录，新的线上查询确认恢复。证据保存在target/dns-live/nat-server.log、nat-client-get.stderr、nat-e2e-result.json、nat-restored-query.stdout和proxy-h3-injected.json。
 
 按用户要求，线上验收移到唯一客户端examples/client.rs（pishoo-client example），提供query、publish、probe、serve、nat-get命令；单元测试只验证本地逻辑，不启动线上DNS、NAT探测或打洞。将客户端从tests/support移到examples，不再新增第二个验收example。example使用标准日志记录实际握手身份、打洞和已验证路径，响应正文与日志分开。生产结构、字段与接口保持不变。qtls 12项测试、qconnection真实连接回归和ddns租期兼容测试通过；构建与最终格式检查另见本次结果。
+
+### 2026-10-03 普通启动自动 NAT 与持续心跳
+
+用户批准为 dhttp 私有 Binding 增加 `nat_probe`，并明确 NAT 分类为每个新 socket 的一次性操作、STUN 绑定心跳持续维护。普通 `DhttpNetwork::init()` 的初始扫描现在装配探测流，由唯一维护任务推进，启动不等待 STUN；Loopback 与 IPv6 link-local 不探测。分类完成后每20秒向同地址族 STUN 节点发送绑定心跳，分别维护映射，登记实际 QUIC 直接/中介别名并更新 AddressBook，已有 Pishoo DNS 维护消费地址变化。分类失败不重新分类，心跳仍继续；不伪造 NAT 类型。心跳失败撤回对应映射，后续心跳继续尝试。绑定撤回和维护任务退出先丢弃流、取消 transaction，再撤回地址及 socket，不存在独立探测任务回写旧地址。
+
+客户端 example 的 `probe/serve/nat-get` 改为等待并检查 Network 维护的结果，删除同 socket 上的第二轮手工分类及映射装配。冻结清单、相邻 Network 详细设计和 README 已同步；DhttpNetwork、Endpoint 与 h3x 成员不变。
+
+验证：dhttp 全部43项库测试通过，包含新增的一次性分类与连续心跳、映射替换/超时撤回、别名冲突保护、分类失败后仍保活以及绑定移除后取消。新增测试使用本地脚本化 STUN 响应，不访问线上节点。dhttp 库 `cargo clippy -- -D warnings`、Pishoo `cargo check --all-targets` 及客户端 example 编译通过。未重跑公网端到端或长期保活验收；此前的公网验收记录保持历史范围。
+
+### 2026-10-03 双身份普通启动与公网续报修复
+
+按用户指定使用 alice.smith.dhttp.net 和 code.alice.smith.dhttp.net，同一普通 Pishoo 进程从 target/workspace-chat-live/home 加载两个身份，各使用隔离的 config/access/workspace/chat 数据库，listen=3。凭据从本地 profile 复制，私钥权限保持0400；身份与 DDNS OCSP 均重新取得并验证。客户端 example 的 run 仅直达现行 pishoo::run，以便日志诊断；最终进程用 target/debug/pishoo 普通入口运行。用户随后要求自行测试，自动联系人和消息步骤已停止，未完成双向 Chat 验收。
+
+用户实际 HTTP 地址查询返回404，genmeta curl 对相同 API 也得到HTTP/3 404（error code1217）；直接 Workspace 管理 API 则为HTTP/3 200。实测旧 DDNS 发布200缺租期头，客户端临时返回300秒，而SIGHUP立即重新发布可恢复H3记录。原Pishoo按100秒续报超过服务端30秒存储租期。publish方法体改为 started + min(lease, MIN_PUBLISH_LEASE) / 3，保持既有300秒兼容返回，实际每10秒续报；不新增成员、配置或任务。重编译并重启同一个双身份普通进程。使用genmeta curl、按API已有允许Origin查询两个身份，复核记录跨30秒存储窗口持续可见；证据保存在 target/workspace-chat-live/renewal-check.json。
+
+### 2026-10-04 中转 DNS 地址修复
+
+用户指出中转 E-record 应为 outer-agent。根因是 Network 已登记 Mediate QUIC 别名，却将其公网映射写成 AddressBook 的 Direct 地址，外部地址表也拒绝 Mediate，导致 DNS 丢失 agent。修复仅改变现有方法体/局部无状态算法：外部地址表允许有效中转地址，内部仍只允许 Direct；FullCone 发布 Direct，受限/未知 NAT 发布各节点的 Mediate，保留实际 socket 的 Direct 别名供打洞。映射替换及撤回按完整 agent/outer 对处理；结构、字段、签名、错误变体和 h3x 不变。DNS 编码器原本就支持 NAT 标记及 outer-agent，不改协议格式；新增 IPv4/IPv6 编码回归。
+
+验证：AddressBook 24项、Network 11项及 DNS packet 7项定向回归通过；Pishoo 普通入口重编译并重启。使用 genmeta curl 对两身份的公网 API 连续4轮、跨度38.2秒查询，8次均200且全部 E-record 为 outer-agent，例如 113.80.22.156:22808-44.253.170.203:20002；证据在 target/workspace-chat-live/relay-dns-result.json。genmeta nslookup --anonymous <name> h3 同样查到两身份的6条中转记录；它的内部 EndpointAddr Display 为 agent-outer，与 DNS API 文本顺序不同，未改变该内部语法。普通进程保持运行供用户测试，用户自己的联系人及 Chat 操作仍由用户完成。

@@ -458,7 +458,7 @@ mDNS 查询资源不依赖本地身份是否监听，故即使 endpoints 为空�
 
 Pishoo 的固定运行值为 PUBLISH_TIMEOUT=3 秒、MAINTENANCE_RETRY=5 秒、MIN_PUBLISH_LEASE=30 秒，均为 dns 模块局部常量，不新增配置结构。
 
-初版 Pishoo 仅接受非空发布租期至少 30 秒：发布操作期限 3 秒，按请求开始时间加租期的三分之一续期，至少留出多次失败重试空间。服务端已有短租期配置不强制改写；不满足条件时 Pishoo 记录“不支持该租期”并进入维护重试，不能声称已建立稳定续期。这个限制是本提案的固定运行约束，不新增用户配置。
+初版 Pishoo 仅接受非空发布租期至少 30 秒：发布操作期限 3 秒，按请求开始时间加租期的三分之一续期；线上旧服务端缺租期头的兼容阶段将间隔上限收紧为10秒（即 MIN_PUBLISH_LEASE / 3），至少留出多次失败重试空间。服务端已有短租期配置不强制改写；不满足条件时 Pishoo 记录“不支持该租期”并进入维护重试，不能声称已建立稳定续期。这个限制是本提案的固定运行约束，不新增用户配置。
 
 ### H3Resolver.publish_endpoints
 
@@ -534,7 +534,7 @@ publish(name, publisher, addresses):
     started = Instant::now()
     result = timeout(3秒, publisher.publish_endpoints(name, addresses.iter().copied()))
     result 成功且 addresses 为空 -> return None
-    result 成功且 lease >= 30秒 -> return Some(started + lease / 3)
+    result 成功且 lease >= 30秒 -> return Some(started + min(lease, 30秒) / 3)
     result 失败、超时或 lease 太短 -> 记录身份与具体错误
                                      return Some(Instant::now() + 5秒)
 ```
@@ -736,3 +736,7 @@ withdraw(endpoint, publisher, mdns):
 ## 2026-10-03 线上旧版临时兼容
 
 用户明确要求先跳过尚未上线的缺失租期头校验。publish_endpoints 签名保持不变：HTTP 200 缺 DHTTP-DNS-Lease-Millis 时，非空发布暂返回300秒续期窗口，空发布返回0；这是当前线上查询 TTL 的临时兼容值，不能视为服务端确认的租期。有该头时继续校验原有数值、重复和清空语义。部署完成后撤销此缺头兼容。此决定不放宽发布身份、证书或签名校验。
+
+2026-10-03 公网续报修复：旧服务端发布返回200但缺少租期头，ddns 暂按已批准的300秒兼容窗口返回；它不是服务端存储租期，不能据此每100秒续报。Pishoo 的 publish 方法体以现有 MIN_PUBLISH_LEASE 将续报间隔封顶10秒，不更改 publish_endpoints 的返回类型或兼容窗口，不新增字段、函数、配置或任务。两身份仍由单一进程使用现有全局维护批续报。
+
+2026-10-04 按用户纠正保留中转地址：AddressBook 的外部快照可携带现有 EndpointAddr::Mediate { agent, outer }，由 H3Resolver 原样传给 E-record 编码器，DNS/API 文本为 outer-agent；不能先转换成 Direct(outer)。FullCone 的直达映射继续发布 Direct。底层 QUIC 仍登记两类别名以保留打洞能力；受限 NAT 的 DNS 快照不混入裸 outer，按 agent/outer 对保留多节点映射。地址替换、心跳失败和绑定撤回同时清理相应中转记录。Pishoo 六个 DNS 函数与全部结构/字段/签名不变。

@@ -31,6 +31,7 @@ pub(crate) fn reserved(path: &str) -> bool {
         "/workspace-api",
         "/chat-api",
         "/std",
+        "/sys",
         "/api",
         "/.pishoo",
         "/exec",

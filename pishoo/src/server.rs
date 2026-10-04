@@ -19,7 +19,7 @@ use crate::{
     dns, exec,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
-    setup::{ServerConfig, load_server_config},
+    setup::{ServerConfig, config_router, load_server_config},
     workspace::{self, Workspace, store::WorkspaceStore},
 };
 
@@ -306,12 +306,17 @@ impl Server {
             access.clone(),
         ));
         workspace.configure_chat(chat.clone()).await;
+        workspace
+            .configure_outbound(Arc::new(endpoint.clone()))
+            .await;
+        chat.configure_outbound(Arc::new(endpoint.clone())).await;
         let exec_tasks = TaskTracker::new();
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
             .merge(access_router(access.clone()))
+            .merge(config_router(profile.clone(), endpoint.clone()))
             .merge(workspace::router(workspace.clone()))
             .merge(chat_router(chat.clone(), workspace.clone()))
             .merge(sandbox.api_router(endpoint.clone()))
@@ -369,6 +374,7 @@ impl Server {
         let proxies = config.proxy_locations.clone();
         let router = Router::new()
             .merge(access_router(self.access.clone()))
+            .merge(config_router(self.profile.clone(), self.endpoint.clone()))
             .merge(workspace::router(self.workspace.clone()))
             .merge(chat_router(self.chat.clone(), self.workspace.clone()))
             .merge(self.sandbox.api_router(self.endpoint.clone()))
@@ -408,6 +414,14 @@ impl Server {
         let service = tower::service_fn(move |request: http::Request<Body>| {
             let (router, name) = (router.clone(), name.clone());
             async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_owned();
+                let version = request.version();
+                let peer = request
+                    .extensions()
+                    .get::<dhttp::HandshakeSummary>()
+                    .and_then(|handshake| handshake.remote.as_ref())
+                    .map(|authority| authority.name().to_owned());
                 let result: Result<http::Response<AxumBody>> = async {
                     let app = router.read().unwrap().clone();
                     let response = app
@@ -428,6 +442,12 @@ impl Server {
                     )
                         .into_response()
                 });
+                eprintln!(
+                    "{} request server={name} peer={} version={version:?} method={method} path={path:?} status={}",
+                    chrono::Utc::now().to_rfc3339(),
+                    peer.as_deref().unwrap_or("anonymous"),
+                    response.status().as_u16(),
+                );
                 Ok::<_, std::convert::Infallible>(response)
             }
         });
@@ -448,3 +468,7 @@ impl Server {
         .map_err(|_| Error::ShutdownDeadline)?
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/server/workspace_network.rs"]
+mod network_tests;

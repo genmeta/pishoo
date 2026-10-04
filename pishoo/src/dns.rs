@@ -160,7 +160,13 @@ pub(crate) async fn publish(
     .await
     {
         Ok(Ok(_)) if addresses.is_empty() => None,
-        Ok(Ok(lease)) if lease >= MIN_PUBLISH_LEASE => Some(started + lease / 3),
+        Ok(Ok(lease)) if lease >= MIN_PUBLISH_LEASE => {
+            // The deployed pre-lease server stores records for 30 seconds even
+            // though its signed DNS packet TTL (and compatibility window) is 300.
+            // Renew against the minimum supported storage lease until every
+            // deployed server reports its lease explicitly.
+            Some(started + lease.min(MIN_PUBLISH_LEASE) / 3)
+        }
         result => {
             match result {
                 Ok(Ok(lease)) => eprintln!(
