@@ -52,8 +52,6 @@ ifdef TRIPLE
 		export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig; \
 		export RUSTFLAGS="$$RUSTFLAGS -Z unstable-options -Clinker-flavor=gnu-lld-cc"; \
 	fi && \
-	$(if $(PISHOO_WORKER_BIN),export PISHOO_WORKER_BIN=$(PISHOO_WORKER_BIN) &&) \
-	$(if $(PISHOO_SSH_SESSION_BIN),export PISHOO_SSH_SESSION_BIN=$(PISHOO_SSH_SESSION_BIN) &&) \
 	cargo zigbuild --locked $(CARGO_PROFILE_ARGS) --manifest-path pishoo/Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
 endif
 
@@ -62,17 +60,11 @@ ifdef TRIPLE
 	mkdir -p debian/pishoo/usr/bin
 	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo debian/pishoo/usr/bin/
 	chmod 755 debian/pishoo/usr/bin/pishoo
-	mkdir -p debian/pishoo/usr/libexec/pishoo
-	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-worker debian/pishoo/usr/libexec/pishoo/
-	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-worker
-ifdef PISHOO_SSH_SESSION_BIN
-	cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/pishoo-ssh-session debian/pishoo/usr/libexec/pishoo/
-	chmod 755 debian/pishoo/usr/libexec/pishoo/pishoo-ssh-session
 endif
-endif
-	# pishoo-common: install config files
+	# Install shared files; identity configuration is initialized at startup.
 	mkdir -p debian/pishoo-common
 	cp -r debian/common/* debian/pishoo-common/
+	rm -f debian/pishoo-common/etc/dhttp/pishoo.conf
 
 override_dh_auto_test:
 	# skip tests in cross-compilation environment

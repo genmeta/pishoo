@@ -484,9 +484,13 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     });
     dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
     let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let mut receiver = Server::load(profile(root.path(), "receiver"), runtime.clone())
+    let receiver_profile = profile(root.path(), "receiver");
+    std::fs::remove_file(receiver_profile.config_db_path()).unwrap();
+    let mut receiver = Server::load(receiver_profile, runtime.clone())
         .await
         .unwrap();
+    assert_eq!(receiver.config.listen, 3);
+    assert!(!receiver.config.exec);
     let mut alice = Server::load(profile(root.path(), "alice"), runtime.clone())
         .await
         .unwrap();
@@ -510,7 +514,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
             async move { app.oneshot(request.map(AxumBody::new)).await }
         }
     });
-    // Use the production Server router with a dedicated loopback registration; listen=0 skips DNS publication.
+    // Use the production Server router with loopback-only registration. The run loop's DNS publication is not started.
     let listener = receiver
         .endpoint
         .listen(dhttp::Scope::Loopback.into(), service)
@@ -549,6 +553,30 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     assert_eq!(status, StatusCode::OK, "{body}");
 
     // Contact admission remains governed by the current daccess policy.
+    let initial = crate::workspace::outbound::OutboundTransport::request(
+        &alice.endpoint,
+        "receiver.dhttp.net",
+        Method::POST,
+        "/contact",
+        Bytes::from_static(b"{}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        initial.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "default named rule reaches the library's JSON validation"
+    );
+    receiver
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::POST),
+            "/contact",
+            access_control::Effect::Deny,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
     let denied = crate::workspace::outbound::OutboundTransport::request(
         &alice.endpoint,
         "receiver.dhttp.net",
@@ -565,7 +593,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
             access_control::Method::Specified(Method::POST),
             "/contact",
             access_control::Effect::Allow,
-            access_control::Grantee::All,
+            access_control::Grantee::Named,
         )
         .await
         .unwrap();
@@ -664,6 +692,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
             page["items"][0]["text"],
             format!("hello from {}", sender.name())
         );
+
     }
     assert_eq!(messages.load(Ordering::SeqCst), 2);
     // Both Empty and WndBuf must reject a different owner before transmitting headers or bytes, including on a pooled connection.

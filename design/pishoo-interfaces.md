@@ -49,6 +49,8 @@ struct ProxyLocation {
 
 config.db 的 schema v1 为 settings(listen,exec) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者，exec 只能是整数0/1。proxy_pass 接受裸回环地址端口或其 `http://` URI，可带路径，不接受非本机目标；没有传输类型字段或数据库列。第一版尚未上线，直接修订 v1 建表定义，不添加 schema v2 或自动迁移。没有 lib_policies、policy_imports、默认策略来源账本。
 
+2026-10-04 用户要求实施正常启动初始化：默认 home 使用现有 dhttp-home 的用户目录解析，目录布局保持 profile 根级 ssl/db/file/lib/logs/repo/templates，头像继续使用 assets/profile。Server.load 在凭据加载后创建缺失目录；load_server_config 首次创建 schema v1（listen=3，内外网均监听、exec=0、空代理），已有配置校验后加载。新 access 由现有 daccess API 在临时库初始化并写入 POST /contact 的 Allow/Named 规则，经 SQLite 快照验证后发布；已有v1不补默认规则，原生v0先备份再由库事务升级。0.8.2旧ACL、未知格式、损坏和不支持版本拒绝启动并保留原数据。Workspace/Chat 在各自 open/migrate 内识别空库、校验当前版本和必要结构；不增加schema版本、表、类型、字段或跨模块函数。已有 Server 的重载与配置 API 读取不初始化缺失配置库；新增身份按启动路径处理。安装脚本不操作用户数据库，不恢复server.conf或实例配置。详情见配置 API 文档。
+
 2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /sys/settings` 和 `GET/PUT /sys/proxies`。前者读写 listen/exec，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理通过 SIGHUP 重载，listen/exec 需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
 
 2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。裸回环地址先补上 `http://`，再校验完整 URI；以 `path_and_query: None` 保留原始配置未写路径的事实，显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。

@@ -44,11 +44,87 @@ impl Clone for ProxyLocation {
 mod tests;
 
 pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
+    initialize_config(profile)
+        .and_then(|()| read_server_config(profile))
+        .map_err(|error| {
+            Error::InvalidConfig(format!(
+                "configuration database {}: {error}",
+                profile.config_db_path().display()
+            ))
+        })
+}
+
+fn read_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
     let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let tx = conn.transaction()?;
     let config = read_config(&tx)?;
     tx.commit()?;
     Ok(config)
+}
+
+fn initialize_config(profile: &IdentityProfile) -> Result<()> {
+    let directory = profile.db_dir();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory)?;
+    if !directory.symlink_metadata()?.file_type().is_dir() {
+        return Err(Error::InvalidConfig(format!(
+            "{} must be a directory, not a symlink",
+            directory.display()
+        )));
+    }
+    let path = profile.config_db_path();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(Error::InvalidConfig(integrity));
+    }
+    let empty = conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
+        [], |row| row.get::<_, bool>(0),
+    )?;
+    drop(conn);
+    if !empty {
+        return Ok(());
+    }
+    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Recheck under SQLite's write lock: another startup may have initialized it.
+    let empty = tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
+        [], |row| row.get::<_, bool>(0),
+    )?;
+    if empty {
+        tx.execute_batch(
+            "CREATE TABLE settings (
+                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3),
+                exec INTEGER NOT NULL CHECK(typeof(exec) = 'integer' AND exec IN (0,1))
+             );
+             INSERT INTO settings(listen,exec) VALUES(3,0);
+             CREATE TABLE proxy_locations(location TEXT NOT NULL PRIMARY KEY, proxy_pass TEXT NOT NULL);
+             PRAGMA user_version=1;",
+        )?;
+    }
+    read_config(&tx)?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
@@ -275,7 +351,7 @@ fn config_database(
     payload: Option<Value>,
 ) -> Result<Value> {
     let config = match payload {
-        None => load_server_config(profile)?,
+        None => read_server_config(profile)?,
         Some(payload) => {
             // Validate the complete input before taking a write transaction.
             let proxies = if settings {

@@ -58,3 +58,26 @@ cargo run --locked -p pishoo --example pishoo-client -- get /sys/proxies
 ```
 
 接口随 Server 启动及重载装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
+
+## 启动初始化与数据库兼容
+
+初始化由正常启动及 SIGHUP 新发现身份时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥、OCSP 或 `server.conf`。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+
+新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。服务应以身份所属用户运行；systemd 部署应通过服务覆盖文件设置 User 和 DHTTP_HOME，SIGHUP 重载、SIGTERM 退出。Homebrew 按当前用户启动服务。
+
+| 数据库 | 首次初始化 | 已有数据库 |
+| --- | --- | --- |
+| config.db | schema v1；settings 一行 listen=3（内外网均监听）、exec=0；代理为空 | 校验版本、配置和值；不补默认设置 |
+| access.db | 由 daccess 建库，并写入 POST /contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
+| workspace.db | schema8；默认资料一行；联系人投递、收藏和能力决定为空 | 只接受当前版本及必要表结构；资料和队列保留 |
+| chat.db | schema4；会话、消息、投递作业和授权观察为空 | 只接受当前版本及必要表结构；历史数据保留 |
+
+所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；聊天按既有能力审批控制。已删除或更改的默认规则在重启和重载后保持原样。
+
+仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Workspace/Chat 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取及已有 Server 重载不重新创建被删除的配置库。
+
+新的 access 数据库先在身份 db 目录下的临时目录中通过现有 daccess API 创建和写入默认规则，使用 SQLite 备份接口生成独立完整快照，校验并同步后发布到正式路径。正式文件缺失时以不覆盖已有文件的方式发布；已有空文件通过 SQLite 备份事务恢复，以保持 journal/WAL 一致。中断留下的未发布临时目录不会被当作正式库；当前调用正常退出时由 tempfile 清理自己的目录。
+
+原生 daccess v0 升级先在临时副本验证，再生成 db/access-v0-backup-*.db，备份包含已提交的 WAL 数据；库自身的事务在原文件上完成升级，保留用户规则。后续v1启动不重复备份。旧0.8.2的 location_rule_sets/location_rules 不是该v0格式，目前无受支持转换，明确报错并保留原文件。旧 server.conf 不读取，也不删除。
+
+四库独立初始化，不建立跨库事务或初始化标记表；全部加载成功后才注册监听。某库失败可使本次启动结束，已完成的库在下次启动被正常复用。升级失败不自动删库、重置授权或回退版本。

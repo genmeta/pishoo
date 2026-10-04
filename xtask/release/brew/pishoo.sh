@@ -36,13 +36,5 @@ fi
 cargo "${args[@]}"
 release_dir="$product_source/target/$target/release"
 cp "$release_dir/pishoo" "$out/staging/pishoo"
-cp "$release_dir/pishoo-worker" "$out/staging/pishoo-worker"
-case ",$features," in
-    *,sshd,*|*,pam,*) cp "$release_dir/pishoo-ssh-session" "$out/staging/pishoo-ssh-session" ;;
-esac
-cp xtask/deb/common/etc/dhttp/pishoo.conf "$out/staging/pishoo.conf"
-cp xtask/deb/common/etc/dhttp/mime.types "$out/staging/mime.types"
-sed -i.bak 's#/etc#etc#g' "$out/staging/pishoo.conf"
-rm -f "$out/staging/pishoo.conf.bak"
 tar -C "$out/staging" -czf "$out/pishoo_$version-$target.tar.gz" .
 rm -rf "$out/staging"

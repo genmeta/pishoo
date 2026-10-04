@@ -86,12 +86,44 @@ fn deb_packaging_disables_sparse_binary_copies() {
     let rules = std::fs::read_to_string(repository_root().join("xtask/deb/rules"))
         .expect("deb rules should be readable");
 
-    for binary in ["pishoo", "pishoo-worker", "pishoo-ssh-session"] {
+    for binary in ["pishoo"] {
         let copy =
             format!("cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/{binary}");
         assert!(
             rules.contains(&copy),
             "missing non-sparse copy for {binary}"
+        );
+    }
+}
+
+#[test]
+fn installation_uses_the_current_single_process_startup() {
+    let root = repository_root();
+    let service =
+        std::fs::read_to_string(root.join("xtask/deb/pishoo-common.pishoo.service")).unwrap();
+    assert!(service.contains("ExecStart=/usr/bin/pishoo\n"));
+    assert!(service.contains("ExecReload=/bin/kill -HUP $MAINPID"));
+    assert!(!service.contains("ExecStartPre="));
+    assert!(!service.contains("PIDFile="));
+    let formula = std::fs::read_to_string(root.join("xtask/templates/pishoo.rb.in")).unwrap();
+    assert!(formula.contains("bin.install \"pishoo\""));
+    assert!(!formula.contains("pishoo-worker"));
+    assert!(!formula.contains("pishoo.conf"));
+    assert!(!formula.contains("_www"));
+    assert!(!formula.contains("\"-V\""));
+    for path in [
+        "xtask/release/brew/pishoo.sh",
+        "xtask/release/rpm/package.sh",
+        "xtask/deb/rules",
+    ] {
+        let script = std::fs::read_to_string(root.join(path)).unwrap();
+        assert!(
+            !script.contains("/pishoo-worker"),
+            "{path} must not package the removed worker binary"
+        );
+        assert!(
+            !script.contains("/pishoo-ssh-session"),
+            "{path} must not package the removed SSH binary"
         );
     }
 }
@@ -123,13 +155,13 @@ fn pishoo_common_package_version_follows_pishoo() {
         PackageVersion::deb(common.source_version.clone(), deb.revision.clone())
             .expect("pishoo-common deb version should compose")
             .as_string(),
-        "0.8.2~beta.2-1"
+        "0.8.2-1"
     );
     assert_eq!(
         PackageVersion::rpm(common.source_version, rpm.release.clone())
             .expect("pishoo-common rpm version should compose")
             .as_string(),
-        "0.8.2~beta.2-1"
+        "0.8.2-1"
     );
 }
 
@@ -178,19 +210,13 @@ fn pishoo_linux_requirements_keep_published_floor_and_current_ceiling() {
             .get("pishoo-common")
             .expect("pishoo-common bounds should resolve");
         assert_eq!(common.minimum.as_deref(), Some("0.5.1-1"));
-        assert_eq!(common.maximum.as_deref(), Some("0.8.2~beta.2-1"));
+        assert_eq!(common.maximum.as_deref(), Some("0.8.2-1"));
 
         let entries = linux_requirement_entries(system, "pishoo-common", common.clone())
             .expect("pishoo-common requirement entries should render");
         let expected = match system {
-            PackageSystem::Deb => vec![
-                "pishoo-common (>= 0.5.1-1)",
-                "pishoo-common (<= 0.8.2~beta.2-1)",
-            ],
-            PackageSystem::Rpm => vec![
-                "pishoo-common >= 0.5.1-1",
-                "pishoo-common <= 0.8.2~beta.2-1",
-            ],
+            PackageSystem::Deb => vec!["pishoo-common (>= 0.5.1-1)", "pishoo-common (<= 0.8.2-1)"],
+            PackageSystem::Rpm => vec!["pishoo-common >= 0.5.1-1", "pishoo-common <= 0.8.2-1"],
             PackageSystem::Brew | PackageSystem::Scoop => unreachable!(),
         };
         assert_eq!(entries, expected);

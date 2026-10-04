@@ -135,6 +135,19 @@ async fn invalid_identity_reload_keeps_loaded_resources_and_can_be_retried() {
 }
 
 #[tokio::test]
+async fn reload_does_not_initialize_deleted_or_empty_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    std::fs::remove_file(server.profile.config_db_path()).unwrap();
+    assert!(server.reload().await.is_err());
+    assert!(!server.profile.config_db_path().exists());
+    std::fs::write(server.profile.config_db_path(), []).unwrap();
+    assert!(server.reload().await.is_err());
+    assert_eq!(server.profile.config_db_path().metadata().unwrap().len(), 0);
+    assert_eq!(server.config.listen, 0);
+}
+
+#[tokio::test]
 async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;

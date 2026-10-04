@@ -1,13 +1,5 @@
-# Stop dance for pishoo
-# =======================
-#
-# ExecReload sends SIGHUP (reload config) to the pishoo process.
-# ExecStop sends SIGQUIT (graceful stop) to the pishoo process.
-# If, after 5s (--retry QUIT/5) pishoo is still running, systemd takes control
-# and sends SIGTERM (fast shutdown) to the main process.
-# After another 5s (TimeoutStopSec=5), and if pishoo is alive, systemd sends
-# SIGKILL to all the remaining processes in the process group (KillMode=mixed).
-#
+# Initialization belongs to the process that owns DHTTP_HOME.
+# Configure User= and Environment=DHTTP_HOME= in a service override when using a user's identities.
 [Unit]
 Description=A modern, secure, QUIC-powered, peer-to-peer web/proxy engine
 After=network-online.target remote-fs.target nss-lookup.target
@@ -15,11 +7,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-PIDFile=/run/pishoo.pid
-ExecStartPre=/usr/bin/pishoo -t
 ExecStart=/usr/bin/pishoo
-ExecReload=/usr/bin/pishoo -s reload
-TimeoutStopSec=5
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=infinity
 KillMode=mixed
 Restart=on-failure
 

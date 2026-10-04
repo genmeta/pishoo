@@ -144,3 +144,5 @@ README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担
 2026-10-03 用户要求普通启动自动进行 NAT 探测，并批准私有 Binding 新增 nat_probe 流成员，随后明确 NAT 分类是每个新 socket 的一次性操作，STUN 绑定心跳则持续维护。Network 初始扫描装配探测，唯一维护任务轮询分类和心跳，映射登记到已有 QUIC/AddressBook；绑定撤回直接丢弃流取消 transaction。该决定替代普通启动尚不自动探测的阶段性边界，完整成员见 dhttp 清单及相邻 Network 详细设计。
 
 2026-10-04 用户指出中转 DNS 应发布 outer-agent。Network 的 QUIC 别名与 DDNS 上报分开：FullCone 映射可发布 Direct，受限或尚未成功分类的映射保留 Mediate(agent, outer)，交既有 E-record 编码输出 outer-agent。AddressBook 的现有外部地址表允许有效 Mediate，内部地址表仍只存 Direct；不新增结构、字段、方法或错误变体。
+
+2026-10-04 用户确认使用 home 身份与根级 ssl/db/file/lib/logs/repo/templates 布局，不再使用 server.conf，并要求实施正常启动初始化。新库默认 listen=3（内外网均监听）、exec=0、空代理、允许具名 POST /contact；聊天独立审批。已有库不补默认规则，原生daccess v0先备份后升级，旧0.8.2及未知格式拒绝启动并保留原文件。初始化归现有资源加载方法与模块内无状态算法，不增加结构、字段、跨模块接口或初始化账本；安装包仅提供程序与服务文件。具体行为见 Pishoo 清单和配置 API。

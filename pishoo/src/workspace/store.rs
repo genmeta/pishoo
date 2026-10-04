@@ -39,10 +39,41 @@ impl WorkspaceStore {
     pub async fn open(profile: &IdentityProfile) -> Result<Self, StoreError> {
         let path = profile.db_dir().join("workspace.db");
         let parent = path.parent().expect("Workspace database path has a parent");
-        std::fs::create_dir_all(parent).context(DirectorySnafu {
-            path: parent.to_path_buf(),
-        })?;
-        let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
+        let prepare = || -> std::io::Result<()> {
+            let mut directory = std::fs::DirBuilder::new();
+            directory.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory.mode(0o700);
+            }
+            directory.create(parent)?;
+            if !parent.symlink_metadata()?.file_type().is_dir() {
+                return Err(std::io::Error::other(
+                    "database directory must not be a symlink",
+                ));
+            }
+            let mut file = std::fs::OpenOptions::new();
+            file.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                file.mode(0o600);
+            }
+            match file.open(&path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            if !path.symlink_metadata()?.file_type().is_file() {
+                return Err(std::io::Error::other(
+                    "database must be a regular file, not a symlink",
+                ));
+            }
+            Ok(())
+        };
+        prepare().context(DirectorySnafu { path: path.clone() })?;
+        let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rw", path.display()));
         options.max_connections(1);
         options.sqlx_logging(false);
         let db = Database::connect(options)
@@ -55,9 +86,37 @@ impl WorkspaceStore {
         }
         migrate(&db, &path).await?;
         let profile_assets = profile.join("assets/profile");
-        std::fs::create_dir_all(&profile_assets).context(DirectorySnafu {
-            path: profile_assets.clone(),
-        })?;
+        for directory in [profile.join("assets"), profile_assets.clone()] {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(StoreError::Directory {
+                        path: directory,
+                        source,
+                    });
+                }
+            }
+            if !directory
+                .symlink_metadata()
+                .context(DirectorySnafu {
+                    path: directory.clone(),
+                })?
+                .file_type()
+                .is_dir()
+            {
+                return Err(StoreError::Directory {
+                    path: directory,
+                    source: std::io::Error::other("profile assets directory must not be a symlink"),
+                });
+            }
+        }
         Ok(Self { db, profile_assets })
     }
 
@@ -71,56 +130,150 @@ impl WorkspaceStore {
 }
 
 async fn migrate(db: &DatabaseConnection, path: &PathBuf) -> Result<(), StoreError> {
-    let transaction = db
-        .begin()
+    let transaction = db.begin().await.context(MigrationSnafu {
+        path: path.to_path_buf(),
+    })?;
+    for row in transaction
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "PRAGMA quick_check".to_owned(),
+        ))
         .await
-        .context(MigrationSnafu { path: path.clone() })?;
-    transaction
-        .execute_unprepared(
-            "CREATE TABLE IF NOT EXISTS module_versions (\
-             module_name TEXT PRIMARY KEY CHECK (length(module_name) > 0), \
-             version INTEGER NOT NULL CHECK (version >= 1))",
-        )
-        .await
-        .context(MigrationSnafu { path: path.clone() })?;
+        .context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?
+    {
+        let integrity: String = row.try_get("", "quick_check").context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?;
+        if integrity != "ok" {
+            return Err(StoreError::Migration {
+                path: path.to_path_buf(),
+                source: sea_orm::DbErr::Custom(integrity),
+            });
+        }
+    }
     let row = transaction
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT version FROM module_versions WHERE module_name = 'workspace'".to_owned(),
+            "SELECT count(*) AS objects FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                .to_owned(),
         ))
         .await
-        .context(MigrationSnafu { path: path.clone() })?;
-    match row {
-        None => {
-            transaction
-                .execute_unprepared(include_str!("migrations/0.sql"))
-                .await
-                .context(MigrationSnafu { path: path.clone() })?;
-            transaction
-                .execute_raw(Statement::from_sql_and_values(
-                    DatabaseBackend::Sqlite,
-                    "INSERT INTO module_versions (module_name, version) VALUES ('workspace', ?)",
-                    [SCHEMA_VERSION.into()],
-                ))
-                .await
-                .context(MigrationSnafu { path: path.clone() })?;
+        .context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?
+        .expect("aggregate row");
+    let objects: i64 = row.try_get("", "objects").context(MigrationSnafu {
+        path: path.to_path_buf(),
+    })?;
+    if objects == 0 {
+        let row = transaction
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "PRAGMA user_version".to_owned(),
+            ))
+            .await
+            .context(MigrationSnafu {
+                path: path.to_path_buf(),
+            })?
+            .expect("pragma row");
+        let version: i64 = row.try_get("", "user_version").context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?;
+        if version != 0 {
+            return Err(StoreError::UnsupportedVersion {
+                path: path.to_path_buf(),
+                version,
+            });
         }
-        Some(row) => {
-            let version: i64 = row
-                .try_get("", "version")
-                .context(MigrationSnafu { path: path.clone() })?;
-            if version != SCHEMA_VERSION {
-                return Err(StoreError::UnsupportedVersion {
-                    path: path.clone(),
-                    version,
-                });
-            }
+        transaction.execute_unprepared(
+            "CREATE TABLE module_versions (module_name TEXT PRIMARY KEY CHECK(length(module_name)>0), version INTEGER NOT NULL CHECK(version>=1))"
+        ).await.context(MigrationSnafu { path: path.to_path_buf() })?;
+        transaction
+            .execute_unprepared(include_str!("migrations/0.sql"))
+            .await
+            .context(MigrationSnafu {
+                path: path.to_path_buf(),
+            })?;
+        transaction
+            .execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO module_versions(module_name,version) VALUES ('workspace', ?)",
+                [SCHEMA_VERSION.into()],
+            ))
+            .await
+            .context(MigrationSnafu {
+                path: path.to_path_buf(),
+            })?;
+    } else {
+        // Read the version before executing DDL: unknown databases are never repaired or adopted.
+        let row = transaction
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT version FROM module_versions WHERE module_name='workspace'".to_owned(),
+            ))
+            .await
+            .context(MigrationSnafu {
+                path: path.to_path_buf(),
+            })?
+            .ok_or_else(|| StoreError::Migration {
+                path: path.to_path_buf(),
+                source: sea_orm::DbErr::Custom(
+                    "missing workspace schema version; database preserved".into(),
+                ),
+            })?;
+        let version: i64 = row.try_get("", "version").context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?;
+        if version != SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedVersion {
+                path: path.to_path_buf(),
+                version,
+            });
         }
     }
-    transaction
-        .commit()
+    for sql in [
+        "SELECT id,display_name,avatar_name,gender,updated_at FROM profile_preferences LIMIT 0",
+        "SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,sender_subject_id,recipient_subject_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_requests LIMIT 0",
+        "SELECT contact_name,capability_id,decision,descriptor_version,subject_id,request_id,updated_at FROM capability_decisions LIMIT 0",
+        "SELECT id,contact_name,capability_id,decision,descriptor_version,subject_id,request_id,decided_at FROM capability_decision_events LIMIT 0",
+        "SELECT contact_name,contact_id,subject_id,saved_at FROM saved_contacts LIMIT 0",
+    ] {
+        transaction
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                sql.to_owned(),
+            ))
+            .await
+            .context(MigrationSnafu {
+                path: path.to_path_buf(),
+            })?;
+    }
+    let row = transaction
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT count(*) AS total FROM profile_preferences WHERE id=1".to_owned(),
+        ))
         .await
-        .context(MigrationSnafu { path: path.clone() })?;
+        .context(MigrationSnafu {
+            path: path.to_path_buf(),
+        })?
+        .expect("aggregate row");
+    if row.try_get::<i64>("", "total").context(MigrationSnafu {
+        path: path.to_path_buf(),
+    })? != 1
+    {
+        return Err(StoreError::Migration {
+            path: path.to_path_buf(),
+            source: sea_orm::DbErr::Custom(
+                "missing profile preferences; database preserved".into(),
+            ),
+        });
+    }
+    transaction.commit().await.context(MigrationSnafu {
+        path: path.to_path_buf(),
+    })?;
     Ok(())
 }
 
