@@ -1,6 +1,6 @@
 # Workspace 与 Chat 接入清单
 
-本文件补充 [Pishoo 清单](pishoo-interfaces.md)。2026-10-02 用户要求保留远端 `pishoo/feat/daccess@9b733c5` 的工作并先 rebase 适配，审批和联系人以 `daccess/feat/fit-pishoo@cf8f72f` 为准；底层接口适配暂缓。
+本文件补充 [Pishoo 清单](pishoo-interfaces.md)。2026-10-02 用户要求保留远端 `pishoo/feat/daccess@9b733c5` 的工作并先 rebase 适配，审批和联系人以 `daccess/feat/fit-pishoo@cf8f72f` 为准；当时暂缓底层接口适配；2026-10-03用户批准并要求接入生产出站，当前接缝见下文。
 
 ## 资源归属与本轮调整
 
@@ -9,7 +9,7 @@
 - `access_router` 改为只接收 AccessService；Server 显式合并 Workspace/Chat Router。`authorize` 签名不变；202、查询归属与公开资料规则见 Pishoo 清单。
 - Workspace/Chat 各保留自己的 worker 句柄、唤醒和关闭信号。句柄保证每个资源实例只启动一个 worker；Notify 用于新任务/授权更新后唤醒；关闭信号结束等待。profile_write、contact_write 和 outbound_send 沿用分支的文件/数据库更新与申请操作串行约束，不是请求或传输并发配额。
 - 新增两个 `shutdown(&self)` 方法：发出关闭信号，取出并中止现有 worker，等待句柄结束。Server.close 在现有15秒退出等待内调用它们。reload 复用同一 Workspace/Chat。
-- 生产出站仍保留下列 OutboundTransport 业务签名，尚未配置实现。旧 PlaneOutbound 的 ControlPlane/H3 实现在目标分支历史中保留；真实网络测试移至 `pishoo/tests/deferred/workspace_network.rs`，待底层稳定后适配。此阶段不增加 dhttp 身份钉住接口，不以响应后的身份检查替代发送前校验。
+- 2026-10-03 用户要求接入生产出站，并批准 [dhttp 清单](dhttp-interfaces.md) 的 Request owner_hash 发送前校验与 RemoteIdentityChanged 错误。Workspace/Chat 的 OutboundTransport 均直接由现有 `dhttp::Endpoint` 实现，由 Server.load 用已有 Endpoint 的 clone 装配，不新增生产结构或成员。Workspace 从内存 LocalAuthority 派生发送者身份，从响应中的已验证 RemoteAuthority 提取远端身份；Chat 将已有联系人 SubjectId 解析为 OwnerHash，在实际连接开流前校验。出站保留15秒总期限和1MiB响应上限；请求使用 WndBuf/RequestWriter，发送完显式 shutdown。旧网络测试素材仍保留于 deferred，新验收使用现行 QUIC 接缝。
 - `/std/message` 继续要求 daccess 允许和分支既有的能力决定校验；`/workspace-api/*`、`/chat-api/*` 的本地管理核对 owner。能力请求与普通访问审批分开保存，Pishoo 不另建 daccess 审批状态。
 
 ## 保留的结构与接口

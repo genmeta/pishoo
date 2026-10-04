@@ -101,9 +101,11 @@ impl Endpoint {
 pub struct Request<B> {
     endpoint: Option<Endpoint>,
     message: http::Request<B>,
+    expected_remote_owner_hash: Option<dhttp_home::certificate::OwnerHash>,
 }
 impl<B> Request<B> {
     pub fn new(message: http::Request<B>) -> Self; // 匿名出站
+    pub fn expect_remote_owner_hash(self, owner_hash: dhttp_home::certificate::OwnerHash) -> Self;
     pub fn header(self, name: http::HeaderName, value: http::HeaderValue) -> Self;
     pub fn append_header(self, name: http::HeaderName, value: http::HeaderValue) -> Self;
     pub fn body<T>(self, body: T) -> Request<T>;
@@ -121,6 +123,8 @@ impl std::future::IntoFuture for Request<dhttp::WndBuf> {
     fn into_future(self) -> Self::IntoFuture;
 }
 ```
+
+2026-10-03 用户批准 Workspace/Chat 接入所需的最小变更：`Request.expected_remote_owner_hash`、`Request::expect_remote_owner_hash` 和无载荷错误变体 `Error::RemoteIdentityChanged`。默认不钉住 owner_hash；指定时，从 Network 取得实际 H3 连接后、开流及发送 HTTP 头/Body 前，从该连接已验证的 RemoteAuthority 证书提取 SKI 并核对 owner_hash；缺少身份、无效 SKI 或不匹配均返回该错误。复用连接（包括反向连接）也逐请求校验，不另建连接池键或身份缓存。body/write 更换 Body 时保留期望身份；没有发送后补救或先探测再发消息的路径。
 
 Endpoint::from_request 绑定当前身份，Request::new 创建匿名请求；匿名出站不读本地身份文件，具名凭据失败不回退匿名。匿名请求可用 bob~，单独的 ~ 因没有本端名称而返回参数错误。URL 和 header 先解析为有效类型，构造请求时不保存待报错状态。首次轮询 await 才开始网络操作；header/body 构造不需要 Network。Request 不 Clone；发送后不再向调用方交付可编辑头字段的 builder。
 
@@ -154,7 +158,7 @@ impl DhttpNetwork {
 
 同名 Endpoint 按本端、远端名称值复用 h3x Pool。Incoming 的本端名称必填、远端可选；Outgoing 的远端名称必填、本端可选，不能同时缺少两端身份。Eq/Hash 统一比较本端和远端名称，双方具名且名称相同时，入站、出站键匹配同一池条目。Network 不保存 socket、网卡快照、scopes 副本、凭据缓存、任务集合或出站标志；不保留 BackendState、Binding、ListenerEntry 或泛型 Network。
 
-`OnceCell::get_or_try_init` 协调并发初始化。唯一 netwatcher 先交付初始完整快照，再由一个任务等待系统变化；每次使用同一 scan 对照 Dock 的实际绑定。匹配绑定保留端口，缺失绑定添加，已失效的设备绑定删除；临时打洞 socket 不受扫描接管。没有可用网卡或部分绑定失败仍可初始化，失败绑定只在下次网卡变化后重试。初始化不等待 STUN 探测。
+`OnceCell::get_or_try_init` 协调并发初始化。唯一 netwatcher 先交付初始完整快照，再由一个任务等待系统变化；每次使用同一 scan 对照 Dock 的实际绑定。匹配绑定保留端口，缺失绑定添加，已失效的设备绑定删除；临时打洞 socket 不受扫描接管。没有可用网卡或部分绑定失败仍可初始化，失败绑定只在下次网卡变化后重试。初始化不等待 STUN 探测。普通启动为每个适用的新 socket 自动装配一次性 NAT 分类，之后持续 STUN 绑定心跳维护公网映射；不定期重做 NAT 分类。
 
 Dock 持有 socket 登记、收包任务及配套 AddressBook 引用，负责直接 QUIC/STUN 登记、地址发布、回滚和清理；Network 不保存第二份资源表。收包失败由 Dock 清理；旧路径按发送失败退出，新地址沿用 dquic 的打洞订阅。
 
@@ -234,3 +238,7 @@ dhttp 的读写等待由流背压、EOF、错误和取消推进，不给开流�
 没有 OwnerKey、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留 Endpoint、Request、ConnectionKey、DhttpNetwork、QuicTransport、RecvStream、SendStream。Error 沿用现有类型。
 
 2026-10-03 用户批准 DNS 接缝：确认上述现行 Endpoint.quic；local_authority 从它的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不缓存、不访问 Network。Endpoint.listen/Network.listen 返回已登记的 ListenFuture；调用方先 await 登记再 spawn 生命周期，登记失败不启动发布。Network 成员不变。相邻 qprotocol 的 AddressBook 新增 `pub fn inner_bindings(&self) -> Vec<(SocketAddr, qudp::BoundDevice)>`，只派生有有效 Internal 地址、端口和现有网卡元数据的实际绑定，按 bound 去重并排除 Loopback；不增加成员。完整跨仓 DNS 差异见 [DNS 设计](pishoo-dns-detailed-design.md)。
+
+2026-10-03 用户要求普通启动自动接入 NAT，并批准为既有私有 Binding 增加 `nat_probe: futures::stream::BoxStream<'static, std::io::Result<(qbase::net::NatType, std::net::SocketAddr, std::net::SocketAddr)>>`。该流由唯一 Network 维护任务轮询，先在新 socket 上进行一次 NAT 分类，再每20秒向同地址族 STUN 节点发送绑定心跳维护映射；Loopback/IPv6 link-local 不探测。映射变化时更新 QUIC 直接/中介别名与 AddressBook，失败映射撤回并在后续心跳重试。绑定撤回时丢弃流和未完成 transaction，不建立独立探测任务或第二份绑定表。DhttpNetwork、Endpoint 和 h3x 成员不变，初始化仍不等待 STUN。
+
+2026-10-04 中转 DNS 修复：已有 nat_probe 取得的 agent/outer 不能在写入 AddressBook 时丢弃 agent。Network 继续登记 Direct 与 Mediate QUIC 别名；对 FullCone 的 DDNS 发布采用 Direct，对受限/未知 NAT 采用已有 Mediate 值。AddressBook 的外部插入/替换方法体允许有效 Mediate，内部仍要求 Direct，成员与签名不变；ddns 既有 E-record 编码保持 NAT 标记并输出 outer-agent。内部 qbase EndpointAddr 的 Display 仍为 agent-outer，不改变内部地址语法。

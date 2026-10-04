@@ -25,7 +25,7 @@
 | [三仓架构](h3x-dhttp-pishoo-architecture.md) | 仓库职责、数据路径、应用约束和实施次序 |
 | [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、连接复用与应用接入 |
 | [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Sandbox/Lib、daccess 接入与 WASM |
-| [Workspace/Chat 接入](workspace-chat-interfaces.md) | 目标分支业务模型、Server 资源归属及暂缓的传输接缝 |
+| [Workspace/Chat 接入](workspace-chat-interfaces.md) | 目标分支业务模型、Server 资源归属及 Endpoint 出站接缝 |
 | [DNS 解析与发布](pishoo-dns-detailed-design.md) | 全进程解析源、内存凭据发布、地址维护、租期和撤回 |
 | [exec 结构](exec-interfaces.md) | 单命令宿主执行、身份准入与子进程回收 |
 
@@ -52,7 +52,7 @@
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
 - 身份直接复用 qtls 的 HandshakeSummary、LocalAuthority、RemoteAuthority，范围复用 qconn 的 Scope/Scopes。没有 RequestInfo 或 Peer 包装。
-- dhttp 出站响应在进程内的 extensions 携带实际连接已验证的 RemoteAuthority；不恢复已删除的 resolve_remote。Pishoo 的统一 DHTTP 通配路由纯转发。联系人申请以目标分支的 application_id、Workspace 队列和 /contact/self 轮询协议为准；实际生产出站接缝按用户要求暂缓。
+- dhttp 出站响应在进程内的 extensions 携带实际连接已验证的 RemoteAuthority；不恢复已删除的 resolve_remote。Pishoo 的统一 DHTTP 通配路由纯转发。联系人申请以目标分支的 application_id、Workspace 队列和 /contact/self 轮询协议为准；2026-10-03 用户要求接入 Workspace/Chat 生产出站，并批准 dhttp Request 的发送前 owner_hash 校验，具体成员见 dhttp 清单。
 - 2026-09-28 用户确认入站 URI authority 简写展开及与握手本端身份的核对归 dhttp 的 `serve_exchange`，在交付应用 Service 前完成；Pishoo 的 `Server.listen` 不重复执行。缺少或不匹配的 authority 由 dhttp 返回 421。
 - 一个 WASM 文件统一称为 Lib，不另设 App；代码类型使用 Lib 和通用 Body/Error。
 - 每个 Server 直接持有一个 Sandbox，集中拥有该身份的 Lib 集合、共享 WasmRuntime 引用与任务跟踪器；组件扫描、校验、版本替换、API 执行和 WASI 宿主能力均归 sandbox 模块。Lib 执行不限制并发数，不设置执行槽或 permit；Sandbox 不新增内部锁、取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
@@ -121,6 +121,10 @@
 
 2026-10-02 用户确认审批和联系人以 `daccess/feat/fit-pishoo@cf8f72f` 为准，随后要求先 rebase 适配，暂缓尚未稳定的底层接口。本地重构已重放至 `pishoo/feat/daccess@9b733c5`，Workspace/Chat 功能按该分支保留并接入 Server。此前的请求内审批、禁止202/status和 ContactNotifier 回调约定由这一决定替代；历史决策段落仅保留其演变记录。生产出站接缝、tcp-mock 与现行底层的兼容及真实网络验收留待后续。具体业务接口见 Pishoo 和 Workspace/Chat 清单。
 
+2026-10-03 用户要求开始 Workspace/Chat 出站接入，并明确批准最小 dhttp 请求成员变更：Request.expected_remote_owner_hash、Request::expect_remote_owner_hash 和 Error::RemoteIdentityChanged。Workspace/Chat 的既有 OutboundTransport 直接由 Endpoint 实现，Server.load 装配现有 Endpoint；Chat 在实际连接开流和发送前检查联系人 owner_hash。该决定替代2026-10-02暂缓生产出站的安排，Pishoo 不新增生产有状态结构。签名及行为见 dhttp 与 Workspace/Chat 清单，验收见实施记录。
+
+2026-10-03 用户要求先取消客户端必须携带 OCSP 的限制，以接入现有 AnySee。qtls ClientVerifier 在证书链与有效期验证后，仅对非空客户端 staple 执行 OCSP 的证书绑定、签名、时效和撤销验证；未附 OCSP 的具名客户端仍以经验证证书及握手签名认证。仍请求支持该能力的客户端提供 staple；服务端证书的 OCSP 要求不变。不新增类型、成员、配置开关，也不更改 HTTP/3 帧格式。
+
 ## 文档清理
 
 本仓此前的接入稿、Pishoo API 草案、数据库重设计、WASM HTTP 适配、身份沙盒、终端旧稿及旧架构图由本组文档替代。仍有效的应用规则已归入架构说明和结构清单。
@@ -130,3 +134,9 @@ README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担
 2026-10-03 用户明确批准 [DNS 详细设计](pishoo-dns-detailed-design.md) 的全部六项接口及相邻仓库变化：Server.publisher 与六个 dns 函数；确认现行 Endpoint.quic 并新增 local_authority/ListenFuture、修改监听登记返回值；AddressBook.inner_bindings；H3Resolver 直接持 Endpoint、发布返回 Duration 及错误变体调整；服务端租期头/no-store；同步本冻结清单。run 在 Network 初始化前注册 System/H3/mDNS 解析源并订阅地址簿；监听登记成功后维护发布批，SIGHUP、删除和退出先排空当前发布，再撤回及清理自己的 mDNS/应用资源。新旧服务端协议部署与公网/NAT 验收仍需分别确认，不改变共享传输的进程生命周期。
 
 2026-10-03 用户要求继续线上端到端验收并包含 NAT 探测与打洞，明确批准临时替换并恢复 code 身份的线上 DNS，随后要求先跳过线上尚未部署的租期头校验。旧发布响应缺头时暂按300秒续期窗口、空发布按0处理；已有租期头仍按原规则校验，签名和身份鉴权不变。qtls 的方法体允许仅为 ddns.genmeta.net 从 DQUIC_DDNS_OCSP_FILE 补充客户端预取的 OCSP，仍执行证书绑定、签名、时效和撤销验证。具名 qconn 出站从同一 LocalAuthority 填充已存在的 ClientName 传输参数，以兼容线上旧版身份识别；不新增类型、字段或方法。NAT 映射登记和仅公网地址的验收装配暂在独立端到端 example 中完成；单元测试不执行线上请求，普通 Network 启动尚不自动探测。
+
+2026-10-03 用户批准配置 API 第一版，按系统设置与代理规则拆为 `GET/PATCH /sys/settings`、`GET/PUT /sys/proxies`，复用 H3、daccess 和 config.db schema v1。仅新增 `setup::config_router(profile, endpoint)` 跨模块函数，现有保留路径检查加入 /sys；不增加结构、字段、数据库表或传输接口。具体签名及权限、生效规则见 Pishoo 清单。
+
+2026-10-03 用户要求普通启动自动进行 NAT 探测，并批准私有 Binding 新增 nat_probe 流成员，随后明确 NAT 分类是每个新 socket 的一次性操作，STUN 绑定心跳则持续维护。Network 初始扫描装配探测，唯一维护任务轮询分类和心跳，映射登记到已有 QUIC/AddressBook；绑定撤回直接丢弃流取消 transaction。该决定替代普通启动尚不自动探测的阶段性边界，完整成员见 dhttp 清单及相邻 Network 详细设计。
+
+2026-10-04 用户指出中转 DNS 应发布 outer-agent。Network 的 QUIC 别名与 DDNS 上报分开：FullCone 映射可发布 Direct，受限或尚未成功分类的映射保留 Mediate(agent, outer)，交既有 E-record 编码输出 outer-agent。AddressBook 的现有外部地址表允许有效 Mediate，内部地址表仍只存 Direct；不新增结构、字段、方法或错误变体。

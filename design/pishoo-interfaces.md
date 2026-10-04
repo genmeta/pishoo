@@ -29,7 +29,7 @@ type Result<T> = std::result::Result<T, Error>;
 | `sandbox/host.rs` | WASI HTTP 出站拒绝接缝和 identity WIT 宿主能力 |
 | `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
 
-子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/api`、`/.pishoo`、`/exec`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。exec 模块接口见[exec 清单](exec-interfaces.md)。
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/api`、`/sys`、`/.pishoo`、`/exec`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。exec 模块接口见[exec 清单](exec-interfaces.md)。
 
 ## 2. 配置和固定默认值
 
@@ -48,6 +48,8 @@ struct ProxyLocation {
 没有实例配置文件或实例数据库。`run` 从启动时的 DHTTP_HOME 取得实例目录，不在运行中修改进程环境。身份通过 dhttp-home 发现，Endpoint 使用相同身份目录。每个 Server 从自己的 `db/config.db` 读取配置；不定义实例配置结构。单命令 exec 由本 Server 的 `exec` 开关控制，`exec=0` 禁用；`exec=1` 时只允许同名已验证远端身份。
 
 config.db 的 schema v1 为 settings(listen,exec) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者，exec 只能是整数0/1。proxy_pass 接受裸回环地址端口或其 `http://` URI，可带路径，不接受非本机目标；没有传输类型字段或数据库列。第一版尚未上线，直接修订 v1 建表定义，不添加 schema v2 或自动迁移。没有 lib_policies、policy_imports、默认策略来源账本。
+
+2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /sys/settings` 和 `GET/PUT /sys/proxies`。前者读写 listen/exec，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理通过 SIGHUP 重载，listen/exec 需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
 
 2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。裸回环地址先补上 `http://`，再校验完整 URI；以 `path_and_query: None` 保留原始配置未写路径的事实，显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。
 
@@ -76,6 +78,8 @@ struct Server {
 pub async fn run() -> Result<()>;
 pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec>;
 fn load_server_config(profile: &dhttp_home::identity::IdentityProfile) -> Result<ServerConfig>;
+fn config_router(profile: dhttp_home::identity::IdentityProfile,
+    endpoint: dhttp::Endpoint) -> axum::Router;
 impl Server {
     async fn load(profile: dhttp_home::identity::IdentityProfile,
         runtime: std::sync::Arc<WasmRuntime>) -> Result<Self>;
@@ -102,7 +106,7 @@ reload 先读取配置、核对磁盘证书链与 Endpoint 的内存链；listen
 2026-10-03 用户决定底层出站仅保留 Empty/WndBuf，并批准 Pishoo 本轮先适配字节流、不支持正向代理的请求 trailers。该入口将标准入站 Body 的 DATA 逐块写入现有 RequestWriter，以有界窗口提供背压，EOF 后显式 shutdown；不全量缓存请求。声明 Trailer 头的请求在转发前返回400；流中出现未声明 trailers 时返回上传错误、记录日志并丢弃未完成 writer 以取消上传，不静默丢弃 trailers。若响应已交付，不能追溯改变响应状态。响应继续使用原生 Body，保留响应 trailers。等待响应头时取消请求会中止本次上传；交付响应后上传独立继续，不以响应 Body 额外控制上传。没有新增有状态结构、字段或跨模块接口。
 
 
-统一 DHTTP 正向代理继续只转发请求。2026-10-02 用户确认审批和联系人以远端目标分支为准：联系人申请改由 Workspace 的 `/workspace-api/contact-requests` 入队，按 application_id 向对端 `/contact` 投递并查询 `/contact/self`。ContactNotifier 与本地 `POST /contact/{name}` 接缝删除。生产出站适配按用户要求暂缓，现阶段保留分支的 OutboundTransport trait 与业务队列，尚未装配实际传输实现。
+统一 DHTTP 正向代理继续只转发请求。2026-10-02 用户确认审批和联系人以远端目标分支为准：联系人申请改由 Workspace 的 `/workspace-api/contact-requests` 入队，按 application_id 向对端 `/contact` 投递并查询 `/contact/self`。ContactNotifier 与本地 `POST /contact/{name}` 接缝删除。2026-10-03 用户要求接入生产出站；Server.load 为 Workspace 和 Chat 的既有 OutboundTransport 装配当前 Endpoint，Chat 使用已批准的发送前 owner_hash 校验，具体接口见 Workspace/Chat 与 dhttp 清单。
 
 组件一次读出的bytes同时用于OpenAPI、摘要和编译，不在提交前重读文件。没有后台编译结果，也没有跨任务revision检查。删除与替换只由该actor执行。
 

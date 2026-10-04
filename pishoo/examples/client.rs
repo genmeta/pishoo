@@ -23,6 +23,9 @@ async fn main() {
 async fn run() -> Result<(), Failure> {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "echo".to_owned());
+    if command == "run" {
+        return pishoo::run().await.map_err(Into::into);
+    }
     let identity =
         std::env::var("PISHOO_CLIENT_IDENTITY").unwrap_or_else(|_| "demo.dhttp.net".to_owned());
     // A standalone client must explicitly install its name sources.
@@ -57,7 +60,6 @@ async fn run() -> Result<(), Failure> {
     let endpoint = dhttp::Endpoint::load(&identity).await?;
     match command.as_str() {
         "probe" | "nat-get" | "serve" => {
-            use futures::StreamExt as _;
             let target = if command == "nat-get" {
                 Some(
                     args.next()
@@ -67,85 +69,33 @@ async fn run() -> Result<(), Failure> {
             } else {
                 None
             };
-            let mut relays = Vec::new();
-            if let Some(uri) = &target {
-                let mut records = h3_dns
-                    .lookup(uri.host().ok_or("missing host")?, "443", None)
-                    .await?;
-                while let Some((source, address)) = records.next().await {
-                    eprintln!("{source}: {address}");
-                    if let dhttp::resolve::EndpointAddr::Mediate { agent, .. } = address {
-                        relays.push(agent);
-                    }
-                }
-            }
-            let servers = qprotocol::StunProtocol::stun_servers().await?;
-            eprintln!("STUN servers: {servers:?}");
             let addresses = dhttp::AddressBook::global();
-            eprintln!(
-                "Network DDNS before probes: {:?}",
-                addresses.subscribe_ddns().borrow()
-            );
+            let mut published = addresses.subscribe_ddns();
+            // Ordinary Network startup owns classification and heartbeat maintenance.
+            // Wait for its public mapping rather than probing the same socket twice.
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while published.borrow_and_update().is_empty() {
+                    published.changed().await.map_err(io::Error::other)?;
+                }
+                Ok::<_, io::Error>(())
+            }).await??;
+            eprintln!("Network DDNS after NAT: {:?}", published.borrow());
             let dock = qprotocol::Dock::global();
-            let stun = dock.topology().stun();
-            for (bound, device) in addresses.inner_bindings() {
-                if !matches!(bound.ip(), std::net::IpAddr::V4(ip) if ip.is_private()) {
-                    continue;
-                }
-                let server = servers
-                    .iter()
-                    .find(|server| server.is_ipv4())
-                    .ok_or("no IPv4 STUN server")?;
-                // Classify once before contacting other discovery nodes. Prior traffic
-                // to changed-source nodes would invalidate filtering observations.
-                let nat =
-                    tokio::time::timeout(Duration::from_secs(20), stun.detect_nat(bound, *server))
-                        .await??;
-                eprintln!("{} {bound} via {server}: NAT {nat:?}", device.name());
-                if command != "probe" {
-                    addresses.set_nat(bound, nat);
-                }
-                let mut probes = servers.to_vec();
-                probes.extend(relays.iter().copied());
-                probes.sort_unstable();
-                probes.dedup();
-                for server in probes.into_iter().filter(|server| server.is_ipv4()) {
-                    let mapped = tokio::time::timeout(
-                        Duration::from_secs(10),
-                        stun.detect_outer(bound, server),
-                    )
-                    .await??;
-                    eprintln!("{} {bound} via {server}: mapped {mapped:?}", device.name());
-                    if command != "probe" {
-                        let outer = mapped.ok_or("STUN mapping unanswered")?;
-                        let socket = dock.find_socket(bound).ok_or("socket disappeared")?;
-                        let direct = dhttp::resolve::EndpointAddr::direct(outer);
-                        if !addresses.subscribe_ddns().borrow().contains(&direct) {
-                            dock.topology().quic().register(direct, &socket)?;
-                            addresses.insert_outer(&socket, direct)?;
-                        }
-                        let mediated = dhttp::resolve::EndpointAddr::mediate(server, outer);
-                        dock.topology().quic().register(mediated, &socket)?;
-                    }
-                }
-            }
-            eprintln!(
-                "Network DDNS after probes: {:?}",
-                addresses.subscribe_ddns().borrow()
-            );
-            if command != "probe" {
-                if addresses.ddns_endpoints().is_empty() {
-                    return Err(io::Error::other("no public NAT mapping discovered").into());
-                }
-                // This acceptance mode advertises only public addresses; otherwise
-                // two local processes could finish punching over LAN or loopback.
-                let mut replay = addresses.subscribe_punch(dhttp::Scopes::ALL);
-                while let Ok(event) = replay.try_recv() {
-                    if let qprotocol::AddressEvent::Added { endpoint, .. } = event
-                        && endpoint.scope() != Some(dhttp::Scope::External)
-                    {
+            let mut replay = addresses.subscribe_punch(dhttp::Scopes::ALL);
+            while let Ok(event) = replay.try_recv() {
+                if let qprotocol::AddressEvent::Added { bound, endpoint, nat } = event {
+                    if endpoint.scope() == Some(dhttp::Scope::External) {
+                        eprintln!("{bound}: NAT {nat:?}, mapped {endpoint}");
+                    } else if command != "probe" {
+                        // Acceptance deliberately excludes LAN/loopback shortcuts.
                         addresses.remove(endpoint);
                     }
+                }
+            }
+            // Every advertised public endpoint must already have a live QUIC alias.
+            for endpoint in published.borrow().iter() {
+                if dock.topology().quic().find_socket(*endpoint).is_none() {
+                    return Err(io::Error::other("public NAT mapping has no socket").into());
                 }
             }
             if command == "serve" {
@@ -382,10 +332,10 @@ async fn run() -> Result<(), Failure> {
             }
             println!("HTTP/3 dropped Echo response: next request still succeeds");
         }
-        "get" | "post" => {
+        "get" | "post" | "put" | "patch" => {
             let target = args
                 .next()
-                .ok_or("usage: pishoo-client get|post URL [BODY]")?;
+                .ok_or("usage: pishoo-client get|post|put|patch URL [BODY]")?;
             let uri: http::Uri = if target.starts_with('/') {
                 format!("https://{identity}{target}").parse()?
             } else {
@@ -395,7 +345,8 @@ async fn run() -> Result<(), Failure> {
                 endpoint.get(uri).await?
             } else {
                 let body = args.next().unwrap_or_default();
-                post_bytes(&endpoint, uri, Bytes::from(body)).await?
+                let method: http::Method = command.to_ascii_uppercase().parse()?;
+                send_bytes(&endpoint, method, uri, Bytes::from(body)).await?
             };
             eprintln!("{:?} {}", response.version(), response.status());
             let body = response.into_body().collect().await?.to_bytes();
@@ -446,7 +397,7 @@ async fn run() -> Result<(), Failure> {
                 (&mut *input).await??;
             }
         }
-        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|smoke|probe|nat-get URL|serve|query [NAME]|publish [ADDRESS ...]]".into()),
+        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|put URL JSON|patch URL JSON|smoke|probe|nat-get URL|serve|query [NAME]|publish [ADDRESS ...]]".into()),
     }
     Ok(())
 }
@@ -458,8 +409,22 @@ async fn post_bytes(
     uri: http::Uri,
     bytes: Bytes,
 ) -> Result<http::Response<dhttp::Body>, Failure> {
-    let (mut writer, response) = endpoint
-        .post(uri)
+    send_bytes(endpoint, http::Method::POST, uri, bytes).await
+}
+
+async fn send_bytes(
+    endpoint: &dhttp::Endpoint,
+    method: http::Method,
+    uri: http::Uri,
+    bytes: Bytes,
+) -> Result<http::Response<dhttp::Body>, Failure> {
+    let json = matches!(method, http::Method::PUT | http::Method::PATCH)
+        || serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
+    let mut request = endpoint.request(method, uri);
+    if json {
+        request = request.header(http::header::CONTENT_TYPE, "application/json".parse()?);
+    }
+    let (mut writer, response) = request
         .body(dhttp::WndBuf::with_initial(64 * 1024, bytes))
         .await?;
     let upload = scopeguard::guard(
