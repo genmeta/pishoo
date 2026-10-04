@@ -51,11 +51,13 @@ pub async fn run() -> Result<()> {
     // Startup failures share the same DNS and application cleanup path as shutdown.
     let result = async {
         let loaded = async {
-            for profile in home.discover_identity_profiles()? {
-                let server = Server::load(profile, runtime.clone()).await?;
-                servers.insert(server.name().to_owned(), server);
-            }
+            // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
             dhttp::DhttpNetwork::init().await?;
+            for profile in home.discover_identity_profiles()? {
+                if let Some(server) = load_profile(profile, runtime.clone()).await? {
+                    servers.insert(server.name().to_owned(), server);
+                }
+            }
             Ok::<(), Error>(())
         }.await;
         if let Err(error) = loaded {
@@ -79,6 +81,9 @@ pub async fn run() -> Result<()> {
         #[cfg(unix)]
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut removed_bounds = Vec::new();
+        let mut ocsp_tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+        ocsp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ocsp_tick.tick().await; // Startup already prepared the cache; first periodic fetch is tomorrow.
         'maintenance: loop {
             let endpoints = servers.values()
                 .filter(|s| !s.exec_tasks.is_closed() && s.config.listen & 1 != 0)
@@ -105,6 +110,46 @@ pub async fn run() -> Result<()> {
                 tokio::select! {
                     result = &mut interrupt => { result?; return Ok(()); }
                     _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
+                    _ = ocsp_tick.tick() => {
+                        while jobs.next().await.is_some() {}
+                        let mut renewals = servers.values().filter(|s| !s.exec_tasks.is_closed()).map(|server| {
+                            let name = server.name().to_owned();
+                            let profile = server.profile.clone();
+                            let endpoint = server.endpoint.clone();
+                            async move {
+                                let result = async {
+                                    let local = endpoint.local_authority()?;
+                                    if profile.load_certs().await.map_err(|e| Error::InvalidIdentity(e.to_string()))? != local.certificates() {
+                                        return Err(Error::InvalidConfig("certificate chain changed; restart required".into()));
+                                    }
+                                    let response = fetch_ocsp(local.certificates()).await?;
+                                    cache_ocsp(&profile, &response)?;
+                                    endpoint.reload().await.map_err(Error::from)
+                                }.await;
+                                (name, result)
+                            }
+                        }).collect::<FuturesUnordered<_>>();
+                        while let Some((name, result)) = renewals.next().await {
+                            let server = servers.get_mut(&name).expect("live server snapshot");
+                            match result {
+                                Ok(endpoint) => {
+                                    server.workspace.configure_outbound(Arc::new(endpoint.clone())).await;
+                                    server.chat.configure_outbound(Arc::new(endpoint.clone())).await;
+                                    server.publisher = if server.config.listen & 2 != 0 { Some(dns::publisher(&endpoint)?) } else { None };
+                                    server.endpoint = endpoint;
+                                    *server.router.write().unwrap() = current_router(server);
+                                    eprintln!("OCSP renewed; endpoint rebuilt for {name}");
+                                }
+                                Err(error) => {
+                                    eprintln!("OCSP renewal for {name}: {error}");
+                                    let local = server.endpoint.local_authority()?;
+                                    qtls::validate_ocsp(local.ocsp(), local.certificates(), qtls::UnixTime::now())
+                                        .map_err(|e| Error::InvalidIdentity(format!("{name}: cached OCSP no longer usable: {e}")))?;
+                                }
+                            }
+                        }
+                        continue 'maintenance;
+                    }
                     _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
                         // Each operation already has its own finite deadline; poll all remaining work.
                         while jobs.next().await.is_some() {}
@@ -125,10 +170,18 @@ pub async fn run() -> Result<()> {
                                         return Err(Error::InvalidConfig(format!(
                                             "server {} was removed; restart required", server.name())));
                                     }
-                                    server.reload().await?;
+                                    match server.reload().await {
+                                        Ok(()) => {}
+                                        Err(error @ Error::InvalidIdentity(_)) => {
+                                            eprintln!("skipping identity reload {}: {error}", server.name());
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
                                     continue;
                                 }
-                                let mut server = Server::load(profile, runtime.clone()).await?;
+                                let Some(mut server) = load_profile(profile, runtime.clone()).await? else {
+                                    continue;
+                                };
                                 if server.config.listen != 0 {
                                     match server.listen().await {
                                         Ok(listener) => { tokio::spawn(listener); }
@@ -202,6 +255,21 @@ mod tests;
 #[path = "../tests/unit/server/exec_route.rs"]
 mod exec_tests;
 
+async fn load_profile(
+    profile: IdentityProfile,
+    runtime: Arc<WasmRuntime>,
+) -> Result<Option<Server>> {
+    let name = profile.name().to_owned();
+    match Server::load(profile, runtime).await {
+        Ok(server) => Ok(Some(server)),
+        Err(error @ Error::InvalidIdentity(_)) => {
+            eprintln!("skipping identity {name}: {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn exec(enabled: bool, name: String, cwd: PathBuf, tasks: TaskTracker) -> Router {
     Router::new().route(
         "/exec",
@@ -261,16 +329,190 @@ fn chat_router(chat: Arc<Chat>, workspace: Arc<Workspace>) -> Router {
     ))
 }
 
+fn cache_ocsp(profile: &IdentityProfile, response: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut cache = tempfile::NamedTempFile::new_in(profile.ssl_dir())?;
+    cache.write_all(response)?;
+    cache.as_file().sync_all()?;
+    cache
+        .persist(profile.ocsp_path())
+        .map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(profile.ssl_dir())?.sync_all()?;
+    Ok(())
+}
+
+async fn fetch_ocsp(certificates: &[dhttp::CertificateDer<'_>]) -> Result<Vec<u8>> {
+    use der::{Decode, Encode};
+    use sha1::{Digest, Sha1};
+    use x509_parser::prelude::FromDer;
+    let error = |error: String| Error::InvalidIdentity(format!("OCSP: {error}"));
+    let leaf = certificates
+        .first()
+        .ok_or_else(|| error("missing certificate".into()))?;
+    let issuer = certificates
+        .get(1)
+        .ok_or_else(|| error("missing issuer certificate".into()))?;
+    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
+        .map_err(|e| error(e.to_string()))?;
+    if !parsed.validity().is_valid() {
+        return Err(error("certificate is outside its validity period".into()));
+    }
+    let url = parsed
+        .extensions()
+        .iter()
+        .find_map(|extension| {
+            let x509_parser::extensions::ParsedExtension::AuthorityInfoAccess(aia) =
+                extension.parsed_extension()
+            else {
+                return None;
+            };
+            aia.accessdescs.iter().find_map(|access| {
+                if access.access_method.to_id_string() != "1.3.6.1.5.5.7.48.1" {
+                    return None;
+                }
+                match &access.access_location {
+                    x509_parser::extensions::GeneralName::URI(uri) => Some((*uri).to_owned()),
+                    _ => None,
+                }
+            })
+        })
+        .ok_or_else(|| error("certificate has no OCSP responder URI".into()))?;
+    let leaf = x509_cert::Certificate::from_der(leaf.as_ref()).map_err(|e| error(e.to_string()))?;
+    let issuer =
+        x509_cert::Certificate::from_der(issuer.as_ref()).map_err(|e| error(e.to_string()))?;
+    let request = x509_ocsp::OcspRequest {
+        tbs_request: x509_ocsp::TbsRequest {
+            request_list: vec![x509_ocsp::Request {
+                req_cert: x509_ocsp::CertId {
+                    hash_algorithm: x509_cert::spki::AlgorithmIdentifierOwned {
+                        oid: "1.3.14.3.2.26"
+                            .parse::<der::asn1::ObjectIdentifier>()
+                            .map_err(|e| error(e.to_string()))?,
+                        parameters: Some(der::asn1::Any::null()),
+                    },
+                    issuer_name_hash: der::asn1::OctetString::new(
+                        Sha1::digest(
+                            issuer
+                                .tbs_certificate
+                                .subject
+                                .to_der()
+                                .map_err(|e| error(e.to_string()))?,
+                        )
+                        .to_vec(),
+                    )
+                    .map_err(|e| error(e.to_string()))?,
+                    issuer_key_hash: der::asn1::OctetString::new(
+                        Sha1::digest(
+                            issuer
+                                .tbs_certificate
+                                .subject_public_key_info
+                                .subject_public_key
+                                .raw_bytes(),
+                        )
+                        .to_vec(),
+                    )
+                    .map_err(|e| error(e.to_string()))?,
+                    serial_number: leaf.tbs_certificate.serial_number,
+                },
+                single_request_extensions: None,
+            }],
+            ..Default::default()
+        },
+        optional_signature: None,
+    }
+    .to_der()
+    .map_err(|e| error(e.to_string()))?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(false)
+            .build()
+            .map_err(|e| error(e.to_string()))?;
+        let uri = reqwest::Url::parse(&url).map_err(|e| error(e.to_string()))?;
+        if !matches!(uri.scheme(), "http" | "https") {
+            return Err(error("unsupported responder scheme".into()));
+        }
+        let mut response = client
+            .post(uri)
+            .header("Content-Type", "application/ocsp-request")
+            .header("Accept", "application/ocsp-response")
+            .body(request)
+            .send()
+            .await
+            .map_err(|e| error(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(error(format!("responder returned {}", response.status())));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| error(e.to_string()))? {
+            if body.len().saturating_add(chunk.len()) > 64 * 1024 {
+                return Err(error("response exceeds 64KiB".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        qtls::validate_ocsp(&body, certificates, qtls::UnixTime::now())
+            .map_err(|e| error(e.to_string()))?;
+        Ok(body)
+    })
+    .await
+    .map_err(|_| error("responder timed out after 15 seconds".into()))?
+}
+
+fn current_router(server: &Server) -> Router {
+    let proxies = server.config.proxy_locations.clone();
+    Router::new()
+        .merge(access_router(server.access.clone()))
+        .merge(config_router(
+            server.profile.clone(),
+            server.endpoint.clone(),
+        ))
+        .merge(workspace::router(server.workspace.clone()))
+        .merge(chat_router(server.chat.clone(), server.workspace.clone()))
+        .merge(server.sandbox.api_router(server.endpoint.clone()))
+        .merge(exec(
+            server.config.exec,
+            server.endpoint.name().to_owned(),
+            server.profile.path().to_path_buf(),
+            server.exec_tasks.clone(),
+        ))
+        .merge(file_router(server.profile.join("file")))
+        .merge(dhttp_router(server.endpoint.clone()))
+        .fallback(any(move |request: Request<AxumBody>| {
+            proxy_pass(proxies.clone(), request)
+        }))
+        .layer(axum::middleware::from_fn_with_state(
+            server.access.clone(),
+            authorize,
+        ))
+}
+
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
         let certs = profile
             .load_certs()
             .await
             .map_err(|e| Error::InvalidIdentity(e.to_string()))?;
-        let endpoint = dhttp::Endpoint::load(profile.name()).await?;
+        match profile.load_ocsp().await {
+            Ok(response)
+                if qtls::validate_ocsp(&response, &certs, qtls::UnixTime::now()).is_ok() => {}
+            _ => {
+                let response = fetch_ocsp(&certs).await?;
+                cache_ocsp(&profile, &response)?;
+            }
+        }
+        let endpoint =
+            dhttp::Endpoint::load(profile.name())
+                .await
+                .map_err(|error| match error {
+                    dhttp::Error::InvalidName { .. }
+                    | dhttp::Error::Home { .. }
+                    | dhttp::Error::Credentials { .. } => Error::InvalidIdentity(error.to_string()),
+                    error => Error::Dhttp(error),
+                })?;
         let config = load_server_config(&profile)?;
         if config.listen != 0 {
-            dns::authority(&endpoint)?;
+            dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;
         }
         let publisher = if config.listen & 2 != 0 {
             Some(dns::publisher(&endpoint)?)
@@ -313,42 +555,23 @@ impl Server {
         let exec_tasks = TaskTracker::new();
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
-        let proxies = config.proxy_locations.clone();
-        let router = Router::new()
-            .merge(access_router(access.clone()))
-            .merge(config_router(profile.clone(), endpoint.clone()))
-            .merge(workspace::router(workspace.clone()))
-            .merge(chat_router(chat.clone(), workspace.clone()))
-            .merge(sandbox.api_router(endpoint.clone()))
-            .merge(exec(
-                config.exec,
-                endpoint.name().to_owned(),
-                profile.path().to_path_buf(),
-                exec_tasks.clone(),
-            ))
-            .merge(file_router(profile.join("file")))
-            .merge(dhttp_router(endpoint.clone()))
-            .fallback(any(move |request: Request<AxumBody>| {
-                proxy_pass(proxies.clone(), request)
-            }))
-            .layer(axum::middleware::from_fn_with_state(
-                access.clone(),
-                authorize,
-            ));
-        chat.start_worker();
-        Ok(Self {
+        let server = Self {
             profile,
             endpoint,
             config,
             access,
             workspace,
             chat,
-            router: Arc::new(RwLock::new(router)),
+            router: Arc::new(RwLock::new(Router::new())),
             sandbox,
             exec_tasks,
             publisher,
-        })
+        };
+        *server.router.write().unwrap() = current_router(&server);
+        server.chat.start_worker();
+        Ok(server)
     }
+
     pub(super) fn name(&self) -> &str {
         self.endpoint.name()
     }
@@ -371,30 +594,8 @@ impl Server {
             ));
         }
         self.sandbox.load_libs(&self.profile)?;
-        let proxies = config.proxy_locations.clone();
-        let router = Router::new()
-            .merge(access_router(self.access.clone()))
-            .merge(config_router(self.profile.clone(), self.endpoint.clone()))
-            .merge(workspace::router(self.workspace.clone()))
-            .merge(chat_router(self.chat.clone(), self.workspace.clone()))
-            .merge(self.sandbox.api_router(self.endpoint.clone()))
-            .merge(exec(
-                config.exec,
-                self.endpoint.name().to_owned(),
-                self.profile.path().to_path_buf(),
-                self.exec_tasks.clone(),
-            ))
-            .merge(file_router(self.profile.join("file")))
-            .merge(dhttp_router(self.endpoint.clone()))
-            .fallback(any(move |request: Request<AxumBody>| {
-                proxy_pass(proxies.clone(), request)
-            }))
-            .layer(axum::middleware::from_fn_with_state(
-                self.access.clone(),
-                authorize,
-            ));
-        *self.router.write().unwrap() = router;
         self.config = config;
+        *self.router.write().unwrap() = current_router(self);
         Ok(())
     }
 

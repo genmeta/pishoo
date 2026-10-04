@@ -291,7 +291,7 @@ DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations
 
 ## 9. 启停、exec 与错误
 
-启动顺序：读各 Server 的数据库配置 → 串行加载身份/AccessService/组件 → 初始化一次全局Network → 为每个需监听的 Server 启动 listen 任务。身份或 Lib 加载失败直接结束启动；静态身份没有代理行也可启动。
+启动顺序：安装解析源并订阅地址事件 → 初始化一次全局 Network → 串行校验身份凭据、加载数据库配置/AccessService/组件 → 为每个需监听的 Server 启动 listen 任务。2026-10-04 用户要求身份验证失败只跳过该身份：凭据读取、证书/私钥、OCSP 及发布用途验证失败记录身份名和原因，继续启动或 SIGHUP 后续身份；跳过身份不保留 Server，下次 SIGHUP 重新尝试。已加载身份在 SIGHUP 读取凭据失败时跳过本次重载，保留原有内存凭据和资源。配置、数据库及 Lib 错误仍结束启动或本次重载；静态身份没有代理行也可启动。不增加结构、字段、错误变体或跨模块函数。
 
 入口先验证 Server 身份；`/exec` 与 Lib 路由一并装入 Server 的 Router，经过统一 daccess 授权层后由 exec 模块额外检查同名已验证远端身份，并按[exec 清单](exec-interfaces.md)执行。Server.listen 不特殊分派 `/exec`。不存在交互终端、终端协议版本头或 TerminalManager。
 

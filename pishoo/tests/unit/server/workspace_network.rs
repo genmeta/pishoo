@@ -78,6 +78,134 @@ async fn owner_request(
 }
 
 #[tokio::test]
+#[ignore = "run alone; requires OpenSSL and owns global TLS/DHTTP_HOME"]
+async fn identity_validation_failure_skips_profile_and_loads_other_identities() {
+    let root = tempfile::tempdir().unwrap();
+    credentials::generate(
+        root.path(),
+        &[
+            ("valid", "valid.dhttp.net"),
+            ("bad-key", "bad-key.dhttp.net"),
+            ("bad-config", "bad-config.dhttp.net"),
+            ("bad-lib", "bad-lib.dhttp.net"),
+        ],
+    );
+    let old_home = std::env::var_os("DHTTP_HOME");
+    unsafe {
+        std::env::set_var("DHTTP_HOME", root.path());
+    }
+    let _environment = scopeguard::guard(old_home, |previous| unsafe {
+        match previous {
+            Some(value) => std::env::set_var("DHTTP_HOME", value),
+            None => std::env::remove_var("DHTTP_HOME"),
+        }
+    });
+    qtls::RootCerts::set([dhttp::CertificateDer::from(
+        std::fs::read(root.path().join("ca.der")).unwrap(),
+    )])
+    .unwrap();
+
+    for name in ["missing", "malformed", "expired"] {
+        std::fs::create_dir_all(root.path().join(name).join("ssl")).unwrap();
+    }
+    std::fs::write(root.path().join("malformed/ssl/fullchain.crt"), b"not PEM").unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["expired.dhttp.net".into()]).unwrap();
+    params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2001, 1, 1);
+    let expired = params.self_signed(&key).unwrap();
+    std::fs::write(
+        root.path().join("expired/ssl/fullchain.crt"),
+        format!("{}{}", expired.pem(), expired.pem()),
+    )
+    .unwrap();
+    std::fs::write(root.path().join("expired/ssl/ocsp.der"), [1]).unwrap();
+    let bad_key = root.path().join("bad-key/ssl/privkey.pem");
+    let original_key = std::fs::read(&bad_key).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&bad_key, b"not a private key").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad_key, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let error = Server::load(
+        IdentityProfile::try_from(root.path().join("expired")).unwrap(),
+        runtime.clone(),
+    )
+    .await
+    .err()
+    .expect("expired certificate must fail validation before OCSP fetching");
+    assert!(
+        error.to_string().contains("outside its validity period"),
+        "{error}"
+    );
+    // The same loading path handles startup and identities discovered on SIGHUP.
+    for name in ["missing", "malformed", "expired", "bad-key"] {
+        let identity = IdentityProfile::try_from(root.path().join(name)).unwrap();
+        assert!(
+            load_profile(identity.clone(), runtime.clone())
+                .await
+                .unwrap()
+                .is_none(),
+            "{name} must be skipped"
+        );
+        assert!(
+            !identity.db_dir().exists(),
+            "{name} must not be initialized"
+        );
+    }
+    let mut valid = load_profile(profile(root.path(), "valid"), runtime.clone())
+        .await
+        .unwrap()
+        .expect("a valid identity after invalid profiles must load");
+    assert_eq!(valid.name(), "valid.dhttp.net");
+    valid.reload().await.unwrap();
+    valid.close().await.unwrap();
+
+    // A corrected identity must not be remembered as permanently invalid.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&bad_key, original_key).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad_key, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    let mut repaired = load_profile(profile(root.path(), "bad-key"), runtime.clone())
+        .await
+        .unwrap()
+        .expect("a repaired identity must load on a later scan");
+    repaired.close().await.unwrap();
+
+    let config = profile(root.path(), "bad-config");
+    rusqlite::Connection::open(config.config_db_path())
+        .unwrap()
+        .execute_batch("UPDATE settings SET listen=99;")
+        .unwrap();
+    assert!(matches!(
+        load_profile(config, runtime.clone()).await,
+        Err(Error::InvalidConfig(_))
+    ));
+    let lib = profile(root.path(), "bad-lib");
+    std::fs::create_dir_all(lib.join("lib/broken")).unwrap();
+    std::fs::write(lib.join("lib/broken/lib.wasm"), b"not WASM").unwrap();
+    assert!(matches!(
+        load_profile(lib, runtime).await,
+        Err(Error::InvalidComponent(_))
+    ));
+}
+
+#[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local UDP and owns global TLS/DNS/DHTTP_HOME"]
 async fn config_api_real_h3_persistence_authorization_and_reload() {
     let root = tempfile::tempdir().unwrap();

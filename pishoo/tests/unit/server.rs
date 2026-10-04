@@ -105,6 +105,36 @@ async fn server(root: &std::path::Path) -> Server {
 }
 
 #[tokio::test]
+async fn invalid_identity_reload_keeps_loaded_resources_and_can_be_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    let original = std::fs::read(server.profile.cert_path()).unwrap();
+    let old_lib = server.sandbox.libs["echo"].clone();
+    let old_authority = server.endpoint.local_authority().unwrap();
+    std::fs::remove_file(server.profile.cert_path()).unwrap();
+    for malformed in [false, true] {
+        if malformed {
+            std::fs::write(server.profile.cert_path(), b"not PEM").unwrap();
+        }
+        assert!(matches!(
+            server.reload().await,
+            Err(Error::InvalidIdentity(_))
+        ));
+        assert!(Arc::ptr_eq(&old_lib, &server.sandbox.libs["echo"]));
+        assert_eq!(
+            server.endpoint.local_authority().unwrap().certificates(),
+            old_authority.certificates()
+        );
+        assert!(!server.exec_tasks.is_closed());
+        assert!(!server.sandbox.tasks.is_closed());
+    }
+    std::fs::write(server.profile.cert_path(), original).unwrap();
+    server.reload().await.unwrap();
+    assert!(Arc::ptr_eq(&old_lib, &server.sandbox.libs["echo"]));
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
