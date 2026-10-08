@@ -14,6 +14,7 @@ import type { WorkspacePage } from './lib/routes'
 import ContactsPage from './pages/ContactsPage'
 import ChatPage from './pages/ChatPage'
 import AddContactPage from './pages/AddContactPage'
+import AppsPage from './pages/AppsPage'
 import CapabilitiesPage from './pages/CapabilitiesPage'
 import HomePage from './pages/HomePage'
 import OutboundRequestsPage from './pages/OutboundRequestsPage'
@@ -147,7 +148,8 @@ export default function App() {
               ownerName={ownerName()} refresh={() => void profileActions.refetch()}
               onSaved={(value: ProfileSettings) => profileActions.mutate(value)} notify={notify} />
           </Match>
-          <Match when={route().page === 'extensions' || route().page === 'apps'}>
+          <Match when={route().page === 'apps'}><AppsPage /></Match>
+          <Match when={route().page === 'extensions'}>
             <header class="page-header"><h1>{t(PAGE_TITLES[route().page])}</h1></header>
             <section class="overview-panel placeholder-panel" role="status">
               <h2>{t('page.notEnabled')}</h2>

@@ -10,7 +10,11 @@ use wasmtime::{
     Config, Engine, Store, StoreLimits,
     component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi::{
+    WasiCtx, WasiCtxView, WasiView,
+    cli::{WasiCli, WasiCliView},
+    filesystem::WasiFilesystemView,
+};
 use wasmtime_wasi_http::{
     WasiHttpCtx,
     p2::{
@@ -34,6 +38,35 @@ impl WasmRuntime {
         let engine = Engine::new(&config).map_err(Error::Guest)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi_http::p2::add_to_linker_async(&mut linker).map_err(Error::Guest)?;
+        // The HTTP proxy world omits filesystem interfaces, but Libs have a
+        // private WASM /db grant. Register only those missing interfaces.
+        wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<
+            StoreData,
+            wasmtime_wasi::filesystem::WasiFilesystem,
+        >(&mut linker, StoreData::filesystem)
+        .map_err(Error::Guest)?;
+        // Rust's WASI libc imports CLI metadata and terminal resource types.
+        // WasiCtx retains its empty environment and non-terminal default I/O.
+        use wasmtime_wasi::p2::bindings::cli;
+        cli::environment::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::exit::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::terminal_input::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::terminal_output::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::terminal_stdin::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::terminal_stdout::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        cli::terminal_stderr::add_to_linker::<StoreData, WasiCli>(&mut linker, StoreData::cli)
+            .map_err(Error::Guest)?;
+        wasmtime_wasi::p2::bindings::filesystem::preopens::add_to_linker::<
+            StoreData,
+            wasmtime_wasi::filesystem::WasiFilesystem,
+        >(&mut linker, StoreData::filesystem)
+        .map_err(Error::Guest)?;
         identity::IdentityHost::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             &mut linker,
             |state| state,
@@ -103,7 +136,7 @@ impl Lib {
         builder
             .preopened_dir(
                 data,
-                "/data",
+                "/db",
                 wasmtime_wasi::DirPerms::all(),
                 wasmtime_wasi::FilePerms::all(),
             )

@@ -4,6 +4,7 @@ import type {
   CapabilityDescriptor,
   Contact,
   DirectoryEntry,
+  LibSummary,
   OutboundContactInput,
   OutboundContactRequest,
   Page,
@@ -49,6 +50,8 @@ export function query(values: Record<string, string | number>): string {
 
 export const api = {
   context: () => request<RuntimeContext>('/workspace-api/context'),
+
+  libs: (signal?: AbortSignal) => request<LibSummary[]>('/workspace-api/libs', { signal }),
 
   capabilities: (signal?: AbortSignal) =>
     request<CapabilityDescriptor[]>('/workspace-api/capabilities', { signal }),

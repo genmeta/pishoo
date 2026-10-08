@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
+  await page.route('**/workspace-api/libs', (route) => route.fulfill({ json: [] }))
   await page.route('**/workspace-api/context', (route) => route.fulfill({ json: {
     profile: 'spike.liu.dhttp.net', owner_name: 'spike.liu.dhttp.net',
     badges: { pending_reviews: 2, incoming_contacts: null },

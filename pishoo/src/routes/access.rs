@@ -80,7 +80,7 @@ pub(crate) async fn authorize(
                 .into_response();
         }
         Err(e) => {
-            eprintln!("authorization failed: {e}");
+            tracing::error!(error = %e, "authorization failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };

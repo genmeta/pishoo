@@ -711,6 +711,9 @@ textarea {
 .capability-endpoints ul { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 18px; }
 .capability-card-footer { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--text-muted); font-size: 12px; }
 
+.wasm-api-link { color: var(--text); text-underline-offset: 3px; }
+.wasm-api-description { margin-left: 8px; overflow-wrap: anywhere; }
+
 .capability-option-list {
   display: grid;
   gap: 12px;

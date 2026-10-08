@@ -48,6 +48,118 @@ async fn status(router: &Router, method: Method, path: &str) -> StatusCode {
 }
 
 #[tokio::test]
+async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
+    use access_control::{SubjectId, Visitor};
+
+    let name = "alice.dhttp.net";
+    let subject = "a".repeat(64);
+    let mut params = rcgen::CertificateParams::new(vec![name.to_owned()]).unwrap();
+    let ski = format!("0:0:{subject}");
+    let mut der = vec![4, ski.len() as u8];
+    der.extend_from_slice(ski.as_bytes());
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            &[2, 5, 29, 14],
+            der,
+        ));
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let endpoint = dhttp::Endpoint::new(
+        qbase::endpoint::Endpoint::new(
+            &qtls::default_provider(),
+            name,
+            vec![cert.der().clone()],
+            qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+            vec![1],
+        )
+        .unwrap(),
+    );
+    let owner = Visitor::new(name, SubjectId::new(subject.as_bytes()).unwrap());
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let empty_router = sandbox.api_router(endpoint.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(
+        &sandbox,
+        directory.path(),
+        r#"{
+            "/": {
+                "get": {"responses":{"200":{"description":"Note page"},"400":{"description":"Bad input"}}},
+                "post": {"responses":{"201":{"description":"Created"},"400":{"description":"Bad input"}}}
+            },
+            "/run": {
+                "get": {"summary":"Read run","description":"Ignored"},
+                "post": {"description":"Create run"},
+                "options": {"responses":{"200":{"$ref":"https://example.com/response"}}}
+            }
+        }"#,
+    );
+    sandbox.libs.insert("z-demo".into(), lib.clone());
+    sandbox.libs.insert("a-demo".into(), lib);
+    let router = sandbox.api_router(endpoint);
+    sandbox.close();
+
+    for (app, expected) in [
+        (&empty_router, serde_json::json!([])),
+        (
+            &router,
+            serde_json::json!([
+                {"id":"a-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                    {"method":"GET","path":"/api/a-demo/","description":"Note page"},
+                    {"method":"POST","path":"/api/a-demo/","description":"Created"},
+                    {"method":"GET","path":"/api/a-demo/run","description":"Read run"},
+                    {"method":"OPTIONS","path":"/api/a-demo/run","description":null},
+                    {"method":"POST","path":"/api/a-demo/run","description":"Create run"}
+                ]},
+                {"id":"z-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                    {"method":"GET","path":"/api/z-demo/","description":"Note page"},
+                    {"method":"POST","path":"/api/z-demo/","description":"Created"},
+                    {"method":"GET","path":"/api/z-demo/run","description":"Read run"},
+                    {"method":"OPTIONS","path":"/api/z-demo/run","description":null},
+                    {"method":"POST","path":"/api/z-demo/run","description":"Create run"}
+                ]}
+            ]),
+        ),
+    ] {
+        let mut request = request(Method::GET, "/workspace-api/libs");
+        request.extensions_mut().insert(owner.clone());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            expected
+        );
+    }
+    for visitor in [
+        None,
+        Some(Visitor::new(
+            "bob.dhttp.net",
+            SubjectId::new(subject.as_bytes()).unwrap(),
+        )),
+        Some(Visitor::new(
+            name,
+            SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
+        )),
+    ] {
+        let mut request = request(Method::GET, "/workspace-api/libs");
+        if let Some(visitor) = visitor {
+            request.extensions_mut().insert(visitor);
+        }
+        assert_eq!(
+            router.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        status(&router, Method::POST, "/workspace-api/libs").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert!(sandbox.tasks.is_empty());
+}
+
+#[tokio::test]
 async fn api_methods_require_manifest_entries_and_namespace_never_falls_through() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();

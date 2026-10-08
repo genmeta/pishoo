@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f3ee">
+<title>note · 私人便签</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23355d43'/%3E%3Ctext x='16' y='47' font-family='sans-serif' font-size='46' fill='white'%3En%3C/text%3E%3C/svg%3E">
+<style>
+:root{color-scheme:light dark;--bg:#f5f3ee;--surface:#fffefb;--text:#292e29;--muted:#71776e;--line:#dedfd5;--accent:#355d43;--accent-bg:#e9eee6;--danger:#a43e3e;--shadow:0 12px 40px #2b38260a}
+@media(prefers-color-scheme:dark){:root{--bg:#1c201c;--surface:#242924;--text:#edf0e8;--muted:#a1aa9b;--line:#3b4338;--accent:#b2cfaa;--accent-bg:#344331;--danger:#f4aaaa;--shadow:none}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{min-height:44px;border:1px solid var(--line);border-radius:12px;padding:8px 16px;color:var(--text);background:var(--surface);cursor:pointer}button:hover{background:var(--accent-bg)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}.danger{color:var(--danger)}input,textarea{background:transparent;color:var(--text);border:0;outline:none}input:focus-visible,textarea:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button,input,textarea{-webkit-tap-highlight-color:transparent}header{max-width:1280px;margin:auto;padding:32px 36px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{font-size:32px;font-weight:650;letter-spacing:-1.5px}.brand span{color:var(--accent)}.identity{color:var(--muted);font-size:13px;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.shell{max-width:1208px;margin:0 auto 36px;display:grid;grid-template-columns:330px 1fr;min-height:calc(100dvh - 155px);border:1px solid var(--line);border-radius:22px;overflow:hidden;background:var(--surface);box-shadow:var(--shadow)}aside{border-right:1px solid var(--line);padding:24px 18px;min-width:0;background:var(--bg)}.list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}.list-head h1{font-size:18px;margin:0;font-weight:600}.search{display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:8px 12px;margin-bottom:12px}.search input{width:100%;min-height:30px;min-width:0}.list-message{color:var(--muted);font-size:14px;white-space:pre-wrap;margin:18px 4px}.list{display:grid;gap:8px}.item{display:block;width:100%;text-align:left;border-color:transparent;padding:16px;border-radius:14px;background:transparent}.item.active{background:var(--surface);border-color:var(--line);box-shadow:var(--shadow)}.item-title{font-weight:600;display:block;overflow-wrap:anywhere;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.item-preview{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:14px;color:var(--muted);white-space:pre-wrap;margin:5px 0 9px;overflow-wrap:anywhere}.item-time{font-size:12px;color:var(--muted)}.workspace{min-width:0;position:relative;display:flex;flex-direction:column}.welcome{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:48px 24px;color:var(--muted)}.welcome-mark{font-size:48px;color:var(--accent);margin:0 0 10px}.welcome h2{font-size:22px;color:var(--text);font-weight:500;margin:4px 0}.welcome p{margin:8px 0 24px}.editor{display:flex;flex-direction:column;flex:1;min-height:550px}.toolbar{padding:20px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:16px}.toolbar-start{display:flex;align-items:center;gap:12px}.toolbar-start button{border:0;padding:8px}.status{font-size:13px;color:var(--muted);overflow-wrap:anywhere}.status.error{color:var(--danger)}.fields{padding:28px 36px 16px;display:flex;flex:1;flex-direction:column;gap:16px}.fields label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}#title{font-size:26px;font-weight:600;min-height:44px;width:100%}#body{width:100%;resize:none;flex:1;min-height:320px;line-height:1.9}.editor-foot{padding:16px 36px 24px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line)}.count{color:var(--muted);font-size:13px}.retry{margin-top:8px}.conflict-banner{margin:0 28px 20px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--accent-bg)}.conflict-banner p{margin:0 0 10px}.conflict-banner button{margin-right:8px;margin-top:4px}dialog{max-width:540px;width:calc(100% - 32px);border:1px solid var(--line);border-radius:20px;background:var(--surface);color:var(--text);padding:28px;box-shadow:var(--shadow)}dialog::backdrop{background:#0007}dialog h2{font-size:20px;font-weight:600;margin:0 0 12px}dialog p{color:var(--muted);margin:0 0 22px}.dialog-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end}.server-copy{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;padding:16px;background:var(--bg);border-radius:12px;margin-bottom:20px;font-size:15px}.server-copy h3{font-size:17px;margin:0 0 8px}.server-copy p{color:var(--text);margin:0}.notice{font-size:12px;color:var(--muted);text-align:center;padding:0 16px 20px}[hidden]{display:none!important}
+@media(max-width:700px){header{padding:20px 20px 16px}.brand{font-size:29px}.shell{display:block;margin:0 12px 20px;min-height:calc(100dvh - 112px);border-radius:18px}.shell aside{border-right:0;min-height:calc(100dvh - 114px);padding:20px 16px}.workspace{display:none}.shell.editor-open aside{display:none}.shell.editor-open .workspace{display:flex;min-height:calc(100dvh - 114px)}.toolbar{padding:14px 16px}.toolbar-start{gap:6px}.fields{padding:24px 22px 16px}#title{font-size:24px}#body{min-height:calc(100dvh - 360px)}.editor-foot{padding:14px 22px 20px}.editor{min-height:calc(100dvh - 114px)}.conflict-banner{margin:0 20px 20px}.identity{max-width:65%;font-size:12px}}
+.primary:hover{background:var(--accent);filter:brightness(1.06)}.primary:disabled:hover{filter:none}
+</style>
+</head>
+<body>
+<header><div class="brand">note<span>.</span></div><div class="identity" id="identity"></div></header>
+<main class="shell" id="shell">
+<aside aria-label="便签列表">
+ <div class="list-head"><h1>我的便签</h1><button class="primary" id="new">＋ 新建</button></div>
+ <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索便签" placeholder="搜索标题或正文" maxlength="400"></label>
+ <div class="list-message" id="listMessage" role="status" aria-live="polite">正在读取便签…</div>
+ <button class="retry" id="retry" hidden>重新加载</button><div class="list" id="list"></div>
+</aside>
+<section class="workspace" aria-label="便签编辑">
+ <div class="welcome" id="welcome"><div class="welcome-mark" aria-hidden="true">✎</div><h2>留住每一个念头</h2><p>记下计划、灵感，还有想留给明天的事。</p><button id="welcomeNew">写一条便签</button></div>
+ <div class="editor" id="editor" hidden>
+  <div class="toolbar"><div class="toolbar-start"><button id="back" aria-label="返回便签列表">← 返回</button><span class="status" id="status" role="status" aria-live="polite">未保存</span></div><button class="primary" id="save">保存</button></div>
+  <div class="fields"><label for="title">标题</label><input id="title" placeholder="标题" autocomplete="off"><label for="body">正文</label><textarea id="body" placeholder="写点什么…" spellcheck="false"></textarea></div>
+  <div class="conflict-banner" id="conflict" hidden><p id="conflictMessage"></p><button id="viewServer">查看服务器内容</button><button id="copyDraft">复制我的草稿</button></div>
+  <div class="editor-foot"><span class="count" id="count">0 字</span><button class="danger" id="delete" hidden>删除便签</button></div>
+ </div>
+</section>
+</main>
+<div class="notice">你的便签保存在此身份的私人存储中 · 由 WASM 提供</div>
+<dialog id="leaveDialog"><h2>还有未保存的内容</h2><p>离开前，要保存这条便签吗？</p><div class="dialog-actions"><button data-choice="cancel">继续编辑</button><button data-choice="discard">放弃修改</button><button class="primary" data-choice="save">保存后离开</button></div></dialog>
+<dialog id="deleteDialog"><h2>删除这条便签？</h2><p>删除后将从便签列表移除，界面中无法撤销。</p><div class="dialog-actions"><button data-choice="cancel">取消</button><button class="danger" data-choice="delete">删除</button></div></dialog>
+<dialog id="serverDialog"><h2>服务器上的当前内容</h2><p>你的草稿仍保留在编辑器中。查看并合并后，可以基于当前版本继续编辑。</p><div class="server-copy"><h3 id="serverTitle"></h3><p id="serverBody"></p></div><div class="dialog-actions"><button data-choice="cancel">保留草稿</button><button class="primary" data-choice="merge">基于当前版本继续编辑</button></div></dialog>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id), title=$('title'), body=$('body');
+let current=null, baseline=null, phase='idle', serverVersion=null, searchTimer;
+$('identity').textContent=location.hostname;
+const dirty=()=>current!==null && (title.value!==(baseline?.title??'') || body.value!==(baseline?.body??''));
+const date=value=>new Intl.DateTimeFormat('zh-CN',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(value));
+function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error);}
+function controls(){const busy=phase!=='idle';for(const id of ['save','back','delete','new','welcomeNew','viewServer','copyDraft'])$(id).disabled=busy;title.disabled=busy;body.disabled=busy;$('save').disabled=busy||!dirty();$('count').textContent=`${Array.from(body.value).length} 字`;}
+async function api(path,options={}){
+ let response;try{response=await fetch('/api/note'+path,{cache:'no-store',...options});}catch(error){throw Object.assign(new Error('连接中断，保存结果可能尚未确认'),{status:0});}
+ let text;try{text=await response.text();}catch(error){throw Object.assign(new Error('响应中断，保存结果尚未确认'),{status:0});}
+ let data;try{data=text?JSON.parse(text):null;}catch{data=null;}
+ if(!response.ok||response.status===202){const message=response.status===403?'没有访问权限，请授权当前手机身份':response.status===202?'请求正在等待授权，请在批准后重试':data?.message||`请求失败（${response.status}）`;throw Object.assign(new Error(message),{status:response.status});}
+ if(response.status!==204&&!data)throw Object.assign(new Error('服务器返回了无法读取的数据'),{status:0});
+ return data;
+}
+async function refreshList(){
+ const query=$('search').value;$('retry').hidden=true;
+ try{const data=await api('/notes?q='+encodeURIComponent(query));if($('search').value!==query)return;
+  $('list').replaceChildren();$('listMessage').textContent=data.notes.length?'':query?'没有找到便签':'写下你的第一条便签';
+  for(const note of data.notes){const button=document.createElement('button');button.className='item';button.classList.toggle('active',current?.id===note.id);button.dataset.id=note.id;
+   const name=document.createElement('span');name.className='item-title';name.textContent=note.title.trim()||note.preview.trim().split('\n')[0]||'无标题';
+   const preview=document.createElement('span');preview.className='item-preview';preview.textContent=note.preview;
+   const time=document.createElement('span');time.className='item-time';time.textContent=date(note.updated_at);
+   button.append(name,preview,time);button.addEventListener('click',()=>openNote(note.id));$('list').append(button);}
+ }catch(error){$('listMessage').textContent=error.message;$('retry').hidden=false;}
+}
+function ask(dialog){return new Promise(resolve=>{dialog.returnValue='cancel';const close=()=>{dialog.removeEventListener('close',close);resolve(dialog.returnValue);};dialog.addEventListener('close',close);dialog.showModal();});}
+document.querySelectorAll('dialog [data-choice]').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close(button.dataset.choice)));
+async function leave(){if(phase!=='idle')return false;if(!dirty())return true;const choice=await ask($('leaveDialog'));return choice==='discard'||(choice==='save'&&await save());}
+function show(note){current=note;baseline=note.version?{...note}:null;title.value=note.title;body.value=note.body;serverVersion=null;$('conflict').hidden=true;$('welcome').hidden=true;$('editor').hidden=false;$('shell').classList.add('editor-open');$('delete').hidden=!note.version;status(note.version?'已保存 · '+date(note.updated_at):'未保存');document.querySelectorAll('.item').forEach(item=>item.classList.toggle('active',item.dataset.id===note.id));controls();}
+async function newNote(){if(!await leave())return;try{const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);const id=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');show({id,title:'',body:''});title.focus();}catch{status('浏览器无法生成便签编号',true);}}
+async function openNote(id){if(!await leave())return;phase='loading';controls();try{const note=await api('/note?id='+id);show(note);}catch(error){if(current)status(error.message,true);else{$('listMessage').textContent=error.message;$('retry').hidden=false;}}finally{phase='idle';controls();}}
+function validate(){if(Array.from(title.value).length>200)throw new Error('标题最多 200 个字符');if(new TextEncoder().encode(body.value).length>65536)throw new Error('正文最多 64 KiB');if(!title.value.trim()&&!body.value.trim())throw new Error('请填写标题或正文');}
+function confirmed(note){current=note;baseline={...note};$('delete').hidden=false;serverVersion=null;$('conflict').hidden=true;status('已保存 · '+date(note.updated_at));}
+function conflict(message){$('conflictMessage').textContent=message;$('conflict').hidden=false;status(message,true);}
+async function save(){
+ if(phase!=='idle'||!current)return false;try{validate();}catch(error){status(error.message,true);return false;}
+ const draft={title:title.value,body:body.value}, id=current.id, version=baseline?.version;phase='saving';controls();status('正在保存…');
+ try{const note=await api(version?'/note?id='+id:'/notes',{method:version?'PUT':'POST',headers:{'Content-Type':'application/json',...(version?{'If-Match':'"'+version+'"'}:{})},body:JSON.stringify(version?draft:{id,...draft})});confirmed(note);await refreshList();return true;}
+ catch(error){
+  if(error.status===412||error.status===409||error.status===0||error.status>=500){
+   try{const note=await api('/note?id='+id);if(note.title===draft.title&&note.body===draft.body){confirmed(note);await refreshList();return true;}serverVersion=note;conflict(error.status===412||error.status===409?'这条便签已在其他设备修改':'保存结果未确认，服务器内容与草稿不同');}
+   catch(readError){if(readError.status===404)status('服务器未找到此便签，草稿已保留，请核对后重试',true);else status('保存结果未确认 · '+readError.message,true);}
+  }else status(error.message,true);
+  return false;
+ }finally{phase='idle';controls();}
+}
+async function remove(){
+ if(phase!=='idle'||!baseline)return;if(await ask($('deleteDialog'))!=='delete')return;phase='deleting';controls();status('正在删除…');let deleted=false;
+ try{await api('/note?id='+current.id,{method:'DELETE',headers:{'If-Match':'"'+baseline.version+'"'}});deleted=true;}
+ catch(error){if(error.status===0||error.status>=500){try{await api('/note?id='+current.id);status('删除结果未确认，便签仍存在',true);}catch(check){if(check.status===404)deleted=true;else status('删除结果未确认 · '+check.message,true);}}
+  else if(error.status===412){try{serverVersion=await api('/note?id='+current.id);conflict('这条便签已在其他设备修改，请先核对当前内容');}catch(check){status(check.message,true);}}
+  else status(error.message,true);}
+ finally{phase='idle';if(deleted){current=null;baseline=null;$('editor').hidden=true;$('welcome').hidden=false;$('shell').classList.remove('editor-open');await refreshList();}controls();}
+}
+$('viewServer').addEventListener('click',async()=>{if(!serverVersion)return;$('serverTitle').textContent=serverVersion.title||'无标题';$('serverBody').textContent=serverVersion.body;if(await ask($('serverDialog'))==='merge'){baseline={...serverVersion};current={...serverVersion};$('delete').hidden=false;$('conflict').hidden=true;status('当前草稿待合并，完成后请手动保存');controls();}});
+$('copyDraft').addEventListener('click',async()=>{const text=title.value+'\n\n'+body.value;try{await navigator.clipboard.writeText(text);status('草稿已复制');}catch{body.focus();body.select();status('请复制已选中的正文，标题仍保留在上方');}});
+title.addEventListener('input',()=>{status(dirty()?'未保存':baseline?'已保存 · '+date(baseline.updated_at):'未保存');controls();});body.addEventListener('input',()=>{status(dirty()?'未保存':baseline?'已保存 · '+date(baseline.updated_at):'未保存');controls();});
+$('new').addEventListener('click',newNote);$('welcomeNew').addEventListener('click',newNote);$('save').addEventListener('click',save);$('delete').addEventListener('click',remove);$('retry').addEventListener('click',refreshList);
+$('back').addEventListener('click',async()=>{if(!await leave())return;current=null;baseline=null;$('editor').hidden=true;$('welcome').hidden=false;$('shell').classList.remove('editor-open');await refreshList();controls();});
+$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(refreshList,220);});
+window.addEventListener('beforeunload',event=>{if(dirty()||phase==='saving'){event.preventDefault();event.returnValue='';}});
+document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='s'){event.preventDefault();if(current&&dirty())save();}});
+controls();refreshList();
+})();
+</script>
+</body>
+</html>

@@ -43,7 +43,7 @@ pub(crate) fn reserved(path: &str) -> bool {
 fn reject(error: Error) -> Response {
     let status = error.status();
     if status.is_server_error() {
-        eprintln!("request failed: {error}");
+        tracing::error!(%error, "request failed");
     }
     (
         status,
@@ -114,7 +114,7 @@ pub(crate) async fn proxy_pass(
     match result {
         Ok(response) => response,
         Err(Error::Io(error)) => {
-            eprintln!("local proxy upstream failed: {error}");
+            tracing::warn!(%error, "local proxy upstream failed");
             StatusCode::BAD_GATEWAY.into_response()
         }
         Err(error) => reject(error),
