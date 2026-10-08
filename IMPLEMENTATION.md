@@ -2,6 +2,13 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-08：每三天刷新 OCSP
+
+- 用户要求运行期间每三天刷新 OCSP，并明确批准将代码已有的 `dhttp::Endpoint::reload(&self) -> Result<Self>` 纳入冻结清单。复用该接口更新监听 TLS；不修改 dhttp/qtls/h3x 源码，不新增自有结构、字段、配置、取消信号或 Server 方法。
+- run 在启动完成后每72小时触发已加载身份的刷新，用局部 Interval（Skip）和当前刷新 futures 与 DNS 维护共同调度，避免获取响应阻塞 DNS 续期。沿用15秒获取期限、64KiB响应上限、证书绑定/签名/有效期/状态校验和原子缓存写入。当前发布批完成后更新 Server.endpoint、publisher、Workspace/Chat 出站与已有资源构造的 Router；配置、Lib、身份集合及证书/私钥变化仍需重启。
+- 单身份失败记录名称及原因，保留旧内存凭据，下一72小时周期再尝试；不自动续签已过期证书。退出丢弃未完成刷新。同步启动说明和设计文档；未重启日常进程或修改实际身份凭据、数据库及线上 DNS。
+- 验证：110项默认库测试通过，4项需独立运行的测试默认跳过；新增隔离 OCSP/QUIC 用例显式通过，覆盖本机签名应答器、新凭据及发布器替换、原连接继续使用、新连接握手、非法响应保留原缓存、应用资源与配置不重载。模拟时间测试覆盖首轮72小时和错过周期不连续补跑，另验证获取失败保留凭据。所有目标编译检查、修改文件 Rustfmt 与 diff 检查通过，普通入口已重新编译到 target/debug/pishoo。测试及编译使用已安装 stable（rustc 1.97.1）和现有临时 Bun 1.4.2；从 /private/tmp 指定原仓清单，避免上级 Cargo 配置注入本地依赖补丁，构建产物仍在原仓 target。
+
 ## 2026-10-08：删除宿主命令 exec
 
 - 按用户要求删除 exec 模块、`/exec` 路由、Server.exec_tasks、ServerConfig.exec、专用错误 BackendUnavailable/Cancelled/Closed、专用测试及 test.sh；移除直接 nix 依赖和 Tokio process feature，base64 仅保留为既有证书测试的开发依赖。同步冻结接口、架构和配置 API 文档，删除 exec 接口清单，不新增替代状态或接口。

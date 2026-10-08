@@ -60,8 +60,8 @@
 - WASM 不设总执行时长期限；每次调用仍受 Store 中逐 linear memory 的内存限制、fuel 和 WASI 宿主能力约束，guest 任务由 TaskTracker 跟踪。
 - daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批立即返回202，由 daccess 持久保存并提供按 Visitor 校验的状态查询；联系人使用申请队列与轮询，删除 ContactNotifier 回调。Lib API 不自动登记访问规则，不建立导入账本。
 - 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 管理实际执行资源。
-- 第一版仅在启动时串行加载，身份、配置、Lib 和凭据更新统一重启。Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；Sandbox 扫描时使用局部候选集合，校验成功后更新自身 Lib，再由 Server 构建 Router。不建立 ServerState、Release 或 begin_build 发布流程。
-- Pishoo 启动时加载身份、配置和 Lib；运行中只维护 DNS 发布及地址变化，不支持 SIGHUP 重载或每日 OCSP 自动更新。身份、配置、Lib 与凭据变更均需重启。
+- 第一版仅在启动时串行加载，身份、配置、Lib 和证书/私钥更新统一重启；OCSP 每72小时更新。Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；Sandbox 扫描时使用局部候选集合，校验成功后更新自身 Lib，再由 Server 构建 Router。不建立 ServerState、Release 或 begin_build 发布流程。
+- Pishoo 启动时加载身份、配置和 Lib；运行中维护 DNS 发布、地址变化，并每72小时刷新已加载身份的 OCSP；不支持 SIGHUP 重载。身份、配置、Lib 与证书/私钥变更需重启。
 
 2026-09-26 用户确认将 WASM 职责集中到 Sandbox：在已有 `lib_slots`、`tasks` 基础上迁入 Server 的 `libs`、`runtime`，Server 改为直接持有 `Sandbox`；组件加载、版本替换和 API Router 构造方法归 Sandbox。当时 `build_router` 接收已构造的 Lib Router；其后改为由 Server 显式组装完整 Router。运行入口保留跨身份共享的 WasmRuntime，Server 保留 Endpoint、授权和整体 Router 发布。当次迁移保持 Invocation 与 Store 的成员及调用签名，`validate_lib` 的根级公开导出不变。字段和方法的完整签名见 [Pishoo 清单](pishoo-interfaces.md)。
 
@@ -156,3 +156,5 @@ README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担
 2026-10-08 用户确认服务端尚不返回租期，DNS 发布成功后统一每20秒续期，删除 Pishoo 的最低租期判断和按租期计算间隔的逻辑。失败或超时仍5秒后重试，空地址停止发布；既有函数签名与 ddns 缺头兼容保持不变。此决定替代此前三分之一租期与10秒间隔上限的安排。
 
 2026-10-08 用户要求先删除 exec：移除宿主命令执行模块及其 `/exec` 路由、Server.exec_tasks、ServerConfig.exec、execute 跨模块接缝与专用错误 BackendUnavailable/Cancelled/Closed，删除 exec 接口文档及专用测试/脚本/依赖。新建 config.db 的 schema v1 仅保留 settings(listen)；已有库的旧 exec 列保留但不读取或更新，配置 API 不返回该字段并拒绝提交 exec 的 PATCH。`/exec` 不再保留为内置命名空间；不新增替代状态或接口。此前 exec 相关段落仅为历史决策记录，由本决定替代。
+
+2026-10-08 用户要求每三天刷新 OCSP，并明确批准将已有 `Endpoint::reload(&self) -> Result<Self>` 纳入冻结接口。只刷新 OCSP；身份、配置、Lib 与证书/私钥变化仍需重启。run 使用局部72小时定时器与刷新 futures，不新增结构或成员。成功后更新监听、DNS 发布器、应用出站和 Router，失败保留旧内存凭据并记录日志。

@@ -118,7 +118,7 @@ Server 直接持有当前 Router 和该身份的 Sandbox；Sandbox 集中持有 
 
 按用户确认，组件扫描、manifest 验证、版本替换、API 路由与执行、Store、响应体及 WASI 宿主能力全部集中在 sandbox 逻辑模块，按职责分文件。Server 保留 Endpoint、daccess、Workspace、Chat、整体 Router。Sandbox 负责该身份的 WASM 执行和任务回收，不限制并发数，不另存内部锁、取消信号、计数、身份或策略，不是操作系统进程或容器；完整字段和方法以 [Pishoo 清单](pishoo-interfaces.md)为准。
 
-启动时加载一次：读取配置 → Sandbox 扫描并串行编译 Lib → 构造 Lib Router 和完整 Router。加载失败直接结束启动，候选使用 Sandbox 方法中的局部 HashMap。身份、配置、Lib 和凭据变化统一重启生效，不支持 SIGHUP 重载或每日 OCSP 自动更新；运行期间只维护 DNS/地址与业务 worker。没有 ServerState、Release、begin_build、发布编号或后台构建队列。
+启动时加载一次：读取配置 → Sandbox 扫描并串行编译 Lib → 构造 Lib Router 和完整 Router。加载失败直接结束启动，候选使用 Sandbox 方法中的局部 HashMap。身份、配置、Lib 和证书/私钥变化统一重启生效，不支持 SIGHUP 重载；运行期间维护 DNS/地址与业务 worker，并每72小时刷新已加载身份的 OCSP。没有 ServerState、Release、begin_build、发布编号或后台构建队列。
 
 同步编译不会因为丢弃等待 future 就自动停止。第一版不承诺可强行中断编译；不为这项尚不需要的能力扩展运行时成员。
 

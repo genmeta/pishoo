@@ -84,9 +84,9 @@ The same-identity DHTTP forwarding route streams request bytes through the nativ
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities, proxy routes, Libs, configuration, and credentials are loaded at startup; restart Pishoo to apply changes. SIGHUP reload and periodic OCSP updates are not supported.
+Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities, proxy routes, Libs, configuration, and certificate/key credentials are loaded at startup; restart Pishoo to apply changes. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
 
-Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried at the next startup. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process does not refresh credentials.
+Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried at the next startup. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
 
 For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
