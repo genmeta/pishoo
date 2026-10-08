@@ -156,7 +156,7 @@ Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 h
 
 ## 10. 保留的路由和组件规则
 
-- `/api/<LibId>` 专供 WASM，包括 `/api/index`；未声明路径 404，方法不匹配 405，业务 HEAD/OPTIONS 必须显式声明。
+- 已加载的 `/api/<LibId>` 前缀专供 WASM；未声明路径404、方法不匹配405，业务 HEAD/OPTIONS 必须显式声明。其他 `/api/*` 可按配置代理，空 Lib 身份不占用 `/api`；显式代理位置落入已加载 Lib 前缀时启动报冲突，根代理与较宽的 `/api` 代理可作兜底。
 - `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/*`、`/chat-api/*`、`/std/*` 为 Workspace/Chat 保留；`/.pishoo/` 继续保留，不能由代理或 Lib 遮盖。
 - 静态文件只在 `/file/{*path}` 提供，URL `/file/a` 映射身份目录的 `file/a`；`/file` 和 `/file/` 不提供文件。静态只接受 GET/HEAD，目录只尝试 index.html，不列目录。workspace 自身保留原管理前端的深链接 fallback，不能与普通静态站点规则混用。
 - 代理作为 fallback，先精确 `= /path`，再最长路径段前缀；query 不参与，`/foo` 不匹配 `/foobar`。`/file` 路径保留给静态文件；未命中代理配置返回 404。proxy_pass 无 URI 路径时保留原路径，有 URI 时替换命中部分，不自动补斜杠。保持已有尾斜杠重定向规则。

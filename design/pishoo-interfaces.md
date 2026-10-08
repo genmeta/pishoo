@@ -30,7 +30,7 @@ type Result<T> = std::result::Result<T, Error>;
 | `sandbox/host.rs` | WASI HTTP 出站拒绝接缝和 identity WIT 宿主能力 |
 | `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
 
-子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/api`、`/pishoo`、`/.pishoo`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/pishoo`、`/.pishoo`、`/file` 的路径段前缀。`/api` 不再整体保留；已加载 Lib 的路径归属见 Sandbox.api_router。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
 
 ## 2. 配置和固定默认值
 
@@ -186,7 +186,9 @@ impl Sandbox {
 
 `load_libs` 每次扫描都重新校验并串行编译全部 Lib，构建局部候选；任一 Lib 加载失败直接返回错误，不修改当前 Lib 集合。完整扫描成功后更新自身集合。局部候选只是调用栈中的标准 HashMap，不引入构建会话、候选容器或发布状态。
 
-`api_router` 根据 Sandbox 当前 Lib 集合构造 `/api` 分支，负责 Lib 查找、声明路径与方法验证、请求 URI 处理和 Invocation 执行。它只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权由 Server 组装 Router 时统一添加，Server 保留完整 Router 的发布权。
+`api_router` 仅根据 Sandbox 当前 Lib 集合注册 `/api/<LibId>`、对应末尾斜杠根路径与子路径分支，负责 Lib 查找、声明路径与方法验证、请求 URI 处理和 Invocation 执行。该前缀的全部方法均交给 Lib，未声明操作返回404、方法不匹配返回405，不再回退代理。空集合不注册 `/api` 分支，未加载 Lib 的其他 `/api/*` 路径可进入配置代理 fallback；不自动提供静态文件。它只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权由 Server 组装 Router 时统一添加，Server 保留完整 Router 的发布权。
+
+2026-10-08 用户批准按已加载 Lib 前缀与配置代理共存：根代理 `/` 和更宽的 `/api` 代理可作兜底；显式代理 location（含精确匹配）若落在已加载 `/api/<LibId>` 前缀内，Server.load 在创建 Workspace/Chat 资源之前返回 InvalidConfig，错误列出 location 与 LibId。配置与 Lib 管理写入仍仅保存磁盘内容、需重启生效，因此按本次启动最终加载集合检查冲突，不新增持久路由表、配置字段、状态结构或函数签名。
 
 Workspace 应用页通过同一 `api_router` 挂载的 `GET /workspace-api/libs` 展示当前已加载的 WASM。目录从既有 Lib 集合及 OpenAPI 派生 id、title、version、description 和完整 API endpoints，按 id 排序；不扫描磁盘、不执行 guest，也不增加成员或独立注册表。目录经过统一 daccess 授权，再核对 Visitor 的名称与 SubjectId 均属于本端 owner；响应使用 no-store，Lib 变化仍需重启。
 
@@ -289,6 +291,8 @@ async fn proxy(route: ProxyLocation,
 WASI HTTP 的入站处理仍需 WasiHttpHooks；当前依赖关闭了默认网络发送器。StoreData 持有无状态 DenyOutgoing，send_request 一律返回 HttpRequestDenied，不创建连接、子任务或取消信号。Lib 出站能力留待单独设计。
 
 proxy 完成路径/query 与 authority 转换后，以 Hyper HTTP/1.1 客户端连接配置中的回环 TCP 地址；每个请求建立一条连接，不增加连接池状态。转发前按上游 authority 设置 Host、清理逐跳头，不自动生成 `X-Forwarded-*`。响应也清理逐跳头，Body 保持流式背压和错误传播；连接和响应头各有30秒期限，连接或响应头失败返回网关错误。
+
+2026-10-08 用户要求修复 WebSocket，以 HA 反代为目标；路由兼容使用前述已加载 Lib 前缀策略。proxy 识别 h3x 原生 `Arc<str>` extension 中的 `:protocol=websocket` 与 CONNECT，将其转换为 HTTP/1.1 GET Upgrade；校验 version=13，为上游生成随机 key，并验证 101 的 Upgrade/Connection/Accept 与所选 subprotocol。成功返回 H3 200，保留协商的 subprotocol/extensions 及普通响应头，移除 HTTP/1.1 升级专用头。拒绝响应保留原非2xx状态和正文；未升级却返回2xx或无效握手返回网关错误。现成 StreamBody/编译器生成的 async 状态直接持有请求 Body 与 Hyper Upgraded，逐块转发不解析 WebSocket 帧；上传每块 flush，上传 EOF 仅结束上游写方向，响应仍可继续。Body Drop、响应 EOF 或任一方向错误释放双向资源，不增加结构、成员、后台隧道任务或取消信号；握手之后没有30秒总时长限制。声明或实际 trailers 的 WebSocket 请求拒绝。
 
 DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations，不接受本机 HTTP/TCP 目标，也不回退到配置反代。它使用本 Server Endpoint 的凭据；对端看到的是影子身份的证书，不是调用手机的证书。其请求和响应 Body 复用标准适配与流背压，不增加自有传输状态。
 

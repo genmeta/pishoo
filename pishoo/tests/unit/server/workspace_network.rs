@@ -17,6 +17,246 @@ use super::*;
 #[path = "../../support/network_credentials.rs"]
 mod credentials;
 
+#[tokio::test]
+#[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
+async fn websocket_real_h3_ha_roundtrip() {
+    use futures::TryStreamExt;
+    use http_body_util::BodyExt;
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+    use tokio_util::io::StreamReader;
+
+    use crate::routes::tests::websocket::{ha_exchange, ha_request, ha_upstream};
+
+    let root = tempfile::tempdir().unwrap();
+    credentials::generate(
+        root.path(),
+        &[
+            ("receiver", "receiver.dhttp.net"),
+            ("alice", "alice.dhttp.net"),
+        ],
+    );
+    let old_home = std::env::var_os("DHTTP_HOME");
+    unsafe {
+        std::env::set_var("DHTTP_HOME", root.path());
+    }
+    let _environment = scopeguard::guard(old_home, |previous| unsafe {
+        match previous {
+            Some(value) => std::env::set_var("DHTTP_HOME", value),
+            None => std::env::remove_var("DHTTP_HOME"),
+        }
+    });
+    dhttp::DhttpNetwork::init().await.unwrap();
+    qtls::RootCerts::set([dhttp::CertificateDer::from(
+        std::fs::read(root.path().join("ca.der")).unwrap(),
+    )])
+    .unwrap();
+    let peer = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let address = EndpointAddr::direct(peer.local_addr().unwrap());
+    qprotocol::Dock::global()
+        .add(peer.clone())
+        .unwrap()
+        .unwrap();
+    let _socket = scopeguard::guard(peer, |peer| {
+        qprotocol::Dock::global().remove(&peer);
+    });
+    dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
+    let client = dhttp::Endpoint::load("alice").await.unwrap();
+    let (upstream, task) = ha_upstream().await;
+    let _upstream = scopeguard::guard(task, |task| task.abort());
+    let profile = profile(root.path(), "receiver");
+    let config = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    for loaded_lib in [false, true] {
+        if loaded_lib {
+            let mut wasm =
+                include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
+            let manifest = br#"{"openapi":"3.1.0","info":{"title":"Note fixture","version":"1"},"paths":{"/upload":{"post":{}}}}"#;
+            let mut section = vec![14];
+            section.extend_from_slice(b"pishoo:openapi");
+            section.extend_from_slice(manifest);
+            wasm.push(0);
+            let mut length = section.len();
+            loop {
+                let byte = (length & 127) as u8;
+                length >>= 7;
+                wasm.push(byte | if length > 0 { 128 } else { 0 });
+                if length == 0 {
+                    break;
+                }
+            }
+            wasm.extend(section);
+            std::fs::create_dir_all(profile.join("lib/note")).unwrap();
+            std::fs::write(profile.join("lib/note/lib.wasm"), wasm).unwrap();
+            for location in [
+                "/api/note",
+                "/api/note/",
+                "= /api/note",
+                "= /api/note/upload",
+                "/api/note/child/",
+            ] {
+                config.execute("DELETE FROM proxy_locations", []).unwrap();
+                config
+                    .execute(
+                        "INSERT INTO proxy_locations VALUES(?1,?2)",
+                        [location, &format!("http://{upstream}")],
+                    )
+                    .unwrap();
+                let error = match Server::load(profile.clone(), runtime.clone()).await {
+                    Ok(_) => panic!("conflicting proxy accepted: {location}"),
+                    Err(error) => error,
+                };
+                assert!(matches!(error, Error::InvalidConfig(_)));
+                let message = error.to_string();
+                assert!(
+                    message.contains(location) && message.contains("Lib 'note'"),
+                    "{message}"
+                );
+            }
+        }
+        config.execute("DELETE FROM proxy_locations", []).unwrap();
+        // Root fallback for the dedicated HA identity; broad /api and a sibling
+        // prefix remain valid alongside a loaded Lib in the mixed identity.
+        let location = if loaded_lib { "/api" } else { "/" };
+        config
+            .execute(
+                "INSERT INTO proxy_locations VALUES(?1,?2)",
+                [location, &format!("http://{upstream}")],
+            )
+            .unwrap();
+        if loaded_lib {
+            config
+                .execute(
+                    "INSERT INTO proxy_locations VALUES('/api/noteworthy',?1)",
+                    [format!("http://{upstream}")],
+                )
+                .unwrap();
+        }
+        let mut server = Server::load(profile.clone(), runtime.clone())
+            .await
+            .unwrap();
+        assert_eq!(server.sandbox.libs.contains_key("note"), loaded_lib);
+        server
+            .access
+            .set_policy(
+                access_control::Method::Unspecified,
+                "/api/websocket",
+                access_control::Effect::Deny,
+                access_control::Grantee::Named,
+            )
+            .await
+            .unwrap();
+        // This is exactly the Router constructed by production Server.load,
+        // including Sandbox, proxy matching and the daccess authorization layer.
+        let app = server.router.clone();
+        let listener = server
+            .endpoint
+            .listen(
+                dhttp::Scope::Loopback.into(),
+                tower::service_fn(move |request: Request<Body>| {
+                    let app = app.read().unwrap().clone();
+                    async move { app.oneshot(request.map(AxumBody::new)).await }
+                }),
+            )
+            .await
+            .unwrap();
+        let listener_task = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
+        let mut request = ha_request(
+            "https://receiver.dhttp.net/api/websocket?case=ha",
+            dhttp::WndBuf::new(64 * 1024),
+        );
+        request.headers_mut().remove(http::header::CONNECTION);
+        request.headers_mut().remove("x-drop");
+        let (writer, response) = client.from_request(request).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        drop(writer);
+        server
+            .access
+            .set_policy(
+                access_control::Method::Unspecified,
+                "/api/websocket",
+                access_control::Effect::Allow,
+                access_control::Grantee::Named,
+            )
+            .await
+            .unwrap();
+        for path in ["/api/states", "/api/note"] {
+            server
+                .access
+                .set_policy(
+                    access_control::Method::Unspecified,
+                    path,
+                    access_control::Effect::Allow,
+                    access_control::Grantee::Named,
+                )
+                .await
+                .unwrap();
+        }
+        let response = client
+            .get("https://receiver.dhttp.net/api/states".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "[]"
+        );
+        if loaded_lib {
+            for (path, expected) in [
+                ("/api/note", StatusCode::NOT_FOUND),
+                ("/api/note/", StatusCode::NOT_FOUND),
+                ("/api/note/missing", StatusCode::NOT_FOUND),
+                ("/api/note/upload", StatusCode::METHOD_NOT_ALLOWED),
+            ] {
+                let response = client
+                    .get(format!("https://receiver.dhttp.net{path}").parse().unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{path}");
+            }
+        }
+        for _ in 0..2 {
+            let mut request = ha_request(
+                "https://receiver.dhttp.net/api/websocket?case=ha",
+                dhttp::WndBuf::new(64 * 1024),
+            );
+            request.headers_mut().remove(http::header::CONNECTION);
+            request.headers_mut().remove("x-drop");
+            let (writer, response) = client.from_request(request).await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.version(), http::Version::HTTP_3);
+            assert_eq!(response.headers()["sec-websocket-protocol"], "ha");
+            let reader = StreamReader::new(
+                response
+                    .into_body()
+                    .into_data_stream()
+                    .map_err(std::io::Error::other),
+            );
+            let mut ws = WebSocketStream::from_raw_socket(
+                tokio::io::join(reader, writer),
+                Role::Client,
+                None,
+            )
+            .await;
+            ha_exchange(&mut ws).await;
+        }
+        let task = scopeguard::ScopeGuard::into_inner(listener_task);
+        task.abort();
+        let _ = task.await;
+        server.close().await.unwrap();
+    }
+}
+
 #[derive(Debug)]
 struct PeerResolver(EndpointAddr);
 impl fmt::Display for PeerResolver {

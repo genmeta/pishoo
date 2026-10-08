@@ -180,13 +180,17 @@ impl Sandbox {
                 result.unwrap_or_else(reject_api)
             }
         });
-        // Reserve every method, including HEAD and OPTIONS, so Axum cannot
-        // bypass the manifest's explicit method check or use another fallback.
-        axum::Router::new()
-            .route("/workspace-api/libs", catalog)
-            .route("/api", api.clone())
-            .route("/api/", api.clone())
-            .route("/api/{*path}", api)
+        // Own every method inside loaded Lib prefixes. Other /api paths retain
+        // the enclosing Server's proxy fallback, including when no Lib is loaded.
+        let mut router = axum::Router::new().route("/workspace-api/libs", catalog);
+        for id in self.libs.keys() {
+            let prefix = format!("/api/{id}");
+            router = router
+                .route(&prefix, api.clone())
+                .route(&format!("{prefix}/"), api.clone())
+                .route(&format!("{prefix}/{{*path}}"), api.clone());
+        }
+        router
     }
 }
 

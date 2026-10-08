@@ -457,8 +457,38 @@ async fn proxy_prefix_matches_path_segments_only() {
 }
 
 #[tokio::test]
-async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
+async fn unowned_api_paths_use_configured_proxy_and_never_static_files() {
+    use std::convert::Infallible;
+
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::{body::Incoming, service::service_fn};
+    use hyper_util::rt::TokioIo;
     use tower::ServiceExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    assert!(request.uri().path().starts_with("/api"));
+                    Ok::<_, Infallible>(
+                        http::Response::builder()
+                            .header("x-proxied", "yes")
+                            .body(Full::new(Bytes::from_static(b"upstream")))
+                            .unwrap(),
+                    )
+                });
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(socket), service)
+                    .await
+                    .unwrap();
+            });
+        }
+    });
+    let _upstream = scopeguard::guard(task, |task| task.abort());
     let (access, _) = authorization_app(access_control::Effect::Allow).await;
     for path in ["/api", "/api/", "/api/missing"] {
         access
@@ -483,12 +513,17 @@ async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
         Vec::new(),
         vec![ProxyLocation {
             location: "/".into(),
-            proxy_pass: "http://127.0.0.1:8080/"
+            proxy_pass: format!("http://{address}/")
                 .parse::<http::Uri>()
                 .unwrap()
                 .into_parts(),
         }],
     ] {
+        let expected = if proxy_locations.is_empty() {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        };
         let app = test_router(
             endpoint.clone(),
             access.clone(),
@@ -504,7 +539,10 @@ async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
                 *request.uri_mut() = format!("https://owner.dhttp.net{path}").parse().unwrap();
                 *request.method_mut() = method;
                 let response = app.clone().oneshot(request).await.unwrap();
-                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                assert_eq!(response.status(), expected, "{path}");
+                if expected == StatusCode::OK {
+                    assert_eq!(response.headers()["x-proxied"], "yes");
+                }
             }
         }
     }

@@ -209,6 +209,45 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
             assert_eq!(status(&router, method, path).await, StatusCode::NOT_FOUND);
         }
     }
+    let router = router.fallback(|| async { StatusCode::IM_A_TEAPOT });
+    for method in [
+        Method::GET,
+        Method::POST,
+        Method::HEAD,
+        Method::OPTIONS,
+        Method::CONNECT,
+    ] {
+        for path in ["/api", "/api/", "/api/missing", "/api/test-other/run"] {
+            assert_eq!(
+                status(&router, method.clone(), path).await,
+                StatusCode::IM_A_TEAPOT,
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/test",
+            "/api/test/",
+            "/api/test/missing",
+            "/api/test/missing/deep",
+        ] {
+            assert_eq!(
+                status(&router, method.clone(), path).await,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+    }
+    assert_eq!(
+        status(&router, Method::CONNECT, "/api/test/run").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let empty = Sandbox::new(sandbox.runtime.clone())
+        .api_router(crate::test_identity::endpoint("alice"))
+        .fallback(|| async { StatusCode::IM_A_TEAPOT });
+    assert_eq!(
+        status(&empty, Method::GET, "/api/test/run").await,
+        StatusCode::IM_A_TEAPOT
+    );
     assert!(sandbox.tasks.is_empty());
 }
 
