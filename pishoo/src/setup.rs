@@ -257,8 +257,8 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
         }
     };
     Router::new()
-        .route("/sys/settings", any(handler.clone()))
-        .route("/sys/proxies", any(handler))
+        .route("/pishoo/settings", any(handler.clone()))
+        .route("/pishoo/proxies", any(handler))
 }
 
 async fn config_request(
@@ -290,108 +290,186 @@ async fn config_request(
         }
     }
 
-    let settings = request.uri().path() == "/sys/settings";
+    let settings = request.uri().path() == "/pishoo/settings";
     let method = request.method().clone();
-    if method != Method::GET && method != if settings { Method::PATCH } else { Method::PUT } {
-        return Ok((
-            StatusCode::METHOD_NOT_ALLOWED,
-            [(
-                header::ALLOW,
-                if settings { "GET, PATCH" } else { "GET, PUT" },
-            )],
-        )
-            .into_response());
-    }
-    let payload = if method == Method::GET {
-        None
+    let uri = request.uri().clone();
+    let allowed = if settings {
+        "GET, PATCH"
     } else {
-        if !request
+        "GET, PUT, PATCH, DELETE"
+    };
+    if !(method == Method::GET
+        || method == Method::PATCH
+        || !settings && (method == Method::PUT || method == Method::DELETE))
+    {
+        return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allowed)]).into_response());
+    }
+    let reading = method == Method::GET || method == Method::DELETE;
+    if !reading
+        && !request
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-        {
-            return Ok(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
-        }
-        let bytes = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                use std::error::Error as _;
-                if error
-                    .source()
-                    .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
-                {
-                    return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+    {
+        return Ok(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
+    }
+    let bytes = match axum::body::to_bytes(request.into_body(), if reading { 0 } else { 64 * 1024 })
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            use std::error::Error as _;
+            if error
+                .source()
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                return Ok(if reading {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::PAYLOAD_TOO_LARGE
                 }
-                return Err(Error::BadRequest("failed to read JSON body".into()));
+                .into_response());
             }
-        };
+            return Err(Error::BadRequest("failed to read request body".into()));
+        }
+    };
+    let payload = if reading {
+        None
+    } else {
         Some(
             serde_json::from_slice::<Value>(&bytes)
                 .map_err(|_| Error::BadRequest("invalid JSON".into()))?,
         )
     };
+    let deleting = method == Method::DELETE;
     let value =
-        tokio::task::spawn_blocking(move || config_database(&profile, settings, payload)).await??;
-    Ok(Json(value).into_response())
+        tokio::task::spawn_blocking(move || config_database(&profile, &method, &uri, payload))
+            .await??;
+    Ok(if deleting {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        Json(value).into_response()
+    })
 }
 
-fn config_database(
+pub(crate) fn config_database(
     profile: &IdentityProfile,
-    settings: bool,
+    method: &Method,
+    uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    let config = match payload {
-        None => read_server_config(profile)?,
-        Some(payload) => {
-            // Validate the complete input before taking a write transaction.
-            let proxies = if settings {
-                validate_settings_patch(&payload)?;
+    let settings = uri.path() == "/pishoo/settings";
+    if !settings && uri.path() != "/pishoo/proxies" {
+        return Err(Error::RouteNotFound);
+    }
+    let location = match uri.query() {
+        None => None,
+        Some(query) if !settings && (*method == Method::GET || *method == Method::DELETE) => {
+            let params = form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+            if params.len() != 1 || params[0].0 != "location" {
+                return Err(Error::BadRequest(
+                    "query requires exactly one location".into(),
+                ));
+            }
+            let location = params[0].1.to_string();
+            let path = location.strip_prefix("= ").unwrap_or(&location);
+            if !valid_path(path) || reserved(path) {
+                return Err(Error::BadRequest("invalid proxy location".into()));
+            }
+            Some(location)
+        }
+        Some(_) => return Err(Error::BadRequest("unsupported query parameters".into())),
+    };
+    if *method == Method::DELETE && location.is_none() {
+        return Err(Error::BadRequest("DELETE requires a location".into()));
+    }
+    let config = if *method == Method::GET {
+        if payload.is_some() {
+            return Err(Error::BadRequest("GET does not accept a body".into()));
+        }
+        read_server_config(profile)?
+    } else {
+        let proxies = match (settings, method) {
+            (true, &Method::PATCH) => {
+                validate_settings_patch(
+                    payload
+                        .as_ref()
+                        .ok_or_else(|| Error::BadRequest("missing settings".into()))?,
+                )?;
                 None
-            } else {
-                Some(parse_proxy_json(&payload)?)
-            };
-            let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            // An immediate transaction serializes read/modify/write, preserving omitted fields.
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let mut config = read_config(&tx)?;
-            if let Some(proxies) = proxies {
+            }
+            (false, &Method::PUT) => {
+                Some(parse_proxy_json(payload.as_ref().ok_or_else(|| {
+                    Error::BadRequest("missing proxies".into())
+                })?)?)
+            }
+            (false, &Method::PATCH) => Some(parse_proxy_json(&Value::Array(vec![
+                payload
+                    .clone()
+                    .ok_or_else(|| Error::BadRequest("missing proxy".into()))?,
+            ]))?),
+            (false, &Method::DELETE) if payload.is_none() => None,
+            _ => return Err(Error::MethodNotAllowed),
+        };
+        let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        read_config(&tx)?;
+        if settings {
+            tx.execute(
+                "UPDATE settings SET listen=?1",
+                [payload.as_ref().unwrap()["listen"].as_u64().unwrap() as u8],
+            )?;
+        } else if *method == Method::DELETE {
+            tx.execute(
+                "DELETE FROM proxy_locations WHERE location=?1",
+                [location.as_ref().unwrap()],
+            )?;
+        } else {
+            if *method == Method::PUT {
                 tx.execute("DELETE FROM proxy_locations", [])?;
-                for proxy in proxies {
-                    tx.execute(
-                        "INSERT INTO proxy_locations(location, proxy_pass) VALUES(?1, ?2)",
-                        rusqlite::params![proxy.location, upstream_text(&proxy)],
-                    )?;
-                }
-            } else {
-                if let Some(listen) = payload.get("listen") {
-                    config.listen = listen.as_u64().unwrap() as u8;
-                }
+            }
+            for proxy in proxies.unwrap() {
+                // Delete/insert also supports existing v1 databases without a declared UNIQUE index.
                 tx.execute(
-                    "UPDATE settings SET listen=?1",
-                    rusqlite::params![config.listen],
+                    "DELETE FROM proxy_locations WHERE location=?1",
+                    [&proxy.location],
+                )?;
+                tx.execute(
+                    "INSERT INTO proxy_locations(location, proxy_pass) VALUES(?1, ?2)",
+                    rusqlite::params![proxy.location, upstream_text(&proxy)],
                 )?;
             }
-            // Revalidate persisted values before commit, including database constraints/triggers.
-            let config = read_config(&tx)?;
-            tx.commit()?;
-            config
         }
+        let config = read_config(&tx)?;
+        tx.commit()?;
+        config
     };
-    if settings {
-        Ok(json!({"listen": config.listen}))
-    } else {
-        Ok(Value::Array(
-            config
-                .proxy_locations
-                .iter()
-                .map(
-                    |proxy| json!({"location": proxy.location, "proxy_pass": upstream_text(proxy)}),
-                )
-                .collect(),
-        ))
+    if *method == Method::DELETE {
+        return Ok(Value::Null);
     }
+    if settings {
+        return Ok(json!({"listen": config.listen}));
+    }
+    let values = config
+        .proxy_locations
+        .iter()
+        .map(|proxy| json!({"location": proxy.location, "proxy_pass": upstream_text(proxy)}))
+        .collect::<Vec<_>>();
+    if let Some(location) = location {
+        return values
+            .into_iter()
+            .find(|proxy| proxy["location"] == location)
+            .ok_or(Error::RouteNotFound);
+    }
+    if *method == Method::PATCH {
+        return values
+            .into_iter()
+            .find(|proxy| proxy["location"] == payload.as_ref().unwrap()["location"])
+            .ok_or(Error::RouteNotFound);
+    }
+    Ok(Value::Array(values))
 }
 
 fn validate_settings_patch(payload: &Value) -> Result<()> {

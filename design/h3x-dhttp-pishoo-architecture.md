@@ -107,7 +107,7 @@ DHTTP_HOME/<name>/
   db/chat.db                   消息、投递队列与远端授权观察
   file/                        静态文件
   lib/<LibId>/lib.wasm          组件和内嵌 OpenAPI
-  lib/<LibId>/data/             Lib 私有数据
+  db/<LibId>/             Lib 私有数据库与 SQLite 辅助文件
 ```
 
 config.db 的 v1 settings 必须只有一行，listen 为 0=off、1=Internal、2=External、3=both；proxy_locations 保存 location 与 proxy_pass。listen 改变重启生效。run 不持有实例锁。
@@ -163,7 +163,7 @@ Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 h
 - 组件顶层恰有一个 `pishoo:openapi` 段，内容为有界 UTF-8 OpenAPI 3.1.x JSON；不运行 guest 获取 API 清单。
 - 第一版仅字面量路径和显式方法；OpenAPI JSON 直接反序列化为 oas3 类型，不额外拒绝重复键或描述字段中的外部引用。路径级引用无法提供显式方法，仍拒绝路径级引用、未支持的路径模板和保留路径冲突。schema 用于描述，不因此缓冲整个请求。
 - OpenAPI 描述路由，不自动写 daccess 规则；权限管理使用当前库的 API，管理界面按它适配。x-access 扩展不产生隐式授权或自动导入流程。
-- 每 Lib 默认只取得自己的 data；身份根、ssl、数据库和兄弟 Lib 不开放给 guest。目录或组件替换不能扩大旧请求已取得的能力。
+- 每 Lib 只取得 db/<LibId>，挂载为 /db；宿主授权、配置与聊天数据库、其他 Lib 目录、身份根、ssl 与组件目录不开放给 guest。目录或组件替换不能扩大旧请求已取得的能力。
 - 组件及其 OpenAPI 使用同一文件快照，部署用临时文件加原子 rename。静态按每请求打开的文件句柄读取，不承诺整个静态目录的事务快照。
 - 启动身份凭据验证失败记录身份名和原因并跳过，继续后续身份，下次启动重试；配置、数据库及 Lib 加载失败仍结束启动。运行期间不更新身份和 Lib，目录变化在重启后生效，数据目录保留。
 

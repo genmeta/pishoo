@@ -20,16 +20,17 @@ type Result<T> = std::result::Result<T, Error>;
 
 ### Rust 文件组织
 
-2026-09-26 用户要求使用普通 `mod` 声明和同名 `.rs` 文件，合并过碎的 Sandbox 实现。库根文件为 `src/pishoo.rs`；Sandbox 保留四个文件：
+2026-09-26 用户要求使用普通 `mod` 声明和同名 `.rs` 文件，合并过碎的 Sandbox 实现。2026-10-08 用户确认将 Lib 文件操作收拢到 `sandbox/files.rs`，CLI 参数解析与 HTTP 处理仍留在原处。库根文件为 `src/pishoo.rs`；Sandbox 按以下职责组织：
 
 | 文件 | 职责 |
 | --- | --- |
 | `sandbox.rs` | 已冻结结构、组件加载、关闭和 API 路由 |
+| `sandbox/files.rs` | Lib 文件读取、查询、原子安装和移除，共用目录及文件校验 |
 | `sandbox/runtime.rs` | WasmRuntime/Lib 构造、Store 限制、Invocation 执行和响应体生命周期 |
 | `sandbox/host.rs` | WASI HTTP 出站拒绝接缝和 identity WIT 宿主能力 |
 | `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
 
-子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/api`、`/sys`、`/.pishoo`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/api`、`/pishoo`、`/.pishoo`、`/file` 的路径段前缀。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
 
 ## 2. 配置和固定默认值
 
@@ -50,7 +51,7 @@ config.db 的 schema v1 为 settings(listen) 与 proxy_locations(location,proxy_
 
 2026-10-04 用户要求实施正常启动初始化：默认 home 使用现有 dhttp-home 的用户目录解析，目录布局保持 profile 根级 ssl/db/file/lib/logs/repo/templates，头像继续使用 assets/profile。Server.load 在凭据加载后创建缺失目录；load_server_config 首次创建 schema v1（listen=3，内外网均监听、空代理），已有配置校验后加载。新 access 由现有 daccess API 在临时库初始化并写入 POST /contact 的 Allow/Named 规则，经 SQLite 快照验证后发布；已有v1不补默认规则，原生v0先备份再由库事务升级。0.8.2旧ACL、未知格式、损坏和不支持版本拒绝启动并保留原数据。Workspace/Chat 在各自 open/migrate 内识别空库、校验当前版本和必要结构；不增加schema版本、表、类型、字段或跨模块函数。配置 API 读取不初始化缺失配置库；身份变化在下次启动处理。安装脚本不操作用户数据库，不恢复server.conf或实例配置。详情见配置 API 文档。
 
-2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /sys/settings` 和 `GET/PUT /sys/proxies`。前者读写 listen，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理和 listen 均需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
+2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /pishoo/settings` 和 `GET/PUT /pishoo/proxies`。前者读写 listen，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理和 listen 均需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
 
 2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。裸回环地址先补上 `http://`，再校验完整 URI；以 `path_and_query: None` 保留原始配置未写路径的事实，显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。
 
@@ -187,13 +188,17 @@ impl Sandbox {
 
 `api_router` 根据 Sandbox 当前 Lib 集合构造 `/api` 分支，负责 Lib 查找、声明路径与方法验证、请求 URI 处理和 Invocation 执行。它只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权由 Server 组装 Router 时统一添加，Server 保留完整 Router 的发布权。
 
+Workspace 应用页通过同一 `api_router` 挂载的 `GET /workspace-api/libs` 展示当前已加载的 WASM。目录从既有 Lib 集合及 OpenAPI 派生 id、title、version、description 和完整 API endpoints，按 id 排序；不扫描磁盘、不执行 guest，也不增加成员或独立注册表。目录经过统一 daccess 授权，再核对 Visitor 的名称与 SubjectId 均属于本端 owner；响应使用 no-store，Lib 变化仍需重启。
+
+API 列表显示每条操作的描述，按非空 summary、description、成功响应 description 的顺序派生。GET 路径可在新标签页打开；其他方法仅展示，不把根路径自动当作页面或为卡片绑定首页跳转。
+
 `close` 同步关闭 TaskTracker 并清空集合，不等待任务。`wait` 在固定15秒内等待已关闭的 TaskTracker，超时返回 ShutdownDeadline。调用方 Server 清空 Router 并调用 Sandbox.close，再调用 `wait` 回收 WASM 任务。Sandbox 不持有自己的取消信号、身份、Endpoint、策略或派生计数；它不是独立的操作系统进程或容器。
 
 2026-09-26 用户明确确认将 WASM 职责集中到 Sandbox：Server 的 `libs`、`runtime` 迁入已有 Sandbox，`sandbox` 改为直接所有；组件加载、替换和 API Router 方法归 Sandbox，构造与关闭签名相应调整。当时 `build_router` 接收标准 axum::Router，不再接收 Lib 集合或 Sandbox；该函数后来由 Server 中的显式 Router 组装取代。共享 WasmRuntime 由运行入口持有，Server 保留 Endpoint、授权、整体 Router；当次迁移保持 Invocation 和 StoreData 的字段及调用签名；随后取消 Lib 并发限制的变更见下文。
 
 2026-09-26 用户要求取消 Lib 并发限制：删除 `Sandbox.lib_slots`、`Invocation.permit`、`StoreData.permit`、`Invocation::new` 的 permit 参数及仅用于满额拒绝的 `Error::Capacity`。请求通过 daccess 授权、Lib API 匹配和可信身份校验后直接执行，不因在途执行数返回429。重载复用同一个 Sandbox，旧版本执行仍由同一个 TaskTracker 跟踪。2026-09-28 用户要求移除旧 Router、Invocation 构造和执行入口对 Lib token 与 TaskTracker 关闭状态的预先拒绝；TaskTracker 关闭状态只用于 `wait`，不阻止后续 spawn。
 
-隔离由每次执行的独立 Store/Instance、受限 WasiCtx、Lib 私有 `/data`、默认 StoreLimits、fuel 和宿主能力控制完成。默认 StoreLimits 不对单个 linear memory 的字节数设额外上限；每次调用 fuel100_000_000。不累计多个 memory 或多个并发调用的内存，没有 Sandbox 总额度或总 fuel 预留，不另存派生计数或租约结构，也不等待传输FIN/ACK。
+隔离由每次执行的独立 Store/Instance、受限 WasiCtx、Lib 私有 `/db`、默认 StoreLimits、fuel 和宿主能力控制完成。默认 StoreLimits 不对单个 linear memory 的字节数设额外上限；每次调用 fuel100_000_000。不累计多个 memory 或多个并发调用的内存，没有 Sandbox 总额度或总 fuel 预留，不另存派生计数或租约结构，也不等待传输FIN/ACK。
 
 默认 StoreLimits 不提供总内存字节硬配额，也不限制 Wasmtime 的全部宿主分配或磁盘用量。
 
@@ -234,7 +239,9 @@ impl Lib {
 
 Runtime直接编译，启动时串行调用；不另存compile_slots、compile_tasks、cancel。Engine启用component model和consume_fuel，禁guest threads。linker注册WASI HTTP与既有identity WIT，instantiate_pre验证imports；不执行guest读取manifest。
 
-每个Lib只预打开自己的lib/<LibId>/data为可写的/data，再保存filesystem clone；禁止身份根、db、ssl和兄弟Lib。使用现有WasiCtxBuilder.preopened_dir，不发明cap-dir注入API。
+每个 Lib 预打开 `<身份目录>/db/<LibId>` 为可写的 `/db`，再保存 filesystem clone。目录能力只覆盖本 Lib，禁止身份根、ssl、宿主 db/config.db、db/access.db、db/workspace.db、db/chat.db 与其他 Lib 的目录。使用现有 WasiCtxBuilder.preopened_dir，不增加字段或自定义目录能力 API。
+
+2026-10-08 用户要求 Note 使用 SQLite `note.db`，在确认标准 WASI 只能授予目录能力后，最终选择 db 下每个 Lib 独立的子目录，撤销整个身份 db 的共享授权。Sandbox.load_libs 复用现有 data_dir 参数传入 profile/db/<LibId>，Note 文件为 `<身份目录>/db/note/note.db`。WasmRuntime.new 注册既有 WASI filesystem types/preopens 及 Rust WASI libc 所需的 CLI metadata/terminal 接口；WasiCtx 不继承进程环境或终端，不注册 sockets。结构、字段和方法签名不变。
 
 2026-09-28 用户要求删除 `Lib.id` 字段。扫描阶段的目录名仍作为 `Lib::load` 的输入进行验证，并直接作为 `Sandbox.libs` 的键；Lib 实例不重复保存该名称。
 
@@ -289,6 +296,8 @@ DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations
 
 ## 9. 启停与错误
 
+`pishoo` 可执行入口在启动服务前创建 `<DHTTP_HOME>/logs/error.log`，以追加方式记录全进程运行诊断，并同时输出 stderr。默认级别 warn，沿用 RUST_LOG 调整过滤级别；debug 仍写入同一文件。Unix 新目录权限0700、新文件0600；日志创建或打开失败在 stderr 报告并结束启动。日志文件由现成 tracing subscriber 直接持有，不增加 Server 字段、自有结构或跨模块函数。身份目录下的 cert.log 继续由证书管理工具记录证书操作。
+
 启动顺序：安装解析源并订阅地址事件 → 初始化一次全局 Network → 串行校验身份凭据、加载数据库配置/AccessService/组件 → 为每个需监听的 Server 启动 listen 任务。凭据读取、证书/私钥、OCSP 及发布用途验证失败记录身份名和原因并跳过，继续启动后续身份；跳过身份不保留 Server，下次启动重新尝试。配置、数据库及 Lib 错误仍结束启动；静态身份没有代理行也可启动。运行期间每72小时获取、验证并原子保存 OCSP，再通过已有 Endpoint.reload 更新监听凭据、应用出站和 Router；不重载身份/配置/Lib，证书链变化拒绝刷新并要求重启。
 
 Server.close 同步调用 Sandbox.close() 并清除 Router，随后等待 Sandbox 任务回收。`run` 不收回 listener 任务；运行期间不删除身份；身份目录变化在重启后生效。Server 不批量取消 HTTP 或审批；已进入的 HTTP 请求由其自身生命周期继续处理。`run` 退出时逐个调用 Server.close。全局 Network 不提供 shutdown；其连接池和后台维护随进程退出结束。`run` 直接等待进程退出信号，不另存取消 token。
@@ -319,3 +328,52 @@ Error实现Display/Error。业务拒绝在headers前生成HTTP响应；headers�
 - WASM提前响应继续上传、多值trailers、body替换、HEAD/204/304、超过4次并发执行及任务回收；Body丢弃不单独取消guest。
 - 配置反代仅连接回环 HTTP/TCP 服务；同名身份的固定前缀 DHTTP 正向代理使用现有 Endpoint；Lib 的 WASI HTTP 出站一律拒绝。验证本机代理响应分块在上传 EOF 前到达，上传保持打开且模拟空闲31秒后仍可双向传输。
 - 同名 Endpoint 共享本端身份连接池；Server.close 在退出时清空应用 Router，但不主动关闭共享传输。
+
+## 11. 管理命令与磁盘 Lib API
+
+2026-10-08 用户要求按[管理命令与 API 详细设计](../pishoo/docs/management-design.md)实施，批准该文档第九节的命名空间、路由行为和以下具体跨模块函数。配置、Lib 资源命令离线操作已初始化的身份；仅 `lib --loaded` 查询运行服务。服务启停交给系统管理器。保留所有既有结构、成员、schema 和运行生命周期。
+
+```rust
+// 库根重导出给同包二进制；实现放在普通 cli.rs。
+pub async fn run_command(args: Vec<std::ffi::OsString>) -> Result<()>;
+
+// setup.rs 中既有 module-local config_database 的签名和可见性变更。
+// method/uri 表达上表的配置资源操作，CLI 已在本机完成身份目录选择。
+pub(crate) fn config_database(
+    profile: &dhttp_home::identity::IdentityProfile,
+    method: &http::Method,
+    uri: &http::Uri,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value>;
+
+// sandbox 逻辑模块的 Lib 管理接入。
+pub(crate) fn lib_management_router(
+    profile: dhttp_home::identity::IdentityProfile,
+    endpoint: dhttp::Endpoint,
+    runtime: std::sync::Arc<WasmRuntime>,
+) -> axum::Router;
+
+pub(crate) fn installed_libs(
+    profile: &dhttp_home::identity::IdentityProfile,
+    id: Option<&str>,
+) -> Result<serde_json::Value>;
+
+pub(crate) fn check_lib(
+    bytes: &[u8],
+    runtime: &WasmRuntime,
+) -> Result<oas3::OpenApiV3Spec>;
+
+pub(crate) fn install_lib(
+    profile: &dhttp_home::identity::IdentityProfile,
+    id: &str,
+    bytes: &[u8],
+    runtime: &WasmRuntime,
+) -> Result<serde_json::Value>;
+
+pub(crate) fn remove_lib(
+    profile: &dhttp_home::identity::IdentityProfile,
+    id: &str,
+) -> Result<()>;
+```
+
+`config_database` 的既有 bool 参数替换为 method/uri；GET/DELETE 代理使用唯一 location query，PATCH 只更新一条规则。`/pishoo` 替换 `/sys` 的保留命名空间，无旧路由别名。Server 的首次及 OCSP 刷新装配均合并 Lib 管理 Router。Sandbox 启动扫描持既有 lib 根目录的共享建议锁；磁盘管理在目录句柄下拒绝符号链接，排他锁内原子提交。编译不实例化 guest，安装不创建数据目录，移除保留数据及授权，修改重启后生效。CLI 使用局部解析值，无新增自有类型、Error 变体或持久状态。

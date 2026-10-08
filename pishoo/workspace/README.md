@@ -25,7 +25,14 @@ Recipient shorthand is normalized to a full `.dhttp.net` name by the backend;
 both spellings address the same pending request. Workspace displays identity
 labels without the `.dhttp.net` suffix, while requests, links and editable
 access-rule values keep the canonical full name.
-Extension/app pages remain clearly labeled as unavailable.
+The apps page lists the identity's loaded WASM components, including their
+OpenAPI title, description, version and API endpoints. Its owner-only
+`GET /workspace-api/libs` catalog comes from the loaded Sandbox snapshot.
+The API list links each GET path to a new browser tab, and displays its OpenAPI
+summary, description, or successful response description. Other methods remain
+plain text. Cards do not assume that a component's root path is an HTML page.
+Component changes take effect after restarting pishoo. The extension page remains
+clearly labeled as unavailable.
 
 The contact directory shows usable, saved, and blocked identities. Incoming Chat
 capability requests appear in the approval center, alongside access reviews;

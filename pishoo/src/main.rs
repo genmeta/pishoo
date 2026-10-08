@@ -2,6 +2,17 @@ use tracing_subscriber::{fmt::writer::MakeWriterExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if !args.is_empty() {
+        if let Err(error) = pishoo::run_command(args).await {
+            eprintln!("pishoo: error: {error}");
+            std::process::exit(match error {
+                pishoo::Error::BadRequest(_) | pishoo::Error::InvalidComponent(_) => 2,
+                _ => 1,
+            });
+        }
+        return;
+    }
     let subscriber = dhttp_home::DhttpHome::load(dhttp_home::HomeScope::User)
         .map_err(std::io::Error::other)
         .and_then(|home| logging(&home));

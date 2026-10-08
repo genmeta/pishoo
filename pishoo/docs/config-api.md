@@ -6,10 +6,12 @@
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/sys/settings` | GET | 读取数据库中的 listen | 设置对象 |
-| `/sys/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
-| `/sys/proxies` | GET | 读取数据库中的代理规则 | 规则数组，按 location 排序 |
-| `/sys/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
+| `/pishoo/settings` | GET | 读取数据库中的 listen | 设置对象 |
+| `/pishoo/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
+| `/pishoo/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
+| `/pishoo/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
+| `/pishoo/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
+| `/pishoo/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
 
 设置对象示例：
 
@@ -27,9 +29,11 @@
 ]
 ```
 
-每条规则必须且只能包含字符串字段 `location`、`proxy_pass`。沿用已有的路径、重复规则和回环 HTTP/TCP 上游校验。`location` 是唯一键，不增加数据库 ID。`= /path` 表示精确匹配，其余位置按现有路径段前缀规则匹配。`/sys` 与其他管理、Lib API、静态文件命名空间保留，不能被代理或 Lib 占用。
+每条规则必须且只能包含字符串字段 `location`、`proxy_pass`。沿用已有的路径、重复规则和回环 HTTP/TCP 上游校验。`location` 是唯一键，不增加数据库 ID。`= /path` 表示精确匹配，其余位置按现有路径段前缀规则匹配。`/pishoo` 与其他管理、Lib API、静态文件命名空间保留，不能被代理或 Lib 占用。
 
 裸上游地址规范化为 `http://` URI。未写路径的 `http://127.0.0.1:8080` 保留原请求路径；显式路径 `/` 或 `/api/` 替换匹配前缀，两者不会在读写中合并。
+
+PATCH 代理接收单个规则对象；PUT 代理接收数组。location query 只用于代理 GET/DELETE，必须恰好出现一次，不接受其他 query 参数。GET/DELETE 不接受非空 Body。单条查询不存在返回404，DELETE 不会隐式清空整表。旧 `/sys` 不再提供管理别名。
 
 写请求必须使用 `Content-Type: application/json`，可带 charset 参数。请求体最多 64 KiB。未知字段、null、错误类型、无效代理与空 PATCH 均拒绝。完整输入校验后再开始写事务，数据库失败也不会留下部分代理规则。
 
@@ -41,7 +45,7 @@
 
 支持 `Accept-Versions: v1`，也支持包含 v1 的逗号分隔列表和多个同名头。省略时使用 v1，没有匹配版本返回 505。配置处理器的响应携带 `Supported-Versions: v1` 和 `Cache-Control: no-store`。
 
-成功返回 200 和 JSON；无效输入返回 400，身份不符返回 403，不支持的方法返回 405 并带 Allow，超大请求返回 413，非 JSON 写请求返回 415，存储错误返回 500，版本不匹配返回 505。外层 daccess 的拒绝与审批响应遵循当前库定义。
+读取及写入返回 200 和 JSON，删除返回204；无效输入返回 400，身份不符返回 403，不支持的方法返回 405 并带 Allow，超大请求返回 413，非 JSON 写请求返回 415，存储错误返回 500，版本不匹配返回 505。外层 daccess 的拒绝与审批响应遵循当前库定义。
 
 ## 生效规则与 H3 调用
 
@@ -51,17 +55,17 @@
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
-cargo run --locked -p pishoo --example pishoo-client -- get /sys/settings
-cargo run --locked -p pishoo --example pishoo-client -- patch /sys/settings '{"listen":1}'
-cargo run --locked -p pishoo --example pishoo-client -- put /sys/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
-cargo run --locked -p pishoo --example pishoo-client -- get /sys/proxies
+cargo run --locked -p pishoo --example pishoo-client -- get /pishoo/settings
+cargo run --locked -p pishoo --example pishoo-client -- patch /pishoo/settings '{"listen":1}'
+cargo run --locked -p pishoo --example pishoo-client -- put /pishoo/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
+cargo run --locked -p pishoo --example pishoo-client -- get /pishoo/proxies
 ```
 
 接口随 Server 启动装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
 
 ## 启动初始化与数据库兼容
 
-初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中不自动更新。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
 新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。服务应以身份所属用户运行；systemd 部署应通过服务覆盖文件设置 User 和 DHTTP_HOME，配置变更后重启、SIGTERM 退出。Homebrew 按当前用户启动服务。
 
@@ -81,3 +85,5 @@ cargo run --locked -p pishoo --example pishoo-client -- get /sys/proxies
 原生 daccess v0 升级先在临时副本验证，再生成 db/access-v0-backup-*.db，备份包含已提交的 WAL 数据；库自身的事务在原文件上完成升级，保留用户规则。后续v1启动不重复备份。旧0.8.2的 location_rule_sets/location_rules 不是该v0格式，目前无受支持转换，明确报错并保留原文件。旧 server.conf 不读取，也不删除。
 
 四库独立初始化，不建立跨库事务或初始化标记表；全部加载成功后才注册监听。某库失败可使本次启动结束，已完成的库在下次启动被正常复用。升级失败不自动删库、重置授权或回退版本。
+
+磁盘 Lib 管理与离线命令见[管理命令与 API 详细设计](management-design.md)。这些命令与配置 HTTP handler 复用 `config_database(profile, method, uri, payload)`，不会启动 Server 或自动重启。

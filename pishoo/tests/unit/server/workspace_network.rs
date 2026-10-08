@@ -51,18 +51,30 @@ async fn owner_request(
     path: &str,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
+    let bytes = if method == Method::GET || method == Method::DELETE {
+        Vec::new()
+    } else {
+        serde_json::to_vec(&body).unwrap()
+    };
+    owner_bytes(server, method, path, &bytes, "application/json").await
+}
+
+async fn owner_bytes(
+    server: &Server,
+    method: Method,
+    path: &str,
+    bytes: &[u8],
+    content_type: &'static str,
+) -> (StatusCode, serde_json::Value) {
     let request = Request::builder()
         .method(method)
         .uri(format!("https://{}{path}", server.name()))
-        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::CONTENT_TYPE, content_type)
         .body(dhttp::WndBuf::new(64 * 1024))
         .unwrap();
     let (mut writer, response) = server.endpoint.from_request(request).await.unwrap();
     use tokio::io::AsyncWriteExt;
-    writer
-        .write_all(&serde_json::to_vec(&body).unwrap())
-        .await
-        .unwrap();
+    writer.write_all(bytes).await.unwrap();
     writer.shutdown().await.unwrap();
     let response = response.await.unwrap();
     assert_eq!(response.version(), http::Version::HTTP_3);
@@ -244,7 +256,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/sys/settings",
+        "/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -268,7 +280,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/sys/settings",
+        "/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -478,10 +490,114 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .unwrap();
     let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
 
+    // Exercise the new disk APIs through real TLS, daccess and H3 transport.
+    let mut wasm =
+        include_bytes!("../../fixtures/wasi-http-stream-response-until-cancelled.wasm").to_vec();
+    let doc = br#"{"openapi":"3.1.0","info":{"title":"Test","version":"1"},"paths":{"/upload":{"post":{}}}}"#;
+    let mut section = vec![14];
+    section.extend_from_slice(b"pishoo:openapi");
+    section.extend_from_slice(doc);
+    wasm.push(0);
+    let mut length = section.len();
+    loop {
+        let b = (length & 127) as u8;
+        length >>= 7;
+        wasm.push(b | if length > 0 { 128 } else { 0 });
+        if length == 0 {
+            break;
+        }
+    }
+    wasm.extend(section);
+    assert_eq!(
+        owner_bytes(
+            &server,
+            Method::POST,
+            "/pishoo/lib-check",
+            &wasm,
+            "application/wasm"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, saved) = owner_bytes(
+        &server,
+        Method::PUT,
+        "/pishoo/libs/note",
+        &wasm,
+        "application/wasm",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["id"], "note");
+    assert!(!server.sandbox.libs.contains_key("note"));
+    assert_eq!(
+        owner_request(
+            &server,
+            Method::GET,
+            "/pishoo/libs",
+            serde_json::Value::Null
+        )
+        .await
+        .1[0]["id"],
+        "note"
+    );
+    assert!(
+        owner_request(
+            &server,
+            Method::GET,
+            "/workspace-api/libs",
+            serde_json::Value::Null
+        )
+        .await
+        .1
+        .as_array()
+        .unwrap()
+        .is_empty()
+    );
+    for (location, upstream) in [
+        ("/one", "127.0.0.1:8080"),
+        ("/two", "http://127.0.0.1:8081/"),
+    ] {
+        assert_eq!(
+            owner_request(
+                &server,
+                Method::PATCH,
+                "/pishoo/proxies",
+                serde_json::json!({"location":location,"proxy_pass":upstream})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        owner_request(
+            &server,
+            Method::GET,
+            "/pishoo/proxies?location=%2Fone",
+            serde_json::Value::Null
+        )
+        .await
+        .1["location"],
+        "/one"
+    );
+    assert_eq!(
+        owner_request(
+            &server,
+            Method::DELETE,
+            "/pishoo/proxies?location=%2Fone",
+            serde_json::Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/sys/settings",
+        "/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -490,7 +606,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
-        "/sys/settings",
+        "/pishoo/settings",
         serde_json::json!({"listen":1}),
     )
     .await;
@@ -506,7 +622,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
-        owner_request(&server, Method::PUT, "/sys/proxies", proxies.clone()).await;
+        owner_request(&server, Method::PUT, "/pishoo/proxies", proxies.clone()).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved, proxies);
     assert!(
@@ -526,10 +642,36 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     );
     assert_eq!(server.config.proxy_locations[0].location, "/service/");
     *app.write().unwrap() = server.router.read().unwrap().clone();
+    assert!(server.sandbox.libs.contains_key("note"));
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
+    let (mut upload, response) = server
+        .endpoint
+        .post(
+            format!("https://{}/api/note/upload", server.name())
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    upload.shutdown().await.unwrap();
+    let mut response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(
+        response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .is_data()
+    );
+    drop(response);
+
     let (status, saved) = owner_request(
         &server,
         Method::GET,
-        "/sys/proxies",
+        "/pishoo/proxies",
         serde_json::Value::Null,
     )
     .await;
@@ -538,8 +680,8 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::PUT,
-        "/sys/proxies",
-        serde_json::json!([{"location":"/sys/settings","proxy_pass":"127.0.0.1:8080"}]),
+        "/pishoo/proxies",
+        serde_json::json!([{"location":"/pishoo/settings","proxy_pass":"127.0.0.1:8080"}]),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -547,7 +689,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/sys/proxies",
+            "/pishoo/proxies",
             serde_json::Value::Null
         )
         .await
@@ -555,12 +697,37 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         proxies
     );
 
+    assert_eq!(
+        owner_request(
+            &server,
+            Method::GET,
+            "/workspace-api/libs",
+            serde_json::Value::Null
+        )
+        .await
+        .1[0]["id"],
+        "note"
+    );
+    assert_eq!(
+        owner_request(
+            &server,
+            Method::DELETE,
+            "/pishoo/libs/note",
+            serde_json::Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(server.sandbox.libs.contains_key("note"));
+    assert!(!server.profile.join("lib/note").exists());
+    assert!(server.profile.join("db/note").is_dir());
     // Even an explicit daccess allow cannot make another TLS identity the profile owner.
     server
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/sys",
+            "/pishoo",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -569,7 +736,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let alice = dhttp::Endpoint::load("alice").await.unwrap();
     let response = alice
         .get(
-            format!("https://{}/sys/settings", server.name())
+            format!("https://{}/pishoo/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -577,9 +744,19 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .unwrap();
     assert_eq!(response.version(), http::Version::HTTP_3);
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = alice
+        .get(
+            format!("https://{}/pishoo/libs", server.name())
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
     let response = dhttp::Anonymous
         .get(
-            format!("https://{}/sys/settings", server.name())
+            format!("https://{}/pishoo/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -592,7 +769,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/sys",
+            "/pishoo",
             access_control::Effect::Deny,
             access_control::Grantee::One(server.name().to_owned()),
         )
@@ -601,7 +778,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/sys/settings",
+        "/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
