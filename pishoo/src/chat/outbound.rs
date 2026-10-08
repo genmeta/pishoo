@@ -60,7 +60,7 @@ impl OutboundTransport for dhttp::Endpoint {
                     .method(method)
                     .uri(uri)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(dhttp::WndBuf::with_initial(64 * 1024, body))
+                    .body(dhttp::WndBuf::new(64 * 1024))
                     .map_err(|error| format!("invalid remote request: {error}"))?;
                 let (mut writer, response) = self
                     .from_request(request)
@@ -74,6 +74,10 @@ impl OutboundTransport for dhttp::Endpoint {
                     })?;
                 let (_, response) = tokio::try_join!(
                     async {
+                        writer
+                            .write_all(&body)
+                            .await
+                            .map_err(|error| format!("remote upload failed: {error}"))?;
                         writer
                             .shutdown()
                             .await

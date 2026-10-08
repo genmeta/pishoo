@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     RemoteApplication, RemoteStatus, now, reconcile_remote_contact, selected_access,
-    sync_remote_chat_grant,
+    update_remote_chat_grant,
 };
 use crate::workspace::Workspace;
 
@@ -68,14 +68,14 @@ pub(crate) fn spawn(
             let Some(state) = state.upgrade() else {
                 break;
             };
-            if let Err(error) = sync_incoming_grants(&state).await {
+            if let Err(error) = refresh_incoming_grants(&state).await {
                 tracing::warn!(%error, "contact worker could not confirm incoming Chat grants");
             }
         }
     })
 }
 
-async fn sync_incoming_grants(state: &Workspace) -> Result<(), String> {
+async fn refresh_incoming_grants(state: &Workspace) -> Result<(), String> {
     let Some(transport) = state.outbound.read().await.clone() else {
         return Ok(());
     };
@@ -364,7 +364,7 @@ async fn finish_response(state: &Workspace, job: &Job, remote: RemoteStatus, cur
             .await
         }
         "pending" | "expired" | "denied" | "revoked" => {
-            sync_remote_chat_grant(state, &job.target, &remote).await
+            update_remote_chat_grant(state, &job.target, &remote).await
         }
         _ => Err((StatusCode::CONFLICT, "未知远端申请状态")),
     };
@@ -561,7 +561,7 @@ mod tests {
                 subject: subject.to_vec(),
             }))
             .await;
-        sync_incoming_grants(state).await.unwrap();
+        refresh_incoming_grants(state).await.unwrap();
     }
 
     #[tokio::test]

@@ -3293,7 +3293,6 @@ dependencies = [
  "imagesize",
  "include_dir",
  "mime_guess",
- "nix 0.31.3",
  "oas3",
  "percent-encoding",
  "qbase",

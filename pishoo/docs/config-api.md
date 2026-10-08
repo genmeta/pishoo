@@ -6,7 +6,7 @@
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/sys/settings` | GET | 读取数据库中的 listen、exec | 设置对象 |
+| `/sys/settings` | GET | 读取数据库中的 listen | 设置对象 |
 | `/sys/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
 | `/sys/proxies` | GET | 读取数据库中的代理规则 | 规则数组，按 location 排序 |
 | `/sys/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
@@ -14,10 +14,10 @@
 设置对象示例：
 
 ```json
-{"listen": 3, "exec": false}
+{"listen": 3}
 ```
 
-`listen` 仅接受整数 0、1、2、3，依次表示关闭、内网、外网、两者。`exec` 使用 JSON 布尔值，数据库中仍是整数 0/1。PATCH 省略的字段保持原值；并发更新通过 SQLite 即时事务串行执行，避免丢失其他字段的更新。
+`listen` 仅接受整数 0、1、2、3，依次表示关闭、内网、外网、两者。宿主命令 exec 已移除；新库的 settings 只含 listen，已有库的旧 exec 列保留但不读取或更新，PATCH 提交 exec 字段返回400。PATCH 省略的字段保持原值；并发更新通过 SQLite 即时事务串行执行，避免丢失其他字段的更新。
 
 代理规则数组示例：
 
@@ -45,36 +45,36 @@
 
 ## 生效规则与 H3 调用
 
-成功写入表示数据库已保存。GET 展示数据库配置；正在运行的配置不会自动更新。代理变更通过现有 SIGHUP 串行重载生效，listen/exec 变更需重启；只要数据库中的 listen/exec 与当前运行值不同，现有 reload 就会拒绝。
+成功写入表示数据库已保存。GET 展示数据库配置；正在运行的配置不会自动更新。代理和 listen 变更均需重启生效；不提供 SIGHUP 重载。
 
 使用原生 H3 示例客户端；设置 DHTTP_HOME 指向客户端身份目录，并以目标身份的同名凭据连接：
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
 cargo run --locked -p pishoo --example pishoo-client -- get /sys/settings
-cargo run --locked -p pishoo --example pishoo-client -- patch /sys/settings '{"exec":true}'
+cargo run --locked -p pishoo --example pishoo-client -- patch /sys/settings '{"listen":1}'
 cargo run --locked -p pishoo --example pishoo-client -- put /sys/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
 cargo run --locked -p pishoo --example pishoo-client -- get /sys/proxies
 ```
 
-接口随 Server 启动及重载装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
+接口随 Server 启动装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
 
 ## 启动初始化与数据库兼容
 
-初始化由正常启动及 SIGHUP 新发现身份时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥、OCSP 或 `server.conf`。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中不自动更新。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
-新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。服务应以身份所属用户运行；systemd 部署应通过服务覆盖文件设置 User 和 DHTTP_HOME，SIGHUP 重载、SIGTERM 退出。Homebrew 按当前用户启动服务。
+新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。服务应以身份所属用户运行；systemd 部署应通过服务覆盖文件设置 User 和 DHTTP_HOME，配置变更后重启、SIGTERM 退出。Homebrew 按当前用户启动服务。
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
-| config.db | schema v1；settings 一行 listen=3（内外网均监听）、exec=0；代理为空 | 校验版本、配置和值；不补默认设置 |
+| config.db | schema v1；settings 一行 listen=3（内外网均监听）；代理为空 | 校验版本、配置和值；不补默认设置 |
 | access.db | 由 daccess 建库，并写入 POST /contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | workspace.db | schema8；默认资料一行；联系人投递、收藏和能力决定为空 | 只接受当前版本及必要表结构；资料和队列保留 |
 | chat.db | schema4；会话、消息、投递作业和授权观察为空 | 只接受当前版本及必要表结构；历史数据保留 |
 
-所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；聊天按既有能力审批控制。已删除或更改的默认规则在重启和重载后保持原样。
+所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；聊天按既有能力审批控制。已删除或更改的默认规则在重启后保持原样。
 
-仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Workspace/Chat 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取及已有 Server 重载不重新创建被删除的配置库。
+仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Workspace/Chat 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取不重新创建被删除的配置库。
 
 新的 access 数据库先在身份 db 目录下的临时目录中通过现有 daccess API 创建和写入默认规则，使用 SQLite 备份接口生成独立完整快照，校验并同步后发布到正式路径。正式文件缺失时以不覆盖已有文件的方式发布；已有空文件通过 SQLite 备份事务恢复，以保持 journal/WAL 一致。中断留下的未发布临时目录不会被当作正式库；当前调用正常退出时由 tempfile 清理自己的目录。
 

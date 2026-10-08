@@ -315,7 +315,6 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
         access,
         &ServerConfig {
             listen: 0,
-            exec: false,
             proxy_locations: ["/", "/docs/"]
                 .into_iter()
                 .map(|location| ProxyLocation {
@@ -363,7 +362,6 @@ async fn file_route_is_separate_from_proxy_fallback() {
         access.clone(),
         &ServerConfig {
             listen: 0,
-            exec: false,
             proxy_locations: Vec::new(),
         },
         &profile,
@@ -390,7 +388,6 @@ async fn file_route_is_separate_from_proxy_fallback() {
         access,
         &ServerConfig {
             listen: 0,
-            exec: false,
             proxy_locations: vec![ProxyLocation {
                 location: "/".into(),
                 proxy_pass: "http://127.0.0.1:8080/"
@@ -435,7 +432,6 @@ async fn proxy_prefix_matches_path_segments_only() {
         access,
         &ServerConfig {
             listen: 0,
-            exec: false,
             proxy_locations: vec![ProxyLocation {
                 location: "/docs/".into(),
                 proxy_pass: "http://127.0.0.1:8080/"
@@ -498,7 +494,6 @@ async fn api_namespace_never_falls_through_to_static_files_or_root_proxy() {
             access.clone(),
             &ServerConfig {
                 listen: 0,
-                exec: false,
                 proxy_locations,
             },
             &profile,

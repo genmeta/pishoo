@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use dhttp_home::identity::IdentityProfile;
 use http_body_util::BodyExt;
-use sha2::{Digest, Sha256};
 use tokio_util::task::TaskTracker;
 use wasmtime::{
     Engine, StoreLimits,
@@ -33,7 +32,6 @@ pub(crate) struct WasmRuntime {
 }
 
 pub(crate) struct Lib {
-    pub(crate) digest: [u8; 32],
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
     runtime: Arc<WasmRuntime>,
@@ -69,7 +67,7 @@ impl Sandbox {
     }
 
     /// Close WASM task tracking and discard the published Lib set.
-    /// Server separately clears the HTTP router and closes exec task tracking.
+    /// Server separately clears the HTTP router.
     pub(crate) fn close(&mut self) {
         self.tasks.close();
         self.libs.clear();
@@ -124,11 +122,6 @@ impl Sandbox {
                 return Err(Error::InvalidComponent("invalid component file".into()));
             }
             let bytes = std::fs::read(&path)?;
-            let digest: [u8; 32] = Sha256::digest(&bytes).into();
-            if let Some(lib) = self.libs.get(&id).filter(|lib| lib.digest == digest) {
-                candidates.insert(id, lib.clone());
-                continue;
-            }
             let lib = Lib::load(
                 self.runtime.clone(),
                 id.clone(),

@@ -9,7 +9,7 @@ fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(1,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(1); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
 
@@ -29,7 +29,6 @@ fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     assert_eq!(load_server_config(&profile).unwrap().listen, 1);
-    assert!(!load_server_config(&profile).unwrap().exec);
     let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute(
         "INSERT INTO proxy_locations VALUES('/plain/','http://127.0.0.1:8080')",
@@ -119,28 +118,9 @@ fn config_requires_one_row_and_local_http_upstreams() {
             .unwrap();
     }
     db.execute("DELETE FROM proxy_locations", []).unwrap();
-    db.execute("INSERT INTO settings VALUES(1,0)", []).unwrap();
+    db.execute("INSERT INTO settings VALUES(1)", []).unwrap();
     assert!(load_server_config(&profile).is_err());
 }
-#[test]
-fn exec_is_a_strict_server_setting() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute("UPDATE settings SET exec=1", []).unwrap();
-    assert!(load_server_config(&profile).unwrap().exec);
-    db.execute("UPDATE settings SET exec=2", []).unwrap();
-    assert!(matches!(
-        load_server_config(&profile),
-        Err(Error::InvalidConfig(_))
-    ));
-    db.execute("UPDATE settings SET exec='on'", []).unwrap();
-    assert!(matches!(
-        load_server_config(&profile),
-        Err(Error::InvalidConfig(_))
-    ));
-}
-
 #[test]
 fn file_namespace_cannot_be_proxied() {
     let root = tempfile::tempdir().unwrap();
@@ -164,6 +144,9 @@ fn file_namespace_cannot_be_proxied() {
 fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch("ALTER TABLE settings ADD COLUMN exec INTEGER NOT NULL DEFAULT 1;")
+        .unwrap();
     let proxies = json!([
         {"location":"/plain", "proxy_pass":"127.0.0.1:8080"},
         {"location":"/replace", "proxy_pass":"http://127.0.0.1:8080/"}
@@ -173,17 +156,18 @@ fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
     assert_eq!(saved[1]["proxy_pass"], "http://127.0.0.1:8080/");
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"listen":1,"exec":false})
-    );
-    assert_eq!(
-        config_database(&profile, true, Some(json!({"exec":true}))).unwrap(),
-        json!({"listen":1,"exec":true})
+        json!({"listen":1})
     );
     assert_eq!(
         config_database(&profile, true, Some(json!({"listen":3}))).unwrap(),
-        json!({"listen":3,"exec":true})
+        json!({"listen":3})
     );
     assert_eq!(config_database(&profile, false, None).unwrap(), saved);
+    assert_eq!(
+        db.query_row("SELECT exec FROM settings", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
     config_database(&profile, false, Some(json!([]))).unwrap();
     assert!(
         load_server_config(&profile)
@@ -191,7 +175,6 @@ fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
             .proxy_locations
             .is_empty()
     );
-    assert!(load_server_config(&profile).unwrap().exec);
 }
 
 #[test]
@@ -204,7 +187,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         json!({}),
         json!(null),
         json!([]),
-        json!({"exec":1}),
+        json!({"exec":true}),
         json!({"listen":1.0}),
         json!({"listen":-1}),
         json!({"listen":4}),
@@ -217,7 +200,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         ));
         assert_eq!(
             config_database(&profile, true, None).unwrap(),
-            json!({"listen":1,"exec":false})
+            json!({"listen":1})
         );
     }
     for payload in [
@@ -261,27 +244,6 @@ fn proxy_replacement_rolls_back_a_database_failure_after_an_insert() {
     );
     assert!(matches!(result, Err(Error::ConfigDatabase(_))));
     assert_eq!(config_database(&profile, false, None).unwrap(), before);
-}
-
-#[test]
-fn concurrent_settings_patches_preserve_each_others_fields() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    std::thread::scope(|scope| {
-        for patch in [json!({"listen":3}), json!({"exec":true})] {
-            let profile = &profile;
-            let barrier = barrier.clone();
-            scope.spawn(move || {
-                barrier.wait();
-                config_database(profile, true, Some(patch)).unwrap();
-            });
-        }
-    });
-    assert_eq!(
-        config_database(&profile, true, None).unwrap(),
-        json!({"listen":3,"exec":true})
-    );
 }
 
 fn api_endpoint(name: &str) -> dhttp::Endpoint {
@@ -344,7 +306,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
                 .unwrap()
         )
         .unwrap(),
-        json!({"listen":1,"exec":false})
+        json!({"listen":1})
     );
     for (versions, expected) in [
         ("v2, v1", StatusCode::OK),
@@ -422,7 +384,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     }
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"listen":1,"exec":false})
+        json!({"listen":1})
     );
 }
 

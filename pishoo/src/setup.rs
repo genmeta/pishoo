@@ -18,7 +18,6 @@ use crate::{Error, Result, routes::reserved};
 #[derive(Clone, Debug)]
 pub(crate) struct ServerConfig {
     pub(crate) listen: u8,
-    pub(crate) exec: bool,
     pub(crate) proxy_locations: Vec<ProxyLocation>,
 }
 #[derive(Debug)]
@@ -114,10 +113,9 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     if empty {
         tx.execute_batch(
             "CREATE TABLE settings (
-                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3),
-                exec INTEGER NOT NULL CHECK(typeof(exec) = 'integer' AND exec IN (0,1))
+                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3)
              );
-             INSERT INTO settings(listen,exec) VALUES(3,0);
+             INSERT INTO settings(listen) VALUES(3);
              CREATE TABLE proxy_locations(location TEXT NOT NULL PRIMARY KEY, proxy_pass TEXT NOT NULL);
              PRAGMA user_version=1;",
         )?;
@@ -146,7 +144,7 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
             "unsupported schema {version}"
         )));
     }
-    let mut stmt = conn.prepare("SELECT listen, exec FROM settings")?;
+    let mut stmt = conn.prepare("SELECT listen FROM settings")?;
     let mut rows = stmt.query([])?;
     let Some(row) = rows.next()? else {
         return Err(Error::InvalidConfig(
@@ -160,11 +158,6 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
                 "listen must be an integer in 0..=3".into(),
             ));
         }
-    };
-    let exec = match row.get_ref(1)? {
-        ValueRef::Integer(0) => false,
-        ValueRef::Integer(1) => true,
-        _ => return Err(Error::InvalidConfig("exec must be 0 or 1".into())),
     };
     if rows.next()?.is_some() {
         return Err(Error::InvalidConfig(
@@ -182,7 +175,6 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(ServerConfig {
         listen,
-        exec,
         proxy_locations: parse_proxies(values)?,
     })
 }
@@ -376,12 +368,9 @@ fn config_database(
                 if let Some(listen) = payload.get("listen") {
                     config.listen = listen.as_u64().unwrap() as u8;
                 }
-                if let Some(exec) = payload.get("exec") {
-                    config.exec = exec.as_bool().unwrap();
-                }
                 tx.execute(
-                    "UPDATE settings SET listen=?1, exec=?2",
-                    rusqlite::params![config.listen, config.exec],
+                    "UPDATE settings SET listen=?1",
+                    rusqlite::params![config.listen],
                 )?;
             }
             // Revalidate persisted values before commit, including database constraints/triggers.
@@ -391,7 +380,7 @@ fn config_database(
         }
     };
     if settings {
-        Ok(json!({"listen": config.listen, "exec": config.exec}))
+        Ok(json!({"listen": config.listen}))
     } else {
         Ok(Value::Array(
             config
@@ -413,7 +402,6 @@ fn validate_settings_patch(payload: &Value) -> Result<()> {
     for (key, value) in object {
         let valid = match key.as_str() {
             "listen" => value.as_u64().is_some_and(|value| value <= 3),
-            "exec" => value.is_boolean(),
             _ => false,
         };
         if !valid {

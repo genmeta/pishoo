@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 const MAINTENANCE_RETRY: Duration = Duration::from_secs(5);
-const MIN_PUBLISH_LEASE: Duration = Duration::from_secs(30);
+const PUBLISH_INTERVAL: Duration = Duration::from_secs(20);
 
 pub(crate) fn install() -> io::Result<MdnsResolverSet> {
     let origin = ddns::resolvers::DHTTP_NAME_SERVICE
@@ -52,7 +52,7 @@ pub(crate) fn publisher(endpoint: &Endpoint) -> io::Result<Arc<H3Resolver>> {
     ))
 }
 
-pub(crate) async fn sync_mdns(
+pub(crate) async fn maintain_mdns(
     mdns: &MdnsResolverSet,
     endpoints: &[Endpoint],
     removed_bounds: &[SocketAddr],
@@ -152,6 +152,10 @@ pub(crate) async fn publish(
     publisher: Arc<H3Resolver>,
     addresses: Arc<[qresolve::EndpointAddr]>,
 ) -> Option<Instant> {
+    // Stop renewing absent addresses; existing records expire with their lease.
+    if addresses.is_empty() {
+        return None;
+    }
     let started = Instant::now();
     match tokio::time::timeout(
         PUBLISH_TIMEOUT,
@@ -159,58 +163,16 @@ pub(crate) async fn publish(
     )
     .await
     {
-        Ok(Ok(_)) if addresses.is_empty() => None,
-        Ok(Ok(lease)) if lease >= MIN_PUBLISH_LEASE => {
-            // The deployed pre-lease server stores records for 30 seconds even
-            // though its signed DNS packet TTL (and compatibility window) is 300.
-            // Renew against the minimum supported storage lease until every
-            // deployed server reports its lease explicitly.
-            Some(started + lease.min(MIN_PUBLISH_LEASE) / 3)
+        Ok(Ok(_)) => Some(started + PUBLISH_INTERVAL),
+        Ok(Err(error)) => {
+            eprintln!("DNS publish {name}: {error:?}");
+            Some(Instant::now() + MAINTENANCE_RETRY)
         }
-        result => {
-            match result {
-                Ok(Ok(lease)) => eprintln!(
-                    "DNS publish {name}: unsupported lease {lease:?}; minimum is {MIN_PUBLISH_LEASE:?}"
-                ),
-                Ok(Err(error)) => eprintln!("DNS publish {name}: {error:?}"),
-                Err(error) => eprintln!("DNS publish {name}: {error}"),
-            }
+        Err(error) => {
+            eprintln!("DNS publish {name}: {error}");
             Some(Instant::now() + MAINTENANCE_RETRY)
         }
     }
-}
-
-pub(crate) async fn withdraw(
-    endpoint: &Endpoint,
-    publisher: Option<&H3Resolver>,
-    mdns: &MdnsResolverSet,
-) -> io::Result<()> {
-    for instance in mdns.snapshot() {
-        instance.remove_name(endpoint.name());
-    }
-    if let Some(publisher) = publisher {
-        match tokio::time::timeout(
-            PUBLISH_TIMEOUT,
-            publisher.publish_endpoints(endpoint.name(), []),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                return Err(io::Error::other(format!(
-                    "DNS withdraw {}: {error:?}",
-                    endpoint.name()
-                )));
-            }
-            Err(error) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("DNS withdraw {}: {error}", endpoint.name()),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -262,17 +224,31 @@ mod tests {
             Arc::new(H3Resolver::new("https://dns.invalid/".parse().unwrap(), &endpoint).unwrap());
         let started = Instant::now();
         // Unit tests do not install a network; the error must schedule maintenance.
-        let due = publish(endpoint.name().to_owned(), publisher, Arc::from([]))
-            .await
-            .unwrap();
+        let due = publish(
+            endpoint.name().to_owned(),
+            publisher,
+            Arc::from(["127.0.0.1:8080".parse::<SocketAddr>().unwrap().into()]),
+        )
+        .await
+        .unwrap();
         assert_eq!(due, started + MAINTENANCE_RETRY);
     }
 
     #[tokio::test]
-    async fn local_withdrawal_and_empty_mdns_maintenance_need_no_network() {
+    async fn empty_publication_stops_renewal_without_network() {
+        let endpoint = endpoint(0);
+        let publisher =
+            Arc::new(H3Resolver::new("https://dns.invalid/".parse().unwrap(), &endpoint).unwrap());
+        assert_eq!(
+            publish(endpoint.name().to_owned(), publisher, Arc::from([])).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_mdns_maintenance_needs_no_network() {
         let mdns = MdnsResolverSet::new(ddns::resolvers::DHTTP_MDNS_SERVICE_DOMAIN);
-        sync_mdns(&mdns, &[], &[]).await.unwrap();
-        withdraw(&endpoint(0), None, &mdns).await.unwrap();
+        maintain_mdns(&mdns, &[], &[]).await.unwrap();
         mdns.shutdown().await.unwrap();
     }
 }

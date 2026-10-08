@@ -3,7 +3,6 @@ use http::StatusCode;
 #[derive(Debug)]
 pub enum Error {
     BadRequest(String),
-    BackendUnavailable(String),
     InvalidConfig(String),
     InvalidComponent(String),
     InvalidIdentity(String),
@@ -12,9 +11,7 @@ pub enum Error {
     RouteNotFound,
     MethodNotAllowed,
     Denied,
-    Cancelled,
     Deadline,
-    Closed,
     GuestExitedWithoutResponse,
     GuestRejectedResponse(wasmtime_wasi_http::p2::bindings::http::types::ErrorCode),
     Guest(wasmtime::Error),
@@ -31,12 +28,10 @@ impl Error {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::BackendUnavailable(_) => StatusCode::NOT_IMPLEMENTED,
             Self::IdentityMismatch => StatusCode::MISDIRECTED_REQUEST,
             Self::RouteNotFound => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Denied | Self::InvalidIdentity(_) => StatusCode::FORBIDDEN,
-            Self::Cancelled | Self::Closed => StatusCode::SERVICE_UNAVAILABLE,
             Self::Deadline => StatusCode::GATEWAY_TIMEOUT,
             Self::Dhttp(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -51,7 +46,6 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadRequest(s)
-            | Self::BackendUnavailable(s)
             | Self::InvalidConfig(s)
             | Self::InvalidComponent(s)
             | Self::InvalidIdentity(s) => f.write_str(s),
@@ -68,9 +62,7 @@ impl std::fmt::Display for Error {
             Self::RouteNotFound => f.write_str("route not found"),
             Self::MethodNotAllowed => f.write_str("method not allowed"),
             Self::Denied => f.write_str("permission denied"),
-            Self::Cancelled => f.write_str("execution cancelled"),
             Self::Deadline => f.write_str("execution deadline exceeded"),
-            Self::Closed => f.write_str("server closed"),
             Self::GuestExitedWithoutResponse => f.write_str("guest exited without a response"),
             Self::ShutdownDeadline => f.write_str("application shutdown deadline exceeded"),
         }

@@ -425,10 +425,13 @@ async fn send_bytes(
         request = request.header(http::header::CONTENT_TYPE, "application/json".parse()?);
     }
     let (mut writer, response) = request
-        .body(dhttp::WndBuf::with_initial(64 * 1024, bytes))
+        .body(dhttp::WndBuf::new(64 * 1024))
         .await?;
     let upload = scopeguard::guard(
-        tokio::spawn(async move { writer.shutdown().await }),
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await?;
+            writer.shutdown().await
+        }),
         |task| task.abort(),
     );
     let response = response.await?;

@@ -13,6 +13,7 @@
 - 互斥状态用 enum 或 Result<正常对象, Error> 表达，只在对应分支持有有效资源；不并列保存正常对象、error、failed/closed 等可能矛盾的标志。
 - 同一结构的成员应表达可独立成立的资源或事实；不要用多个相关 Option/bool 组合出若干非法状态。仅在特定阶段有效的成员移入该阶段的 enum 分支。
 - 不新增 XxxGuard 类型；必要的局部释放和取消复用已有所有权与库工具。
+- 自定义函数按具体动作命名，不使用 `sync_` 前缀；区分维护资源、刷新远端结果和应用更新。
 - 不冻结纯局部 helper 的实现拆分，更不把 helper 包装成一层公共 API。
 - 不用重命名、匿名元组、扩展表或额外全局变量藏回已删除的状态。
 
@@ -26,18 +27,17 @@
 | [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、连接复用与应用接入 |
 | [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Sandbox/Lib、daccess 接入与 WASM |
 | [Workspace/Chat 接入](workspace-chat-interfaces.md) | 目标分支业务模型、Server 资源归属及 Endpoint 出站接缝 |
-| [DNS 解析与发布](pishoo-dns-detailed-design.md) | 全进程解析源、内存凭据发布、地址维护、租期和撤回 |
-| [exec 结构](exec-interfaces.md) | 单命令宿主执行、身份准入与子进程回收 |
+| [DNS 解析与发布](pishoo-dns-detailed-design.md) | 全进程解析源、内存凭据发布、地址维护、租期和自然过期 |
 
 ## 冻结规则
 
-1. 冻结范围覆盖 HTTP 网关、WASM 及单命令 exec。每个自定义有状态结构的私有成员也在范围内。
+1. 冻结范围覆盖 HTTP 网关和 WASM。每个自定义有状态结构的私有成员也在范围内。
 2. 清单列出的结构名、字段名及类型、枚举变体及载荷、方法签名、跨模块函数签名和调用归属，后续实现不得自行增加、删除或修改。
 3. 方法体、局部变量、闭包及编译器生成的 async 状态可以按实现需要编写。模块内部的无状态辅助函数可拆分算法；它们不能新增跨模块接口或持久状态。
 4. 不允许用 `Any`、通用属性包、未限定的 extensions、占位成员或匿名集合隐藏清单之外的状态。清单中的集合只能存其明确列出的业务内容。
 5. 已复用的第三方类型按所选依赖版本使用，不复制新模型。后续依赖升级若改变冻结接口，按接口变更处理。
 6. 发现清单无法满足实现时，先列出具体冲突、受影响调用和最小变更，取得用户明确同意后再修改清单及代码。不得在“顺手重构”中扩展结构。
-7. 没有在结构清单中列出的能力不通过预留字段进入代码。exec 的 OS 权限和后代回收限制必须如实报告，不能用文档替代实现验收。
+7. 没有在结构清单中列出的能力不通过预留字段进入代码。不提供宿主命令 exec 入口。
 8. 这份基线冻结的是设计，不代表实现已经编译、联网或通过隔离测试。结构实现与行为验收分别检查。
 
 ## 当前边界
@@ -45,7 +45,7 @@
 - h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 持已加载的 `Arc<qconn::QuicEndpoint>`，不持 Network 或连接；DNS 签名与 TLS 共用同一组内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
-- 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 与 exec 都不设并发名额。
+- 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 不设并发名额。
 - 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
 - 2026-10-02 按用户指定的 [Network 详细设计](../../dhttp/docs/design/network-detailed-design.md)统一为 QUIC。Network 只保存服务表和 H3 连接池；幂等 init 准备全部可用网卡，由 netwatcher 事件触发扫描，socket/地址登记及清理交给 dquic Dock。listener scopes 只限制名称来源；取消 listener 保留 socket。接入回调直接装配 H3，匿名出站由 Request::new 创建。池键用 Incoming、Outgoing 分别约束本端或远端身份必填；双方具名时按名称对跨方向复用，qconn 的本端 identity 可选。原泛型后端、TCP mock、BackendState、Binding 和 ListenerEntry 从当前清单移除。
 - dhttp 保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。Lib 暂不调用该出站接口。
@@ -59,13 +59,13 @@
 - WASM 执行归 Pishoo；h3x 和 dhttp 不依赖 Pishoo 或 Wasmtime。
 - WASM 不设总执行时长期限；每次调用仍受 Store 中逐 linear memory 的内存限制、fuel 和 WASI 宿主能力约束，guest 任务由 TaskTracker 跟踪。
 - daccess 的当前库接口是授权、审批和管理路由的依据；尽量复用 `pishoo/feat/daccess` 的集成，不兼容处按库调整。审批立即返回202，由 daccess 持久保存并提供按 Visitor 校验的状态查询；联系人使用申请队列与轮询，删除 ContactNotifier 回调。Lib API 不自动登记访问规则，不建立导入账本。
-- 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 和 exec 各自管理实际执行资源。
-- 第一版串行加载/重载，Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；Sandbox 扫描时使用局部候选集合，校验成功后更新自身 Lib，再由 Server 构建并替换 Router。不建立 ServerState、Release 或 begin_build 发布流程。
-- Pishoo 启动时加载身份与配置，运行中仅在收到 SIGHUP 时扫描并串行重载；不定时轮询。`listen` 和 `exec` 变化仍需重启。
+- 不增加 Server 级统一请求并发限额或应用租约；静态/代理直接使用现成 Body，Lib 管理实际执行资源。
+- 第一版仅在启动时串行加载，身份、配置、Lib 和凭据更新统一重启。Server 直接持有 Router 和 Sandbox，Sandbox 直接持有 Lib；Sandbox 扫描时使用局部候选集合，校验成功后更新自身 Lib，再由 Server 构建 Router。不建立 ServerState、Release 或 begin_build 发布流程。
+- Pishoo 启动时加载身份、配置和 Lib；运行中只维护 DNS 发布及地址变化，不支持 SIGHUP 重载或每日 OCSP 自动更新。身份、配置、Lib 与凭据变更均需重启。
 
 2026-09-26 用户确认将 WASM 职责集中到 Sandbox：在已有 `lib_slots`、`tasks` 基础上迁入 Server 的 `libs`、`runtime`，Server 改为直接持有 `Sandbox`；组件加载、版本替换和 API Router 构造方法归 Sandbox。当时 `build_router` 接收已构造的 Lib Router；其后改为由 Server 显式组装完整 Router。运行入口保留跨身份共享的 WasmRuntime，Server 保留 Endpoint、授权和整体 Router 发布。当次迁移保持 Invocation 与 Store 的成员及调用签名，`validate_lib` 的根级公开导出不变。字段和方法的完整签名见 [Pishoo 清单](pishoo-interfaces.md)。
 
-2026-09-27 用户要求移除 DaemonConfig 与 Daemon 结构：`run` 以局部变量持有实例目录、Server 和 WasmRuntime，保留串行重载及关闭顺序。随后用户取消实例配置文件和 TerminalPolicy，并将第一版交互终端收缩为单命令宿主 exec：每个 Server 的 schema v1 settings 单行包含执行开关与同名身份准入，删除终端会话、WASM shell 和平台隔离后端，Server 直接持有 exec 任务跟踪器。执行开关现命名为 `exec`，接口以 [Pishoo 清单](pishoo-interfaces.md) 和 [exec 清单](exec-interfaces.md) 为准。
+2026-09-27 用户要求移除 DaemonConfig 与 Daemon 结构：`run` 以局部变量持有实例目录、Server 和 WasmRuntime，保留串行重载及关闭顺序。随后用户取消实例配置文件和 TerminalPolicy，并将第一版交互终端收缩为单命令宿主 exec：每个 Server 的 schema v1 settings 单行包含执行开关与同名身份准入，删除终端会话、WASM shell 和平台隔离后端，Server 直接持有 exec 任务跟踪器。执行开关现命名为 `exec`，接口以 [Pishoo 清单](pishoo-interfaces.md) 为准。
 
 2026-09-28 用户要求移除 `exec_slots` 并发名额与 `Server.cancel` 身份取消信号。exec 与 Lib 不设并发名额；Server 关闭时清空当前 Router、关闭任务跟踪器，Lib 在途执行自然完成，exec 已启动命令仍由单次请求取消或超时机制负责回收。
 
@@ -127,6 +127,8 @@
 
 ## 文档清理
 
+2026-10-08 用户要求删除 `Lib.digest` 及摘要复用分支。每次启动或 SIGHUP 扫描都重新校验、编译全部 Lib；完整扫描成功后替换集合，失败仍保留当前 Lib 与 Router。具体字段及行为见 [Pishoo 清单](pishoo-interfaces.md)。
+
 2026-10-04 用户要求先兼容官方服务未携带 OCSP，随后明确扩大到所有域名：qtls ServerVerifier 在证书链、域名、有效期验证后允许缺失服务端 staple；已提供的 OCSP 仍校验证书绑定、签名、时效和撤销状态。握手签名校验不变。仅调整方法体，不增加结构、字段、接口或开关；替代此前服务端必须携带 OCSP 的规则。已有 DDNS 显式文件补充路径保留，指定文件仍必须验证；正常启动不再依赖该文件。本地身份 OCSP 加载与续期规则保持原样。
 
 2026-10-04 用户要求身份验证失败跳过该身份，替代2026-09-28身份加载失败直接结束的约定：启动和 SIGHUP 新身份加载记录凭据失败的身份名及原因，继续后续身份；跳过身份下次 SIGHUP 重试。已加载身份在 SIGHUP 凭据读取失败时跳过本次重载并保留内存资源。配置、数据库、Lib 及全局网络错误仍直接返回。不增加结构、字段、错误变体或跨模块函数，具体行为见 Pishoo 清单。
@@ -135,7 +137,7 @@
 
 README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担接口定义。其他仓库中的历史设计也不作为本轮三仓接口的实现依据。
 
-2026-10-03 用户明确批准 [DNS 详细设计](pishoo-dns-detailed-design.md) 的全部六项接口及相邻仓库变化：Server.publisher 与六个 dns 函数；确认现行 Endpoint.quic 并新增 local_authority/ListenFuture、修改监听登记返回值；AddressBook.inner_bindings；H3Resolver 直接持 Endpoint、发布返回 Duration 及错误变体调整；服务端租期头/no-store；同步本冻结清单。run 在 Network 初始化前注册 System/H3/mDNS 解析源并订阅地址簿；监听登记成功后维护发布批，SIGHUP、删除和退出先排空当前发布，再撤回及清理自己的 mDNS/应用资源。新旧服务端协议部署与公网/NAT 验收仍需分别确认，不改变共享传输的进程生命周期。
+2026-10-03 用户明确批准 [DNS 详细设计](pishoo-dns-detailed-design.md) 的全部六项接口及相邻仓库变化：Server.publisher 与六个 dns 函数；确认现行 Endpoint.quic 并新增 local_authority/ListenFuture、修改监听登记返回值；AddressBook.inner_bindings；H3Resolver 直接持 Endpoint、发布返回 Duration 及错误变体调整；服务端租期头/no-store；同步本冻结清单。run 在 Network 初始化前注册 System/H3/mDNS 解析源并订阅地址簿；监听登记成功后维护发布批，SIGHUP、删除和退出先排空当前发布，再清理自己的 mDNS/应用资源；2026-10-08 用户取消主动撤回，停止续期后由记录自然过期。新旧服务端协议部署与公网/NAT 验收仍需分别确认，不改变共享传输的进程生命周期。
 
 2026-10-03 用户要求继续线上端到端验收并包含 NAT 探测与打洞，明确批准临时替换并恢复 code 身份的线上 DNS，随后要求先跳过线上尚未部署的租期头校验。旧发布响应缺头时暂按300秒续期窗口、空发布按0处理；已有租期头仍按原规则校验，签名和身份鉴权不变。qtls 的方法体允许仅为 ddns.genmeta.net 从 DQUIC_DDNS_OCSP_FILE 补充客户端预取的 OCSP，仍执行证书绑定、签名、时效和撤销验证。具名 qconn 出站从同一 LocalAuthority 填充已存在的 ClientName 传输参数，以兼容线上旧版身份识别；不新增类型、字段或方法。NAT 映射登记和仅公网地址的验收装配暂在独立端到端 example 中完成；单元测试不执行线上请求，普通 Network 启动尚不自动探测。
 
@@ -146,3 +148,11 @@ README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担
 2026-10-04 用户指出中转 DNS 应发布 outer-agent。Network 的 QUIC 别名与 DDNS 上报分开：FullCone 映射可发布 Direct，受限或尚未成功分类的映射保留 Mediate(agent, outer)，交既有 E-record 编码输出 outer-agent。AddressBook 的现有外部地址表允许有效 Mediate，内部地址表仍只存 Direct；不新增结构、字段、方法或错误变体。
 
 2026-10-04 用户确认使用 home 身份与根级 ssl/db/file/lib/logs/repo/templates 布局，不再使用 server.conf，并要求实施正常启动初始化。新库默认 listen=3（内外网均监听）、exec=0、空代理、允许具名 POST /contact；聊天独立审批。已有库不补默认规则，原生daccess v0先备份后升级，旧0.8.2及未知格式拒绝启动并保留原文件。初始化归现有资源加载方法与模块内无状态算法，不增加结构、字段、跨模块接口或初始化账本；安装包仅提供程序与服务文件。具体行为见 Pishoo 清单和配置 API。
+
+2026-10-08 用户要求取消 DNS 主动撤回，删除 `dns::withdraw` 及删除身份、退出时的调用。地址为空也停止发布与续期，DDNS 记录按租期自然过期；删除身份仍清除 mDNS 本机应答，远端缓存按 TTL 过期，退出仍关闭自有 mDNS 资源。不新增结构、字段或替代接口。
+
+2026-10-08 用户进一步要求删除每日 OCSP 自动更新和 SIGHUP 重载，更新统一重启。删除 `Server::reload`、模块内 renew_ocsp/reload_profiles、信号及定时更新分支、运行中身份增删和相关测试/服务 ExecReload；启动身份校验、OCSP 缓存准备、DNS 续期与地址维护、应用退出清理保留。发布 future 不再装箱，select 直接使用下一次维护时刻，不持有额外 timer。此决定替代此前运行中重载和 OCSP 续期约定。
+
+2026-10-08 用户确认服务端尚不返回租期，DNS 发布成功后统一每20秒续期，删除 Pishoo 的最低租期判断和按租期计算间隔的逻辑。失败或超时仍5秒后重试，空地址停止发布；既有函数签名与 ddns 缺头兼容保持不变。此决定替代此前三分之一租期与10秒间隔上限的安排。
+
+2026-10-08 用户要求先删除 exec：移除宿主命令执行模块及其 `/exec` 路由、Server.exec_tasks、ServerConfig.exec、execute 跨模块接缝与专用错误 BackendUnavailable/Cancelled/Closed，删除 exec 接口文档及专用测试/脚本/依赖。新建 config.db 的 schema v1 仅保留 settings(listen)；已有库的旧 exec 列保留但不读取或更新，配置 API 不返回该字段并拒绝提交 exec 的 PATCH。`/exec` 不再保留为内置命名空间；不新增替代状态或接口。此前 exec 相关段落仅为历史决策记录，由本决定替代。

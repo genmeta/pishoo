@@ -44,8 +44,8 @@ async fn setup_tcp_demo() -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open(root.join("db/config.db"))?;
     db.execute_batch(
         "PRAGMA user_version=1;
-             CREATE TABLE settings(listen INTEGER NOT NULL, exec INTEGER NOT NULL);
-             INSERT INTO settings VALUES(1,0);
+             CREATE TABLE settings(listen INTEGER NOT NULL);
+             INSERT INTO settings VALUES(1);
              CREATE TABLE proxy_locations(location TEXT NOT NULL, proxy_pass TEXT NOT NULL);",
     )?;
     db.execute(

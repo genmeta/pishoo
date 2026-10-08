@@ -2,6 +2,25 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-08：删除宿主命令 exec
+
+- 按用户要求删除 exec 模块、`/exec` 路由、Server.exec_tasks、ServerConfig.exec、专用错误 BackendUnavailable/Cancelled/Closed、专用测试及 test.sh；移除直接 nix 依赖和 Tokio process feature，base64 仅保留为既有证书测试的开发依赖。同步冻结接口、架构和配置 API 文档，删除 exec 接口清单，不新增替代状态或接口。
+- 新建 config.db 继续使用 schema v1，settings 只含 listen；已有库的旧 exec 列原样保留但不读取或更新。配置 API 仅返回 listen，提交 exec 字段按未知字段返回400；`/exec` 不再保留为内置命名空间。现有测试改为验证 listen 的保存/重启生效，并核验新库列及旧列兼容。
+- 验证：108项默认库测试通过，3项默认跳过；其中两项本机 TCP 代理测试先受沙箱端口限制，再于允许绑定本机端口的环境下补跑通过。另行显式运行本机 QUIC 配置 API 用例通过，确认 listen/代理保存、授权及重启生效。`cargo check --locked --offline -p pishoo --all-targets`、修改 Rust 文件格式和 diff 检查通过；未修改实际身份数据库、线上 DNS 或重启现有服务。
+
+## 2026-10-08：运行入口只保留启动、DNS 维护和退出
+
+- 用户明确选择删除每日 OCSP 自动更新和 SIGHUP 重载，更新统一重启。移除 `Server::reload`、renew_ocsp/reload_profiles、信号与定时更新分支、运行中身份增删、关闭身份筛选和重载恢复逻辑；删除对应重载测试及 systemd ExecReload，同步冻结接口和使用说明。
+- 保留启动身份校验与 OCSP 缓存准备、共享 Network、串行 Lib 加载、DNS 续期/失败重试/地址变化、Ctrl-C/SIGTERM 退出和应用/mDNS 收尾。发布 future 不再装箱，select 直接按 next_due 等待，不保存额外 timer；run 当前83行，不新增结构、字段或替代 API。
+- 验证：117项库测试通过、3项默认跳过；配置 API 本机 QUIC 用例另行显式通过，确认写入不更新当前 exec/代理配置，关闭后新建 Server 才读取新值。all-targets 编译、修改 Rust 文件格式及 diff 检查通过。库测试首次受沙箱端口权限限制，获准本机端口后复测通过；未重启日常进程或修改线上 DNS。
+- 完整 xtask release_contract 离线运行缺少 arc-swap 1.9.2，未改依赖或锁文件；将受影响的纯标准库安装契约测试原样提取，用 rustc 单独执行通过，临时测试文件与程序已清理。
+
+## 2026-10-08：DNS 记录自然过期
+
+- 用户取消主动撤回：删除 `dns::withdraw` 及身份删除、退出时的调用；外网地址为空时不发送空发布、不安排续期，已有 DDNS 记录按租期自然过期。同步冻结清单和 DNS 详细设计。
+- 删除身份仍清除 mDNS 本机应答，已有远端缓存按 TTL 过期；退出仍关闭应用与自有 mDNS 资源。移除仅为撤回准备的启动失败分支，保留统一收尾及发布批次边界，不增加结构、字段或替代接口。
+- 验证：4 项 DNS 单元测试通过，覆盖空地址停止续期和非空发布失败重试；`cargo check --locked --offline -p pishoo --all-targets`、修改 DNS 文件格式检查及 diff 检查通过。实际组播测试未重跑，未修改线上 DNS 或重启现有进程。
+
 ## 2026-10-04：好友申请的反向聊天授权确认
 
 - 接收方复用现有 Workspace 联系人 worker，对已激活、涉及聊天能力且存在同名同 SubjectId 入站申请的联系人调用 daccess 既有 `GET /contact/self`。批准时唤醒，启动及每30秒核验；无需反向重复申请，不新增结构、成员、跨模块接口或数据库表。
@@ -315,3 +334,7 @@ DDNS 服务端30项 router 测试通过，包括租期头、查询 no-store 和�
 用户指出中转 E-record 应为 outer-agent。根因是 Network 已登记 Mediate QUIC 别名，却将其公网映射写成 AddressBook 的 Direct 地址，外部地址表也拒绝 Mediate，导致 DNS 丢失 agent。修复仅改变现有方法体/局部无状态算法：外部地址表允许有效中转地址，内部仍只允许 Direct；FullCone 发布 Direct，受限/未知 NAT 发布各节点的 Mediate，保留实际 socket 的 Direct 别名供打洞。映射替换及撤回按完整 agent/outer 对处理；结构、字段、签名、错误变体和 h3x 不变。DNS 编码器原本就支持 NAT 标记及 outer-agent，不改协议格式；新增 IPv4/IPv6 编码回归。
 
 验证：AddressBook 24项、Network 11项及 DNS packet 7项定向回归通过；Pishoo 普通入口重编译并重启。使用 genmeta curl 对两身份的公网 API 连续4轮、跨度38.2秒查询，8次均200且全部 E-record 为 outer-agent，例如 113.80.22.156:22808-44.253.170.203:20002；证据在 target/workspace-chat-live/relay-dns-result.json。genmeta nslookup --anonymous <name> h3 同样查到两身份的6条中转记录；它的内部 EndpointAddr Display 为 agent-outer，与 DNS API 文本顺序不同，未改变该内部语法。普通进程保持运行供用户测试，用户自己的联系人及 Chat 操作仍由用户完成。
+
+### 2026-10-08 DNS 固定20秒续期
+
+按用户要求，发布成功后统一返回请求开始时间加20秒，不再检查最低租期或按租期计算间隔。失败或超时仍5秒后重试，空地址仍停止发布。同步当前设计说明，不改变结构、字段、函数签名或 ddns 缺头兼容。现有 DNS 库测试4项通过，dns.rs 格式检查通过；未重启运行中的进程或重跑公网验收。

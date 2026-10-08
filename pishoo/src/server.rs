@@ -1,22 +1,19 @@
 use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
+    collections::BTreeMap,
     sync::{Arc, RwLock},
 };
 
 use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any};
 use dhttp_home::{DhttpHome, identity::IdentityProfile};
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
 use http::Request;
-use http_body_util::BodyExt;
 use tokio::time::Instant;
-use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
 use crate::{
     Body, Error, Result,
     chat::{self, Chat, store::ChatStore},
-    dns, exec,
+    dns,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, config_router, load_server_config},
@@ -32,63 +29,41 @@ struct Server {
     chat: Arc<Chat>,
     router: Arc<RwLock<axum::Router>>,
     sandbox: Sandbox,
-    exec_tasks: TaskTracker,
     publisher: Option<Arc<ddns::H3Resolver>>,
 }
 
 pub async fn run() -> Result<()> {
     let home = DhttpHome::load(dhttp_home::HomeScope::User)
         .map_err(|e| Error::InvalidConfig(e.to_string()))?;
-    #[cfg(unix)]
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let runtime = Arc::new(WasmRuntime::new()?);
     let mdns = dns::install()?;
     let addresses = qprotocol::AddressBook::global();
     let mut inner_events = addresses.subscribe_punch(dhttp::Scope::Internal);
     let mut outer = addresses.subscribe_ddns();
     let mut servers = BTreeMap::<String, Server>::new();
-    let mut jobs = FuturesUnordered::<BoxFuture<'static, Option<Instant>>>::new();
+    let mut jobs = FuturesUnordered::new();
     // Startup failures share the same DNS and application cleanup path as shutdown.
     let result = async {
-        let loaded = async {
-            // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
-            dhttp::DhttpNetwork::init().await?;
-            for profile in home.discover_identity_profiles()? {
-                if let Some(server) = load_profile(profile, runtime.clone()).await? {
-                    servers.insert(server.name().to_owned(), server);
-                }
+        // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
+        dhttp::DhttpNetwork::init().await?;
+        for profile in home.discover_identity_profiles()? {
+            if let Some(server) = load_profile(profile, runtime.clone()).await? {
+                servers.insert(server.name().to_owned(), server);
             }
-            Ok::<(), Error>(())
-        }.await;
-        if let Err(error) = loaded {
-            // Nothing has registered yet: do not send withdrawals for unused publishers.
-            for server in servers.values_mut() { server.publisher.take(); }
-            return Err(error);
         }
-        let mut unregistered = servers.values_mut().filter(|s| s.config.listen != 0);
-        while let Some(server) = unregistered.next() {
-            match server.listen().await {
-                Ok(listener) => { tokio::spawn(listener); }
-                Err(error) => {
-                    server.publisher.take();
-                    for server in unregistered { server.publisher.take(); }
-                    return Err(error);
-                }
-            }
+        for server in servers.values().filter(|s| s.config.listen != 0) {
+            tokio::spawn(server.listen().await?);
         }
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         #[cfg(unix)]
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut removed_bounds = Vec::new();
-        let mut ocsp_tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-        ocsp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        ocsp_tick.tick().await; // Startup already prepared the cache; first periodic fetch is tomorrow.
-        'maintenance: loop {
+        loop {
             let endpoints = servers.values()
-                .filter(|s| !s.exec_tasks.is_closed() && s.config.listen & 1 != 0)
+                .filter(|s| s.config.listen & 1 != 0)
                 .map(|s| s.endpoint.clone()).collect::<Vec<_>>();
-            let mut next_due = match dns::sync_mdns(&mdns, &endpoints, &removed_bounds).await {
+            let mut next_due = match dns::maintain_mdns(&mdns, &endpoints, &removed_bounds).await {
                 Ok(()) => None,
                 Err(error) => {
                     eprintln!("DNS maintenance: {error}");
@@ -97,108 +72,15 @@ pub async fn run() -> Result<()> {
             };
             removed_bounds.clear();
             let snapshot = outer.borrow_and_update().clone();
-            for server in servers.values().filter(|s| !s.exec_tasks.is_closed()) {
+            for server in servers.values() {
                 if let Some(publisher) = &server.publisher {
-                    jobs.push(dns::publish(server.name().to_owned(), publisher.clone(), snapshot.clone()).boxed());
+                    jobs.push(dns::publish(server.name().to_owned(), publisher.clone(), snapshot.clone()));
                 }
             }
-            let mut timer = None;
             loop {
-                if jobs.is_empty() && timer.is_none() {
-                    timer = next_due.take().map(|due| Box::pin(tokio::time::sleep_until(due)));
-                }
                 tokio::select! {
                     result = &mut interrupt => { result?; return Ok(()); }
                     _ = async { #[cfg(unix)] { terminate.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => return Ok(()),
-                    _ = ocsp_tick.tick() => {
-                        while jobs.next().await.is_some() {}
-                        let mut renewals = servers.values().filter(|s| !s.exec_tasks.is_closed()).map(|server| {
-                            let name = server.name().to_owned();
-                            let profile = server.profile.clone();
-                            let endpoint = server.endpoint.clone();
-                            async move {
-                                let result = async {
-                                    let local = endpoint.local_authority()?;
-                                    if profile.load_certs().await.map_err(|e| Error::InvalidIdentity(e.to_string()))? != local.certificates() {
-                                        return Err(Error::InvalidConfig("certificate chain changed; restart required".into()));
-                                    }
-                                    let response = fetch_ocsp(local.certificates()).await?;
-                                    cache_ocsp(&profile, &response)?;
-                                    endpoint.reload().await.map_err(Error::from)
-                                }.await;
-                                (name, result)
-                            }
-                        }).collect::<FuturesUnordered<_>>();
-                        while let Some((name, result)) = renewals.next().await {
-                            let server = servers.get_mut(&name).expect("live server snapshot");
-                            match result {
-                                Ok(endpoint) => {
-                                    server.workspace.configure_outbound(Arc::new(endpoint.clone())).await;
-                                    server.chat.configure_outbound(Arc::new(endpoint.clone())).await;
-                                    server.publisher = if server.config.listen & 2 != 0 { Some(dns::publisher(&endpoint)?) } else { None };
-                                    server.endpoint = endpoint;
-                                    *server.router.write().unwrap() = current_router(server);
-                                    eprintln!("OCSP renewed; endpoint rebuilt for {name}");
-                                }
-                                Err(error) => {
-                                    eprintln!("OCSP renewal for {name}: {error}");
-                                    let local = server.endpoint.local_authority()?;
-                                    qtls::validate_ocsp(local.ocsp(), local.certificates(), qtls::UnixTime::now())
-                                        .map_err(|e| Error::InvalidIdentity(format!("{name}: cached OCSP no longer usable: {e}")))?;
-                                }
-                            }
-                        }
-                        continue 'maintenance;
-                    }
-                    _ = async { #[cfg(unix)] { hangup.recv().await; } #[cfg(not(unix))] { std::future::pending::<()>().await; } } => {
-                        // Each operation already has its own finite deadline; poll all remaining work.
-                        while jobs.next().await.is_some() {}
-                        let reload = async {
-                            let profiles = home.discover_identity_profiles()?;
-                            let present = profiles.iter().map(|p| p.name()).collect::<HashSet<_>>();
-                            for server in servers.values_mut() {
-                                if !present.contains(server.name()) && !server.exec_tasks.is_closed() {
-                                    if let Err(error) = dns::withdraw(&server.endpoint, server.publisher.as_deref(), &mdns).await {
-                                        eprintln!("{error}");
-                                    }
-                                    server.close().await?;
-                                }
-                            }
-                            for profile in profiles {
-                                if let Some(server) = servers.get_mut(profile.name()) {
-                                    if server.exec_tasks.is_closed() {
-                                        return Err(Error::InvalidConfig(format!(
-                                            "server {} was removed; restart required", server.name())));
-                                    }
-                                    match server.reload().await {
-                                        Ok(()) => {}
-                                        Err(error @ Error::InvalidIdentity(_)) => {
-                                            eprintln!("skipping identity reload {}: {error}", server.name());
-                                        }
-                                        Err(error) => return Err(error),
-                                    }
-                                    continue;
-                                }
-                                let Some(mut server) = load_profile(profile, runtime.clone()).await? else {
-                                    continue;
-                                };
-                                if server.config.listen != 0 {
-                                    match server.listen().await {
-                                        Ok(listener) => { tokio::spawn(listener); }
-                                        Err(error) => {
-                                            if let Err(close) = server.close().await { eprintln!("new server cleanup: {close}"); }
-                                            return Err(error);
-                                        }
-                                    }
-                                }
-                                servers.insert(server.name().to_owned(), server);
-                            }
-                            Ok::<(), Error>(())
-                        }.await;
-                        if let Err(error) = reload { eprintln!("reload rejected: {error}"); }
-                        // Even a partially rejected reload must resume maintenance of live servers.
-                        continue 'maintenance;
-                    }
                     result = jobs.next(), if !jobs.is_empty() => {
                         if let Some(Some(due)) = result {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
@@ -213,7 +95,7 @@ pub async fn run() -> Result<()> {
                         break;
                     }
                     changed = outer.changed(), if jobs.is_empty() => { changed.map_err(std::io::Error::other)?; break; }
-                    _ = async { if let Some(timer) = &mut timer { timer.as_mut().await; } }, if jobs.is_empty() && timer.is_some() => { break; }
+                    _ = async { if let Some(due) = next_due { tokio::time::sleep_until(due).await; } }, if jobs.is_empty() && next_due.is_some() => { break; }
                 }
             }
         }
@@ -221,19 +103,6 @@ pub async fn run() -> Result<()> {
     // No new batches after the run body exits, including failure during startup.
     while jobs.next().await.is_some() {}
     let mut shutdown = Ok(());
-    {
-        let mut withdrawals = servers
-            .values()
-            .filter(|s| !s.exec_tasks.is_closed())
-            .map(|s| dns::withdraw(&s.endpoint, s.publisher.as_deref(), &mdns))
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = withdrawals.next().await {
-            if let Err(error) = result {
-                eprintln!("{error}");
-                shutdown = Err(Error::Io(error));
-            }
-        }
-    }
     for server in servers.values_mut() {
         if let Err(error) = server.close().await {
             eprintln!("server {} shutdown: {error}", server.name());
@@ -251,10 +120,6 @@ pub async fn run() -> Result<()> {
 #[path = "../tests/unit/server.rs"]
 mod tests;
 
-#[cfg(test)]
-#[path = "../tests/unit/server/exec_route.rs"]
-mod exec_tests;
-
 async fn load_profile(
     profile: IdentityProfile,
     runtime: Arc<WasmRuntime>,
@@ -268,32 +133,6 @@ async fn load_profile(
         }
         Err(error) => Err(error),
     }
-}
-
-fn exec(enabled: bool, name: String, cwd: PathBuf, tasks: TaskTracker) -> Router {
-    Router::new().route(
-        "/exec",
-        any(move |request: Request<AxumBody>| {
-            let (name, cwd, tasks) = (name.clone(), cwd.clone(), tasks.clone());
-            async move {
-                let request = request.map(|body| body.map_err(Into::into).boxed_unsync());
-                match exec::execute(enabled, &name, &cwd, tasks, request).await {
-                    Ok(response) => response.map(AxumBody::new).into_response(),
-                    Err(error) => {
-                        let status = error.status();
-                        if status.is_server_error() {
-                            eprintln!("exec request for {name}: {error}");
-                        }
-                        (
-                            status,
-                            status.canonical_reason().unwrap_or("request failed"),
-                        )
-                            .into_response()
-                    }
-                }
-            }
-        }),
-    )
 }
 
 fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
@@ -740,12 +579,6 @@ fn current_router(server: &Server) -> Router {
         .merge(workspace::router(server.workspace.clone()))
         .merge(chat_router(server.chat.clone(), server.workspace.clone()))
         .merge(server.sandbox.api_router(server.endpoint.clone()))
-        .merge(exec(
-            server.config.exec,
-            server.endpoint.name().to_owned(),
-            server.profile.path().to_path_buf(),
-            server.exec_tasks.clone(),
-        ))
         .merge(file_router(server.profile.join("file")))
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |request: Request<AxumBody>| {
@@ -819,7 +652,6 @@ impl Server {
             .configure_outbound(Arc::new(endpoint.clone()))
             .await;
         chat.configure_outbound(Arc::new(endpoint.clone())).await;
-        let exec_tasks = TaskTracker::new();
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
         let server = Self {
@@ -831,7 +663,6 @@ impl Server {
             chat,
             router: Arc::new(RwLock::new(Router::new())),
             sandbox,
-            exec_tasks,
             publisher,
         };
         *server.router.write().unwrap() = current_router(&server);
@@ -841,37 +672,6 @@ impl Server {
 
     pub(super) fn name(&self) -> &str {
         self.endpoint.name()
-    }
-
-    pub(super) async fn reload(&mut self) -> Result<()> {
-        // Reload must not recreate a database removed from a running identity.
-        std::fs::symlink_metadata(self.profile.config_db_path())?;
-        let conn = rusqlite::Connection::open_with_flags(
-            self.profile.config_db_path(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        conn.prepare("SELECT listen,exec FROM settings")?;
-        drop(conn);
-        let config = load_server_config(&self.profile)?;
-        if config.listen != self.config.listen || config.exec != self.config.exec {
-            return Err(Error::InvalidConfig(
-                "listen and exec changes require restarting the instance".into(),
-            ));
-        }
-        let certs = self
-            .profile
-            .load_certs()
-            .await
-            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
-        if certs != self.endpoint.local_authority()?.certificates() {
-            return Err(Error::InvalidConfig(
-                "identity credentials changed; restart required".into(),
-            ));
-        }
-        self.sandbox.load_libs(&self.profile)?;
-        self.config = config;
-        *self.router.write().unwrap() = current_router(self);
-        Ok(())
     }
 
     pub(super) async fn listen(&self) -> Result<dhttp::ListenFuture> {
@@ -933,12 +733,10 @@ impl Server {
     pub(super) async fn close(&mut self) -> Result<()> {
         self.publisher.take();
         self.sandbox.close();
-        self.exec_tasks.close();
         *self.router.write().unwrap() = axum::Router::new();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             tokio::join!(self.workspace.shutdown(), self.chat.shutdown());
-            let (sandbox, ()) = tokio::join!(self.sandbox.wait(), self.exec_tasks.wait());
-            sandbox
+            self.sandbox.wait().await
         })
         .await
         .map_err(|_| Error::ShutdownDeadline)?
