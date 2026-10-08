@@ -15,6 +15,14 @@ export interface RuntimeContext {
   }
 }
 
+export interface LibSummary {
+  id: string
+  title: string
+  version: string
+  description: string | null
+  endpoints: Array<{ method: string; path: string; description: string | null }>
+}
+
 export interface Page<T> {
   items: T
   total: number

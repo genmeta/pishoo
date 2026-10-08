@@ -60,6 +60,7 @@ pub async fn run() -> Result<()> {
         }
         for server in servers.values().filter(|s| s.config.listen != 0) {
             tokio::spawn(server.listen().await?);
+            tracing::trace!(endpoint = server.name(), listen = server.config.listen, "Pishoo listener ready");
         }
         let mut ocsp_ticks = ocsp_ticks();
         let mut ocsp_updates = FuturesUnordered::new();
@@ -75,7 +76,7 @@ pub async fn run() -> Result<()> {
             let mut next_due = match dns::maintain_mdns(&mdns, &endpoints, &removed_bounds).await {
                 Ok(()) => None,
                 Err(error) => {
-                    eprintln!("DNS maintenance: {error}");
+                    tracing::warn!(%error, "DNS maintenance failed");
                     Some(Instant::now() + std::time::Duration::from_secs(5))
                 }
             };
@@ -112,8 +113,8 @@ pub async fn run() -> Result<()> {
                             Err(error) => Err(error),
                         };
                         match result {
-                            Ok(()) => eprintln!("OCSP refreshed identity {name}"),
-                            Err(error) => eprintln!("OCSP refresh failed identity {name}: {error}"),
+                            Ok(()) => tracing::info!(identity = %name, "OCSP refreshed"),
+                            Err(error) => tracing::warn!(identity = %name, %error, "OCSP refresh failed"),
                         }
                         // Publish the current credentials after the preceding DNS batch ends.
                         break;
@@ -137,12 +138,12 @@ pub async fn run() -> Result<()> {
     let mut shutdown = Ok(());
     for server in servers.values_mut() {
         if let Err(error) = server.close().await {
-            eprintln!("server {} shutdown: {error}", server.name());
+            tracing::error!(identity = server.name(), %error, "server shutdown failed");
             shutdown = Err(error);
         }
     }
     if let Err(error) = mdns.shutdown().await {
-        eprintln!("mDNS shutdown: {error}");
+        tracing::error!(%error, "mDNS shutdown failed");
         shutdown = Err(Error::Io(std::io::Error::other(error)));
     }
     result.and(shutdown)
@@ -160,7 +161,7 @@ async fn load_profile(
     match Server::load(profile, runtime).await {
         Ok(server) => Ok(Some(server)),
         Err(error @ Error::InvalidIdentity(_)) => {
-            eprintln!("skipping identity {name}: {error}");
+            tracing::warn!(identity = %name, %error, "skipping identity");
             Ok(None)
         }
         Err(error) => Err(error),
@@ -220,7 +221,7 @@ fn chat_router(chat: Arc<Chat>, workspace: Arc<Workspace>) -> Router {
                         Ok(true) => {}
                         Ok(false) => return http::StatusCode::FORBIDDEN.into_response(),
                         Err(error) => {
-                            eprintln!("Chat capability authorization failed: {error}");
+                            tracing::error!(%error, "Chat capability authorization failed");
                             return http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
                         }
                     }
@@ -593,10 +594,10 @@ async fn load_access(
             .tempfile_in(profile.db_dir())?;
         snapshot_access(&path, backup.path())?;
         let (_, backup_path) = backup.keep().map_err(|error| error.error)?;
-        eprintln!(
-            "access database {} backup: {}",
-            path.display(),
-            backup_path.display()
+        tracing::info!(
+            database = %path.display(),
+            backup = %backup_path.display(),
+            "access database backed up"
         );
         // SQLite performs the replacement as a database transaction, including
         // existing journals/WAL, rather than renaming only the main database file.
@@ -773,7 +774,7 @@ impl Server {
                 let response = result.unwrap_or_else(|error| {
                     let status = error.status();
                     if status.is_server_error() {
-                        eprintln!("request for {name}: {error}");
+                        tracing::error!(identity = %name, %error, "request failed");
                     }
                     (
                         status,

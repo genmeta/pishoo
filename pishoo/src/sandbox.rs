@@ -126,7 +126,7 @@ impl Sandbox {
                 self.runtime.clone(),
                 id.clone(),
                 &bytes,
-                &entry.path().join("data"),
+                &profile.join("db").join(&id),
             )?;
             candidates.insert(id, Arc::new(lib));
         }
@@ -135,6 +135,22 @@ impl Sandbox {
     }
 
     pub(crate) fn api_router(&self, endpoint: dhttp::Endpoint) -> axum::Router {
+        let catalog_libs = self.libs.clone();
+        let catalog_endpoint = endpoint.clone();
+        let catalog = axum::routing::get(move |request: http::Request<axum::body::Body>| {
+            let (libs, endpoint) = (catalog_libs.clone(), catalog_endpoint.clone());
+            async move {
+                use axum::response::IntoResponse;
+                let mut response = list_libs(&libs, &endpoint, &request)
+                    .map(IntoResponse::into_response)
+                    .unwrap_or_else(reject_api);
+                response.headers_mut().insert(
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("no-store"),
+                );
+                response
+            }
+        });
         let libs = self.libs.clone();
         let tasks = self.tasks.clone();
         let api = axum::routing::any(move |request: http::Request<axum::body::Body>| {
@@ -192,16 +208,99 @@ impl Sandbox {
         // Reserve every method, including HEAD and OPTIONS, so Axum cannot
         // bypass the manifest's explicit method check or use another fallback.
         axum::Router::new()
+            .route("/workspace-api/libs", catalog)
             .route("/api", api.clone())
             .route("/api/", api.clone())
             .route("/api/{*path}", api)
     }
 }
 
+fn list_libs(
+    libs: &HashMap<String, Arc<Lib>>,
+    endpoint: &dhttp::Endpoint,
+    request: &http::Request<axum::body::Body>,
+) -> Result<axum::Json<serde_json::Value>> {
+    // Server's authorization layer creates Visitor from the verified TLS peer.
+    let visitor = request
+        .extensions()
+        .get::<access_control::Visitor>()
+        .ok_or(Error::Denied)?;
+    let local = endpoint.local_authority()?;
+    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .map_err(|_| Error::Denied)?;
+    let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
+        .map_err(|_| Error::Denied)?;
+    if visitor.name() != endpoint.name() || visitor.subject_id() != &subject {
+        return Err(Error::Denied);
+    }
+    let mut libs = libs.iter().collect::<Vec<_>>();
+    libs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let items = libs
+        .into_iter()
+        .map(|(id, lib)| {
+            let mut endpoints = Vec::new();
+            if let Some(paths) = &lib.openapi.paths {
+                for (path, item) in paths {
+                    for (method, operation) in item.methods() {
+                        let description = operation
+                            .summary
+                            .as_deref()
+                            .filter(|text| !text.trim().is_empty())
+                            .or_else(|| {
+                                operation
+                                    .description
+                                    .as_deref()
+                                    .filter(|text| !text.trim().is_empty())
+                            })
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                operation.responses.as_ref()?.iter().find_map(
+                                    |(status, response)| {
+                                        if status != "2XX"
+                                            && !status
+                                                .parse::<u16>()
+                                                .is_ok_and(|code| (200..300).contains(&code))
+                                        {
+                                            return None;
+                                        }
+                                        response
+                                            .resolve(&lib.openapi)
+                                            .ok()?
+                                            .description
+                                            .filter(|text| !text.trim().is_empty())
+                                    },
+                                )
+                            });
+                        endpoints.push(serde_json::json!({
+                            "method": method.as_str(),
+                            "path": format!("/api/{id}{path}"),
+                            "description": description,
+                        }));
+                    }
+                }
+            }
+            endpoints.sort_by(|left, right| {
+                left["path"]
+                    .as_str()
+                    .cmp(&right["path"].as_str())
+                    .then_with(|| left["method"].as_str().cmp(&right["method"].as_str()))
+            });
+            serde_json::json!({
+                "id": id,
+                "title": lib.openapi.info.title,
+                "version": lib.openapi.info.version,
+                "description": lib.openapi.info.description,
+                "endpoints": endpoints,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(axum::Json(serde_json::json!(items)))
+}
+
 fn reject_api(error: Error) -> axum::response::Response {
     let status = error.status();
     if status.is_server_error() {
-        eprintln!("request failed: {error}");
+        tracing::error!(%error, "request failed");
     }
     axum::response::IntoResponse::into_response((
         status,

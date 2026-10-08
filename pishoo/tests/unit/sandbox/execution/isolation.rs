@@ -40,7 +40,7 @@ async fn filesystem_grants_are_private_writable_and_hold_the_open_directory() {
     };
     let dirs = Host::get_directories(&mut view).unwrap();
     assert_eq!(dirs.len(), 1);
-    assert_eq!(dirs[0].1, "/data");
+    assert_eq!(dirs[0].1, "/db");
     let descriptor = dirs[0].0.rep();
     let file = view
         .open_at(

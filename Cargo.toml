@@ -3,11 +3,11 @@ resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
 
-# Share registry dependency types with the pinned Git transport graph.
+# Share registry dependency types with the local transport workspaces.
 [patch.crates-io]
-dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "d925b240986eaa2863acfaf3f4ad34509e5795e2" }
-dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "d925b240986eaa2863acfaf3f4ad34509e5795e2" }
-qtls = { git = "https://github.com/genmeta/dquic.git", rev = "c64cf762cbaab9f0b848cf744d4f7352b2514864" }
-qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "c64cf762cbaab9f0b848cf744d4f7352b2514864" }
-qbase = { git = "https://github.com/genmeta/dquic.git", rev = "c64cf762cbaab9f0b848cf744d4f7352b2514864" }
-qrecovery = { git = "https://github.com/genmeta/dquic.git", rev = "c64cf762cbaab9f0b848cf744d4f7352b2514864" }
+dhttp = { path = "../dhttp/dhttp" }
+dhttp-home = { path = "../dhttp/home" }
+qtls = { path = "../dquic/qtls" }
+qresolve = { path = "../dquic/qresolve" }
+qbase = { path = "../dquic/qbase" }
+qrecovery = { path = "../dquic/qrecovery" }

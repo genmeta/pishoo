@@ -68,10 +68,11 @@ pub(crate) async fn maintain_mdns(
             let binding = MdnsBinding::new(instance.bound_device(), instance.bound_ip());
             if let Err(failed) = mdns.remove(&binding).await {
                 let failed = io::Error::other(failed);
-                eprintln!(
-                    "mDNS remove {} at {}: {failed}",
-                    binding.device(),
-                    binding.ip()
+                tracing::warn!(
+                    device = binding.device(),
+                    ip = %binding.ip(),
+                    error = %failed,
+                    "mDNS remove failed"
                 );
                 error.get_or_insert(failed);
             }
@@ -104,10 +105,11 @@ pub(crate) async fn maintain_mdns(
         if !desired.contains_key(&binding) {
             if let Err(failed) = mdns.remove(&binding).await {
                 let failed = io::Error::other(failed);
-                eprintln!(
-                    "mDNS remove {} at {}: {failed}",
-                    binding.device(),
-                    binding.ip()
+                tracing::warn!(
+                    device = binding.device(),
+                    ip = %binding.ip(),
+                    error = %failed,
+                    "mDNS remove failed"
                 );
                 error.get_or_insert(failed);
             }
@@ -118,10 +120,11 @@ pub(crate) async fn maintain_mdns(
             Ok(instance) => instance,
             Err(failed) => {
                 let failed = io::Error::other(failed);
-                eprintln!(
-                    "mDNS bind {} at {}: {failed}",
-                    binding.device(),
-                    binding.ip()
+                tracing::warn!(
+                    device = binding.device(),
+                    ip = %binding.ip(),
+                    error = %failed,
+                    "mDNS bind failed"
                 );
                 error.get_or_insert(failed);
                 continue;
@@ -134,11 +137,12 @@ pub(crate) async fn maintain_mdns(
                     .map_err(io::Error::other)
             });
             if let Err(failed) = result {
-                eprintln!(
-                    "mDNS publish {} on {} at {}: {failed}",
-                    endpoint.name(),
-                    binding.device(),
-                    binding.ip()
+                tracing::warn!(
+                    identity = endpoint.name(),
+                    device = binding.device(),
+                    ip = %binding.ip(),
+                    error = %failed,
+                    "mDNS publish failed"
                 );
                 error.get_or_insert(failed);
             }
@@ -165,11 +169,11 @@ pub(crate) async fn publish(
     {
         Ok(Ok(_)) => Some(started + PUBLISH_INTERVAL),
         Ok(Err(error)) => {
-            eprintln!("DNS publish {name}: {error:?}");
+            tracing::warn!(identity = %name, ?error, "DNS publish failed");
             Some(Instant::now() + MAINTENANCE_RETRY)
         }
         Err(error) => {
-            eprintln!("DNS publish {name}: {error}");
+            tracing::warn!(identity = %name, %error, "DNS publish timed out");
             Some(Instant::now() + MAINTENANCE_RETRY)
         }
     }
