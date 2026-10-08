@@ -2,7 +2,6 @@
 mod chat;
 mod dns;
 mod error;
-mod exec;
 mod routes;
 mod sandbox;
 mod server;

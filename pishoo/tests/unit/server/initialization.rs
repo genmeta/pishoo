@@ -38,7 +38,15 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
     let profile = profile(root.path(), "alice");
     let config = load_server_config(&profile).unwrap();
     assert_eq!(config.listen, 3);
-    assert!(!config.exec);
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    let columns: Vec<String> = db
+        .prepare("PRAGMA table_info(settings)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(columns, ["listen"]);
     assert!(config.proxy_locations.is_empty());
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await
@@ -151,10 +159,9 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         .await
         .unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("UPDATE settings SET listen=1,exec=1; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
+    db.execute_batch("UPDATE settings SET listen=1; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
     let config = load_server_config(&profile).unwrap();
     assert_eq!(config.listen, 1);
-    assert!(config.exec);
     assert_eq!(config.proxy_locations.len(), 1);
     let reopened = load_access(&profile, &subject).await.unwrap();
     assert!(matches!(
@@ -397,7 +404,7 @@ fn unknown_config_is_preserved_and_empty_config_recovers() {
         ("future", "PRAGMA user_version=99;"),
         (
             "partial",
-            "CREATE TABLE settings(listen,exec); INSERT INTO settings VALUES(1,1);",
+            "CREATE TABLE settings(listen); INSERT INTO settings VALUES(1);",
         ),
     ] {
         let profile = profile(root.path(), name);

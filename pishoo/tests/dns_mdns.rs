@@ -14,7 +14,7 @@ use qprotocol::{AddressBook, Dock, UdpSocket};
 
 #[tokio::test]
 #[ignore = "requires an internal IPv4 interface and local UDP/multicast socket permission"]
-async fn merges_quic_ports_rebuilds_removed_bindings_and_withdraws_names() {
+async fn merges_quic_ports_rebuilds_removed_bindings_and_removes_names() {
     let mdns = dns::install().unwrap();
     dhttp::DhttpNetwork::init().await.unwrap();
     let addresses = AddressBook::global();
@@ -76,7 +76,7 @@ async fn merges_quic_ports_rebuilds_removed_bindings_and_withdraws_names() {
         )
         .await
         .unwrap();
-    if let Err(error) = dns::sync_mdns(&mdns, std::slice::from_ref(&endpoint), &[]).await {
+    if let Err(error) = dns::maintain_mdns(&mdns, std::slice::from_ref(&endpoint), &[]).await {
         eprintln!("another interface could not join mDNS: {error}");
     }
     let instance = mdns
@@ -113,7 +113,8 @@ async fn merges_quic_ports_rebuilds_removed_bindings_and_withdraws_names() {
     let removed = sockets[0].local_addr().unwrap();
     addresses.remove_bound(removed);
     Dock::global().remove(&sockets[0]);
-    if let Err(error) = dns::sync_mdns(&mdns, std::slice::from_ref(&endpoint), &[removed]).await {
+    if let Err(error) = dns::maintain_mdns(&mdns, std::slice::from_ref(&endpoint), &[removed]).await
+    {
         eprintln!("another interface could not join mDNS: {error}");
     }
     let replacement = mdns
@@ -140,7 +141,9 @@ async fn merges_quic_ports_rebuilds_removed_bindings_and_withdraws_names() {
             .iter()
             .any(|(_, endpoint)| endpoint.addr() == sockets[1].local_addr().unwrap())
     );
-    dns::withdraw(&endpoint, None, &mdns).await.unwrap();
+    for instance in mdns.snapshot() {
+        instance.remove_name(endpoint.name());
+    }
     assert!(
         replacement
             .lookup(&name, "", Some(Family::V4))
@@ -148,7 +151,7 @@ async fn merges_quic_ports_rebuilds_removed_bindings_and_withdraws_names() {
             .is_err()
     );
     // Query resources still exist without listening identities.
-    dns::sync_mdns(&mdns, &[], &[]).await.ok();
+    dns::maintain_mdns(&mdns, &[], &[]).await.ok();
     assert!(!mdns.snapshot().is_empty());
     drop(listener);
     mdns.shutdown().await.unwrap();

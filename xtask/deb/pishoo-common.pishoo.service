@@ -8,7 +8,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/pishoo
-ExecReload=/bin/kill -HUP $MAINPID
 TimeoutStopSec=infinity
 KillMode=mixed
 Restart=on-failure

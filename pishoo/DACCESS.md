@@ -6,8 +6,8 @@
 `pishoo/feat/daccess@9b733c5`。审批和联系人协议采用
 `daccess/feat/fit-pishoo@cf8f72f4e6bedbd7c98648ffee31053cb509b395`，Cargo 使用固定 Git revision。
 
-Server 直接拥有 Endpoint、AccessService、Workspace、Chat、Router、Sandbox 和 exec
-任务资源。Workspace 与 Chat 使用普通 `workspace.rs`、`chat.rs` 模块；类型与接口以
+Server 直接拥有 Endpoint、AccessService、Workspace、Chat、Router 和 Sandbox
+资源。Workspace 与 Chat 使用普通 `workspace.rs`、`chat.rs` 模块；类型与接口以
 [设计入口](../design/README.md)为准。
 
 ## 身份、审批和联系人
@@ -40,7 +40,7 @@ Chat 的远端入口只有 `POST /std/message`，受 daccess 和有效 Chat capa
 共同约束。消息历史只读本地 chat.db；发送先入 outbox，保持 client_message_id 幂等、
 重试及身份绑定。授予 Chat 只修改该联系人的精确 POST /std/message 规则，保留其他规则。
 
-重载复用 Workspace/Chat 资源。Server.close 清空 Router，并停止、等待各模块现有 worker；
+运行期间使用同一 Workspace/Chat 资源，身份变化统一重启。Server.close 清空 Router，并停止、等待各模块现有 worker；
 未完成投递保存在数据库中供恢复。
 
 ## 暂缓的底层接缝

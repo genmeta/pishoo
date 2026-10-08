@@ -34,7 +34,6 @@ pub(crate) fn reserved(path: &str) -> bool {
         "/sys",
         "/api",
         "/.pishoo",
-        "/exec",
         "/file",
     ]
     .into_iter()

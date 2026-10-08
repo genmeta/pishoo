@@ -102,7 +102,7 @@ fn installation_uses_the_current_single_process_startup() {
     let service =
         std::fs::read_to_string(root.join("xtask/deb/pishoo-common.pishoo.service")).unwrap();
     assert!(service.contains("ExecStart=/usr/bin/pishoo\n"));
-    assert!(service.contains("ExecReload=/bin/kill -HUP $MAINPID"));
+    assert!(!service.contains("ExecReload="));
     assert!(!service.contains("ExecStartPre="));
     assert!(!service.contains("PIDFile="));
     let formula = std::fs::read_to_string(root.join("xtask/templates/pishoo.rb.in")).unwrap();

@@ -1,8 +1,8 @@
 # Pishoo DNS 解析与发布详细设计
 
-日期：2026-10-03。状态：2026-10-03 用户明确批准全部六项接口与相邻仓库修改，已并入冻结基线；实现与验证进度见 [实施记录](../IMPLEMENTATION.md)。
+日期：2026-10-03。状态：2026-10-03 用户明确批准全部六项接口与相邻仓库修改，已并入冻结基线；2026-10-08 用户取消主动撤回并删除 withdraw 接口，现保留五个 Pishoo DNS 函数；实现与验证进度见 [实施记录](../IMPLEMENTATION.md)。
 
-Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份地址，并在地址变化、记录续期、身份删除和退出时更新记录。协议编码、签名和缓存规则归 ddns；地址、socket、NAT 与连接池继续归 dhttp/dquic。本文逐项定义所需结构、成员、函数及伪代码，按本次批准实施。
+Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份地址，并在地址变化和记录续期时更新记录；退出或地址为空时停止续期，身份目录变化在重启后生效，已有记录自然过期。协议编码、签名和缓存规则归 ddns；地址、socket、NAT 与连接池继续归 dhttp/dquic。本文逐项定义所需结构、成员、函数及伪代码，按本次批准实施。
 
 ## 设计依据与实施前提
 
@@ -26,13 +26,13 @@ Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份�
 
 1. 全进程分别注册现有 SystemResolver、匿名 H3Resolver 和 MdnsResolverSet 各一次；由现有 qresolve::Resolver 并行聚合。各源在 lookup 中筛选自己支持的名称，不新增 Pishoo 组合解析器。
 2. 解析不依赖 Server 是否监听。listen 为 0 的身份仍能出站。
-3. 发布严格遵循启动时 listen 范围：0 不发布，1 只 mDNS，2 只 H3，3 两者。重载不能改变 listen，保持原有重启要求。
+3. 发布严格遵循启动时 listen 范围：0 不发布，1 只 mDNS，2 只 H3，3 两者。运行期间不读取配置，变化统一重启生效。
 4. 只有成功完成监听登记的 Server 进入发布流程。启动登记失败直接结束启动并收尾已经创建的 DNS 资源。
 5. 同一身份同一时刻最多存在一个本进程 H3 发布请求。每批开始时取地址簿最新完整快照，批结束后才创建下一批。
-6. Server 删除、重载或进程退出前，当前发布批必须结束；退出之后不再创建续期请求。
+6. 运行期间 Server 集合固定，身份与凭据更新统一重启；进程退出前，当前发布批必须结束，退出之后不再创建续期请求。
 7. 发布器使用与它的 Endpoint 相同的内存凭据，编码签名与 TLS 身份不混用新旧证书。
 8. Pishoo 不保存 IP 列表、网卡快照、成功发布记录表或逐身份发布状态。不引入 DNS Manager、发布数据库、世代计数、取消 token 或新的应用并发限制。
-9. 相同完整身份凭据的多个进程会更新同一服务端记录；本版不承诺隔离它们的撤回。同名多设备应使用各自独立的发布者凭据。
+9. 相同完整身份凭据的多个进程会更新同一服务端记录；任一进程继续续期时该记录仍有效。同名多设备应使用各自独立的发布者凭据。
 10. DNS 返回的是候选地址；实际可达性、握手身份和路径验证仍归 dquic/qtls。
 
 ## 结构与成员
@@ -51,7 +51,7 @@ H3 与 mDNS 的协议资源和生命周期分别成立，无需包装成一个�
 
 ### Pishoo Server
 
-保留原有 profile、endpoint、config、access、workspace、chat、router、sandbox、exec_tasks。新增一个实际协议资源成员：
+保留原有 profile、endpoint、config、access、workspace、chat、router、sandbox。新增一个实际协议资源成员：
 
 ```rust
 publisher: Option<Arc<ddns::H3Resolver>>,
@@ -60,8 +60,8 @@ publisher: Option<Arc<ddns::H3Resolver>>,
 - 只有外网监听身份构造 H3 发布器；其他身份没有这项资源。
 - 发布器固定绑定本 Server 已加载的 Endpoint；进行中的发布 future 克隆它。
 - 不额外保存 publish_enabled、last_published、failed 或 next_retry。是否需要该资源从 listen 推导；Option 表示实际资源是否存在。
-- 关闭时先由 run 调用 DNS 撤回，再由 Server.close 丢弃 publisher。
-- 重载 Lib、代理和 Router 保留它；证书链切换本版要求重启，不能仅把磁盘新凭据塞进旧发布器。
+- 关闭时由 Server.close 丢弃 publisher，停止续期；不向 DDNS 发送撤回请求。
+- 运行期间保留原 Endpoint 与发布器；配置、Lib 和凭据切换统一重启，不把磁盘新凭据塞进旧发布器。
 
 ServerConfig 不新增字段，数据库 schema 不变。沿用 ddns 的编译期默认 origin；第一版不增加实例配置文件、DNS 开关或服务端列表。
 
@@ -115,7 +115,7 @@ ListenFuture 是标准 future 的类型别名，不是新状态结构。其唯�
 ## 文件组织与依赖装配
 
 - 新增普通 `pishoo/src/dns.rs`，在 `pishoo.rs` 使用 `mod dns;`，不使用 include、mod.rs 或实现片段。
-- 保留 server.rs 对运行循环、Server.load/reload/close 的所有权；dns.rs 只实现本文六个函数，不定义自有解析器结构。
+- 保留 server.rs 对运行循环、Server.load/close 的所有权；dns.rs 只实现本文五个函数，不定义自有解析器结构。
 - Pishoo 增加本地 dyns 包依赖，Rust crate 名使用 ddns，开启 h3、mdns；增加 qprotocol 以读取 Dock 的实际资源。qresolve 通过 `use dhttp::resolve as qresolve` 使用现成重导出。
 - workspace 根级补齐 crates.io patch，把 ddns 的 dhttp、dhttp-home、qtls、qresolve、qbase、qprotocol 等实际交叉依赖统一到同一组本地版本。依赖子仓的 patch 不会替代顶层 workspace 的依赖选择。
 - 实施时用 cargo tree 检查这些包是否存在同版本不同来源的重复实例。尤其 qresolve 注册表、AddressBook、Dock 和 qtls 信任资源必须来自相同 crate 实例，否则会得到互不相通的全局资源。
@@ -133,20 +133,17 @@ ListenFuture 是标准 future 的类型别名，不是新状态结构。其唯�
 fn install() -> io::Result<ddns::mdns::MdnsResolverSet>;
 fn authority(endpoint: &dhttp::Endpoint) -> io::Result<qtls::LocalAuthority>;
 fn publisher(endpoint: &dhttp::Endpoint) -> io::Result<Arc<ddns::H3Resolver>>;
-async fn sync_mdns(mdns: &ddns::mdns::MdnsResolverSet,
+async fn maintain_mdns(mdns: &ddns::mdns::MdnsResolverSet,
                    endpoints: &[dhttp::Endpoint],
                    removed_bounds: &[SocketAddr]) -> io::Result<()>;
 async fn publish(name: String, publisher: Arc<ddns::H3Resolver>,
                  addresses: Arc<[qresolve::EndpointAddr]>) -> Option<tokio::time::Instant>;
-async fn withdraw(endpoint: &dhttp::Endpoint,
-                  publisher: Option<&ddns::H3Resolver>,
-                  mdns: &ddns::mdns::MdnsResolverSet) -> io::Result<()>;
 
 // Server.listen 修改；其余方法签名保持
 async fn Server::listen(&self) -> Result<dhttp::ListenFuture>;
 ```
 
-sync_mdns 的 endpoints 只包含已经监听、内网范围开启且应用尚未关闭的身份，是本轮从 Server 集合派生的短生命周期参数，不是持久身份表。removed_bounds 是本轮消费的 BoundRemoved 事件值，返回后丢弃。publish 的 name 来自当前 Server，只有当前请求 future 持有它；返回值是本请求决定的下一次维护时刻，空集合撤回成功不需要续期，所以返回 None。
+maintain_mdns 的 endpoints 只包含启动时已经监听且内网范围开启的身份，是本轮从 Server 集合派生的短生命周期参数，不是持久身份表。removed_bounds 是本轮消费的 BoundRemoved 事件值，返回后丢弃。publish 的 name 来自当前 Server，只有当前请求 future 持有它；返回值是本请求决定的下一次维护时刻，地址为空时不发送请求、不需要续期，直接返回 None。
 
 run 内部创建批、排空批、选出下次时刻的闭包属于局部算法，不导出为另一层管理 API。
 
@@ -187,7 +184,7 @@ pub async fn H3Resolver::publish_endpoints(&self, name: &str,
 InvalidLease,
 ```
 
-H3Resolver::anonymous、lookup、clear_cache 以及 qresolve::Publish trait 的签名不变。Publish trait 实现把成功返回的 Duration 映射成 ()；Pishoo 直接使用 publish_endpoints 取得租期。
+H3Resolver::anonymous、lookup、clear_cache 以及 qresolve::Publish trait 的签名不变。Publish trait 实现把成功返回的 Duration 映射成 ()；Pishoo 使用 publish_endpoints 的成功或失败结果，不消费返回租期。
 
 MdnsResolverSet 的 Resolve::lookup 签名不变，但实现改为按网卡流式交付，不等待所有网卡查询完成。其候选分组查询接口保持原语义。
 
@@ -274,7 +271,7 @@ local_authority():
     )
 ```
 
-沿用 qtls 校验与错误映射。不缓存返回值；底层 signing_key 的 Arc 仍共享同一实际资源。删除磁盘身份目录不影响已经加载的材料，证书过期或吊销仍可能使服务端拒绝撤回。
+沿用 qtls 校验与错误映射。不缓存返回值；底层 signing_key 的 Arc 仍共享同一实际资源。删除磁盘身份目录不影响已经加载的材料，证书过期或吊销仍可能使服务端拒绝后续发布。
 
 ### authority
 
@@ -308,7 +305,7 @@ H3Resolver::new(origin, endpoint):
 
 mDNS 单独开启的身份只校验 authority，不创建用不到的 H3 发布器。H3Resolver 的匿名构造保持 endpoint=None。
 
-### Server 的加载重载与关闭
+### Server 的加载与关闭
 
 ```text
 Server.load(profile, runtime):
@@ -320,19 +317,12 @@ Server.load(profile, runtime):
     按既有流程创建 Access、Sandbox、Workspace、Chat 与 Router
     return Server { 原有成员, publisher }
 
-Server.reload():
-    按既有规则拒绝 listen/exec 变化
-    从 profile 读取证书链，与 endpoint.local_authority().certificates 比较
-    证书链变化 -> 返回 InvalidConfig，说明凭据更换需重启
-    按既有流程加载 Lib 并替换 Router/config
-    保留 endpoint 与 publisher
-
 Server.close():
     按既有流程清除 Router，关闭并等待应用任务
     进入关闭收尾时 take publisher，不能因应用等待超时跳过资源释放
 ```
 
-磁盘私钥或 OCSP 的更新也在下次启动时生效；不轮询身份文件。证书链比较只在明确 SIGHUP 重载时执行。run 识别关闭身份仍沿用既有 exec_tasks.is_closed，不增加 active/registered 成员。
+身份、配置、Lib、私钥和 OCSP 更新统一重启生效；运行中不扫描目录、读取凭据或定时更新 OCSP。run 中的 Server 集合在启动完成后保持不变，不增加 active/registered 成员。
 
 ## 监听登记函数与伪代码
 
@@ -396,10 +386,10 @@ inner_bindings():
 
 多个地址别名指向同一 bound 只返回一次。mDNS 端口是 mDNS 实例自己的资源，公布的 QUIC 端口仍来自 mdns_endpoints(bound)。
 
-### sync_mdns
+### maintain_mdns
 
 ```text
-sync_mdns(mdns, endpoints, removed_bounds):
+maintain_mdns(mdns, endpoints, removed_bounds):
     for instance in mdns.snapshot():
         若 instance.bound_ip 与 removed_bounds 中任一 IP 相同：
             await mdns.remove(由 instance 派生的 MdnsBinding)
@@ -426,7 +416,7 @@ sync_mdns(mdns, endpoints, removed_bounds):
 
 desired 仅用于本次对照和地址分组，函数返回后丢弃；实际资源只在既有 MdnsResolverSet 中。多个 QUIC 绑定共享网卡/IP 时，在一个 mDNS 实例中公布端口并集，避免后一次写入覆盖前一个端口。网卡元数据变化在下轮重新核对；不根据 IP 猜网卡。
 
-run 使用 `AddressBook.subscribe_punch(Scope::Internal)` 的现有重放与事件作为维护触发。BoundRemoved 即使没有地址也会触发核对。接收连续事件后用 try_recv 排空本轮已到达事件，把 BoundRemoved.bound 临时交给 sync_mdns，再取完整快照；不重放每个旧事件的地址值。
+run 使用 `AddressBook.subscribe_punch(Scope::Internal)` 的现有重放与事件作为维护触发。BoundRemoved 即使没有地址也会触发核对。接收连续事件后用 try_recv 排空本轮已到达事件，把 BoundRemoved.bound 临时交给 maintain_mdns，再取完整快照；不重放每个旧事件的地址值。
 
 删除绑定后即使系统迅速复用了同一个网卡名和 IP，也先移除这个 IP 对应的旧 mDNS 实例，再按当前元数据重新 upsert。MdnsBinding 只有网卡名和 IP，单纯对照相同键无法识别网卡重建。这个保守重建可能同时重建其他网卡上同 IP 的实例，但不会撤回其当前有效 QUIC 地址，也不增加硬件标识镜像。
 
@@ -456,9 +446,9 @@ mDNS 查询资源不依赖本地身份是否监听，故即使 endpoints 为空�
 
 该头是本次批准的项目协议扩展，不是标准 DNS/HTTP 响应头。服务端使用与存储代码相同的毫秒转换，不能返回四舍五入后更长的租期。头缺失、重复、溢出或不合语义时客户端返回 InvalidLease，不猜测 30 秒。
 
-Pishoo 的固定运行值为 PUBLISH_TIMEOUT=3 秒、MAINTENANCE_RETRY=5 秒、MIN_PUBLISH_LEASE=30 秒，均为 dns 模块局部常量，不新增配置结构。
+Pishoo 的固定运行值为 PUBLISH_TIMEOUT=3 秒、MAINTENANCE_RETRY=5 秒、PUBLISH_INTERVAL=20 秒，均为 dns 模块局部常量，不新增配置结构。
 
-初版 Pishoo 仅接受非空发布租期至少 30 秒：发布操作期限 3 秒，按请求开始时间加租期的三分之一续期；线上旧服务端缺租期头的兼容阶段将间隔上限收紧为10秒（即 MIN_PUBLISH_LEASE / 3），至少留出多次失败重试空间。服务端已有短租期配置不强制改写；不满足条件时 Pishoo 记录“不支持该租期”并进入维护重试，不能声称已建立稳定续期。这个限制是本提案的固定运行约束，不新增用户配置。
+2026-10-08 用户确认服务端尚不返回租期，Pishoo 发布成功后统一按请求开始时间加20秒续期，删除最低租期判断与按租期计算间隔的逻辑。失败或超时后5秒重试，发布操作期限仍为3秒。H3Resolver 的返回类型及缺头兼容保持现状，不新增用户配置。
 
 ### H3Resolver.publish_endpoints
 
@@ -531,12 +521,12 @@ lookup(request):
 
 ```text
 publish(name, publisher, addresses):
+    addresses 为空 -> return None           // 不发送空地址撤回请求
     started = Instant::now()
     result = timeout(3秒, publisher.publish_endpoints(name, addresses.iter().copied()))
-    result 成功且 addresses 为空 -> return None
-    result 成功且 lease >= 30秒 -> return Some(started + min(lease, 30秒) / 3)
-    result 失败、超时或 lease 太短 -> 记录身份与具体错误
-                                     return Some(Instant::now() + 5秒)
+    result 成功 -> return Some(started + 20秒)
+    result 失败或超时 -> 记录身份与具体错误
+                       return Some(Instant::now() + 5秒)
 ```
 
 name 取自任务创建时的 Server.name，不给 H3Resolver 增加名字 getter。一次维护重试的固定 5 秒延迟用于抑制故障下的紧循环；本版不增加逐身份指数退避状态。地址变化仍能触发提前更新。
@@ -550,11 +540,10 @@ name 取自任务创建时的 Server.name，不给 H3Resolver 增加名字 gette
 | mdns: MdnsResolverSet | 维护全进程 mDNS 实例，查询器持其共享引用 |
 | inner_events: mpsc::UnboundedReceiver<AddressEvent> | 现有内网地址重放与变化触发 |
 | outer: watch::Receiver<Arc<[EndpointAddr]>> | 现有外网完整快照订阅 |
-| jobs: FuturesUnordered<BoxFuture<'static, Option<Instant>>> | 本轮实际发布 future；每身份最多一个 |
+| jobs: FuturesUnordered | 本轮实际 publish future；由编译器推导同一种 future 类型，每身份最多一个，无需装箱 |
 | next_due: Option<Instant> | 当前批返回的最早续期或重试时刻 |
-| timer: Option<Pin<Box<Sleep>>> | 有续期或维护重试需求时存在的真实定时器 |
 
-这些是 run 的局部变量及标准 async 资源，不封装进新 State，也不建立第二份 Server 集合。next_due 与 timer 的使用分阶段：批运行中只折叠 next_due，批结束后 move 成 timer，清空 next_due；不会同时把两个值当作独立调度事实。
+这些是 run 的局部变量及标准 async 资源，不封装进新 State，也不建立第二份 Server 集合。批运行中只折叠 next_due；批结束后，select 中直接按该绝对时刻等待 sleep_until，不另外保存 timer 或装箱定时器。
 
 ### 启动
 
@@ -580,16 +569,16 @@ Server.load 在创建完整 Server 前，对监听身份校验发布 authority�
 
 ```text
 创建批（仅 jobs 为空时）：
-    丢弃上轮 timer，取本轮当前内网身份；执行 sync_mdns(mdns, endpoints, removed_bounds)
-    next_due = 本轮 sync_mdns 失败时的 now+5秒，成功时 None
+    取本轮当前内网身份；执行 maintain_mdns(mdns, endpoints, removed_bounds)
+    next_due = 本轮 maintain_mdns 失败时的 now+5秒，成功时 None
     addresses = outer.borrow_and_update().clone()
     for 现有 Server 中应用仍开启且 publisher=Some 的身份:
         克隆 publisher 与 server.name，捕获同一个 addresses 快照
         jobs.push(Box::pin(dns::publish(...)))
-    没有 jobs -> 直接按 next_due 安装/清除 timer
+    没有 jobs -> 有 next_due 时直接等待该时刻，否则只等待地址变化和信号
 ```
 
-外网快照为空也发送空集合，以清除之前可能存在的记录；撤回成功不周期发送空集合，后续新地址变化会重新触发。每次重读最新快照，既有 watch 版本机制承担更新记录，不新增 dirty 标志。
+外网快照为空时不发送请求、不安排续期，已有记录按租期自然过期；后续新地址变化会重新触发发布。每次重读最新快照，既有 watch 版本机制承担更新记录，不新增 dirty 标志。
 
 ### 事件循环
 
@@ -600,17 +589,9 @@ loop:
             排空当前有限期限发布批
             break，进入退出收尾
 
-        SIGHUP:
-            排空当前发布批
-            串行扫描身份
-            删除身份 -> await withdraw，再 await server.close
-            现有身份 -> 按现有约定 reload，保留旧 Endpoint/publisher
-            新身份 -> load，成功监听登记后 spawn listener
-            按最终有效 Server 集合创建维护批，removed_bounds 为空
-
         job 结果（jobs 非空时）:
             next_due = 所有 Some(Instant) 与 mDNS 重试时刻的最小值
-            批完成 -> next_due move 成 timer，next_due 清空
+            批完成 -> 启用按 next_due 等待的分支
 
         内网事件（jobs 为空时）:
             排空本轮已经到达的事件并收集 BoundRemoved.bound
@@ -619,48 +600,22 @@ loop:
         outer.changed（jobs 为空时）:
             创建维护批，removed_bounds 为空；读取并标记最新 watch 值
 
-        timer 到期（jobs 为空时且 timer 存在）:
-            清除 timer，创建维护批，removed_bounds 为空
+        next_due 到期（jobs 为空时且 next_due 存在）:
+            创建维护批，removed_bounds 为空
 ```
 
-批进行时不消耗内外地址事件，消息队列与 watch 自然保留待处理更新。这样不在请求进行中重复发布旧/新集合，也不保存待发布快照。全进程按最短租期续期，允许较长租期身份一起提前续期；本版不为减少这部分请求增加逐身份调度表。
+批进行时不消耗内外地址事件，消息队列与 watch 自然保留待处理更新。这样不在请求进行中重复发布旧/新集合，也不保存待发布快照。全进程统一每20秒续期，发布失败时按5秒重试；不增加逐身份调度表。
 
 排空批不是额外总停机期限：所有已启动请求各自受 3 秒期限约束，FuturesUnordered 必须并行 poll 剩余 future，不能逐个重新创建 timeout。mDNS upsert/remove 使用现成短操作；不得把未经期限约束的远程 I/O 放在 select 之外。
 
-SIGHUP 的部分失败沿既有串行重载语义处理。无论扫描或某身份加载是否失败，都对最终仍有效的 Server 集合恢复 DNS 维护；不得因日志分支遗漏而永久停止旧身份续期。
-
-## 删除和退出函数
-
-### withdraw
-
-```text
-withdraw(endpoint, publisher, mdns):
-    for instance in mdns.snapshot():
-        instance.remove_name(endpoint.name())
-    if publisher 存在:
-        timeout(3秒, publisher.publish_endpoints(endpoint.name(), 空集合))
-        失败则返回有身份上下文的 io::Error
-    return Ok
-```
-
-调用前必须排空本进程该批发布请求。撤回不读取 profile 文件，删除身份目录后仍可尝试；mDNS 本地撤销与 H3 撤回互不阻断。H3 请求失败不阻止清除 Router、关闭 guest/exec 的现有任务资源或处理其他身份。
-
-已经上传到服务端但客户端超时的旧请求仍可能晚于撤回完成，现协议没有请求版本或服务端写入栅栏。本版不承诺严格“撤回后永不再出现”；残余记录由租期到期清理。新增代际协议需要另行设计批准，不通过隐藏计数解决。
+## 退出函数
 
 ### Server.close 与进程退出
 
 ```text
-删身份：
-    排空当前批
-    await withdraw(server.endpoint, server.publisher, mdns)，失败记录
-    await server.close()                     // 即使撤回失败也执行
-    server.close 内丢弃 publisher
-    保留现有关闭后的 Server 项，以维持同名恢复需重启约定
-
 退出：
     不创建后续维护批
     排空当前批
-    并行尝试全部活跃身份的 withdraw，每项自己的 3秒期限
     逐个执行现有 Server.close，收集原有关闭错误
     await mdns.shutdown()                    // 关闭 Pishoo 拥有的 mDNS 资源
     DNS 错误映射现有 Error::Io，应用收尾仍全部执行
@@ -678,12 +633,12 @@ withdraw(endpoint, publisher, mdns):
 | DDNS 服务暂不可达 | 保持应用服务；记录具体错误；5 秒后维护重试 |
 | 一个解析源失败 | 继续其他源；全部无候选时返回 NotFound |
 | 一个 mDNS 网卡绑定失败 | 处理其他网卡；5 秒后重新核对实际绑定 |
-| 无外网地址 | H3 清除自身记录；等待地址变化，不伪造公网地址 |
+| 无外网地址 | 停止发布与续期，已有记录自然过期；等待地址变化，不伪造公网地址 |
 | 无内网地址 | 移除无效 mDNS 实例；查询仍可走 H3 |
 | 服务端缺少租期头 | InvalidLease；需要先部署协议扩展，不使用固定 TTL 回退 |
-| 身份目录已删除 | 使用内存 Endpoint 凭据撤回；凭据被吊销时可能失败，按租期清理 |
+| 身份目录已删除 | 运行中继续使用启动时加载的资源；重启后不再加载或续期该身份 |
 | 本机 mDNS 名称删除 | 不再回答该名称；已有远端缓存按原 TTL 过期 |
-| SIGHUP 发现证书替换 | Endpoint/发布器保持原凭据；提示需重启，不混用新旧链 |
+| 磁盘凭据更新 | 运行中 Endpoint/发布器保持原凭据，统一重启生效 |
 
 需要先部署服务端租期响应与查询 no-store，再接入改造后的 ddns 和 Pishoo；旧客户端可忽略新发布响应头。新客户端对旧服务端的发布将报告协议缺口。既有 qresolve::Publish 的调用代码无需消费租期。
 
@@ -694,20 +649,20 @@ withdraw(endpoint, publisher, mdns):
 3. listen 失败时零发布；取得未 poll 的 ListenFuture 后直接 Drop 仍撤销登记；取消监听不清理共享连接和 socket。
 4. listen 0/1/2/3 发布范围正确；listen 为零仍可出站解析。
 5. 初始绑定重放、网卡/IP 新增删除、多端口共网卡、socket 失效全部从实际地址簿派生；Source 保留真实网卡与 family。
-6. 非空发布取得租期；超时、缺头、重复头、零值、溢出和短租期均按明确规则处理；续期使用请求开始时间计算，批之间无并发写入同身份。
-7. 地址变化发生于发布期间，下一批使用最新完整集合；最后地址消失后清除记录；空集合清除成功不持续发送空请求。
+6. 非空发布成功后按请求开始时间加20秒续期，失败或超时后5秒重试，不按返回租期调度；ddns 的缺头兼容与已有租期头校验保持现状，批之间无并发写入同身份。
+7. 地址变化发生于发布期间，下一批使用最新完整集合；最后地址消失后停止续期，已有记录自然过期；不发送空请求。
 8. 服务端 lookup no-store 被 ddns 遵守，动态记录失效后不仍命中包内 300 秒缓存。
-9. 同名两个独立发布者中删除一个，只清除其完整 SKI 对应记录；复制相同凭据的并行进程按明确限制处理。
-10. 删除磁盘 profile 后仍能用原内存凭据发送撤回；撤回失败不阻止其他身份与应用关闭。
-11. 退出在正在发布、重试、SIGHUP 失败时都不再创建后续批；mDNS 自有任务结束，共享传输不被主动关闭。
+9. 同名两个独立发布者中删除一个，仅停止其续期，不影响其他发布者；复制相同凭据的并行进程仍更新同一记录。
+10. 身份/配置/Lib/凭据变更统一重启；运行中不增删 Server、不自动更新 OCSP。退出不发送撤回请求，已有 DDNS 记录自然过期。
+11. 退出在正在发布或重试时都不再创建后续批；mDNS 自有任务结束，共享传输不被主动关闭。
 12. NAT 验收分开：当前阶段只使用 AddressBook 已有可公布地址，公网直连通过后再验证底层提供的 NAT 映射。接上 DNS 不等于完成 NAT 探测或打洞。
 
 ## 已批准的成员与接口变化汇总
 
 | 位置 | 具体变化 | 当前必需用途 |
 | --- | --- | --- |
-| Pishoo Server | 新增 publisher: Option<Arc<H3Resolver>> | 身份删除后仍能持原凭据撤回，并在进行中请求间共享协议资源 |
-| Pishoo dns 模块 | 新增 install、authority、publisher、sync_mdns、publish、withdraw 六个内部跨模块函数 | 装配、校验和维护本轮要求的解析发布能力 |
+| Pishoo Server | 新增 publisher: Option<Arc<H3Resolver>> | 在进行中的发布请求间共享协议资源，关闭时释放并停止续期 |
+| Pishoo dns 模块 | 保留 install、authority、publisher、maintain_mdns、publish 五个内部跨模块函数；删除 withdraw | 装配、校验和维护本轮要求的解析发布能力 |
 | Pishoo Server.listen | 改为 async 并返回 Result<ListenFuture> | 登记成功后才首次发布 |
 | dhttp Endpoint | 确认现行 quic 成员并替换冻结 name；新增 local_authority | 从原加载材料签名，不重复读取已删除目录 |
 | dhttp | 新增 ListenFuture 别名；Endpoint.listen、Network.listen 返回它 | 用实际监听 future 表达登记完成与存续，不加通知状态 |
@@ -731,7 +686,7 @@ withdraw(endpoint, publisher, mdns):
 - [mDNS 应答与本地删除](../../ddns/src/mdns/service.rs)
 - [E 记录固定 TTL](../../ddns/src/core/parser/packet.rs)
 - [DDNS 服务端 handler](../../ddns-sever/src/router.rs)
-- [Server 启动重载与关闭](../pishoo/src/server.rs)
+- [Server 启动与关闭](../pishoo/src/server.rs)
 
 ## 2026-10-03 线上旧版临时兼容
 
@@ -739,4 +694,6 @@ withdraw(endpoint, publisher, mdns):
 
 2026-10-03 公网续报修复：旧服务端发布返回200但缺少租期头，ddns 暂按已批准的300秒兼容窗口返回；它不是服务端存储租期，不能据此每100秒续报。Pishoo 的 publish 方法体以现有 MIN_PUBLISH_LEASE 将续报间隔封顶10秒，不更改 publish_endpoints 的返回类型或兼容窗口，不新增字段、函数、配置或任务。两身份仍由单一进程使用现有全局维护批续报。
 
-2026-10-04 按用户纠正保留中转地址：AddressBook 的外部快照可携带现有 EndpointAddr::Mediate { agent, outer }，由 H3Resolver 原样传给 E-record 编码器，DNS/API 文本为 outer-agent；不能先转换成 Direct(outer)。FullCone 的直达映射继续发布 Direct。底层 QUIC 仍登记两类别名以保留打洞能力；受限 NAT 的 DNS 快照不混入裸 outer，按 agent/outer 对保留多节点映射。地址替换、心跳失败和绑定撤回同时清理相应中转记录。Pishoo 六个 DNS 函数与全部结构/字段/签名不变。
+2026-10-04 按用户纠正保留中转地址：AddressBook 的外部快照可携带现有 EndpointAddr::Mediate { agent, outer }，由 H3Resolver 原样传给 E-record 编码器，DNS/API 文本为 outer-agent；不能先转换成 Direct(outer)。FullCone 的直达映射继续发布 Direct。底层 QUIC 仍登记两类别名以保留打洞能力；受限 NAT 的 DNS 快照不混入裸 outer，按 agent/outer 对保留多节点映射。地址替换、心跳失败和绑定撤回同时清理相应中转记录。该次变更未修改 Pishoo DNS 函数与结构/字段/签名；2026-10-08 后续删除 withdraw。
+
+2026-10-08 用户取消每日 OCSP 自动更新和 SIGHUP 重载，删除 Server.reload；身份、配置、Lib 和凭据更新统一重启。run 不再维护关闭身份筛选或重载后的发布恢复分支，仅保留启动、地址/DNS 维护与退出清理。

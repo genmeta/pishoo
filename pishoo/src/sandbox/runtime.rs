@@ -4,7 +4,6 @@ use std::{path::Path, sync::Arc};
 
 use http::{Request, Response};
 use http_body_util::BodyExt;
-use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tokio_util::task::TaskTracker;
 use wasmtime::{
@@ -71,7 +70,6 @@ impl Lib {
             return Err(Error::InvalidComponent("invalid Lib id".into()));
         }
         let openapi = validate_lib(bytes)?;
-        let digest = Sha256::digest(bytes).into();
         let component = runtime.compile(bytes)?;
         match std::fs::symlink_metadata(data_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -112,7 +110,6 @@ impl Lib {
             .map_err(Error::Guest)?;
         let filesystem = builder.build().filesystem().clone();
         Ok(Self {
-            digest,
             openapi,
             component,
             runtime,

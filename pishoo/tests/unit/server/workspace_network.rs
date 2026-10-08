@@ -8,6 +8,7 @@ use std::{
 use access_control::{ContactPatch, ContactStatus, SubjectId};
 use bytes::Bytes;
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
+use futures::FutureExt;
 use http::{Method, StatusCode};
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
@@ -40,7 +41,7 @@ fn profile(root: &std::path::Path, name: &str) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join(name)).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(0,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
 
@@ -54,13 +55,14 @@ async fn owner_request(
         .method(method)
         .uri(format!("https://{}{path}", server.name()))
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body(dhttp::WndBuf::with_initial(
-            64 * 1024,
-            Bytes::from(serde_json::to_vec(&body).unwrap()),
-        ))
+        .body(dhttp::WndBuf::new(64 * 1024))
         .unwrap();
     let (mut writer, response) = server.endpoint.from_request(request).await.unwrap();
     use tokio::io::AsyncWriteExt;
+    writer
+        .write_all(&serde_json::to_vec(&body).unwrap())
+        .await
+        .unwrap();
     writer.shutdown().await.unwrap();
     let response = response.await.unwrap();
     assert_eq!(response.version(), http::Version::HTTP_3);
@@ -146,7 +148,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         error.to_string().contains("outside its validity period"),
         "{error}"
     );
-    // The same loading path handles startup and identities discovered on SIGHUP.
+    // Startup skips invalid identities and still loads later valid profiles.
     for name in ["missing", "malformed", "expired", "bad-key"] {
         let identity = IdentityProfile::try_from(root.path().join(name)).unwrap();
         assert!(
@@ -166,7 +168,6 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         .unwrap()
         .expect("a valid identity after invalid profiles must load");
     assert_eq!(valid.name(), "valid.dhttp.net");
-    valid.reload().await.unwrap();
     valid.close().await.unwrap();
 
     // A corrected identity must not be remembered as permanently invalid.
@@ -207,7 +208,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
 
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local UDP and owns global TLS/DNS/DHTTP_HOME"]
-async fn config_api_real_h3_persistence_authorization_and_reload() {
+async fn config_api_real_h3_persistence_authorization_and_restart() {
     let root = tempfile::tempdir().unwrap();
     credentials::generate(
         root.path(),
@@ -248,12 +249,13 @@ async fn config_api_real_h3_persistence_authorization_and_reload() {
     .await
     .unwrap();
     let app = server.router.clone();
+    let listener_app = app.clone();
     let listener = server
         .endpoint
         .listen(
             dhttp::Scope::Loopback.into(),
             tower::service_fn(move |request: Request<Body>| {
-                let app = app.read().unwrap().clone();
+                let app = listener_app.read().unwrap().clone();
                 async move { app.oneshot(request.map(AxumBody::new)).await }
             }),
         )
@@ -269,37 +271,23 @@ async fn config_api_real_h3_persistence_authorization_and_reload() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"listen":0,"exec":false}));
+    assert_eq!(settings, serde_json::json!({"listen":0}));
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
         "/sys/settings",
-        serde_json::json!({"exec":true}),
+        serde_json::json!({"listen":1}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"listen":0,"exec":true}));
-    assert!(
+    assert_eq!(settings, serde_json::json!({"listen":1}));
+    assert_eq!(
         crate::setup::load_server_config(&server.profile)
             .unwrap()
-            .exec
+            .listen,
+        1
     );
-    assert!(
-        !server.config.exec,
-        "writing settings does not enable running exec"
-    );
-    assert!(
-        server.reload().await.is_err(),
-        "exec changes require restart"
-    );
-    let (status, _) = owner_request(
-        &server,
-        Method::PATCH,
-        "/sys/settings",
-        serde_json::json!({"exec":false}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(server.config.listen, 0, "writing settings requires restart");
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
@@ -308,10 +296,21 @@ async fn config_api_real_h3_persistence_authorization_and_reload() {
     assert_eq!(saved, proxies);
     assert!(
         server.config.proxy_locations.is_empty(),
-        "writing proxies awaits reload"
+        "writing proxies requires restart"
     );
-    server.reload().await.unwrap();
+    server.close().await.unwrap();
+    server = Server::load(
+        server.profile.clone(),
+        Arc::new(WasmRuntime::new().unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server.config.listen, 1,
+        "restart loads the saved listen setting"
+    );
     assert_eq!(server.config.proxy_locations[0].location, "/service/");
+    *app.write().unwrap() = server.router.read().unwrap().clone();
     let (status, saved) = owner_request(
         &server,
         Method::GET,
@@ -490,7 +489,6 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         .await
         .unwrap();
     assert_eq!(receiver.config.listen, 3);
-    assert!(!receiver.config.exec);
     let mut alice = Server::load(profile(root.path(), "alice"), runtime.clone())
         .await
         .unwrap();

@@ -31,7 +31,7 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
     std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, exec INTEGER); INSERT INTO settings VALUES(0,0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = crate::test_identity::endpoint(profile.name());
@@ -75,83 +75,25 @@ async fn server(root: &std::path::Path) -> Server {
     workspace.configure_chat(chat.clone()).await;
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
-    let proxies = config.proxy_locations.clone();
-    let router = Router::new()
-        .merge(access_router(access.clone()))
-        .merge(workspace::router(workspace.clone()))
-        .merge(chat_router(chat.clone(), workspace.clone()))
-        .merge(sandbox.api_router(endpoint.clone()))
-        .merge(file_router(profile.join("file")))
-        .fallback(any(move |request: Request<AxumBody>| {
-            proxy_pass(proxies.clone(), request)
-        }))
-        .layer(axum::middleware::from_fn_with_state(
-            access.clone(),
-            authorize,
-        ));
-    let router = Arc::new(RwLock::new(router));
-    Server {
+    let server = Server {
         profile,
         endpoint,
         config,
         access,
         workspace,
         chat,
-        router,
+        router: Arc::new(RwLock::new(Router::new())),
         sandbox,
-        exec_tasks: TaskTracker::new(),
         publisher: None,
-    }
-}
-
-#[tokio::test]
-async fn invalid_identity_reload_keeps_loaded_resources_and_can_be_retried() {
-    let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    let original = std::fs::read(server.profile.cert_path()).unwrap();
-    let old_lib = server.sandbox.libs["echo"].clone();
-    let old_authority = server.endpoint.local_authority().unwrap();
-    std::fs::remove_file(server.profile.cert_path()).unwrap();
-    for malformed in [false, true] {
-        if malformed {
-            std::fs::write(server.profile.cert_path(), b"not PEM").unwrap();
-        }
-        assert!(matches!(
-            server.reload().await,
-            Err(Error::InvalidIdentity(_))
-        ));
-        assert!(Arc::ptr_eq(&old_lib, &server.sandbox.libs["echo"]));
-        assert_eq!(
-            server.endpoint.local_authority().unwrap().certificates(),
-            old_authority.certificates()
-        );
-        assert!(!server.exec_tasks.is_closed());
-        assert!(!server.sandbox.tasks.is_closed());
-    }
-    std::fs::write(server.profile.cert_path(), original).unwrap();
-    server.reload().await.unwrap();
-    assert!(Arc::ptr_eq(&old_lib, &server.sandbox.libs["echo"]));
-    server.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn reload_does_not_initialize_deleted_or_empty_configuration() {
-    let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    std::fs::remove_file(server.profile.config_db_path()).unwrap();
-    assert!(server.reload().await.is_err());
-    assert!(!server.profile.config_db_path().exists());
-    std::fs::write(server.profile.config_db_path(), []).unwrap();
-    assert!(server.reload().await.is_err());
-    assert_eq!(server.profile.config_db_path().metadata().unwrap().len(), 0);
-    assert_eq!(server.config.listen, 0);
+    };
+    *server.router.write().unwrap() = current_router(&server);
+    server
 }
 
 #[tokio::test]
 async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths() {
     let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    server.reload().await.unwrap();
+    let server = server(root.path()).await;
 
     let name = server.endpoint.name();
     let cert = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
@@ -195,46 +137,11 @@ async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths()
 }
 
 #[tokio::test]
-async fn reload_reuses_valid_versions_and_rejects_bad_candidates() {
-    let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    let workspace = server.workspace.clone();
-    let chat = server.chat.clone();
-    let old = server.sandbox.libs["echo"].clone();
-    let task = server.sandbox.tasks.token();
-    server.reload().await.unwrap();
-    assert_eq!(server.sandbox.tasks.len(), 1);
-    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
-    std::fs::write(
-        server.profile.join("lib/echo/lib.wasm"),
-        b"broken component",
-    )
-    .unwrap();
-    assert!(server.reload().await.is_err());
-    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
-    std::fs::write(server.profile.join("lib/echo/lib.wasm"), component("2")).unwrap();
-    server.reload().await.unwrap();
-    let new = server.sandbox.libs["echo"].clone();
-    assert!(!Arc::ptr_eq(&old, &new));
-    assert_eq!(server.sandbox.tasks.len(), 1);
-    std::fs::remove_dir_all(server.profile.join("lib/echo")).unwrap();
-    server.reload().await.unwrap();
-    assert!(server.sandbox.libs.is_empty());
-    assert_eq!(server.sandbox.tasks.len(), 1);
-    drop(task);
-    assert!(server.sandbox.tasks.is_empty());
-    assert!(Arc::ptr_eq(&workspace, &server.workspace));
-    assert!(Arc::ptr_eq(&chat, &server.chat));
-    server.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn reload_does_not_write_access_rules_or_replace_admin_rules() {
+async fn lib_routes_use_existing_access_rules() {
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TryGetable};
 
     let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    server.reload().await.unwrap();
+    let server = server(root.path()).await;
 
     let rule = server
         .access
@@ -279,7 +186,6 @@ async fn reload_does_not_write_access_rules_or_replace_admin_rules() {
         )
         .await
         .unwrap();
-    server.reload().await.unwrap();
 
     let rule = server
         .access
@@ -296,28 +202,22 @@ async fn reload_does_not_write_access_rules_or_replace_admin_rules() {
 }
 
 #[tokio::test]
-async fn reload_failure_keeps_config_and_lib_and_close_is_permanent() {
+async fn close_clears_router_and_execution_resources() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
-    let old = server.sandbox.libs["echo"].clone();
-    let db = rusqlite::Connection::open(server.profile.db_dir().join("config.db")).unwrap();
-    db.execute("UPDATE settings SET listen=3", []).unwrap();
-    assert!(matches!(
-        server.reload().await,
-        Err(Error::InvalidConfig(_))
-    ));
-    assert_eq!(server.config.listen, 0);
-    assert!(Arc::ptr_eq(&old, &server.sandbox.libs["echo"]));
-    db.execute("UPDATE settings SET listen=0, exec=1", [])
-        .unwrap();
-    assert!(matches!(
-        server.reload().await,
-        Err(Error::InvalidConfig(_))
-    ));
-    assert!(!server.config.exec);
     server.close().await.unwrap();
-    assert!(server.exec_tasks.is_closed());
     assert!(server.sandbox.libs.is_empty() && server.sandbox.tasks.is_closed());
+    let router = server.router.read().unwrap().clone();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/echo/upload")
+                .body(AxumBody::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
     server.close().await.unwrap();
 }
 
@@ -330,22 +230,6 @@ async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
     assert!(server.sandbox.load_libs(&server.profile).is_err());
-}
-
-#[tokio::test]
-async fn reload_rejects_replaced_credentials_and_preserves_loaded_endpoint() {
-    let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
-    let loaded = server.endpoint.local_authority().unwrap();
-    let changed = rcgen::generate_simple_self_signed(vec![server.name().to_owned()]).unwrap();
-    std::fs::write(server.profile.cert_path(), changed.cert.pem()).unwrap();
-    assert!(
-        matches!(server.reload().await, Err(Error::InvalidConfig(message)) if message.contains("restart"))
-    );
-    assert_eq!(
-        server.endpoint.local_authority().unwrap().certificates(),
-        loaded.certificates()
-    );
 }
 
 #[tokio::test]

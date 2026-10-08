@@ -573,11 +573,11 @@ async fn reconcile_remote_contact(
         )
         .await?;
     }
-    sync_remote_chat_grant(state, target, remote).await?;
+    update_remote_chat_grant(state, target, remote).await?;
     Ok(())
 }
 
-async fn sync_remote_chat_grant(
+async fn update_remote_chat_grant(
     state: &Workspace,
     target: &str,
     remote: &RemoteStatus,
