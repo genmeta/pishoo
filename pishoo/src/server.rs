@@ -32,6 +32,13 @@ struct Server {
     publisher: Option<Arc<ddns::H3Resolver>>,
 }
 
+fn ocsp_ticks() -> tokio::time::Interval {
+    let period = std::time::Duration::from_secs(3 * 24 * 60 * 60);
+    let mut interval = tokio::time::interval_at(Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
 pub async fn run() -> Result<()> {
     let home = DhttpHome::load(dhttp_home::HomeScope::User)
         .map_err(|e| Error::InvalidConfig(e.to_string()))?;
@@ -54,6 +61,8 @@ pub async fn run() -> Result<()> {
         for server in servers.values().filter(|s| s.config.listen != 0) {
             tokio::spawn(server.listen().await?);
         }
+        let mut ocsp_ticks = ocsp_ticks();
+        let mut ocsp_updates = FuturesUnordered::new();
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         #[cfg(unix)]
@@ -85,6 +94,29 @@ pub async fn run() -> Result<()> {
                         if let Some(Some(due)) = result {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
                         }
+                    }
+                    _ = ocsp_ticks.tick(), if ocsp_updates.is_empty() => {
+                        for server in servers.values() {
+                            let profile = server.profile.clone();
+                            let endpoint = server.endpoint.clone();
+                            ocsp_updates.push(async move {
+                                let result = renew_ocsp(&profile, &endpoint).await;
+                                (profile.name().to_owned(), result)
+                            });
+                        }
+                    }
+                    Some((name, result)) = ocsp_updates.next(), if jobs.is_empty() && !ocsp_updates.is_empty() => {
+                        let server = servers.get_mut(&name).expect("loaded identity remains registered");
+                        let result = match result {
+                            Ok(endpoint) => apply_ocsp(server, endpoint).await,
+                            Err(error) => Err(error),
+                        };
+                        match result {
+                            Ok(()) => eprintln!("OCSP refreshed identity {name}"),
+                            Err(error) => eprintln!("OCSP refresh failed identity {name}: {error}"),
+                        }
+                        // Publish the current credentials after the preceding DNS batch ends.
+                        break;
                     }
                     event = inner_events.recv(), if jobs.is_empty() => {
                         let event = event.ok_or_else(|| std::io::Error::other("DNS address subscription ended"))?;
@@ -133,6 +165,37 @@ async fn load_profile(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn renew_ocsp(
+    profile: &IdentityProfile,
+    endpoint: &dhttp::Endpoint,
+) -> Result<dhttp::Endpoint> {
+    // Renew the loaded certificate's proof; certificate/key rotation still requires restart.
+    let authority = endpoint.local_authority()?;
+    let response = fetch_ocsp(authority.certificates()).await?;
+    cache_ocsp(profile, &response)?;
+    endpoint.reload().await.map_err(Into::into)
+}
+
+async fn apply_ocsp(server: &mut Server, endpoint: dhttp::Endpoint) -> Result<()> {
+    let publisher = if server.config.listen & 2 != 0 {
+        Some(dns::publisher(&endpoint)?)
+    } else {
+        None
+    };
+    server
+        .workspace
+        .configure_outbound(Arc::new(endpoint.clone()))
+        .await;
+    server
+        .chat
+        .configure_outbound(Arc::new(endpoint.clone()))
+        .await;
+    server.endpoint = endpoint;
+    server.publisher = publisher;
+    *server.router.write().unwrap() = current_router(server);
+    Ok(())
 }
 
 fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {

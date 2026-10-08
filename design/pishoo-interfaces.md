@@ -6,7 +6,7 @@
 
 - Pishoo 使用 dhttp Endpoint、本机 HTTP/1.1 客户端、标准 HTTP/Body、Tower/Axum；不持 QPACK、H3 writer 或 QUIC connection。
 - Endpoint 独立 load；同名 Endpoint 经全局 Network 的同一本端身份池复用连接。Endpoint 不提供 close 或 stop_listening；Network 属于进程生命周期，不提供 shutdown。
-- Server 仅启动时串行加载；身份、配置、Lib 和凭据更新统一重启，不支持 SIGHUP 重载或每日 OCSP 自动更新。没有 ServerState、Release、revision、构建队列或后台发布任务。
+- Server 仅启动时串行加载；身份、配置、Lib 和证书/私钥更新统一重启，不支持 SIGHUP 重载；OCSP 每72小时刷新。没有 ServerState、Release、revision、构建队列或后台发布任务。
 - WasmRuntime 只保存 Engine/Linker。编译按当前调用顺序执行，不建立编译任务注册表或并发槽。
 - 配置反代只连接本机 HTTP/TCP 上游；同名身份专用的 DHTTP 正向代理使用 Server 现有 Endpoint。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。没有 UpstreamKind、传输选择字段或失败回退。
 - 一个 `.wasm` component 文件就是一个 Lib，不另设 App 概念。接收和响应复用下述标准 Body 别名。局部流转换不是新的模块接口。
@@ -56,7 +56,7 @@ config.db 的 schema v1 为 settings(listen) 与 proxy_locations(location,proxy_
 
 以下运行约束不是配置字段：WASM 无总执行时长限制；每次调用 fuel100_000_000、每10_000 fuel让出。StoreLimits 使用 Wasmtime 47.0.4 默认值：每个 Store 最多10_000 instances、10_000 memories、10_000 tables，对每个 linear memory 的字节数和每张 table 的元素数不另设上限。WASI输出1块、每块16KiB；签名输入1MiB、签名8KiB。每个 Server 的退出等待上限15秒。
 
-全局 Network 无初始化配置，直接调用 `DhttpNetwork::init()`。每个 Server 的 listen 范围在 `Endpoint.listen` 时交给 dhttp，Network 初始化全部可用网卡并监听系统事件维护绑定；监听范围由 qconn 按名称执行，停止监听保留 socket。Pishoo 的配置、Lib、路由与凭据变化均在重启后生效。
+全局 Network 无初始化配置，直接调用 `DhttpNetwork::init()`。每个 Server 的 listen 范围在 `Endpoint.listen` 时交给 dhttp，Network 初始化全部可用网卡并监听系统事件维护绑定；监听范围由 qconn 按名称执行，停止监听保留 socket。Pishoo 的配置、Lib、路由与证书/私钥变化均在重启后生效；OCSP 刷新同时更新已有路由捕获的 Endpoint。
 
 ## 3. 运行循环和 Server
 
@@ -94,11 +94,13 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
     request: http::Request<axum::body::Body>) -> axum::response::Response;
 ```
 
-`run` 以局部变量持有 home、Server 集合和共享 WasmRuntime。启动时串行加载一次；身份、配置、Lib 和凭据的变化均需重启，不注册 SIGHUP，不定时扫描或更新 OCSP。启动仍校验身份并在本地 OCSP 缓存缺失或无效时获取、验证和保存缓存。监听登记失败结束启动并统一收尾；登记成功交付 ListenFuture 后 spawn，不保留 JoinHandle。退出时逐个关闭并回收 Server。Server.listen 返回的 ListenFuture 不借用 Server。
+`run` 以局部变量持有 home、Server 集合和共享 WasmRuntime。启动时串行加载一次；身份、配置、Lib 和证书/私钥的变化需重启，不注册 SIGHUP，不定时扫描目录；每72小时刷新已加载身份的 OCSP。启动仍校验身份并在本地 OCSP 缓存缺失或无效时获取、验证和保存缓存。监听登记失败结束启动并统一收尾；登记成功交付 ListenFuture 后 spawn，不保留 JoinHandle。退出时逐个关闭并回收 Server。Server.listen 返回的 ListenFuture 不借用 Server。
+
+2026-10-08 用户批准每72小时刷新 OCSP，复用已有 Endpoint.reload（见 dhttp 清单）。run 只增加局部 Interval 和正在执行的刷新 futures，首轮在启动完成后72小时触发，错过的周期不连续补跑。获取沿用15秒期限和完整校验，与 DNS 维护共同轮询；当前 DNS 批结束后应用新 Endpoint、发布器、Workspace/Chat 出站与 Router，不扫描配置或重编译 Lib。失败记录身份和原因，保留旧内存凭据，下一周期再尝试；退出丢弃未完成刷新，不新增结构、字段、取消信号或后台管理器。
 
 每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
-Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib、配置、Endpoint 或完整 Router，close 仍清空 Router。
+Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib 或配置；OCSP 成功刷新后替换 Endpoint、发布器与基于已有资源构造的 Router，close 仍清空 Router。
 
 `/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
 
@@ -287,7 +289,7 @@ DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations
 
 ## 9. 启停与错误
 
-启动顺序：安装解析源并订阅地址事件 → 初始化一次全局 Network → 串行校验身份凭据、加载数据库配置/AccessService/组件 → 为每个需监听的 Server 启动 listen 任务。凭据读取、证书/私钥、OCSP 及发布用途验证失败记录身份名和原因并跳过，继续启动后续身份；跳过身份不保留 Server，下次启动重新尝试。配置、数据库及 Lib 错误仍结束启动；静态身份没有代理行也可启动。运行期间不更新 OCSP、不读取凭据或重载身份/配置/Lib。
+启动顺序：安装解析源并订阅地址事件 → 初始化一次全局 Network → 串行校验身份凭据、加载数据库配置/AccessService/组件 → 为每个需监听的 Server 启动 listen 任务。凭据读取、证书/私钥、OCSP 及发布用途验证失败记录身份名和原因并跳过，继续启动后续身份；跳过身份不保留 Server，下次启动重新尝试。配置、数据库及 Lib 错误仍结束启动；静态身份没有代理行也可启动。运行期间每72小时获取、验证并原子保存 OCSP，再通过已有 Endpoint.reload 更新监听凭据、应用出站和 Router；不重载身份/配置/Lib，证书链变化拒绝刷新并要求重启。
 
 Server.close 同步调用 Sandbox.close() 并清除 Router，随后等待 Sandbox 任务回收。`run` 不收回 listener 任务；运行期间不删除身份；身份目录变化在重启后生效。Server 不批量取消 HTTP 或审批；已进入的 HTTP 请求由其自身生命周期继续处理。`run` 退出时逐个调用 Server.close。全局 Network 不提供 shutdown；其连接池和后台维护随进程退出结束。`run` 直接等待进程退出信号，不另存取消 token。
 
@@ -312,7 +314,7 @@ Error实现Display/Error。业务拒绝在headers前生成HTTP响应；headers�
 ## 10. 验收边界
 
 - 从Endpoint进入标准Service；Pishoo生产代码和测试驱动不传QPACK/H3写流。
-- 启动串行加载 Lib 并构造 Router；运行期间不重载，配置/Lib/凭据变更在重启后生效。
+- 启动串行加载 Lib 并构造 Router；运行期间不重载，配置/Lib/证书及私钥变更在重启后生效；OCSP 每72小时刷新。
 - 按固定 daccess 分支验证允许、拒绝、202 持久审批、查询归属和一次性重试；验证联系人申请编号、轮询及幂等。Workspace/Chat 的本地管理要求 owner，公开资料仅放行精确 GET 端点。
 - WASM提前响应继续上传、多值trailers、body替换、HEAD/204/304、超过4次并发执行及任务回收；Body丢弃不单独取消guest。
 - 配置反代仅连接回环 HTTP/TCP 服务；同名身份的固定前缀 DHTTP 正向代理使用现有 Endpoint；Lib 的 WASI HTTP 出站一律拒绝。验证本机代理响应分块在上传 EOF 前到达，上传保持打开且模拟空闲31秒后仍可双向传输。

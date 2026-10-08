@@ -79,6 +79,7 @@ Error 复用现有错误类型；失败通过 Result、流错误或任务返回�
 pub struct Endpoint { pub(crate) quic: Arc<qconn::QuicEndpoint> }
 impl Endpoint {
     pub async fn load(name: impl AsRef<str>) -> Result<Self>;
+    pub async fn reload(&self) -> Result<Self>;
     pub fn name(&self) -> &str;
     pub fn local_authority(&self) -> Result<qtls::LocalAuthority>;
     pub fn get(&self, uri: http::Uri) -> Request<EmptyBody>;
@@ -99,7 +100,11 @@ impl Endpoint {
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<BoxError>;
 }
+```
 
+2026-10-08 用户批准将代码已有的 `Endpoint::reload(&self) -> Result<Self>` 纳入冻结接口，供 Pishoo 每72小时更新 OCSP。它读取并验证新 staple，要求证书链保持不变，并复用 Network 已登记的回调、范围和监听生命周期，替换未来握手的 TLS 凭据，返回新的不可变 Endpoint。失败保留原监听；现有连接和连接池不关闭。应用负责更新其 Endpoint 克隆和 DNS 发布器；证书/私钥轮换仍需重启。不新增结构或成员。
+
+```rust
 pub struct Request<B> {
     endpoint: Option<Endpoint>,
     message: http::Request<B>,

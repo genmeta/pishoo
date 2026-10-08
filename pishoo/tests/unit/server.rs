@@ -1,6 +1,49 @@
 use super::*;
 use crate::{Error, setup::load_server_config};
 
+#[tokio::test(start_paused = true)]
+async fn ocsp_refresh_starts_after_three_days_and_skips_missed_ticks() {
+    use std::time::Duration;
+    let mut ticks = ocsp_ticks();
+    let started = Instant::now();
+    let period = Duration::from_secs(72 * 60 * 60);
+    assert!(
+        tokio::time::timeout(period - Duration::from_secs(1), ticks.tick())
+            .await
+            .is_err()
+    );
+    assert_eq!(ticks.tick().await, started + period);
+    tokio::time::advance(period * 4 + Duration::from_secs(1)).await;
+    ticks.tick().await;
+    // A delayed runtime performs one renewal rather than replaying every missed day.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), ticks.tick())
+            .await
+            .is_err()
+    );
+    assert_eq!(ticks.tick().await, started + period * 6);
+}
+
+#[tokio::test]
+async fn failed_ocsp_refresh_preserves_loaded_credentials_and_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    let before = server.endpoint.local_authority().unwrap();
+    std::fs::write(server.profile.ocsp_path(), b"existing cache").unwrap();
+    // This fixture has no responder URI; fetching must fail before changing any resource.
+    assert!(renew_ocsp(&server.profile, &server.endpoint).await.is_err());
+    assert_eq!(
+        server.endpoint.local_authority().unwrap().ocsp(),
+        before.ocsp()
+    );
+    assert_eq!(
+        std::fs::read(server.profile.ocsp_path()).unwrap(),
+        b"existing cache"
+    );
+    assert!(!server.sandbox.libs.is_empty());
+    server.close().await.unwrap();
+}
+
 fn component(version: &str) -> Vec<u8> {
     let mut bytes = include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
     fn leb(mut n: usize, out: &mut Vec<u8>) {

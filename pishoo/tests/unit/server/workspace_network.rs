@@ -80,6 +80,221 @@ async fn owner_request(
 }
 
 #[tokio::test]
+#[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
+async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    credentials::generate(root.path(), &[("receiver", "receiver.dhttp.net")]);
+    let responder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}/ocsp", responder.local_addr().unwrap());
+    let openssl = |args: &[&str]| {
+        let output = std::process::Command::new(
+            std::env::var_os("DHTTP_TEST_OPENSSL").unwrap_or_else(|| "openssl".into()),
+        )
+        .args(args)
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let mut extensions = std::fs::read_to_string(root.path().join("leaf.ext")).unwrap();
+    extensions.push_str(&format!("authorityInfoAccess=OCSP;URI:{uri}\n"));
+    std::fs::write(root.path().join("leaf.ext"), extensions).unwrap();
+    openssl(&[
+        "x509",
+        "-req",
+        "-sha256",
+        "-in",
+        "leaf.csr",
+        "-CA",
+        "ca.crt",
+        "-CAkey",
+        "ca.key",
+        "-set_serial",
+        "01",
+        "-out",
+        "receiver/ssl/fullchain.crt",
+        "-days",
+        "1",
+        "-extfile",
+        "leaf.ext",
+    ]);
+    let cert_path = root.path().join("receiver/ssl/fullchain.crt");
+    let mut chain = std::fs::read(&cert_path).unwrap();
+    chain.extend(std::fs::read(root.path().join("ca.crt")).unwrap());
+    std::fs::write(cert_path, chain).unwrap();
+    let sign_ocsp = |path: &str| {
+        openssl(&[
+            "ocsp",
+            "-rmd",
+            "sha256",
+            "-index",
+            "index.txt",
+            "-rsigner",
+            "ca.crt",
+            "-rkey",
+            "ca.key",
+            "-CA",
+            "ca.crt",
+            "-issuer",
+            "ca.crt",
+            "-cert",
+            "receiver/ssl/fullchain.crt",
+            "-respout",
+            path,
+            "-ndays",
+            "1",
+        ])
+    };
+    sign_ocsp("receiver/ssl/ocsp.der");
+    sign_ocsp("renewed.ocsp");
+    let renewed = std::fs::read(root.path().join("renewed.ocsp")).unwrap();
+    let before = std::fs::read(root.path().join("receiver/ssl/ocsp.der")).unwrap();
+    assert_ne!(renewed, before);
+
+    let response_bytes = renewed.clone();
+    let responder_task = tokio::spawn(async move {
+        // First return a signed renewal; then a malformed response to exercise retention.
+        for body in [response_bytes, b"invalid OCSP".to_vec()] {
+            let (mut socket, _) = responder.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let length = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(length, 0);
+                request.extend_from_slice(&buffer[..length]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            assert!(request.starts_with(b"POST /ocsp "));
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/ocsp-response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    let _responder = scopeguard::guard(responder_task, |task| task.abort());
+    let old_home = std::env::var_os("DHTTP_HOME");
+    unsafe {
+        std::env::set_var("DHTTP_HOME", root.path());
+    }
+    let _environment = scopeguard::guard(old_home, |previous| unsafe {
+        match previous {
+            Some(value) => std::env::set_var("DHTTP_HOME", value),
+            None => std::env::remove_var("DHTTP_HOME"),
+        }
+    });
+    dhttp::DhttpNetwork::init().await.unwrap();
+    qtls::RootCerts::set([dhttp::CertificateDer::from(
+        std::fs::read(root.path().join("ca.der")).unwrap(),
+    )])
+    .unwrap();
+    let peer = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let address = EndpointAddr::direct(peer.local_addr().unwrap());
+    qprotocol::Dock::global()
+        .add(peer.clone())
+        .unwrap()
+        .unwrap();
+    let _socket = scopeguard::guard(peer, |peer| {
+        qprotocol::Dock::global().remove(&peer);
+    });
+    dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
+    let profile = profile(root.path(), "receiver");
+    rusqlite::Connection::open(profile.config_db_path())
+        .unwrap()
+        .execute("UPDATE settings SET listen=3", [])
+        .unwrap();
+    let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
+        .await
+        .unwrap();
+    // Keep the in-memory configuration and application resources through the update.
+    let workspace = server.workspace.clone();
+    let chat = server.chat.clone();
+    let router = server.router.clone();
+    let publisher = server.publisher.clone().unwrap();
+    let app = router.clone();
+    let listener = server
+        .endpoint
+        .listen(
+            dhttp::Scope::Loopback.into(),
+            tower::service_fn(move |request: Request<Body>| {
+                let app = app.read().unwrap().clone();
+                async move { app.oneshot(request.map(AxumBody::new)).await }
+            }),
+        )
+        .await
+        .unwrap();
+    let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
+    let (status, _) = owner_request(
+        &server,
+        Method::GET,
+        "/sys/settings",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A disk config change must stay unapplied; no identity/Lib reload occurs.
+    rusqlite::Connection::open(server.profile.config_db_path())
+        .unwrap()
+        .execute("UPDATE settings SET listen=1", [])
+        .unwrap();
+
+    let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
+    apply_ocsp(&mut server, endpoint).await.unwrap();
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
+    assert!(Arc::ptr_eq(&workspace, &server.workspace));
+    assert!(Arc::ptr_eq(&chat, &server.chat));
+    assert!(Arc::ptr_eq(&router, &server.router));
+    assert_eq!(server.config.listen, 3);
+    assert!(!Arc::ptr_eq(&publisher, server.publisher.as_ref().unwrap()));
+    // The existing pooled connection remains usable after renewal.
+    let (status, settings) = owner_request(
+        &server,
+        Method::GET,
+        "/sys/settings",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    // Anonymous traffic creates a different connection and verifies the renewed TLS staple.
+    let request = Request::builder()
+        .uri("https://receiver.dhttp.net/std/profile")
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+    let response = dhttp::Request::new(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .extensions()
+            .get::<dhttp::RemoteAuthority>()
+            .unwrap()
+            .name(),
+        server.name()
+    );
+    assert!(renew_ocsp(&server.profile, &server.endpoint).await.is_err());
+    assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
+    assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "run alone; requires OpenSSL and owns global TLS/DHTTP_HOME"]
 async fn identity_validation_failure_skips_profile_and_loads_other_identities() {
     let root = tempfile::tempdir().unwrap();
