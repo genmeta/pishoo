@@ -19,3 +19,6 @@ mod execution;
 mod manifest;
 #[path = "sandbox/resources.rs"]
 mod resources;
+
+#[path = "sandbox/management.rs"]
+mod management;

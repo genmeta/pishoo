@@ -2,6 +2,14 @@
 
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
+## 2026-10-08：管理命令与 API
+
+- 按用户指定的管理详细设计实施，并先将第九节的具体签名及路由行为纳入冻结清单。配置管理统一迁到 `/pishoo/settings`、`/pishoo/proxies`；旧 `/sys` 无别名且不再保留，`/pishoo` 根及路径段子路径拒绝代理和 Lib 占用。代理增加 location 精确查询、单条 PATCH 和幂等 DELETE；SQLite 即时事务内修改唯一键并复核配置，保留整表 PUT 和 schema v1。
+- 增加 `/pishoo/libs` 磁盘目录、单个 Lib 的 GET/PUT/DELETE 及独立 POST `/pishoo/lib-check`。复用 manifest 与宿主 imports/incoming-handler 编译校验，不实例化 guest；元数据从磁盘派生，集合用互斥错误条目表示损坏组件。沿用 daccess 后同名同 owner 校验、v1 协商、no-store、方法/query/内容类型/实际 Body 上限检查，存储错误不暴露绝对路径。
+- Linux/macOS 文件操作使用已打开目录句柄和 NOFOLLOW，共享 flock 覆盖查询及启动扫描，编译在提交锁外完成；私有临时目录位于扫描根外，更新临时文件在组件目录内。完整文件同步后，在排他锁下重新核验目录身份并原子 rename、同步目录；竞争安装/移除仅重新准备同一份已校验字节。移除只处理组件，保留 db/<id> 和 ACL；没有运行 Lib 替换、取消、热更新、安装账本、自有状态容器或新增 Error 变体。
+- `run_command` 与普通 cli.rs 提供 listen/proxy/lib、list/ls/remove/rm、离线 check、在线 `--loaded`，`--id/-i` 支持资源前后位置。默认身份只读取共享 settings.toml 的 default.name，不自动选第一项，不写默认设置或初始化缺失配置。进程级命令拒绝身份参数；无参数前台运行保持原入口。start/stop/restart/status 使用已安装 systemd 或当前用户 Homebrew 服务，直接程序/参数调用，不自动提权、安装或启动另一份进程。
+- 验证：`cargo test --offline --locked -p pishoo` 共124项默认测试通过、9项按既有条件跳过；另独立显式通过真实本机 H3 管理用例，验证 API 保存、授权、安装、重启后实际 WASM 请求、移除及保留数据。新增测试覆盖 CLI 默认/显式身份、停止监听时离线操作、退出码、在线读取失败不回退、管理器参数/失败（替身）、并发提交、完整扫描、符号链接、上传中断与累计大小超限。all-targets 编译、改动文件格式及 diff 检查通过。使用现有 stable rustc 1.97.1 和缓存依赖；初次完整测试受沙箱端口限制，获准本机套接字后通过。文件行为在当前 macOS 实测；Linux 部署及真实 systemd/Homebrew 服务启停未执行。
+
 ## 2026-10-08：每三天刷新 OCSP
 
 - 用户要求运行期间每三天刷新 OCSP，并明确批准将代码已有的 `dhttp::Endpoint::reload(&self) -> Result<Self>` 纳入冻结清单。复用该接口更新监听 TLS；不修改 dhttp/qtls/h3x 源码，不新增自有结构、字段、配置、取消信号或 Server 方法。
@@ -151,7 +159,7 @@ WASM 职责集中到 Sandbox 前的 Pishoo 检查点：`bc30231`，保存上一�
 
 测试代码统一放在各 crate 的 `tests/` 下：`unit/` 存放需要访问私有实现的单元测试，`support/` 存放内存流等测试工具，`cases/` 存放较长集成测试的分组。`src/` 仅保留测试模块挂载声明，不为测试扩大生产 API 的可见性。
 
-Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 合并为四个文件：`sandbox.rs` 负责组件管理和 API 路由，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责 WASI HTTP 出站拒绝接缝和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 前端现位于 `pishoo/workspace/`，构建后内嵌 dist 资源。此次接入保留 Workspace/Chat 分支原有的业务测试布局。
+Pishoo 使用普通 `mod` 声明和同名 `.rs` 文件，子模块放在同名目录。库入口分别为 `pishoo/src/pishoo.rs` 和 `gateway/src/gateway.rs`，由 Cargo 的 `[lib].path` 指定。Sandbox 按职责组织：`sandbox.rs` 负责组件加载和 API 路由，`sandbox/files.rs` 负责 Lib 文件读取、查询、原子安装和移除，`sandbox/runtime.rs` 负责编译、Store、执行和响应体，`sandbox/host.rs` 负责 WASI HTTP 出站拒绝接缝和身份宿主能力，`sandbox/manifest.rs` 负责清单校验。CLI 参数解析留在 `cli.rs`，HTTP 处理留在 `sandbox.rs`，既有跨模块函数路径通过重导出保持不变。测试继续放在 `tests/unit/`，通过 `#[path] mod` 挂载；测试文件也使用同名 `.rs`，不使用 `mod.rs`。Workspace 前端现位于 `pishoo/workspace/`，构建后内嵌 dist 资源。此次接入保留 Workspace/Chat 分支原有的业务测试布局。
 
 Pishoo 的其他实现按同样原则合并：`server.rs` 集中运行循环和单身份服务；`routes.rs` 集中分发与静态文件，`routes/access.rs` 负责授权和管理入口，`routes/proxy.rs` 负责反代；配置归 `setup.rs`，单命令宿主执行归 `exec.rs`。
 

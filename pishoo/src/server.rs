@@ -643,6 +643,11 @@ fn current_router(server: &Server) -> Router {
         .merge(workspace::router(server.workspace.clone()))
         .merge(chat_router(server.chat.clone(), server.workspace.clone()))
         .merge(server.sandbox.api_router(server.endpoint.clone()))
+        .merge(crate::sandbox::lib_management_router(
+            server.profile.clone(),
+            server.endpoint.clone(),
+            server.sandbox.runtime.clone(),
+        ))
         .merge(file_router(server.profile.join("file")))
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |request: Request<AxumBody>| {

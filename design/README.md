@@ -25,6 +25,7 @@
 | --- | --- |
 | [三仓架构](h3x-dhttp-pishoo-architecture.md) | 仓库职责、数据路径、应用约束和实施次序 |
 | [dhttp 结构](dhttp-interfaces.md) | 独立 Endpoint、全局 Network、连接复用与应用接入 |
+| [管理命令与 API](../pishoo/docs/management-design.md) | 已批准管理行为、命令、磁盘原子操作和验收 |
 | [Pishoo 结构](pishoo-interfaces.md) | 简单配置、Server/Router/Sandbox/Lib、daccess 接入与 WASM |
 | [Workspace/Chat 接入](workspace-chat-interfaces.md) | 目标分支业务模型、Server 资源归属及 Endpoint 出站接缝 |
 | [DNS 解析与发布](pishoo-dns-detailed-design.md) | 全进程解析源、内存凭据发布、地址维护、租期和自然过期 |
@@ -158,3 +159,7 @@ README 的安装说明、CHANGELOG 的历史记录和 CONTEXT 词汇表不承担
 2026-10-08 用户要求先删除 exec：移除宿主命令执行模块及其 `/exec` 路由、Server.exec_tasks、ServerConfig.exec、execute 跨模块接缝与专用错误 BackendUnavailable/Cancelled/Closed，删除 exec 接口文档及专用测试/脚本/依赖。新建 config.db 的 schema v1 仅保留 settings(listen)；已有库的旧 exec 列保留但不读取或更新，配置 API 不返回该字段并拒绝提交 exec 的 PATCH。`/exec` 不再保留为内置命名空间；不新增替代状态或接口。此前 exec 相关段落仅为历史决策记录，由本决定替代。
 
 2026-10-08 用户要求每三天刷新 OCSP，并明确批准将已有 `Endpoint::reload(&self) -> Result<Self>` 纳入冻结接口。只刷新 OCSP；身份、配置、Lib 与证书/私钥变化仍需重启。run 使用局部72小时定时器与刷新 futures，不新增结构或成员。成功后更新监听、DNS 发布器、应用出站和 Router，失败保留旧内存凭据并记录日志。
+
+2026-10-08 用户要求 Note 使用 SQLite note.db，在确认标准 WASI 的目录授权边界后，最终选择 `<身份目录>/db/<LibId>` 的逐 Lib 私有目录，guest 挂载为 `/db`。Note 文件为 `<身份目录>/db/note/note.db`；根级授权、配置与聊天数据库不开放，撤销此前整个 db 的共享授权。Sandbox.load_libs 复用现有 data_dir 参数，不新增结构、字段或跨模块接口；目录及挂载变更在重启后生效。此前 lib/<LibId>/data 挂载为 /data 的约定由本决定替代。
+
+2026-10-08 用户要求按[管理命令与 API 详细设计](../pishoo/docs/management-design.md)实施；第九节的具体接口和 `/pishoo` 命名空间迁移已批准并纳入 Pishoo 清单。配置与 Lib 的 HTTP/离线命令复用存储算法，运行目录仍使用 Workspace API，服务管理使用已有 systemd/Homebrew 服务。结构、schema、执行和重启生命周期不变。

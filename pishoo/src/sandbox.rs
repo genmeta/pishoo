@@ -14,10 +14,13 @@ use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::{Error, Result};
 
+mod files;
 mod host;
 mod manifest;
 mod runtime;
 
+use files::{disk_bytes, disk_ids, lib_root, valid_id};
+pub(crate) use files::{install_lib, installed_libs, remove_lib};
 pub use manifest::validate_lib;
 
 pub(crate) struct Sandbox {
@@ -81,47 +84,19 @@ impl Sandbox {
     }
 
     pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
-        let root = profile.join("lib");
-        let mut candidates = HashMap::new();
-        match root.symlink_metadata() {
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                return Err(Error::InvalidComponent(
-                    "lib root must be a directory, not a symlink".into(),
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        let root = match lib_root(profile) {
+            Ok(root) => root,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.libs.clear();
                 return Ok(());
             }
-            Err(e) => return Err(e.into()),
-            _ => {}
-        }
-        let entries = std::fs::read_dir(&root)?;
-        let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let id = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
-            if id.is_empty()
-                || id.len() > 63
-                || !id.as_bytes()[0].is_ascii_lowercase()
-                || !id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
-                return Err(Error::InvalidComponent("invalid Lib id".into()));
-            }
-            let path = entry.path().join("lib.wasm");
-            let metadata = path.symlink_metadata()?;
-            if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
-                return Err(Error::InvalidComponent("invalid component file".into()));
-            }
-            let bytes = std::fs::read(&path)?;
+            Err(error) => return Err(error),
+        };
+        rustix::fs::flock(&root, rustix::fs::FlockOperation::LockShared)
+            .map_err(std::io::Error::from)?;
+        let mut candidates = HashMap::new();
+        for id in disk_ids(&root)? {
+            let bytes = disk_bytes(&root, &id)?;
             let lib = Lib::load(
                 self.runtime.clone(),
                 id.clone(),
@@ -237,62 +212,7 @@ fn list_libs(
     libs.sort_by(|(left, _), (right, _)| left.cmp(right));
     let items = libs
         .into_iter()
-        .map(|(id, lib)| {
-            let mut endpoints = Vec::new();
-            if let Some(paths) = &lib.openapi.paths {
-                for (path, item) in paths {
-                    for (method, operation) in item.methods() {
-                        let description = operation
-                            .summary
-                            .as_deref()
-                            .filter(|text| !text.trim().is_empty())
-                            .or_else(|| {
-                                operation
-                                    .description
-                                    .as_deref()
-                                    .filter(|text| !text.trim().is_empty())
-                            })
-                            .map(str::to_owned)
-                            .or_else(|| {
-                                operation.responses.as_ref()?.iter().find_map(
-                                    |(status, response)| {
-                                        if status != "2XX"
-                                            && !status
-                                                .parse::<u16>()
-                                                .is_ok_and(|code| (200..300).contains(&code))
-                                        {
-                                            return None;
-                                        }
-                                        response
-                                            .resolve(&lib.openapi)
-                                            .ok()?
-                                            .description
-                                            .filter(|text| !text.trim().is_empty())
-                                    },
-                                )
-                            });
-                        endpoints.push(serde_json::json!({
-                            "method": method.as_str(),
-                            "path": format!("/api/{id}{path}"),
-                            "description": description,
-                        }));
-                    }
-                }
-            }
-            endpoints.sort_by(|left, right| {
-                left["path"]
-                    .as_str()
-                    .cmp(&right["path"].as_str())
-                    .then_with(|| left["method"].as_str().cmp(&right["method"].as_str()))
-            });
-            serde_json::json!({
-                "id": id,
-                "title": lib.openapi.info.title,
-                "version": lib.openapi.info.version,
-                "description": lib.openapi.info.description,
-                "endpoints": endpoints,
-            })
-        })
+        .map(|(id, lib)| lib_metadata(&lib.openapi, Some(id)))
         .collect::<Vec<_>>();
     Ok(axum::Json(serde_json::json!(items)))
 }
@@ -306,6 +226,225 @@ fn reject_api(error: Error) -> axum::response::Response {
         status,
         status.canonical_reason().unwrap_or("request failed"),
     ))
+}
+
+fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::Value {
+    let mut endpoints = Vec::new();
+    if let Some(paths) = &openapi.paths {
+        for (path, item) in paths {
+            for (method, operation) in item.methods() {
+                let description = operation
+                    .summary
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                    .or_else(|| {
+                        operation
+                            .description
+                            .as_deref()
+                            .filter(|text| !text.trim().is_empty())
+                    })
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        operation
+                            .responses
+                            .as_ref()?
+                            .iter()
+                            .find_map(|(status, response)| {
+                                if status != "2XX"
+                                    && !status
+                                        .parse::<u16>()
+                                        .is_ok_and(|code| (200..300).contains(&code))
+                                {
+                                    return None;
+                                }
+                                response
+                                    .resolve(openapi)
+                                    .ok()?
+                                    .description
+                                    .filter(|text| !text.trim().is_empty())
+                            })
+                    });
+                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/api/{id}{path}")), "description":description}));
+            }
+        }
+    }
+    endpoints.sort_by(|a, b| {
+        a["path"]
+            .as_str()
+            .cmp(&b["path"].as_str())
+            .then_with(|| a["method"].as_str().cmp(&b["method"].as_str()))
+    });
+    let mut value = serde_json::json!({"title":openapi.info.title, "version":openapi.info.version, "description":openapi.info.description, "endpoints":endpoints});
+    if let Some(id) = id {
+        value["id"] = id.into();
+    }
+    value
+}
+
+pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::OpenApiV3Spec> {
+    let openapi = validate_lib(bytes)?;
+    runtime.compile(bytes)?;
+    Ok(openapi)
+}
+
+pub(crate) fn lib_management_router(
+    profile: IdentityProfile,
+    endpoint: dhttp::Endpoint,
+    runtime: Arc<WasmRuntime>,
+) -> axum::Router {
+    use axum::{response::IntoResponse, routing::any};
+    let handler = move |request: http::Request<axum::body::Body>| {
+        let (profile, endpoint, runtime) = (profile.clone(), endpoint.clone(), runtime.clone());
+        async move {
+            let mut response = lib_management_request(profile, endpoint, runtime, request)
+                .await
+                .unwrap_or_else(|error| {
+                    let status = match &error {
+                        Error::InvalidComponent(_) => http::StatusCode::BAD_REQUEST,
+                        Error::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                            http::StatusCode::CONFLICT
+                        }
+                        _ => error.status(),
+                    };
+                    if status.is_server_error() {
+                        tracing::error!(%error, "Lib management failed");
+                        (status, "Lib storage or compilation failed; query the resource to confirm the saved result").into_response()
+                    } else {
+                        (status, error.to_string()).into_response()
+                    }
+                });
+            response
+                .headers_mut()
+                .insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("supported-versions", "v1".parse().unwrap());
+            response
+        }
+    };
+    axum::Router::new()
+        .route("/pishoo/libs", any(handler.clone()))
+        .route("/pishoo/libs/{id}", any(handler.clone()))
+        .route("/pishoo/lib-check", any(handler))
+}
+
+async fn lib_management_request(
+    profile: IdentityProfile,
+    endpoint: dhttp::Endpoint,
+    runtime: Arc<WasmRuntime>,
+    request: http::Request<axum::body::Body>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    use http::{Method, StatusCode, header};
+    let visitor = request
+        .extensions()
+        .get::<access_control::Visitor>()
+        .ok_or(Error::Denied)?;
+    let local = endpoint.local_authority()?;
+    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .map_err(|_| Error::Denied)?;
+    let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
+        .map_err(|_| Error::Denied)?;
+    if visitor.name() != endpoint.name() || visitor.subject_id() != &subject {
+        return Err(Error::Denied);
+    }
+    if request.headers().contains_key("accept-versions") {
+        let mut supported = false;
+        for value in request.headers().get_all("accept-versions") {
+            supported |= value
+                .to_str()
+                .map_err(|_| Error::BadRequest("invalid Accept-Versions".into()))?
+                .split(',')
+                .any(|v| v.trim() == "v1");
+        }
+        if !supported {
+            return Ok(StatusCode::HTTP_VERSION_NOT_SUPPORTED.into_response());
+        }
+    }
+    let path = request.uri().path();
+    let checking = path == "/pishoo/lib-check";
+    let id = path
+        .strip_prefix("/pishoo/libs/")
+        .map(|id| {
+            percent_encoding::percent_decode_str(id)
+                .decode_utf8()
+                .map(|s| s.into_owned())
+                .map_err(|_| Error::BadRequest("invalid id encoding".into()))
+        })
+        .transpose()?;
+    if let Some(id) = &id {
+        valid_id(id)?;
+    }
+    let method = request.method().clone();
+    let allow = if checking {
+        "POST"
+    } else if id.is_none() {
+        "GET"
+    } else {
+        "GET, PUT, DELETE"
+    };
+    if !(checking && method == Method::POST
+        || !checking && method == Method::GET
+        || id.is_some() && (method == Method::PUT || method == Method::DELETE))
+    {
+        return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response());
+    }
+    if request.uri().query().is_some() {
+        return Err(Error::BadRequest("unsupported query parameters".into()));
+    }
+    let writing = method == Method::PUT || checking;
+    if writing
+        && !request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/wasm"))
+    {
+        return Ok(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
+    }
+    let bytes = match axum::body::to_bytes(
+        request.into_body(),
+        if writing { 64 * 1024 * 1024 } else { 0 },
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            use std::error::Error as _;
+            if error
+                .source()
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                return Ok(if writing {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+                .into_response());
+            }
+            return Err(Error::BadRequest("failed to read component body".into()));
+        }
+    };
+    let value = tokio::task::spawn_blocking(move || {
+        if checking {
+            return check_lib(&bytes, &runtime).map(|api| lib_metadata(&api, None));
+        }
+        match method {
+            Method::GET => installed_libs(&profile, id.as_deref()),
+            Method::PUT => install_lib(&profile, id.as_deref().unwrap(), &bytes, &runtime),
+            Method::DELETE => {
+                remove_lib(&profile, id.as_deref().unwrap()).map(|()| serde_json::Value::Null)
+            }
+            _ => Err(Error::MethodNotAllowed),
+        }
+    })
+    .await??;
+    Ok(if value.is_null() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        axum::Json(value).into_response()
+    })
 }
 
 #[cfg(test)]
