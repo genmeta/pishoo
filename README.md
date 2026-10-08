@@ -25,9 +25,6 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 
 ## Getting started
 
-For a reproducible source build of this development branch, follow the
-[Git revisions, environment setup, and run instructions](docs/REPRODUCIBLE-RUN.md).
-
 The current development branch is implementing the [v1 contract](design/README.md).
 Its SQLite configuration, completed work, test commands, and remaining
 transport work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
