@@ -353,3 +353,27 @@ DDNS 服务端30项 router 测试通过，包括租期头、查询 no-store 和�
 ### 2026-10-08 DNS 固定20秒续期
 
 按用户要求，发布成功后统一返回请求开始时间加20秒，不再检查最低租期或按租期计算间隔。失败或超时仍5秒后重试，空地址仍停止发布。同步当前设计说明，不改变结构、字段、函数签名或 ddns 缺头兼容。现有 DNS 库测试4项通过，dns.rs 格式检查通过；未重启运行中的进程或重跑公网验收。
+
+### 2026-10-08 WebSocket / HA 协议桥接
+
+按用户要求，以 HA 反代为目标补齐 H3 WebSocket extended CONNECT 到本机 HTTP/1.1 上游的桥接；`/api/*` 保留规则暂不调整。修复前当前管理命令、API 与 Lib 磁盘修改已提交为 `ae62271`，基线117项库测试及3项管理命令测试通过。
+
+- 使用 h3x 已有 Arc<str> extension 识别 `:protocol=websocket`。上游使用 GET Upgrade、随机16字节 nonce、version13；验证101、Upgrade/Connection、Sec-WebSocket-Accept与所选subprotocol，成功转换为H3 200，保留协商的subprotocol/extensions及普通响应头。非2xx拒绝状态和正文保留，未升级的2xx或无效握手返回网关错误。
+- 复用 StreamBody 与 Hyper Upgraded，编译器生成的async状态直接拥有双向I/O；不新增自有结构、字段、跨模块生产函数、隧道任务或取消信号。小块上传逐次flush，不解析、解压或重写WebSocket帧。上传EOF只关闭上游写方向；响应EOF、Body Drop和任一方向错误释放双方资源。声明或实际trailers拒绝，握手后没有30秒总时长限制。
+- 按用户选择在 `/private/tmp/pishoo-websocket/dhttp` 的 `feat/websocket-proxy` 独立worktree验证dhttp，并让Pishoo的依赖与本地Cargo patch指向它。该worktree沿用原工作区当时的core改动以保持SDK接缝兼容，不迁移SDK文件；本轮仅新增extended CONNECT回归测试，没有改变dhttp/h3x生产接口。原dhttp工作区中的SDK工作不受本轮写入影响。
+- Pishoo全部122项非忽略库测试通过，9项独立/手动验收默认忽略；新增5项WebSocket测试覆盖HA `auth_required/auth/auth_ok`、订阅结果及8条事件、JSON心跳与WebSocket Ping/Pong、32KiB二进制跨分块、关闭/重连、31秒后的流可用性、拒绝/错误握手、上传EOF、错误与Body Drop资源释放，并验证带RSV1的字节透明转发。
+- 单独运行 `websocket_real_h3_ha_roundtrip --ignored` 通过：新生成的测试证书和有效OCSP、具名QUIC/H3连接、两个WebSocket会话，经Pishoo proxy接缝转发本机HA协议模拟上游。dhttp隔离worktree全部55项库测试通过，新增测试验证协议extension、服务端先发小帧、双向DATA及上传EOF后的响应。
+- `cargo check -p pishoo --all-targets`、修改文件的nightly rustfmt检查及diff检查通过。严格Clippy被基线代码9项告警阻断（cli、dns、sandbox、workspace/approvals、workspace/store、chat/bridge和workspace测试）；WebSocket新增文件未报Clippy告警。构建使用已有Bun1.4.2，未更改前端锁文件或系统Bun。
+
+验收范围是HA协议模拟上游与真实QUIC/H3传输，没有连接真实HA实例或完成浏览器/AnySee联调。真实H3测试直接交付代理Service接缝，不经过仍保留`/api/*`的Router；单独身份本身不绕过该规则。本轮未部署、重启或修改运行中的服务。
+
+### 2026-10-08 `/api` 代理与已加载 Lib 共存
+
+用户明确批准前述兼容策略，本节替代上节早期验收中“保留整个/api、绕过Router”的限制。
+
+- `routes::reserved` 不再保留整个 `/api`；Sandbox.api_router 仅注册当前已加载 `/api/<LibId>` 的无斜杠根、斜杠根和子路径，覆盖全部方法。该前缀内未声明操作404、方法不匹配405，不回退代理；其他API路径按现有代理规则匹配，无配置仍404。目录页和管理路径继续保留，静态文件仍只在 `/file` 提供。
+- Server.load 先加载Sandbox并校验代理位置，再创建Workspace/Chat资源；显式location及精确匹配若落入已加载Lib前缀，返回InvalidConfig并列出location和LibId。根代理、较宽的`/api`代理及名称相近的兄弟前缀允许共存。配置/Lib磁盘写入仍需重启，按启动时实际加载集合检查，无新增类型、字段或生产函数签名。
+- 全部123项非忽略库测试通过，9项独立/手动测试默认忽略。增加API代理配置验收，并扩展原路由与Sandbox测试，验证空Lib、未加载名称、相近名称、已加载根及深层路径、HEAD/OPTIONS/CONNECT、404/405不落入fallback，以及API未配置时不会读取静态文件。
+- 显式单独运行 `websocket_real_h3_ha_roundtrip --ignored` 通过。现在使用生产Server.load构造的完整Router和daccess授权层，经具名QUIC/H3进入本机HA协议模拟上游。覆盖无Lib根代理和加载Note后的`/api`代理，分别验证拒绝策略403、放行后的两次WebSocket认证/事件/心跳/大帧/关闭/重连，以及普通GET `/api/states` 的200正文；加载Note时其根及未知操作404、错误方法405，5种显式代理冲突启动拒绝，`/api/noteworthy`兄弟代理不误判。
+- 修改文件nightly rustfmt与diff检查通过。保留真实TLS/OCSP与身份验证，没有绕过Router、授权层或Lib命名空间。上游仍为HA协议模拟服务，尚未接真实HA/浏览器/AnySee；本轮未部署或重启运行中的服务。
+- 最终 `cargo check --locked --offline -p pishoo --all-targets` 通过；本轮重新恢复已清理的依赖缓存与编译产物，Cargo.lock 版本保持锁定。

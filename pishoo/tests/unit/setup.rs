@@ -141,6 +141,28 @@ fn file_namespace_cannot_be_proxied() {
 }
 
 #[test]
+fn api_proxy_locations_are_valid_until_loaded_libs_are_checked_at_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    for location in [
+        "/api",
+        "/api/",
+        "/api/websocket",
+        "= /api/websocket",
+        "/api/note/",
+    ] {
+        db.execute("DELETE FROM proxy_locations", []).unwrap();
+        db.execute(
+            "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
+            [location],
+        )
+        .unwrap();
+        assert!(load_server_config(&profile).is_ok(), "{location}");
+    }
+}
+
+#[test]
 fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());

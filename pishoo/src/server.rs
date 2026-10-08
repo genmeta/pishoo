@@ -697,6 +697,21 @@ impl Server {
         let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
             .map_err(|_| Error::InvalidIdentity("invalid certificate subject".into()))?;
         let access = load_access(&profile, &subject).await?;
+        let mut sandbox = Sandbox::new(runtime);
+        sandbox.load_libs(&profile)?;
+        for route in &config.proxy_locations {
+            let path = route.location.strip_prefix("= ").unwrap_or(&route.location);
+            if let Some(id) = path
+                .strip_prefix("/api/")
+                .map(|tail| tail.split('/').next().unwrap())
+                && sandbox.libs.contains_key(id)
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "proxy location '{}' conflicts with loaded Lib '{id}' (/api/{id})",
+                    route.location
+                )));
+            }
+        }
         let workspace_store = WorkspaceStore::open(&profile)
             .await
             .map_err(|error| Error::InvalidConfig(error.to_string()))?;
@@ -721,8 +736,6 @@ impl Server {
             .configure_outbound(Arc::new(endpoint.clone()))
             .await;
         chat.configure_outbound(Arc::new(endpoint.clone())).await;
-        let mut sandbox = Sandbox::new(runtime);
-        sandbox.load_libs(&profile)?;
         let server = Self {
             profile,
             endpoint,

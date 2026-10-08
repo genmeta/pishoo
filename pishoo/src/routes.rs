@@ -32,7 +32,6 @@ pub(crate) fn reserved(path: &str) -> bool {
         "/chat-api",
         "/std",
         "/pishoo",
-        "/api",
         "/.pishoo",
         "/file",
     ]
@@ -180,4 +179,4 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
 
 #[cfg(test)]
 #[path = "../tests/unit/routes.rs"]
-mod tests;
+pub(crate) mod tests;
