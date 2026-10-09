@@ -3,21 +3,21 @@ resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
 
-# Share local project dependency types throughout the development graph.
+# Use one pinned source for project types throughout the dependency graph.
 [patch.crates-io]
-dhttp = { path = "../dhttp/dhttp" }
-dhttp-home = { path = "../dhttp/home" }
-dyns = { path = "../ddns" }
-h3x = { path = "../h3x" }
-qmacro = { path = "../dquic/qmacro" }
-qbase = { path = "../dquic/qbase" }
-qevent = { path = "../dquic/qevent" }
-qcongestion = { path = "../dquic/qcongestion" }
-qconnection = { path = "../dquic/qconnection" }
-qprotocol = { path = "../dquic/qprotocol" }
-qrecovery = { path = "../dquic/qrecovery" }
-qresolve = { path = "../dquic/qresolve" }
-qtls = { path = "../dquic/qtls" }
-qtransport = { path = "../dquic/qtransport" }
-qtraversal = { path = "../dquic/qtraversal" }
-qudp = { path = "../dquic/qudp" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
+dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
+dyns = { git = "https://github.com/genmeta/ddns.git", rev = "b3ef11233e2598a75b316df104b35c2863f64e9f" }
+h3x = { git = "https://github.com/genmeta/h3x.git", rev = "c26abcd3d8596c10c0fadece240a713741c7873a" }
+qmacro = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qevent = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qcongestion = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qconnection = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qrecovery = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qtransport = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qtraversal = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qudp = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }

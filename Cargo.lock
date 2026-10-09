@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "access_control"
 version = "0.1.0"
+source = "git+https://github.com/genmeta/daccess.git?rev=3e3ac6199e88f6b5e521e8d29c934ead3bb5db7c#3e3ac6199e88f6b5e521e8d29c934ead3bb5db7c"
 dependencies = [
  "axum",
  "chrono",
@@ -1288,6 +1289,7 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/dhttp.git?rev=f8bdd2700e42782e5b68b62cf69827d37a1e305b#f8bdd2700e42782e5b68b62cf69827d37a1e305b"
 dependencies = [
  "bytes",
  "dhttp-home",
@@ -1317,11 +1319,12 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0"
+source = "git+https://github.com/genmeta/dhttp.git?rev=f8bdd2700e42782e5b68b62cf69827d37a1e305b#f8bdd2700e42782e5b68b62cf69827d37a1e305b"
 dependencies = [
  "dirs",
  "futures",
  "ring",
- "rustls 0.23.45",
+ "rustls",
  "snafu",
  "tokio",
  "x509-parser",
@@ -1454,6 +1457,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.7.2"
+source = "git+https://github.com/genmeta/ddns.git?rev=b3ef11233e2598a75b316df104b35c2863f64e9f#b3ef11233e2598a75b316df104b35c2863f64e9f"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1472,7 +1476,7 @@ dependencies = [
  "qtls",
  "rand 0.10.2",
  "ring",
- "rustls 0.23.45",
+ "rustls",
  "rustls-pemfile",
  "snafu",
  "socket2",
@@ -1940,6 +1944,7 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/h3x.git?rev=c26abcd3d8596c10c0fadece240a713741c7873a#c26abcd3d8596c10c0fadece240a713741c7873a"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2159,7 +2164,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "rustls 0.23.45",
+ "rustls",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -3558,7 +3563,8 @@ dependencies = [
 
 [[package]]
 name = "qbase"
-version = "0.6.4"
+version = "0.7.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -3570,7 +3576,7 @@ dependencies = [
  "qmacro",
  "qtls",
  "rand 0.10.2",
- "rustls 0.23.45",
+ "rustls",
  "serde",
  "smallvec",
  "thiserror 2.0.20",
@@ -3580,7 +3586,8 @@ dependencies = [
 
 [[package]]
 name = "qcongestion"
-version = "0.6.2"
+version = "0.7.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "qbase",
  "qevent",
@@ -3592,7 +3599,8 @@ dependencies = [
 
 [[package]]
 name = "qconnection"
-version = "0.6.1"
+version = "0.9.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "futures",
@@ -3610,7 +3618,8 @@ dependencies = [
 
 [[package]]
 name = "qevent"
-version = "0.6.2"
+version = "0.7.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3627,7 +3636,8 @@ dependencies = [
 
 [[package]]
 name = "qmacro"
-version = "0.5.1"
+version = "0.6.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3636,7 +3646,8 @@ dependencies = [
 
 [[package]]
 name = "qprotocol"
-version = "0.6.1"
+version = "0.7.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3655,7 +3666,8 @@ dependencies = [
 
 [[package]]
 name = "qrecovery"
-version = "0.6.2"
+version = "0.7.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3669,7 +3681,8 @@ dependencies = [
 
 [[package]]
 name = "qresolve"
-version = "0.8.1"
+version = "0.9.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -3678,15 +3691,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrustls"
+version = "0.23.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8050bd9948ac6868ddadcb6bf58e5da7a46ad922acd595db4a9ba04578139c2f"
+dependencies = [
+ "once_cell",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "qtls"
-version = "0.6.1"
+version = "0.1.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "der 0.8.2",
  "pkix-path",
  "pkix-revocation",
+ "qrustls",
  "ring",
- "rustls 0.23.31",
  "signature 2.2.0",
  "signature 3.0.0",
  "spki 0.8.1",
@@ -3699,7 +3727,8 @@ dependencies = [
 
 [[package]]
 name = "qtransport"
-version = "0.6.1"
+version = "0.1.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3718,7 +3747,8 @@ dependencies = [
 
 [[package]]
 name = "qtraversal"
-version = "0.7.2"
+version = "0.8.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3732,7 +3762,8 @@ dependencies = [
 
 [[package]]
 name = "qudp"
-version = "0.7.2"
+version = "0.8.0"
+source = "git+https://github.com/genmeta/dquic.git?rev=34a713b48535892ad9843cf2bb0db285e0d09439#34a713b48535892ad9843cf2bb0db285e0d09439"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3766,7 +3797,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash",
- "rustls 0.23.45",
+ "rustls",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
@@ -3787,7 +3818,7 @@ dependencies = [
  "rand_pcg",
  "ring",
  "rustc-hash",
- "rustls 0.23.45",
+ "rustls",
  "rustls-pki-types",
  "slab",
  "thiserror 2.0.20",
@@ -4075,7 +4106,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "quinn",
- "rustls 0.23.45",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -4219,18 +4250,6 @@ checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
 dependencies = [
  "once_cell",
  "rustix",
-]
-
-[[package]]
-name = "rustls"
-version = "0.23.31"
-dependencies = [
- "once_cell",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "subtle",
- "zeroize",
 ]
 
 [[package]]
@@ -4814,7 +4833,7 @@ dependencies = [
  "memchr",
  "percent-encoding",
  "rust_decimal",
- "rustls 0.23.45",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5243,7 +5262,7 @@ version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
- "rustls 0.23.45",
+ "rustls",
  "tokio",
 ]
 
@@ -6739,23 +6758,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "dhttp-access"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "dhttp-log"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dshell"
-version = "0.6.2"
-
-[[patch.unused]]
-name = "qdatagram"
-version = "0.6.2"
-
-[[patch.unused]]
-name = "rankey"
-version = "0.2.2"

@@ -11,14 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
       - name: Install PAM development libraries
         run: |
           sudo apt-get update
           sudo apt-get install --assume-yes --no-install-recommends libpam0g-dev
       - uses: taiki-e/install-action@cargo-llvm-cov
       # Limit test parallelism to 1 thread to avoid resource contention
-      - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
+      - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
