@@ -56,3 +56,6 @@ tmp/
 
 TODO
 pishoo.pid
+
+# Local VM acceptance captures and runtime diagnostics
+/pishoo/docs/workspace/vm-evidence/
