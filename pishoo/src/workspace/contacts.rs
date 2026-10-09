@@ -929,12 +929,12 @@ pub(crate) async fn refresh(
     let current = now()?;
     expire(&state, current).await?;
     let request = find(&state, id).await?;
-    if !matches!(request.status.as_str(), "queued" | "pending") {
+    if !matches!(request.status.as_str(), "queued" | "pending" | "active") {
         return Ok(Json(request));
     }
     state.store.db().execute_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
-        "UPDATE outbound_contact_requests SET next_attempt_at = ? WHERE id = ? AND status IN ('queued', 'pending')",
+        "UPDATE outbound_contact_requests SET next_attempt_at = ? WHERE id = ? AND status IN ('queued', 'pending', 'active')",
         [current.into(), id.into()],
     )).await.map_err(storage_error)?;
     state.wake_worker();
