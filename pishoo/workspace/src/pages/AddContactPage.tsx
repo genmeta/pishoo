@@ -49,7 +49,7 @@ export default function AddContactPage(props: {
         offered_capabilities: offeredCapabilities(),
       })
       props.notify(t('outbound.sent'))
-      props.navigate('/workspace/contacts/requests')
+      props.navigate('/std/workspace/contacts/requests')
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) setTargetError(t('outbound.duplicate'))
       else if (error instanceof ApiError && error.status === 400 && error.message.includes('target name')) {
@@ -76,7 +76,7 @@ export default function AddContactPage(props: {
         <h1>{t('nav.contactNew')}</h1>
         <div class="header-actions">
           <button class="button button-secondary" type="button"
-            onClick={() => props.navigate('/workspace/contacts/requests')}>
+            onClick={() => props.navigate('/std/workspace/contacts/requests')}>
             {t('nav.contactRequests')}
           </button>
         </div>

@@ -57,7 +57,6 @@ async fn merges_quic_ports_rebuilds_removed_bindings_and_removes_names() {
     let cert = params.self_signed(&key).unwrap();
     let endpoint = Endpoint::new(
         qbase::endpoint::Endpoint::new(
-            &qtls::default_provider(),
             &name,
             vec![cert.der().clone()],
             qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),

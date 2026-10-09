@@ -13,11 +13,11 @@ type NavItem = {
 }
 
 const PRIMARY_NAV: NavItem[] = [
-  { page: 'contacts', href: '/workspace/contacts', label: 'nav.contacts', mobileLabel: 'nav.mobileContacts' },
-  { page: 'extensions', href: '/workspace/extensions', label: 'nav.extensions', mobileLabel: 'nav.mobileExtensions' },
-  { page: 'apps', href: '/workspace/apps', label: 'nav.apps', mobileLabel: 'nav.mobileApps' },
-  { page: 'approvals', href: '/workspace/approvals', label: 'nav.reviews', mobileLabel: 'nav.mobileReviews' },
-  { page: 'profile', href: '/workspace/settings/profile', label: 'nav.settings', mobileLabel: 'nav.mobileSettings' },
+  { page: 'contacts', href: '/std/workspace/contacts', label: 'nav.contacts', mobileLabel: 'nav.mobileContacts' },
+  { page: 'extensions', href: '/std/workspace/extensions', label: 'nav.extensions', mobileLabel: 'nav.mobileExtensions' },
+  { page: 'apps', href: '/std/workspace/apps', label: 'nav.apps', mobileLabel: 'nav.mobileApps' },
+  { page: 'approvals', href: '/std/workspace/approvals', label: 'nav.reviews', mobileLabel: 'nav.mobileReviews' },
+  { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.settings', mobileLabel: 'nav.mobileSettings' },
 ]
 
 export interface SidebarProps {
@@ -46,11 +46,11 @@ export default function Sidebar(props: SidebarProps) {
 
   return (
     <aside class="sidebar">
-      <a class="brand" href="/workspace/" onClick={(event) => props.follow(event, '/workspace/')}>
+      <a class="brand" href="/std/workspace/" onClick={(event) => props.follow(event, '/std/workspace/')}>
         <span class="brand-mark" aria-hidden="true">P</span>
         <span><strong>pishoo</strong><small>{t('brand.subtitle')}</small></span>
       </a>
-      <a class="profile-summary" href="/workspace/" onClick={(event) => props.follow(event, '/workspace/')}>
+      <a class="profile-summary" href="/std/workspace/" onClick={(event) => props.follow(event, '/std/workspace/')}>
         <Avatar name={props.profileName} src={props.profileAvatar} />
         <span>
           <strong>{props.profileName}</strong>

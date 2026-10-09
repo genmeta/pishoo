@@ -176,24 +176,24 @@ async fn context(
 pub(crate) fn router(state: Arc<Workspace>) -> Router {
     state.start_worker();
     Router::new()
-        .route("/workspace-api/context", get(context))
-        .route("/workspace-api/capabilities", get(capabilities::list))
-        .route("/workspace-api/approvals", get(approvals::list))
+        .route("/std/workspace-api/context", get(context))
+        .route("/std/workspace-api/capabilities", get(capabilities::list))
+        .route("/std/workspace-api/approvals", get(approvals::list))
         .route(
-            "/workspace-api/approvals/{kind}/{id}",
+            "/std/workspace-api/approvals/{kind}/{id}",
             axum::routing::delete(approvals::delete),
         )
-        .route("/workspace-api/contact-directory", get(directory::list))
+        .route("/std/workspace-api/contact-directory", get(directory::list))
         .route(
-            "/workspace-api/capability-requests",
+            "/std/workspace-api/capability-requests",
             get(contacts::capability_requests),
         )
         .route(
-            "/workspace-api/settings/profile",
+            "/std/workspace-api/settings/profile",
             get(settings::get_profile).patch(settings::patch_profile),
         )
         .route(
-            "/workspace-api/settings/profile/avatar",
+            "/std/workspace-api/settings/profile/avatar",
             get(profile::get_avatar)
                 .put(profile::put_avatar)
                 .delete(profile::delete_avatar),
@@ -201,39 +201,39 @@ pub(crate) fn router(state: Arc<Workspace>) -> Router {
         .route("/std/profile", get(profile::get_public_profile))
         .route("/std/profile/avatar", get(profile::get_public_avatar))
         .route(
-            "/workspace-api/profiles/{name}",
+            "/std/workspace-api/profiles/{name}",
             get(profile::get_remote_profile),
         )
         .route(
-            "/workspace-api/profiles/{name}/avatar",
+            "/std/workspace-api/profiles/{name}/avatar",
             get(profile::get_remote_avatar),
         )
         .route(
-            "/workspace-api/contact-requests",
+            "/std/workspace-api/contact-requests",
             get(contacts::list).post(contacts::create),
         )
         .route(
-            "/workspace-api/contacts/{name}/capabilities/{capability}/grant",
+            "/std/workspace-api/contacts/{name}/capabilities/{capability}/grant",
             axum::routing::post(contacts::grant),
         )
         .route(
-            "/workspace-api/contacts/{name}/capabilities/{capability}/revoke",
+            "/std/workspace-api/contacts/{name}/capabilities/{capability}/revoke",
             axum::routing::post(contacts::revoke),
         )
         .route(
-            "/workspace-api/contacts/{name}/capabilities/{capability}/deny",
+            "/std/workspace-api/contacts/{name}/capabilities/{capability}/deny",
             axum::routing::post(contacts::deny),
         )
         .route(
-            "/workspace-api/contacts/{name}/saved",
+            "/std/workspace-api/contacts/{name}/saved",
             axum::routing::put(directory::save).delete(directory::unsave),
         )
         .route(
-            "/workspace-api/contact-requests/{id}",
+            "/std/workspace-api/contact-requests/{id}",
             get(contacts::get).delete(contacts::delete),
         )
         .route(
-            "/workspace-api/contact-requests/{id}/refresh",
+            "/std/workspace-api/contact-requests/{id}/refresh",
             axum::routing::post(contacts::refresh),
         )
         .with_state(state)
@@ -308,7 +308,7 @@ mod tests {
                 } else {
                     serde_json::from_slice(&body).map_err(|error| error.to_string())?
                 };
-                let application_id = if method == Method::POST && path == "/contact" {
+                let application_id = if method == Method::POST && path == "/std/contact" {
                     payload["application_id"]
                         .as_str()
                         .unwrap_or_default()
@@ -412,7 +412,7 @@ mod tests {
     }
 
     fn request(method: Method, body: &str, visitor: Option<Visitor>) -> Request<Body> {
-        request_to("/workspace-api/settings/profile", method, body, visitor)
+        request_to("/std/workspace-api/settings/profile", method, body, visitor)
     }
 
     async fn response_json(response: Response) -> serde_json::Value {
@@ -530,7 +530,7 @@ mod tests {
                 let response = app
                     .clone()
                     .oneshot(request_to(
-                        &format!("/workspace-api/contact-requests/{id}"),
+                        &format!("/std/workspace-api/contact-requests/{id}"),
                         Method::GET,
                         "",
                         Some(owner.clone()),
@@ -553,7 +553,7 @@ mod tests {
         let remote = Arc::new(FakeOutbound::default());
         remote.fail.store(true, Ordering::SeqCst);
         let (app, root, owner) = fixture_with_transport(Some(remote.clone())).await;
-        let path = "/workspace-api/contact-requests";
+        let path = "/std/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
         let denied = app
             .clone()
@@ -609,7 +609,7 @@ mod tests {
         let log = remote.requests.lock().unwrap();
         let sent = log
             .iter()
-            .find(|(_, method, path, _)| method == &Method::POST && path == "/contact")
+            .find(|(_, method, path, _)| method == &Method::POST && path == "/std/contact")
             .unwrap();
         assert_eq!(sent.0, "friend.example.dhttp.net");
         assert!(
@@ -635,7 +635,7 @@ mod tests {
         let capability = app
             .clone()
             .oneshot(request_to(
-                "/chat-api/conversations/friend.example.dhttp.net/capability",
+                "/std/chat-api/conversations/friend.example.dhttp.net/capability",
                 Method::GET,
                 "",
                 Some(owner.clone()),
@@ -702,7 +702,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/grant",
+                "/std/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/grant",
                 http::Method::POST,
                 "",
                 Some(owner.clone()),
@@ -729,7 +729,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/revoke",
+                "/std/workspace-api/contacts/friend.example.dhttp.net/capabilities/chat/revoke",
                 http::Method::POST,
                 "",
                 Some(owner),
@@ -766,7 +766,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/contacts/profile-only.example.dhttp.net/capabilities/chat/grant",
+                "/std/workspace-api/contacts/profile-only.example.dhttp.net/capabilities/chat/grant",
                 Method::POST,
                 "",
                 Some(owner),
@@ -817,14 +817,14 @@ mod tests {
             )
             .await
             .expect("active contact");
-        let path = "/workspace-api/contact-directory";
+        let path = "/std/workspace-api/contact-directory";
         let list = app
             .clone()
             .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
             .await
             .expect("directory");
         assert_eq!(response_json(list).await, serde_json::json!([]));
-        let save_path = format!("/workspace-api/contacts/{name}/saved");
+        let save_path = format!("/std/workspace-api/contacts/{name}/saved");
         let forbidden = app
             .clone()
             .oneshot(request_to(&save_path, Method::PUT, "", None))
@@ -928,7 +928,7 @@ mod tests {
         let granted = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/contacts/{name}/capabilities/chat/grant"),
+                &format!("/std/workspace-api/contacts/{name}/capabilities/chat/grant"),
                 Method::POST,
                 "",
                 Some(owner.clone()),
@@ -971,7 +971,7 @@ mod tests {
         let revoked = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/contacts/{name}/capabilities/chat/revoke"),
+                &format!("/std/workspace-api/contacts/{name}/capabilities/chat/revoke"),
                 Method::POST,
                 "",
                 Some(owner.clone()),
@@ -1037,7 +1037,7 @@ mod tests {
             )
             .await
             .expect("activate contact");
-        let path = "/workspace-api/contact-directory";
+        let path = "/std/workspace-api/contact-directory";
         let list = app
             .clone()
             .oneshot(request_to(path, Method::GET, "", Some(owner.clone())))
@@ -1126,7 +1126,7 @@ mod tests {
         let saved = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/contacts/{name}/saved"),
+                &format!("/std/workspace-api/contacts/{name}/saved"),
                 Method::PUT,
                 "",
                 Some(owner.clone()),
@@ -1137,7 +1137,7 @@ mod tests {
         let list = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/contact-directory",
+                "/std/workspace-api/contact-directory",
                 Method::GET,
                 "",
                 Some(owner.clone()),
@@ -1151,7 +1151,7 @@ mod tests {
         let request = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/capability-requests",
+                "/std/workspace-api/capability-requests",
                 Method::GET,
                 "",
                 Some(owner),
@@ -1179,7 +1179,7 @@ mod tests {
     async fn outbound_requests_are_isolated_between_profiles() {
         let (alice, alice_root, alice_owner) = fixture_named("alice.example.dhttp.net", None).await;
         let (bob, bob_root, bob_owner) = fixture_named("bob.example.dhttp.net", None).await;
-        let path = "/workspace-api/contact-requests";
+        let path = "/std/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
         let sent = alice
             .clone()
@@ -1211,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_sends_queue_once_and_expired_request_can_be_replaced() {
         let (app, root, owner) = fixture_with_transport(None).await;
-        let path = "/workspace-api/contact-requests";
+        let path = "/std/workspace-api/contact-requests";
         let body = r#"{"target_name":"friend.example","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#;
         let (first, second) = tokio::join!(
             app.clone()
@@ -1270,7 +1270,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/context",
+                "/std/workspace-api/context",
                 Method::GET,
                 "",
                 Some(owner),
@@ -1372,7 +1372,7 @@ mod tests {
         }
 
         for status in ["pending", "expired"] {
-            let path = format!("/workspace-api/approvals?status={status}&page=1&page_size=20");
+            let path = format!("/std/workspace-api/approvals?status={status}&page=1&page_size=20");
             let response = app
                 .clone()
                 .oneshot(request_to(&path, Method::GET, "", Some(owner.clone())))
@@ -1398,7 +1398,7 @@ mod tests {
             let first_page = app
                 .clone()
                 .oneshot(request_to(
-                    &format!("/workspace-api/approvals?status={status}&page=1&page_size=1"),
+                    &format!("/std/workspace-api/approvals?status={status}&page=1&page_size=1"),
                     Method::GET,
                     "",
                     Some(owner.clone()),
@@ -1416,7 +1416,7 @@ mod tests {
         let denied = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/approvals",
+                "/std/workspace-api/approvals",
                 Method::GET,
                 "",
                 None,
@@ -1427,7 +1427,7 @@ mod tests {
         let invalid = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/approvals?status=pending&page=0",
+                "/std/workspace-api/approvals?status=pending&page=0",
                 Method::GET,
                 "",
                 Some(owner),
@@ -1519,7 +1519,7 @@ mod tests {
         let unauthorized = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/approvals/access/{access_id}"),
+                &format!("/std/workspace-api/approvals/access/{access_id}"),
                 Method::DELETE,
                 "",
                 None,
@@ -1530,7 +1530,7 @@ mod tests {
         let delete_access = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/approvals/access/{access_id}"),
+                &format!("/std/workspace-api/approvals/access/{access_id}"),
                 Method::DELETE,
                 "",
                 Some(owner.clone()),
@@ -1541,7 +1541,7 @@ mod tests {
         let delete_capability = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/approvals/capability/{capability_id}"),
+                &format!("/std/workspace-api/approvals/capability/{capability_id}"),
                 Method::DELETE,
                 "",
                 Some(owner.clone()),
@@ -1552,7 +1552,7 @@ mod tests {
         let delete_pending = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/approvals/access/2",
+                "/std/workspace-api/approvals/access/2",
                 Method::DELETE,
                 "",
                 Some(owner.clone()),
@@ -1563,7 +1563,7 @@ mod tests {
         let repeat_delete = app
             .clone()
             .oneshot(request_to(
-                &format!("/workspace-api/approvals/access/{access_id}"),
+                &format!("/std/workspace-api/approvals/access/{access_id}"),
                 Method::DELETE,
                 "",
                 Some(owner),
@@ -1600,7 +1600,7 @@ mod tests {
         let list = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/capability-requests",
+                "/std/workspace-api/capability-requests",
                 Method::GET,
                 "",
                 Some(owner.clone()),
@@ -1612,7 +1612,7 @@ mod tests {
         let request_id = listed[0]["request_id"].as_i64().expect("request id");
 
         let deny_path = format!(
-            "/workspace-api/contacts/{name}/capabilities/chat/deny?request_id={request_id}&capability_version=1"
+            "/std/workspace-api/contacts/{name}/capabilities/chat/deny?request_id={request_id}&capability_version=1"
         );
         for _ in 0..2 {
             let response = app
@@ -1631,7 +1631,7 @@ mod tests {
         let context = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/context",
+                "/std/workspace-api/context",
                 Method::GET,
                 "",
                 Some(owner.clone()),
@@ -1667,7 +1667,7 @@ mod tests {
         let list = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/capability-requests",
+                "/std/workspace-api/capability-requests",
                 Method::GET,
                 "",
                 Some(owner.clone()),
@@ -1689,7 +1689,7 @@ mod tests {
             .expect("stale decision response");
         assert_eq!(stale.status(), StatusCode::CONFLICT);
 
-        let grant_path = format!("/workspace-api/contacts/{name}/capabilities/chat/grant");
+        let grant_path = format!("/std/workspace-api/contacts/{name}/capabilities/chat/grant");
         let stale_grant = app
             .clone()
             .oneshot(request_to(
@@ -1759,7 +1759,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/workspace-api/context")
+                    .uri("/std/workspace-api/context")
                     .body(Body::empty())
                     .expect("valid context request"),
             )
@@ -1817,7 +1817,7 @@ mod tests {
         let avatar = Bytes::from_static(include_bytes!("../../assets/pishoo/pishoo-icon.jpg"));
         let avatar_request = |visitor: Option<Visitor>| {
             let mut request = request_to(
-                "/workspace-api/settings/profile/avatar",
+                "/std/workspace-api/settings/profile/avatar",
                 Method::PUT,
                 "",
                 visitor,
@@ -1855,7 +1855,7 @@ mod tests {
         let uploaded = response_json(uploaded).await;
         assert_eq!(
             uploaded["avatar_url"],
-            "/workspace-api/settings/profile/avatar"
+            "/std/workspace-api/settings/profile/avatar"
         );
         let avatar_updated = uploaded["updated_at"].as_i64().expect("avatar timestamp");
         assert!(avatar_updated > profile_updated);
@@ -1900,7 +1900,7 @@ mod tests {
         let deleted = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/settings/profile/avatar",
+                "/std/workspace-api/settings/profile/avatar",
                 Method::DELETE,
                 "",
                 Some(owner),
@@ -1921,7 +1921,7 @@ mod tests {
         let denied = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/capabilities",
+                "/std/workspace-api/capabilities",
                 Method::GET,
                 "",
                 None,
@@ -1932,7 +1932,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/capabilities",
+                "/std/workspace-api/capabilities",
                 Method::GET,
                 "",
                 Some(owner),
@@ -1952,7 +1952,7 @@ mod tests {
     async fn remote_profiles_are_proxied_without_a_server_cache() {
         let remote = Arc::new(FakeOutbound::default());
         let (app, root, owner) = fixture_with_transport(Some(remote.clone())).await;
-        let path = "/workspace-api/profiles/friend.example";
+        let path = "/std/workspace-api/profiles/friend.example";
         let denied = app
             .clone()
             .oneshot(request_to(path, Method::GET, "", None))
@@ -1975,7 +1975,7 @@ mod tests {
             assert_eq!(body["display_name"], "Remote friend");
             assert_eq!(
                 body["avatar_url"],
-                "/workspace-api/profiles/friend.example.dhttp.net/avatar?v=1700000000"
+                "/std/workspace-api/profiles/friend.example.dhttp.net/avatar?v=1700000000"
             );
         }
         let profile_requests = remote
@@ -1990,7 +1990,7 @@ mod tests {
         let avatar = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/profiles/friend.example/avatar",
+                "/std/workspace-api/profiles/friend.example/avatar",
                 Method::GET,
                 "",
                 Some(owner),
@@ -2015,8 +2015,8 @@ mod tests {
         tokio::time::pause();
 
         for path in [
-            "/workspace-api/profiles/offline.example",
-            "/workspace-api/profiles/offline.example/avatar",
+            "/std/workspace-api/profiles/offline.example",
+            "/std/workspace-api/profiles/offline.example/avatar",
         ] {
             let started = tokio::time::Instant::now();
             let response = app
@@ -2035,7 +2035,7 @@ mod tests {
         let local = app
             .clone()
             .oneshot(request_to(
-                "/workspace-api/context",
+                "/std/workspace-api/context",
                 Method::GET,
                 "",
                 Some(owner),

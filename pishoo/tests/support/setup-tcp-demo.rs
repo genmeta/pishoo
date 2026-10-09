@@ -89,7 +89,7 @@ async fn setup_tcp_demo() -> Result<(), Box<dyn std::error::Error>> {
     let subject =
         access_control::SubjectId::new(hash.into_bytes()).map_err(|_| "invalid demo subject")?;
     let access = access_control::AccessService::load_from_db(&uri, name, &subject).await?;
-    for api in ["/file/hello.txt", "/proxy/hello.txt", "/exact"] {
+    for api in ["/std/file/hello.txt", "/proxy/hello.txt", "/exact"] {
         access
             .set_policy(
                 access_control::Method::Specified(http::Method::GET),
@@ -119,7 +119,7 @@ async fn setup_tcp_demo() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = std::fs::read(entry.path().join("lib.wasm"))?;
         let openapi = pishoo::validate_lib(&bytes)?;
         for (path, item) in openapi.paths.ok_or("validated Lib has no paths")? {
-            let api = format!("/api/{id}{path}");
+            let api = format!("/std/api/{id}{path}");
             for (method, _) in item.methods() {
                 access
                     .set_policy(

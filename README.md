@@ -85,15 +85,15 @@ genmeta identity apply
 
 Pishoo uses the running user's `~/.dhttp` by default; set `DHTTP_HOME` to use another identity home. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. Address changes and leases drive publication, and identity removal or shutdown withdraws records using the loaded credentials. Until the online DDNS upgrade, a successful response without `DHTTP-DNS-Lease-Millis` temporarily uses a 300-second renewal window (zero for withdrawal). This window is not a confirmed server lease; Pishoo renews at most every 10 seconds to cover the deployed 30-second storage lifetime. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema, verification results and current limits.
 
-Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. Only loaded `/api/<LibId>` prefixes belong to WASM; other `/api/*` paths use configured proxies. Root or broad `/api` proxies can coexist with Libs, while explicit proxy locations inside a loaded Lib prefix fail startup with the conflicting location and LibId. Management namespaces remain reserved. Home Assistant protocol acceptance tests pass through the complete Router and authorization layer.
+Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
-Database configuration is available over H3 through `GET/PATCH /pishoo/settings` and `GET/PUT/PATCH/DELETE /pishoo/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
+Database configuration is available over H3 through `GET/PATCH /std/pishoo/settings` and `GET/PUT/PATCH/DELETE /std/pishoo/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
 
-First startup with valid identity credentials creates `db/`, `file/`, `lib/`, `logs/`, `repo/`, `templates/`, and `assets/profile/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
+First startup with valid identity credentials creates `db/`, `file/`, `lib/`, `logs/`, `repo/`, `templates/`, and `assets/profile/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Run services as the identity owner; systemd installations need an appropriate `User=` and `Environment=DHTTP_HOME=...` override.
 
-Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/file/{path}`. The `/file` path itself is unavailable; configured proxy locations handle other matching paths.
+Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
 
 The same-identity DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
 
@@ -110,7 +110,7 @@ For an interactive Echo over QUIC, use an already running Pishoo endpoint and a 
 ```sh
 DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
   --transport quic --identity client.dhttp.net \
-  --url https://server.dhttp.net/api/echo/echo
+  --url https://server.dhttp.net/std/api/echo/echo
 ```
 
 The endpoint must be reachable, and daccess must allow that source identity to call the Echo API. The example builds the native client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
@@ -148,7 +148,7 @@ wasm-tools validate /path/to/identity/lib/echo/lib.wasm
 cargo run --locked -p pishoo --example check-lib -- /path/to/identity/lib/echo/lib.wasm
 ```
 
-The file must be one WASM component with exactly one top-level `pishoo:openapi` custom section. Pishoo reads this section without executing the guest. It routes `POST /api/echo/echo` to Lib `echo` only when its manifest declares `POST /echo`. On load, Pishoo registers each declared method and public path in daccess with a default deny rule if that method and path have no rule yet. Grant access through daccess; the OpenAPI declaration itself does not grant access.
+The file must be one WASM component with exactly one top-level `pishoo:openapi` custom section. Pishoo reads this section without executing the guest. It routes `POST /std/api/echo/echo` to Lib `echo` only when its manifest declares `POST /echo`. Lib loading does not create access rules. Grant access through daccess; the OpenAPI declaration itself does not grant access.
 
 ### Access
 
@@ -176,4 +176,4 @@ pishoo lib -i alice.smith --loaded
 pishoo lib -i alice.smith rm note
 ```
 
-`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management design](pishoo/docs/management-design.md) for commands, `/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.
+`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management design](pishoo/docs/management-design.md) for commands, `/std/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.

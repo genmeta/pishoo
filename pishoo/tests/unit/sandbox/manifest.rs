@@ -27,8 +27,8 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
     let valid = component(document);
     assert!(validate_lib(&valid).is_ok());
     for broken in [
-        document.replace("/echo", "/workspace"),
-        document.replace("/echo", "/file/a"),
+        document.replace("/echo", "/std/workspace"),
+        document.replace("/echo", "/std/file/a"),
         document.replace("/echo", "/{id}"),
         document.replace(
             "\"get\":",
@@ -36,6 +36,19 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
         ),
     ] {
         assert!(validate_lib(&component(&broken)).is_err());
+    }
+    for path in [
+        "/file/a",
+        "/contact",
+        "/acl",
+        "/workspace",
+        "/api",
+        "/std-extra",
+    ] {
+        assert!(
+            validate_lib(&component(&document.replace("/echo", path))).is_ok(),
+            "{path}"
+        );
     }
     let mut duplicate = valid.clone();
     duplicate.extend_from_slice(&valid[8..]);

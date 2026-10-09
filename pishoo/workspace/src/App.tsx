@@ -26,9 +26,9 @@ type ToastState = { message: string; tone: 'success' | 'error' } | null
 type NavItem = { page: WorkspacePage; href: string; label: MessageKey }
 
 const SETTINGS_NAV: NavItem[] = [
-  { page: 'profile', href: '/workspace/settings/profile', label: 'nav.profile' },
-  { page: 'capabilities', href: '/workspace/settings/capabilities', label: 'nav.capabilities' },
-  { page: 'access', href: '/workspace/settings/access', label: 'nav.policies' },
+  { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.profile' },
+  { page: 'capabilities', href: '/std/workspace/settings/capabilities', label: 'nav.capabilities' },
+  { page: 'access', href: '/std/workspace/settings/access', label: 'nav.policies' },
 ]
 
 const PAGE_TITLES: Record<WorkspacePage, MessageKey> = {
@@ -129,7 +129,7 @@ export default function App() {
           <Match when={route().page === 'contacts'}>
             <ContactsPage notify={notify} contactName={route().contactName} navigate={navigate}
               returnTo={new URLSearchParams(pathname().split('?')[1] ?? '').get('from') === 'approvals'
-                ? '/workspace/approvals' : undefined}
+                ? '/std/workspace/approvals' : undefined}
               onResolved={() => void contextActions.refetch()} />
           </Match>
           <Match when={route().page === 'contact-requests'}>
@@ -158,7 +158,7 @@ export default function App() {
           <Match when={route().page === 'contact-new'}><AddContactPage notify={notify} navigate={navigate} /></Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>
-            <a href="/workspace/" onClick={(event) => follow(event, '/workspace/')}>{t('page.backHome')}</a>
+            <a href="/std/workspace/" onClick={(event) => follow(event, '/std/workspace/')}>{t('page.backHome')}</a>
           </Match>
         </Switch>
       </main>

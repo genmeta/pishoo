@@ -93,16 +93,16 @@ pub(crate) async fn authorize(
 pub(crate) fn access_router(access: Arc<AccessService>) -> Router {
     access_control::management_router(access)
         .route(
-            "/workspace",
+            "/std/workspace",
             any(|| async {
                 (
                     StatusCode::TEMPORARY_REDIRECT,
-                    [(header::LOCATION, "/workspace/")],
+                    [(header::LOCATION, "/std/workspace/")],
                 )
             }),
         )
-        .route("/workspace/", any(workspace))
-        .route("/workspace/{*path}", any(workspace))
+        .route("/std/workspace/", any(workspace))
+        .route("/std/workspace/{*path}", any(workspace))
 }
 
 pub(super) async fn workspace(request: Request<AxumBody>) -> Response {
@@ -112,7 +112,7 @@ pub(super) async fn workspace(request: Request<AxumBody>) -> Response {
     let path = request
         .uri()
         .path()
-        .strip_prefix("/workspace/")
+        .strip_prefix("/std/workspace/")
         .unwrap_or_default();
     if path.split('/').any(|p| p == "..") {
         return reject(Error::RouteNotFound);

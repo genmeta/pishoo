@@ -5,14 +5,14 @@ async function mockSettings(page: Page): Promise<void> {
   let displayName: string | null = 'Initial name'
   let avatarUrl: string | null = null
 
-  await page.route('**/workspace-api/context', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/context', (route) => route.fulfill({ json: {
     profile: 'owner.local', owner_name: 'owner.local',
     badges: { pending_reviews: 0, incoming_contacts: null },
   } }))
-  await page.route('**/acl/reviews?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/workspace-api/settings/profile', (route) => {
+  await page.route('**/std/workspace-api/settings/profile', (route) => {
     if (route.request().method() === 'PATCH') {
       const body = route.request().postDataJSON() as { display_name: string }
       displayName = body.display_name.trim() || null
@@ -21,7 +21,7 @@ async function mockSettings(page: Page): Promise<void> {
       identity_name: 'owner.local', display_name: displayName, avatar_url: avatarUrl, updated_at: 1700000000,
     } })
   })
-  await page.route('**/workspace-api/capabilities', (route) => route.fulfill({ json: [
+  await page.route('**/std/workspace-api/capabilities', (route) => route.fulfill({ json: [
     {
       id: 'public_profile', version: '1', visibility: 'public', approval_mode: 'none',
       selectable: false, endpoints: [{ method: 'GET', path: '/std/profile' }],
@@ -31,14 +31,14 @@ async function mockSettings(page: Page): Promise<void> {
       selectable: true, endpoints: [{ method: 'POST', path: '/std/message' }],
     },
   ] }))
-  await page.route(/\/workspace-api\/settings\/profile\/avatar(?:\?.*)?$/, (route) => {
+  await page.route(/\/std\/workspace-api\/settings\/profile\/avatar(?:\?.*)?$/, (route) => {
     if (route.request().method() === 'GET') {
       return route.fulfill({
         contentType: 'image/png',
         body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
       })
     }
-    avatarUrl = route.request().method() === 'DELETE' ? null : '/workspace-api/settings/profile/avatar'
+    avatarUrl = route.request().method() === 'DELETE' ? null : '/std/workspace-api/settings/profile/avatar'
     return route.fulfill({ json: {
       identity_name: 'owner.local', display_name: displayName, avatar_url: avatarUrl, updated_at: 1700000001,
     } })

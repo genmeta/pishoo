@@ -126,7 +126,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
     let application_id = "a".repeat(64);
     let mut application = Request::builder()
         .method(Method::POST)
-        .uri("/contact")
+        .uri("/std/contact")
         .header(header::CONTENT_TYPE, "application/json")
         .body(AxumBody::from(
             serde_json::json!({
@@ -143,7 +143,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
     );
     let mut approval = Request::builder()
         .method(Method::PATCH)
-        .uri("/contact/peer.dhttp.net")
+        .uri("/std/contact/peer.dhttp.net")
         .header(header::CONTENT_TYPE, "application/json")
         .body(AxumBody::from(r#"{"status":"active"}"#))
         .unwrap();
@@ -164,7 +164,7 @@ async fn contact_approval_is_local_and_the_applicant_polls_its_application() {
         2
     );
     let mut status = Request::builder()
-        .uri(format!("/contact/self?application_id={application_id}"))
+        .uri(format!("/std/contact/self?application_id={application_id}"))
         .body(AxumBody::empty())
         .unwrap();
     status.extensions_mut().insert(visitor);
@@ -184,8 +184,8 @@ async fn status_routes_reject_a_forged_visitor_on_an_anonymous_connection() {
     let app = access_router(access.clone())
         .layer(axum::middleware::from_fn_with_state(access, authorize));
     for (path, expected) in [
-        ("/acl/review/1/status", StatusCode::FORBIDDEN),
-        ("/contact/self", StatusCode::BAD_REQUEST),
+        ("/std/acl/review/1/status", StatusCode::FORBIDDEN),
+        ("/std/contact/self", StatusCode::BAD_REQUEST),
     ] {
         let mut request = anonymous_request();
         *request.uri_mut() = path.parse().unwrap();

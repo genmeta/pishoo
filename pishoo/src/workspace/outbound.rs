@@ -73,14 +73,24 @@ impl OutboundTransport for dhttp::Endpoint {
                     .map_err(|error| format!("remote request failed: {error}"))?;
                 let (_, response) = tokio::try_join!(
                     async {
-                        writer
-                            .write_all(&body)
-                            .await
-                            .map_err(|error| format!("remote upload failed: {error}"))?;
-                        writer
-                            .shutdown()
-                            .await
-                            .map_err(|error| format!("remote upload failed: {error}"))
+                        let result = async {
+                            writer.write_all(&body).await?;
+                            writer.shutdown().await
+                        }
+                        .await;
+                        match result.map_err(dhttp::Error::from) {
+                            // The peer may stop receiving and still return a valid response.
+                            // Keep reading it; STOP_SENDING alone is not an HTTP result.
+                            Err(dhttp::Error::Http3 { source })
+                                if matches!(source.as_ref(), h3x::Error::Stream(detail)
+                                    if detail.code == h3x::ErrorCode::NoError) =>
+                            {
+                                Ok(())
+                            }
+                            result => {
+                                result.map_err(|error| format!("remote upload failed: {error}"))
+                            }
+                        }
                     },
                     async {
                         response

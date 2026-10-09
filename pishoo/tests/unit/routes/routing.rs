@@ -212,7 +212,7 @@ async fn static_handles_streaming_head_and_directory_confinement() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("index.html"), "home").unwrap();
     let req = Request::builder()
-        .uri("/file/index.html")
+        .uri("/std/file/index.html")
         .body(AxumBody::empty())
         .unwrap();
     let response = static_file(root.path(), req).await.unwrap();
@@ -222,7 +222,7 @@ async fn static_handles_streaming_head_and_directory_confinement() {
     );
     let req = Request::builder()
         .method(Method::HEAD)
-        .uri("/file/index.html")
+        .uri("/std/file/index.html")
         .body(AxumBody::empty())
         .unwrap();
     let response = static_file(root.path(), req).await.unwrap();
@@ -236,7 +236,11 @@ async fn static_handles_streaming_head_and_directory_confinement() {
             .to_bytes()
             .is_empty()
     );
-    for path in ["/file/%2e%2e/secret", "/file/missing", "/file/nested/"] {
+    for path in [
+        "/std/file/%2e%2e/secret",
+        "/std/file/missing",
+        "/std/file/nested/",
+    ] {
         let req = Request::builder()
             .uri(path)
             .body(AxumBody::empty())
@@ -253,7 +257,7 @@ async fn static_handles_streaming_head_and_directory_confinement() {
         std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("escape"))
             .unwrap();
         let req = Request::builder()
-            .uri("/file/escape")
+            .uri("/std/file/escape")
             .body(AxumBody::empty())
             .unwrap();
         assert!(matches!(
@@ -266,8 +270,8 @@ async fn static_handles_streaming_head_and_directory_confinement() {
 #[tokio::test]
 async fn workspace_deep_link_and_asset_are_distinct() {
     for (path, expected) in [
-        ("/workspace/reviews", StatusCode::OK),
-        ("/workspace/missing.js", StatusCode::NOT_FOUND),
+        ("/std/workspace/reviews", StatusCode::OK),
+        ("/std/workspace/missing.js", StatusCode::NOT_FOUND),
     ] {
         let response = workspace(
             Request::builder()
@@ -340,7 +344,12 @@ async fn file_route_is_separate_from_proxy_fallback() {
     use tower::ServiceExt;
 
     let (access, _) = authorization_app(access_control::Effect::Allow).await;
-    for path in ["/file", "/file/", "/file/hello.txt", "/hello.txt"] {
+    for path in [
+        "/std/file",
+        "/std/file/",
+        "/std/file/hello.txt",
+        "/hello.txt",
+    ] {
         access
             .set_policy(
                 access_control::Method::Unspecified,
@@ -367,10 +376,10 @@ async fn file_route_is_separate_from_proxy_fallback() {
         &profile,
     );
     for (path, expected) in [
-        ("/file", StatusCode::NOT_FOUND),
-        ("/file/", StatusCode::NOT_FOUND),
+        ("/std/file", StatusCode::NOT_FOUND),
+        ("/std/file/", StatusCode::NOT_FOUND),
         ("/hello.txt", StatusCode::NOT_FOUND),
-        ("/file/hello.txt", StatusCode::OK),
+        ("/std/file/hello.txt", StatusCode::OK),
     ] {
         let mut request = anonymous_request();
         *request.uri_mut() = format!("https://owner.dhttp.net{path}").parse().unwrap();
@@ -399,7 +408,9 @@ async fn file_route_is_separate_from_proxy_fallback() {
         &profile,
     );
     let mut request = anonymous_request();
-    *request.uri_mut() = "https://owner.dhttp.net/file/hello.txt".parse().unwrap();
+    *request.uri_mut() = "https://owner.dhttp.net/std/file/hello.txt"
+        .parse()
+        .unwrap();
     let response = root_proxy.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(

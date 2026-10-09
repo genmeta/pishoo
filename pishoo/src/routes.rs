@@ -17,26 +17,13 @@ mod outbound;
 
 mod proxy;
 
-pub(crate) const DHTTP_PREFIX: &str = "/.pishoo/dhttp/";
+pub(crate) const DHTTP_PREFIX: &str = "/std/dhttp/";
 
 pub(crate) use access::{access_router, authorize};
 pub(crate) use outbound::forward_dhttp;
 
 pub(crate) fn reserved(path: &str) -> bool {
-    [
-        "/contact",
-        "/contacts",
-        "/acl",
-        "/workspace",
-        "/workspace-api",
-        "/chat-api",
-        "/std",
-        "/pishoo",
-        "/.pishoo",
-        "/file",
-    ]
-    .into_iter()
-    .any(|p| path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+    path == "/std" || path.starts_with("/std/")
 }
 
 fn reject(error: Error) -> Response {
@@ -53,9 +40,9 @@ fn reject(error: Error) -> Response {
 
 pub(crate) fn file_router(root: PathBuf) -> Router {
     Router::new()
-        .route("/file", any(|| async { StatusCode::NOT_FOUND }))
+        .route("/std/file", any(|| async { StatusCode::NOT_FOUND }))
         .route(
-            "/file/{*path}",
+            "/std/file/{*path}",
             any(move |request: Request<AxumBody>| {
                 let root = root.clone();
                 async move { static_file(&root, request).await.unwrap_or_else(reject) }
@@ -69,17 +56,7 @@ pub(crate) async fn proxy_pass(
 ) -> Response {
     let result: Result<Response> = async {
         let path = request.uri().path();
-        let explicit_file_proxy = proxies.iter().any(|route| {
-            let location = route.location.strip_prefix("= ").unwrap_or(&route.location);
-            (location == "/file" || location.starts_with("/file/"))
-                && if route.location.starts_with("= ") {
-                    path == location
-                } else {
-                    path == location.trim_end_matches('/')
-                        || path.starts_with(&format!("{}/", location.trim_end_matches('/')))
-                }
-        });
-        if reserved(path) && !explicit_file_proxy {
+        if reserved(path) {
             return Err(Error::RouteNotFound);
         }
         let exact = proxies
@@ -137,7 +114,7 @@ async fn static_file(root: &std::path::Path, request: Request<AxumBody>) -> Resu
     let path = request
         .uri()
         .path()
-        .strip_prefix("/file/")
+        .strip_prefix("/std/file/")
         .ok_or(Error::RouteNotFound)?;
     if path.is_empty() {
         return Err(Error::RouteNotFound);

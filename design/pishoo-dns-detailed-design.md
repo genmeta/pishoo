@@ -20,7 +20,7 @@ Pishoo 在进程入口装配名称解析，在监听登记成功后发布身份�
 | ddns 编码的 E 记录 TTL 当前固定 300 秒，服务端存储租期可与它不同 | 查询缓存不能直接把 300 秒当作动态记录剩余有效期 |
 | mDNS 的 remove_name 当前只删除本机应答记录 | 本版不承诺向已有查询者主动广播撤回，远端已有缓存按 TTL 过期 |
 
-原冻结清单写 Endpoint 只有 name，而现行 dhttp 已使用 `quic: Arc<qconn::QuicEndpoint>` 并在 load 时保存凭据。本次用户明确批准确认此差异，并同步 dhttp 清单；签名使用同一组内存材料，Pishoo 不添加另一份凭据容器。
+2026-10-09 用户批准 Endpoint 直接使用 `identity: Arc<qbase::endpoint::Endpoint>` 并在 load 时保存凭据，替代此前保存 QuicEndpoint 的形式；签名使用同一组内存材料，Pishoo 不添加另一份凭据容器。
 
 ## 范围与不变量
 
@@ -91,13 +91,13 @@ Endpoint 的现行真实成员已由本次批准确认：
 
 ```rust
 pub struct Endpoint {
-    pub(crate) quic: Arc<qconn::QuicEndpoint>,
+    pub(crate) identity: Arc<qbase::endpoint::Endpoint>,
 }
 
 pub type ListenFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 ```
 
-新增 `Endpoint::local_authority(&self) -> dhttp::Result<qtls::LocalAuthority>`，从 quic.identity 的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不访问 Network、不增加成员。
+新增 `Endpoint::local_authority(&self) -> dhttp::Result<qtls::LocalAuthority>`，从 identity 的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不访问 Network、不增加成员。
 
 DhttpNetwork 的 listeners 与 pool 保持不变。listen 的登记阶段返回拥有原清理 guard 的 ListenFuture。清理仍只撤销服务与名称登记，保留连接池、socket 和已有请求；不新增 stop_listening 或 shutdown。
 
@@ -264,7 +264,7 @@ lookup(name, servname, family):
 
 ```text
 local_authority():
-    identity = self.quic.identity
+    identity = self.identity
     return LocalAuthority::from_signing_key(
         identity.name(), identity.cert_chain().to_vec(),
         identity.signing_key().clone(), identity.ocsp().to_vec()

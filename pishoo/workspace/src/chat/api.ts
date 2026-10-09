@@ -2,7 +2,7 @@ import type { ChatCapabilityState, ChatMessage, ChatMessagePage } from '../api/t
 import { query, request } from '../api/client'
 
 function conversationPath(name: string): string {
-  return `/chat-api/conversations/${encodeURIComponent(name)}`
+  return `/std/chat-api/conversations/${encodeURIComponent(name)}`
 }
 
 export const chatApi = {
@@ -25,17 +25,17 @@ export const chatApi = {
     request<ChatCapabilityState>(`${conversationPath(name)}/capability`, { signal }),
 
   grantCapability: (name: string, capability: string, reference?: { requestId: number; version: string }) =>
-    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/grant${reference ? `?${query({ request_id: reference.requestId, capability_version: reference.version })}` : ''}`, {
+    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/grant${reference ? `?${query({ request_id: reference.requestId, capability_version: reference.version })}` : ''}`, {
       method: 'POST',
     }),
 
   revokeCapability: (name: string, capability: string) =>
-    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/revoke`, {
+    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/revoke`, {
       method: 'POST',
     }),
 
   denyCapability: (name: string, capability: string, requestId: number, capabilityVersion: string) =>
-    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/deny?${query({ request_id: requestId, capability_version: capabilityVersion })}`, {
+    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/capabilities/${encodeURIComponent(capability)}/deny?${query({ request_id: requestId, capability_version: capabilityVersion })}`, {
       method: 'POST',
     }),
 }

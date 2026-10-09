@@ -18,6 +18,134 @@ use super::*;
 mod credentials;
 
 #[tokio::test]
+#[ignore = "run alone; requires OpenSSL/local UDP and owns global TLS/DNS/DHTTP_HOME"]
+async fn outbound_early_response_survives_stopped_upload() {
+    let root = tempfile::tempdir().unwrap();
+    credentials::generate(
+        root.path(),
+        &[
+            ("receiver", "receiver.dhttp.net"),
+            ("alice", "alice.dhttp.net"),
+        ],
+    );
+    let old_home = std::env::var_os("DHTTP_HOME");
+    unsafe {
+        std::env::set_var("DHTTP_HOME", root.path());
+    }
+    let _environment = scopeguard::guard(old_home, |previous| unsafe {
+        match previous {
+            Some(value) => std::env::set_var("DHTTP_HOME", value),
+            None => std::env::remove_var("DHTTP_HOME"),
+        }
+    });
+    dhttp::DhttpNetwork::init().await.unwrap();
+    qtls::RootCerts::set([dhttp::CertificateDer::from(
+        std::fs::read(root.path().join("ca.der")).unwrap(),
+    )])
+    .unwrap();
+    let peer = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let address = EndpointAddr::direct(peer.local_addr().unwrap());
+    qprotocol::Dock::global()
+        .add(peer.clone())
+        .unwrap()
+        .unwrap();
+    let _socket = scopeguard::guard(peer, |peer| {
+        qprotocol::Dock::global().remove(&peer);
+    });
+    dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
+    let client = dhttp::Endpoint::load("alice").await.unwrap();
+    let receiver = dhttp::Endpoint::load("receiver").await.unwrap();
+    let subject = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+        receiver.local_authority().unwrap().certificates(),
+    )
+    .unwrap();
+    let subject = SubjectId::new(subject.owner_hash().as_str().as_bytes()).unwrap();
+    let listener = receiver
+        .listen(
+            dhttp::Scope::Loopback.into(),
+            tower::service_fn(|request: Request<Body>| async move {
+                let status = request
+                    .uri()
+                    .path()
+                    .trim_start_matches('/')
+                    .parse::<u16>()
+                    .unwrap();
+                // Send STOP_SENDING before response headers, with the upload still active.
+                drop(request);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if status == 500 {
+                    return Err(std::io::Error::other("service failed without a response"));
+                }
+                Ok(http::Response::builder()
+                    .status(status)
+                    .header("x-early-response", "preserved")
+                    .body(AxumBody::from("early response"))
+                    .unwrap())
+            }),
+        )
+        .await
+        .unwrap();
+    let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
+    // Exercise shutdown failure for a small upload and write failure under backpressure.
+    for size in [237, 1024 * 1024] {
+        for status in [200, 400, 403, 404] {
+            let path = format!("/{status}");
+            let body = Bytes::from(vec![b'x'; size]);
+            let workspace = crate::workspace::outbound::OutboundTransport::request(
+                &client,
+                "receiver.dhttp.net",
+                Method::POST,
+                &path,
+                body.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(workspace.status.as_u16(), status);
+            assert_eq!(workspace.headers["x-early-response"], "preserved");
+            assert_eq!(workspace.body, "early response");
+            assert_eq!(workspace.remote_subject_id, subject.as_bytes());
+            let chat = crate::chat::outbound::OutboundTransport::request(
+                &client,
+                "receiver.dhttp.net",
+                &subject,
+                Method::POST,
+                &path,
+                body,
+            )
+            .await
+            .unwrap();
+            assert_eq!(chat.status.as_u16(), status);
+            assert_eq!(chat.body, "early response");
+        }
+    }
+    assert!(
+        crate::workspace::outbound::OutboundTransport::request(
+            &client,
+            "receiver.dhttp.net",
+            Method::POST,
+            "/500",
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .is_err(),
+        "stopping upload alone cannot substitute for a valid response"
+    );
+    assert!(
+        crate::chat::outbound::OutboundTransport::request(
+            &client,
+            "receiver.dhttp.net",
+            &subject,
+            Method::POST,
+            "/500",
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .is_err(),
+        "stopping upload alone cannot substitute for a valid response"
+    );
+}
+
+#[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
 async fn websocket_real_h3_ha_roundtrip() {
     use futures::TryStreamExt;
@@ -88,11 +216,11 @@ async fn websocket_real_h3_ha_roundtrip() {
             std::fs::create_dir_all(profile.join("lib/note")).unwrap();
             std::fs::write(profile.join("lib/note/lib.wasm"), wasm).unwrap();
             for location in [
-                "/api/note",
-                "/api/note/",
-                "= /api/note",
-                "= /api/note/upload",
-                "/api/note/child/",
+                "/std/api/note",
+                "/std/api/note/",
+                "= /std/api/note",
+                "= /std/api/note/upload",
+                "/std/api/note/child/",
             ] {
                 config.execute("DELETE FROM proxy_locations", []).unwrap();
                 config
@@ -108,14 +236,13 @@ async fn websocket_real_h3_ha_roundtrip() {
                 assert!(matches!(error, Error::InvalidConfig(_)));
                 let message = error.to_string();
                 assert!(
-                    message.contains(location) && message.contains("Lib 'note'"),
+                    message.contains(location) && message.contains("reserved"),
                     "{message}"
                 );
             }
         }
         config.execute("DELETE FROM proxy_locations", []).unwrap();
-        // Root fallback for the dedicated HA identity; broad /api and a sibling
-        // prefix remain valid alongside a loaded Lib in the mixed identity.
+        // HA owns its ordinary /api paths, independently of loaded /std/api Libs.
         let location = if loaded_lib { "/api" } else { "/" };
         config
             .execute(
@@ -186,7 +313,7 @@ async fn websocket_real_h3_ha_roundtrip() {
             )
             .await
             .unwrap();
-        for path in ["/api/states", "/api/note"] {
+        for path in ["/api/states", "/std/api/note"] {
             server
                 .access
                 .set_policy(
@@ -209,10 +336,10 @@ async fn websocket_real_h3_ha_roundtrip() {
         );
         if loaded_lib {
             for (path, expected) in [
-                ("/api/note", StatusCode::NOT_FOUND),
-                ("/api/note/", StatusCode::NOT_FOUND),
-                ("/api/note/missing", StatusCode::NOT_FOUND),
-                ("/api/note/upload", StatusCode::METHOD_NOT_ALLOWED),
+                ("/std/api/note", StatusCode::NOT_FOUND),
+                ("/std/api/note/", StatusCode::NOT_FOUND),
+                ("/std/api/note/missing", StatusCode::NOT_FOUND),
+                ("/std/api/note/upload", StatusCode::METHOD_NOT_ALLOWED),
             ] {
                 let response = client
                     .get(format!("https://receiver.dhttp.net{path}").parse().unwrap())
@@ -496,7 +623,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/pishoo/settings",
+        "/std/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -520,7 +647,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/pishoo/settings",
+        "/std/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -752,7 +879,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_bytes(
             &server,
             Method::POST,
-            "/pishoo/lib-check",
+            "/std/pishoo/lib-check",
             &wasm,
             "application/wasm"
         )
@@ -763,7 +890,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_bytes(
         &server,
         Method::PUT,
-        "/pishoo/libs/note",
+        "/std/pishoo/libs/note",
         &wasm,
         "application/wasm",
     )
@@ -775,7 +902,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/pishoo/libs",
+            "/std/pishoo/libs",
             serde_json::Value::Null
         )
         .await
@@ -786,7 +913,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/workspace-api/libs",
+            "/std/workspace-api/libs",
             serde_json::Value::Null
         )
         .await
@@ -803,7 +930,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
             owner_request(
                 &server,
                 Method::PATCH,
-                "/pishoo/proxies",
+                "/std/pishoo/proxies",
                 serde_json::json!({"location":location,"proxy_pass":upstream})
             )
             .await
@@ -815,7 +942,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/pishoo/proxies?location=%2Fone",
+            "/std/pishoo/proxies?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -826,7 +953,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/pishoo/proxies?location=%2Fone",
+            "/std/pishoo/proxies?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -837,7 +964,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/pishoo/settings",
+        "/std/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -846,7 +973,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
-        "/pishoo/settings",
+        "/std/pishoo/settings",
         serde_json::json!({"listen":1}),
     )
     .await;
@@ -862,7 +989,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
-        owner_request(&server, Method::PUT, "/pishoo/proxies", proxies.clone()).await;
+        owner_request(&server, Method::PUT, "/std/pishoo/proxies", proxies.clone()).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved, proxies);
     assert!(
@@ -888,7 +1015,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (mut upload, response) = server
         .endpoint
         .post(
-            format!("https://{}/api/note/upload", server.name())
+            format!("https://{}/std/api/note/upload", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -911,7 +1038,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_request(
         &server,
         Method::GET,
-        "/pishoo/proxies",
+        "/std/pishoo/proxies",
         serde_json::Value::Null,
     )
     .await;
@@ -920,8 +1047,8 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::PUT,
-        "/pishoo/proxies",
-        serde_json::json!([{"location":"/pishoo/settings","proxy_pass":"127.0.0.1:8080"}]),
+        "/std/pishoo/proxies",
+        serde_json::json!([{"location":"/std/pishoo/settings","proxy_pass":"127.0.0.1:8080"}]),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -929,7 +1056,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/pishoo/proxies",
+            "/std/pishoo/proxies",
             serde_json::Value::Null
         )
         .await
@@ -941,7 +1068,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/workspace-api/libs",
+            "/std/workspace-api/libs",
             serde_json::Value::Null
         )
         .await
@@ -952,7 +1079,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/pishoo/libs/note",
+            "/std/pishoo/libs/note",
             serde_json::Value::Null
         )
         .await
@@ -967,7 +1094,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/pishoo",
+            "/std/pishoo",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -976,7 +1103,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let alice = dhttp::Endpoint::load("alice").await.unwrap();
     let response = alice
         .get(
-            format!("https://{}/pishoo/settings", server.name())
+            format!("https://{}/std/pishoo/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -986,7 +1113,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = alice
         .get(
-            format!("https://{}/pishoo/libs", server.name())
+            format!("https://{}/std/pishoo/libs", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -996,7 +1123,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
 
     let response = dhttp::Anonymous
         .get(
-            format!("https://{}/pishoo/settings", server.name())
+            format!("https://{}/std/pishoo/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1009,7 +1136,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/pishoo",
+            "/std/pishoo",
             access_control::Effect::Deny,
             access_control::Grantee::One(server.name().to_owned()),
         )
@@ -1018,7 +1145,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/pishoo/settings",
+        "/std/pishoo/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -1032,7 +1159,7 @@ async fn wait_contact(server: &Server, id: i64, expected: &str) {
             let (status, body) = owner_request(
                 server,
                 Method::GET,
-                &format!("/workspace-api/contact-requests/{id}"),
+                &format!("/std/workspace-api/contact-requests/{id}"),
                 serde_json::Value::Null,
             )
             .await;
@@ -1054,7 +1181,7 @@ async fn wait_message(server: &Server, recipient: &str, id: &str, expected: &str
             let (status, page) = owner_request(
                 server,
                 Method::GET,
-                &format!("/chat-api/conversations/{recipient}/messages"),
+                &format!("/std/chat-api/conversations/{recipient}/messages"),
                 serde_json::Value::Null,
             )
             .await;
@@ -1176,7 +1303,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     let (status, body) = owner_request(
         &receiver,
         Method::PATCH,
-        "/workspace-api/settings/profile",
+        "/std/workspace-api/settings/profile",
         serde_json::json!({"display_name": "Receiver"}),
     )
     .await;
@@ -1187,7 +1314,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         &alice.endpoint,
         "receiver.dhttp.net",
         Method::POST,
-        "/contact",
+        "/std/contact",
         Bytes::from_static(b"{}"),
     )
     .await
@@ -1201,7 +1328,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         .access
         .set_policy(
             access_control::Method::Specified(Method::POST),
-            "/contact",
+            "/std/contact",
             access_control::Effect::Deny,
             access_control::Grantee::Named,
         )
@@ -1211,7 +1338,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         &alice.endpoint,
         "receiver.dhttp.net",
         Method::POST,
-        "/contact",
+        "/std/contact",
         Bytes::from_static(b"{}"),
     )
     .await
@@ -1221,7 +1348,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         .access
         .set_policy(
             access_control::Method::Specified(Method::POST),
-            "/contact",
+            "/std/contact",
             access_control::Effect::Allow,
             access_control::Grantee::Named,
         )
@@ -1232,13 +1359,13 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, body) = owner_request(
             sender,
             Method::GET,
-            "/workspace-api/profiles/receiver.dhttp.net",
+            "/std/workspace-api/profiles/receiver.dhttp.net",
             serde_json::Value::Null,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["display_name"], "Receiver");
-        let (status, created) = owner_request(sender, Method::POST, "/workspace-api/contact-requests", serde_json::json!({
+        let (status, created) = owner_request(sender, Method::POST, "/std/workspace-api/contact-requests", serde_json::json!({
             "target_name": "receiver.dhttp.net", "description": "Hello over QUIC", "requested_capabilities": ["chat"], "offered_capabilities": ["chat"]
         })).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{created}");
@@ -1269,7 +1396,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
             &receiver,
             Method::POST,
             &format!(
-                "/workspace-api/contacts/{}/capabilities/chat/grant",
+                "/std/workspace-api/contacts/{}/capabilities/chat/grant",
                 sender.name()
             ),
             serde_json::Value::Null,
@@ -1279,7 +1406,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, body) = owner_request(
             sender,
             Method::POST,
-            &format!("/workspace-api/contact-requests/{id}/refresh"),
+            &format!("/std/workspace-api/contact-requests/{id}/refresh"),
             serde_json::Value::Null,
         )
         .await;
@@ -1288,7 +1415,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, body) = owner_request(
             sender,
             Method::GET,
-            "/chat-api/conversations/receiver.dhttp.net/capability",
+            "/std/chat-api/conversations/receiver.dhttp.net/capability",
             serde_json::Value::Null,
         )
         .await;
@@ -1297,7 +1424,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, queued) = owner_request(
             sender,
             Method::POST,
-            "/chat-api/conversations/receiver.dhttp.net/messages",
+            "/std/chat-api/conversations/receiver.dhttp.net/messages",
             serde_json::json!({"text": format!("hello from {}", sender.name())}),
         )
         .await;
@@ -1312,7 +1439,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, page) = owner_request(
             &receiver,
             Method::GET,
-            &format!("/chat-api/conversations/{}/messages", sender.name()),
+            &format!("/std/chat-api/conversations/{}/messages", sender.name()),
             serde_json::Value::Null,
         )
         .await;
@@ -1330,7 +1457,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
                 let (status, capability) = owner_request(
                     &receiver,
                     Method::GET,
-                    &format!("/chat-api/conversations/{}/capability", sender.name()),
+                    &format!("/std/chat-api/conversations/{}/capability", sender.name()),
                     serde_json::Value::Null,
                 )
                 .await;
@@ -1346,7 +1473,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, directory) = owner_request(
             &receiver,
             Method::GET,
-            "/workspace-api/contact-directory",
+            "/std/workspace-api/contact-directory",
             serde_json::Value::Null,
         )
         .await;
@@ -1362,7 +1489,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, reply) = owner_request(
             &receiver,
             Method::POST,
-            &format!("/chat-api/conversations/{}/messages", sender.name()),
+            &format!("/std/chat-api/conversations/{}/messages", sender.name()),
             serde_json::json!({"text": "reply from receiver"}),
         )
         .await;
@@ -1377,7 +1504,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
         let (status, page) = owner_request(
             sender,
             Method::GET,
-            "/chat-api/conversations/receiver.dhttp.net/messages",
+            "/std/chat-api/conversations/receiver.dhttp.net/messages",
             serde_json::Value::Null,
         )
         .await;
@@ -1450,7 +1577,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     let (status, queued) = owner_request(
         &alice,
         Method::POST,
-        "/chat-api/conversations/receiver.dhttp.net/messages",
+        "/std/chat-api/conversations/receiver.dhttp.net/messages",
         serde_json::json!({"text": "blocked by stale pin"}),
     )
     .await;
@@ -1465,7 +1592,7 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     let (_, capability) = owner_request(
         &alice,
         Method::GET,
-        "/chat-api/conversations/receiver.dhttp.net/capability",
+        "/std/chat-api/conversations/receiver.dhttp.net/capability",
         serde_json::Value::Null,
     )
     .await;

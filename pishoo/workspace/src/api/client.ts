@@ -50,59 +50,59 @@ export function query(values: Record<string, string | number>): string {
 }
 
 export const api = {
-  context: () => request<RuntimeContext>('/workspace-api/context'),
+  context: () => request<RuntimeContext>('/std/workspace-api/context'),
 
-  libs: (signal?: AbortSignal) => request<LibSummary[]>('/workspace-api/libs', { signal }),
+  libs: (signal?: AbortSignal) => request<LibSummary[]>('/std/workspace-api/libs', { signal }),
 
   capabilities: (signal?: AbortSignal) =>
-    request<CapabilityDescriptor[]>('/workspace-api/capabilities', { signal }),
+    request<CapabilityDescriptor[]>('/std/workspace-api/capabilities', { signal }),
 
   approvals: (status: 'pending' | 'expired', page: number, signal?: AbortSignal) =>
-    request<Page<Approval[]>>(`/workspace-api/approvals?${query({ status, page, page_size: 20 })}`, { signal }),
+    request<Page<Approval[]>>(`/std/workspace-api/approvals?${query({ status, page, page_size: 20 })}`, { signal }),
 
   deleteExpiredApproval: (approval: Approval) => {
     const id = approval.kind === 'capability' ? approval.request_id : approval.id
-    return request<void>(`/workspace-api/approvals/${approval.kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    return request<void>(`/std/workspace-api/approvals/${approval.kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
   },
 
   outboundRequests: (page: number, signal?: AbortSignal) =>
-    request<Page<OutboundContactRequest[]>>(`/workspace-api/contact-requests?${query({ page, page_size: 20 })}`, { signal }),
+    request<Page<OutboundContactRequest[]>>(`/std/workspace-api/contact-requests?${query({ page, page_size: 20 })}`, { signal }),
 
   outboundRequest: (id: number, signal?: AbortSignal) =>
-    request<OutboundContactRequest>(`/workspace-api/contact-requests/${encodeURIComponent(id)}`, { signal }),
+    request<OutboundContactRequest>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}`, { signal }),
 
   sendContactRequest: (value: OutboundContactInput) =>
-    request<OutboundContactRequest>('/workspace-api/contact-requests', { method: 'POST', body: JSON.stringify(value) }),
+    request<OutboundContactRequest>('/std/workspace-api/contact-requests', { method: 'POST', body: JSON.stringify(value) }),
 
   refreshOutboundRequest: (id: number) =>
-    request<OutboundContactRequest>(`/workspace-api/contact-requests/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+    request<OutboundContactRequest>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
 
   deleteOutboundRequest: (id: number) =>
-    request<void>(`/workspace-api/contact-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    request<void>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   profileSettings: (signal?: AbortSignal) =>
-    request<ProfileSettings>('/workspace-api/settings/profile', { signal }),
+    request<ProfileSettings>('/std/workspace-api/settings/profile', { signal }),
 
   saveProfile: (displayName: string) =>
-    request<ProfileSettings>('/workspace-api/settings/profile', {
+    request<ProfileSettings>('/std/workspace-api/settings/profile', {
       method: 'PATCH',
       body: JSON.stringify({ display_name: displayName }),
     }),
 
   saveAvatar: (file: File) =>
-    request<ProfileSettings>('/workspace-api/settings/profile/avatar', {
+    request<ProfileSettings>('/std/workspace-api/settings/profile/avatar', {
       method: 'PUT',
       headers: { 'content-type': file.type },
       body: file,
     }),
 
   deleteAvatar: () =>
-    request<ProfileSettings>('/workspace-api/settings/profile/avatar', { method: 'DELETE' }),
+    request<ProfileSettings>('/std/workspace-api/settings/profile/avatar', { method: 'DELETE' }),
 
   publicProfile: (name: string, signal?: AbortSignal) => {
     const deadline = AbortSignal.timeout(2500)
     const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
-    return request<PublicProfile>(`/workspace-api/profiles/${encodeURIComponent(name)}`, { signal: requestSignal })
+    return request<PublicProfile>(`/std/workspace-api/profiles/${encodeURIComponent(name)}`, { signal: requestSignal })
   },
 
   decideReview: (
@@ -110,7 +110,7 @@ export const api = {
     action: 'allow' | 'deny',
     expiredAfter: string,
   ) =>
-    request<void>('/acl/review', {
+    request<void>('/std/acl/review', {
       method: 'PATCH',
       body: JSON.stringify({
         id: reviewId,
@@ -121,7 +121,7 @@ export const api = {
 
   contacts: (page: number, sort: string, order: string, signal?: AbortSignal, pageSize = 20) =>
     request<Page<Contact[]>>(
-      `/contacts?${query({ page, page_size: pageSize, sort, order })}`,
+      `/std/contacts?${query({ page, page_size: pageSize, sort, order })}`,
       { signal },
     ),
 
@@ -137,51 +137,51 @@ export const api = {
   },
 
   contactDirectory: (signal?: AbortSignal) =>
-    request<DirectoryEntry[]>('/workspace-api/contact-directory', { signal }),
+    request<DirectoryEntry[]>('/std/workspace-api/contact-directory', { signal }),
 
   saveContactIdentity: (name: string) =>
-    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'PUT' }),
+    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'PUT' }),
 
   unsaveContactIdentity: (name: string) =>
-    request<void>(`/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'DELETE' }),
+    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'DELETE' }),
 
   contact: (name: string, signal?: AbortSignal) =>
-    request<Contact>(`/contact/${encodeURIComponent(name)}`, { signal }),
+    request<Contact>(`/std/contact/${encodeURIComponent(name)}`, { signal }),
 
   patchContact: (name: string, body: { status?: string; alias?: string }) =>
-    request<void>(`/contact/${encodeURIComponent(name)}`, {
+    request<void>(`/std/contact/${encodeURIComponent(name)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   deleteContact: (name: string) =>
-    request<void>(`/contact/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    request<void>(`/std/contact/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
   deleteContacts: (names: string[]) =>
-    request<void>('/contacts', {
+    request<void>('/std/contacts', {
       method: 'DELETE',
       body: JSON.stringify({ names }),
     }),
 
   apiSummaries: (page: number, signal?: AbortSignal) =>
     request<Page<ApiSummary[]>>(
-      `/acl/apis?${query({ page, page_size: 20, sort: 'api', order: 'asc' })}`,
+      `/std/acl/apis?${query({ page, page_size: 20, sort: 'api', order: 'asc' })}`,
       { signal },
     ),
 
-  rulesByApi: (signal?: AbortSignal) => request<RulesByApi>('/acl/access', { signal }),
+  rulesByApi: (signal?: AbortSignal) => request<RulesByApi>('/std/acl/access', { signal }),
 
   rulesByGrantee: (signal?: AbortSignal) =>
-    request<RulesByGrantee>('/acl/allow', { signal }),
+    request<RulesByGrantee>('/std/acl/allow', { signal }),
 
   setRule: (rule: RuleRow) =>
-    request<void>(`/acl/allow/${encodeURIComponent(rule.grantee)}`, {
+    request<void>(`/std/acl/allow/${encodeURIComponent(rule.grantee)}`, {
       method: 'PATCH',
       body: JSON.stringify({ api: rule.api, method: rule.method, effect: rule.effect }),
     }),
 
   deleteRule: (rule: RuleRow) =>
-    request<void>(`/acl/allow/${encodeURIComponent(rule.grantee)}`, {
+    request<void>(`/std/acl/allow/${encodeURIComponent(rule.grantee)}`, {
       method: 'DELETE',
       body: JSON.stringify({ api: rule.api, method: rule.method }),
     }),

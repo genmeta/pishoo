@@ -4,7 +4,6 @@ pub(crate) fn endpoint(name: &str) -> dhttp::Endpoint {
     let name = dhttp_home::normalize_name(name).unwrap();
     let certificate = rcgen::generate_simple_self_signed(vec![name.clone()]).unwrap();
     let identity = qbase::endpoint::Endpoint::new(
-        &qtls::default_provider(),
         &name,
         vec![certificate.cert.der().clone()],
         qtls::PrivateKeyDer::try_from(certificate.signing_key.serialize_der()).unwrap(),

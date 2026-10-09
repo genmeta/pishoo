@@ -107,7 +107,7 @@ async fn refresh_incoming_grants(state: &Workspace) -> Result<(), String> {
             .try_get("", "subject_id")
             .map_err(|error| error.to_string())?;
         let result = async {
-            let response = transport.request(&name, Method::GET, "/contact/self", Bytes::new()).await?;
+            let response = transport.request(&name, Method::GET, "/std/contact/self", Bytes::new()).await?;
             if response.remote_subject_id != subject {
                 return Err("remote contact identity changed".to_owned());
             }
@@ -277,14 +277,14 @@ async fn process(state: &Workspace, job: Job) {
                             requested_access: &requested_access,
                             offers: &offers,
                         })
-                        .map(|body| (Method::POST, "/contact".to_owned(), Bytes::from(body)))
+                        .map(|body| (Method::POST, "/std/contact".to_owned(), Bytes::from(body)))
                         .map_err(|error| error.to_string()),
                         Err((_, error)) => Err(error.to_owned()),
                     }
                 } else {
                     Ok((
                         Method::GET,
-                        format!("/contact/self?application_id={}", job.application_id),
+                        format!("/std/contact/self?application_id={}", job.application_id),
                         Bytes::new(),
                     ))
                 };
@@ -473,7 +473,7 @@ mod tests {
             Box::pin(async move {
                 assert_eq!(target, "alice.dhttp.net");
                 assert_eq!(method, Method::GET);
-                assert_eq!(path, "/contact/self");
+                assert_eq!(path, "/std/contact/self");
                 assert!(body.is_empty());
                 Ok(RemoteResponse {
                     status: self.status,
@@ -503,7 +503,7 @@ mod tests {
         // Enter through the real daccess application route, including offers.
         let mut request = http::Request::builder()
             .method(Method::POST)
-            .uri("/contact")
+            .uri("/std/contact")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::json!({
@@ -586,12 +586,23 @@ mod tests {
             b"alice-key",
         )
         .await;
-        assert!(chat.remote_chat_grants().await.unwrap().is_empty(),
-            "first 404 means the sender may not have reconciled yet, not a denial");
+        assert!(
+            chat.remote_chat_grants().await.unwrap().is_empty(),
+            "first 404 means the sender may not have reconciled yet, not a denial"
+        );
         confirm(&state, StatusCode::OK, granted(), b"alice-key").await;
         assert!(chat.remote_chat_grants().await.unwrap()[0].2);
-        confirm(&state, StatusCode::NOT_FOUND, serde_json::Value::Null, b"alice-key").await;
-        assert!(!chat.remote_chat_grants().await.unwrap()[0].2, "removal after confirmation revokes the observed grant");
+        confirm(
+            &state,
+            StatusCode::NOT_FOUND,
+            serde_json::Value::Null,
+            b"alice-key",
+        )
+        .await;
+        assert!(
+            !chat.remote_chat_grants().await.unwrap()[0].2,
+            "removal after confirmation revokes the observed grant"
+        );
         confirm(&state, StatusCode::OK, granted(), b"alice-key").await;
         confirm(
             &state,

@@ -1,12 +1,12 @@
 # pishoo Workspace
 
 This Solid/Vite application is the profile Workspace served by pishoo at
-`/workspace/`. The shell exposes contacts, API extensions, apps, approvals and
+`/std/workspace/`. The shell exposes contacts, API extensions, apps, approvals and
 quick settings. The existing contacts, approvals and advanced access-control
 pages consume daccess APIs mounted by the same pishoo profile server. Outbound
 contact requests use owner-only Workspace APIs. The backend also exposes
-owner-only APIs for the public display name (`GET/PATCH /workspace-api/settings/profile`)
-and avatar (`GET/PUT/DELETE /workspace-api/settings/profile/avatar`)
+owner-only APIs for the public display name (`GET/PATCH /std/workspace-api/settings/profile`)
+and avatar (`GET/PUT/DELETE /std/workspace-api/settings/profile/avatar`)
 An empty display name clears it. The settings pages support editing the public display name; the home page shows
 identity and pending reviews. The add-contact form keeps requested and offered
 capabilities separate for each request; the sent-requests view supports manual
@@ -27,7 +27,7 @@ labels without the `.dhttp.net` suffix, while requests, links and editable
 access-rule values keep the canonical full name.
 The apps page lists the identity's loaded WASM components, including their
 OpenAPI title, description, version and API endpoints. Its owner-only
-`GET /workspace-api/libs` catalog comes from the loaded Sandbox snapshot.
+`GET /std/workspace-api/libs` catalog comes from the loaded Sandbox snapshot.
 The API list links each GET path to a new browser tab, and displays its OpenAPI
 summary, description, or successful response description. Other methods remain
 plain text. Cards do not assume that a component's root path is an HTML page.
@@ -39,7 +39,7 @@ capability requests appear in the approval center, alongside access reviews;
 there is no separate received-contact request list. Sent requests have their own
 page until the remote profile accepts the requested capabilities.
 Contact details link to advanced access rules scoped to that contact. Since
-daccess currently has no status filter for `GET /contacts`, the UI temporarily
+daccess currently has no status filter for `GET /std/contacts`, the UI temporarily
 loads all backend pages before filtering and paginating locally; a server-side
 filter will be needed for large directories.
 
@@ -53,7 +53,7 @@ bun install --frozen-lockfile
 PISHOO_WORKSPACE_BACKEND=http://127.0.0.1:3000 bun run dev
 ```
 
-The development entry point is `http://localhost:5173/workspace/`. Production
+The development entry point is `http://localhost:5173/std/workspace/`. Production
 builds are generated automatically by the pishoo Cargo build script.
 
 ## Verification

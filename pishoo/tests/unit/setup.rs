@@ -122,11 +122,25 @@ fn config_requires_one_row_and_local_http_upstreams() {
     assert!(load_server_config(&profile).is_err());
 }
 #[test]
-fn file_namespace_accepts_explicit_proxy_overrides() {
+fn only_std_namespace_is_reserved_for_proxy_locations() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let db = Connection::open(profile.config_db_path()).unwrap();
-    for location in ["/file", "/file/", "= /file/a"] {
+    for location in [
+        "/file",
+        "/file/",
+        "= /file/a",
+        "/contact",
+        "/contacts",
+        "/acl",
+        "/workspace",
+        "/workspace-api",
+        "/chat-api",
+        "/pishoo",
+        "/.pishoo",
+        "/std-extra",
+        "/standard",
+    ] {
         db.execute("DELETE FROM proxy_locations", []).unwrap();
         db.execute(
             "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
@@ -135,10 +149,46 @@ fn file_namespace_accepts_explicit_proxy_overrides() {
         .unwrap();
         assert!(load_server_config(&profile).is_ok(), "{location}");
     }
+    for location in [
+        "/std",
+        "/std/",
+        "/std/file",
+        "= /std/file/a",
+        "/std/api/note",
+        "/std/unknown/",
+    ] {
+        db.execute("DELETE FROM proxy_locations", []).unwrap();
+        db.execute(
+            "INSERT INTO proxy_locations VALUES(?1,'127.0.0.1:8080')",
+            [location],
+        )
+        .unwrap();
+        assert!(load_server_config(&profile).is_err(), "{location}");
+        assert!(
+            parse_proxy_json(&json!([{"location":location,"proxy_pass":"127.0.0.1:8080"}]))
+                .is_err(),
+            "{location}"
+        );
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("location", location)
+            .finish();
+        for method in [Method::GET, Method::DELETE] {
+            assert!(
+                super::config_database(
+                    &profile,
+                    &method,
+                    &format!("/std/pishoo/proxies?{query}").parse().unwrap(),
+                    None
+                )
+                .is_err(),
+                "{location}"
+            );
+        }
+    }
 }
 
 #[test]
-fn api_proxy_locations_are_valid_until_loaded_libs_are_checked_at_startup() {
+fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let db = Connection::open(profile.config_db_path()).unwrap();
@@ -227,8 +277,8 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         json!([{"location":"/a","proxy_pass":"127.0.0.1:8080","extra":1}]),
         json!([{"location":"/a","proxy_pass":null}]),
         json!([{"location":"/a","proxy_pass":"127.0.0.1:8080"},{"location":"/a","proxy_pass":"127.0.0.1:8081"}]),
-        json!([{"location":"/valid","proxy_pass":"127.0.0.1:8080"},{"location":"/pishoo/settings","proxy_pass":"127.0.0.1:8081"}]),
-        json!([{"location":"/pishoo","proxy_pass":"127.0.0.1:8080"}]),
+        json!([{"location":"/valid","proxy_pass":"127.0.0.1:8080"},{"location":"/std/pishoo/settings","proxy_pass":"127.0.0.1:8081"}]),
+        json!([{"location":"/std/pishoo","proxy_pass":"127.0.0.1:8080"}]),
         json!([{"location":"/bad","proxy_pass":"http://192.168.1.1:8080"}]),
         json!([{"location":"/bad","proxy_pass":"http://127.0.0.1:0"}]),
         json!([{"location":"/bad","proxy_pass":"https://127.0.0.1:8080"}]),
@@ -239,9 +289,9 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         ));
         assert_eq!(config_database(&profile, false, None).unwrap(), before);
     }
-    // /pishoo uses a path-segment boundary, so unrelated /pishootem proxies are valid.
+    // /std uses a path-segment boundary, so unrelated /std-extra proxies are valid.
     assert!(
-        parse_proxy_json(&json!([{"location":"/pishootem","proxy_pass":"127.0.0.1:8080"}])).is_ok()
+        parse_proxy_json(&json!([{"location":"/std-extra","proxy_pass":"127.0.0.1:8080"}])).is_ok()
     );
 }
 
@@ -280,7 +330,6 @@ fn api_endpoint(name: &str) -> dhttp::Endpoint {
     let cert = params.self_signed(&key).unwrap();
     dhttp::Endpoint::new(
         qbase::endpoint::Endpoint::new(
-            &qtls::default_provider(),
             name,
             vec![cert.der().clone()],
             qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
@@ -312,7 +361,11 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     let app = config_router(profile.clone(), api_endpoint("alice.dhttp.net"));
     let response = app
         .clone()
-        .oneshot(api_request(Method::GET, "/pishoo/settings", Body::empty()))
+        .oneshot(api_request(
+            Method::GET,
+            "/std/pishoo/settings",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -331,7 +384,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         ("v2, v1", StatusCode::OK),
         ("v2", StatusCode::HTTP_VERSION_NOT_SUPPORTED),
     ] {
-        let mut request = api_request(Method::GET, "/pishoo/proxies", Body::empty());
+        let mut request = api_request(Method::GET, "/std/pishoo/proxies", Body::empty());
         request
             .headers_mut()
             .insert("accept-versions", versions.parse().unwrap());
@@ -341,8 +394,12 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         );
     }
     for (method, path, allow) in [
-        (Method::PUT, "/pishoo/settings", "GET, PATCH"),
-        (Method::POST, "/pishoo/proxies", "GET, PUT, PATCH, DELETE"),
+        (Method::PUT, "/std/pishoo/settings", "GET, PATCH"),
+        (
+            Method::POST,
+            "/std/pishoo/proxies",
+            "GET, PUT, PATCH, DELETE",
+        ),
     ] {
         let response = app
             .clone()
@@ -365,14 +422,14 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     ] {
         assert_eq!(
             app.clone()
-                .oneshot(api_request(Method::PATCH, "/pishoo/settings", body))
+                .oneshot(api_request(Method::PATCH, "/std/pishoo/settings", body))
                 .await
                 .unwrap()
                 .status(),
             expected
         );
     }
-    let mut request = api_request(Method::PATCH, "/pishoo/settings", Body::from("{}"));
+    let mut request = api_request(Method::PATCH, "/std/pishoo/settings", Body::from("{}"));
     request
         .headers_mut()
         .insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -391,7 +448,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
             SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut request = api_request(Method::GET, "/pishoo/settings", Body::empty());
+        let mut request = api_request(Method::GET, "/std/pishoo/settings", Body::empty());
         request.extensions_mut().remove::<Visitor>();
         if let Some(visitor) = visitor {
             request.extensions_mut().insert(visitor);
@@ -427,7 +484,7 @@ async fn config_routes_do_not_trust_forged_visitors_after_daccess_authorization(
     access
         .set_policy(
             access_control::Method::Unspecified,
-            "/pishoo",
+            "/std/pishoo",
             access_control::Effect::Allow,
             access_control::Grantee::Anony,
         )
@@ -437,7 +494,7 @@ async fn config_routes_do_not_trust_forged_visitors_after_daccess_authorization(
         access,
         crate::routes::authorize,
     ));
-    let mut request = api_request(Method::GET, "/pishoo/settings", Body::empty());
+    let mut request = api_request(Method::GET, "/std/pishoo/settings", Body::empty());
     request.extensions_mut().insert(dhttp::HandshakeSummary {
         alpn: None,
         local: Some(endpoint.local_authority().unwrap().clone()),
@@ -466,9 +523,9 @@ fn config_database(
         profile,
         &method,
         &if settings {
-            http::Uri::from_static("/pishoo/settings")
+            http::Uri::from_static("/std/pishoo/settings")
         } else {
-            http::Uri::from_static("/pishoo/proxies")
+            http::Uri::from_static("/std/pishoo/proxies")
         },
         payload,
     )
@@ -485,7 +542,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
                 super::config_database(
                     profile,
                     &Method::PATCH,
-                    &http::Uri::from_static("/pishoo/proxies"),
+                    &http::Uri::from_static("/std/pishoo/proxies"),
                     Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"})),
                 )
                 .unwrap()
@@ -495,7 +552,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
     let all = super::config_database(
         &profile,
         &Method::GET,
-        &http::Uri::from_static("/pishoo/proxies"),
+        &http::Uri::from_static("/std/pishoo/proxies"),
         None,
     )
     .unwrap();
@@ -504,7 +561,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
         super::config_database(
             &profile,
             &Method::GET,
-            &"/pishoo/proxies?location=%2Fone".parse().unwrap(),
+            &"/std/pishoo/proxies?location=%2Fone".parse().unwrap(),
             None
         )
         .unwrap()["location"],
@@ -515,7 +572,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
             super::config_database(
                 &profile,
                 &Method::DELETE,
-                &"/pishoo/proxies?location=%2Fone".parse().unwrap(),
+                &"/std/pishoo/proxies?location=%2Fone".parse().unwrap(),
                 None
             )
             .unwrap()
@@ -526,16 +583,16 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
         super::config_database(
             &profile,
             &Method::GET,
-            &http::Uri::from_static("/pishoo/proxies"),
+            &http::Uri::from_static("/std/pishoo/proxies"),
             None
         )
         .unwrap()[0]["location"],
         "/two"
     );
     for uri in [
-        "/pishoo/proxies",
-        "/pishoo/proxies?extra=1",
-        "/pishoo/proxies?location=%2Ftwo&location=%2Fone",
+        "/std/pishoo/proxies",
+        "/std/pishoo/proxies?extra=1",
+        "/std/pishoo/proxies?location=%2Ftwo&location=%2Fone",
     ] {
         assert!(matches!(
             super::config_database(&profile, &Method::DELETE, &uri.parse().unwrap(), None),
@@ -545,7 +602,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
     // An existing incompatible namespace fails without mutating the old data.
     let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/pishoo/conflict','127.0.0.1:8080')",
+        "INSERT INTO proxy_locations VALUES('/std/pishoo/conflict','127.0.0.1:8080')",
         [],
     )
     .unwrap();
@@ -565,34 +622,39 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
     let root = tempfile::tempdir().unwrap();
     let app = config_router(profile(root.path()), api_endpoint("alice.dhttp.net"));
     for (method, uri, body, status) in [
-        (Method::GET, "/pishoo/proxies", "x", StatusCode::BAD_REQUEST),
         (
             Method::GET,
-            "/pishoo/settings?extra=x",
+            "/std/pishoo/proxies",
+            "x",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Method::GET,
+            "/std/pishoo/settings?extra=x",
             "",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::DELETE,
-            "/pishoo/proxies",
+            "/std/pishoo/proxies",
             "",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::DELETE,
-            "/pishoo/proxies?location=%2Fgone",
+            "/std/pishoo/proxies?location=%2Fgone",
             "",
             StatusCode::NO_CONTENT,
         ),
         (
             Method::GET,
-            "/pishoo/proxies?location=%2Fgone",
+            "/std/pishoo/proxies?location=%2Fgone",
             "",
             StatusCode::NOT_FOUND,
         ),
         (
             Method::PATCH,
-            "/pishoo/proxies?location=%2Ftest",
+            "/std/pishoo/proxies?location=%2Ftest",
             "{}",
             StatusCode::BAD_REQUEST,
         ),

@@ -569,7 +569,7 @@ async fn load_access(
     access
         .set_policy(
             access_control::Method::Specified(http::Method::POST),
-            "/contact",
+            "/std/contact",
             access_control::Effect::Allow,
             access_control::Grantee::Named,
         )
@@ -634,14 +634,6 @@ async fn load_access(
 
 fn current_router(server: &Server) -> Router {
     let proxies = server.config.proxy_locations.clone();
-    let file_proxies: Vec<_> = proxies
-        .iter()
-        .filter(|route| {
-            let location = route.location.strip_prefix("= ").unwrap_or(&route.location);
-            location == "/file" || location.starts_with("/file/")
-        })
-        .cloned()
-        .collect();
     Router::new()
         .merge(access_router(server.access.clone()))
         .merge(config_router(
@@ -656,29 +648,7 @@ fn current_router(server: &Server) -> Router {
             server.endpoint.clone(),
             server.sandbox.runtime.clone(),
         ))
-        .merge(
-            file_router(server.profile.join("file")).layer(axum::middleware::from_fn(
-                move |request: Request<AxumBody>, next: axum::middleware::Next| {
-                    let proxies = file_proxies.clone();
-                    async move {
-                        let path = request.uri().path();
-                        let matched = proxies.iter().any(|route| {
-                            if let Some(location) = route.location.strip_prefix("= ") {
-                                path == location
-                            } else {
-                                let location = route.location.trim_end_matches('/');
-                                path == location || path.starts_with(&format!("{location}/"))
-                            }
-                        });
-                        if matched {
-                            proxy_pass(proxies, request).await
-                        } else {
-                            next.run(request).await
-                        }
-                    }
-                },
-            )),
-        )
+        .merge(file_router(server.profile.join("file")))
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)
@@ -729,19 +699,6 @@ impl Server {
         let access = load_access(&profile, &subject).await?;
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
-        for route in &config.proxy_locations {
-            let path = route.location.strip_prefix("= ").unwrap_or(&route.location);
-            if let Some(id) = path
-                .strip_prefix("/api/")
-                .map(|tail| tail.split('/').next().unwrap())
-                && sandbox.libs.contains_key(id)
-            {
-                return Err(Error::InvalidConfig(format!(
-                    "proxy location '{}' conflicts with loaded Lib '{id}' (/api/{id})",
-                    route.location
-                )));
-            }
-        }
         let workspace_store = WorkspaceStore::open(&profile)
             .await
             .map_err(|error| Error::InvalidConfig(error.to_string()))?;

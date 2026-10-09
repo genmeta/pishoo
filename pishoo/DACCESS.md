@@ -17,10 +17,10 @@ Server 直接拥有 Endpoint、AccessService、Workspace、Chat、Router 和 San
   文本字节。普通头和预先注入的 Visitor 不作为身份来源。
 - daccess Allowed 放行业务，Denied 返回403，Reviewing 立即返回202和 status_url。
   状态查询按 Visitor 校验，获准后重试原请求；一次性决定由 daccess 消费。
-- 联系人申请通过 `/workspace-api/contact-requests` 保存到本地队列，使用稳定
-  application_id。接收方 `/contact` 从收到时起计算7天期限，申请方通过
-  `/contact/self?application_id=...` 查询状态。批准操作在接收方本地完成。
-- 查询状态的精确路径交由 daccess handler 执行记录归属检查；首次 POST /contact
+- 联系人申请通过 `/std/workspace-api/contact-requests` 保存到本地队列，使用稳定
+  application_id。接收方 `/std/contact` 从收到时起计算7天期限，申请方通过
+  `/std/contact/self?application_id=...` 查询状态。批准操作在接收方本地完成。
+- 查询状态的精确路径交由 daccess handler 执行记录归属检查；首次 POST /std/contact
   仍由接收方的访问策略决定。
 - Workspace/Chat 的本地管理操作额外核对 owner 的名称和 SubjectId。
 
@@ -29,12 +29,12 @@ Server 直接拥有 Endpoint、AccessService、Workspace、Chat、Router 和 San
 `pishoo/workspace/` 保留目标分支的 Solid/Vite 前端：联系人目录、发送申请、能力审批、
 访问审批、设置和聊天。扩展/App 页面沿用分支占位状态。
 
-`/workspace` 重定向至 `/workspace/`；深链接回退到 index.html，缺失资源404。
+`/std/workspace` 重定向至 `/std/workspace/`；深链接回退到 index.html，缺失资源404。
 Cargo build script 使用 Bun 安装锁定依赖并构建 dist，资源由 Pishoo 内嵌提供。
 本轮验证使用 Bun 1.4.2；旧 Bun 1.2 无法读取当前版本的 bun.lock。
 
 `GET /std/profile` 与 `GET /std/profile/avatar` 提供最小公开资料。
-`/workspace-api/context` 返回当前 profile、owner_name 和审批计数。
+`/std/workspace-api/context` 返回当前 profile、owner_name 和审批计数。
 
 Chat 的远端入口只有 `POST /std/message`，受 daccess 和有效 Chat capability decision
 共同约束。消息历史只读本地 chat.db；发送先入 outbox，保持 client_message_id 幂等、

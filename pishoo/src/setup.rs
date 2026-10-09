@@ -184,10 +184,7 @@ fn parse_proxies(values: Vec<(String, String)>) -> Result<Vec<ProxyLocation>> {
     let mut seen = HashSet::new();
     for (location, upstream) in values {
         let path = location.strip_prefix("= ").unwrap_or(&location);
-        if !valid_path(path)
-            || !seen.insert(location.clone())
-            || (reserved(path) && path != "/file" && !path.starts_with("/file/"))
-        {
+        if !valid_path(path) || !seen.insert(location.clone()) || reserved(path) {
             return Err(Error::InvalidConfig(format!(
                 "invalid or reserved proxy location: {location}"
             )));
@@ -260,8 +257,8 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
         }
     };
     Router::new()
-        .route("/pishoo/settings", any(handler.clone()))
-        .route("/pishoo/proxies", any(handler))
+        .route("/std/pishoo/settings", any(handler.clone()))
+        .route("/std/pishoo/proxies", any(handler))
 }
 
 async fn config_request(
@@ -293,7 +290,7 @@ async fn config_request(
         }
     }
 
-    let settings = request.uri().path() == "/pishoo/settings";
+    let settings = request.uri().path() == "/std/pishoo/settings";
     let method = request.method().clone();
     let uri = request.uri().clone();
     let allowed = if settings {
@@ -363,8 +360,8 @@ pub(crate) fn config_database(
     uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    let settings = uri.path() == "/pishoo/settings";
-    if !settings && uri.path() != "/pishoo/proxies" {
+    let settings = uri.path() == "/std/pishoo/settings";
+    if !settings && uri.path() != "/std/pishoo/proxies" {
         return Err(Error::RouteNotFound);
     }
     let location = match uri.query() {
@@ -378,9 +375,7 @@ pub(crate) fn config_database(
             }
             let location = params[0].1.to_string();
             let path = location.strip_prefix("= ").unwrap_or(&location);
-            if !valid_path(path)
-                || (reserved(path) && path != "/file" && !path.starts_with("/file/"))
-            {
+            if !valid_path(path) || reserved(path) {
                 return Err(Error::BadRequest("invalid proxy location".into()));
             }
             Some(location)

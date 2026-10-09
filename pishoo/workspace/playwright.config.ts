@@ -17,7 +17,7 @@ export default defineConfig({
   expect: { timeout: 8_000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: `${frontendUrl}/workspace/`,
+    baseURL: `${frontendUrl}/std/workspace/`,
     locale: 'en-US',
     trace: 'retain-on-failure',
   },
@@ -25,7 +25,7 @@ export default defineConfig({
     {
       command: 'bun run dev -- --host 127.0.0.1 --port 4173 --strictPort',
       env: { PISHOO_WORKSPACE_BACKEND: backendUrl },
-      url: `${frontendUrl}/workspace/`,
+      url: `${frontendUrl}/std/workspace/`,
       timeout: 30_000,
       reuseExistingServer: false,
       stdout: 'pipe',

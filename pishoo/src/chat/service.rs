@@ -42,7 +42,7 @@ pub(crate) struct CapabilityState {
     pub(crate) can_send: bool,
     pub(crate) can_receive: bool,
     /// Most recently observed permission on the remote profile. `None` means
-    /// that this profile has not observed a `/contact/self` response yet.
+    /// that this profile has not observed a `/std/contact/self` response yet.
     pub(crate) remote_grant: Option<bool>,
     pub(crate) endpoints: &'static [super::capabilities::CapabilityEndpoint],
 }
