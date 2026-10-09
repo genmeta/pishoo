@@ -117,10 +117,12 @@ pub(super) async fn workspace(request: Request<AxumBody>) -> Response {
     if path.split('/').any(|p| p == "..") {
         return reject(Error::RouteNotFound);
     }
+    let contact_route = path
+        .strip_prefix("contacts/")
+        .map(|name| name.strip_prefix("requests/").unwrap_or(name))
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'));
     let file = WORKSPACE_DIST.get_file(path).or_else(|| {
-        std::path::Path::new(path)
-            .extension()
-            .is_none()
+        (contact_route || std::path::Path::new(path).extension().is_none())
             .then(|| WORKSPACE_DIST.get_file("index.html"))
             .flatten()
     });
