@@ -141,7 +141,7 @@ export default function App() {
           <Match when={route().page === 'approvals'}>
             <ReviewsPage notify={notify} onRefresh={() => void contextActions.refetch()} />
           </Match>
-          <Match when={route().page === 'access'}><PoliciesPage /></Match>
+          <Match when={route().page === 'access'}><PoliciesPage notify={notify} /></Match>
           <Match when={route().page === 'capabilities'}><CapabilitiesPage /></Match>
           <Match when={route().page === 'profile'}>
             <ProfileSettingsPage profile={profile()} loading={profile.loading} error={profile.error}
