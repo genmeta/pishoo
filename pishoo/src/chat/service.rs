@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use access_control::{ContactStatus, SubjectId, Visitor};
 use http::StatusCode;
@@ -14,8 +11,6 @@ use super::{
 };
 
 pub(crate) type ServiceError = (StatusCode, &'static str);
-
-static NEXT_CLIENT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct LocalMessage {
@@ -456,7 +451,12 @@ pub(crate) fn now() -> Result<i64, ServiceError> {
 }
 
 fn next_client_message_id() -> Result<String, ServiceError> {
-    let timestamp = now()?;
-    let sequence = NEXT_CLIENT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed);
-    Ok(format!("{timestamp}-{sequence}"))
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "random source unavailable",
+        )
+    })?;
+    Ok(nonce.iter().map(|byte| format!("{byte:02x}")).collect())
 }
