@@ -1255,9 +1255,32 @@ tbody tr.selected {
 
 .chat-page {
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell-chat {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.app-shell-chat .sidebar {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.app-shell-chat .workspace {
+  min-height: 0;
+  padding-bottom: 32px;
 }
 
 .chat-page-header {
+  flex: 0 0 auto;
   align-items: flex-start;
 }
 
@@ -1312,21 +1335,24 @@ tbody tr.selected {
 }
 
 .chat-workspace {
-  display: grid;
-  grid-template-rows: minmax(320px, 1fr) auto auto;
-  min-height: calc(100dvh - 220px);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
 }
 
 .chat-feed {
-  min-height: 320px;
-  max-height: calc(100dvh - 390px);
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  overflow-anchor: none;
   padding: 20px;
   background: var(--surface-subtle);
 }
@@ -1401,6 +1427,7 @@ tbody tr.selected {
 }
 
 .chat-composer {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
@@ -1659,6 +1686,10 @@ tbody tr.selected {
     padding: 28px 22px 188px;
   }
 
+  .app-shell-chat .workspace {
+    padding-bottom: 22px;
+  }
+
   .quick-chat-dock {
     left: 184px;
     padding-right: 22px;
@@ -1680,6 +1711,12 @@ tbody tr.selected {
     display: block;
   }
 
+  .app-shell-chat {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .sidebar {
     position: static;
     height: auto;
@@ -1688,6 +1725,11 @@ tbody tr.selected {
     align-items: center;
     padding: 12px 14px;
     gap: 8px;
+  }
+
+  .app-shell-chat .sidebar {
+    height: auto;
+    overflow: visible;
   }
 
   .brand {
@@ -1767,6 +1809,10 @@ tbody tr.selected {
     padding: 22px 14px 204px;
   }
 
+  .app-shell-chat .workspace {
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+
   .quick-chat-dock {
     right: 0;
     bottom: max(67px, calc(60px + env(safe-area-inset-bottom)));
@@ -1828,13 +1874,7 @@ tbody tr.selected {
     flex: 1;
   }
 
-  .chat-workspace {
-    min-height: calc(100dvh - 250px);
-  }
-
   .chat-feed {
-    min-height: 260px;
-    max-height: none;
     padding: 14px;
   }
 

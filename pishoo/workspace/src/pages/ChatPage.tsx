@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { api } from '../api/client'
 import type { ChatMessage } from '../api/types'
@@ -62,32 +62,52 @@ export default function ChatPage(props: {
   const [profile] = createResource(() => contact()?.name ?? null, loadProfile)
   const loadCapability = abortable((name: string, signal: AbortSignal) => chatApi.capability(name, signal))
   const [capability, capabilityActions] = createResource(() => contact()?.name ?? null, loadCapability)
-  const canChat = () => capability()?.status === 'available'
-  const canSend = () => capability()?.can_send === true
-  onMount(() => {
-    const timer = window.setInterval(() => {
-      if (!document.hidden && !capability.loading && !capability.error
-        && capability()?.contact_status === 'active' && capability()?.remote_grant !== true) {
-        void capabilityActions.refetch()
-      }
-    }, 3000)
-    onCleanup(() => window.clearInterval(timer))
+  const canChat = () => !capability.error && capability()?.status === 'available'
+  const canSend = () => !capability.error && capability()?.can_send === true
+  let loadedName: string | undefined
+  let loadedMessages: ChatMessage[] = []
+  const loadMessages = abortable(async (name: string, signal: AbortSignal) => {
+    const previous = loadedName === name ? loadedMessages : []
+    // Delivered messages are immutable. Refresh from the first unresolved
+    // message so retries and permission changes also update older messages.
+    const unresolved = previous.findIndex((message) => !['sent', 'received'].includes(message.state))
+    const items = unresolved === -1 ? [...previous] : previous.slice(0, unresolved)
+    let cursor: string | null = items.at(-1)?.id ?? null
+    do {
+      const page = await chatApi.messages(name, cursor, 100, signal)
+      items.push(...page.items)
+      cursor = page.next_cursor
+    } while (cursor)
+    signal.throwIfAborted()
+    loadedName = name
+    loadedMessages = items
+    const scrollTop = feed?.scrollTop ?? 0
+    const followMessages = !feed?.isConnected || feed.scrollHeight - feed.clientHeight - scrollTop < 32
+    window.requestAnimationFrame(() => {
+      if (feed?.isConnected) feed.scrollTop = followMessages ? feed.scrollHeight : scrollTop
+    })
+    return { items, next_cursor: null }
   })
-  const loadMessages = abortable((name: string, signal: AbortSignal) => chatApi.messages(name, null, 100, signal))
   const [messages, messageActions] = createResource(() => canChat() ? props.contactName : null, loadMessages)
+
+  onMount(() => {
+    const refresh = () => {
+      if (document.hidden) return
+      if (contact() && !capability.loading) void capabilityActions.refetch()
+      if (canChat() && !messages.loading) void messageActions.refetch()
+    }
+    const timer = window.setInterval(refresh, 3000)
+    document.addEventListener('visibilitychange', refresh)
+    onCleanup(() => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+    })
+  })
 
   const resolvedProfile = () => profile.error ? undefined : profile()
   const label = () => contactDisplayName(props.contactName, contact()?.alias, resolvedProfile()?.display_name)
   const identityName = () => displayIdentityName(props.contactName)
   const avatarUrl = () => profileAvatarUrl(resolvedProfile())
-
-  createEffect(() => {
-    const count = messages()?.items.length
-    if (count === undefined) return
-    queueMicrotask(() => {
-      if (feed) feed.scrollTop = feed.scrollHeight
-    })
-  })
 
   const back = () => props.navigate(contactPath(props.contactName))
 
