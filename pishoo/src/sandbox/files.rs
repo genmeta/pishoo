@@ -178,7 +178,7 @@ fn initialized_profile(profile: &IdentityProfile) -> Result<std::fs::File> {
     crate::setup::config_database(
         profile,
         &http::Method::GET,
-        &http::Uri::from_static("/pishoo/settings"),
+        &http::Uri::from_static("/std/pishoo/settings"),
         None,
     )?;
     Ok(dir)

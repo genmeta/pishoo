@@ -1,5 +1,15 @@
 # 第一版实施记录
 
+### 2026-10-09 联系人申请的提前响应与上传停止
+
+- Workspace/Chat 出站的上传与响应通过 `try_join!` 并发推进；远端提前丢弃请求体会发出 `H3_NO_ERROR (0x100)`，旧实现把它当作上传失败并丢弃响应，掩盖真实 HTTP 状态。现有两个 request 方法仅将上传方向的该流错误视为停止发送，继续读取、验证并交付响应；其他传输错误仍失败，无有效响应也仍失败。直接依赖已有 h3x 错误类型做精确匹配，不修改 h3x、冻结接口或生产状态。
+- 新增独立真实 QUIC 回归，以临时证书、签名 OCSP 和本机 UDP 验证237字节与1MiB请求、远端先停止上传后返回200/400/403/404、Workspace响应头/正文/身份及Chat正文、无响应失败。修复前真实复现同类 `remote upload failed: NoError (0x100)`，修复后通过；125项默认库测试通过、10项按既有条件忽略，现有真实QUIC联系人/聊天投递及发送前身份校验用例另行通过，Pishoo和原生客户端构建、改动文件格式与diff检查通过。
+- spike.liu 的具名 DDNS 查询取得当前中转记录；普通诊断客户端的只读状态查询仍在解析/建连阶段失败，不能据此确定本次申请的远端HTTP状态或送达结果。尚未重启现有服务或重新提交申请。
+
+2026-10-09：用户进一步要求由宿主统一挂载 WASM 内部 API，页面不写宿主前缀。Sandbox 已声明 GET/HEAD 的无尾斜杠根入口307跳转到带尾斜杠入口并保留 query；其他方法、非根路径及清单校验保持原语义。Note 页面使用 `notes`、`note` 相对 URL，重建并通过现有 CLI 安装到 home.alice.smith/alice.smith，旧组件备份于 target/std-live，原 db/note 保留。宿主重启后，两个身份的根入口307、相对 API 页面200、列表200实测通过（包含 home.alice.smith~ 简写）。库回归125项通过、9项按既有条件忽略；另显式执行真实 Note 页面/CRUD/SQLite持久化/身份隔离测试通过。相邻 dquic 的接口更新与当前 dhttp 不兼容，测试和运行宿主使用 /private/tmp/pishoo-std-mount-snapshot 中的当前 Pishoo 源码及既有固定传输依赖快照，daccess 使用本次本地修改；未覆盖主目录或相邻仓库的依赖改动。证据见 target/std-live/note-relative-verification.json。
+
+2026-10-09：系统 HTTP 路径统一到 `/std`，包括 daccess、Workspace/Chat、配置/Lib 管理、静态文件、DHTTP 正向代理及 Lib 执行；清理旧 `/file` 覆盖和已加载 Lib 对旧 `/api` 的代理冲突检查。磁盘目录及已有 ACL 保留，旧 URL 无兼容别名。映射及升级注意事项见 [系统路径](pishoo/docs/system-paths.md)。本次通过前端源码/配置/E2E代码的三组 TypeScript no-emit 检查、14项 Workspace 导航检查、8项 daccess 管理员 SQL 路径作用域检查、生产路由命名空间扫描、Rust 格式及解析检查、两仓 diff 空白检查。新增/更新 Rust 路由回归断言；遵照 daccess AGENTS.md，不执行编译、Rust运行测试或完整前端构建/E2E。
+
 ### 2026-10-09 测试提交与依赖固定
 
 - 将 Pishoo 的当前改动整理到非 main 分支 `feat/pishoo-integration`，dhttp、dquic、ddns、h3x 各自使用按修改内容命名的修复或诊断分支。Pishoo 的直接依赖及根级 crates.io patches 固定同一组 Git SHA，dhttp 的跨仓路径同步改为 Git SHA；保留 daccess 和 rustls fork 的既有固定提交。分支、依赖清单与构建命令见 [测试快照说明](pishoo/docs/testing-snapshot.md)。

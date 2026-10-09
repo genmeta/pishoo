@@ -30,7 +30,7 @@ type Result<T> = std::result::Result<T, Error>;
 | `sandbox/host.rs` | WASI HTTP 出站拒绝接缝和 identity WIT 宿主能力 |
 | `sandbox/manifest.rs` | 组件 OpenAPI 清单校验 |
 
-子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 统一检查 `/contact`、`/contacts`、`/acl`、`/workspace`、`/workspace-api`、`/chat-api`、`/std`、`/pishoo`、`/.pishoo`、`/file` 的路径段前缀。`/api` 不再整体保留；已加载 Lib 的路径归属见 Sandbox.api_router。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
+子模块为私有模块，既有对外路径通过 `use` 重导出。`Server` 的现有方法使用 `pub(super)` 供 daemon 内部调用；现有无状态函数 `static_file`、`proxy_uri`、`clean_hop_headers`、`workspace` 的可见范围限定在各自所属的 routes/sandbox 内。内部跨模块函数 `routes::reserved(path: &str) -> bool` 只检查 `/std` 根路径和路径段子路径；旧顶层路径不保留，`/std-extra` 等无关名称仍可代理。`clean_hop_headers` 只清理逐跳头及 Connection 点名的头；不保留或过滤 `pishoo-` 头前缀。可信身份只取自 request extensions 的 HandshakeSummary。
 
 ## 2. 配置和固定默认值
 
@@ -49,9 +49,9 @@ struct ProxyLocation {
 
 config.db 的 schema v1 为 settings(listen) 与 proxy_locations(location,proxy_pass)。settings 恰好一行；listen=0/1/2/3表示关闭/内网/外网/两者。proxy_pass 接受裸回环地址端口或其 `http://` URI，可带路径，不接受非本机目标；没有传输类型字段或数据库列。第一版尚未上线，直接修订 v1 建表定义，不添加 schema v2 或自动迁移。没有 lib_policies、policy_imports、默认策略来源账本。已有 schema v1 中的旧 exec 列原样保留但不读取、不更新；配置 API 只返回 listen，PATCH 的 exec 字段作为未知字段拒绝。
 
-2026-10-04 用户要求实施正常启动初始化：默认 home 使用现有 dhttp-home 的用户目录解析，目录布局保持 profile 根级 ssl/db/file/lib/logs/repo/templates，头像继续使用 assets/profile。Server.load 在凭据加载后创建缺失目录；load_server_config 首次创建 schema v1（listen=3，内外网均监听、空代理），已有配置校验后加载。新 access 由现有 daccess API 在临时库初始化并写入 POST /contact 的 Allow/Named 规则，经 SQLite 快照验证后发布；已有v1不补默认规则，原生v0先备份再由库事务升级。0.8.2旧ACL、未知格式、损坏和不支持版本拒绝启动并保留原数据。Workspace/Chat 在各自 open/migrate 内识别空库、校验当前版本和必要结构；不增加schema版本、表、类型、字段或跨模块函数。配置 API 读取不初始化缺失配置库；身份变化在下次启动处理。安装脚本不操作用户数据库，不恢复server.conf或实例配置。详情见配置 API 文档。
+2026-10-04 用户要求实施正常启动初始化：默认 home 使用现有 dhttp-home 的用户目录解析，目录布局保持 profile 根级 ssl/db/file/lib/logs/repo/templates，头像继续使用 assets/profile。Server.load 在凭据加载后创建缺失目录；load_server_config 首次创建 schema v1（listen=3，内外网均监听、空代理），已有配置校验后加载。新 access 由现有 daccess API 在临时库初始化并写入 POST /std/contact 的 Allow/Named 规则，经 SQLite 快照验证后发布；已有v1不补默认规则，原生v0先备份再由库事务升级。0.8.2旧ACL、未知格式、损坏和不支持版本拒绝启动并保留原数据。Workspace/Chat 在各自 open/migrate 内识别空库、校验当前版本和必要结构；不增加schema版本、表、类型、字段或跨模块函数。配置 API 读取不初始化缺失配置库；身份变化在下次启动处理。安装脚本不操作用户数据库，不恢复server.conf或实例配置。详情见配置 API 文档。
 
-2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /pishoo/settings` 和 `GET/PUT /pishoo/proxies`。前者读写 listen，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理和 listen 均需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
+2026-10-03 用户批准配置 API 第一版：`setup::config_router(profile, endpoint)` 使用现有 H3 监听提供 `GET/PATCH /std/pishoo/settings` 和 `GET/PUT /std/pishoo/proxies`。前者读写 listen，后者读写整个代理规则数组；继续使用 schema v1。请求经过既有 daccess 授权层，处理器复核已验证 Visitor 与 Endpoint 同名、owner_hash 相同。JSON 只在请求内解析，不增加配置 DTO、字段或持久状态；SQLite 即时事务保证部分设置更新和代理列表替换的原子性。API 支持 Accept-Versions 的 v1 协商，响应 no-store。写入只更新数据库，代理和 listen 均需重启；接口不保证仅本地网络访问，当前握手信息不含网络范围。详见 [配置 API](../pishoo/docs/config-api.md)。
 
 2026-09-26 实施确认：用户批准将 `ProxyLocation.proxy_pass` 从 `http::Uri` 改为 `http::uri::Parts`。裸回环地址先补上 `http://`，再校验完整 URI；以 `path_and_query: None` 保留原始配置未写路径的事实，显式 `/` 则保存 `Some`。标准 `Uri` 会将两者规范化为相同值，无法落实既定的保留路径/替换前缀规则。不新增字段或自有结构。
 
@@ -101,14 +101,14 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
 
 每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
-Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件。2026-10-09 用户批准显式 `/file` 根或子路径代理按精确/路径段前缀规则优先于匹配的静态路径；`/` 根代理不覆盖静态路径，未匹配的静态路径保持原行为。配置校验仅对该代理命名空间豁免 reserved，Lib 校验和其他保留路径不变；不修改函数签名。代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib 或配置；OCSP 成功刷新后替换 Endpoint、发布器与基于已有资源构造的 Router，close 仍清空 Router。
+Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/std/file/{*path}` 提供，磁盘仍为身份目录的 `file/`；`/std/file` 本身不提供文件。仅 `/std` 根及子路径保留，配置中的显式代理 location 一律不能占用它，不设置静态代理豁免。旧 `/file` 使用普通代理规则，不保留覆盖中间件。代理 fallback 在拒绝 `/std` 后按精确路径或路径段前缀转发，否则返回404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib 或配置；OCSP 成功刷新后替换 Endpoint、发布器与基于已有资源构造的 Router，close 仍清空 Router。
 
-`/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
+`/std/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
 
 2026-10-03 用户决定底层出站仅保留 Empty/WndBuf，并批准 Pishoo 本轮先适配字节流、不支持正向代理的请求 trailers。该入口将标准入站 Body 的 DATA 逐块写入现有 RequestWriter，以有界窗口提供背压，EOF 后显式 shutdown；不全量缓存请求。声明 Trailer 头的请求在转发前返回400；流中出现未声明 trailers 时返回上传错误、记录日志并丢弃未完成 writer 以取消上传，不静默丢弃 trailers。若响应已交付，不能追溯改变响应状态。响应继续使用原生 Body，保留响应 trailers。等待响应头时取消请求会中止本次上传；交付响应后上传独立继续，不以响应 Body 额外控制上传。没有新增有状态结构、字段或跨模块接口。
 
 
-统一 DHTTP 正向代理继续只转发请求。2026-10-02 用户确认审批和联系人以远端目标分支为准：联系人申请改由 Workspace 的 `/workspace-api/contact-requests` 入队，按 application_id 向对端 `/contact` 投递并查询 `/contact/self`。ContactNotifier 与本地 `POST /contact/{name}` 接缝删除。2026-10-03 用户要求接入生产出站；Server.load 为 Workspace 和 Chat 的既有 OutboundTransport 装配当前 Endpoint，Chat 使用已批准的发送前 owner_hash 校验，具体接口见 Workspace/Chat 与 dhttp 清单。
+统一 DHTTP 正向代理继续只转发请求。2026-10-02 用户确认审批和联系人以远端目标分支为准：联系人申请改由 Workspace 的 `/std/workspace-api/contact-requests` 入队，按 application_id 向对端 `/std/contact` 投递并查询 `/std/contact/self`。ContactNotifier 与本地 `POST /std/contact/{name}` 接缝删除。2026-10-03 用户要求接入生产出站；Server.load 为 Workspace 和 Chat 的既有 OutboundTransport 装配当前 Endpoint，Chat 使用已批准的发送前 owner_hash 校验，具体接口见 Workspace/Chat 与 dhttp 清单。
 
 组件一次读出的bytes同时用于OpenAPI和编译，不在提交前重读文件。没有后台编译结果，也没有跨任务revision检查。运行期间不扫描或替换组件。
 
@@ -156,11 +156,11 @@ Headers 只含 method、完整 path_and_query 和 fields。RequestId 由 daccess
 
 Visitor 构造后，库的 `is_review_status_path` 和 `is_contact_status_path` 指定的 GET 端点直接交给库 handler，按名称和 SubjectId 校验记录归属。公开资料只对 GET `/std/profile` 与 `/std/profile/avatar` 放行。其余入口仍受统一 daccess 授权。Workspace/Chat 本地管理 handler 再核对 owner；POST `/std/message` 在 daccess 允许后检查 capability decision 的联系人、SubjectId、请求编号和版本。
 
-管理 Router 直接使用 `access_control::management_router`：联系人采用 application_id、接收方起算7天期限及申请方轮询；审批管理为 `/acl/reviews`、PATCH `/acl/review` 和 `/acl/review/{id}/status`。删除 DhttpContactNotifier、submit_application、granted_update、管理路由 Endpoint 参数，以及本地回调协议。申请接收仍遵循接收方自身的 daccess 策略。
+管理 Router 直接使用 `access_control::management_router`：联系人采用 application_id、接收方起算7天期限及申请方轮询；审批管理为 `/std/acl/reviews`、PATCH `/std/acl/review` 和 `/std/acl/review/{id}/status`。删除 DhttpContactNotifier、submit_application、granted_update、管理路由 Endpoint 参数，以及本地回调协议。申请接收仍遵循接收方自身的 daccess 策略。
 
 Server 直接持有 Workspace 和 Chat 的 Arc；资源、数据库及路由清单见 [Workspace/Chat 接入清单](workspace-chat-interfaces.md)。这次保留目标分支现有业务模型和 worker 资源，每个模块使用自身已有的句柄与关闭信号；不额外添加 Server 投递任务集合。资源和队列在运行期间保持，close 清空 Router 并停止、等待两个模块的 worker。
 
-Workspace 以普通 `workspace.rs` 模块组织；Chat 使用 `chat.rs`。完整前端位于 `pishoo/workspace`，由 Bun 构建并以内嵌 dist 提供。`/workspace` 返回307，深链接回到 index.html，缺失资源404，GET/HEAD 沿用当前静态入口。`/workspace-api/context` 采用分支的 profile、owner_name、badges 响应，并要求 owner。
+Workspace 以普通 `workspace.rs` 模块组织；Chat 使用 `chat.rs`。完整前端位于 `pishoo/workspace`，由 Bun 构建并以内嵌 dist 提供。`/std/workspace` 返回307，深链接回到 index.html，缺失资源404，GET/HEAD 沿用当前静态入口。`/std/workspace-api/context` 采用分支的 profile、owner_name、badges 响应，并要求 owner。
 
 Lib API 仍不自动写入默认访问规则。Lib 的 WASI HTTP 出站继续拒绝；现有本机反代及 DHTTP 通配转发保持各自职责。底层出站与真实网络测试按用户要求暂缓，不新增预期 SubjectId 的底层接口。
 
@@ -186,11 +186,13 @@ impl Sandbox {
 
 `load_libs` 每次扫描都重新校验并串行编译全部 Lib，构建局部候选；任一 Lib 加载失败直接返回错误，不修改当前 Lib 集合。完整扫描成功后更新自身集合。局部候选只是调用栈中的标准 HashMap，不引入构建会话、候选容器或发布状态。
 
-`api_router` 仅根据 Sandbox 当前 Lib 集合注册 `/api/<LibId>`、对应末尾斜杠根路径与子路径分支，负责 Lib 查找、声明路径与方法验证、请求 URI 处理和 Invocation 执行。该前缀的全部方法均交给 Lib，未声明操作返回404、方法不匹配返回405，不再回退代理。空集合不注册 `/api` 分支，未加载 Lib 的其他 `/api/*` 路径可进入配置代理 fallback；不自动提供静态文件。它只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权由 Server 组装 Router 时统一添加，Server 保留完整 Router 的发布权。
+`api_router` 仅根据 Sandbox 当前 Lib 集合注册 `/std/api/<LibId>`、对应末尾斜杠根路径与子路径分支，负责 Lib 查找、声明路径与方法验证、请求 URI 处理和 Invocation 执行。该前缀的全部方法均交给 Lib，未声明操作返回404、方法不匹配返回405。未加载 Lib 或其他未注册的 `/std` 路径由 Server fallback 拒绝，不进入上游；旧 `/api/*` 独立使用普通代理，不再按加载 Lib 集合检查冲突。Router 只克隆本版本需要的 Lib 与共享执行资源；完整对外路径上的 daccess 授权由 Server 组装时统一添加。
 
-2026-10-08 用户批准按已加载 Lib 前缀与配置代理共存：根代理 `/` 和更宽的 `/api` 代理可作兜底；显式代理 location（含精确匹配）若落在已加载 `/api/<LibId>` 前缀内，Server.load 在创建 Workspace/Chat 资源之前返回 InvalidConfig，错误列出 location 与 LibId。配置与 Lib 管理写入仍仅保存磁盘内容、需重启生效，因此按本次启动最终加载集合检查冲突，不新增持久路由表、配置字段、状态结构或函数签名。
+2026-10-09 用户批准统一到 `/std`，替代此前已加载 `/api/<LibId>` 与代理共存的特殊冲突检查。`/std` 的配置拒绝由既有 `routes::reserved` 完成，与是否加载 Lib 无关；配置、Lib 变化仍需重启。
 
-Workspace 应用页通过同一 `api_router` 挂载的 `GET /workspace-api/libs` 展示当前已加载的 WASM。目录从既有 Lib 集合及 OpenAPI 派生 id、title、version、description 和完整 API endpoints，按 id 排序；不扫描磁盘、不执行 guest，也不增加成员或独立注册表。目录经过统一 daccess 授权，再核对 Visitor 的名称与 SubjectId 均属于本端 owner；响应使用 no-store，Lib 变化仍需重启。
+2026-10-09 用户要求由宿主统一拼接 WASM 内部 API，页面不写宿主路径。沿用 `api_router` 的清单路径挂载与入站 URI 去前缀；对于已声明 GET/HEAD 的 Lib 根操作，无尾斜杠入口先307跳转到带尾斜杠入口并保留 query，使标准浏览器相对 URL 自动落到当前 Lib 下。不修改其他路径、未声明方法、POST 等操作或响应正文，不增加结构、成员、函数签名或挂载路径注入接口。
+
+Workspace 应用页通过同一 `api_router` 挂载的 `GET /std/workspace-api/libs` 展示当前已加载的 WASM。目录从既有 Lib 集合及 OpenAPI 派生 id、title、version、description 和完整 API endpoints，按 id 排序；不扫描磁盘、不执行 guest，也不增加成员或独立注册表。目录经过统一 daccess 授权，再核对 Visitor 的名称与 SubjectId 均属于本端 owner；响应使用 no-store，Lib 变化仍需重启。
 
 API 列表显示每条操作的描述，按非空 summary、description、成功响应 description 的顺序派生。GET 路径可在新标签页打开；其他方法仅展示，不把根路径自动当作页面或为卡片绑定首页跳转。
 
@@ -294,7 +296,7 @@ proxy 完成路径/query 与 authority 转换后，以 Hyper HTTP/1.1 客户端�
 
 2026-10-08 用户要求修复 WebSocket，以 HA 反代为目标；路由兼容使用前述已加载 Lib 前缀策略。proxy 识别 h3x 原生 `Arc<str>` extension 中的 `:protocol=websocket` 与 CONNECT，将其转换为 HTTP/1.1 GET Upgrade；校验 version=13，为上游生成随机 key，并验证 101 的 Upgrade/Connection/Accept 与所选 subprotocol。成功返回 H3 200，保留协商的 subprotocol/extensions 及普通响应头，移除 HTTP/1.1 升级专用头。拒绝响应保留原非2xx状态和正文；未升级却返回2xx或无效握手返回网关错误。现成 StreamBody/编译器生成的 async 状态直接持有请求 Body 与 Hyper Upgraded，逐块转发不解析 WebSocket 帧；上传每块 flush，上传 EOF 仅结束上游写方向，响应仍可继续。Body Drop、响应 EOF 或任一方向错误释放双向资源，不增加结构、成员、后台隧道任务或取消信号；握手之后没有30秒总时长限制。声明或实际 trailers 的 WebSocket 请求拒绝。
 
-DHTTP 正向代理固定在 `/.pishoo/dhttp/` 前缀，不读取 proxy_locations，不接受本机 HTTP/TCP 目标，也不回退到配置反代。它使用本 Server Endpoint 的凭据；对端看到的是影子身份的证书，不是调用手机的证书。其请求和响应 Body 复用标准适配与流背压，不增加自有传输状态。
+DHTTP 正向代理固定在 `/std/dhttp/` 前缀，不读取 proxy_locations，不接受本机 HTTP/TCP 目标，也不回退到配置反代。它使用本 Server Endpoint 的凭据；对端看到的是影子身份的证书，不是调用手机的证书。其请求和响应 Body 复用标准适配与流背压，不增加自有传输状态。
 
 已有 `pishoo:identity/signatures@0.1.0` 的 sign/verify 保留。StoreData 检查固定输入上限；sign 直接使用 qtls::LocalAuthority 选择 DHTTP 规范签名算法。verify 只使用已验证的 local 或当前握手 remote 公钥；其他身份返回 Unavailable，不发起远端解析。使用 dhttp-home 的 verify_signature，不把私钥或 authority 交给 guest。
 
@@ -380,4 +382,4 @@ pub(crate) fn remove_lib(
 ) -> Result<()>;
 ```
 
-`config_database` 的既有 bool 参数替换为 method/uri；GET/DELETE 代理使用唯一 location query，PATCH 只更新一条规则。`/pishoo` 替换 `/sys` 的保留命名空间，无旧路由别名。Server 的首次及 OCSP 刷新装配均合并 Lib 管理 Router。Sandbox 启动扫描持既有 lib 根目录的共享建议锁；磁盘管理在目录句柄下拒绝符号链接，排他锁内原子提交。编译不实例化 guest，安装不创建数据目录，移除保留数据及授权，修改重启后生效。CLI 使用局部解析值，无新增自有类型、Error 变体或持久状态。
+`config_database` 的既有 bool 参数替换为 method/uri；GET/DELETE 代理使用唯一 location query，PATCH 只更新一条规则。`/std/pishoo` 替换 `/sys` 的保留命名空间，无旧路由别名。Server 的首次及 OCSP 刷新装配均合并 Lib 管理 Router。Sandbox 启动扫描持既有 lib 根目录的共享建议锁；磁盘管理在目录句柄下拒绝符号链接，排他锁内原子提交。编译不实例化 guest，安装不创建数据目录，移除保留数据及授权，修改重启后生效。CLI 使用局部解析值，无新增自有类型、Error 变体或持久状态。

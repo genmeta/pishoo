@@ -151,10 +151,10 @@ async fn run() -> Result<(), Failure> {
         }
         "smoke" => {
             for (path, expected) in [
-                ("/file/hello.txt", "static from demo\n"),
+                ("/std/file/hello.txt", "static from demo\n"),
                 ("/proxy/hello.txt", "static from upstream\n"),
                 ("/exact", "static from upstream\n"),
-                ("/api/info/info", "info Lib handled /info\n"),
+                ("/std/api/info/info", "info Lib handled /info\n"),
             ] {
                 let uri: http::Uri = format!("https://demo.dhttp.net{path}").parse()?;
                 let response = endpoint.get(uri).await?;
@@ -184,7 +184,7 @@ async fn run() -> Result<(), Failure> {
                 let endpoint = endpoint.clone();
                 async move {
                     let (path, expected) = if index % 2 == 0 {
-                        ("/file/hello.txt", "static from demo\n")
+                        ("/std/file/hello.txt", "static from demo\n")
                     } else {
                         ("/proxy/hello.txt", "static from upstream\n")
                     };
@@ -206,7 +206,7 @@ async fn run() -> Result<(), Failure> {
                 }
             }
             println!("HTTP/3 eight concurrent static/proxy streams: 200");
-            let uri: http::Uri = "https://demo.dhttp.net/api/echo/echo".parse()?;
+            let uri: http::Uri = "https://demo.dhttp.net/std/api/echo/echo".parse()?;
             let response =
                 post_bytes(&endpoint, uri.clone(), Bytes::from_static(b"hello h3x")).await?;
             if response.version() != http::Version::HTTP_3
@@ -215,10 +215,10 @@ async fn run() -> Result<(), Failure> {
             {
                 return Err(io::Error::other("POST Echo failed").into());
             }
-            println!("HTTP/3 POST /api/echo/echo: 200");
+            println!("HTTP/3 POST /std/api/echo/echo: 200");
 
             let large = Bytes::from(vec![b'x'; 256 * 1024]);
-            let uri: http::Uri = "https://demo.dhttp.net/api/echo/echo".parse()?;
+            let uri: http::Uri = "https://demo.dhttp.net/std/api/echo/echo".parse()?;
             let response = post_bytes(&endpoint, uri.clone(), large.clone()).await?;
             let echoed =
                 tokio::time::timeout(Duration::from_secs(10), response.into_body().collect())
@@ -229,7 +229,7 @@ async fn run() -> Result<(), Failure> {
             }
             println!("HTTP/3 256 KiB Echo with stream backpressure: 200");
 
-            let trailers_uri: http::Uri = "https://demo.dhttp.net/api/trailers/read".parse()?;
+            let trailers_uri: http::Uri = "https://demo.dhttp.net/std/api/trailers/read".parse()?;
             let response = post_bytes(
                 &endpoint,
                 trailers_uri,
@@ -313,7 +313,7 @@ async fn run() -> Result<(), Failure> {
             tokio::time::timeout(Duration::from_secs(5), response.into_body().collect()).await??;
             println!("HTTP/3 local proxy duplex: each chunk arrived before upload EOF");
 
-            let uri: http::Uri = "https://demo.dhttp.net/api/echo/echo".parse()?;
+            let uri: http::Uri = "https://demo.dhttp.net/std/api/echo/echo".parse()?;
             let (mut upload, response) = endpoint.post(uri).await?;
             let mut response = response.await?;
             upload.write_all(b"abandoned\n").await?;
@@ -322,7 +322,7 @@ async fn run() -> Result<(), Failure> {
                 .ok_or_else(|| io::Error::other("cancel test response ended early"))??;
             drop(response);
             drop(upload);
-            let uri: http::Uri = "https://demo.dhttp.net/file/hello.txt".parse()?;
+            let uri: http::Uri = "https://demo.dhttp.net/std/file/hello.txt".parse()?;
             let follow_up =
                 tokio::time::timeout(Duration::from_secs(5), endpoint.get(uri)).await??;
             if follow_up.status() != http::StatusCode::OK
@@ -474,7 +474,7 @@ async fn run() -> Result<(), Failure> {
         "echo" => {
             let target = args
                 .next()
-                .unwrap_or_else(|| format!("https://{identity}/api/echo/echo"));
+                .unwrap_or_else(|| format!("https://{identity}/std/api/echo/echo"));
             let uri: http::Uri = if target.starts_with('/') {
                 format!("https://{identity}{target}").parse()?
             } else {

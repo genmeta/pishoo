@@ -11,7 +11,7 @@
 - Workspace/Chat 各保留自己的 worker 句柄、唤醒和关闭信号。句柄保证每个资源实例只启动一个 worker；Notify 用于新任务/授权更新后唤醒；关闭信号结束等待。profile_write、contact_write 和 outbound_send 沿用分支的文件/数据库更新与申请操作串行约束，不是请求或传输并发配额。
 - 新增两个 `shutdown(&self)` 方法：发出关闭信号，取出并中止现有 worker，等待句柄结束。Server.close 在现有15秒退出等待内调用它们。运行期间使用同一 Workspace/Chat，身份变更统一重启。
 - 2026-10-03 用户要求接入生产出站，并批准 [dhttp 清单](dhttp-interfaces.md) 的 Request owner_hash 发送前校验与 RemoteIdentityChanged 错误。Workspace/Chat 的 OutboundTransport 均直接由现有 `dhttp::Endpoint` 实现，由 Server.load 用已有 Endpoint 的 clone 装配，不新增生产结构或成员。Workspace 从内存 LocalAuthority 派生发送者身份，从响应中的已验证 RemoteAuthority 提取远端身份；Chat 将已有联系人 SubjectId 解析为 OwnerHash，在实际连接开流前校验。出站保留15秒总期限和1MiB响应上限；请求使用 WndBuf/RequestWriter，发送完显式 shutdown。旧网络测试素材仍保留于 deferred，新验收使用现行 QUIC 接缝。
-- `/std/message` 继续要求 daccess 允许和分支既有的能力决定校验；`/workspace-api/*`、`/chat-api/*` 的本地管理核对 owner。能力请求与普通访问审批分开保存，Pishoo 不另建 daccess 审批状态。
+- `/std/message` 继续要求 daccess 允许和分支既有的能力决定校验；`/std/workspace-api/*`、`/std/chat-api/*` 的本地管理核对 owner。能力请求与普通访问审批分开保存，Pishoo 不另建 daccess 审批状态。
 
 ## 保留的结构与接口
 
@@ -850,7 +850,7 @@ pub(crate) struct CapabilityState {
     pub(crate) can_send: bool,
     pub(crate) can_receive: bool,
     /// Most recently observed permission on the remote profile. `None` means
-    /// that this profile has not observed a `/contact/self` response yet.
+    /// that this profile has not observed a `/std/contact/self` response yet.
     pub(crate) remote_grant: Option<bool>,
     pub(crate) endpoints: &'static [super::capabilities::CapabilityEndpoint],
 }

@@ -218,7 +218,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
     access
         .set_policy(
             AccessMethod::Specified(http::Method::POST),
-            "/contact",
+            "/std/contact",
             Effect::Allow,
             Grantee::All,
         )
@@ -294,7 +294,7 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
     ] {
         let mut request = Request::builder()
             .method(http::Method::POST)
-            .uri("/workspace-api/contact-requests")
+            .uri("/std/workspace-api/contact-requests")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 r#"{"target_name":"receiver.dhttp.net","description":"Hello","requested_capabilities":["chat"],"offered_capabilities":["chat"]}"#,
@@ -310,20 +310,27 @@ async fn two_profiles_send_over_real_dhttp_mtls_to_the_same_remote() -> TestResu
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let mut check = Request::builder()
-                    .uri(format!("/workspace-api/contact-requests/{id}"))
-                    .body(Body::empty()).expect("valid status request");
+                    .uri(format!("/std/workspace-api/contact-requests/{id}"))
+                    .body(Body::empty())
+                    .expect("valid status request");
                 check.extensions_mut().insert(visitor.clone());
                 let response = app.clone().oneshot(check).await.expect("status response");
                 let checked: serde_json::Value = serde_json::from_slice(
-                    &to_bytes(response.into_body(), 16_384).await.expect("status body")
-                ).expect("valid status JSON");
-                if checked["status"] == "pending" { break; }
+                    &to_bytes(response.into_body(), 16_384)
+                        .await
+                        .expect("status body"),
+                )
+                .expect("valid status JSON");
+                if checked["status"] == "pending" {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await?;
+        })
+        .await?;
 
         let mut profile = Request::builder()
-            .uri("/workspace-api/profiles/receiver.dhttp.net")
+            .uri("/std/workspace-api/profiles/receiver.dhttp.net")
             .body(Body::empty())?;
         profile.extensions_mut().insert(visitor.clone());
         let response = app.clone().oneshot(profile).await?;

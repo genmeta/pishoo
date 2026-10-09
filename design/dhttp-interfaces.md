@@ -1,5 +1,7 @@
 # dhttp 第一版结构与接口清单
 
+2026-10-09 用户批准 Endpoint.quic 替换为 Endpoint.identity，直接持有 qbase 的内存身份，现有公开方法签名不变。适配本地 QuicEndpoint::from/anonymous/set_alpn/listen，使用新的参数默认值；用户明确采用新 dquic 的严格客户端 OCSP 要求，不恢复旧宽松接缝。
+
 2026-10-09 QPACK 反馈修复例外：用户批准 h3x Decoder 的私有反馈队列、reported_insert_count、take_feedback 及对应私有写出接缝调整，详见 [冻结基线](README.md)。h3x 公开接口及本文的 dhttp 结构、成员、签名不变。
 
 本清单定义当前设计；遵循[清单约束](README.md)。h3x 的既定接口、结构和协议行为保持不变。DHTTP 只封装 Endpoint、共享网络、连接复用、应用接入与流适配，不增加传输配额、交换控制、完成订阅或错误缓存。
@@ -10,7 +12,7 @@
 
 2026-10-04 用户要求临时允许所有远端服务域名缺少 OCSP staple。qtls 在完整证书链、域名和有效期验证后，仅对已提供的 staple 执行 OCSP 绑定、签名、时效和撤销状态验证；握手签名仍验证。不增加类型、成员、跨模块接口或配置开关。本地身份的 OCSP 持有和加载规则不变。
 
-- Endpoint 持已加载的 `Arc<qconn::QuicEndpoint>`，独立 load 不访问 Network；签名与 QUIC 共用内存凭据。
+- Endpoint 持已加载的 `Arc<qbase::endpoint::Endpoint>`，独立 load 不访问 Network；签名与 QUIC 共用内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint。同名句柄不区分 load 次数，经 Network 使用同一个本端身份连接池。
 - Network 通过幂等 init 在进程内装配一次；准备全部可用网卡并监听变化，负责连接复用与服务登记。
 - Endpoint 不提供 close 或 stop_listening；同名出站请求继续复用连接。
@@ -78,7 +80,7 @@ Error 复用现有错误类型；失败通过 Result、流错误或任务返回�
 
 ```rust
 #[derive(Clone)]
-pub struct Endpoint { pub(crate) quic: Arc<qconn::QuicEndpoint> }
+pub struct Endpoint { pub(crate) identity: Arc<qbase::endpoint::Endpoint> }
 impl Endpoint {
     pub async fn load(name: impl AsRef<str>) -> Result<Self>;
     pub async fn reload(&self) -> Result<Self>;
@@ -210,7 +212,7 @@ impl QuicTransport {
 }
 ```
 
-构造时校验实际 ALPN 为 h3，随后直接调用已有 H3Connection::new。qconn 两端使用全局默认 h3 ALPN，QuicEndpoint.identity/new 接受 Option<Arc<qbase::endpoint::Endpoint>>；匿名 connect 省略本地证书，listen 仍要求本端身份。角色来自 connect/listen 接入路径，HandshakeSummary 保留实际本端/对端身份和协商结果。
+构造时校验实际 ALPN 为 h3，随后直接调用已有 H3Connection::new。dhttp 直接保存必填的 qbase 身份；建连/监听时使用局部 QuicEndpoint::from，匿名出站使用 QuicEndpoint::anonymous。参数采用新 dquic 的默认值，ALPN 使用现有 set_alpn 明确配置 h3。匿名 connect 省略本地证书，listen 仍要求本端身份。角色来自 connect/listen 接入路径，HandshakeSummary 保留实际本端/对端身份和协商结果。
 
 Transport/AsyncRead/AsyncWrite/StopSending/CancelStream/TransportError 继续转接原生连接和流。装配失败沿用既有连接 Drop 语义；无 Service 时对请求流同时 stop/cancel，连接上的其他交换继续。
 
@@ -246,7 +248,7 @@ dhttp 的读写等待由流背压、EOF、错误和取消推进，不给开流�
 
 没有 OwnerKey、Phase、NetworkState、ListenerPhase、ServiceAdapter、ListenGuard、ShutdownReport、ExchangeLease 或精细关闭计数。保留 Endpoint、Request、ConnectionKey、DhttpNetwork、QuicTransport、RecvStream、SendStream。Error 沿用现有类型。
 
-2026-10-03 用户批准 DNS 接缝：确认上述现行 Endpoint.quic；local_authority 从它的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不缓存、不访问 Network。Endpoint.listen/Network.listen 返回已登记的 ListenFuture；调用方先 await 登记再 spawn 生命周期，登记失败不启动发布。Network 成员不变。相邻 qprotocol 的 AddressBook 新增 `pub fn inner_bindings(&self) -> Vec<(SocketAddr, qudp::BoundDevice)>`，只派生有有效 Internal 地址、端口和现有网卡元数据的实际绑定，按 bound 去重并排除 Loopback；不增加成员。完整跨仓 DNS 差异见 [DNS 设计](pishoo-dns-detailed-design.md)。
+2026-10-03 用户批准 DNS 接缝；2026-10-09 将其资源归属调整为上述 Endpoint.identity。local_authority 从它的名称、证书、signing_key 和 OCSP 构造现成 LocalAuthority，不读磁盘、不缓存、不访问 Network。Endpoint.listen/Network.listen 返回已登记的 ListenFuture；调用方先 await 登记再 spawn 生命周期，登记失败不启动发布。Network 成员不变。相邻 qprotocol 的 AddressBook 新增 `pub fn inner_bindings(&self) -> Vec<(SocketAddr, qudp::BoundDevice)>`，只派生有有效 Internal 地址、端口和现有网卡元数据的实际绑定，按 bound 去重并排除 Loopback；不增加成员。完整跨仓 DNS 差异见 [DNS 设计](pishoo-dns-detailed-design.md)。
 
 2026-10-03 用户要求普通启动自动接入 NAT，并批准为既有私有 Binding 增加 `nat_probe: futures::stream::BoxStream<'static, std::io::Result<(qbase::net::NatType, std::net::SocketAddr, std::net::SocketAddr)>>`。该流由唯一 Network 维护任务轮询，先在新 socket 上进行一次 NAT 分类，再每20秒向同地址族 STUN 节点发送绑定心跳维护映射；Loopback/IPv6 link-local 不探测。映射变化时更新 QUIC 直接/中介别名与 AddressBook，失败映射撤回并在后续心跳重试。绑定撤回时丢弃流和未完成 transaction，不建立独立探测任务或第二份绑定表。DhttpNetwork、Endpoint 和 h3x 成员不变，初始化仍不等待 STUN。
 

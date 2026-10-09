@@ -1,10 +1,10 @@
 # Pishoo 管理命令与 API 详细设计
 
-日期：2026-10-08。状态：2026-10-08 用户已要求按本文实施。
+日期：2026-10-09。状态：管理命令已实施，系统 HTTP 路径按用户要求统一到 `/std`。
 
 Pishoo 统一提供配置、Lib 安装移除和本机服务管理命令。配置与 Lib 操作属于指定身份的 Server；服务启停属于整个 Pishoo 进程。每个资源操作均给出对应 API，本机服务操作对应系统服务管理器接口。
 
-管理 API 统一使用 `/pishoo` 前缀，与 `pishoo` 命令名称一致。现有实现中的 `/sys/settings` 和 `/sys/proxies` 在实施时迁移为 `/pishoo/settings` 和 `/pishoo/proxies`；本文后续表格和示例均使用目标路径，不能据此认为新路径已经上线。
+管理 API 统一使用 `/std/pishoo` 前缀；配置入口为 `/std/pishoo/settings` 和 `/std/pishoo/proxies`。旧 `/sys`、`/pishoo` 不提供系统兼容别名。本文表格和示例使用当前路径，完整映射及升级注意事项见 [系统路径](system-paths.md)。
 
 本文第九节的具体契约变更已由用户的实现请求批准并纳入冻结清单；实现结果以测试及实施记录为准。现有行为以 [设计入口](../../design/README.md)、[Pishoo 冻结接口](../../design/pishoo-interfaces.md)和[配置 API](config-api.md)为准。新增 HTTP 路由及所需跨模块函数列于第九节，并已按本次请求纳入冻结清单。
 
@@ -66,20 +66,20 @@ Pishoo 只读取这个默认选择，不创建、修改或迁移 `settings.toml`
 
 | 操作 | 命令示例 | 对应 API | API 状态 |
 | --- | --- | --- | --- |
-| 查看监听设置 | `pishoo listen --id alice.smith` | `GET /pishoo/settings` | 现有能力迁移路径 |
-| 修改监听范围 | `pishoo listen --id alice.smith internal` | `PATCH /pishoo/settings` | 现有能力迁移路径 |
-| 查看全部代理 | `pishoo proxy --id alice.smith` | `GET /pishoo/proxies` | 现有能力迁移路径 |
-| 查看单条代理 | `pishoo proxy --id alice.smith /test` | `GET /pishoo/proxies?location=%2Ftest` | 迁移路径并新增查询语义 |
-| 添加或更新代理 | `pishoo proxy --id alice.smith /test 127.0.0.1:8080` | `PATCH /pishoo/proxies` | 新增 |
-| 删除单条代理 | `pishoo proxy --id alice.smith remove /test` | `DELETE /pishoo/proxies?location=%2Ftest` | 新增 |
-| 清空全部代理 | `pishoo proxy --id alice.smith clear` | `PUT /pishoo/proxies`，请求体 `[]` | 现有能力迁移路径 |
-| 替换全部代理 | `pishoo proxy --id alice.smith replace ./proxies.json` | `PUT /pishoo/proxies`，请求体为完整数组 | 现有能力迁移路径 |
-| 列出磁盘上的 Lib | `pishoo lib --id alice.smith` | `GET /pishoo/libs` | 新增 |
-| 查看磁盘上的单个 Lib | `pishoo lib --id alice.smith info note` | `GET /pishoo/libs/note` | 新增 |
-| 查看当前已加载的 Lib | `pishoo lib --id alice.smith --loaded` | `GET /workspace-api/libs` | 已有 HTTP API；本命令需要在线请求 |
-| 安装或更新 Lib | `pishoo lib --id alice.smith install note ./note.wasm` | `PUT /pishoo/libs/note` | 新增 |
-| 移除 Lib | `pishoo lib --id alice.smith remove note` | `DELETE /pishoo/libs/note` | 新增 |
-| 校验本地 WASM 文件 | `pishoo lib check ./note.wasm` | `POST /pishoo/lib-check` | 新增；本机校验不需要身份 |
+| 查看监听设置 | `pishoo listen --id alice.smith` | `GET /std/pishoo/settings` | 现有能力迁移路径 |
+| 修改监听范围 | `pishoo listen --id alice.smith internal` | `PATCH /std/pishoo/settings` | 现有能力迁移路径 |
+| 查看全部代理 | `pishoo proxy --id alice.smith` | `GET /std/pishoo/proxies` | 现有能力迁移路径 |
+| 查看单条代理 | `pishoo proxy --id alice.smith /test` | `GET /std/pishoo/proxies?location=%2Ftest` | 迁移路径并新增查询语义 |
+| 添加或更新代理 | `pishoo proxy --id alice.smith /test 127.0.0.1:8080` | `PATCH /std/pishoo/proxies` | 新增 |
+| 删除单条代理 | `pishoo proxy --id alice.smith remove /test` | `DELETE /std/pishoo/proxies?location=%2Ftest` | 新增 |
+| 清空全部代理 | `pishoo proxy --id alice.smith clear` | `PUT /std/pishoo/proxies`，请求体 `[]` | 现有能力迁移路径 |
+| 替换全部代理 | `pishoo proxy --id alice.smith replace ./proxies.json` | `PUT /std/pishoo/proxies`，请求体为完整数组 | 现有能力迁移路径 |
+| 列出磁盘上的 Lib | `pishoo lib --id alice.smith` | `GET /std/pishoo/libs` | 新增 |
+| 查看磁盘上的单个 Lib | `pishoo lib --id alice.smith info note` | `GET /std/pishoo/libs/note` | 新增 |
+| 查看当前已加载的 Lib | `pishoo lib --id alice.smith --loaded` | `GET /std/workspace-api/libs` | 已有 HTTP API；本命令需要在线请求 |
+| 安装或更新 Lib | `pishoo lib --id alice.smith install note ./note.wasm` | `PUT /std/pishoo/libs/note` | 新增 |
+| 移除 Lib | `pishoo lib --id alice.smith remove note` | `DELETE /std/pishoo/libs/note` | 新增 |
+| 校验本地 WASM 文件 | `pishoo lib check ./note.wasm` | `POST /std/pishoo/lib-check` | 新增；本机校验不需要身份 |
 | 前台运行 | `pishoo` | 进程入口，调用现有 `run()` | 已有进程入口 |
 | 启动服务 | `pishoo start` | 系统服务管理器的启动操作 | 新增命令，无 Pishoo HTTP API |
 | 停止服务 | `pishoo stop` | 系统服务管理器的停止操作 | 新增命令，无 Pishoo HTTP API |
@@ -92,7 +92,7 @@ Pishoo 只读取这个默认选择，不创建、修改或迁移 `settings.toml`
 
 ### 身份与权限
 
-所有新增 `/pishoo` 请求先经过现有 daccess 授权，再核对可信 Visitor 的名称与 SubjectId：须与 Server Endpoint 同名且 owner_hash 相同。即使 ACL 允许，匿名、其他名称和同名不同 owner 的请求仍返回403。请求头不能声明可信身份。
+所有新增 `/std/pishoo` 请求先经过现有 daccess 授权，再核对可信 Visitor 的名称与 SubjectId：须与 Server Endpoint 同名且 owner_hash 相同。即使 ACL 允许，匿名、其他名称和同名不同 owner 的请求仍返回403。请求头不能声明可信身份。
 
 HTTP API 不承诺仅本地网络可访问。其可达范围仍取决于 Server 的监听配置；权限来自经过验证的身份。
 
@@ -104,7 +104,7 @@ JSON 写入要求 `Content-Type: application/json`，允许 charset，最多64 K
 
 Lib 标识必须符合现有规则：长度1至63字节，以小写 ASCII 字母开头，后续仅允许小写字母、数字、连字符。直接使用现有名称，不能包含路径分隔符、点号或百分号；路径解码后再校验。
 
-`/pishoo/lib-check` 单独放在集合外，避免与合法 Lib 标识 `check` 的资源路径冲突。
+`/std/pishoo/lib-check` 单独放在集合外，避免与合法 Lib 标识 `check` 的资源路径冲突。
 
 ### 返回值与错误
 
@@ -126,7 +126,7 @@ Lib 标识必须符合现有规则：长度1至63字节，以小写 ASCII 字母
 
 请求中断或响应丢失不代表写入一定未提交。客户端通过 GET 核实磁盘或数据库结果；不返回“正在安装”的202，也没有任务状态查询。
 
-新增路由的 Allow 分别为：`/pishoo/proxies` 使用 GET、PUT、PATCH、DELETE；`/pishoo/libs` 使用 GET；`/pishoo/libs/{id}` 使用 GET、PUT、DELETE；`/pishoo/lib-check` 使用 POST。未知 query 参数返回400；仅代理 GET/DELETE 允许本文定义的 location 参数。GET 和 DELETE 不接受非空 Body。`/pishoo/settings` 沿用现有设置 API 的方法与响应约定。
+新增路由的 Allow 分别为：`/std/pishoo/proxies` 使用 GET、PUT、PATCH、DELETE；`/std/pishoo/libs` 使用 GET；`/std/pishoo/libs/{id}` 使用 GET、PUT、DELETE；`/std/pishoo/lib-check` 使用 POST。未知 query 参数返回400；仅代理 GET/DELETE 允许本文定义的 location 参数。GET 和 DELETE 不接受非空 Body。`/std/pishoo/settings` 沿用现有设置 API 的方法与响应约定。
 
 ## 四 监听设置
 
@@ -136,7 +136,7 @@ Lib 标识必须符合现有规则：长度1至63字节，以小写 ASCII 字母
 pishoo listen --id alice.smith
 ```
 
-对应 `GET /pishoo/settings`，返回：
+对应 `GET /std/pishoo/settings`，返回：
 
 ```json
 {"listen":3}
@@ -155,7 +155,7 @@ pishoo listen --id alice.smith both
 
 同时接受数字 `0`、`1`、`2`、`3`，分别对应上述四个名称。CLI 先解析成现有 `u8` 值，无效输入在开始写操作前拒绝。
 
-对应 `PATCH /pishoo/settings`：
+对应 `PATCH /std/pishoo/settings`：
 
 ```json
 {"listen":1}
@@ -169,7 +169,7 @@ pishoo listen --id alice.smith both
 
 ### 查询规则
 
-无参数、`list` 或 `ls` 对应 `GET /pishoo/proxies`，返回完整数组，按 location 排序。
+无参数、`list` 或 `ls` 对应 `GET /std/pishoo/proxies`，返回完整数组，按 location 排序。
 
 ```json
 [
@@ -177,7 +177,7 @@ pishoo listen --id alice.smith both
 ]
 ```
 
-提供一个 location 对应 `GET /pishoo/proxies?location=...`，返回单个对象；未找到返回404。query 必须恰好出现一次 location，未知或重复参数返回400。保留无 query 的既有全表行为。
+提供一个 location 对应 `GET /std/pishoo/proxies?location=...`，返回单个对象；未找到返回404。query 必须恰好出现一次 location，未知或重复参数返回400。保留无 query 的既有全表行为。
 
 精确匹配的位置沿用 `= /test`：
 
@@ -185,7 +185,7 @@ pishoo listen --id alice.smith both
 pishoo proxy --id alice.smith '= /test'
 ```
 
-对应 `GET /pishoo/proxies?location=%3D%20%2Ftest`。以 query 表达 location，避免把包含斜杠和空格的配置键放进路由参数。
+对应 `GET /std/pishoo/proxies?location=%3D%20%2Ftest`。以 query 表达 location，避免把包含斜杠和空格的配置键放进路由参数。
 
 ### 添加与更新规则
 
@@ -194,7 +194,7 @@ pishoo proxy --id alice.smith /test 127.0.0.1:8080
 pishoo proxy --id alice.smith /test http://127.0.0.1:8080/api/
 ```
 
-对应新增 `PATCH /pishoo/proxies`，请求必须且只能包含两个字符串字段：
+对应新增 `PATCH /std/pishoo/proxies`，请求必须且只能包含两个字符串字段：
 
 ```json
 {"location":"/test","proxy_pass":"http://127.0.0.1:8080"}
@@ -215,7 +215,7 @@ pishoo proxy --id alice.smith remove /test
 pishoo proxy --id alice.smith rm '= /test'
 ```
 
-对应 `DELETE /pishoo/proxies?location=...`。必须提供恰好一个 location，不带参数返回400，不能意外变成清空操作。事务内删除准确的唯一键；已不存在也返回204，不接受模式匹配或批量路径表达式。
+对应 `DELETE /std/pishoo/proxies?location=...`。必须提供恰好一个 location，不带参数返回400，不能意外变成清空操作。事务内删除准确的唯一键；已不存在也返回204，不接受模式匹配或批量路径表达式。
 
 ### 清空与整表替换
 
@@ -224,7 +224,7 @@ pishoo proxy --id alice.smith clear
 pishoo proxy --id alice.smith replace ./proxies.json
 ```
 
-两者对应 `PUT /pishoo/proxies`，复用现有整表替换行为。clear 使用 `[]`；replace 从文件读取完整 JSON 数组，遵守64 KiB上限。全部输入验证成功后在一个事务内替换列表，返回保存后的完整数组。
+两者对应 `PUT /std/pishoo/proxies`，复用现有整表替换行为。clear 使用 `[]`；replace 从文件读取完整 JSON 数组，遵守64 KiB上限。全部输入验证成功后在一个事务内替换列表，返回保存后的完整数组。
 
 PUT 表达明确的整表覆盖，不自动合并并发更新，不引入 revision、ETag 列或配置历史。并发单条修改通过事务串行提交；并发整表覆盖按提交顺序生效。
 
@@ -236,7 +236,7 @@ PUT 表达明确的整表覆盖，不自动合并并发更新，不引入 revisi
 
 每个组件固定存放在 `<身份目录>/lib/<LibId>/lib.wasm`。数据位于 `<身份目录>/db/<LibId>/`，二者职责独立。组件清单中的 title 和 version 是显示信息；资源身份由目录名 LibId 决定，不由文件 basename 或 title 推导。
 
-磁盘 API `/pishoo/libs` 展示下次启动要加载的组件；已有 `/workspace-api/libs` 展示当前进程已加载的组件。两者不承诺一致。不添加“待生效”持久字段、Lib 摘要、版本登记表或新的运行状态容器，也不根据 title/version 相同就推断文件相同。
+磁盘 API `/std/pishoo/libs` 展示下次启动要加载的组件；已有 `/std/workspace-api/libs` 展示当前进程已加载的组件。两者不承诺一致。不添加“待生效”持久字段、Lib 摘要、版本登记表或新的运行状态容器，也不根据 title/version 相同就推断文件相同。
 
 ### 列表与详情
 
@@ -246,7 +246,7 @@ pishoo lib --id alice.smith list
 pishoo lib --id alice.smith info note
 ```
 
-分别对应 `GET /pishoo/libs` 和 `GET /pishoo/libs/note`。有效条目的字段沿用现有已加载目录的形状：
+分别对应 `GET /std/pishoo/libs` 和 `GET /std/pishoo/libs/note`。有效条目的字段沿用现有已加载目录的形状：
 
 ```json
 {
@@ -254,7 +254,7 @@ pishoo lib --id alice.smith info note
   "title":"Note",
   "version":"1.0.0",
   "description":"个人便签",
-  "endpoints":[{"method":"GET","path":"/api/note/","description":"打开便签"}]
+  "endpoints":[{"method":"GET","path":"/std/api/note/","description":"打开便签"}]
 }
 ```
 
@@ -274,7 +274,7 @@ pishoo lib --id alice.smith info note
 pishoo lib --id alice.smith --loaded
 ```
 
-这一命令明确使用同名身份加载客户端 Endpoint，调用该身份的 `GET /workspace-api/libs`。保留已有 owner 校验和响应数组。此操作读取运行进程，服务不可达时返回错误，不退回磁盘列表冒充运行结果。
+这一命令明确使用同名身份加载客户端 Endpoint，调用该身份的 `GET /std/workspace-api/libs`。保留已有 owner 校验和响应数组。此操作读取运行进程，服务不可达时返回错误，不退回磁盘列表冒充运行结果。
 
 为保证查询本机正在运行的目标，第一版命令仅在所选身份可连接时提供这项在线查询；HTTP API 的目标仍是实际建立连接的身份服务，不把连接成功等同于系统服务管理器确认某个 PID。输出明确标注“Catalog:    loaded (running service)”，磁盘列表标注“Catalog:    installed (disk)”。
 
@@ -284,7 +284,7 @@ pishoo lib --id alice.smith --loaded
 pishoo lib --id alice.smith install note ./note.wasm
 ```
 
-对应 `PUT /pishoo/libs/note`：
+对应 `PUT /std/pishoo/libs/note`：
 
 ```http
 Content-Type: application/wasm
@@ -312,7 +312,7 @@ pishoo lib --id alice.smith remove note
 pishoo lib --id alice.smith rm note
 ```
 
-对应 `DELETE /pishoo/libs/note`，无 Body。文件修改锁下检查目录，将 `lib/note` 原子移出扫描根，再清理本次调用的临时目录，成功返回204。目标不存在也返回204。
+对应 `DELETE /std/pishoo/libs/note`，无 Body。文件修改锁下检查目录，将 `lib/note` 原子移出扫描根，再清理本次调用的临时目录，成功返回204。目标不存在也返回204。
 
 操作仅处理组件目录，保留 `db/note/`，不提供自动清库或 purge 参数。已有 daccess 规则也保持不变；安装和移除都不创建、删除或自动授权 API 规则。
 
@@ -326,7 +326,7 @@ pishoo lib check ./note.wasm
 
 本机 check 不需要身份和配置库。与安装相同，执行 `validate_lib` 和当前宿主 `WasmRuntime::compile`，返回 title、version、description 和组件内声明的接口；不创建数据目录，不执行 guest，不检查业务逻辑或已有数据库兼容性。
 
-对应 HTTP 能力为 `POST /pishoo/lib-check`，Body 和大小限制与安装相同，要求同名 owner 权限。成功返回200：
+对应 HTTP 能力为 `POST /std/pishoo/lib-check`，Body 和大小限制与安装相同，要求同名 owner 权限。成功返回200：
 
 ```json
 {
@@ -337,7 +337,7 @@ pishoo lib check ./note.wasm
 }
 ```
 
-check 尚未指定 LibId，接口路径因此是组件内路径，不构造 `/api/<id>`；失败返回400或基础设施故障500。远端 check 检查的是服务端宿主版本，本机 check 检查的是当前二进制版本。
+check 尚未指定 LibId，接口路径因此是组件内路径，不构造 `/std/api/<id>`；失败返回400或基础设施故障500。远端 check 检查的是服务端宿主版本，本机 check 检查的是当前二进制版本。
 
 ### 并发与文件完整性
 
@@ -400,7 +400,7 @@ pishoo lib --id alice.smith remove note
 pishoo restart
 ```
 
-HTTP 客户端顺序对应：PATCH `/pishoo/proxies` → POST `/pishoo/lib-check` → PUT `/pishoo/libs/note` → 在目标机器上执行服务重启 → GET `/workspace-api/libs`。HTTP 客户端不拥有本机管理器调用权限时，保存后由目标机器上的运维操作完成重启。
+HTTP 客户端顺序对应：PATCH `/std/pishoo/proxies` → POST `/std/pishoo/lib-check` → PUT `/std/pishoo/libs/note` → 在目标机器上执行服务重启 → GET `/std/workspace-api/libs`。HTTP 客户端不拥有本机管理器调用权限时，保存后由目标机器上的运维操作完成重启。
 
 ## 九 冻结契约变更提案
 
@@ -408,16 +408,16 @@ HTTP 客户端顺序对应：PATCH `/pishoo/proxies` → POST `/pishoo/lib-check
 
 ### 管理命名空间迁移
 
-配置路由、示例客户端、配置 API 文档及相关测试统一切换到 `/pishoo`。本设计不为旧 `/sys` 路径增加兼容别名或重定向；发布新版本时客户端须一同更新。现有 `/.pishoo/dhttp/` 正向代理路径属于已经冻结的独立接口，不随本次配置管理前缀调整。
+配置路由、示例客户端、配置 API 文档及相关测试统一切换到 `/std/pishoo`。本设计不为旧 `/sys` 路径增加兼容别名或重定向；发布新版本时客户端须一同更新。DHTTP 正向代理同步迁入 `/std/dhttp/`，不保留旧入口。
 
-`/pishoo` 根路径及其子路径成为管理保留命名空间，代理和 Lib 声明不能占用；`/pishoo-extra` 不受该路径段前缀影响。实施前检查既有代理配置和 Lib 清单是否占用 `/pishoo`；发现冲突直接报告，保留原始数据，不自动删除或改写规则。旧 `/sys` 前缀从管理保留路径列表移除。
+`/std` 根路径及其子路径成为唯一系统保留命名空间，显式代理和 Lib 清单不能占用；`/std-extra` 不受该路径段前缀影响。加载时检查既有代理配置和 Lib 清单是否占用 `/std`；发现冲突直接报告，保留原始数据，不自动删除或改写规则。旧顶层系统前缀从保留路径列表移除。
 
 ### 路由行为
 
 | 现有接缝 | 已批准变更 |
 | --- | --- |
-| `setup::config_router(profile, endpoint)` | 保持签名；配置路由迁入 `/pishoo/settings` 与 `/pishoo/proxies`，增加代理 GET 的 location 查询、PATCH 单条更新和 DELETE 单条删除 |
-| `routes::reserved(path)` | 管理保留前缀由 `/sys` 改为 `/pishoo`，检查根路径及路径段前缀；新增 Lib 管理路由均在该命名空间内，保持函数签名 |
+| `setup::config_router(profile, endpoint)` | 保持签名；配置路由迁入 `/std/pishoo/settings` 与 `/std/pishoo/proxies`，增加代理 GET 的 location 查询、PATCH 单条更新和 DELETE 单条删除 |
+| `routes::reserved(path)` | 保留检查统一为 `/std`，旧 `/sys`、`/pishoo` 释放给代理，检查根路径及路径段前缀；新增 Lib 管理路由均在该命名空间内，保持函数签名 |
 | `Server.load` 与 OCSP 刷新后的 Router 装配 | 挂载 Lib 管理 Router，捕获已有 profile、Endpoint、Sandbox.runtime 的克隆；不增加 Server 成员 |
 | `Sandbox::load_libs` | 方法体增加局部共享文件锁，保持签名、串行加载、失败处理及启动规则 |
 | `main` | 无参数沿用运行入口；带命令调用新命令入口，管理命令不进入 Server 启动循环 |
@@ -487,7 +487,7 @@ gmutils 的 `identity ensite/dissite` 仍使用旧 server.conf 和 reload 提示
 | 默认身份有效、缺失、无效或文件损坏 | 按规定选择或立即失败，不修改其他身份 |
 | 服务停止或 listen=0 | 本机配置、安装和移除仍可使用；在线运行目录查询明确失败 |
 | HTTP ACL 放行但身份不符 | 所有新增管理 API 仍拒绝 |
-| 管理路径迁移和保留前缀 | `/pishoo` 路由可用；旧 `/sys` 无管理别名；配置冲突被报告；`/pishoo-extra` 可作为普通路径 |
+| 管理路径迁移和保留前缀 | `/std/pishoo` 路由可用；旧 `/sys` 无管理别名；配置冲突被报告；`/pishoo-extra` 可作为普通路径 |
 | 代理 PATCH 与另一个 location 的 PATCH 并发 | 两条修改均保留，不以整表覆盖实现 |
 | 重复删除和无参数 DELETE | 前者204；后者400，不清空全表 |
 | URI 未写路径与显式 / 路径 | 保存、读取与重启后的转发语义保持区别 |

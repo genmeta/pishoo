@@ -135,7 +135,7 @@ impl Sandbox {
                     let tail = request
                         .uri()
                         .path()
-                        .strip_prefix("/api/")
+                        .strip_prefix("/std/api/")
                         .ok_or(Error::RouteNotFound)?;
                     let (id, suffix) = tail
                         .split_once('/')
@@ -153,6 +153,20 @@ impl Sandbox {
                         .any(|(method, _)| method == *request.method())
                     {
                         return Err(Error::MethodNotAllowed);
+                    }
+                    // Canonicalize only declared page roots so browser-relative
+                    // URLs stay inside this Lib's mount, regardless of its name.
+                    if !tail.contains('/')
+                        && (request.method() == http::Method::GET
+                            || request.method() == http::Method::HEAD)
+                    {
+                        let location = match request.uri().query() {
+                            Some(query) => format!("{}/?{query}", request.uri().path()),
+                            None => format!("{}/", request.uri().path()),
+                        };
+                        return Ok(axum::response::IntoResponse::into_response(
+                            axum::response::Redirect::temporary(&location),
+                        ));
                     }
                     let handshake = request
                         .extensions()
@@ -180,11 +194,11 @@ impl Sandbox {
                 result.unwrap_or_else(reject_api)
             }
         });
-        // Own every method inside loaded Lib prefixes. Other /api paths retain
-        // the enclosing Server's proxy fallback, including when no Lib is loaded.
-        let mut router = axum::Router::new().route("/workspace-api/libs", catalog);
+        // Own every method inside loaded Lib prefixes. The enclosing Server
+        // rejects all other /std paths before its ordinary proxy fallback.
+        let mut router = axum::Router::new().route("/std/workspace-api/libs", catalog);
         for id in self.libs.keys() {
-            let prefix = format!("/api/{id}");
+            let prefix = format!("/std/api/{id}");
             router = router
                 .route(&prefix, api.clone())
                 .route(&format!("{prefix}/"), api.clone())
@@ -268,7 +282,7 @@ fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::
                                     .filter(|text| !text.trim().is_empty())
                             })
                     });
-                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/api/{id}{path}")), "description":description}));
+                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/std/api/{id}{path}")), "description":description}));
             }
         }
     }
@@ -327,9 +341,9 @@ pub(crate) fn lib_management_router(
         }
     };
     axum::Router::new()
-        .route("/pishoo/libs", any(handler.clone()))
-        .route("/pishoo/libs/{id}", any(handler.clone()))
-        .route("/pishoo/lib-check", any(handler))
+        .route("/std/pishoo/libs", any(handler.clone()))
+        .route("/std/pishoo/libs/{id}", any(handler.clone()))
+        .route("/std/pishoo/lib-check", any(handler))
 }
 
 async fn lib_management_request(
@@ -366,9 +380,9 @@ async fn lib_management_request(
         }
     }
     let path = request.uri().path();
-    let checking = path == "/pishoo/lib-check";
+    let checking = path == "/std/pishoo/lib-check";
     let id = path
-        .strip_prefix("/pishoo/libs/")
+        .strip_prefix("/std/pishoo/libs/")
         .map(|id| {
             percent_encoding::percent_decode_str(id)
                 .decode_utf8()

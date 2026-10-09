@@ -1,5 +1,13 @@
 # 三仓第一版设计清单
 
+2026-10-09 用户明确选择采用本地新 dquic 的严格客户端 OCSP 要求：dhttp 使用现有 QuicEndpoint::listen，不恢复旧 optional-client-OCSP 入口，不增加 dquic 的注册或身份读取接口。具名客户端必须提交有效 OCSP；匿名客户端仍按现有匿名身份与授权规则处理。此决定替代旧的客户端 OCSP 兼容行为。
+
+2026-10-09 用户批准适配本地新 dquic，将 dhttp::Endpoint 唯一冻结字段 `quic: Arc<qconn::QuicEndpoint>` 替换为 `identity: Arc<qbase::endpoint::Endpoint>`。名称、签名和 OCSP 直接读取同一份已加载内存身份；建连、监听及重载在方法内用现成 QuicEndpoint 构造局部资源。公开方法签名、按名称连接复用与监听生命周期保持，不增加身份读取 API、重复凭据、结构或字段。
+
+2026-10-09 用户要求宿主统一挂载 WASM 内部 API，页面不写宿主前缀。Sandbox 沿用清单路径拼接和入站去前缀；已声明 GET/HEAD 的无尾斜杠 Lib 根入口307跳转到带尾斜杠入口并保留 query，使所有 Lib 页面都能使用标准相对 URL。其他方法和路径保持原语义，不增加结构、字段或函数签名。
+
+2026-10-09 用户批准系统 HTTP 路径统一到 `/std`：daccess 管理、Workspace 页面及 API、Chat 管理、Pishoo 配置/Lib 管理、DHTTP 正向代理、静态文件和 Lib 执行全部位于该命名空间。仅 `/std` 及其路径段子路径保留；旧顶层路径交给普通代理，不提供系统兼容别名或重定向。磁盘 `file/` 目录保持，HTTP 入口改为 `/std/file/*`；删除 `/file` 代理覆盖、配置豁免及按已加载 Lib 检查旧 `/api` 代理冲突的逻辑。daccess 同步路由、状态 URL、拉黑规则和管理员保护，结构、字段和函数签名不变。此决定替代下方早前的 `/file` 覆盖与 `/api` 共存方案。已有 ACL 不自动改写，迁移说明见 [系统路径](../pishoo/docs/system-paths.md)。
+
 2026-10-09 用户批准为 OpenCode Web 允许显式 `/file` 代理覆盖匹配的静态文件路径；精确和路径段前缀规则均可使用，根代理不覆盖静态文件，未匹配的静态路径保持原行为。只改现有配置校验和 Router 方法体，不新增结构、字段或函数签名。部署于 code.alice.smith，并授权 alice.smith。
 
 2026-10-09 用户批准在主目录修复 h3x 的 QPACK 反馈：Decoder::State 用有界 feedback 队列替换 on_instruction，新增 reported_insert_count；未提交插入计数由现有动态表计数减它推导。Decoder 增加 take_feedback；对应 State 算法、私有 write_decoder/sync_decoder_with 与连接装配改为直接读取 Decoder 反馈，复用 ArcQpack 已有 watch 唤醒。ACK 无空间时保持解码 Pending，同步取消使用保留空间；反馈空间和等待字段字节保持有界。删除不再使用的 Decoder 回调方法及接收队列别名，公开接口、其余结构及 h3x 职责不变；不新增 Guard、传输配额或工作树。
@@ -50,16 +58,16 @@
 ## 当前边界
 
 - h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
-- Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 持已加载的 `Arc<qconn::QuicEndpoint>`，不持 Network 或连接；DNS 签名与 TLS 共用同一组内存凭据。
+- Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 持已加载的 `Arc<qbase::endpoint::Endpoint>`，不持 Network 或连接；DNS 签名与 TLS 共用同一组内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 不设并发名额。
-- 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/.pishoo/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
+- 配置反代只允许本机 HTTP/TCP 上游；另设同名身份专用的 `/std/dhttp/{*path}` 路由，用当前 Server 的 Endpoint 正向代理 DHTTP 请求。Lib 出站暂不实现，WASI HTTP 出站请求一律拒绝。不增加 UpstreamKind、传输选择字段或连接失败后的回退。
 - 2026-10-02 按用户指定的 [Network 详细设计](../../dhttp/docs/design/network-detailed-design.md)统一为 QUIC。Network 只保存服务表和 H3 连接池；幂等 init 准备全部可用网卡，由 netwatcher 事件触发扫描，socket/地址登记及清理交给 dquic Dock。listener scopes 只限制名称来源；取消 listener 保留 socket。接入回调直接装配 H3，匿名出站由 Request::new 创建。池键用 Incoming、Outgoing 分别约束本端或远端身份必填；双方具名时按名称对跨方向复用，qconn 的本端 identity 可选。原泛型后端、TCP mock、BackendState、Binding 和 ListenerEntry 从当前清单移除。
 - dhttp 保留 `endpoint.get(url).header(...).await`；URL/header 使用已校验类型，解析错误立即返回。Lib 暂不调用该出站接口。
 - 不新增 dhttp Body 结构；复用 h3x 原生流，标准 Service 接缝仅用现成 StreamBody/UnsyncBoxBody 适配。
 - 完成和取消使用流式 EOF、错误、stop、cancel 及读写 future 的结果。没有 ExchangeControl 或公开 finished。
 - 身份直接复用 qtls 的 HandshakeSummary、LocalAuthority、RemoteAuthority，范围复用 qconn 的 Scope/Scopes。没有 RequestInfo 或 Peer 包装。
-- dhttp 出站响应在进程内的 extensions 携带实际连接已验证的 RemoteAuthority；不恢复已删除的 resolve_remote。Pishoo 的统一 DHTTP 通配路由纯转发。联系人申请以目标分支的 application_id、Workspace 队列和 /contact/self 轮询协议为准；2026-10-03 用户要求接入 Workspace/Chat 生产出站，并批准 dhttp Request 的发送前 owner_hash 校验，具体成员见 dhttp 清单。
+- dhttp 出站响应在进程内的 extensions 携带实际连接已验证的 RemoteAuthority；不恢复已删除的 resolve_remote。Pishoo 的统一 DHTTP 通配路由纯转发。联系人申请以目标分支的 application_id、Workspace 队列和 /std/contact/self 轮询协议为准；2026-10-03 用户要求接入 Workspace/Chat 生产出站，并批准 dhttp Request 的发送前 owner_hash 校验，具体成员见 dhttp 清单。
 - 2026-09-28 用户确认入站 URI authority 简写展开及与握手本端身份的核对归 dhttp 的 `serve_exchange`，在交付应用 Service 前完成；Pishoo 的 `Server.listen` 不重复执行。缺少或不匹配的 authority 由 dhttp 返回 421。
 - 一个 WASM 文件统一称为 Lib，不另设 App；代码类型使用 Lib 和通用 Body/Error。
 - 每个 Server 直接持有一个 Sandbox，集中拥有该身份的 Lib 集合、共享 WasmRuntime 引用与任务跟踪器；组件扫描、校验、版本替换、API 执行和 WASI 宿主能力均归 sandbox 模块。Lib 执行不限制并发数，不设置执行槽或 permit；Sandbox 不新增内部锁、取消信号、派生计数或策略容器，实际隔离由 Store、WasiCtx、limiter/fuel 和宿主能力实现。
@@ -122,7 +130,7 @@
 
 2026-09-29 用户批准在 Pishoo 实现 daccess 既有的 `ContactNotifier`，由本 Server 的 Endpoint 直接发送联系人授权更新，不修改 daccess。冻结新增 `DhttpContactNotifier { endpoint }` 及其 trait 方法，并为管理路由装配函数增加 Endpoint 参数；Server 与 dhttp 均不新增成员。通知失败由 daccess 保留 Syncing 供重试。
 
-2026-09-29 用户批准新增同名身份专用的 DHTTP 正向代理：`/.pishoo/dhttp/` 前缀由 `routes::forward_dhttp(endpoint, request) -> Response` 处理，复用 Server 已有 Endpoint，不增加成员或替换本机 HTTP/TCP 代理。请求先经过 daccess 授权，再核对握手来访者与本 Server 同名且 SKI owner_hash 相同；目标仅为 DHTTP 名称。Lib 的 WASI HTTP 出站仍拒绝。随后用户要求用单条 `/.pishoo/dhttp/{*path}` 路由覆盖带或不带末尾斜杠的目标根路径及其子路径。
+2026-09-29 用户批准新增同名身份专用的 DHTTP 正向代理：`/.pishoo/dhttp/` 前缀由 `routes::forward_dhttp(endpoint, request) -> Response` 处理，复用 Server 已有 Endpoint，不增加成员或替换本机 HTTP/TCP 代理。请求先经过 daccess 授权，再核对握手来访者与本 Server 同名且 SKI owner_hash 相同；目标仅为 DHTTP 名称。Lib 的 WASI HTTP 出站仍拒绝。随后用户要求用单条 `/std/dhttp/{*path}` 路由覆盖带或不带末尾斜杠的目标根路径及其子路径。
 
 2026-09-29 用户批准联系人申请由 daccess 管理 API 发起：在现有 `/contact/{name}` 增加 POST，并给 `ContactNotifier` 增加 `submit_application(contact, body) -> Future<Result<SubjectId, NotifyError>>`。Pishoo 的 `DhttpContactNotifier` 使用已有 Endpoint 发送到 Bob，核对响应扩展中的已验证对端身份并返回 SubjectId；daccess 收到成功结果后调用现有 `create_contact`。统一 DHTTP outgoing 仍纯转发，不新增 Server 字段或运行时 handler 注册状态。
 

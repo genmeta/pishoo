@@ -269,7 +269,7 @@ mod tests {
                 .app
                 .clone()
                 .oneshot(request(
-                    "/chat-api/conversations/friend.example.dhttp.net/messages",
+                    "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                     Method::GET,
                     "",
                     Some(fixture.owner.clone()),
@@ -292,7 +292,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::POST,
                 r#"{"text":"hello"}"#,
                 None,
@@ -305,7 +305,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::POST,
                 r#"{"text":"hello"}"#,
                 Some(fixture.owner.clone()),
@@ -328,7 +328,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::GET,
                 "",
                 Some(fixture.owner.clone()),
@@ -345,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn capability_state_distinguishes_active_and_blocked_contacts() {
         let fixture = fixture().await;
-        let path = "/chat-api/conversations/friend.example.dhttp.net/capability";
+        let path = "/std/chat-api/conversations/friend.example.dhttp.net/capability";
         let initial = fixture
             .app
             .clone()
@@ -440,7 +440,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::POST,
                 r#"{"text":"will fail"}"#,
                 Some(fixture.owner.clone()),
@@ -460,7 +460,9 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                &format!("/chat-api/conversations/friend.example.dhttp.net/messages/{id}/requeue"),
+                &format!(
+                    "/std/chat-api/conversations/friend.example.dhttp.net/messages/{id}/requeue"
+                ),
                 Method::POST,
                 "",
                 Some(fixture.owner.clone()),
@@ -494,7 +496,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::POST,
                 r#"{"text":"wait for grant"}"#,
                 Some(fixture.owner.clone()),
@@ -534,7 +536,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                &format!("/chat-api/conversations/{name}/messages"),
+                &format!("/std/chat-api/conversations/{name}/messages"),
                 Method::POST,
                 r#"{"text":"old subject only"}"#,
                 Some(fixture.owner.clone()),
@@ -581,7 +583,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                &format!("/chat-api/conversations/{name}/capability"),
+                &format!("/std/chat-api/conversations/{name}/capability"),
                 Method::GET,
                 "",
                 Some(fixture.owner.clone()),
@@ -622,7 +624,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                &format!("/chat-api/conversations/{name}/messages/{message_id}/requeue"),
+                &format!("/std/chat-api/conversations/{name}/messages/{message_id}/requeue"),
                 Method::POST,
                 "",
                 Some(fixture.owner.clone()),
@@ -639,7 +641,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                &format!("/chat-api/conversations/{name}/messages"),
+                &format!("/std/chat-api/conversations/{name}/messages"),
                 Method::GET,
                 "",
                 Some(fixture.owner.clone()),
@@ -661,7 +663,7 @@ mod tests {
             .app
             .clone()
             .oneshot(request(
-                "/chat-api/conversations/friend.example.dhttp.net/messages",
+                "/std/chat-api/conversations/friend.example.dhttp.net/messages",
                 Method::POST,
                 r#"{"text":"do not deliver to replacement"}"#,
                 Some(fixture.owner.clone()),

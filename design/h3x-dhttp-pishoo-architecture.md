@@ -25,7 +25,7 @@ flowchart TB
     H --> Q
 ```
 
-Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store。配置反代连接本机 HTTP/TCP 服务；同名身份专用的 DHTTP 正向代理在固定 `/.pishoo/dhttp/` 前缀使用 Server 的 Endpoint；Lib 的 WASI HTTP 出站暂不实现。
+Pishoo 不取得 QPACK、H3 连接或 QUIC 读写流。dhttp 不认识 Lib、OpenAPI、Wasmtime Store。配置反代连接本机 HTTP/TCP 服务；同名身份专用的 DHTTP 正向代理在固定 `/std/dhttp/` 前缀使用 Server 的 Endpoint；Lib 的 WASI HTTP 出站暂不实现。
 
 ## 2. h3x 接口保持不变
 
@@ -86,7 +86,7 @@ dhttp 在入站请求交付 Service 前展开 authority 简写，核对它与握
 
 每个 Server 拥有独立 AccessService、Workspace 和 Chat。可信身份仍来自 HandshakeSummary 的名称及证书 SKI owner_hash，不从普通 HTTP 头构造 Visitor。Allowed 进入业务，Denied 返回403，Reviewing 立即返回202及状态地址。审批记录由 daccess 持久管理，状态查询按 Visitor 的名称与 SubjectId 校验，获准后重试业务请求并消费决定。连接退出不删除审批。
 
-联系人通过 Workspace 的本地持久队列发送稳定 application_id，接收方记录申请并从接收时起计算7天期限，申请方查询 /contact/self 得到状态和精确授权。批准操作只更新接收方本地状态；ContactNotifier 与 Syncing 回调移除。首次 POST /contact 仍由接收方访问策略决定。
+联系人通过 Workspace 的本地持久队列发送稳定 application_id，接收方记录申请并从接收时起计算7天期限，申请方查询 /std/contact/self 得到状态和精确授权。批准操作只更新接收方本地状态；ContactNotifier 与 Syncing 回调移除。首次 POST /std/contact 仍由接收方访问策略决定。
 
 Workspace 保留完整前端、资料设置、联系人目录和能力审批；Chat 只通过 POST /std/message 投递，消息历史来自本地 chat.db。Server 显式组装路由；本地管理操作核对 owner，公开资料仅放行精确 GET 路径，Chat 入站同时要求 daccess 允许和有效能力授予。
 
@@ -150,16 +150,16 @@ WASM 产生响应头后可以继续读上传或写响应。响应使用 Wasmtime
 
 代理负责路由和路径转换，用 HTTP/1.1 客户端连接回环 TCP 地址；配置支持带路径的 `http://127.0.0.1:8080` 和裸 `127.0.0.1:8080`。代理清理 HTTP/3 与 HTTP/1.1 之间的逐跳头，按上游 authority 设置 Host，不自动生成 `X-Forwarded-*`。
 
-同名身份专用的 DHTTP 正向代理在 `/.pishoo/dhttp/{*path}` 接收请求，包括带或不带末尾斜杠的目标根路径及其子路径。Pishoo 核对已验证来访者与本 Server 的名称和 SKI owner_hash，按路径中的目标名称构造 DHTTP URI，使用本 Server 的 Endpoint 转发并流式交付响应；不会继承来访者的可信身份 extensions，也不使用配置反代或 Lib 出站 hook。
+同名身份专用的 DHTTP 正向代理在 `/std/dhttp/{*path}` 接收请求，包括带或不带末尾斜杠的目标根路径及其子路径。Pishoo 核对已验证来访者与本 Server 的名称和 SKI owner_hash，按路径中的目标名称构造 DHTTP URI，使用本 Server 的 Endpoint 转发并流式交付响应；不会继承来访者的可信身份 extensions，也不使用配置反代或 Lib 出站 hook。
 
 Lib 仍使用 WASI HTTP 接收请求并产生流式响应；宿主的无状态 hook 对 guest 发起的 HTTP 出站返回 HttpRequestDenied，不调用 Wasmtime 默认网络发送器。身份签名验证只读取本端或当前握手对端的已验证公钥。
 
 ## 10. 保留的路由和组件规则
 
-- 已加载的 `/api/<LibId>` 前缀专供 WASM；未声明路径404、方法不匹配405，业务 HEAD/OPTIONS 必须显式声明。其他 `/api/*` 可按配置代理，空 Lib 身份不占用 `/api`；显式代理位置落入已加载 Lib 前缀时启动报冲突，根代理与较宽的 `/api` 代理可作兜底。
-- `/contact`、`/contacts`、`/contact/*`、`/acl/*` 为当前 daccess 管理路由保留，`/workspace`、`/workspace-api/*`、`/chat-api/*`、`/std/*` 为 Workspace/Chat 保留；`/.pishoo/` 继续保留，不能由代理或 Lib 遮盖。
-- 静态文件只在 `/file/{*path}` 提供，URL `/file/a` 映射身份目录的 `file/a`；`/file` 和 `/file/` 不提供文件。静态只接受 GET/HEAD，目录只尝试 index.html，不列目录。workspace 自身保留原管理前端的深链接 fallback，不能与普通静态站点规则混用。
-- 代理作为 fallback，先精确 `= /path`，再最长路径段前缀；query 不参与，`/foo` 不匹配 `/foobar`。`/file` 路径保留给静态文件；未命中代理配置返回 404。proxy_pass 无 URI 路径时保留原路径，有 URI 时替换命中部分，不自动补斜杠。保持已有尾斜杠重定向规则。
+- WASM 使用 `/std/api/<LibId>`；未声明路径404、方法不匹配405，业务 HEAD/OPTIONS 必须显式声明。系统路径不回退代理；旧 `/api/*` 由配置代理独立处理。
+- 仅 `/std` 根路径及其路径段子路径为系统保留；daccess、Workspace/Chat、Pishoo 管理和 DHTTP 正向代理全部位于该命名空间。旧顶层路径释放给代理，无兼容别名或重定向。
+- 静态文件只在 `/std/file/{*path}` 提供，URL `/std/file/a` 映射身份目录 `file/a`；根入口不提供文件。静态只接受 GET/HEAD，目录只尝试 index.html，不列目录。Workspace 保留自身页面深链接 fallback。
+- 代理作为 fallback，先精确 `= /path`，再最长路径段前缀；query 不参与，`/foo` 不匹配 `/foobar`。`/std` 不回退代理，旧 `/file` 是普通代理路径；未命中代理配置返回 404。proxy_pass 无 URI 路径时保留原路径，有 URI 时替换命中部分，不自动补斜杠。保持已有尾斜杠重定向规则。
 - 组件顶层恰有一个 `pishoo:openapi` 段，内容为有界 UTF-8 OpenAPI 3.1.x JSON；不运行 guest 获取 API 清单。
 - 第一版仅字面量路径和显式方法；OpenAPI JSON 直接反序列化为 oas3 类型，不额外拒绝重复键或描述字段中的外部引用。路径级引用无法提供显式方法，仍拒绝路径级引用、未支持的路径模板和保留路径冲突。schema 用于描述，不因此缓冲整个请求。
 - OpenAPI 描述路由，不自动写 daccess 规则；权限管理使用当前库的 API，管理界面按它适配。x-access 扩展不产生隐式授权或自动导入流程。

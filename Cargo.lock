@@ -5,7 +5,6 @@ version = 4
 [[package]]
 name = "access_control"
 version = "0.1.0"
-source = "git+https://github.com/genmeta/daccess.git?rev=cf8f72f4e6bedbd7c98648ffee31053cb509b395#cf8f72f4e6bedbd7c98648ffee31053cb509b395"
 dependencies = [
  "axum",
  "chrono",
@@ -1157,9 +1156,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
- "der_derive",
+ "der_derive 0.7.3",
  "flagset",
- "pem-rfc7468",
+ "pem-rfc7468 0.7.0",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+dependencies = [
+ "const-oid 0.10.2",
+ "der_derive 0.8.0",
+ "flagset",
+ "pem-rfc7468 1.0.0",
  "zeroize",
 ]
 
@@ -1182,6 +1194,17 @@ name = "der_derive"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "der_derive"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59600e2c2d636fde9b65e99cc6445ac770c63d3628195ff39932b8d6d7409903"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1265,7 +1288,6 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.6.2"
-source = "git+https://github.com/genmeta/dhttp.git?rev=0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1#0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1"
 dependencies = [
  "bytes",
  "dhttp-home",
@@ -1295,7 +1317,6 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0"
-source = "git+https://github.com/genmeta/dhttp.git?rev=0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1#0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1"
 dependencies = [
  "dirs",
  "futures",
@@ -1357,7 +1378,7 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users 0.5.3",
+ "redox_users 0.5.2",
  "windows-sys 0.61.2",
 ]
 
@@ -1433,7 +1454,6 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.7.2"
-source = "git+https://github.com/genmeta/ddns.git?rev=65487e4b5d8bc35029595de382fb835d0b52ebff#65487e4b5d8bc35029595de382fb835d0b52ebff"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1468,11 +1488,11 @@ version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
 dependencies = [
- "der",
+ "der 0.7.10",
  "digest 0.10.7",
  "elliptic-curve",
  "rfc6979",
- "signature",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -1920,7 +1940,6 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.2"
-source = "git+https://github.com/genmeta/h3x.git?rev=cd1ed3aea181d1f05f1627564f88a5e2d33aaee5#cd1ed3aea181d1f05f1627564f88a5e2d33aaee5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2366,7 +2385,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3243,6 +3262,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3284,13 +3312,14 @@ dependencies = [
  "bytes",
  "cap-std",
  "chrono",
- "der",
+ "der 0.7.10",
  "dhttp",
  "dhttp-home",
  "dyns",
  "form_urlencoded",
  "futures",
  "getrandom 0.4.3",
+ "h3x",
  "http",
  "http-body",
  "http-body-util",
@@ -3328,7 +3357,7 @@ dependencies = [
  "wasmtime-wasi",
  "wasmtime-wasi-http",
  "wat",
- "x509-cert",
+ "x509-cert 0.2.5",
  "x509-ocsp",
  "x509-parser",
 ]
@@ -3339,9 +3368,9 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
 dependencies = [
- "der",
+ "der 0.7.10",
  "pkcs8",
- "spki",
+ "spki 0.7.3",
 ]
 
 [[package]]
@@ -3350,8 +3379,8 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
 ]
 
 [[package]]
@@ -3366,13 +3395,13 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "325809ccf6e48c67f1e1e7a91187566372346797737ee00d1381a5881f76aecf"
 dependencies = [
- "der",
+ "der 0.7.10",
  "p256",
  "rsa",
  "sha2 0.10.9",
- "signature",
- "spki",
- "x509-cert",
+ "signature 2.2.0",
+ "spki 0.7.3",
+ "x509-cert 0.2.5",
 ]
 
 [[package]]
@@ -3381,12 +3410,12 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da3b442616fbb7b036180da1830f4877bfa09e7cbe38d06aa78c64d4dadbeafc"
 dependencies = [
- "der",
+ "der 0.7.10",
  "pkix-path",
  "sha1 0.10.7",
  "sha2 0.10.9",
- "spki",
- "x509-cert",
+ "spki 0.7.3",
+ "x509-cert 0.2.5",
  "x509-ocsp",
 ]
 
@@ -3530,7 +3559,6 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.6.4"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -3553,7 +3581,6 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.6.2"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "qbase",
  "qevent",
@@ -3566,7 +3593,6 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.6.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "futures",
@@ -3585,7 +3611,6 @@ dependencies = [
 [[package]]
 name = "qevent"
 version = "0.6.2"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3603,7 +3628,6 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.5.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3613,7 +3637,6 @@ dependencies = [
 [[package]]
 name = "qprotocol"
 version = "0.6.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3633,7 +3656,6 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.6.2"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3648,7 +3670,6 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.8.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -3659,18 +3680,19 @@ dependencies = [
 [[package]]
 name = "qtls"
 version = "0.6.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
- "der",
+ "der 0.8.2",
  "pkix-path",
  "pkix-revocation",
  "ring",
  "rustls 0.23.31",
- "signature",
- "spki",
+ "signature 2.2.0",
+ "signature 3.0.0",
+ "spki 0.8.1",
  "thiserror 2.0.20",
- "x509-cert",
+ "x509-cert 0.2.5",
+ "x509-cert 0.3.0",
  "x509-parser",
  "zeroize",
 ]
@@ -3678,7 +3700,6 @@ dependencies = [
 [[package]]
 name = "qtransport"
 version = "0.6.1"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3690,6 +3711,7 @@ dependencies = [
  "qprotocol",
  "qrecovery",
  "qtls",
+ "smallvec",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -3697,7 +3719,6 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.7.2"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3712,7 +3733,6 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.7.2"
-source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3962,10 +3982,11 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
-version = "0.5.3"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
+checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
+ "getrandom 0.2.17",
  "libredox",
  "thiserror 2.0.20",
 ]
@@ -4110,8 +4131,8 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
- "signature",
- "spki",
+ "signature 2.2.0",
+ "spki 0.7.3",
  "subtle",
  "zeroize",
 ]
@@ -4203,7 +4224,6 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.31"
-source = "git+https://github.com/genmeta/rustls.git?rev=22dec513c4ebdf89f113f46e100393cf18963aa6#22dec513c4ebdf89f113f46e100393cf18963aa6"
 dependencies = [
  "once_cell",
  "ring",
@@ -4456,7 +4476,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
 dependencies = [
  "base16ct",
- "der",
+ "der 0.7.10",
  "generic-array",
  "subtle",
  "zeroize",
@@ -4660,6 +4680,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4737,7 +4763,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
+]
+
+[[package]]
+name = "spki"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
+dependencies = [
+ "base64ct",
+ "der 0.8.2",
 ]
 
 [[package]]
@@ -6278,15 +6314,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
-dependencies = [
- "windows-targets 0.53.5",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -6318,28 +6345,11 @@ dependencies = [
  "windows_aarch64_gnullvm 0.52.6",
  "windows_aarch64_msvc 0.52.6",
  "windows_i686_gnu 0.52.6",
- "windows_i686_gnullvm 0.52.6",
+ "windows_i686_gnullvm",
  "windows_i686_msvc 0.52.6",
  "windows_x86_64_gnu 0.52.6",
  "windows_x86_64_gnullvm 0.52.6",
  "windows_x86_64_msvc 0.52.6",
-]
-
-[[package]]
-name = "windows-targets"
-version = "0.53.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3"
-dependencies = [
- "windows-link",
- "windows_aarch64_gnullvm 0.53.1",
- "windows_aarch64_msvc 0.53.1",
- "windows_i686_gnu 0.53.1",
- "windows_i686_gnullvm 0.53.1",
- "windows_i686_msvc 0.53.1",
- "windows_x86_64_gnu 0.53.1",
- "windows_x86_64_gnullvm 0.53.1",
- "windows_x86_64_msvc 0.53.1",
 ]
 
 [[package]]
@@ -6364,12 +6374,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
 
 [[package]]
-name = "windows_aarch64_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
-
-[[package]]
 name = "windows_aarch64_msvc"
 version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6380,12 +6384,6 @@ name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
-
-[[package]]
-name = "windows_aarch64_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
 
 [[package]]
 name = "windows_i686_gnu"
@@ -6400,22 +6398,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
 
 [[package]]
-name = "windows_i686_gnu"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "960e6da069d81e09becb0ca57a65220ddff016ff2d6af6a223cf372a506593a3"
-
-[[package]]
 name = "windows_i686_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
-
-[[package]]
-name = "windows_i686_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
 
 [[package]]
 name = "windows_i686_msvc"
@@ -6430,12 +6416,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
-name = "windows_i686_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
-
-[[package]]
 name = "windows_x86_64_gnu"
 version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6446,12 +6426,6 @@ name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
-
-[[package]]
-name = "windows_x86_64_gnu"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
 
 [[package]]
 name = "windows_x86_64_gnullvm"
@@ -6466,12 +6440,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
 
 [[package]]
-name = "windows_x86_64_gnullvm"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
-
-[[package]]
 name = "windows_x86_64_msvc"
 version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6482,12 +6450,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "windows_x86_64_msvc"
-version = "0.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
@@ -6564,8 +6526,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid 0.9.6",
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
+ "tls_codec",
+]
+
+[[package]]
+name = "x509-cert"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "105ef4642d9cb137ef83d623d0e4bf08b8adf69e9918ca904a174adb6d3d038b"
+dependencies = [
+ "const-oid 0.10.2",
+ "der 0.8.2",
+ "spki 0.8.1",
  "tls_codec",
 ]
 
@@ -6576,9 +6550,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e54e695a31f0fecb826cf59ae2093c941d7ef932a1f8508185dd23b29ce2e2e"
 dependencies = [
  "const-oid 0.9.6",
- "der",
- "spki",
- "x509-cert",
+ "der 0.7.10",
+ "spki 0.7.3",
+ "x509-cert 0.2.5",
 ]
 
 [[package]]
@@ -6765,3 +6739,23 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "dhttp-access"
+version = "0.4.2"
+
+[[patch.unused]]
+name = "dhttp-log"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "dshell"
+version = "0.6.2"
+
+[[patch.unused]]
+name = "qdatagram"
+version = "0.6.2"
+
+[[patch.unused]]
+name = "rankey"
+version = "0.2.2"

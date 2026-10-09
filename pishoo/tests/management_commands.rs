@@ -104,7 +104,7 @@ fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     assert!(!String::from_utf8_lossy(&loaded.stderr).contains("Catalog:    installed (disk)"));
     let info: Value =
         serde_json::from_slice(&success(home, &["lib", "info", "note"]).stdout).unwrap();
-    assert_eq!(info["endpoints"][0]["path"], "/api/note/upload");
+    assert_eq!(info["endpoints"][0]["path"], "/std/api/note/upload");
     let libs: Value = serde_json::from_slice(&success(home, &["lib"]).stdout).unwrap();
     assert_eq!(libs[0]["id"], "note");
     std::fs::create_dir(home.join("alice.smith/db/note")).unwrap();

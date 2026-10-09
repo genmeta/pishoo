@@ -72,7 +72,7 @@ pub(super) fn profile_settings(identity_name: &str, stored: StoredProfile) -> Pr
         avatar_url: stored
             .avatar_name
             .as_ref()
-            .map(|_| "/workspace-api/settings/profile/avatar"),
+            .map(|_| "/std/workspace-api/settings/profile/avatar"),
         updated_at: stored.updated_at,
     }
 }

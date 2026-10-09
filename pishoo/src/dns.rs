@@ -199,7 +199,6 @@ mod tests {
         let cert = params.self_signed(&key).unwrap();
         Endpoint::new(
             qbase::endpoint::Endpoint::new(
-                &qtls::default_provider(),
                 name,
                 vec![cert.der().clone()],
                 qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),

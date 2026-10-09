@@ -2,7 +2,7 @@ use super::*;
 use crate::{Error, setup::load_server_config};
 
 #[tokio::test]
-async fn explicit_file_proxies_override_only_matching_static_paths() {
+async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
     use http_body_util::BodyExt;
     use hyper::{body::Incoming, service::service_fn};
     use hyper_util::rt::TokioIo;
@@ -47,22 +47,114 @@ async fn explicit_file_proxies_override_only_matching_static_paths() {
         .await
         .unwrap();
     let local = server.endpoint.local_authority().unwrap();
-    for (location, path, expected) in [
-        ("/", "/file/local.txt", "static"),
-        ("= /file", "/file", "upstream /file"),
+    for (location, path, expected_status, expected) in [
+        ("/", "/std/file/local.txt", http::StatusCode::OK, "static"),
+        (
+            "/",
+            "/file/local.txt",
+            http::StatusCode::OK,
+            "upstream /file/local.txt",
+        ),
+        ("= /file", "/file", http::StatusCode::OK, "upstream /file"),
         (
             "= /file/content",
             "/file/content?path=README.md",
+            http::StatusCode::OK,
             "upstream /file/content?path=README.md",
         ),
-        ("= /file/content", "/file/content/local.txt", "static"),
+        (
+            "= /file/content",
+            "/file/content/local.txt",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
         (
             "/file/content",
             "/file/content/local.txt",
+            http::StatusCode::OK,
             "upstream /file/content/local.txt",
         ),
-        ("/file/content", "/file/contentish", "static"),
-        ("/file", "/file/local.txt", "upstream /file/local.txt"),
+        (
+            "/file/content",
+            "/file/contentish",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            "/file",
+            "/file/local.txt",
+            http::StatusCode::OK,
+            "upstream /file/local.txt",
+        ),
+        (
+            "/",
+            "/std/file/missing",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        ("/", "/std", http::StatusCode::NOT_FOUND, "Not Found"),
+        (
+            "/",
+            "/std/missing",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            "/",
+            "/std/api/unloaded/run",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            "/",
+            "/std-extra",
+            http::StatusCode::OK,
+            "upstream /std-extra",
+        ),
+        (
+            "/",
+            "/api/note/upload",
+            http::StatusCode::OK,
+            "upstream /api/note/upload",
+        ),
+        ("/", "/contact", http::StatusCode::OK, "upstream /contact"),
+        ("/", "/contacts", http::StatusCode::OK, "upstream /contacts"),
+        (
+            "/",
+            "/acl/access",
+            http::StatusCode::OK,
+            "upstream /acl/access",
+        ),
+        (
+            "/",
+            "/workspace/",
+            http::StatusCode::OK,
+            "upstream /workspace/",
+        ),
+        (
+            "/",
+            "/workspace-api/context",
+            http::StatusCode::OK,
+            "upstream /workspace-api/context",
+        ),
+        (
+            "/",
+            "/chat-api/context",
+            http::StatusCode::OK,
+            "upstream /chat-api/context",
+        ),
+        (
+            "/",
+            "/pishoo/settings",
+            http::StatusCode::OK,
+            "upstream /pishoo/settings",
+        ),
+        (
+            "/",
+            "/.pishoo/dhttp/target",
+            http::StatusCode::OK,
+            "upstream /.pishoo/dhttp/target",
+        ),
     ] {
         let mut parts = format!("http://{address}")
             .parse::<http::Uri>()
@@ -83,11 +175,7 @@ async fn explicit_file_proxies_override_only_matching_static_paths() {
             remote: None,
         });
         let response = current_router(&server).oneshot(request).await.unwrap();
-        assert_eq!(
-            response.status(),
-            http::StatusCode::OK,
-            "{location}: {path}"
-        );
+        assert_eq!(response.status(), expected_status, "{location}: {path}");
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
             expected,
@@ -246,9 +334,9 @@ async fn dhttp_route_matches_target_root_with_or_without_slash_and_child_paths()
     .unwrap();
 
     for path in [
-        "/.pishoo/dhttp/bob.dhttp.net",
-        "/.pishoo/dhttp/bob.dhttp.net/",
-        "/.pishoo/dhttp/bob.dhttp.net/a/b",
+        "/std/dhttp/bob.dhttp.net",
+        "/std/dhttp/bob.dhttp.net/",
+        "/std/dhttp/bob.dhttp.net/a/b",
     ] {
         server
             .access

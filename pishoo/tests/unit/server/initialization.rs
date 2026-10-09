@@ -73,11 +73,11 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
         "initialization does not manufacture identity credentials"
     );
     assert!(matches!(
-        authorization(&access, Method::POST, "/contact", Some("bob.dhttp.net")).await,
+        authorization(&access, Method::POST, "/std/contact", Some("bob.dhttp.net")).await,
         AuthResult::Allowed
     ));
     assert!(matches!(
-        authorization(&access, Method::POST, "/contact", None).await,
+        authorization(&access, Method::POST, "/std/contact", None).await,
         AuthResult::Denied
     ));
     assert!(matches!(
@@ -88,7 +88,7 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
         authorization(
             &access,
             Method::GET,
-            "/workspace-api/context",
+            "/std/workspace-api/context",
             Some(profile.name())
         )
         .await,
@@ -153,7 +153,7 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
     access
         .remove_policy(
             AccessMethod::Specified(Method::POST),
-            "/contact",
+            "/std/contact",
             Grantee::Named,
         )
         .await
@@ -165,7 +165,13 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
     assert_eq!(config.proxy_locations.len(), 1);
     let reopened = load_access(&profile, &subject).await.unwrap();
     assert!(matches!(
-        authorization(&reopened, Method::POST, "/contact", Some("bob.dhttp.net")).await,
+        authorization(
+            &reopened,
+            Method::POST,
+            "/std/contact",
+            Some("bob.dhttp.net")
+        )
+        .await,
         AuthResult::Denied
     ));
     assert_eq!(
@@ -190,7 +196,7 @@ async fn empty_access_file_and_abandoned_staging_do_not_lose_initial_rules() {
         .await
         .unwrap();
     assert!(matches!(
-        authorization(&access, Method::POST, "/contact", Some("bob.dhttp.net")).await,
+        authorization(&access, Method::POST, "/std/contact", Some("bob.dhttp.net")).await,
         AuthResult::Allowed
     ));
     assert_eq!(access_version(&profile.access_db_path()).unwrap(), Some(1));
@@ -258,7 +264,7 @@ async fn published_legacy_configuration_is_backed_up_and_not_imported() {
         .await
         .unwrap();
     assert!(matches!(
-        authorization(&access, Method::POST, "/contact", Some("bob.dhttp.net")).await,
+        authorization(&access, Method::POST, "/std/contact", Some("bob.dhttp.net")).await,
         AuthResult::Allowed
     ));
     let current = rusqlite::Connection::open(profile.access_db_path()).unwrap();
@@ -324,7 +330,7 @@ async fn old_access_v0_is_archived_without_importing_its_policies() {
     access
         .set_policy(
             AccessMethod::Specified(Method::POST),
-            "/contact",
+            "/std/contact",
             Effect::Deny,
             Grantee::Named,
         )
@@ -337,7 +343,13 @@ async fn old_access_v0_is_archived_without_importing_its_policies() {
     assert!(profile.db_dir().join("access.db-wal").exists());
     let reopened = load_access(&profile, &subject).await.unwrap();
     assert!(matches!(
-        authorization(&reopened, Method::POST, "/contact", Some("bob.dhttp.net")).await,
+        authorization(
+            &reopened,
+            Method::POST,
+            "/std/contact",
+            Some("bob.dhttp.net")
+        )
+        .await,
         AuthResult::Allowed
     ));
     assert_eq!(access_version(&profile.access_db_path()).unwrap(), Some(1));
@@ -357,7 +369,7 @@ async fn old_access_v0_is_archived_without_importing_its_policies() {
         rusqlite::Connection::open(&backups[0])
             .unwrap()
             .query_row(
-                "SELECT effect FROM access_rules WHERE api='/contact'",
+                "SELECT effect FROM access_rules WHERE api='/std/contact'",
                 [],
                 |row| row.get::<_, String>(0)
             )
@@ -368,7 +380,7 @@ async fn old_access_v0_is_archived_without_importing_its_policies() {
         rusqlite::Connection::open(&backups[0])
             .unwrap()
             .query_row(
-                "SELECT updated_at FROM access_rules WHERE api='/contact'",
+                "SELECT updated_at FROM access_rules WHERE api='/std/contact'",
                 [],
                 |row| row.get::<_, i64>(0)
             )

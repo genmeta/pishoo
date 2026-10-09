@@ -39,7 +39,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let profile = profile(root.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
-    assert_eq!(saved["endpoints"][0]["path"], "/api/note/upload");
+    assert_eq!(saved["endpoints"][0]["path"], "/std/api/note/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
     assert!(!profile.join("db/note").exists());
     assert_eq!(
@@ -224,7 +224,6 @@ fn endpoint() -> dhttp::Endpoint {
     let cert = params.self_signed(&key).unwrap();
     dhttp::Endpoint::new(
         qbase::endpoint::Endpoint::new(
-            &qtls::default_provider(),
             name,
             vec![cert.der().clone()],
             qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
@@ -260,61 +259,61 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     for (method, path, body, expected) in [
         (
             Method::POST,
-            "/pishoo/lib-check",
+            "/std/pishoo/lib-check",
             AxumBody::from(component("1")),
             StatusCode::OK,
         ),
         (
             Method::PUT,
-            "/pishoo/libs/check",
+            "/std/pishoo/libs/check",
             AxumBody::from(component("1")),
             StatusCode::OK,
         ),
         (
             Method::GET,
-            "/pishoo/libs/check",
+            "/std/pishoo/libs/check",
             AxumBody::empty(),
             StatusCode::OK,
         ),
         (
             Method::DELETE,
-            "/pishoo/libs/check",
+            "/std/pishoo/libs/check",
             AxumBody::empty(),
             StatusCode::NO_CONTENT,
         ),
         (
             Method::DELETE,
-            "/pishoo/libs/check",
+            "/std/pishoo/libs/check",
             AxumBody::empty(),
             StatusCode::NO_CONTENT,
         ),
         (
             Method::GET,
-            "/pishoo/libs/check",
+            "/std/pishoo/libs/check",
             AxumBody::empty(),
             StatusCode::NOT_FOUND,
         ),
         (
             Method::PUT,
-            "/pishoo/libs/note",
+            "/std/pishoo/libs/note",
             AxumBody::from("bad"),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/pishoo/libs?extra=x",
+            "/std/pishoo/libs?extra=x",
             AxumBody::empty(),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/pishoo/libs",
+            "/std/pishoo/libs",
             AxumBody::from("x"),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/pishoo/libs/%2Fescape",
+            "/std/pishoo/libs/%2Fescape",
             AxumBody::empty(),
             StatusCode::BAD_REQUEST,
         ),
@@ -327,7 +326,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         assert_eq!(response.status(), expected, "{path}");
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(response.headers()["supported-versions"], "v1");
-        if path == "/pishoo/lib-check" {
+        if path == "/std/pishoo/lib-check" {
             let value: Value = serde_json::from_slice(
                 &axum::body::to_bytes(response.into_body(), 65536)
                     .await
@@ -339,9 +338,9 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         }
     }
     for (path, method, allow) in [
-        ("/pishoo/libs", Method::POST, "GET"),
-        ("/pishoo/libs/note", Method::PATCH, "GET, PUT, DELETE"),
-        ("/pishoo/lib-check", Method::GET, "POST"),
+        ("/std/pishoo/libs", Method::POST, "GET"),
+        ("/std/pishoo/libs/note", Method::PATCH, "GET, PUT, DELETE"),
+        ("/std/pishoo/lib-check", Method::GET, "POST"),
     ] {
         let response = app
             .clone()
@@ -352,7 +351,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         assert_eq!(response.headers()["allow"], allow);
     }
     for version in ["v2", "v2, v1"] {
-        let mut req = request(Method::GET, "/pishoo/libs", AxumBody::empty());
+        let mut req = request(Method::GET, "/std/pishoo/libs", AxumBody::empty());
         req.headers_mut()
             .insert("accept-versions", version.parse().unwrap());
         assert_eq!(
@@ -375,7 +374,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
             access_control::SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut req = request(Method::GET, "/pishoo/libs", AxumBody::empty());
+        let mut req = request(Method::GET, "/std/pishoo/libs", AxumBody::empty());
         req.extensions_mut().remove::<access_control::Visitor>();
         if let Some(visitor) = visitor {
             req.extensions_mut().insert(visitor);
@@ -387,7 +386,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     }
     let mut req = request(
         Method::PUT,
-        "/pishoo/libs/note",
+        "/std/pishoo/libs/note",
         AxumBody::from(component("1")),
     );
     req.headers_mut()
@@ -401,7 +400,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     );
     let mut req = request(
         Method::PUT,
-        "/pishoo/libs/note",
+        "/std/pishoo/libs/note",
         AxumBody::from_stream(chunks),
     );
     req.headers_mut()
@@ -418,7 +417,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         app.clone()
             .oneshot(request(
                 Method::PUT,
-                "/pishoo/libs/note",
+                "/std/pishoo/libs/note",
                 AxumBody::from_stream(broken)
             ))
             .await
@@ -431,7 +430,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     assert_eq!(
         app.oneshot(request(
             Method::PUT,
-            "/pishoo/libs/escape",
+            "/std/pishoo/libs/escape",
             AxumBody::from(component("1"))
         ))
         .await

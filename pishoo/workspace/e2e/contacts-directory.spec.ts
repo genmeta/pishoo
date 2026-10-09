@@ -44,33 +44,33 @@ async function mockDirectory(page: Page): Promise<void> {
     : deniedRemoteGrants.has(name) ? false : null
   const chatAvailable = (item: Contact) => item.status === 'active'
     && (remoteGrants.has(item.name) || localGrants.has(item.name))
-  await page.route('**/workspace-api/context', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/context', (route) => route.fulfill({ json: {
     profile: 'owner.local', owner_name: 'owner.local',
     badges: { pending_reviews: 0, incoming_contacts: null },
   } }))
-  await page.route('**/workspace-api/settings/profile', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/settings/profile', (route) => route.fulfill({ json: {
     identity_name: 'owner.local', display_name: null, avatar_url: null, updated_at: 1700000000,
   } }))
-  await page.route(/\/workspace-api\/profiles\/[^/?]+(?:\?.*)?$/, (route) => {
+  await page.route(/\/std\/workspace-api\/profiles\/[^/?]+(?:\?.*)?$/, (route) => {
     const path = new URL(route.request().url()).pathname
     const name = decodeURIComponent(path.split('/').pop() ?? '')
     if (name === 'active-1.example') return route.fulfill({ status: 502, body: 'unavailable' })
     return route.fulfill({ json: {
       display_name: name === 'active-0.example' ? 'Remote Alice' : null,
       avatar_url: name === 'active-0.example'
-        ? '/workspace-api/profiles/active-0.example/avatar?v=1700000000'
+        ? '/std/workspace-api/profiles/active-0.example/avatar?v=1700000000'
         : null,
       updated_at: 1700000000,
     } })
   })
-  await page.route(/\/workspace-api\/profiles\/[^/?]+\/avatar(?:\?.*)?$/, (route) => route.fulfill({
+  await page.route(/\/std\/workspace-api\/profiles\/[^/?]+\/avatar(?:\?.*)?$/, (route) => route.fulfill({
     contentType: 'image/png',
     body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
   }))
-  await page.route('**/acl/reviews?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/workspace-api/approvals?*', (route) => {
+  await page.route('**/std/workspace-api/approvals?*', (route) => {
     const url = new URL(route.request().url())
     const page = Number(url.searchParams.get('page') ?? 1)
     const pageSize = Number(url.searchParams.get('page_size') ?? 20)
@@ -106,7 +106,7 @@ async function mockDirectory(page: Page): Promise<void> {
       total: entries.length, page, page_size: pageSize,
     } })
   })
-  await page.route('**/contacts?*', (route) => {
+  await page.route('**/std/contacts?*', (route) => {
     const url = new URL(route.request().url())
     const current = Number(url.searchParams.get('page') ?? 1)
     const size = Number(url.searchParams.get('page_size') ?? 20)
@@ -115,7 +115,7 @@ async function mockDirectory(page: Page): Promise<void> {
       total: items.length, page: current, page_size: size,
     } })
   })
-  await page.route('**/workspace-api/contact-directory', (route) => route.fulfill({ json:
+  await page.route('**/std/workspace-api/contact-directory', (route) => route.fulfill({ json:
     items
       .filter((item) => saved.has(item.name) || item.status === 'blocked' || chatAvailable(item))
       .map((item) => ({
@@ -125,14 +125,14 @@ async function mockDirectory(page: Page): Promise<void> {
         remote_chat_granted: remoteGrant(item.name),
       })),
   }))
-  await page.route(/\/workspace-api\/contacts\/[^/?]+\/saved$/, (route) => {
+  await page.route(/\/std\/workspace-api\/contacts\/[^/?]+\/saved$/, (route) => {
     const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2) ?? '')
     if (!items.some((item) => item.name === name)) return route.fulfill({ status: 404, body: 'not found' })
     if (route.request().method() === 'PUT') saved.add(name)
     else if (route.request().method() === 'DELETE') saved.delete(name)
     return route.fulfill({ status: 204, body: '' })
   })
-  await page.route('**/contact/*', (route) => {
+  await page.route('**/std/contact/*', (route) => {
     const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop() ?? '')
     const found = items.find((item) => item.name === name)
     if (!found) return route.fulfill({ status: 404, body: 'not found' })
@@ -140,13 +140,13 @@ async function mockDirectory(page: Page): Promise<void> {
     if (route.request().method() === 'DELETE') items.splice(items.indexOf(found), 1)
     return route.fulfill(route.request().method() === 'GET' ? { json: found } : { status: 204, body: '' })
   })
-  await page.route('**/acl/apis?*', (route) => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 20 } }))
-  await page.route('**/acl/access', (route) => route.fulfill({ json: {} }))
-  await page.route('**/acl/allow', (route) => route.fulfill({ json: {} }))
-  await page.route('**/workspace-api/contact-requests?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/apis?*', (route) => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 20 } }))
+  await page.route('**/std/acl/access', (route) => route.fulfill({ json: {} }))
+  await page.route('**/std/acl/allow', (route) => route.fulfill({ json: {} }))
+  await page.route('**/std/workspace-api/contact-requests?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/workspace-api/capability-requests', (route) => route.fulfill({ json:
+  await page.route('**/std/workspace-api/capability-requests', (route) => route.fulfill({ json:
     items
       .filter((item) => ['pending', 'transfered'].includes(String(item.status))
         && Object.prototype.hasOwnProperty.call(item.requested_access, '/std/message'))
@@ -159,7 +159,7 @@ async function mockDirectory(page: Page): Promise<void> {
         requested_at: item.updated_at,
       })),
   }))
-  await page.route(/\/chat-api\/conversations\/[^/]+\/capability$/, (route) => {
+  await page.route(/\/std\/chat-api\/conversations\/[^/]+\/capability$/, (route) => {
     const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const found = items.find((item) => item.name === name)
     if (!found) return route.fulfill({ status: 404, body: 'not found' })
@@ -174,7 +174,7 @@ async function mockDirectory(page: Page): Promise<void> {
       endpoints: [{ method: 'POST', path: '/std/message' }],
     } })
   })
-  await page.route(/\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/grant(?:\?.*)?$/, (route) => {
+  await page.route(/\/std\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/grant(?:\?.*)?$/, (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.split('/')
     const name = decodeURIComponent(path[path.length - 4] ?? '')
@@ -189,13 +189,13 @@ async function mockDirectory(page: Page): Promise<void> {
     localGrants.add(name)
     return route.fulfill({ status: 204, body: '' })
   })
-  await page.route(/\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/revoke$/, (route) => {
+  await page.route(/\/std\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/revoke$/, (route) => {
     const path = new URL(route.request().url()).pathname.split('/')
     const name = decodeURIComponent(path[path.length - 4] ?? '')
     localGrants.delete(name)
     return route.fulfill({ status: 204, body: '' })
   })
-  await page.route(/\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/deny(?:\?.*)?$/, (route) => {
+  await page.route(/\/std\/workspace-api\/contacts\/[^/?]+\/capabilities\/chat\/deny(?:\?.*)?$/, (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname.split('/')
     const name = decodeURIComponent(path[path.length - 4] ?? '')
@@ -255,7 +255,7 @@ test('contact directory and sent requests use separate views', async ({ page }, 
   await expect(list).not.toContainText('saved-chat.example')
   await expect(list).not.toContainText('saved-not-granted.example')
 
-  await page.route('**/workspace-api/capabilities', (route) => route.fulfill({ json: [] }))
+  await page.route('**/std/workspace-api/capabilities', (route) => route.fulfill({ json: [] }))
   await expect(page.getByRole('navigation', { name: 'Section navigation' })).toHaveCount(0)
   await page.setViewportSize({ width: 375, height: 812 })
   await expect(page.getByRole('button', { name: 'Add contact' })).toBeVisible()
@@ -263,7 +263,7 @@ test('contact directory and sent requests use separate views', async ({ page }, 
   await page.screenshot({ path: testInfo.outputPath('contacts-mobile-add-button.png') })
   await page.getByRole('button', { name: 'Add contact' }).click()
   await expect(page.getByRole('heading', { name: 'Add contact' })).toBeVisible()
-  await expect(page).toHaveURL(/\/workspace\/contacts\/new$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts\/new$/)
   await expect(page.getByRole('navigation', { name: 'Section navigation' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Sent requests' })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
@@ -285,7 +285,7 @@ test('contact directory and sent requests use separate views', async ({ page }, 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.getByRole('button', { name: 'Sent requests' }).click()
   await expect(page.getByRole('heading', { name: 'Sent requests' })).toBeVisible()
-  await expect(page).toHaveURL(/\/workspace\/contacts\/requests$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts\/requests$/)
   await expect(page.getByText('No sent requests')).toBeVisible()
   await expect(page.locator('tbody tr')).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
@@ -295,7 +295,7 @@ test('contact directory and sent requests use separate views', async ({ page }, 
 test('approval requester opens contact details and grants requested chat access', async ({ page }) => {
   await page.goto('./approvals')
   await page.getByRole('button', { name: /pending-0\.example/ }).first().click()
-  await expect(page).toHaveURL(/\/workspace\/approvals$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/approvals$/)
   await expect(page.getByRole('combobox', { name: 'Local permission set' })).toHaveCount(0)
   await expect(page.getByRole('complementary', { name: 'Contact details' })).toContainText('pending-0.example')
   await expect(page.getByRole('complementary', { name: 'Contact details' })
@@ -304,7 +304,7 @@ test('approval requester opens contact details and grants requested chat access'
   const approval = page.locator('tbody tr').filter({ hasText: 'pending-0.example' })
   await approval.getByRole('button', { name: 'Allow', exact: true }).click()
   await expect(approval).toHaveCount(0)
-  await expect(page).toHaveURL(/\/workspace\/approvals$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/approvals$/)
   await page.goto('./contacts')
   await page.getByRole('button', { name: /Needs attention\s+5/ }).click()
   await expect(page.getByRole('button', { name: 'Chat with pending-0.example' })).toBeVisible()
@@ -429,7 +429,7 @@ test('contact state and deletion remain available in the separated directory', a
 })
 
 test('contact details show the other profile grant state without explanatory paragraphs', async ({ page }) => {
-  await page.route(/\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({ json: {
+  await page.route(/\/std\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({ json: {
     capability: 'chat', status: 'available', contact_status: 'active',
     can_send: true, can_receive: true, remote_grant: false,
     endpoints: [{ method: 'POST', path: '/std/message' }],
@@ -446,13 +446,13 @@ test('contact and approval details agree on local aliases and unknown chat grant
   const name = 'active-0.example'
   const subjectId = `hex:${Buffer.from(Array.from({ length: 64 }, (_, index) => index + 128)).toString('hex')}`
   const item = { ...contact(name, 'active'), alias: 'Local Alice', subject_id: subjectId }
-  await page.route('**/contact/active-0.example', (route) => route.fulfill({ json: item }))
-  await page.route(/\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({ json: {
+  await page.route('**/std/contact/active-0.example', (route) => route.fulfill({ json: item }))
+  await page.route(/\/std\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({ json: {
     capability: 'chat', status: 'available', contact_status: 'active',
     can_send: true, can_receive: true, remote_grant: null,
     endpoints: [{ method: 'POST', path: '/std/message' }],
   } }))
-  await page.route('**/workspace-api/approvals?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/approvals?*', (route) => route.fulfill({ json: {
     items: [{
       kind: 'capability', request_id: 900, contact_name: name,
       capability_id: 'chat', capability_version: '1',
@@ -484,18 +484,18 @@ for (const status of [502, 504]) {
   test(`unavailable remote profiles (${status}) preserve approval details and chat`, async ({ page }) => {
     const name = 'active-0.example'
     const alias = 'Local Alice'
-    await page.route(/\/workspace-api\/profiles\/[^/?]+(?:\?.*)?$/, (route) =>
+    await page.route(/\/std\/workspace-api\/profiles\/[^/?]+(?:\?.*)?$/, (route) =>
       route.fulfill({ status, body: 'remote profile unavailable' }))
-    await page.route('**/contact/active-0.example', (route) =>
+    await page.route('**/std/contact/active-0.example', (route) =>
       route.fulfill({ json: { ...contact(name, 'active'), alias } }))
-    await page.route('**/workspace-api/approvals?*', (route) => route.fulfill({ json: {
+    await page.route('**/std/workspace-api/approvals?*', (route) => route.fulfill({ json: {
       items: [{
         kind: 'capability', request_id: 900, contact_name: name,
         capability_id: 'chat', capability_version: '1',
         requested_at: 1700000000, expired_after: 2000000000,
       }], total: 1, page: 1, page_size: 20,
     } }))
-    await page.route(/\/chat-api\/conversations\/active-0\.example\/messages\?/, (route) =>
+    await page.route(/\/std\/chat-api\/conversations\/active-0\.example\/messages\?/, (route) =>
       route.fulfill({ json: { items: [], next_cursor: null } }))
 
     await page.goto('./approvals')
@@ -535,14 +535,14 @@ test('active contacts open the static chat page and expose message actions', asy
     },
   ]
 
-  await page.route(/\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({
+  await page.route(/\/std\/chat-api\/conversations\/active-0\.example\/capability$/, (route) => route.fulfill({
     json: {
       capability: 'chat', status: 'available', contact_status: 'active',
       can_send: true, can_receive: true, remote_grant: true,
       endpoints: [{ method: 'POST', path: '/std/message' }],
     },
   }))
-  await page.route(/\/chat-api\/conversations\/active-0\.example\/messages(?:\?.*)?$/, async (route) => {
+  await page.route(/\/std\/chat-api\/conversations\/active-0\.example\/messages(?:\?.*)?$/, async (route) => {
     if (route.request().method() === 'POST') {
       const body = route.request().postDataJSON() as { text: string }
       const message: ChatMessage = {
@@ -558,7 +558,7 @@ test('active contacts open the static chat page and expose message actions', asy
   })
   await page.goto('./contacts')
   await page.getByRole('button', { name: 'Chat with active-0.example' }).click()
-  await expect(page).toHaveURL(/\/workspace\/contacts\/active-0\.example\/chat$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts\/active-0\.example\/chat$/)
   await expect(page.getByRole('heading', { name: 'Remote Alice' })).toBeVisible()
   const incoming = page.getByRole('article', { name: 'Incoming message' })
   await expect(incoming).toContainText('Hello from the other side')

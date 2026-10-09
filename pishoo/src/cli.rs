@@ -137,7 +137,7 @@ Queries are written to stdout; context and status messages to stderr."
         let result = async {
             dhttp::DhttpNetwork::init().await?;
             crate::dns::maintain_mdns(&mdns, &[], &[]).await?;
-            let uri: Uri = format!("https://{}/workspace-api/libs", profile.name())
+            let uri: Uri = format!("https://{}/std/workspace-api/libs", profile.name())
                 .parse()
                 .map_err(|_| usage("invalid identity URI"))?;
             let response =
@@ -186,7 +186,7 @@ Queries are written to stdout; context and status messages to stderr."
                 let value = config_database(
                     &profile,
                     if saving { &Method::PATCH } else { &Method::GET },
-                    &Uri::from_static("/pishoo/settings"),
+                    &Uri::from_static("/std/pishoo/settings"),
                     payload,
                 )?;
                 let listen = value["listen"].as_u64().unwrap();
@@ -322,7 +322,7 @@ fn proxy_operation(args: &[OsString]) -> Result<(Method, Uri, Option<Value>)> {
         let value = serde_json::from_slice(&bytes).map_err(|_| usage("invalid proxies JSON"))?;
         return Ok((
             Method::PUT,
-            Uri::from_static("/pishoo/proxies"),
+            Uri::from_static("/std/pishoo/proxies"),
             Some(value),
         ));
     }
@@ -331,11 +331,11 @@ fn proxy_operation(args: &[OsString]) -> Result<(Method, Uri, Option<Value>)> {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("location", location)
             .finish();
-        format!("/pishoo/proxies?{query}")
+        format!("/std/pishoo/proxies?{query}")
             .parse()
             .map_err(|_| usage("invalid proxy location"))
     };
-    let uri = Uri::from_static("/pishoo/proxies");
+    let uri = Uri::from_static("/std/pishoo/proxies");
     match words.as_slice() {
         [] | ["list" | "ls"] => Ok((Method::GET, uri, None)),
         ["clear"] => Ok((Method::PUT, uri, Some(json!([])))),
@@ -464,7 +464,7 @@ fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::
                                     .filter(|text| !text.trim().is_empty())
                             })
                     });
-                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/api/{id}{path}")), "description":description}));
+                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/std/api/{id}{path}")), "description":description}));
             }
         }
     }

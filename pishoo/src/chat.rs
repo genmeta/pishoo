@@ -214,19 +214,19 @@ pub(crate) fn router(state: Arc<Chat>) -> Router {
             "/std/message",
             axum::routing::post(messages::post).layer(DefaultBodyLimit::max(64 * 1024)),
         )
-        .route("/chat-api/context", get(context))
+        .route("/std/chat-api/context", get(context))
         .route(
-            "/chat-api/conversations/{name}/messages",
+            "/std/chat-api/conversations/{name}/messages",
             get(bridge::get_messages)
                 .post(bridge::post_message)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
-            "/chat-api/conversations/{name}/messages/{id}/requeue",
+            "/std/chat-api/conversations/{name}/messages/{id}/requeue",
             axum::routing::post(bridge::requeue_message),
         )
         .route(
-            "/chat-api/conversations/{name}/capability",
+            "/std/chat-api/conversations/{name}/capability",
             get(bridge::get_capability),
         )
         .with_state(state)

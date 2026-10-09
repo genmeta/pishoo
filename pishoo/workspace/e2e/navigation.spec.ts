@@ -1,37 +1,37 @@
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
-  await page.route('**/workspace-api/libs', (route) => route.fulfill({ json: [] }))
-  await page.route('**/workspace-api/context', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/libs', (route) => route.fulfill({ json: [] }))
+  await page.route('**/std/workspace-api/context', (route) => route.fulfill({ json: {
     profile: 'spike.liu.dhttp.net', owner_name: 'spike.liu.dhttp.net',
     badges: { pending_reviews: 2, incoming_contacts: null },
   } }))
-  await page.route('**/workspace-api/settings/profile', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/settings/profile', (route) => route.fulfill({ json: {
     identity_name: 'spike.liu.dhttp.net', display_name: null, avatar_url: null, updated_at: 1700000000,
   } }))
-  await page.route('**/workspace-api/profiles/*', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/profiles/*', (route) => route.fulfill({ json: {
     display_name: null, avatar_url: null, updated_at: 1700000000,
   } }))
-  await page.route('**/acl/reviews?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [], total: 2, page: 1, page_size: 20,
   } }))
-  await page.route('**/workspace-api/approvals?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/approvals?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/acl/apis?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/apis?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/acl/access', (route) => route.fulfill({ json: {} }))
-  await page.route('**/acl/allow', (route) => route.fulfill({ json: {} }))
-  await page.route('**/workspace-api/contact-directory', (route) => route.fulfill({ json: [{
+  await page.route('**/std/acl/access', (route) => route.fulfill({ json: {} }))
+  await page.route('**/std/acl/allow', (route) => route.fulfill({ json: {} }))
+  await page.route('**/std/workspace-api/contact-directory', (route) => route.fulfill({ json: [{
     name: 'alice.example', saved: false, chat_available: true, remote_chat_granted: true,
   }] }))
-  await page.route('**/chat-api/conversations/alice.example/capability', (route) => route.fulfill({ json: {
+  await page.route('**/std/chat-api/conversations/alice.example/capability', (route) => route.fulfill({ json: {
     capability: 'chat', status: 'available', contact_status: 'active',
     can_send: true, can_receive: false, remote_grant: true,
     endpoints: [{ method: 'POST', path: '/std/message' }],
   } }))
-  await page.route('**/contacts?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/contacts?*', (route) => route.fulfill({ json: {
     items: [{
       name: 'alice.example', subject_id: 'subject-alice', alias: null, class: 'Human',
       description: 'Test contact', status: 'active', created_at: 1700000000,
@@ -39,7 +39,7 @@ test.beforeEach(async ({ page }) => {
       requested_access: {}, granted_access: {}, offers: {},
     }], total: 1, page: 1, page_size: 20,
   } }))
-  await page.route('**/contact/alice.example', (route) => route.fulfill({ json: {
+  await page.route('**/std/contact/alice.example', (route) => route.fulfill({ json: {
     name: 'alice.example', subject_id: 'subject-alice', alias: null, class: 'Human',
     description: 'Test contact', status: 'active', created_at: 1700000000,
     updated_at: 1700000000, expired_after: 2000000000,
@@ -57,9 +57,9 @@ test('shell paths support navigation, refresh and browser history', async ({ pag
 
   await primary.getByRole('link', { name: 'Contacts' }).focus()
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(/\/workspace\/contacts$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts$/)
   await page.getByRole('button', { name: /alice\.example/ }).first().click()
-  await expect(page).toHaveURL(/\/workspace\/contacts\/alice\.example$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts\/alice\.example$/)
   await expect(page.getByRole('complementary', { name: 'Contact details' })).toBeVisible()
   await page.reload()
   await expect(page.getByRole('complementary', { name: 'Contact details' })).toBeVisible()
@@ -71,7 +71,7 @@ test('shell paths support navigation, refresh and browser history', async ({ pag
 
   await primary.getByRole('link', { name: 'Quick settings' }).click()
   await page.getByRole('link', { name: 'Access rules' }).click()
-  await expect(page).toHaveURL(/\/workspace\/settings\/access$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/settings\/access$/)
   await expect(primary.getByRole('link', { name: 'Quick settings' })).toHaveAttribute('aria-current', 'page')
   await page.goto('./extensions')
   await expect(page.getByText('Not enabled yet')).toBeVisible()
@@ -103,34 +103,34 @@ test('identity labels omit the domain suffix while routes and rule data retain i
     updated_at: 1700000000, expired_after: 2000000000,
     requested_access: {}, granted_access: {}, offers: {},
   }
-  await page.route('**/contacts?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/contacts?*', (route) => route.fulfill({ json: {
     items: [contact], total: 1, page: 1, page_size: 100,
   } }))
-  await page.route('**/contact/friend.dhttp.net', (route) => route.fulfill({ json: contact }))
-  await page.route('**/workspace-api/contact-directory', (route) => route.fulfill({ json: [{
+  await page.route('**/std/contact/friend.dhttp.net', (route) => route.fulfill({ json: contact }))
+  await page.route('**/std/workspace-api/contact-directory', (route) => route.fulfill({ json: [{
     name, saved: false, chat_available: true, remote_chat_granted: true,
   }] }))
-  await page.route('**/chat-api/conversations/friend.dhttp.net/capability', (route) => route.fulfill({ json: {
+  await page.route('**/std/chat-api/conversations/friend.dhttp.net/capability', (route) => route.fulfill({ json: {
     capability: 'chat', status: 'available', contact_status: 'active',
     can_send: true, can_receive: false, remote_grant: true,
     endpoints: [{ method: 'POST', path: '/std/message' }],
   } }))
-  await page.route('**/acl/reviews?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [{ id: 1, visitor: name, method: 'GET', api: '/files', reason: 'Need access', expired_after: '2033-01-01T00:00:00Z' }],
     total: 1, page: 1, page_size: 20,
   } }))
-  await page.route('**/workspace-api/approvals?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/workspace-api/approvals?*', (route) => route.fulfill({ json: {
     items: [{ kind: 'access', id: 1, visitor: name, method: 'GET', api: '/files',
       reason: 'Need access', requested_at: 1700000000, expired_after: 2000000000 }],
     total: 1, page: 1, page_size: 20,
   } }))
-  await page.route('**/acl/apis?*', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/apis?*', (route) => route.fulfill({ json: {
     items: [{ api: '/files', updated_at: 1700000000 }], total: 1, page: 1, page_size: 20,
   } }))
-  await page.route('**/acl/access', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/access', (route) => route.fulfill({ json: {
     '/files': { GET: { allow: [name], review: [], deny: [] } },
   } }))
-  await page.route('**/acl/allow', (route) => route.fulfill({ json: {
+  await page.route('**/std/acl/allow', (route) => route.fulfill({ json: {
     [name]: { '/files': { allow: ['GET'], review: [], deny: [] } },
   } }))
 
@@ -147,7 +147,7 @@ test('identity labels omit the domain suffix while routes and rule data retain i
   await expect(link).toContainText('friend')
   await expect(link).not.toContainText(name)
   await link.click()
-  await expect(page).toHaveURL(/\/workspace\/contacts\/friend\.dhttp\.net$/)
+  await expect(page).toHaveURL(/\/std\/workspace\/contacts\/friend\.dhttp\.net$/)
   const drawer = page.getByRole('complementary', { name: 'Contact details' })
   await expect(drawer.getByRole('heading', { level: 2 })).toHaveText('friend')
   await expect(drawer.locator('.contact-heading strong')).toHaveText('friend')

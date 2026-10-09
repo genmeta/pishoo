@@ -398,7 +398,7 @@ pub(crate) async fn get_remote_profile(
     validate_remote_profile(&profile)?;
     let avatar_url = profile.avatar_url.map(|_| {
         format!(
-            "/workspace-api/profiles/{target}/avatar?v={}",
+            "/std/workspace-api/profiles/{target}/avatar?v={}",
             profile.updated_at
         )
     });

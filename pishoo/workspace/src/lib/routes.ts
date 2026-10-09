@@ -12,20 +12,20 @@ export interface WorkspaceRoute {
 export function routeFromPath(pathname: string): WorkspaceRoute {
   const path = pathname.replace(/\/$/, '') || '/'
   switch (path) {
-    case '/workspace': return { page: 'home' }
-    case '/workspace/contacts': return { page: 'contacts' }
-    case '/workspace/contacts/new': return { page: 'contact-new' }
-    case '/workspace/contacts/requests': return { page: 'contact-requests' }
-    case '/workspace/extensions': return { page: 'extensions' }
-    case '/workspace/apps': return { page: 'apps' }
-    case '/workspace/approvals': return { page: 'approvals' }
-    case '/workspace/settings/profile': return { page: 'profile' }
-    case '/workspace/settings/access': return { page: 'access' }
-    case '/workspace/settings/capabilities': return { page: 'capabilities' }
+    case '/std/workspace': return { page: 'home' }
+    case '/std/workspace/contacts': return { page: 'contacts' }
+    case '/std/workspace/contacts/new': return { page: 'contact-new' }
+    case '/std/workspace/contacts/requests': return { page: 'contact-requests' }
+    case '/std/workspace/extensions': return { page: 'extensions' }
+    case '/std/workspace/apps': return { page: 'apps' }
+    case '/std/workspace/approvals': return { page: 'approvals' }
+    case '/std/workspace/settings/profile': return { page: 'profile' }
+    case '/std/workspace/settings/access': return { page: 'access' }
+    case '/std/workspace/settings/capabilities': return { page: 'capabilities' }
   }
 
-  const chatMatch = /^\/workspace\/contacts\/([^/]+)\/chat$/.exec(path)
-  const match = chatMatch ?? /^\/workspace\/contacts\/(?:requests\/)?([^/]+)$/.exec(path)
+  const chatMatch = /^\/std\/workspace\/contacts\/([^/]+)\/chat$/.exec(path)
+  const match = chatMatch ?? /^\/std\/workspace\/contacts\/(?:requests\/)?([^/]+)$/.exec(path)
   if (match) {
     try {
       const contactName = decodeURIComponent(match[1])
@@ -40,7 +40,7 @@ export function routeFromPath(pathname: string): WorkspaceRoute {
 }
 
 export function contactPath(name: string): string {
-  return `/workspace/contacts/${encodeURIComponent(name)}`
+  return `/std/workspace/contacts/${encodeURIComponent(name)}`
 }
 
 export function contactChatPath(name: string): string {

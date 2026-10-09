@@ -39,7 +39,7 @@ fi
 ready=0
 attempt=0
 while [ "$attempt" -lt 200 ]; do
-    if target/debug/examples/pishoo-client get /file/hello.txt >/dev/null 2>&1; then
+    if target/debug/examples/pishoo-client get /std/file/hello.txt >/dev/null 2>&1; then
         ready=1
         break
     fi

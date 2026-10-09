@@ -2,7 +2,7 @@
 
 Note 是由一个 WASI HTTP component 提供的个人便签工具，支持手机和电脑新建、编辑、搜索和删除便签。页面和 API 都由 `lib/note/lib.wasm` 返回，数据库为 `<身份目录>/db/note/note.db`，该 Lib 的私有目录挂载为 `/db`。Pishoo 继续使用现有组件加载、路由、WASI 文件能力和 daccess 授权。
 
-本文件定义第一版实现及验收方式。访问入口为 `https://<身份名称>/api/note/`；手机使用支持 DHTTP 的浏览器。
+本文件定义第一版实现及验收方式。访问入口为 `https://<身份名称>/std/api/note/`；手机使用支持 DHTTP 的浏览器。
 
 ## 页面与操作
 
@@ -24,14 +24,14 @@ Note 是由一个 WASI HTTP component 提供的个人便签工具，支持手机
 
 | 方法 | 组件内路径 | 对外路径 | 用途 |
 | --- | --- | --- | --- |
-| GET | `/` | `/api/note/` | 返回完整页面 |
-| GET | `/notes` | `/api/note/notes?q=文字` | 返回便签列表或搜索结果 |
-| POST | `/notes` | `/api/note/notes` | 新建便签 |
-| GET | `/note` | `/api/note/note?id=…` | 读取一条便签 |
-| PUT | `/note` | `/api/note/note?id=…` | 保存已有便签 |
-| DELETE | `/note` | `/api/note/note?id=…` | 删除便签 |
+| GET | `/` | `/std/api/note/` | 返回完整页面 |
+| GET | `/notes` | `/std/api/note/notes?q=文字` | 返回便签列表或搜索结果 |
+| POST | `/notes` | `/std/api/note/notes` | 新建便签 |
+| GET | `/note` | `/std/api/note/note?id=…` | 读取一条便签 |
+| PUT | `/note` | `/std/api/note/note?id=…` | 保存已有便签 |
+| DELETE | `/note` | `/std/api/note/note?id=…` | 删除便签 |
 
-页面用绝对同源路径 `/api/note/notes` 与 `/api/note/note` 发请求，使浏览器访问带或不带末尾斜杠的入口时都能找到 API。Pishoo 交给 guest 的请求路径已去掉 `/api/note`；guest 按上表的组件内路径处理。
+页面只使用相对路径 `notes` 与 `note`，不包含宿主命名空间或 LibId。Pishoo 将清单内 `/notes` 挂到 `/std/api/<LibId>/notes`，并把已声明 GET/HEAD 的无尾斜杠 Lib 根入口307跳转到带尾斜杠的入口，保留 query；浏览器因此自动把页面相对请求拼到当前 Lib 入口下。Pishoo 交给 guest 的请求再去掉外部挂载前缀，guest 按上表的组件内路径处理。更换 LibId 或宿主前缀无需改页面。
 
 JSON API 的请求为 `application/json`；响应为 `application/json; charset=utf-8`，页面为 `text/html; charset=utf-8`。页面和数据响应设置 `Cache-Control: no-store`。列表返回 `{ "notes": [...] }`，每项只有 `id`、`title`、`preview`、`updated_at` 和 `version`；列表不返回全部正文。
 
@@ -114,7 +114,7 @@ Note 不修改 Server、Sandbox、Lib、StoreData、Invocation、dhttp 或 h3x �
 
 | 场景 | 操作 | 预期 |
 | --- | --- | --- |
-| 页面载入 | 手机打开 `/api/note/` | 显示列表或空状态，无外部资源依赖 |
+| 页面载入 | 手机打开 `/std/api/note/` | 显示列表或空状态，无外部资源依赖 |
 | 新建 | 输入中文、换行和 emoji，保存 | 显示已保存，重新读取内容完全一致 |
 | 持久化 | 关闭页面后重开，再重启 Pishoo | 已保存的便签仍然存在 |
 | 编辑与搜索 | 改标题和正文，分别搜索 | 新内容可读，列表排序与搜索正确 |
@@ -148,7 +148,7 @@ cargo test --locked -p pishoo --lib execution::note:: -- --ignored --skip note_b
 cargo test --locked -p pishoo --lib note_browser_preview -- --ignored --nocapture
 ```
 
-在五分钟内打开 `http://127.0.0.1:18743/api/note/`；临时数据随后删除。这不是部署入口，手机正式验收使用 DHTTP 身份地址。
+在五分钟内打开 `http://127.0.0.1:18743/std/api/note/`；临时数据随后删除。这不是部署入口，手机正式验收使用 DHTTP 身份地址。
 
 ## 已完成验收
 

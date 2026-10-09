@@ -6,12 +6,12 @@
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/pishoo/settings` | GET | 读取数据库中的 listen | 设置对象 |
-| `/pishoo/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
-| `/pishoo/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
-| `/pishoo/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
-| `/pishoo/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
-| `/pishoo/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
+| `/std/pishoo/settings` | GET | 读取数据库中的 listen | 设置对象 |
+| `/std/pishoo/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
+| `/std/pishoo/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
+| `/std/pishoo/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
+| `/std/pishoo/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
+| `/std/pishoo/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
 
 设置对象示例：
 
@@ -29,9 +29,9 @@
 ]
 ```
 
-每条规则必须且只能包含字符串字段 `location`、`proxy_pass`。沿用已有的路径、重复规则和回环 HTTP/TCP 上游校验。`location` 是唯一键，不增加数据库 ID。`= /path` 表示精确匹配，其余位置按现有路径段前缀规则匹配。`/pishoo` 与其他管理命名空间保留，不能被代理或 Lib 占用。显式 `/file` 根或子路径代理可覆盖匹配的静态路径，例如 `= /file/content` 只代理该 API，`/file` 代理整个文件命名空间；未匹配的静态路径保持原行为，`/` 根代理不覆盖静态路径。Lib 仍不能占用 `/file`。
+每条规则必须且只能包含字符串字段 `location`、`proxy_pass`。沿用路径、重复规则和回环 HTTP/TCP 上游校验。`location` 是唯一键，不增加数据库 ID。`= /path` 表示精确匹配，其余位置按路径段前缀匹配。仅 `/std` 根及子路径是系统保留路径，禁止显式代理 location 占用，包含 `/std/file` 和 `/std/api`，没有例外；`/std-extra` 等无关名称可代理。
 
-`/api` 不整体保留：仅当前已加载 `/api/<LibId>` 的根及子路径归 Lib，未声明操作404、方法不匹配405均不回退代理。其他 `/api/*` 可按配置代理；没有 Lib 的 HA 专用身份可配置根代理。`/`、`/api` 或 `/api/` 等较宽代理可与 Lib 共存，但显式 location（含 `= /path`）若落入已加载 Lib 前缀，启动返回配置冲突并列出 location/LibId。HTTP和离线配置命令只保存磁盘配置，冲突按重启时实际加载的 Lib 集合检查；Lib 安装、移除与配置变更均不改变当前进程的路由归属。
+系统静态文件使用 `/std/file/*`，磁盘仍为身份目录 `file/`。旧 `/file` 和 `/api/*` 使用普通代理，与加载 Lib 无关；HA 可以配置 `/` 或 `/api` 代理，OpenCode 可以配置 `/file` 代理。Lib 执行入口为 `/std/api/<LibId>`，未声明操作404、方法不匹配405，未注册系统路径也不回退上游。配置与 Lib 变化仍需重启。旧系统路径不提供兼容别名或重定向，已有 ACL 不自动改写，详见 [系统路径迁移](system-paths.md)。
 
 裸上游地址规范化为 `http://` URI。未写路径的 `http://127.0.0.1:8080` 保留原请求路径；显式路径 `/` 或 `/api/` 替换匹配前缀，两者不会在读写中合并。
 
@@ -57,10 +57,10 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
-cargo run --locked -p pishoo --example pishoo-client -- get /pishoo/settings
-cargo run --locked -p pishoo --example pishoo-client -- patch /pishoo/settings '{"listen":1}'
-cargo run --locked -p pishoo --example pishoo-client -- put /pishoo/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
-cargo run --locked -p pishoo --example pishoo-client -- get /pishoo/proxies
+cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/settings
+cargo run --locked -p pishoo --example pishoo-client -- patch /std/pishoo/settings '{"listen":1}'
+cargo run --locked -p pishoo --example pishoo-client -- put /std/pishoo/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
+cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 ```
 
 接口随 Server 启动装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
