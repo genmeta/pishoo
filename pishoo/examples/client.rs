@@ -332,6 +332,123 @@ async fn run() -> Result<(), Failure> {
             }
             println!("HTTP/3 dropped Echo response: next request still succeeds");
         }
+        "ha-websocket" => {
+            use futures::{SinkExt, StreamExt, TryStreamExt};
+            use tokio_tungstenite::{WebSocketStream, tungstenite::{Message, protocol::Role}};
+            use tokio_util::io::StreamReader;
+
+            let origin: http::Uri = args
+                .next()
+                .ok_or("usage: pishoo-client ha-websocket ORIGIN [ROUNDS]")?
+                .parse()?;
+            if origin.scheme_str() != Some("https") {
+                return Err("HA WebSocket requires an https origin".into());
+            }
+            let authority = origin.authority().ok_or("HA WebSocket requires an authority")?;
+            let rounds: usize = args.next().map_or(Ok(3), |value| value.parse())?;
+            if rounds == 0 {
+                return Err("HA WebSocket requires at least one round".into());
+            }
+            for round in 0..rounds {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let request = http::Request::builder()
+                        .method(http::Method::CONNECT)
+                        .uri(format!("https://{authority}/api/websocket"))
+                        .extension(std::sync::Arc::<str>::from("websocket"))
+                        .header("sec-websocket-version", "13")
+                        .body(dhttp::WndBuf::new(64 * 1024))?;
+                    let (writer, response) = endpoint.from_request(request).await?;
+                    let response = response.await?;
+                    if response.status() != http::StatusCode::OK
+                        || response.version() != http::Version::HTTP_3
+                    {
+                        return Err(io::Error::other(format!(
+                            "HA WebSocket: {:?} {}", response.version(), response.status()
+                        )).into());
+                    }
+                    let reader = StreamReader::new(
+                        response.into_body().into_data_stream().map_err(io::Error::other),
+                    );
+                    let mut ws = WebSocketStream::from_raw_socket(
+                        tokio::io::join(reader, writer), Role::Client, None,
+                    ).await;
+                    let first = ws.next().await.ok_or("HA WebSocket ended before greeting")??;
+                    let Message::Text(text) = first else {
+                        return Err("HA WebSocket did not send a text greeting".into());
+                    };
+                    let greeting: serde_json::Value = serde_json::from_str(&text)?;
+                    if greeting["type"] != "auth_required" {
+                        return Err("HA WebSocket did not request authentication".into());
+                    }
+                    let ping = format!("pishoo-{round}").into_bytes();
+                    ws.send(Message::Ping(ping.clone())).await?;
+                    if ws.next().await.ok_or("HA WebSocket ended before pong")?? != Message::Pong(ping) {
+                        return Err("HA WebSocket pong mismatch".into());
+                    }
+                    ws.close(None).await?;
+                    if !matches!(ws.next().await, Some(Ok(Message::Close(_)))) {
+                        return Err("HA WebSocket did not acknowledge close".into());
+                    }
+                    println!("HTTP/3 HA WebSocket round {}: 200, auth_required, ping/pong, close", round + 1);
+                    Ok::<_, Failure>(())
+                }).await??;
+            }
+        }
+        "ha-burst" => {
+            let origin: http::Uri = args
+                .next()
+                .ok_or("usage: pishoo-client ha-burst ORIGIN PATHS.json [ROUNDS]")?
+                .parse()?;
+            if origin.scheme_str() != Some("https") {
+                return Err("HA burst requires an https origin".into());
+            }
+            let authority = origin.authority().ok_or("HA burst requires an authority")?;
+            let paths: Vec<String> = serde_json::from_slice(&std::fs::read(
+                args.next().ok_or("HA burst requires PATHS.json")?,
+            )?)?;
+            if paths.is_empty()
+                || paths.iter().any(|path| !path.starts_with('/') || path.starts_with("//"))
+            {
+                return Err("HA burst requires nonempty origin-relative paths".into());
+            }
+            let rounds: usize = args.next().map_or(Ok(3), |value| value.parse())?;
+            let warmup = endpoint
+                .get(format!("https://{authority}/manifest.json").parse()?)
+                .await?;
+            if warmup.status() != http::StatusCode::OK || warmup.version() != http::Version::HTTP_3 {
+                return Err("HA burst warmup did not return HTTP/3 200".into());
+            }
+            warmup.into_body().collect().await?;
+            for round in 0..rounds {
+                let requests = paths.iter().enumerate().map(|(index, path)| {
+                    let endpoint = &endpoint;
+                    async move {
+                        let response = endpoint
+                            .get(format!("https://{authority}{path}").parse()?)
+                            .header(
+                                http::HeaderName::from_static("x-qpack-regression"),
+                                format!("{round}-{index}").parse()?,
+                            )
+                            .await?;
+                        if response.status() != http::StatusCode::OK
+                            || response.version() != http::Version::HTTP_3
+                        {
+                            return Err(io::Error::other(format!(
+                                "HA burst {path}: {:?} {}", response.version(), response.status()
+                            )).into());
+                        }
+                        Ok::<_, Failure>(response.into_body().collect().await?.to_bytes().len())
+                    }
+                });
+                let sizes = tokio::time::timeout(
+                    Duration::from_secs(60), futures::future::try_join_all(requests),
+                ).await??;
+                println!(
+                    "HTTP/3 HA burst round {}: {} responses all 200; {} bytes",
+                    round + 1, sizes.len(), sizes.iter().sum::<usize>(),
+                );
+            }
+        }
         "get" | "post" | "put" | "patch" => {
             let target = args
                 .next()
@@ -397,7 +514,7 @@ async fn run() -> Result<(), Failure> {
                 (&mut *input).await??;
             }
         }
-        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|put URL JSON|patch URL JSON|smoke|probe|nat-get URL|serve|query [NAME]|publish [ADDRESS ...]]".into()),
+        _ => return Err("usage: pishoo-client [echo [URL]|get URL|post URL BODY|put URL JSON|patch URL JSON|ha-websocket ORIGIN [ROUNDS]|ha-burst ORIGIN PATHS.json [ROUNDS]|smoke|probe|nat-get URL|serve|query [NAME]|publish [ADDRESS ...]]".into()),
     }
     Ok(())
 }
@@ -424,9 +541,7 @@ async fn send_bytes(
     if json {
         request = request.header(http::header::CONTENT_TYPE, "application/json".parse()?);
     }
-    let (mut writer, response) = request
-        .body(dhttp::WndBuf::new(64 * 1024))
-        .await?;
+    let (mut writer, response) = request.body(dhttp::WndBuf::new(64 * 1024)).await?;
     let upload = scopeguard::guard(
         tokio::spawn(async move {
             writer.write_all(&bytes).await?;

@@ -184,7 +184,10 @@ fn parse_proxies(values: Vec<(String, String)>) -> Result<Vec<ProxyLocation>> {
     let mut seen = HashSet::new();
     for (location, upstream) in values {
         let path = location.strip_prefix("= ").unwrap_or(&location);
-        if !valid_path(path) || !seen.insert(location.clone()) || reserved(path) {
+        if !valid_path(path)
+            || !seen.insert(location.clone())
+            || (reserved(path) && path != "/file" && !path.starts_with("/file/"))
+        {
             return Err(Error::InvalidConfig(format!(
                 "invalid or reserved proxy location: {location}"
             )));
@@ -375,7 +378,9 @@ pub(crate) fn config_database(
             }
             let location = params[0].1.to_string();
             let path = location.strip_prefix("= ").unwrap_or(&location);
-            if !valid_path(path) || reserved(path) {
+            if !valid_path(path)
+                || (reserved(path) && path != "/file" && !path.starts_with("/file/"))
+            {
                 return Err(Error::BadRequest("invalid proxy location".into()));
             }
             Some(location)

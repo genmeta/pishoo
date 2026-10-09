@@ -1,5 +1,36 @@
 # 第一版实施记录
 
+### 2026-10-09 测试提交与依赖固定
+
+- 将 Pishoo 的当前改动整理到非 main 分支 `feat/pishoo-integration`，dhttp、dquic、ddns、h3x 各自使用按修改内容命名的修复或诊断分支。Pishoo 的直接依赖及根级 crates.io patches 固定同一组 Git SHA，dhttp 的跨仓路径同步改为 Git SHA；保留 daccess 和 rustls fork 的既有固定提交。分支、依赖清单与构建命令见 [测试快照说明](pishoo/docs/testing-snapshot.md)。
+- 从父目录配置之外读取锁定 Git 依赖图，确认只有 Gateway/Pishoo 两个工作区 crate 使用本地路径，没有相邻仓库路径或重复的传输类型来源。该图上的 workspace 测试共131项通过、10项按既有条件忽略，workspace all-targets 编译及修改文件格式/diff检查通过；没有升级其余 registry 依赖。固定提交先导入本机 Cargo Git 缓存完成离线验证，推送测试分支须经用户明确授权。
+- dquic 的 `AddressBook::pathways_to` 直接从现有地址簿选择同类端点，中转匹配中转、直连匹配直连，不再按对端 agent 拼装本端地址，也不新增结构、字段或生产接口。95 项 qprotocol 回归通过，覆盖不同中转、socket 登记、NAT 类型及原有网卡/范围筛选。Pishoo 124 项库回归通过，9 项按既有条件忽略。
+- 加入实际建连的 DNS 端点/候选及跳过原因日志，DDNS 记录 H3 查询状态和失败原因。真实具名服务请求已读取 Spike 资料并返回 HTTP/3 200；申请后续的403属于对端授权响应。联系人建立后，按用户要求通过现有管理 API 给 Spike 添加 home 身份的 `* / allow` 并读回确认；这些本机身份、数据库和授权记录不进入代码提交。
+
+### 2026-10-09 OpenCode Web 反代
+
+- 用户指定 `code.alice.smith` 反代 OpenCode Web，并授权 `alice.smith`；明确批准显式 `/file` 代理覆盖匹配的静态路径，随后确认 Alice 可完整使用项目文件、终端与命令执行能力。只修改既有配置校验、proxy_pass 与 current_router 方法体，不新增生产结构、字段或函数签名；Lib 和其他管理命名空间的保留规则不变。
+- OpenCode 1.18.21 在本机 `127.0.0.1:4096` 后台运行，工作目录为本仓。code 身份保存 `/`、`/file` 两条无路径替换的本机代理。使用现行 daccess 的具名 H3 管理 API 为 Alice 添加根路径允许与管理命名空间拒绝规则；已有联系人与聊天规则保留。配置生效已重启本会话的 Pishoo 测试进程，HA 上游仍运行。
+- 124 项库回归通过、9 项按既有条件忽略；新增生产 Router 测试覆盖精确/前缀 `/file` 覆盖、query 保留、兄弟路径隔离与根代理不覆盖静态文件。真实具名 QUIC/H3 验证 Alice 的首页、7项页面静态资源、健康接口、项目接口和3个文件 API、PTY列表均200；Alice 请求 Pishoo settings 返回403，phone 身份请求首页返回403。HA manifest 仍为200。
+- 浏览器、聊天 SSE 与终端 WebSocket 交互留给用户验收，本轮没有发起模型请求或执行终端命令。背景进程未设置开机自启。原配置与授权读出备份、运行日志、构建/测试结果与 `verification.json` 保存在 `target/opencode-live/`。
+
+### 2026-10-09 电脑 AnySee HA 错误复查
+
+- 用户报告更新服务后电脑 AnySee 的 manifest FetchEvent 网络错误、字体慢网络提示及 WebSocket `dhttp request failed: failed to connect endpoint`。11:11–11:14 当前服务日志有相同身份的 manifest 与 WebSocket CONNECT 200；11:13 原生客户端读取 manifest 完整正文并返回 HTTP/3 200。这些成功记录不能证明浏览器的所有尝试都成功。
+- 原生 pishoo-client 增加 `ha-websocket ORIGIN [ROUNDS]`，复用现有依赖和请求接缝，不新增生产结构、成员或跨模块接口。11:15 对真实 HA 十次会话均完成 HTTP/3 200、`auth_required` 首帧、ping/pong 和关闭握手；另复测 HAR 的155个GET资源三轮共465个完整响应全部200。证据保存于 target/ha-live/ha-live-websocket-recheck.log、ha-live-resources-recheck.log、manifest-recheck.log。
+- AnySee 源码的错误文字来自建连错误映射，显示文本没有展开底层原因，单凭控制台不能区分 DNS、TLS、连接池或 H3 装配失败。当前原生测试未复现，也未验证 HA 登录后的浏览器会话。电脑控制工具拒绝访问 AnySee，后续需浏览器 Network/NetLog 的失败原因或获准的界面访问；未清理浏览器缓存、重启 AnySee 或修改客户端与生产传输实现。
+
+### 2026-10-09 QPACK 反馈合并与背压（主目录）
+
+补充更高压力验收：新增主目录测试，1,000个并发生产者、100,000个ACK、1,024条取消、1字节输出窗口，确认输出停读时暂停（完成2,048个ACK），恢复读取后全部完成且无连接错误。编码侧连续100,000次编码中99,985次队列满回退静态/字面量，真实对端逐条解码正确，写出恢复后动态压缩恢复；首次SETTINGS前编码不产生动态指令，不占编码队列。另行确认同步取消反馈真正耗尽内存仍会产生连接级ExcessiveLoad，等待字段内存上限仍可能拒绝单条流；不承诺任意压力下永不断链。本轮只补测试和记录，未修改生产行为或重启服务。证据见target/ha-live/qpack-both-directions-pressure.json。
+
+- 用户批准直接修改主目录 h3x，并明确授权 Decoder 私有反馈资源、reported_insert_count、take_feedback 与对应写出接缝；冻结例外已记入 design/README.md。公开 H3/dhttp 接口不变，其他正在进行的工作区改动保留。
+- Decoder 直接持有有界 FIFO，插入进度由动态表累计计数减 reported_insert_count 推导，写出或 ACK/取消提交时合并；提交 ACK 前先提交相应增量，避免重复计数。ACK 无空间时解码 Pending，等待不持有 QPACK 锁；已有 watch 同时唤醒反馈 writer 和失败等待。同步 reset/Drop/GOAWAY 使用保留的取消空间，真实未发送取消内存超限仍报连接错误。写出最多持有一批有界反馈，输入每16条指令让出执行。
+- 主目录新回归覆盖4097条缓冲插入合并、真实编码器对1025个插入与全部ACK的计数校验、交错插入/ACK顺序、输出阻塞后恢复的10,000个ACK与512条取消、取消内存上限，以及ACK存储已满时控制进度仍可推进。h3x原有113项库测试及全部集成测试通过，最后追加的控制进度测试单独通过；dhttp 55项库测试、Pishoo 123项库测试（9项默认忽略）通过，真实QUIC/H3 HA WebSocket测试单独通过，Pishoo all-targets检查通过。
+- 原生 pishoo-client 增加 ha-burst ORIGIN PATHS.json [ROUNDS]，只按提供的路径发GET并检查HTTP/3 200及完整Body。使用alice.smith经实际Pishoo代理请求真实HA，从HAR提取155个资源路径（含source maps），并发三轮共465个响应全部200，当前服务日志无QPACK反馈/队列错误。未重放HAR的登录凭据或授权码。
+- 原会话启动的Pishoo测试进程已更新为主目录构建；HA容器和home.alice.smith根代理继续运行供手机AnySee复测。日志与验收证据保存在target/ha-live/。
+
+
 日期：2026-09-26。这是实现和验收记录，接口以 `design/README.md` 为准。
 
 ## 2026-10-08：管理命令与 API

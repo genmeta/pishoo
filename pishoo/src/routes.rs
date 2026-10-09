@@ -69,7 +69,17 @@ pub(crate) async fn proxy_pass(
 ) -> Response {
     let result: Result<Response> = async {
         let path = request.uri().path();
-        if reserved(path) {
+        let explicit_file_proxy = proxies.iter().any(|route| {
+            let location = route.location.strip_prefix("= ").unwrap_or(&route.location);
+            (location == "/file" || location.starts_with("/file/"))
+                && if route.location.starts_with("= ") {
+                    path == location
+                } else {
+                    path == location.trim_end_matches('/')
+                        || path.starts_with(&format!("{}/", location.trim_end_matches('/')))
+                }
+        });
+        if reserved(path) && !explicit_file_proxy {
             return Err(Error::RouteNotFound);
         }
         let exact = proxies

@@ -101,7 +101,7 @@ async fn forward_dhttp(endpoint: dhttp::Endpoint,
 
 每次请求仅短暂read-lock并clone当前Router，然后释放锁再驱动oneshot。Sandbox 构造的 Lib handler 捕获本路由的 Arc<Lib>、任务跟踪器与 Endpoint，不捕获 Server 或 Sandbox；普通 routes 模块不负责 WASM 执行。旧请求保有旧Router/Lib，不需要另一个发布对象。
 
-Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件；代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib 或配置；OCSP 成功刷新后替换 Endpoint、发布器与基于已有资源构造的 Router，close 仍清空 Router。
+Server.load 读取配置、加载 Endpoint 和 Sandbox Lib，显式合并管理、Lib API 与静态文件 Router，再配置代理 fallback，并在完整 Router 外添加 daccess 授权层。静态文件仅在 `/file/{*path}` 提供，`/file` 本身不提供文件。2026-10-09 用户批准显式 `/file` 根或子路径代理按精确/路径段前缀规则优先于匹配的静态路径；`/` 根代理不覆盖静态路径，未匹配的静态路径保持原行为。配置校验仅对该代理命名空间豁免 reserved，Lib 校验和其他保留路径不变；不修改函数签名。代理 fallback 仅在命中配置的精确路径或路径段前缀时转发，否则返回 404。Lib 扫描或编译失败直接结束启动；运行期间不替换 Lib 或配置；OCSP 成功刷新后替换 Endpoint、发布器与基于已有资源构造的 Router，close 仍清空 Router。
 
 `/.pishoo/dhttp/{*path}` 在代理 fallback 之前挂载；通配部分必须包含目标名称，支持无斜杠和带末尾斜杠的目标根路径及其子路径。目标名称来自单个路径段，规范化为 DHTTP 名称，可带证书序号；剩余原始路径与 query、方法及 Body 交给现有 Endpoint 发送。该入口除统一 daccess 授权外，要求已验证远端与当前 Server 同名且 SKI owner_hash 相同；不转带入站可信身份 extensions，清理逐跳头，并将目标设为 Host。响应状态、普通头及 Body 流式返回。输入无效返回400，身份不符返回403，DHTTP 出站失败返回502。它不修改本机 TCP 代理、Lib 出站或 Server 字段。
 

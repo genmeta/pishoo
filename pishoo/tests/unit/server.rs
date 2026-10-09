@@ -1,6 +1,102 @@
 use super::*;
 use crate::{Error, setup::load_server_config};
 
+#[tokio::test]
+async fn explicit_file_proxies_override_only_matching_static_paths() {
+    use http_body_util::BodyExt;
+    use hyper::{body::Incoming, service::service_fn};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(socket),
+                        service_fn(|request: Request<Incoming>| async move {
+                            Ok::<_, std::convert::Infallible>(http::Response::new(
+                                http_body_util::Full::new(bytes::Bytes::from(format!(
+                                    "upstream {}",
+                                    request.uri()
+                                ))),
+                            ))
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+    });
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    std::fs::create_dir_all(server.profile.join("file/content")).unwrap();
+    for path in ["local.txt", "content/local.txt", "contentish"] {
+        std::fs::write(server.profile.join(&format!("file/{path}")), "static").unwrap();
+    }
+    server
+        .access
+        .set_policy(
+            access_control::Method::Unspecified,
+            "/",
+            access_control::Effect::Allow,
+            access_control::Grantee::Anony,
+        )
+        .await
+        .unwrap();
+    let local = server.endpoint.local_authority().unwrap();
+    for (location, path, expected) in [
+        ("/", "/file/local.txt", "static"),
+        ("= /file", "/file", "upstream /file"),
+        (
+            "= /file/content",
+            "/file/content?path=README.md",
+            "upstream /file/content?path=README.md",
+        ),
+        ("= /file/content", "/file/content/local.txt", "static"),
+        (
+            "/file/content",
+            "/file/content/local.txt",
+            "upstream /file/content/local.txt",
+        ),
+        ("/file/content", "/file/contentish", "static"),
+        ("/file", "/file/local.txt", "upstream /file/local.txt"),
+    ] {
+        let mut parts = format!("http://{address}")
+            .parse::<http::Uri>()
+            .unwrap()
+            .into_parts();
+        parts.path_and_query = None;
+        server.config.proxy_locations = vec![crate::setup::ProxyLocation {
+            location: location.into(),
+            proxy_pass: parts,
+        }];
+        let mut request = Request::builder()
+            .uri(path)
+            .body(AxumBody::empty())
+            .unwrap();
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(local.clone()),
+            remote: None,
+        });
+        let response = current_router(&server).oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            http::StatusCode::OK,
+            "{location}: {path}"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            expected,
+            "{location}: {path}"
+        );
+    }
+    upstream.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn ocsp_refresh_starts_after_three_days_and_skips_missed_ticks() {
     use std::time::Duration;

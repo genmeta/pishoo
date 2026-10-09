@@ -11,11 +11,11 @@ autobins = false
 path = "src/pishoo.rs"
 
 [dependencies]
-ddns = { package = "dyns", path = "../../ddns", features = ["h3", "mdns"] }
-qprotocol = { path = "../../dquic/qprotocol" }
-dhttp = { path = "../../dhttp/dhttp" }
-dhttp-home = { path = "../../dhttp/home" }
-qtls = { path = "../../dquic/qtls" }
+ddns = { package = "dyns", git = "https://github.com/genmeta/ddns.git", rev = "65487e4b5d8bc35029595de382fb835d0b52ebff", features = ["h3", "mdns"] }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1" }
+dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
 access_control = { git = "https://github.com/genmeta/daccess.git", rev = "cf8f72f4e6bedbd7c98648ffee31053cb509b395" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
@@ -65,7 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-qbase = { path = "../../dquic/qbase" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
 rcgen = "0.14"
