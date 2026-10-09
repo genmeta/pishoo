@@ -106,7 +106,7 @@ export default function App() {
   const profileAvatar = () => profileAvatarUrl(profile())
 
   return (
-    <div class="app-shell">
+    <div class="app-shell" classList={{ 'app-shell-chat': route().page === 'chat' }}>
       <a class="skip-link" href="#main-content">{t('nav.skipContent')}</a>
       <Sidebar activePage={primaryPage(route().page)} profileName={profileLabel()}
         profileIdentity={displayIdentityName(ownerName())} profileAvatar={profileAvatar()}
