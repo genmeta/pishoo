@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { api } from '../api/client'
 import type { Effect, GrantedMethods, RuleRow } from '../api/types'
-import { EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
+import { Dialog, EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
 import { useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { displayIdentityName, errorMessage } from '../lib/format'
@@ -10,6 +10,8 @@ import { displayIdentityName, errorMessage } from '../lib/format'
 type View = 'api' | 'grantee'
 
 const EFFECTS = ['allow', 'review', 'deny'] as const
+const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE', '*'] as const
+
 function flattenRules(
   buckets: Record<string, GrantedMethods> | undefined,
   toRow: (key: string, effect: Effect, value: string) => RuleRow,
@@ -38,13 +40,24 @@ function rowsForGrantee(
   return flattenRules(paths, (api, effect, method) => ({ api, method, effect, grantee }))
 }
 
-export default function PoliciesPage() {
+export default function PoliciesPage(props: {
+  notify: (message: string, tone?: 'success' | 'error') => void
+}) {
   const { t } = useI18n()
   const requestedGrantee = new URLSearchParams(window.location.search).get('grantee')
   const [view, setView] = createSignal<View>(requestedGrantee ? 'grantee' : 'api')
   const [page, setPage] = createSignal(1)
   const [revision, setRevision] = createSignal(0)
   const [selection, setSelection] = createSignal<string | null>(requestedGrantee)
+  const [editing, setEditing] = createSignal(false)
+  const [editingRule, setEditingRule] = createSignal<RuleRow | null>(null)
+  const [deleting, setDeleting] = createSignal<RuleRow | null>(null)
+  const [submitting, setSubmitting] = createSignal(false)
+  const [actionError, setActionError] = createSignal<string | null>(null)
+  const [apiPath, setApiPath] = createSignal('')
+  const [method, setMethod] = createSignal('GET')
+  const [effect, setEffect] = createSignal<Effect>('allow')
+  const [grantee, setGrantee] = createSignal('')
 
   const loadSummaries = abortable(
     ([currentPage]: readonly [number, number], signal: AbortSignal) =>
@@ -89,6 +102,69 @@ export default function PoliciesPage() {
     setPage(1)
   }
 
+  const openEditor = (rule?: RuleRow) => {
+    setEditingRule(rule ?? null)
+    setApiPath(rule?.api ?? (view() === 'api' ? currentSelection() ?? '' : ''))
+    setMethod(rule?.method ?? 'GET')
+    setEffect(rule?.effect ?? 'allow')
+    setGrantee(rule?.grantee ?? (view() === 'grantee' ? currentSelection() ?? '' : ''))
+    setActionError(null)
+    setEditing(true)
+  }
+
+  const saveRule = async (event: SubmitEvent) => {
+    event.preventDefault()
+    if (submitting()) return
+    const rule: RuleRow = {
+      api: apiPath().trim().replace(/\/+$/, '') || '/',
+      method: method(),
+      effect: effect(),
+      grantee: grantee().trim(),
+    }
+    setSubmitting(true)
+    setActionError(null)
+    try {
+      await api.setRule(rule)
+      if (view() === 'api') {
+        const paths = [...new Set([...Object.keys(byApi() ?? {}), rule.api])].sort()
+        setPage(Math.floor(paths.indexOf(rule.api) / 20) + 1)
+      }
+      setSelection(view() === 'api' ? rule.api : rule.grantee)
+      setEditing(false)
+      refresh()
+      props.notify(t('policies.saved'))
+    } catch (error) {
+      setActionError(errorMessage(error, t('common.unexpectedError')))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const openDelete = (rule: RuleRow) => {
+    setActionError(null)
+    setDeleting(rule)
+  }
+
+  const deleteRule = async () => {
+    const rule = deleting()
+    if (!rule || submitting()) return
+    setSubmitting(true)
+    setActionError(null)
+    try {
+      await api.deleteRule(rule)
+      if (view() === 'api' && rows().length === 1 && summaries()?.items.length === 1 && page() > 1) {
+        setPage(page() - 1)
+      }
+      setDeleting(null)
+      refresh()
+      props.notify(t('policies.deleted'))
+    } catch (error) {
+      setActionError(errorMessage(error, t('common.unexpectedError')))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   const loading = () => summaries.loading || byApi.loading || byGrantee.loading
   const loadError = () => summaries.error || byApi.error || byGrantee.error
 
@@ -96,9 +172,14 @@ export default function PoliciesPage() {
     <div class="policies-page">
       <header class="page-header">
         <h1>{t('policies.title')}</h1>
-        <button class="button button-secondary" type="button" onClick={refresh} disabled={loading()}>
-          {t('common.refresh')}
-        </button>
+        <div class="header-actions">
+          <button class="button button-secondary" type="button" onClick={refresh} disabled={loading()}>
+            {t('common.refresh')}
+          </button>
+          <button class="button button-primary" type="button" onClick={() => openEditor()} disabled={submitting()}>
+            {t('policies.add')}
+          </button>
+        </div>
       </header>
       <div class="toolbar">
         <div class="segmented" role="tablist" aria-label={t('policies.organization')}>
@@ -187,6 +268,7 @@ export default function PoliciesPage() {
                       <th>{t('policies.method')}</th>
                       <th>{t('policies.effect')}</th>
                       <Show when={view() === 'api'}><th>{t('policies.grantee')}</th></Show>
+                      <th><span class="sr-only">{t('common.actions')}</span></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -197,6 +279,16 @@ export default function PoliciesPage() {
                           <td><span class="method">{rule.method}</span></td>
                           <td><StatusBadge value={rule.effect} /></td>
                           <Show when={view() === 'api'}><td><code>{displayIdentityName(rule.grantee)}</code></td></Show>
+                          <td>
+                            <div class="row-actions">
+                              <button class="button button-secondary button-small" type="button" disabled={submitting()} onClick={() => openEditor(rule)}>
+                                {t('common.edit')}
+                              </button>
+                              <button class="button button-danger-quiet button-small" type="button" disabled={submitting()} onClick={() => openDelete(rule)}>
+                                {t('common.delete')}
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                       )}
                     </For>
@@ -208,6 +300,68 @@ export default function PoliciesPage() {
         </div>
       </Show>
 
+      <Dialog open={editing()} title={t('policies.title')} onClose={() => !submitting() && setEditing(false)}>
+        <form class="form-grid" onSubmit={saveRule} aria-busy={submitting()}>
+          <label class="field field-wide">
+            <span>{t('policies.apiPath')}</span>
+            <input value={apiPath()} onInput={(event) => setApiPath(event.currentTarget.value)}
+              placeholder="/files/private" pattern="/.*" required disabled={submitting() || editingRule() !== null} />
+          </label>
+          <label class="field">
+            <span id="rule-method-label">{t('policies.method')}</span>
+            <select aria-labelledby="rule-method-label" value={method()} onChange={(event) => setMethod(event.currentTarget.value)} disabled={submitting() || editingRule() !== null}>
+              <For each={HTTP_METHODS}>{(value) => <option value={value}>{value === '*' ? t('policies.anyMethod') : value}</option>}</For>
+              <Show when={!HTTP_METHODS.some((value) => value === method())}>
+                <option value={method()}>{method()}</option>
+              </Show>
+            </select>
+          </label>
+          <label class="field">
+            <span id="rule-effect-label">{t('policies.effect')}</span>
+            <select aria-labelledby="rule-effect-label" value={effect()} onChange={(event) => setEffect(event.currentTarget.value as Effect)} disabled={submitting()}>
+              <For each={EFFECTS}>{(value) => <option value={value}>{t(`status.${value}`)}</option>}</For>
+            </select>
+          </label>
+          <label class="field field-wide">
+            <span>{t('policies.grantee')}</span>
+            <input value={grantee()} onInput={(event) => setGrantee(event.currentTarget.value)}
+              placeholder="alice.example.dhttp.net" list="grantee-options" aria-describedby="grantee-hint"
+              required disabled={submitting() || editingRule() !== null} />
+            <datalist id="grantee-options">
+              <option value="**" /><option value="*?" /><option value="?" />
+              <For each={grantees()}>{(name) => <option value={name} />}</For>
+            </datalist>
+          </label>
+          <p id="grantee-hint" class="muted field-wide">{t('policies.granteeHint')}</p>
+          <Show when={editingRule()}><p class="muted field-wide">{t('policies.editHint')}</p></Show>
+          <Show when={actionError()}><p class="field-error field-wide" role="alert">{actionError()}</p></Show>
+          <div class="dialog-actions field-wide">
+            <button class="button button-secondary" type="button" disabled={submitting()} onClick={() => setEditing(false)}>
+              {t('common.cancel')}
+            </button>
+            <button class="button button-primary" type="submit" disabled={submitting()}>
+              {submitting() ? t('common.saving') : t('policies.save')}
+            </button>
+          </div>
+        </form>
+      </Dialog>
+
+      <Dialog open={deleting() !== null} title={t('policies.deleteTitle')} onClose={() => !submitting() && setDeleting(null)}>
+        <div class="decision-summary">
+          <code>{deleting()?.api}</code><span class="method">{deleting()?.method}</span>
+          <StatusBadge value={deleting()?.effect ?? 'deny'} /><code>{deleting()?.grantee}</code>
+        </div>
+        <p class="dialog-copy">{t('policies.deleteHint')}</p>
+        <Show when={actionError()}><p class="field-error" role="alert">{actionError()}</p></Show>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" disabled={submitting()} onClick={() => setDeleting(null)}>
+            {t('common.cancel')}
+          </button>
+          <button class="button button-danger" type="button" disabled={submitting()} onClick={() => void deleteRule()}>
+            {submitting() ? t('common.deleting') : t('policies.deleteRule')}
+          </button>
+        </div>
+      </Dialog>
     </div>
   )
 }

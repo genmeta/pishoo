@@ -11,6 +11,7 @@ import type {
   ProfileSettings,
   PublicProfile,
   RuntimeContext,
+  RuleRow,
   RulesByApi,
   RulesByGrantee,
 } from './types'
@@ -172,4 +173,16 @@ export const api = {
 
   rulesByGrantee: (signal?: AbortSignal) =>
     request<RulesByGrantee>('/acl/allow', { signal }),
+
+  setRule: (rule: RuleRow) =>
+    request<void>(`/acl/allow/${encodeURIComponent(rule.grantee)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ api: rule.api, method: rule.method, effect: rule.effect }),
+    }),
+
+  deleteRule: (rule: RuleRow) =>
+    request<void>(`/acl/allow/${encodeURIComponent(rule.grantee)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ api: rule.api, method: rule.method }),
+    }),
 }

@@ -54,7 +54,9 @@ test('core pages remain usable at the target viewport', async ({ page }, testInf
   await expectNoPageOverflow(page)
   if (testInfo.project.name === 'desktop') await expectNoVerticalPageOverflow(page)
 
-  await expect(page.getByRole('button', { name: 'Add rule' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Add rule', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Access rules', exact: true })).toBeVisible()
   await expectNoPageOverflow(page)
-  await page.screenshot({ path: testInfo.outputPath('access-rules.png'), fullPage: true })
+  await page.screenshot({ path: testInfo.outputPath('access-rule-editor.png'), fullPage: true })
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
 })
