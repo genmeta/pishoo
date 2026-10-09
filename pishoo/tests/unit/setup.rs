@@ -122,7 +122,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
     assert!(load_server_config(&profile).is_err());
 }
 #[test]
-fn file_namespace_cannot_be_proxied() {
+fn file_namespace_accepts_explicit_proxy_overrides() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let db = Connection::open(profile.config_db_path()).unwrap();
@@ -133,10 +133,7 @@ fn file_namespace_cannot_be_proxied() {
             [location],
         )
         .unwrap();
-        assert!(matches!(
-            load_server_config(&profile),
-            Err(Error::InvalidConfig(_))
-        ));
+        assert!(load_server_config(&profile).is_ok(), "{location}");
     }
 }
 

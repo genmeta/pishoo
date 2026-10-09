@@ -3,11 +3,21 @@ resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
 
-# Share registry dependency types with the local transport workspaces.
+# Keep registry dependencies on the same Git snapshots as direct dependencies.
 [patch.crates-io]
-dhttp = { path = "../dhttp/dhttp" }
-dhttp-home = { path = "../dhttp/home" }
-qtls = { path = "../dquic/qtls" }
-qresolve = { path = "../dquic/qresolve" }
-qbase = { path = "../dquic/qbase" }
-qrecovery = { path = "../dquic/qrecovery" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1" }
+dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1" }
+dyns = { git = "https://github.com/genmeta/ddns.git", rev = "65487e4b5d8bc35029595de382fb835d0b52ebff" }
+h3x = { git = "https://github.com/genmeta/h3x.git", rev = "cd1ed3aea181d1f05f1627564f88a5e2d33aaee5" }
+qmacro = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qevent = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qcongestion = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qconnection = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qrecovery = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qtransport = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qtraversal = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }
+qudp = { git = "https://github.com/genmeta/dquic.git", rev = "4acdce041ee3b6d1bb1c0277462e3783028755da" }

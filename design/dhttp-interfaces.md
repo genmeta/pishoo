@@ -1,5 +1,7 @@
 # dhttp 第一版结构与接口清单
 
+2026-10-09 QPACK 反馈修复例外：用户批准 h3x Decoder 的私有反馈队列、reported_insert_count、take_feedback 及对应私有写出接缝调整，详见 [冻结基线](README.md)。h3x 公开接口及本文的 dhttp 结构、成员、签名不变。
+
 本清单定义当前设计；遵循[清单约束](README.md)。h3x 的既定接口、结构和协议行为保持不变。DHTTP 只封装 Endpoint、共享网络、连接复用、应用接入与流适配，不增加传输配额、交换控制、完成订阅或错误缓存。
 
 2026-10-02 按用户指定的 [Network 详细设计](../../dhttp/docs/design/network-detailed-design.md)重构：QUIC 为唯一传输，Network 逻辑统一在 `network.rs`，流适配保留在 `transport/quic.rs`。删除泛型后端包装、TCP mock 和绑定状态镜像。库根保持 `src/dhttp.rs`，使用普通 `mod`。

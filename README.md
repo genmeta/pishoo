@@ -30,6 +30,19 @@ Its SQLite configuration, completed work, test commands, and remaining
 transport work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 The packaged-release installation instructions below describe the earlier release.
 
+### Colleague test snapshot
+
+The `feat/pishoo-integration` branch pins DHTTP, DQUIC, DDNS and H3X to exact Git revisions, including the current proxy, QPACK and endpoint-selection fixes. No sibling repository checkout is required. Use Rust 1.97.1 and Bun 1.4.2 on PATH, then run:
+
+```sh
+git clone --branch feat/pishoo-integration https://github.com/genmeta/pishoo.git
+cd pishoo
+cargo build --locked -p pishoo --bin pishoo
+cargo test --locked --workspace
+```
+
+Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. The exact dependency commits and test coverage are listed in [the test snapshot notes](pishoo/docs/testing-snapshot.md).
+
 ### Install Pishoo
 
 Pishoo supports mainstream Linux distributions and macOS on both Arm and x86 architectures. For a quick deployment, we recommend installing the `gmutils` operations toolkit alongside Pishoo.
@@ -114,6 +127,10 @@ cargo run --locked -p pishoo --example pishoo-client -- nat-get https://server.d
 ```
 
 `serve` follows the test identity's `listen` configuration and publishes/withdraws its online records. Use an isolated profile and restore any pre-existing records after acceptance. Unit tests only exercise local logic; none of these commands run automatically.
+
+The native client also provides `ha-burst ORIGIN PATHS.json [ROUNDS]` for read-only HA resource acceptance over a shared QUIC/H3 connection. PATHS.json is an array of origin-relative GET resource paths to check. It verifies HTTP/3 200 and completes each response body. The HA QPACK regression used 155 static paths from the HAR, including source maps, for three concurrent rounds without replaying login credentials or authorization codes.
+
+`ha-websocket ORIGIN [ROUNDS]` checks the real HA proxy with an HTTP/3 extended CONNECT, the server's `auth_required` greeting, WebSocket ping/pong, and a close handshake on each session. It does not authenticate to HA; each round has a ten-second deadline. This checks the native client and server path; AnySee's connection handling and authenticated sessions require separate browser validation.
 
 Peer OCSP staples are temporarily optional for all server domains. Certificate chain, hostname, validity and handshake signature checks remain enabled; supplied OCSP responses still require certificate binding, signature, freshness and good status. For `ddns.genmeta.net`, an explicitly configured `DQUIC_DDNS_OCSP_FILE` remains an optional fallback and must pass those same OCSP checks. Ordinary startup does not need this file.
 

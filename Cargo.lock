@@ -1265,6 +1265,7 @@ dependencies = [
 [[package]]
 name = "dhttp"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/dhttp.git?rev=0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1#0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1"
 dependencies = [
  "bytes",
  "dhttp-home",
@@ -1294,6 +1295,7 @@ dependencies = [
 [[package]]
 name = "dhttp-home"
 version = "0.5.0"
+source = "git+https://github.com/genmeta/dhttp.git?rev=0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1#0a1464941021dcf3f9c0161d2bc5d42cb47ccbf1"
 dependencies = [
  "dirs",
  "futures",
@@ -1431,6 +1433,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dyns"
 version = "0.7.2"
+source = "git+https://github.com/genmeta/ddns.git?rev=65487e4b5d8bc35029595de382fb835d0b52ebff#65487e4b5d8bc35029595de382fb835d0b52ebff"
 dependencies = [
  "base64 0.22.1",
  "bitfield-struct",
@@ -1917,6 +1920,7 @@ dependencies = [
 [[package]]
 name = "h3x"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/h3x.git?rev=cd1ed3aea181d1f05f1627564f88a5e2d33aaee5#cd1ed3aea181d1f05f1627564f88a5e2d33aaee5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3526,6 +3530,7 @@ dependencies = [
 [[package]]
 name = "qbase"
 version = "0.6.4"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -3548,6 +3553,7 @@ dependencies = [
 [[package]]
 name = "qcongestion"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "qbase",
  "qevent",
@@ -3560,6 +3566,7 @@ dependencies = [
 [[package]]
 name = "qconnection"
 version = "0.6.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "futures",
@@ -3572,11 +3579,13 @@ dependencies = [
  "qtransport",
  "qtraversal",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "qevent"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "derive_builder",
@@ -3594,6 +3603,7 @@ dependencies = [
 [[package]]
 name = "qmacro"
 version = "0.5.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3603,6 +3613,7 @@ dependencies = [
 [[package]]
 name = "qprotocol"
 version = "0.6.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3622,6 +3633,7 @@ dependencies = [
 [[package]]
 name = "qrecovery"
 version = "0.6.2"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3636,6 +3648,7 @@ dependencies = [
 [[package]]
 name = "qresolve"
 version = "0.8.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -3646,6 +3659,7 @@ dependencies = [
 [[package]]
 name = "qtls"
 version = "0.6.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "der",
@@ -3664,6 +3678,7 @@ dependencies = [
 [[package]]
 name = "qtransport"
 version = "0.6.1"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3682,6 +3697,7 @@ dependencies = [
 [[package]]
 name = "qtraversal"
 version = "0.7.2"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3696,6 +3712,7 @@ dependencies = [
 [[package]]
 name = "qudp"
 version = "0.7.2"
+source = "git+https://github.com/genmeta/dquic.git?rev=4acdce041ee3b6d1bb1c0277462e3783028755da#4acdce041ee3b6d1bb1c0277462e3783028755da"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -6748,23 +6765,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "dhttp-access"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "dhttp-log"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "dshell"
-version = "0.6.2"
-
-[[patch.unused]]
-name = "qdatagram"
-version = "0.6.2"
-
-[[patch.unused]]
-name = "rankey"
-version = "0.2.2"

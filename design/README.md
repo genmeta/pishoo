@@ -1,5 +1,9 @@
 # 三仓第一版设计清单
 
+2026-10-09 用户批准为 OpenCode Web 允许显式 `/file` 代理覆盖匹配的静态文件路径；精确和路径段前缀规则均可使用，根代理不覆盖静态文件，未匹配的静态路径保持原行为。只改现有配置校验和 Router 方法体，不新增结构、字段或函数签名。部署于 code.alice.smith，并授权 alice.smith。
+
+2026-10-09 用户批准在主目录修复 h3x 的 QPACK 反馈：Decoder::State 用有界 feedback 队列替换 on_instruction，新增 reported_insert_count；未提交插入计数由现有动态表计数减它推导。Decoder 增加 take_feedback；对应 State 算法、私有 write_decoder/sync_decoder_with 与连接装配改为直接读取 Decoder 反馈，复用 ArcQpack 已有 watch 唤醒。ACK 无空间时保持解码 Pending，同步取消使用保留空间；反馈空间和等待字段字节保持有界。删除不再使用的 Decoder 回调方法及接收队列别名，公开接口、其余结构及 h3x 职责不变；不新增 Guard、传输配额或工作树。
+
 2026-10-08 用户批准代理与 Lib 的 `/api` 路由兼容策略：取消全局 `/api` 保留，只注册已加载 `/api/<LibId>` 的根及子路径；该前缀内404/405不回退代理，其他 `/api/*` 走配置代理。Server.load 拒绝落入已加载 Lib 前缀的显式代理 location，并列出 location/LibId；`/` 或 `/api` 等更宽代理可作兜底。管理命名空间仍保留。不新增结构、字段或方法/跨模块函数签名。
 
 日期：2026-09-26。状态：按用户确认持续维护的冻结接口基线；实现及验收进度见[实施记录](../IMPLEMENTATION.md)。

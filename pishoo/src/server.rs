@@ -634,6 +634,14 @@ async fn load_access(
 
 fn current_router(server: &Server) -> Router {
     let proxies = server.config.proxy_locations.clone();
+    let file_proxies: Vec<_> = proxies
+        .iter()
+        .filter(|route| {
+            let location = route.location.strip_prefix("= ").unwrap_or(&route.location);
+            location == "/file" || location.starts_with("/file/")
+        })
+        .cloned()
+        .collect();
     Router::new()
         .merge(access_router(server.access.clone()))
         .merge(config_router(
@@ -648,7 +656,29 @@ fn current_router(server: &Server) -> Router {
             server.endpoint.clone(),
             server.sandbox.runtime.clone(),
         ))
-        .merge(file_router(server.profile.join("file")))
+        .merge(
+            file_router(server.profile.join("file")).layer(axum::middleware::from_fn(
+                move |request: Request<AxumBody>, next: axum::middleware::Next| {
+                    let proxies = file_proxies.clone();
+                    async move {
+                        let path = request.uri().path();
+                        let matched = proxies.iter().any(|route| {
+                            if let Some(location) = route.location.strip_prefix("= ") {
+                                path == location
+                            } else {
+                                let location = route.location.trim_end_matches('/');
+                                path == location || path.starts_with(&format!("{location}/"))
+                            }
+                        });
+                        if matched {
+                            proxy_pass(proxies, request).await
+                        } else {
+                            next.run(request).await
+                        }
+                    }
+                },
+            )),
+        )
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)
