@@ -1,0 +1,1235 @@
+{
+  "date": "2026-10-09",
+  "timezone": "Asia/Shanghai",
+  "commit": "21b96fdd078b2485fb39ad253228355a4ac242ee",
+  "profile": "debug, four Tokio workers",
+  "formal_cases": 65,
+  "passed": 59,
+  "failed": 6,
+  "matrix": [
+    {
+      "case": "static_0_bytes",
+      "metrics": {
+        "body_elapsed_s": 3.9458e-05,
+        "body_first_byte_s": null,
+        "bytes": 0,
+        "elapsed_s": 0.012544292,
+        "headers_s": 0.012479875,
+        "mib_per_s": 0.0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "recorded_utc": "2026-10-09T10:36:08.823992+00:00",
+      "status": "passed",
+      "wall_s": 0.012556709
+    },
+    {
+      "case": "static_1_bytes",
+      "metrics": {
+        "body_elapsed_s": 7.1042e-05,
+        "body_first_byte_s": 4.3875e-05,
+        "bytes": 1,
+        "elapsed_s": 0.010415833,
+        "headers_s": 0.010333375,
+        "mib_per_s": 9.1549804781247e-05,
+        "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+      },
+      "recorded_utc": "2026-10-09T10:36:08.835113+00:00",
+      "status": "passed",
+      "wall_s": 0.010423375
+    },
+    {
+      "case": "static_4095_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.000686375,
+        "body_first_byte_s": 0.000325708,
+        "bytes": 4095,
+        "elapsed_s": 0.06313075,
+        "headers_s": 0.062430625,
+        "mib_per_s": 0.06185844474743956,
+        "sha256": "9e928acd293e4c83ee16b1dbc6cae65db8ffb830e304d91f53921935373c951d"
+      },
+      "recorded_utc": "2026-10-09T10:36:08.898492+00:00",
+      "status": "passed",
+      "wall_s": 0.063139709
+    },
+    {
+      "case": "static_4096_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.000366916,
+        "body_first_byte_s": 6.875e-06,
+        "bytes": 4096,
+        "elapsed_s": 0.0362345,
+        "headers_s": 0.035852458,
+        "mib_per_s": 0.10779864149288859,
+        "sha256": "2610bbf76b9999397fd47c1ea60b5ecfbb0fd09b6cde608d286190c33d93f7e1"
+      },
+      "recorded_utc": "2026-10-09T10:36:08.935363+00:00",
+      "status": "passed",
+      "wall_s": 0.036246041
+    },
+    {
+      "case": "static_65535_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.0056605,
+        "body_first_byte_s": 1.1875e-05,
+        "bytes": 65535,
+        "elapsed_s": 0.035222416,
+        "headers_s": 0.029546291,
+        "mib_per_s": 1.774297769798118,
+        "sha256": "b60e79d429a8d65cf7ede1bce4f8bc6e2e0e09acfe0a89b1f71dcc63b0d5eb1a"
+      },
+      "recorded_utc": "2026-10-09T10:36:08.971191+00:00",
+      "status": "passed",
+      "wall_s": 0.035234875
+    },
+    {
+      "case": "static_65536_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.005328958,
+        "body_first_byte_s": 8.333e-06,
+        "bytes": 65536,
+        "elapsed_s": 0.039732958,
+        "headers_s": 0.034388458,
+        "mib_per_s": 1.5729123652756518,
+        "sha256": "82d97640ca5cbb8d1d4d89722c446249d4114d3808b60ad30deee0cdef7ab443"
+      },
+      "recorded_utc": "2026-10-09T10:36:09.011447+00:00",
+      "status": "passed",
+      "wall_s": 0.039744792
+    },
+    {
+      "case": "static_65537_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.005304458,
+        "body_first_byte_s": 8.458e-06,
+        "bytes": 65537,
+        "elapsed_s": 0.036146083,
+        "headers_s": 0.030826208,
+        "mib_per_s": 1.7290233912358222,
+        "sha256": "b6e8b649db90e783bd2b810d671e3592e9a47f4890cd7ffe3908b31a90b5f5ee"
+      },
+      "recorded_utc": "2026-10-09T10:36:09.048318+00:00",
+      "status": "passed",
+      "wall_s": 0.036159292
+    },
+    {
+      "case": "static_1048576_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.071455459,
+        "body_first_byte_s": 1.0417e-05,
+        "bytes": 1048576,
+        "elapsed_s": 0.250715792,
+        "headers_s": 0.179242042,
+        "mib_per_s": 3.9885435627371817,
+        "sha256": "c13f3286b0caac1b7c9222b4404c89fd63f6d31712e4fe12f9fc7d428848f9c2"
+      },
+      "recorded_utc": "2026-10-09T10:36:09.299573+00:00",
+      "status": "passed",
+      "wall_s": 0.250728667
+    },
+    {
+      "case": "static_104857600_bytes",
+      "metrics": {
+        "body_elapsed_s": 13.186404,
+        "body_first_byte_s": 6.041e-06,
+        "bytes": 104857600,
+        "elapsed_s": 13.253394125,
+        "headers_s": 0.066976667,
+        "mib_per_s": 7.545236285015007,
+        "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+      },
+      "recorded_utc": "2026-10-09T10:36:22.553589+00:00",
+      "status": "passed",
+      "wall_s": 13.253403
+    },
+    {
+      "case": "static_1073741824_bytes",
+      "metrics": {
+        "body_elapsed_s": 139.759361083,
+        "body_first_byte_s": 7.708e-06,
+        "bytes": 1073741824,
+        "elapsed_s": 139.786099333,
+        "headers_s": 0.026720667,
+        "mib_per_s": 7.325477956665372,
+        "sha256": "c0c64fff20a8c1f2fa5dbd29305695a54d3e4616ebfa524a1ef71f1a1137317f"
+      },
+      "recorded_utc": "2026-10-09T10:38:42.342532+00:00",
+      "status": "passed",
+      "wall_s": 139.786106916
+    },
+    {
+      "case": "head_1_gib",
+      "metrics": {
+        "body_elapsed_s": 1.8125e-05,
+        "body_first_byte_s": null,
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "recorded_utc": "2026-10-09T10:38:42.404159+00:00",
+      "status": "passed",
+      "wall_s": 0.061088417
+    },
+    {
+      "case": "proxy_download_100_mib",
+      "metrics": {
+        "body_elapsed_s": 13.069752584,
+        "body_first_byte_s": 6.167e-06,
+        "bytes": 104857600,
+        "elapsed_s": 13.095477,
+        "headers_s": 0.025713041,
+        "mib_per_s": 7.636223376295267,
+        "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.500073+00:00",
+      "status": "passed",
+      "wall_s": 13.095483542
+    },
+    {
+      "case": "wasm_echo_0_bytes",
+      "metrics": {
+        "body_elapsed_s": 3.725e-05,
+        "body_first_byte_s": null,
+        "bytes": 0,
+        "elapsed_s": 0.0026455,
+        "mib_per_s": 0.0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.503917+00:00",
+      "status": "passed",
+      "wall_s": 0.002651792
+    },
+    {
+      "case": "wasm_echo_1_bytes",
+      "metrics": {
+        "body_elapsed_s": 2.7042e-05,
+        "body_first_byte_s": 1.6417e-05,
+        "bytes": 1,
+        "elapsed_s": 0.001507625,
+        "mib_per_s": 0.0006322356143174363,
+        "sha256": "4d7b3ef7300acf70c892d8327db8272f54434adbc61a4e130a563cb59a0d0f47"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.505615+00:00",
+      "status": "passed",
+      "wall_s": 0.001513708
+    },
+    {
+      "case": "wasm_echo_65535_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.077132042,
+        "body_first_byte_s": 0.000550167,
+        "bytes": 65535,
+        "elapsed_s": 0.080180292,
+        "mib_per_s": 0.7794696572860771,
+        "sha256": "0a11a51d32c484f71bb532ad120c6c8e557adcefaad3e4b10e08bd30a0d22f7f"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.586+00:00",
+      "status": "passed",
+      "wall_s": 0.080186875
+    },
+    {
+      "case": "wasm_echo_65536_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.014525959,
+        "body_first_byte_s": 0.000736625,
+        "bytes": 65536,
+        "elapsed_s": 0.018079334,
+        "mib_per_s": 3.4567706494619412,
+        "sha256": "17b56af410a8db1e95397e6fea78fbb1396026035a8489cbdb51d51cc7cb76b6"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.604395+00:00",
+      "status": "passed",
+      "wall_s": 0.018085709
+    },
+    {
+      "case": "wasm_echo_65537_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.007816458,
+        "body_first_byte_s": 0.00320425,
+        "bytes": 65537,
+        "elapsed_s": 0.010898708,
+        "mib_per_s": 5.734208155948669,
+        "sha256": "39c16289892d487982478294d4d46f02b768b21213f9d5aeb1300b2fd8d1a157"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.615532+00:00",
+      "status": "passed",
+      "wall_s": 0.010904375
+    },
+    {
+      "case": "wasm_echo_1048576_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.052125375,
+        "body_first_byte_s": 0.000300584,
+        "bytes": 1048576,
+        "elapsed_s": 0.122617958,
+        "mib_per_s": 8.155301404648727,
+        "sha256": "26ae27379c26de0b34cfc5ad15ab2d5a0e45445da0695de766c2bc699d6b0810"
+      },
+      "recorded_utc": "2026-10-09T10:38:55.738416+00:00",
+      "status": "passed",
+      "wall_s": 0.122625083
+    },
+    {
+      "case": "wasm_echo_104857600_bytes",
+      "error": "NoError (0x100): The stream was reset with app error code: 256, final size: 91759845",
+      "recorded_utc": "2026-10-09T10:39:05.025992+00:00",
+      "status": "failed",
+      "wall_s": 9.287130917
+    },
+    {
+      "case": "wasm_duplex_idle_31s",
+      "error": "InternalError (0x102): No error in V1(Padding), reason: connection idle timeout",
+      "recorded_utc": "2026-10-09T10:39:36.020072+00:00",
+      "status": "failed",
+      "wall_s": 31.017093416
+    },
+    {
+      "case": "wasm_slow_writer",
+      "metrics": {
+        "body_elapsed_s": 0.781384667,
+        "body_first_byte_s": 0.01010375,
+        "bytes": 2097152,
+        "elapsed_s": 0.834537,
+        "mib_per_s": 2.396531978573806,
+        "sha256": "af1f969e9dd587622801862bcaa54e3fee5cae212f052dec0e28d87ca63b98a8"
+      },
+      "recorded_utc": "2026-10-09T10:39:36.855239+00:00",
+      "status": "passed",
+      "wall_s": 0.83455725
+    },
+    {
+      "case": "wasm_slow_reader",
+      "error": "ClosedCriticalStream (0x104): No error in V1(Padding), reason: connection idle timeout",
+      "recorded_utc": "2026-10-09T10:40:15.232792+00:00",
+      "status": "failed",
+      "wall_s": 38.384886166
+    },
+    {
+      "case": "proxy_echo_0_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.000250667,
+        "body_first_byte_s": null,
+        "bytes": 0,
+        "elapsed_s": 0.013673958,
+        "mib_per_s": 0.0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.247141+00:00",
+      "status": "passed",
+      "wall_s": 0.013689833
+    },
+    {
+      "case": "proxy_echo_1_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.001519833,
+        "body_first_byte_s": 0.000305166,
+        "bytes": 1,
+        "elapsed_s": 0.012278208,
+        "mib_per_s": 7.766262165242447e-05,
+        "sha256": "4d7b3ef7300acf70c892d8327db8272f54434adbc61a4e130a563cb59a0d0f47"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.259861+00:00",
+      "status": "passed",
+      "wall_s": 0.012290583
+    },
+    {
+      "case": "proxy_echo_65535_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.121921083,
+        "body_first_byte_s": 0.003304125,
+        "bytes": 65535,
+        "elapsed_s": 0.126863458,
+        "mib_per_s": 0.492641827426098,
+        "sha256": "0a11a51d32c484f71bb532ad120c6c8e557adcefaad3e4b10e08bd30a0d22f7f"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.387134+00:00",
+      "status": "passed",
+      "wall_s": 0.126873625
+    },
+    {
+      "case": "proxy_echo_65536_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.010655041,
+        "body_first_byte_s": 0.007164625,
+        "bytes": 65536,
+        "elapsed_s": 0.015976791,
+        "mib_per_s": 3.911659091086894,
+        "sha256": "17b56af410a8db1e95397e6fea78fbb1396026035a8489cbdb51d51cc7cb76b6"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.403564+00:00",
+      "status": "passed",
+      "wall_s": 0.015984833
+    },
+    {
+      "case": "proxy_echo_65537_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.008145542,
+        "body_first_byte_s": 0.005148584,
+        "bytes": 65537,
+        "elapsed_s": 0.012364917,
+        "mib_per_s": 5.054240772780523,
+        "sha256": "39c16289892d487982478294d4d46f02b768b21213f9d5aeb1300b2fd8d1a157"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.416245+00:00",
+      "status": "passed",
+      "wall_s": 0.012371542
+    },
+    {
+      "case": "proxy_echo_1048576_bytes",
+      "metrics": {
+        "body_elapsed_s": 0.044865209,
+        "body_first_byte_s": 0.000189667,
+        "bytes": 1048576,
+        "elapsed_s": 0.094649709,
+        "mib_per_s": 10.565156641653658,
+        "sha256": "26ae27379c26de0b34cfc5ad15ab2d5a0e45445da0695de766c2bc699d6b0810"
+      },
+      "recorded_utc": "2026-10-09T10:40:15.511168+00:00",
+      "status": "passed",
+      "wall_s": 0.094656041
+    },
+    {
+      "case": "proxy_echo_104857600_bytes",
+      "metrics": {
+        "body_elapsed_s": 8.758428834,
+        "body_first_byte_s": 0.092390125,
+        "bytes": 104857600,
+        "elapsed_s": 8.856991625,
+        "mib_per_s": 11.290514086885107,
+        "sha256": "3e9660e05f8e2413c2d8f78ddb8be30e7753a136f73168db49e414bdc648f75c"
+      },
+      "recorded_utc": "2026-10-09T10:40:24.368238+00:00",
+      "status": "passed",
+      "wall_s": 8.856998708
+    },
+    {
+      "case": "proxy_duplex_idle_31s",
+      "error": "InternalError (0x102): No error in V1(Padding), reason: connection idle timeout",
+      "recorded_utc": "2026-10-09T10:40:55.373496+00:00",
+      "status": "failed",
+      "wall_s": 31.004976084
+    },
+    {
+      "case": "proxy_slow_writer",
+      "metrics": {
+        "body_elapsed_s": 0.768446083,
+        "body_first_byte_s": 0.001716125,
+        "bytes": 2097152,
+        "elapsed_s": 0.796587583,
+        "mib_per_s": 2.5107055448767506,
+        "sha256": "af1f969e9dd587622801862bcaa54e3fee5cae212f052dec0e28d87ca63b98a8"
+      },
+      "recorded_utc": "2026-10-09T10:40:56.171254+00:00",
+      "status": "passed",
+      "wall_s": 0.796635875
+    },
+    {
+      "case": "proxy_slow_reader",
+      "error": "ClosedCriticalStream (0x104): No error in V1(Padding), reason: connection idle timeout",
+      "recorded_utc": "2026-10-09T10:41:17.019053+00:00",
+      "status": "failed",
+      "wall_s": 20.8473355
+    },
+    {
+      "case": "proxy_echo_1_gib",
+      "metrics": {
+        "body_elapsed_s": 102.460060791,
+        "body_first_byte_s": 0.0002615,
+        "bytes": 1073741824,
+        "elapsed_s": 102.636160542,
+        "mib_per_s": 9.976990403463624,
+        "sha256": "d7797a7e778d6579b5666c76e628d4d1fa5d61bacfd64b11276302f745424304"
+      },
+      "recorded_utc": "2026-10-09T10:42:59.658184+00:00",
+      "status": "passed",
+      "wall_s": 102.636172458
+    },
+    {
+      "case": "concurrent_static_1",
+      "metrics": {
+        "aggregate_mib_per_s": 14.058444468265696,
+        "bytes": 1048576,
+        "elapsed_s": 0.071131208,
+        "p50_s": 0.071096208,
+        "p95_s": 0.071096208,
+        "p99_s": 0.071096208,
+        "requests": 1
+      },
+      "recorded_utc": "2026-10-09T10:42:59.730328+00:00",
+      "status": "passed",
+      "wall_s": 0.071139791
+    },
+    {
+      "case": "concurrent_wasm_1",
+      "metrics": {
+        "aggregate_mib_per_s": 8.756845390232396,
+        "bytes": 1048576,
+        "elapsed_s": 0.114195958,
+        "p50_s": 0.114180834,
+        "p95_s": 0.114180834,
+        "p99_s": 0.114180834,
+        "requests": 1
+      },
+      "recorded_utc": "2026-10-09T10:42:59.844870+00:00",
+      "status": "passed",
+      "wall_s": 0.1142025
+    },
+    {
+      "case": "concurrent_proxy_1",
+      "metrics": {
+        "aggregate_mib_per_s": 9.625550029195736,
+        "bytes": 1048576,
+        "elapsed_s": 0.10388975,
+        "p50_s": 0.103874333,
+        "p95_s": 0.103874333,
+        "p99_s": 0.103874333,
+        "requests": 1
+      },
+      "recorded_utc": "2026-10-09T10:42:59.949073+00:00",
+      "status": "passed",
+      "wall_s": 0.103896708
+    },
+    {
+      "case": "concurrent_static_8",
+      "metrics": {
+        "aggregate_mib_per_s": 19.157541141567943,
+        "bytes": 8388608,
+        "elapsed_s": 0.417589584,
+        "p50_s": 0.411968708,
+        "p95_s": 0.417315542,
+        "p99_s": 0.417315542,
+        "requests": 8
+      },
+      "recorded_utc": "2026-10-09T10:43:00.367016+00:00",
+      "status": "passed",
+      "wall_s": 0.417603292
+    },
+    {
+      "case": "concurrent_wasm_8",
+      "metrics": {
+        "aggregate_mib_per_s": 9.3662808559771,
+        "bytes": 8388608,
+        "elapsed_s": 0.854127333,
+        "p50_s": 0.504123084,
+        "p95_s": 0.841585375,
+        "p99_s": 0.841585375,
+        "requests": 8
+      },
+      "recorded_utc": "2026-10-09T10:43:01.221427+00:00",
+      "status": "passed",
+      "wall_s": 0.854141792
+    },
+    {
+      "case": "concurrent_proxy_8",
+      "metrics": {
+        "aggregate_mib_per_s": 9.783929559376146,
+        "bytes": 8388608,
+        "elapsed_s": 0.817667,
+        "p50_s": 0.573428041,
+        "p95_s": 0.706324458,
+        "p99_s": 0.706324458,
+        "requests": 8
+      },
+      "recorded_utc": "2026-10-09T10:43:02.039432+00:00",
+      "status": "passed",
+      "wall_s": 0.817679875
+    },
+    {
+      "case": "concurrent_static_32",
+      "metrics": {
+        "aggregate_mib_per_s": 15.672201855891174,
+        "bytes": 33554432,
+        "elapsed_s": 2.041831417,
+        "p50_s": 2.030327875,
+        "p95_s": 2.040154708,
+        "p99_s": 2.040155541,
+        "requests": 32
+      },
+      "recorded_utc": "2026-10-09T10:43:04.081663+00:00",
+      "status": "passed",
+      "wall_s": 2.041861959
+    },
+    {
+      "case": "concurrent_wasm_32",
+      "metrics": {
+        "aggregate_mib_per_s": 9.052371363827664,
+        "bytes": 33554432,
+        "elapsed_s": 3.534984916,
+        "p50_s": 2.422926208,
+        "p95_s": 3.35323725,
+        "p99_s": 3.4935715,
+        "requests": 32
+      },
+      "recorded_utc": "2026-10-09T10:43:07.616989+00:00",
+      "status": "passed",
+      "wall_s": 3.535015666
+    },
+    {
+      "case": "concurrent_proxy_32",
+      "metrics": {
+        "aggregate_mib_per_s": 9.665072760253414,
+        "bytes": 33554432,
+        "elapsed_s": 3.310890375,
+        "p50_s": 2.092428084,
+        "p95_s": 3.17416875,
+        "p99_s": 3.191465125,
+        "requests": 32
+      },
+      "recorded_utc": "2026-10-09T10:43:10.929438+00:00",
+      "status": "passed",
+      "wall_s": 3.310927875
+    },
+    {
+      "case": "concurrent_static_128",
+      "metrics": {
+        "aggregate_mib_per_s": 18.282930599832877,
+        "bytes": 134217728,
+        "elapsed_s": 7.001065417,
+        "p50_s": 5.3001133750000005,
+        "p95_s": 6.983954541,
+        "p99_s": 6.988375792,
+        "requests": 128
+      },
+      "recorded_utc": "2026-10-09T10:43:17.931008+00:00",
+      "status": "passed",
+      "wall_s": 7.001179042
+    },
+    {
+      "case": "concurrent_wasm_128",
+      "metrics": {
+        "aggregate_mib_per_s": 9.150109993883277,
+        "bytes": 134217728,
+        "elapsed_s": 13.9889025,
+        "p50_s": 8.725453708,
+        "p95_s": 12.82441325,
+        "p99_s": 13.271813917,
+        "requests": 128
+      },
+      "recorded_utc": "2026-10-09T10:43:31.920509+00:00",
+      "status": "passed",
+      "wall_s": 13.98900775
+    },
+    {
+      "case": "concurrent_proxy_128",
+      "metrics": {
+        "aggregate_mib_per_s": 9.320118360615943,
+        "bytes": 134217728,
+        "elapsed_s": 13.733730791,
+        "p50_s": 8.579287291,
+        "p95_s": 12.523977875,
+        "p99_s": 12.654981667,
+        "requests": 128
+      },
+      "recorded_utc": "2026-10-09T10:43:45.654846+00:00",
+      "status": "passed",
+      "wall_s": 13.733899833
+    },
+    {
+      "case": "simultaneous_reverse_requests_100_mib",
+      "metrics": {
+        "a_to_b": {
+          "body_elapsed_s": 10.054081,
+          "body_first_byte_s": 0.003601875,
+          "bytes": 104857600,
+          "elapsed_s": 10.059402042,
+          "headers_s": 0.005313875,
+          "mib_per_s": 9.940947252238189,
+          "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+        },
+        "b_to_a": {
+          "body_elapsed_s": 9.880136166,
+          "body_first_byte_s": 0.003307291,
+          "bytes": 104857600,
+          "elapsed_s": 9.884355082999999,
+          "headers_s": 0.004210125,
+          "mib_per_s": 10.11699640338643,
+          "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+        }
+      },
+      "recorded_utc": "2026-10-09T10:43:55.715623+00:00",
+      "status": "passed",
+      "wall_s": 10.059425208
+    },
+    {
+      "case": "two_named_clients_16_streams",
+      "metrics": {
+        "elapsed_s": 5.185907541,
+        "identities": 2,
+        "requests": 16
+      },
+      "recorded_utc": "2026-10-09T10:44:00.902052+00:00",
+      "status": "passed",
+      "wall_s": 5.185924458
+    },
+    {
+      "case": "mixed_1_gib_and_small_requests",
+      "metrics": {
+        "large": {
+          "body_elapsed_s": 56.510815375,
+          "body_first_byte_s": 4e-06,
+          "bytes": 1073741824,
+          "elapsed_s": 56.519496042,
+          "headers_s": 0.008669042,
+          "mib_per_s": 18.117641615621228,
+          "sha256": "c0c64fff20a8c1f2fa5dbd29305695a54d3e4616ebfa524a1ef71f1a1137317f"
+        },
+        "small_p95_s": 0.153242333,
+        "small_p99_s": 0.170075458,
+        "small_requests": 32
+      },
+      "recorded_utc": "2026-10-09T10:44:57.423551+00:00",
+      "status": "passed",
+      "wall_s": 56.520678583
+    },
+    {
+      "case": "wasm_cancel_and_reuse",
+      "metrics": {
+        "cancelled_streams": 16,
+        "remaining_wasm_tasks": 0,
+        "survivor": {
+          "body_elapsed_s": 0.060131708,
+          "body_first_byte_s": 0.001106666,
+          "bytes": 1048576,
+          "elapsed_s": 0.061558833,
+          "headers_s": 0.001418625,
+          "mib_per_s": 16.244215536373844,
+          "sha256": "c13f3286b0caac1b7c9222b4404c89fd63f6d31712e4fe12f9fc7d428848f9c2"
+        }
+      },
+      "recorded_utc": "2026-10-09T10:44:57.536559+00:00",
+      "status": "passed",
+      "wall_s": 0.112342916
+    },
+    {
+      "case": "proxy_cancel_and_reuse",
+      "metrics": {
+        "cancelled_streams": 16,
+        "remaining_wasm_tasks": 0,
+        "survivor": {
+          "body_elapsed_s": 0.061326625,
+          "body_first_byte_s": 0.000113458,
+          "bytes": 1048576,
+          "elapsed_s": 0.063629,
+          "headers_s": 0.002294042,
+          "mib_per_s": 15.715764679997564,
+          "sha256": "c13f3286b0caac1b7c9222b4404c89fd63f6d31712e4fe12f9fc7d428848f9c2"
+        }
+      },
+      "recorded_utc": "2026-10-09T10:44:57.646321+00:00",
+      "status": "passed",
+      "wall_s": 0.109394167
+    },
+    {
+      "case": "cancel_large_download_and_reuse",
+      "metrics": {
+        "body_elapsed_s": 0.05114225,
+        "body_first_byte_s": 7.584e-06,
+        "bytes": 1048576,
+        "elapsed_s": 0.078366125,
+        "headers_s": 0.027210042,
+        "mib_per_s": 12.760384905271113,
+        "sha256": "c13f3286b0caac1b7c9222b4404c89fd63f6d31712e4fe12f9fc7d428848f9c2"
+      },
+      "recorded_utc": "2026-10-09T10:44:57.931356+00:00",
+      "status": "passed",
+      "wall_s": 0.284658
+    },
+    {
+      "case": "cancel_one_stream_preserves_eight_active_streams",
+      "metrics": {
+        "bytes": 33554432,
+        "unaffected_streams": 8
+      },
+      "recorded_utc": "2026-10-09T10:45:01.780431+00:00",
+      "status": "passed",
+      "wall_s": 3.84863275
+    },
+    {
+      "case": "anonymous_access_denied",
+      "metrics": {
+        "anonymous_status": 403
+      },
+      "recorded_utc": "2026-10-09T10:45:01.788217+00:00",
+      "status": "passed",
+      "wall_s": 0.007491333
+    },
+    {
+      "case": "mixed_soak",
+      "metrics": {
+        "elapsed_s": 1800.349636167,
+        "max_request_s": 1.183307166,
+        "remaining_wasm_tasks": 0,
+        "requests": 10288
+      },
+      "recorded_utc": "2026-10-09T11:15:02.151446+00:00",
+      "status": "passed",
+      "wall_s": 1800.349652167
+    },
+    {
+      "case": "application_shutdown",
+      "metrics": {
+        "remaining_wasm_tasks": 0
+      },
+      "recorded_utc": "2026-10-09T11:15:02.162018+00:00",
+      "status": "passed",
+      "wall_s": 0.008293375
+    }
+  ],
+  "process_runs": [
+    {
+      "evidence": "target/transport-process-20261009",
+      "cases": [
+        {
+          "case": "process_alice_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 15.489685417,
+            "body_first_byte_s": 2.4625e-05,
+            "bytes": 104857600,
+            "elapsed_s": 15.499523125,
+            "headers_s": 0.009776041,
+            "mib_per_s": 6.45181048138876,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:48:53.136121+00:00",
+          "status": "passed",
+          "wall_s": 15.499554875
+        },
+        {
+          "case": "process_alice_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.906838,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:48:55.043351+00:00",
+          "status": "passed",
+          "wall_s": 1.9068494999999999
+        },
+        {
+          "case": "process_bob_download_100_mib",
+          "error": "QUIC: No viable network path exists in V1(Padding), reason: Can't assign requested address (os error 49)",
+          "recorded_utc": "2026-10-09T10:48:38.783691+00:00",
+          "status": "failed",
+          "wall_s": 1.147210959
+        },
+        {
+          "case": "process_bob_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.231038292,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:48:40.015107+00:00",
+          "status": "passed",
+          "wall_s": 1.231049084
+        }
+      ]
+    },
+    {
+      "evidence": "target/transport-process-repeat-20261009",
+      "cases": [
+        {
+          "case": "process_alice_download_100_mib",
+          "error": "QUIC: No viable network path exists in V1(Padding), reason: Can't assign requested address (os error 49)",
+          "recorded_utc": "2026-10-09T10:50:34.892297+00:00",
+          "status": "failed",
+          "wall_s": 0.104649208
+        },
+        {
+          "case": "process_alice_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 2.05842175,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:50:36.951076+00:00",
+          "status": "passed",
+          "wall_s": 2.058441709
+        },
+        {
+          "case": "process_bob_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 20.99365675,
+            "body_first_byte_s": 2.6209e-05,
+            "bytes": 104857600,
+            "elapsed_s": 21.005628166,
+            "headers_s": 0.011894958,
+            "mib_per_s": 4.760628318436881,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:50:55.793428+00:00",
+          "status": "passed",
+          "wall_s": 21.005668041
+        },
+        {
+          "case": "process_bob_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 2.159465875,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:50:57.953317+00:00",
+          "status": "passed",
+          "wall_s": 2.159479667
+        }
+      ]
+    },
+    {
+      "evidence": "target/transport-process-final-20261009/processes",
+      "cases": [
+        {
+          "case": "process_alice_download_100_mib",
+          "error": "QUIC: No viable network path exists in V1(Padding), reason: Can't assign requested address (os error 49)",
+          "recorded_utc": "2026-10-09T10:52:43.229170+00:00",
+          "status": "failed",
+          "wall_s": 0.035819875
+        },
+        {
+          "case": "process_alice_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.3755315000000001,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:52:44.605839+00:00",
+          "status": "passed",
+          "wall_s": 1.37555125
+        },
+        {
+          "case": "process_bob_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 14.404764125,
+            "body_first_byte_s": 2.6083e-05,
+            "bytes": 104857600,
+            "elapsed_s": 14.507968541,
+            "headers_s": 0.103008333,
+            "mib_per_s": 6.8927626261105726,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:52:57.700887+00:00",
+          "status": "passed",
+          "wall_s": 14.508044041
+        },
+        {
+          "case": "process_bob_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.840564792,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:52:59.541916+00:00",
+          "status": "passed",
+          "wall_s": 1.840576708
+        }
+      ]
+    },
+    {
+      "evidence": "target/transport-process-warm-20261009/processes",
+      "cases": [
+        {
+          "case": "process_alice_download_100_mib",
+          "error": "QUIC: No viable network path exists in V1(Padding), reason: Can't assign requested address (os error 49)",
+          "recorded_utc": "2026-10-09T10:56:03.806148+00:00",
+          "status": "failed",
+          "wall_s": 0.005821542
+        },
+        {
+          "case": "process_alice_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.422743,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:56:05.229515+00:00",
+          "status": "passed",
+          "wall_s": 1.422764167
+        },
+        {
+          "case": "process_alice_warm_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 16.724613625,
+            "body_first_byte_s": 1.0625e-05,
+            "bytes": 104857600,
+            "elapsed_s": 16.751409917,
+            "headers_s": 0.02675175,
+            "mib_per_s": 5.969645665114937,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:56:33.144401+00:00",
+          "status": "passed",
+          "wall_s": 16.751423542
+        },
+        {
+          "case": "process_bob_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 10.954993833,
+            "body_first_byte_s": 6.7333e-05,
+            "bytes": 104857600,
+            "elapsed_s": 10.970623875,
+            "headers_s": 0.015538125,
+            "mib_per_s": 9.115249880758585,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:56:14.770886+00:00",
+          "status": "passed",
+          "wall_s": 10.9706465
+        },
+        {
+          "case": "process_bob_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.608364208,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:56:16.379883+00:00",
+          "status": "passed",
+          "wall_s": 1.608378583
+        },
+        {
+          "case": "process_bob_warm_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 16.319814208,
+            "body_first_byte_s": 1.0375e-05,
+            "bytes": 104857600,
+            "elapsed_s": 16.329465875,
+            "headers_s": 0.009631875,
+            "mib_per_s": 6.1238982657296175,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:56:32.730271+00:00",
+          "status": "passed",
+          "wall_s": 16.329481125
+        }
+      ]
+    },
+    {
+      "evidence": "target/transport-process-complete-20261009/processes",
+      "cases": [
+        {
+          "case": "process_alice_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 16.049092208,
+            "body_first_byte_s": 0.000673833,
+            "bytes": 104857600,
+            "elapsed_s": 16.062291875,
+            "headers_s": 0.013103917,
+            "mib_per_s": 6.225760568548787,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:59:04.337158+00:00",
+          "status": "passed",
+          "wall_s": 16.062305042
+        },
+        {
+          "case": "process_alice_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.536172875,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:59:05.874031+00:00",
+          "status": "passed",
+          "wall_s": 1.536188708
+        },
+        {
+          "case": "process_alice_duplex_no_idle",
+          "metrics": {
+            "chunks_before_upload_eof": 3,
+            "idle_s": 0.0,
+            "max_chunk_rtt_s": 0.001202458
+          },
+          "recorded_utc": "2026-10-09T10:59:05.884015+00:00",
+          "status": "passed",
+          "wall_s": 0.009699209
+        },
+        {
+          "case": "process_alice_slow_reader_1ms",
+          "metrics": {
+            "body_elapsed_s": 10.987001333,
+            "body_first_byte_s": 0.000648,
+            "bytes": 2097152,
+            "elapsed_s": 11.113887,
+            "mib_per_s": 0.17995500944808787,
+            "sha256": "87cc42e722a90e8618b3ee663a829d253d8744a288b884b858c9f37cc3261d7f"
+          },
+          "recorded_utc": "2026-10-09T10:59:16.998256+00:00",
+          "status": "passed",
+          "wall_s": 11.113909208
+        },
+        {
+          "case": "process_alice_warm_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 20.516938,
+            "body_first_byte_s": 4.9e-05,
+            "bytes": 104857600,
+            "elapsed_s": 20.535600167,
+            "headers_s": 0.018643584,
+            "mib_per_s": 4.869591902754931,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:59:49.370217+00:00",
+          "status": "passed",
+          "wall_s": 20.535613833
+        },
+        {
+          "case": "process_bob_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 18.207920292,
+            "body_first_byte_s": 3.5042e-05,
+            "bytes": 104857600,
+            "elapsed_s": 18.221173875,
+            "headers_s": 0.013168209,
+            "mib_per_s": 5.488119813201907,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:59:06.495974+00:00",
+          "status": "passed",
+          "wall_s": 18.221200833
+        },
+        {
+          "case": "process_bob_eight_wasm_streams",
+          "metrics": {
+            "bytes": 8388608,
+            "elapsed_s": 1.7662955,
+            "requests": 8
+          },
+          "recorded_utc": "2026-10-09T10:59:08.262703+00:00",
+          "status": "passed",
+          "wall_s": 1.766312708
+        },
+        {
+          "case": "process_bob_duplex_no_idle",
+          "metrics": {
+            "chunks_before_upload_eof": 3,
+            "idle_s": 0.0,
+            "max_chunk_rtt_s": 0.002089208
+          },
+          "recorded_utc": "2026-10-09T10:59:08.282270+00:00",
+          "status": "passed",
+          "wall_s": 0.019283083
+        },
+        {
+          "case": "process_bob_slow_reader_1ms",
+          "error": "ClosedCriticalStream (0x104): No error in V1(Padding), reason: connection idle timeout",
+          "recorded_utc": "2026-10-09T10:59:28.819771+00:00",
+          "status": "failed",
+          "wall_s": 20.537021
+        },
+        {
+          "case": "process_bob_warm_download_100_mib",
+          "metrics": {
+            "body_elapsed_s": 19.861769083,
+            "body_first_byte_s": 0.00592475,
+            "bytes": 104857600,
+            "elapsed_s": 19.875939083,
+            "headers_s": 0.014157,
+            "mib_per_s": 5.031208386384893,
+            "sha256": "6ba2e0e5770f4d1e61619da7479a36c272aa04e7a85125ea69e92745850bf069"
+          },
+          "recorded_utc": "2026-10-09T10:59:48.718139+00:00",
+          "status": "passed",
+          "wall_s": 19.875954458
+        }
+      ]
+    }
+  ],
+  "resources": {
+    "peak_rss_mib": 2907.28125,
+    "peak_phase": "concurrent_proxy_128",
+    "peak_cpu_percent": 424.8,
+    "soak_rss_min_mib": 97.109375,
+    "soak_rss_max_mib": 567.84375,
+    "soak_first_5min_median_mib": 505.296875,
+    "soak_last_5min_median_mib": 361.640625,
+    "soak_fd_min": 39,
+    "soak_fd_max": 45,
+    "sample_count": 2359,
+    "soak_sample_count": 1771
+  },
+  "case_resources": {
+    "static_65537_bytes": {
+      "sampled_peak_rss_mib": 117.203125
+    },
+    "static_104857600_bytes": {
+      "sampled_peak_rss_mib": 331.359375
+    },
+    "static_1073741824_bytes": {
+      "sampled_peak_rss_mib": 273.453125
+    },
+    "head_1_gib": {
+      "sampled_peak_rss_mib": 174.359375
+    },
+    "proxy_download_100_mib": {
+      "sampled_peak_rss_mib": 197.03125
+    },
+    "wasm_echo_104857600_bytes": {
+      "sampled_peak_rss_mib": 521.9375
+    },
+    "wasm_duplex_idle_31s": {
+      "sampled_peak_rss_mib": 523.671875
+    },
+    "wasm_slow_writer": {
+      "sampled_peak_rss_mib": 524.484375
+    },
+    "wasm_slow_reader": {
+      "sampled_peak_rss_mib": 524.640625
+    },
+    "proxy_echo_104857600_bytes": {
+      "sampled_peak_rss_mib": 582.828125
+    },
+    "proxy_duplex_idle_31s": {
+      "sampled_peak_rss_mib": 473.734375
+    },
+    "proxy_slow_writer": {
+      "sampled_peak_rss_mib": 241.796875
+    },
+    "proxy_slow_reader": {
+      "sampled_peak_rss_mib": 299.171875
+    },
+    "proxy_echo_1_gib": {
+      "sampled_peak_rss_mib": 652.546875
+    },
+    "concurrent_static_8": {
+      "sampled_peak_rss_mib": 554.109375
+    },
+    "concurrent_wasm_8": {
+      "sampled_peak_rss_mib": 618.78125
+    },
+    "concurrent_static_32": {
+      "sampled_peak_rss_mib": 679.53125
+    },
+    "concurrent_wasm_32": {
+      "sampled_peak_rss_mib": 1320.34375
+    },
+    "concurrent_proxy_32": {
+      "sampled_peak_rss_mib": 1556.9375
+    },
+    "concurrent_static_128": {
+      "sampled_peak_rss_mib": 1234.78125
+    },
+    "concurrent_wasm_128": {
+      "sampled_peak_rss_mib": 2779.78125
+    },
+    "concurrent_proxy_128": {
+      "sampled_peak_rss_mib": 2907.28125
+    },
+    "simultaneous_reverse_requests_100_mib": {
+      "sampled_peak_rss_mib": 1153.78125
+    },
+    "two_named_clients_16_streams": {
+      "sampled_peak_rss_mib": 1035.859375
+    },
+    "mixed_1_gib_and_small_requests": {
+      "sampled_peak_rss_mib": 1040.6875
+    },
+    "cancel_one_stream_preserves_eight_active_streams": {
+      "sampled_peak_rss_mib": 526.046875
+    },
+    "mixed_soak": {
+      "sampled_peak_rss_mib": 567.84375
+    }
+  },
+  "cold_start_requests": 10,
+  "cold_start_failures": 4,
+  "cross_device_report": "transport-public-2026-10-09.md",
+  "cross_device_data": "transport-public-2026-10-09.json"
+}

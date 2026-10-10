@@ -17,6 +17,9 @@ use super::*;
 #[path = "../../support/network_credentials.rs"]
 mod credentials;
 
+#[path = "transport.rs"]
+mod transport;
+
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local UDP and owns global TLS/DNS/DHTTP_HOME"]
 async fn outbound_early_response_survives_stopped_upload() {
@@ -396,7 +399,7 @@ impl Resolve for PeerResolver {
         async move {
             assert!(matches!(
                 name,
-                "receiver.dhttp.net" | "alice.dhttp.net" | "bob.dhttp.net"
+                "receiver.dhttp.net" | "alice.dhttp.net" | "bob.dhttp.net" | "usopp.li.dhttp.net"
             ));
             Ok(futures::stream::iter([(Source::System, self.0)]).boxed())
         }
