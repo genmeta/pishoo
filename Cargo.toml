@@ -5,19 +5,19 @@ exclude = ["xtask"]
 
 # Use one pinned source for project types throughout the dependency graph.
 [patch.crates-io]
-dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
-dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
-dyns = { git = "https://github.com/genmeta/ddns.git", rev = "b3ef11233e2598a75b316df104b35c2863f64e9f" }
-h3x = { git = "https://github.com/genmeta/h3x.git", rev = "c26abcd3d8596c10c0fadece240a713741c7873a" }
-qmacro = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qbase = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qevent = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qcongestion = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qconnection = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qrecovery = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qtls = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qtransport = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qtraversal = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-qudp = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "03dad9b191a23bf93cdfd4cde9b4b56aed7938de" }
+dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "03dad9b191a23bf93cdfd4cde9b4b56aed7938de" }
+dyns = { git = "https://github.com/genmeta/ddns.git", rev = "27663c4a1c1adf64ed1ea7bb79a63b582a347f9e" }
+h3x = { git = "https://github.com/genmeta/h3x.git", rev = "d1b475d8ae87da73ae886620ae702c978f75b868" }
+qmacro = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qevent = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qcongestion = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qconnection = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qrecovery = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qresolve = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qtransport = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qtraversal = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+qudp = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }

@@ -11,12 +11,12 @@ autobins = false
 path = "src/pishoo.rs"
 
 [dependencies]
-ddns = { package = "dyns", git = "https://github.com/genmeta/ddns.git", rev = "b3ef11233e2598a75b316df104b35c2863f64e9f", features = ["h3", "mdns"] }
-qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
-dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
-h3x = { git = "https://github.com/genmeta/h3x.git", rev = "c26abcd3d8596c10c0fadece240a713741c7873a" }
-dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "f8bdd2700e42782e5b68b62cf69827d37a1e305b" }
-qtls = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+ddns = { package = "dyns", git = "https://github.com/genmeta/ddns.git", rev = "27663c4a1c1adf64ed1ea7bb79a63b582a347f9e", features = ["h3", "mdns"] }
+qprotocol = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
+dhttp = { git = "https://github.com/genmeta/dhttp.git", rev = "03dad9b191a23bf93cdfd4cde9b4b56aed7938de" }
+h3x = { git = "https://github.com/genmeta/h3x.git", rev = "d1b475d8ae87da73ae886620ae702c978f75b868" }
+dhttp-home = { git = "https://github.com/genmeta/dhttp.git", rev = "03dad9b191a23bf93cdfd4cde9b4b56aed7938de" }
+qtls = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
 access_control = { git = "https://github.com/genmeta/daccess.git", rev = "3e3ac6199e88f6b5e521e8d29c934ead3bb5db7c" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
@@ -66,7 +66,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-qbase = { git = "https://github.com/genmeta/dquic.git", rev = "34a713b48535892ad9843cf2bb0db285e0d09439" }
+qbase = { git = "https://github.com/genmeta/dquic.git", rev = "b9af55da49c2e10a6b2004b72a90b0fff81da0ce" }
 hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["test-util"] }
 rcgen = "0.14"

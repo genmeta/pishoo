@@ -30,18 +30,19 @@ Its SQLite configuration, completed work, test commands, and remaining
 transport work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 The packaged-release installation instructions below describe the earlier release.
 
-### Colleague test snapshot
+### Local development build
 
-The `feat/pishoo-integration` branch pins DHTTP, DQUIC, DDNS, H3X and daccess to exact Git revisions, including the current `/std` routes, QUIC endpoint adaptation and QPACK fixes. No sibling repository checkout is required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+The `feat/pishoo-integration` branch pins DHTTP, DQUIC, DDNS, H3X and daccess to full Git revisions. Cargo fetches them automatically; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch feat/pishoo-integration https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
-cargo test --locked --workspace
+cargo test --locked --workspace -- --test-threads=1
+cargo check --locked --workspace --all-targets
 ```
 
-Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. The exact dependency commits and test coverage are listed in [the test snapshot notes](pishoo/docs/testing-snapshot.md).
+The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Exact revisions, prerequisites, optional transport tests and current validation results are listed in [the dependency snapshot notes](pishoo/docs/testing-snapshot.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -131,6 +132,17 @@ cargo run --locked -p pishoo --example pishoo-client -- nat-get https://server.d
 The native client also provides `ha-burst ORIGIN PATHS.json [ROUNDS]` for read-only HA resource acceptance over a shared QUIC/H3 connection. PATHS.json is an array of origin-relative GET resource paths to check. It verifies HTTP/3 200 and completes each response body. The HA QPACK regression used 155 static paths from the HAR, including source maps, for three concurrent rounds without replaying login credentials or authorization codes.
 
 `ha-websocket ORIGIN [ROUNDS]` checks the real HA proxy with an HTTP/3 extended CONNECT, the server's `auth_required` greeting, WebSocket ping/pong, and a close handshake on each session. It does not authenticate to HA; each round has a ten-second deadline. This checks the native client and server path; AnySee's connection handling and authenticated sessions require separate browser validation.
+
+For isolated large-file, duplex, concurrency and cancellation acceptance, run:
+
+```sh
+python3 pishoo/tests/run-transport.py --soak-seconds 1800
+python3 pishoo/tests/run-transport.py --case process
+```
+
+This builds the locked debug test binary and uses temporary identities with a test CA and signed OCSP, production Pishoo routers, real UDP/QUIC/H3 and a local HTTP upstream. It checks streamed SHA-256 and byte counts up to 1 GiB, 1/8/32/128 concurrent requests, reverse requests, slow readers/writers and cancellation, then runs a mixed soak. Python 3, OpenSSL 3, cached Cargo dependencies, local TCP/UDP permissions and about 1.3 GiB of free space for fixtures are required in addition to the normal build prerequisites. Set `DHTTP_TEST_OPENSSL` if OpenSSL 3 is not on PATH. Each run saves results, logs and process resource samples in its own `target/transport-*` directory. Run the ignored network tests in separate processes; they own process-wide TLS roots, name resolution and `DHTTP_HOME`. These measurements cover local transport correctness and do not establish cross-device, NAT or release-build performance.
+
+See the [2026-10-09 transport test report](pishoo/docs/transport-testing-2026-10-09.md) and [cross-device/NAT supplement](pishoo/docs/transport-public-2026-10-09.md) for measured results, versions and known failures.
 
 The pinned DQUIC snapshot requires valid OCSP staples from named clients and servers, in addition to certificate chain, hostname, validity and handshake signature checks. Anonymous callers continue through anonymous authorization rules. Older clients that omit their staple cannot authenticate as a named caller. For `ddns.genmeta.net`, `DQUIC_DDNS_OCSP_FILE` can supply a missing server staple and must pass the same OCSP checks; see the [test snapshot notes](pishoo/docs/testing-snapshot.md) before online testing.
 

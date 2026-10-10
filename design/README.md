@@ -1,6 +1,12 @@
 # 三仓第一版设计清单
 
-2026-10-09 用户明确选择采用本地新 dquic 的严格客户端 OCSP 要求：dhttp 使用现有 QuicEndpoint::listen，不恢复旧 optional-client-OCSP 入口，不增加 dquic 的注册或身份读取接口。具名客户端必须提交有效 OCSP；匿名客户端仍按现有匿名身份与授权规则处理。此决定替代旧的客户端 OCSP 兼容行为。
+2026-10-10 用户批准将现有 h3x 连接池与 SETTINGS 查询变更提交、发布并纳入 Pishoo 依赖快照，作为 h3x 接口不变规则的具体例外：`H3Connection::new` 接收第三个 `on_unreusable` 回调，导出 `UnreusableCallback<T>`；`Pool::new` 的工厂接收该回调，`Pool::on_unreusable(key)` 为入站连接生成回调。复用已实现的 `Pool.inner`、`PoolInner { factory, entries }`、`Entry { ready, connecting }` 连接池结构与既有方法，不新增应用或 Network 状态。新增 `H3Connection::peer_settings(&self) -> Result<Settings>`、`Settings::get(&self, id: u64) -> Option<u64>`、四个 `SETTINGS_*` 常量，以及 `Control.settings_received: tokio::sync::Notify` 和私有 `Control::peer_settings`；Notify 只唤醒等待已验证 peer SETTINGS 的调用，结果仍由现有 `OnceLock<Settings>` 保存，失败复用 QPACK 错误。dhttp 的既有跨模块 `network::connection::connect` 增加 `on_unreusable: h3x::UnreusableCallback<QuicTransport>` 参数，入站/出站均在构造 H3 前装配同一池的回调。具体签名见 [dhttp 清单](dhttp-interfaces.md)。
+
+2026-10-10 用户要求采用底层 QUIC 恢复的强制 OCSP 校验并重新编译运行：具名客户端和服务端必须提供有效 OCSP，缺失或无效时拒绝握手；匿名客户端保持现有规则。Pishoo 使用现有严格默认接口，不启用 optional-client-OCSP。此决定替代下述临时允许缺失 OCSP 的决定；不新增或修改结构、字段、方法或跨模块函数签名。
+
+2026-10-09 用户要求本地依赖 dquic 临时允许握手对端缺少 OCSP：qtls 默认接受未携带 staple 的具名客户端和服务端，已提供的 staple 仍验证证书绑定、签名、时效及撤销状态；证书链、域名、有效期和握手签名校验保留。本地身份 OCSP 加载与持有规则不变，不新增结构、成员、接口或配置开关。此临时决定替代下述严格客户端 OCSP 要求；改动仅保留本地，不提交、不 push。
+
+2026-10-09 此前用户选择采用本地新 dquic 的严格客户端 OCSP 要求：dhttp 使用现有 QuicEndpoint::listen，不恢复旧 optional-client-OCSP 入口，不增加 dquic 的注册或身份读取接口。该严格要求已由上面的临时决定替代；匿名客户端仍按现有匿名身份与授权规则处理。
 
 2026-10-09 用户批准适配本地新 dquic，将 dhttp::Endpoint 唯一冻结字段 `quic: Arc<qconn::QuicEndpoint>` 替换为 `identity: Arc<qbase::endpoint::Endpoint>`。名称、签名和 OCSP 直接读取同一份已加载内存身份；建连、监听及重载在方法内用现成 QuicEndpoint 构造局部资源。公开方法签名、按名称连接复用与监听生命周期保持，不增加身份读取 API、重复凭据、结构或字段。
 
@@ -57,7 +63,7 @@
 
 ## 当前边界
 
-- h3x 不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
+- h3x 除本页明确批准的 QPACK、连接池及 SETTINGS 变更外，不新增或修改结构、字段、接口。dhttp 使用已确定的 `open_bi`、`accept_bi`、`read_request`、`read_response`、`write_request`、`write_response`。
 - Endpoint 独立 `load(name)`；Network 全局初始化。Endpoint 持已加载的 `Arc<qbase::endpoint::Endpoint>`，不持 Network 或连接；DNS 签名与 TLS 共用同一组内存凭据。
 - 同规范化名称代表同一逻辑 Endpoint；多次 load 通过全局 Network 的同一身份连接池复用连接。Endpoint 不提供 close 或 stop_listening。Network 属于进程生命周期，不提供 shutdown。
 - 当前不设计全局或逐 Endpoint 的网络传输配额，不预留配额字段、permit 或租约结构；保留流级背压、连接超时和单次执行限制。Lib 不设并发名额。
