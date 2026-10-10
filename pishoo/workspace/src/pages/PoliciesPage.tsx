@@ -44,11 +44,12 @@ export default function PoliciesPage(props: {
   notify: (message: string, tone?: 'success' | 'error') => void
 }) {
   const { t } = useI18n()
-  const requestedGrantee = new URLSearchParams(window.location.search).get('grantee')
+  const query = new URLSearchParams(window.location.search)
+  const requestedGrantee = query.get('grantee')
   const [view, setView] = createSignal<View>(requestedGrantee ? 'grantee' : 'api')
   const [page, setPage] = createSignal(1)
   const [revision, setRevision] = createSignal(0)
-  const [selection, setSelection] = createSignal<string | null>(requestedGrantee)
+  const [selection, setSelection] = createSignal<string | null>(requestedGrantee ?? query.get('api'))
   const [editing, setEditing] = createSignal(false)
   const [editingRule, setEditingRule] = createSignal<RuleRow | null>(null)
   const [deleting, setDeleting] = createSignal<RuleRow | null>(null)
@@ -59,29 +60,37 @@ export default function PoliciesPage(props: {
   const [effect, setEffect] = createSignal<Effect>('allow')
   const [grantee, setGrantee] = createSignal('')
 
-  const loadSummaries = abortable(
-    ([currentPage]: readonly [number, number], signal: AbortSignal) =>
-      api.apiSummaries(currentPage, signal),
-  )
+  const loadLibs = abortable((_revision: number, signal: AbortSignal) => api.libs(signal))
   const loadRulesByApi = abortable((_revision: number, signal: AbortSignal) =>
     api.rulesByApi(signal),
   )
   const loadRulesByGrantee = abortable((_revision: number, signal: AbortSignal) =>
     api.rulesByGrantee(signal),
   )
-  const [summaries] = createResource(
-    () => [page(), revision()] as const,
-    loadSummaries,
-  )
+  const [libs] = createResource(revision, loadLibs)
   const [byApi] = createResource(revision, loadRulesByApi)
   const [byGrantee] = createResource(revision, loadRulesByGrantee)
 
   const refresh = () => setRevision((value) => value + 1)
-  const grantees = () => Object.keys(byGrantee() ?? {}).sort()
+  const grantees = () => Object.keys(byGrantee.error ? {} : byGrantee() ?? {}).sort()
+  // daccess lists saved rules; Lib metadata also supplies scopes without rules.
+  // Parameterized OpenAPI paths become static prefixes that daccess can match.
+  const apiPaths = () => [...new Set([
+    ...Object.keys(byApi.error ? {} : byApi() ?? {}),
+    ...(libs.error ? [] : libs() ?? []).flatMap((lib) => [
+      `/std/api/${lib.id}`,
+      ...lib.endpoints.map((endpoint) => endpoint.path.split('{')[0].replace(/\/+$/, '') || '/'),
+    ]),
+  ])].sort()
+  const currentPage = () => {
+    const index = apiPaths().indexOf(selection() ?? '')
+    return index >= 0 ? Math.floor(index / 20) + 1 : Math.min(page(), Math.max(1, Math.ceil(apiPaths().length / 20)))
+  }
+  const pagePaths = () => apiPaths().slice((currentPage() - 1) * 20, currentPage() * 20)
   const currentSelection = () => {
     const selected = selection()
-    const options = view() === 'api' ? summaries()?.items.map((item) => item.api) ?? [] : grantees()
-    return selected && options.includes(selected) ? selected : options[0] ?? selected
+    const options = view() === 'api' ? apiPaths() : grantees()
+    return selected && options.includes(selected) ? selected : (view() === 'api' ? pagePaths()[0] : options[0]) ?? selected
   }
   const selectionLabel = () => {
     const selected = currentSelection()
@@ -90,7 +99,7 @@ export default function PoliciesPage(props: {
   }
   const rows = () => {
     const selected = currentSelection()
-    if (!selected) return []
+    if (!selected || byApi.error || byGrantee.error) return []
     return view() === 'api'
       ? rowsForApi(selected, byApi()?.[selected])
       : rowsForGrantee(selected, byGrantee()?.[selected])
@@ -125,10 +134,6 @@ export default function PoliciesPage(props: {
     setActionError(null)
     try {
       await api.setRule(rule)
-      if (view() === 'api') {
-        const paths = [...new Set([...Object.keys(byApi() ?? {}), rule.api])].sort()
-        setPage(Math.floor(paths.indexOf(rule.api) / 20) + 1)
-      }
       setSelection(view() === 'api' ? rule.api : rule.grantee)
       setEditing(false)
       refresh()
@@ -152,9 +157,7 @@ export default function PoliciesPage(props: {
     setActionError(null)
     try {
       await api.deleteRule(rule)
-      if (view() === 'api' && rows().length === 1 && summaries()?.items.length === 1 && page() > 1) {
-        setPage(page() - 1)
-      }
+      setPage(currentPage())
       setDeleting(null)
       refresh()
       props.notify(t('policies.deleted'))
@@ -165,8 +168,8 @@ export default function PoliciesPage(props: {
     }
   }
 
-  const loading = () => summaries.loading || byApi.loading || byGrantee.loading
-  const loadError = () => summaries.error || byApi.error || byGrantee.error
+  const loading = () => libs.loading || byApi.loading || byGrantee.loading
+  const loadError = () => byApi.error || byGrantee.error
 
   return (
     <div class="policies-page">
@@ -210,7 +213,12 @@ export default function PoliciesPage(props: {
           <ErrorState message={errorMessage(loadError(), t('common.unexpectedError'))} onRetry={refresh} />
         </section>
       </Show>
-      <Show when={loading() && !byApi() && !byGrantee()}>
+      <Show when={libs.error && !loadError()}>
+        <section class="data-panel">
+          <ErrorState message={errorMessage(libs.error, t('common.unexpectedError'))} onRetry={refresh} />
+        </section>
+      </Show>
+      <Show when={!loadError() && loading() && !byApi() && !byGrantee()}>
         <section class="data-panel"><LoadingState label={t('policies.loading')} /></section>
       </Show>
       <Show when={!loadError() && (byApi() || byGrantee())}>
@@ -218,14 +226,14 @@ export default function PoliciesPage(props: {
           <aside class="master-list" aria-label={view() === 'api' ? t('policies.apis') : t('policies.grantees')}>
             <div class="master-list-header">
               <strong>{view() === 'api' ? t('policies.apis') : t('policies.grantees')}</strong>
-              <span>{view() === 'api' ? summaries()?.total ?? 0 : grantees().length}</span>
+              <span>{view() === 'api' ? apiPaths().length : grantees().length}</span>
             </div>
             <div class="master-list-items">
               <Show
-                when={(view() === 'api' ? summaries()?.items.length : grantees().length) ?? 0}
+                when={view() === 'api' ? pagePaths().length : grantees().length}
                 fallback={<EmptyState title={view() === 'api' ? t('policies.noApis') : t('policies.noGrantees')} />}
               >
-                <For each={view() === 'api' ? summaries()?.items.map((item) => item.api) : grantees()}>
+                <For each={view() === 'api' ? pagePaths() : grantees()}>
                   {(item) => (
                     <button
                       type="button"
@@ -239,11 +247,11 @@ export default function PoliciesPage(props: {
                 </For>
               </Show>
             </div>
-            <Show when={view() === 'api' && (summaries()?.total ?? 0) > 20}>
+            <Show when={view() === 'api' && apiPaths().length > 20}>
               <Pagination
-                page={summaries()?.page ?? page()}
-                pageSize={summaries()?.page_size ?? 20}
-                total={summaries()?.total ?? 0}
+                page={currentPage()}
+                pageSize={20}
+                total={apiPaths().length}
                 onPage={(next) => {
                   setPage(next)
                   setSelection(null)
@@ -305,8 +313,12 @@ export default function PoliciesPage(props: {
           <label class="field field-wide">
             <span>{t('policies.apiPath')}</span>
             <input value={apiPath()} onInput={(event) => setApiPath(event.currentTarget.value)}
-              placeholder="/files/private" pattern="/.*" required disabled={submitting() || editingRule() !== null} />
+              placeholder="/std/api/note" list="api-path-options" aria-describedby="api-path-hint" pattern="/.*" required disabled={submitting() || editingRule() !== null} />
+            <datalist id="api-path-options">
+              <For each={apiPaths()}>{(path) => <option value={path} />}</For>
+            </datalist>
           </label>
+          <p id="api-path-hint" class="muted field-wide">{t('policies.pathHint')}</p>
           <label class="field">
             <span id="rule-method-label">{t('policies.method')}</span>
             <select aria-labelledby="rule-method-label" value={method()} onChange={(event) => setMethod(event.currentTarget.value)} disabled={submitting() || editingRule() !== null}>

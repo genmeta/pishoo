@@ -63,6 +63,10 @@ export default function AppsPage() {
                 </details>
                 <footer class="capability-card-footer">
                   <span>{t('capabilities.version', { version: lib.version })}</span>
+                  <a class="button button-secondary button-small"
+                    href={`/std/workspace/settings/access?api=${encodeURIComponent(`/std/api/${lib.id}`)}`}>
+                    {t('apps.manageAccess')}
+                  </a>
                 </footer>
               </article>
             )}</For>

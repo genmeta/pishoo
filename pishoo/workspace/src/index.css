@@ -498,6 +498,13 @@ code {
   padding: 0 14px;
 }
 
+a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .button-small {
   min-height: 32px;
   padding: 0 10px;
@@ -709,7 +716,8 @@ textarea {
 .capability-endpoints { color: var(--text-muted); font-size: 13px; }
 .capability-endpoints summary { cursor: pointer; color: var(--text); font-weight: 650; }
 .capability-endpoints ul { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 18px; }
-.capability-card-footer { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--text-muted); font-size: 12px; }
+.capability-card-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; color: var(--text-muted); font-size: 12px; }
+.capability-card-footer .button { margin-left: auto; }
 
 .wasm-api-link { color: var(--text); text-underline-offset: 3px; }
 .wasm-api-description { margin-left: 8px; overflow-wrap: anywhere; }
