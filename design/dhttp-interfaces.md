@@ -1,6 +1,44 @@
 # dhttp 第一版结构与接口清单
 
-2026-10-09 用户批准 Endpoint.quic 替换为 Endpoint.identity，直接持有 qbase 的内存身份，现有公开方法签名不变。适配本地 QuicEndpoint::from/anonymous/set_alpn/listen，使用新的参数默认值；用户明确采用新 dquic 的严格客户端 OCSP 要求，不恢复旧宽松接缝。
+2026-10-10 用户批准纳入现有 h3x 连接池回调与 peer SETTINGS 查询。以下签名及私有结构是本次明确批准的 h3x 接口例外；其他成员沿用所选依赖提交，不由 Pishoo 扩展。
+
+```rust
+pub type UnreusableCallback<T> = Box<dyn Fn(&H3Connection<T>) + Send + 'static>;
+impl<T: Transport> H3Connection<T> {
+    pub fn new(transport: T, settings: Settings,
+        on_unreusable: impl Fn(&Self) + Send + 'static) -> Result<Self>;
+    pub async fn peer_settings(&self) -> Result<Settings>;
+}
+impl Settings {
+    pub fn get(&self, id: u64) -> Option<u64>;
+}
+pub const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x1;
+pub const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x6;
+pub const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x7;
+pub const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x8;
+impl<K, T, E> Pool<K, T, E> {
+    pub fn new<F, Fut>(factory: F) -> Self
+    where F: Fn(K, UnreusableCallback<T>) -> Fut + Send + Sync + 'static,
+          Fut: Future<Output = Result<H3Connection<T>, E>> + Send + 'static;
+    pub fn on_unreusable(&self, key: K) -> UnreusableCallback<T>;
+}
+// h3x 已有连接池布局：Pool.inner: Arc<PoolInner<K, T, E>>；
+// PoolInner.factory: Box<Factory<K, T, E>>，entries: DashMap<K, Arc<Mutex<Entry<T>>>>；
+// Entry.ready: Vec<H3Connection<T>>，connecting: Option<watch::Receiver<()>>。
+// h3x Control 新增 settings_received: tokio::sync::Notify；
+// 私有 Control::peer_settings(&self) -> Settings，结果仍来自已有 peer_settings OnceLock。
+// dhttp 既有跨模块建连函数：
+pub(super) async fn connect(key: ConnectionKey,
+    on_unreusable: h3x::UnreusableCallback<QuicTransport>) -> Result<H3>;
+```
+
+回调在本端/对端 GOAWAY 或连接驱动结束时将对应连接移出复用池；已有请求仍持有自身资源。入站从已经验证的 remote authority 派生池键，出站由 Pool 工厂传入回调；不增加 Network 成员、应用关闭阶段或独立失败通知。SETTINGS 查询等待验证完成或已有 QPACK 错误，不保存第二份设置；`Settings::get` 对缺失/越界 id 返回 None。
+
+2026-10-10 用户要求恢复底层 QUIC 的强制 OCSP 校验：具名客户端和服务端缺失或提供无效 OCSP 时拒绝握手，匿名客户端保持现有规则。使用现有严格默认接口，不启用 optional-client-OCSP；此决定替代下述临时宽松决定，结构、成员和接口签名不变。
+
+2026-10-09 用户要求本地 dquic 临时允许具名客户端和服务端缺少 OCSP staple；已提供的 staple 仍严格校验，证书链、域名、有效期、握手签名及本地身份 OCSP 规则不变。仅调整现有方法体，不新增结构、成员、接口或配置开关，改动不提交、不 push。此决定替代此前采用新 dquic 严格客户端 OCSP 的要求。
+
+2026-10-09 用户批准 Endpoint.quic 替换为 Endpoint.identity，直接持有 qbase 的内存身份，现有公开方法签名不变。适配本地 QuicEndpoint::from/anonymous/set_alpn/listen，使用新的参数默认值；不恢复旧宽松接缝。
 
 2026-10-09 QPACK 反馈修复例外：用户批准 h3x Decoder 的私有反馈队列、reported_insert_count、take_feedback 及对应私有写出接缝调整，详见 [冻结基线](README.md)。h3x 公开接口及本文的 dhttp 结构、成员、签名不变。
 
