@@ -51,11 +51,11 @@ value = "/opt/homebrew/etc/dhttp"
 value = "/usr/local/etc/dhttp"
 
 [package.pishoo-common]
-version = "0.8.2"
+version = "0.9.0-preview.1"
 description = "Common files for pishoo"
 license = "Apache-2.0"
 homepage = "https://dhttp.net"
-repository = "https://github.com/genmeta/gateway"
+repository = "https://github.com/genmeta/pishoo"
 
 [package.pishoo-common.deb]
 revision = "1"

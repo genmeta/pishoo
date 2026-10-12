@@ -1,0 +1,16 @@
+[package]
+name = "pishoo-sdk"
+version = "0.1.0-preview.1"
+edition = "2024"
+description = "Guest bindings for Pishoo WASM identity interfaces"
+license = "Apache-2.0"
+readme = "README.md"
+include = ["src/pishoo_sdk.rs", "pishoo-identity/*.wit", "README.md", "Cargo.lock", "LICENSE"]
+
+[workspace]
+
+[lib]
+path = "src/pishoo_sdk.rs"
+
+[dependencies]
+wit-bindgen = "=0.51.0"

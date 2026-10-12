@@ -79,15 +79,13 @@ features=${XTASK_RELEASE_FEATURES:-}
 if [ -n "$features" ]; then
     export CARGO_FEATURES=$features
 fi
-case ",$features," in
-    *,sshd,*|*,pam,*) export PISHOO_SSH_SESSION_BIN=/usr/libexec/pishoo/pishoo-ssh-session ;;
-esac
-export PISHOO_WORKER_BIN=/usr/libexec/pishoo/pishoo-worker
 export HOME=/tmp
 : "${RUSTUP_HOME:=/usr/local/rustup}"
 : "${CARGO_HOME:=/usr/local/cargo}"
 export RUSTUP_HOME CARGO_HOME
 export PATH="$CARGO_HOME/bin:/usr/local/zig:$PATH"
+# Use the toolchain for which the container installed this cross target.
+export RUSTUP_TOOLCHAIN="$(rustup default | awk '{ print $1 }')"
 export TRIPLE=$target
 export ZIG_TARGET=$target
 export BUILD_PROFILE=$profile

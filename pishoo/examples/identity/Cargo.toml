@@ -1,0 +1,16 @@
+[package]
+name = "pishoo-identity-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/identity.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pishoo-sdk = { version = "=0.1.0-preview.1", path = "../../../wit" }
+wasip2 = "=1.0.4"
+serde_json = "1"

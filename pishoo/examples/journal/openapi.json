@@ -1,0 +1,300 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "手记",
+    "version": "0.1.2",
+    "description": "个人图文手记与具名评论；页面、API、照片和私有 SQLite 存储均由同一个 WASM 提供。"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          }
+        }
+      },
+      "head": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          }
+        }
+      }
+    },
+    "/context": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          }
+        }
+      }
+    },
+    "/entries": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "201": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "413": {
+            "description": "内容超过限制"
+          },
+          "415": {
+            "description": "需要 JSON"
+          },
+          "409": {
+            "description": "编号已使用或留言达到上限"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      }
+    },
+    "/entry": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      },
+      "put": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "413": {
+            "description": "内容超过限制"
+          },
+          "415": {
+            "description": "需要 JSON"
+          },
+          "412": {
+            "description": "版本冲突"
+          },
+          "428": {
+            "description": "缺少 If-Match"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      },
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "412": {
+            "description": "版本冲突"
+          },
+          "428": {
+            "description": "缺少 If-Match"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      }
+    },
+    "/comments": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      },
+      "post": {
+        "responses": {
+          "201": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "413": {
+            "description": "内容超过限制"
+          },
+          "415": {
+            "description": "需要 JSON"
+          },
+          "409": {
+            "description": "编号已使用或留言达到上限"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      }
+    },
+    "/comment": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      }
+    },
+    "/photo": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "操作成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          },
+          "400": {
+            "description": "输入无效"
+          },
+          "500": {
+            "description": "存储失败或提交结果未确认"
+          },
+          "404": {
+            "description": "内容不存在"
+          },
+          "503": {
+            "description": "数据库忙，请保留输入后重试"
+          }
+        }
+      }
+    }
+  }
+}

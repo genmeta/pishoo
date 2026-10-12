@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## [0.9.0-preview.1] - 2026-10-12
+
+### Changed
+
+- Replace the legacy gateway implementation with the frozen Server/Router/Sandbox/Lib design.
+- Serve Workspace, access management, chat, files and Lib APIs under /std.
+- Use SQLite configuration, startup initialization and explicit management commands.
+- Bridge local HTTP/TCP and WebSocket upstreams; execute WASI HTTP components.
+- Add Note and Journal examples and the guest identity SDK.
+- Use daccess for authorization; remove legacy SSH and host exec.
+
+### Release versions
+
+| Package | Previous published version | Prepared version |
+| --- | --- | --- |
+| `pishoo` | 0.8.2 | 0.9.0-preview.1 |
+| `pishoo-common` | 0.8.2 | 0.9.0-preview.1 |
+| `pishoo-sdk` | first release | 0.1.0-preview.1 |
+
 
 ## [0.8.2] - 2026-08-31
 

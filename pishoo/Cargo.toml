@@ -1,91 +1,89 @@
-# pishoo/Cargo.toml
-
 [package]
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://www.dhttp.net"
-version = "0.8.2"
+version = "0.9.0-preview.1"
 edition = "2024"
 license = "Apache-2.0"
+autobins = false
+
+[lib]
+path = "src/pishoo.rs"
+
+[dependencies]
+ddns = { version = "0.8.0", package = "dyns", features = ["h3", "mdns"] }
+qprotocol = { version = "0.7.0" }
+dhttp = { version = "0.7.0" }
+h3x = { version = "0.7.0" }
+dhttp-home = { version = "0.6.0" }
+qtls = { version = "0.1.0" }
+access_control = { package = "daccess", version = "0.1.0" }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
+sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+der = "0.7"
+sha1 = "0.10"
+x509-cert = "0.2"
+x509-ocsp = "0.2"
+x509-parser = "0.18"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+scopeguard = "1"
+tower = { version = "0.5", features = ["util"] }
+cap-std = "4"
+rustix = { version = "1", features = ["fs"] }
+toml = "0.9"
+form_urlencoded = "1"
+percent-encoding = "2"
+mime_guess = "2"
+wasmparser = "0.259.0"
+
+bytes = "1"
+async-stream = "0.3"
+base64 = "0.22"
+chrono = "0.4"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "net"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+wasmtime = "47.0.4"
+wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
+wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = ["p2"] }
+oas3 = { version = "0.22.0", default-features = false }
+getrandom = "0.4"
+imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
+include_dir = "0.7"
+snafu = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+qbase = { version = "0.7.0" }
+hyper = { version = "1", features = ["server", "http1"] }
+tokio = { version = "1", features = ["test-util"] }
+rcgen = "0.14"
+wat = "1"
 
 [[bin]]
 name = "pishoo"
 path = "src/main.rs"
 
-[[bin]]
-name = "pishoo-worker"
-path = "src/bin/pishoo_worker.rs"
+[[example]]
+name = "setup-tcp-demo"
+path = "tests/support/setup-tcp-demo.rs"
 
-[[bin]]
-name = "pishoo-ssh-session"
-path = "src/bin/pishoo_ssh_session.rs"
-required-features = ["sshd"]
+[[example]]
+name = "check-lib"
+path = "tools/check-lib.rs"
 
-[dependencies]
-# --- Workspace Member ---
-gateway = { workspace = true }
-dhttp = { workspace = true, features = ["access-orm"] }
-h3x = { workspace = true, features = ["ipc"] }
-rustls = { workspace = true }
-rustls-pemfile = "2"
-
-# --- Serialization & IPC ---
-remoc = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-# --- Error Handling ---
-snafu = { workspace = true }
-
-# --- Async Runtime ---
-futures = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true, features = ["rt"] }
-
-# --- HTTP ---
-http = { workspace = true }
-axum = { workspace = true }
-
-# --- Tower ---
-tower = { workspace = true }
-
-# --- CLI Parsing ---
-clap = { workspace = true }
-
-# --- DShell ---
-dshell = { workspace = true, optional = true }
-
-# --- Database & ORM ---
-sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
-
-# --- Logging & Tracing ---
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
-console-subscriber = { workspace = true, optional = true }
-
-# --- System / OS ---
-libc = { workspace = true }
-nix = { workspace = true, features = ["signal", "process", "user", "fs"] }
-sha2 = "0.11"
-notify = "8"
-
-[features]
-default = ["sqlx-sqlite"]
-sshd = [
-    "gateway/sshd",
-    "dep:dshell",
-    "dshell/server",
-    "h3x/webtransport",
-    "nix/socket",
-    "nix/uio",
-]
-pam = ["sshd", "dshell/pam", "gateway/pam"]
-qlog = ["gateway/qlog"]
-console_subscriber = ["dep:console-subscriber"]
-sqlx-sqlite = ["sea-orm-migration/sqlx-sqlite"]
-
-[dev-dependencies]
-rcgen = "0.14"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+[[example]]
+name = "pishoo-client"
+path = "examples/client.rs"

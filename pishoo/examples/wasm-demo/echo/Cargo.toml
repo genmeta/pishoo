@@ -1,0 +1,11 @@
+[package]
+name = "pishoo-tcp-demo-echo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasip2.workspace = true

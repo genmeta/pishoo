@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.2-1f6feb?style=flat-square" alt="Version 0.8.2">
+  <img src="https://img.shields.io/badge/version-0.9.0--preview.1-1f6feb?style=flat-square" alt="Version 0.9.0-preview.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -24,6 +24,24 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 - **Access Control:** Open APIs do not mean unrestricted access. Pishoo grants API access to authorized names rather than requiring a traditional login.
 
 ## Getting started
+
+Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
+and WASM components. See the [configuration API](pishoo/docs/config-api.md),
+[management guide](pishoo/docs/management.md) and [system paths](pishoo/docs/system-paths.md).
+
+### Local development build
+
+The 0.9.0-preview.1 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+
+```sh
+git clone --branch feat/release-pishoo-0.9.0 https://github.com/genmeta/pishoo.git
+cd pishoo
+cargo build --locked -p pishoo --bin pishoo
+cargo test --locked --workspace -- --test-threads=1
+cargo check --locked --workspace --all-targets
+```
+
+The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -63,73 +81,81 @@ You can purchase a name and certificate, then place them in the appropriate loca
 genmeta identity apply
 ```
 
-### Configuration files
+### Current development configuration
 
-- Linux global configuration: `/etc/dhttp/pishoo.conf`
-- macOS global configuration: `$(brew --prefix)/etc/dhttp/pishoo.conf`
-- Per-identity service configuration: `<DHTTP home>/<identity>/server.conf`, for example `~/.dhttp/your.name/server.conf`
+Pishoo uses the running user's `~/.dhttp` by default; set `DHTTP_HOME` to use another identity home. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
 
-Pishoo loads the global configuration and then discovers `server.conf` files for users in the platform worker group: `dhttp` on Linux and `_www` on macOS. The identity directory also contains the generated certificate and private key under `ssl/`; do not rename or manually change their permissions.
+Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
-Add the account that owns the identity to the worker group:
+Database configuration is available over H3 through `GET/PATCH /std/pishoo/settings` and `GET/PUT/PATCH/DELETE /std/pishoo/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
 
-```sh
-# Linux
-sudo usermod -aG dhttp "$USER"
+First startup with valid identity credentials creates `db/`, `file/`, `lib/`, `logs/`, `repo/`, `templates/`, and `assets/profile/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
-# macOS
-sudo dseditgroup -o edit -a "$USER" -t user _www
-```
+Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Run services as the identity owner; systemd installations need an appropriate `User=` and `Environment=DHTTP_HOME=...` override.
 
-### Configuration example
+Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
 
-The global file can remain minimal. The packaged default configuration only needs a PID file when the platform default worker group should be discovered automatically:
-
-```nginx
-# /etc/dhttp/pishoo.conf on Linux
-pishoo {
-    pid /var/run/pishoo.pid;
-}
-```
-
-Put the service configuration in your identity directory. Pishoo derives the service identity and TLS material from that directory. The following example enables SSH, serves a static site, and proxies `/app` to a local application:
-
-```nginx
-# ~/.dhttp/your.name/server.conf
-server {
-    # SSH is disabled unless it is enabled at server scope.
-    sshd on;
-
-    location / {
-        root  templates;
-        index index.html;
-    }
-
-    location /app {
-        proxy_pass http://127.0.0.1:8081;
-    }
-}
-```
-
-When enabled, SSH clients connect to `/shell/<username>`. Requests pass through
-the server's `access_rules` before reaching the SSH service, and root login is
-always rejected.
+The same-identity DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
 
 ### Run
 
-Validate and start (or reload) Pishoo after changing its configuration:
+Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities, proxy routes, Libs, configuration, and certificate/key credentials are loaded at startup; restart Pishoo to apply changes. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
+
+Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried at the next startup. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
+
+The `pishoo` executable appends runtime diagnostics to `<DHTTP_HOME>/logs/error.log` (default `~/.dhttp/logs/error.log`) and also writes them to stderr. This process-wide log includes shared network diagnostics and identity failures. The default level is `warn`; set `RUST_LOG=debug` for more detail in the same file. New log directories and files use permissions 0700 and 0600 on Unix. Failure to open the log stops startup with a stderr diagnostic. Per-identity `logs/cert.log` remains the certificate-operation history written by gmutils.
+
+For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
 ```sh
-# Linux
-sudo pishoo -t
-sudo systemctl start pishoo
-sudo systemctl reload pishoo
-
-# macOS
-sudo pishoo -t
-sudo brew services start pishoo
-sudo brew services reload pishoo
+DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
+  --transport quic --identity client.dhttp.net \
+  --url https://server.dhttp.net/std/api/echo/echo
 ```
+
+The endpoint must be reachable, and daccess must allow that source identity to call the Echo API. The example builds the native client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
+
+### Testing
+
+Run the normal Rust checks from a release checkout with its registry lockfile:
+
+```sh
+cargo test --locked --workspace -- --test-threads=1
+cargo check --locked --workspace --all-targets
+```
+
+For isolated real QUIC/H3 transport tests:
+
+```sh
+python3 pishoo/tests/run-transport.py --soak-seconds 1800
+python3 pishoo/tests/run-transport.py --case process
+```
+
+The transport runner creates temporary test identities and local upstreams.
+It requires Python 3, OpenSSL 3, cached Cargo dependencies, local TCP/UDP access
+and about 1.3 GiB of free fixture space. Set `DHTTP_TEST_OPENSSL` to select OpenSSL 3.
+Results and logs are written under `target/transport-*`. Local transport tests
+do not establish cross-device, NAT or release-build performance.
+
+Named clients and servers require valid OCSP staples as well as valid certificate
+chains, names and handshake signatures. Anonymous callers follow the configured
+anonymous authorization rules. Older named clients that omit OCSP must upgrade.
+
+### Build your own Lib
+
+For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [minimal identity example](pishoo/examples/identity/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with the Identity and Journal examples. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
+
+1. Write a WASI HTTP component exporting `wasi:http/incoming-handler@0.2.12#handle`. The [Echo source](pishoo/examples/wasm-demo/echo/src/lib.rs) is a working Rust example. Build it for `wasm32-unknown-unknown`, then turn the core WASM into a component with `wasm-tools component new` as shown in [build-wasm-demo.sh](pishoo/tools/build-wasm-demo.sh).
+2. Write an OpenAPI 3.1 JSON document declaring the paths and HTTP methods the Lib accepts. See [echo/openapi.json](pishoo/examples/wasm-demo/echo/openapi.json). The handler's actual response statuses should match the document.
+3. Attach that JSON to the component, check it with Pishoo, and place the result in the identity profile's `lib/<id>/lib.wasm`:
+
+```sh
+./pishoo/tools/package-lib.py component.wasm openapi.json /path/to/identity/lib/echo/lib.wasm
+wasm-tools validate /path/to/identity/lib/echo/lib.wasm
+cargo run --locked -p pishoo --example check-lib -- /path/to/identity/lib/echo/lib.wasm
+```
+
+The file must be one WASM component with exactly one top-level `pishoo:openapi` custom section. Pishoo reads this section without executing the guest. It routes `POST /std/api/echo/echo` to Lib `echo` only when its manifest declares `POST /echo`. Lib loading does not create access rules. Grant access through daccess; the OpenAPI declaration itself does not grant access.
 
 ### Access
 
@@ -140,3 +166,21 @@ genmeta curl https://your.name~/welcome
 ```
 
 For directive reference and additional reverse-proxy examples, see the official [Pishoo documentation](https://docs.dhttp.net/en/docs/core-components/pishoo).
+
+### Management commands
+
+Local commands use `DHTTP_HOME` (otherwise `~/.dhttp`) and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Resource changes require a service restart.
+
+```sh
+pishoo listen -i alice.smith internal
+pishoo proxy -i alice.smith /test 127.0.0.1:8080
+pishoo proxy -i alice.smith rm /test
+pishoo lib check ./note.wasm
+pishoo lib -i alice.smith install note ./note.wasm
+pishoo lib -i alice.smith
+pishoo restart
+pishoo lib -i alice.smith --loaded
+pishoo lib -i alice.smith rm note
+```
+
+`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management guide](pishoo/docs/management.md) for commands, `/std/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.
