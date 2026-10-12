@@ -46,3 +46,6 @@ Release, uploads artifacts, and publishes that Release after all package jobs
 succeed. Release builds keep `--locked`; refresh the registry lockfile after
 upstream publication before tagging. The existing S3, signing and tap/bucket
 credentials must be configured in repository Actions settings.
+
+Windows publication is deferred for this release. Tag-triggered binary
+artifacts cover Linux DEB/RPM and macOS Homebrew.
