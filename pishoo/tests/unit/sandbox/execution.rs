@@ -103,12 +103,12 @@ async fn reaped(tasks: &TaskTracker) {
 
 #[path = "execution/isolation.rs"]
 mod isolation;
+#[path = "execution/journal.rs"]
+mod journal;
 #[path = "execution/lifecycle.rs"]
 mod lifecycle;
 #[path = "execution/note.rs"]
 mod note;
-#[path = "execution/journal.rs"]
-mod journal;
 #[path = "execution/policy.rs"]
 mod policy;
 #[path = "execution/streaming.rs"]
