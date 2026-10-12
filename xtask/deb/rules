@@ -53,6 +53,7 @@ ifdef TRIPLE
 		} > /tmp/pishoo-aarch64-zig; \
 		chmod +x /tmp/pishoo-aarch64-zig; \
 		export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig; \
+		export RUSTUP_TOOLCHAIN="$$(rustup default | awk '{ print $$1 }')"; \
 		export RUSTFLAGS="$$RUSTFLAGS -Z unstable-options -Clinker-flavor=gnu-lld-cc"; \
 	fi && \
 	cargo zigbuild --locked $(CARGO_PROFILE_ARGS) --manifest-path pishoo/Cargo.toml --target $(ZIG_TARGET)$(if $(CARGO_FEATURES), --features $(CARGO_FEATURES))
