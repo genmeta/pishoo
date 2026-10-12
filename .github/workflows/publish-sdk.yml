@@ -44,7 +44,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Test workspace
-        run: cargo test --workspace --all-features --all-targets -- --test-threads=1
+        run: cargo test --locked --workspace --all-features --all-targets -- --test-threads=1
 
       - name: Determine publication authentication
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
@@ -94,7 +94,7 @@ jobs:
             pishoo-sdk
           )
 
-          cargo metadata --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/workspace-metadata.json"
           package_versions="$(
             PACKAGES="$(printf '%s\n' "${packages[@]}")" RUNNER_TEMP="$RUNNER_TEMP" python3 - <<'PY'
           import json

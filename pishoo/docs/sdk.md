@@ -26,15 +26,15 @@ python3 pishoo/tools/package-sdk.py
 python3 pishoo/tools/package-sdk.py --offline
 ```
 
-The script produces `target/sdk-dist/pishoo-sdk-0.1.0.crate` and
-`target/sdk-dist/pishoo-sdk-0.1.0.tar.gz`; the version comes from the SDK manifest.
+The script produces `target/sdk-dist/pishoo-sdk-0.1.0-preview.1.crate` and
+`target/sdk-dist/pishoo-sdk-0.1.0-preview.1.tar.gz`; the version comes from the SDK manifest.
 Use `--output-dir PATH` to select another destination. Cargo verifies the `.crate`
 in isolation. The script does not publish to crates.io or install any Libs.
 
 The developer archive contains:
 
 ```text
-pishoo-sdk-0.1.0/
+pishoo-sdk-0.1.0-preview.1/
   sdk/                  Rust crate, WIT, Cargo.lock, documentation and license
   examples/identity/    Minimal HTTP component using the SDK
   examples/journal/     Journal component, embedded page and SQLite
@@ -54,8 +54,8 @@ interface version 0.1.0; use a host that implements request-identity and signatu
 Install `wasm-tools`, then unpack the developer archive and run:
 
 ```sh
-tar -xzf pishoo-sdk-0.1.0.tar.gz
-cd pishoo-sdk-0.1.0
+tar -xzf pishoo-sdk-0.1.0-preview.1.tar.gz
+cd pishoo-sdk-0.1.0-preview.1
 rustup target add wasm32-wasip2
 sh examples/identity/build.sh
 pishoo lib check examples/identity/dist/lib.wasm
@@ -94,7 +94,7 @@ build script's WASM output filename. Keep the SDK dependency:
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0", path = "../../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.1", path = "../../sdk" }
 wasip2 = "=1.0.4"
 ```
 

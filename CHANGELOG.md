@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.9.0] - 2026-10-12
+## [0.9.0-preview.1] - 2026-10-12
 
 ### Changed
 
@@ -15,9 +15,9 @@
 
 | Package | Previous published version | Prepared version |
 | --- | --- | --- |
-| `pishoo` | 0.8.2 | 0.9.0 |
-| `pishoo-common` | 0.8.2 | 0.9.0 |
-| `pishoo-sdk` | first release | 0.1.0 |
+| `pishoo` | 0.8.2 | 0.9.0-preview.1 |
+| `pishoo-common` | 0.8.2 | 0.9.0-preview.1 |
+| `pishoo-sdk` | first release | 0.1.0-preview.1 |
 
 
 ## [0.8.2] - 2026-08-31
