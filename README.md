@@ -150,6 +150,8 @@ The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are inc
 
 ### Build your own Lib
 
+For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [minimal identity example](pishoo/examples/identity/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with the Identity and Journal examples. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
+
 1. Write a WASI HTTP component exporting `wasi:http/incoming-handler@0.2.12#handle`. The [Echo source](pishoo/examples/wasm-demo/echo/src/lib.rs) is a working Rust example. Build it for `wasm32-unknown-unknown`, then turn the core WASM into a component with `wasm-tools component new` as shown in [build-wasm-demo.sh](pishoo/tools/build-wasm-demo.sh).
 2. Write an OpenAPI 3.1 JSON document declaring the paths and HTTP methods the Lib accepts. See [echo/openapi.json](pishoo/examples/wasm-demo/echo/openapi.json). The handler's actual response statuses should match the document.
 3. Attach that JSON to the component, check it with Pishoo, and place the result in the identity profile's `lib/<id>/lib.wasm`:

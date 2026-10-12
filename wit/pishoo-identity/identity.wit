@@ -1,5 +1,15 @@
 package pishoo:identity@0.1.0;
 
+/// Read-only identity of this invocation, taken from the verified handshake.
+/// These operations never consult HTTP headers or guest-supplied identity data.
+interface request-identity {
+    local-name: func() -> string;
+    caller-name: func() -> option<string>;
+    /// Both the normalized name and certificate owner_hash must match.
+    /// Anonymous callers and unavailable certificate identifiers return false.
+    caller-is-owner: func() -> bool;
+}
+
 /// Host operations on DHTTP identity signatures. The signing identity is
 /// selected by the host from the current Server, never by the guest.
 interface signatures {

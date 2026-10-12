@@ -1,5 +1,7 @@
 # 三仓第一版设计清单
 
+2026-10-10 用户批准个人手记 WASM 的三个只读身份函数：新增 `pishoo:identity/request-identity@0.1.0` 的 `local-name`、`caller-name`、`caller-is-owner`，直接读取 StoreData 已有 local/remote 握手信息。owner 同时核对名称与证书 owner_hash，匿名无 caller-name。不新增状态字段，不通过 HTTP 头传递可信身份；继续由 daccess 授权。具体签名见 [Pishoo 清单](pishoo-interfaces.md)。
+
 2026-10-10 用户批准将现有 h3x 连接池与 SETTINGS 查询变更提交、发布并纳入 Pishoo 依赖快照，作为 h3x 接口不变规则的具体例外：`H3Connection::new` 接收第三个 `on_unreusable` 回调，导出 `UnreusableCallback<T>`；`Pool::new` 的工厂接收该回调，`Pool::on_unreusable(key)` 为入站连接生成回调。复用已实现的 `Pool.inner`、`PoolInner { factory, entries }`、`Entry { ready, connecting }` 连接池结构与既有方法，不新增应用或 Network 状态。新增 `H3Connection::peer_settings(&self) -> Result<Settings>`、`Settings::get(&self, id: u64) -> Option<u64>`、四个 `SETTINGS_*` 常量，以及 `Control.settings_received: tokio::sync::Notify` 和私有 `Control::peer_settings`；Notify 只唤醒等待已验证 peer SETTINGS 的调用，结果仍由现有 `OnceLock<Settings>` 保存，失败复用 QPACK 错误。dhttp 的既有跨模块 `network::connection::connect` 增加 `on_unreusable: h3x::UnreusableCallback<QuicTransport>` 参数，入站/出站均在构造 H3 前装配同一池的回调。具体签名见 [dhttp 清单](dhttp-interfaces.md)。
 
 2026-10-10 用户要求采用底层 QUIC 恢复的强制 OCSP 校验并重新编译运行：具名客户端和服务端必须提供有效 OCSP，缺失或无效时拒绝握手；匿名客户端保持现有规则。Pishoo 使用现有严格默认接口，不启用 optional-client-OCSP。此决定替代下述临时允许缺失 OCSP 的决定；不新增或修改结构、字段、方法或跨模块函数签名。
