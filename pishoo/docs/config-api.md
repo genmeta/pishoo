@@ -43,7 +43,7 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 请求经过现有 daccess 授权层；处理器还核对 middleware 从 TLS 构造的 Visitor 与 Endpoint 同名、owner_hash 相同。即使 ACL 放行，匿名、其他身份及同名不同 owner_hash 的来访者仍不能操作配置。请求头不能声明可信身份。联系人、ACL 和审批继续使用已挂载的 daccess API。
 
-本版实施的是身份限制，未限制请求来自本地网络。minidocs 的系统 API 另有仅本地网络访问的约定，当前 `HandshakeSummary` 不包含网络范围，身份核对不能保证该约定。
+管理 API 的权限由已验证的身份决定；网络可达范围由监听设置决定。
 
 支持 `Accept-Versions: v1`，也支持包含 v1 的逗号分隔列表和多个同名头。省略时使用 v1，没有匹配版本返回 505。配置处理器的响应携带 `Supported-Versions: v1` 和 `Cache-Control: no-store`。
 
@@ -63,7 +63,7 @@ cargo run --locked -p pishoo --example pishoo-client -- put /std/pishoo/proxies 
 cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 ```
 
-接口随 Server 启动装配；仅新增已批准的 `setup::config_router(profile, endpoint) -> Router` 跨模块函数。复用 ServerConfig、ProxyLocation 和现有资源；没有新增配置 DTO、Server 字段、数据库表或传输接口。
+接口随身份服务启动提供。配置修改保存到磁盘后，需重启服务生效。
 
 ## 启动初始化与数据库兼容
 
@@ -74,7 +74,7 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
 | config.db | schema v1；settings 一行 listen=3（内外网均监听）；代理为空 | 校验版本、配置和值；不补默认设置 |
-| access.db | 由 daccess 建库，并写入 POST /contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
+| access.db | 由 daccess 建库，并写入 POST /std/contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | workspace.db | schema8；默认资料一行；联系人投递、收藏和能力决定为空 | 只接受当前版本及必要表结构；资料和队列保留 |
 | chat.db | schema4；会话、消息、投递作业和授权观察为空 | 只接受当前版本及必要表结构；历史数据保留 |
 
@@ -88,4 +88,4 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 
 四库独立初始化，不建立跨库事务或初始化标记表；全部加载成功后才注册监听。某库失败可使本次启动结束，已完成的库在下次启动被正常复用。升级失败不自动删库、重置授权或回退版本。
 
-磁盘 Lib 管理与离线命令见[管理命令与 API 详细设计](management-design.md)。这些命令与配置 HTTP handler 复用 `config_database(profile, method, uri, payload)`，不会启动 Server 或自动重启。
+磁盘 Lib 管理与离线命令见[管理命令与 API](management.md)。本机资源命令不启动 Server，也不自动重启。

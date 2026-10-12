@@ -59,3 +59,19 @@ pishoo.pid
 
 # Local VM acceptance captures and runtime diagnostics
 /pishoo/docs/workspace/vm-evidence/
+
+# Local implementation notes and agent working documents
+/CONTEXT.md
+/IMPLEMENTATION.md
+/test.txt
+/design/
+/pishoo/DACCESS.md
+/pishoo/docs/management-design.md
+/pishoo/docs/testing-snapshot.md
+/pishoo/docs/transport-*.md
+/pishoo/docs/transport-*.json
+/pishoo/docs/workspace/*IMPLEMENTATION_PLAN.md
+/pishoo/docs/workspace/CHAT_ASYNC_DELIVERY_DESIGN.md
+/pishoo/docs/workspace/BRANCH_MIGRATION_*.md
+/pishoo/docs/workspace/VM_*.md
+/pishoo/docs/workspace/source/

@@ -25,10 +25,9 @@ Pishoo takes its name from Pixiu (貔貅), an auspicious creature in ancient Chi
 
 ## Getting started
 
-The current development branch is implementing the [v1 contract](design/README.md).
-Its SQLite configuration, completed work, test commands, and remaining
-transport work are recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md).
-The packaged-release installation instructions below describe the earlier release.
+Pishoo 0.9 uses per-identity SQLite configuration, name-based access control,
+and WASM components. See the [configuration API](pishoo/docs/config-api.md),
+[management guide](pishoo/docs/management.md) and [system paths](pishoo/docs/system-paths.md).
 
 ### Local development build
 
@@ -42,7 +41,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). The [dependency snapshot notes](pishoo/docs/testing-snapshot.md) record the earlier Git snapshot validation. Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -84,7 +83,7 @@ genmeta identity apply
 
 ### Current development configuration
 
-Pishoo uses the running user's `~/.dhttp` by default; set `DHTTP_HOME` to use another identity home. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the SQL schema, verification results and current limits.
+Pishoo uses the running user's `~/.dhttp` by default; set `DHTTP_HOME` to use another identity home. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
@@ -116,37 +115,31 @@ DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
 
 The endpoint must be reachable, and daccess must allow that source identity to call the Echo API. The example builds the native client and opens one full-duplex POST. Type lines and see each `echo>` reply without ending the upload; Ctrl-D finishes the request and Ctrl-C exits the client.
 
-QUIC is the only DHTTP transport. The former TCP mock smoke fixtures remain under `pishoo/tests/` for adaptation; their old script is no longer a working test entry point. Real QUIC/H3 acceptance has passed through online DDNS and a local HTTP upstream, including public relay bootstrap and direct punching between two processes behind the same RestrictedPort NAT. Different NATs and devices remain to be tested; see [IMPLEMENTATION.md](IMPLEMENTATION.md).
+### Testing
 
-Online acceptance lives in the existing `pishoo-client` example, outside unit tests. Set `DHTTP_HOME` and `PISHOO_CLIENT_IDENTITY` to a test identity. Its commands are `query [NAME]`, `publish [ADDRESS ...]`, `probe`, `serve`, and `nat-get URL`. Publication always uses the loaded identity. `serve` starts the real Pishoo application after waiting for the Network-owned mapping; `nat-get` checks HTTP/3 responses before and after punching. Both omit mDNS and LAN/loopback advertisements for acceptance. Ordinary Network startup now classifies NAT once for each new socket and continuously maintains mappings with STUN binding heartbeats. Filtering NAT publishes relay E-records as `outer-agent`; FullCone mappings can be published directly. These commands reuse that maintenance and do not run a second classification on the same socket.
+Run the normal Rust checks from a release checkout with its registry lockfile:
 
 ```sh
-cargo run --locked -p pishoo --example pishoo-client -- probe
-# In separate processes, with a prepared test configuration and upstream:
-cargo run --locked -p pishoo --example pishoo-client -- serve
-cargo run --locked -p pishoo --example pishoo-client -- nat-get https://server.dhttp.net/path
+cargo test --locked --workspace -- --test-threads=1
+cargo check --locked --workspace --all-targets
 ```
 
-`serve` follows the test identity's `listen` configuration and publishes its online records; stopping renewal lets them expire naturally. Use an isolated profile and restore any pre-existing records after acceptance. Unit tests only exercise local logic; none of these commands run automatically.
-
-The native client also provides `ha-burst ORIGIN PATHS.json [ROUNDS]` for read-only HA resource acceptance over a shared QUIC/H3 connection. PATHS.json is an array of origin-relative GET resource paths to check. It verifies HTTP/3 200 and completes each response body. The HA QPACK regression used 155 static paths from the HAR, including source maps, for three concurrent rounds without replaying login credentials or authorization codes.
-
-`ha-websocket ORIGIN [ROUNDS]` checks the real HA proxy with an HTTP/3 extended CONNECT, the server's `auth_required` greeting, WebSocket ping/pong, and a close handshake on each session. It does not authenticate to HA; each round has a ten-second deadline. This checks the native client and server path; AnySee's connection handling and authenticated sessions require separate browser validation.
-
-For isolated large-file, duplex, concurrency and cancellation acceptance, run:
+For isolated real QUIC/H3 transport tests:
 
 ```sh
 python3 pishoo/tests/run-transport.py --soak-seconds 1800
 python3 pishoo/tests/run-transport.py --case process
 ```
 
-This builds the locked debug test binary and uses temporary identities with a test CA and signed OCSP, production Pishoo routers, real UDP/QUIC/H3 and a local HTTP upstream. It checks streamed SHA-256 and byte counts up to 1 GiB, 1/8/32/128 concurrent requests, reverse requests, slow readers/writers and cancellation, then runs a mixed soak. Python 3, OpenSSL 3, cached Cargo dependencies, local TCP/UDP permissions and about 1.3 GiB of free space for fixtures are required in addition to the normal build prerequisites. Set `DHTTP_TEST_OPENSSL` if OpenSSL 3 is not on PATH. Each run saves results, logs and process resource samples in its own `target/transport-*` directory. Run the ignored network tests in separate processes; they own process-wide TLS roots, name resolution and `DHTTP_HOME`. These measurements cover local transport correctness and do not establish cross-device, NAT or release-build performance.
+The transport runner creates temporary test identities and local upstreams.
+It requires Python 3, OpenSSL 3, cached Cargo dependencies, local TCP/UDP access
+and about 1.3 GiB of free fixture space. Set `DHTTP_TEST_OPENSSL` to select OpenSSL 3.
+Results and logs are written under `target/transport-*`. Local transport tests
+do not establish cross-device, NAT or release-build performance.
 
-See the [2026-10-09 transport test report](pishoo/docs/transport-testing-2026-10-09.md) and [cross-device/NAT supplement](pishoo/docs/transport-public-2026-10-09.md) for measured results, versions and known failures.
-
-The pinned DQUIC snapshot requires valid OCSP staples from named clients and servers, in addition to certificate chain, hostname, validity and handshake signature checks. Anonymous callers continue through anonymous authorization rules. Older clients that omit their staple cannot authenticate as a named caller. For `ddns.genmeta.net`, `DQUIC_DDNS_OCSP_FILE` can supply a missing server staple and must pass the same OCSP checks; see the [test snapshot notes](pishoo/docs/testing-snapshot.md) before online testing.
-
-The Lib sources are in `pishoo/examples/wasm-demo/`. Prebuilt components are included; to rebuild them, run `./pishoo/tools/build-wasm-demo.sh` with `wasm-tools` and the Rust `wasm32-unknown-unknown` target installed.
+Named clients and servers require valid OCSP staples as well as valid certificate
+chains, names and handshake signatures. Anonymous callers follow the configured
+anonymous authorization rules. Older named clients that omit OCSP must upgrade.
 
 ### Build your own Lib
 
@@ -190,4 +183,4 @@ pishoo lib -i alice.smith --loaded
 pishoo lib -i alice.smith rm note
 ```
 
-`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management design](pishoo/docs/management-design.md) for commands, `/std/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.
+`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management guide](pishoo/docs/management.md) for commands, `/std/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.
