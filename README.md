@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-1f6feb?style=flat-square" alt="Version 0.9.0">
+  <img src="https://img.shields.io/badge/version-0.9.0--preview.1-1f6feb?style=flat-square" alt="Version 0.9.0-preview.1">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -31,7 +31,7 @@ and WASM components. See the [configuration API](pishoo/docs/config-api.md),
 
 ### Local development build
 
-The 0.9.0 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+The 0.9.0-preview.1 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch feat/release-pishoo-0.9.0 https://github.com/genmeta/pishoo.git

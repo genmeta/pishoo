@@ -12,7 +12,7 @@ not been published to crates.io. In an extracted developer bundle, a Lib under
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0", path = "../../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.1", path = "../../sdk" }
 wasip2 = "=1.0.4"
 ```
 

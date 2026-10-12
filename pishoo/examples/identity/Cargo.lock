@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "pishoo-sdk"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 dependencies = [
  "wit-bindgen 0.51.0",
 ]
