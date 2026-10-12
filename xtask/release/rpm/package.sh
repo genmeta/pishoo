@@ -60,6 +60,7 @@ exec /usr/local/zig/zig "$@"
 SH
     chmod +x /tmp/pishoo-aarch64-zig
     export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig
+    export RUSTUP_TOOLCHAIN="$(rustup default | awk '{ print $1 }')"
     export RUSTFLAGS="${RUSTFLAGS:-} -Z unstable-options -Clinker-flavor=gnu-lld-cc"
 }
 
