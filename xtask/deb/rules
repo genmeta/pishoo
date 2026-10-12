@@ -12,6 +12,9 @@
 # before dpkg-buildpackage runs. xtask points SOURCE_ROOT at the primary source
 # bind mount inside the build container.
 
+# Keep Debian hardening flags while allowing native crates to choose their
+# per-file optimization (AWS-LC jitterentropy requires -O0).
+export DEB_CFLAGS_MAINT_STRIP = -O2
 export DH_VERBOSE = 1
 BUILD_PROFILE ?= release
 CARGO_PROFILE_ARGS ?= --release
