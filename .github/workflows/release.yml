@@ -41,6 +41,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Validate release tag version
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pishoo/Cargo.toml").read_text())["package"]["version"]
+          expected = f"v{version}"
+          if sys.argv[1] != expected:
+              raise SystemExit(f"release tag {sys.argv[1]} must match {expected}")
+          PY
+
       - name: Create GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         env:
@@ -85,6 +99,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
+            --draft \
             --title "$GITHUB_REF_NAME" \
             --notes-file "$notes_file" \
             "${release_args[@]}"
@@ -99,12 +114,12 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: gateway
+        working-directory: pishoo
     steps:
-      - name: Checkout gateway
+      - name: Checkout pishoo
         uses: actions/checkout@v6
         with:
-          path: gateway
+          path: pishoo
           persist-credentials: false
 
       - name: Install Rust
@@ -118,9 +133,9 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-linux-deb-cargo-${{ hashFiles('gateway/Cargo.lock') }}
+          key: pishoo-linux-deb-cargo-${{ hashFiles('pishoo/Cargo.lock') }}
           restore-keys: |
-            gateway-linux-deb-cargo-
+            pishoo-linux-deb-cargo-
 
       - name: Install Linux deb tooling
         run: |
@@ -184,7 +199,7 @@ jobs:
           fi
 
           cargo xtask package --overwrite-manifest \
-            deb "${deb_args[@]}" --features sshd,pam
+            deb "${deb_args[@]}"
 
       - name: Publish or dry-run S3 for deb artifacts
         env:
@@ -250,11 +265,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gateway-deb-release
+          name: pishoo-deb-release
           if-no-files-found: ignore
           path: |
-            gateway/target/common/deb/**
-            gateway/target/publish-reports/*.toml
+            pishoo/target/common/deb/**
+            pishoo/target/publish-reports/*.toml
 
   linux-rpm:
     needs: github-release
@@ -267,12 +282,12 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: gateway
+        working-directory: pishoo
     steps:
-      - name: Checkout gateway
+      - name: Checkout pishoo
         uses: actions/checkout@v6
         with:
-          path: gateway
+          path: pishoo
           persist-credentials: false
 
       - name: Install Rust
@@ -286,9 +301,9 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-linux-rpm-cargo-${{ hashFiles('gateway/Cargo.lock') }}
+          key: pishoo-linux-rpm-cargo-${{ hashFiles('pishoo/Cargo.lock') }}
           restore-keys: |
-            gateway-linux-rpm-cargo-
+            pishoo-linux-rpm-cargo-
 
       - name: Install Linux rpm tooling
         run: |
@@ -333,7 +348,7 @@ jobs:
           fi
 
           cargo xtask package --overwrite-manifest \
-            rpm "${rpm_args[@]}" --features sshd,pam
+            rpm "${rpm_args[@]}"
 
       - name: Publish S3 for rpm artifacts
         env:
@@ -394,11 +409,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gateway-rpm-release
+          name: pishoo-rpm-release
           if-no-files-found: ignore
           path: |
-            gateway/target/common/rpm/**
-            gateway/target/publish-reports/*.toml
+            pishoo/target/common/rpm/**
+            pishoo/target/publish-reports/*.toml
 
   homebrew:
     needs: github-release
@@ -408,12 +423,12 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: gateway
+        working-directory: pishoo
     steps:
-      - name: Checkout gateway
+      - name: Checkout pishoo
         uses: actions/checkout@v6
         with:
-          path: gateway
+          path: pishoo
           persist-credentials: false
 
       - name: Install Rust
@@ -472,17 +487,26 @@ jobs:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-          key: gateway-macos-cargo-${{ hashFiles('gateway/Cargo.lock') }}
+          key: pishoo-macos-cargo-${{ hashFiles('pishoo/Cargo.lock') }}
           restore-keys: |
-            gateway-macos-cargo-
+            pishoo-macos-cargo-
+
+      - name: Install Node.js for Workspace
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Bun for Workspace
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
 
       - name: Package Homebrew artifacts
         run: |
           cargo xtask package --overwrite-manifest \
             brew \
               --target aarch64-apple-darwin \
-              --target x86_64-apple-darwin \
-              --features sshd
+              --target x86_64-apple-darwin
 
       - name: Publish S3 for Homebrew artifacts
         env:
@@ -595,8 +619,20 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gateway-homebrew-release
+          name: pishoo-homebrew-release
           if-no-files-found: ignore
           path: |
-            gateway/target/common/brew/**
-            gateway/target/publish-reports/*.toml
+            pishoo/target/common/brew/**
+            pishoo/target/publish-reports/*.toml
+
+  finalize-release:
+    name: Publish completed GitHub Release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [github-release, linux-deb, linux-rpm, homebrew]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
