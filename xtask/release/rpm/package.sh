@@ -60,7 +60,6 @@ exec /usr/local/zig/zig "$@"
 SH
     chmod +x /tmp/pishoo-aarch64-zig
     export CARGO_ZIGBUILD_ZIG_PATH=/tmp/pishoo-aarch64-zig
-    export RUSTUP_TOOLCHAIN="$(rustup default | awk '{ print $1 }')"
     export RUSTFLAGS="${RUSTFLAGS:-} -Z unstable-options -Clinker-flavor=gnu-lld-cc"
 }
 
@@ -236,6 +235,8 @@ run_binary() {
     write_aarch64_zig_workaround
 
     cd "$product_source"
+    # The repository pin must not override the container cross-target toolchain.
+    export RUSTUP_TOOLCHAIN="$(rustup default | awk '{ print $1 }')"
     cargo zigbuild --locked $profile_args --target "$target" -p pishoo "${feature_flag[@]}"
 
     local release_dir="$product_source/target/$target/$profile"
