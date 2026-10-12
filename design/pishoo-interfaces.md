@@ -300,6 +300,16 @@ DHTTP 正向代理固定在 `/std/dhttp/` 前缀，不读取 proxy_locations，�
 
 已有 `pishoo:identity/signatures@0.1.0` 的 sign/verify 保留。StoreData 检查固定输入上限；sign 直接使用 qtls::LocalAuthority 选择 DHTTP 规范签名算法。verify 只使用已验证的 local 或当前握手 remote 公钥；其他身份返回 Unavailable，不发起远端解析。使用 dhttp-home 的 verify_signature，不把私钥或 authority 交给 guest。
 
+2026-10-10 用户在比较 Request Header 和 WIT 后，明确批准新增 `pishoo:identity/request-identity@0.1.0`：
+
+```wit
+local-name: func() -> string;
+caller-name: func() -> option<string>;
+caller-is-owner: func() -> bool;
+```
+
+StoreData 实现这三个异步 Host trait 方法，WasmRuntime.new 沿用现有 IdentityHost 的 linker 注册。local-name 直接读取已验证 local.name；caller-name 读取已验证 remote.name，匿名返回 none。caller-is-owner 同时核对规范化名称与证书 SKI owner_hash，匿名或 SKI 不可提取时返回 false；不新增缓存或 bool 状态字段，不接受 HTTP 头、正文或 guest 指定的身份。WIT 不暴露证书、私钥或 owner_hash。现有 sign/verify 与其错误变体不变，daccess 仍决定完整方法/路径的访问权限。此决定替代同日试行的 Request 身份头方案，不保留身份头注入。
+
 ## 9. 启停与错误
 
 `pishoo` 可执行入口在启动服务前创建 `<DHTTP_HOME>/logs/error.log`，以追加方式记录全进程运行诊断，并同时输出 stderr。默认级别 warn，沿用 RUST_LOG 调整过滤级别；debug 仍写入同一文件。Unix 新目录权限0700、新文件0600；日志创建或打开失败在 stderr 报告并结束启动。日志文件由现成 tracing subscriber 直接持有，不增加 Server 字段、自有结构或跨模块函数。身份目录下的 cert.log 继续由证书管理工具记录证书操作。

@@ -107,6 +107,8 @@ mod isolation;
 mod lifecycle;
 #[path = "execution/note.rs"]
 mod note;
+#[path = "execution/journal.rs"]
+mod journal;
 #[path = "execution/policy.rs"]
 mod policy;
 #[path = "execution/streaming.rs"]

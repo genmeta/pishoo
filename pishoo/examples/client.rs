@@ -462,8 +462,25 @@ async fn run() -> Result<(), Failure> {
                 endpoint.get(uri).await?
             } else {
                 let body = args.next().unwrap_or_default();
+                let body = if let Some(file) = body.strip_prefix('@') {
+                    tokio::fs::read(file).await?
+                } else {
+                    body.into_bytes()
+                };
+                let mut headers = http::HeaderMap::new();
+                while let Some(flag) = args.next() {
+                    if flag != "-H" {
+                        return Err("expected -H 'name: value' after request body".into());
+                    }
+                    let header = args.next().ok_or("-H requires 'name: value'")?;
+                    let (name, value) = header.split_once(':').ok_or("invalid header")?;
+                    headers.append(
+                        http::header::HeaderName::from_bytes(name.trim().as_bytes())?,
+                        http::HeaderValue::from_str(value.trim())?,
+                    );
+                }
                 let method: http::Method = command.to_ascii_uppercase().parse()?;
-                send_bytes(&endpoint, method, uri, Bytes::from(body)).await?
+                send_bytes(&endpoint, method, uri, Bytes::from(body), headers).await?
             };
             eprintln!("{:?} {}", response.version(), response.status());
             let body = response.into_body().collect().await?.to_bytes();
@@ -526,7 +543,14 @@ async fn post_bytes(
     uri: http::Uri,
     bytes: Bytes,
 ) -> Result<http::Response<dhttp::Body>, Failure> {
-    send_bytes(endpoint, http::Method::POST, uri, bytes).await
+    send_bytes(
+        endpoint,
+        http::Method::POST,
+        uri,
+        bytes,
+        http::HeaderMap::new(),
+    )
+    .await
 }
 
 async fn send_bytes(
@@ -534,12 +558,18 @@ async fn send_bytes(
     method: http::Method,
     uri: http::Uri,
     bytes: Bytes,
+    headers: http::HeaderMap,
 ) -> Result<http::Response<dhttp::Body>, Failure> {
     let json = matches!(method, http::Method::PUT | http::Method::PATCH)
         || serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
     let mut request = endpoint.request(method, uri);
     if json {
         request = request.header(http::header::CONTENT_TYPE, "application/json".parse()?);
+    }
+    for name in headers.keys() {
+        for value in headers.get_all(name) {
+            request = request.header(name.clone(), value.clone());
+        }
     }
     let (mut writer, response) = request.body(dhttp::WndBuf::new(64 * 1024)).await?;
     let upload = scopeguard::guard(

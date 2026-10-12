@@ -25,9 +25,45 @@ impl WasiHttpHooks for DenyOutgoing {
 pub(super) mod identity {
     wasmtime::component::bindgen!({
         path: "../wit/pishoo-identity",
-        inline: "package pishoo:host; world identity-host { import pishoo:identity/signatures@0.1.0; }",
+        inline: "package pishoo:host; world identity-host { import pishoo:identity/signatures@0.1.0; import pishoo:identity/request-identity@0.1.0; }",
         imports: { default: async },
     });
+}
+
+impl identity::pishoo::identity::request_identity::Host for StoreData {
+    async fn local_name(&mut self) -> String {
+        self.local.name().to_owned()
+    }
+
+    async fn caller_name(&mut self) -> Option<String> {
+        self.remote.as_ref().map(|remote| remote.name().to_owned())
+    }
+
+    async fn caller_is_owner(&mut self) -> bool {
+        let Some(remote) = &self.remote else {
+            return false;
+        };
+        let Some(local_name) = dhttp_home::normalize_name(self.local.name()) else {
+            return false;
+        };
+        let Some(caller_name) = dhttp_home::normalize_name(remote.name()) else {
+            return false;
+        };
+        if caller_name != local_name {
+            return false;
+        }
+        let Ok(local) = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+            self.local.certificates(),
+        ) else {
+            return false;
+        };
+        let Ok(remote) =
+            dhttp_home::certificate::extract_dhttp_subject_key_identifier(remote.certificates())
+        else {
+            return false;
+        };
+        local.owner_hash() == remote.owner_hash()
+    }
 }
 
 impl identity::pishoo::identity::signatures::Host for StoreData {

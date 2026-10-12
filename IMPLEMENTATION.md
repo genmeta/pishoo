@@ -1,5 +1,18 @@
 # 第一版实施记录
 
+### 2026-10-10 个人图文手记 WASM 与只读身份能力
+
+2026-10-10 用户报告 `alice.smith~` 自己评论返回403。原生具名 H3 复现 guest 的 cross_origin_denied：dhttp 已展开 Request authority，而 Origin 保留浏览器简写，guest 的字符串比较误拒绝。Journal 0.1.2 使用标准 http URI 类型校验 Origin，展开显式 DHTTP 简写并比较协议、主机和有效端口；裸 ~ 按已验证来访者名称展开。跨站标记、不同主机/协议/端口、重复/无效 Origin 和路径/query/fragment/用户信息仍拒绝，认证仍来自 WIT。四项独立真实组件专项通过，新增回归验证简写与完整地址评论201、作者仍为完整已验证身份及恶意来源403。组件校验、安装与正常重启完成；线上空对象探针在正确简写 Origin 下返回输入400（已通过来源检查、不创建评论），恶意来源仍403，运行版本0.1.2。证据在 target/journal-live/origin-fix-verification.json。
+
+2026-10-10 按用户反馈更新 Journal 0.1.1：标题、当前身份、留言署名及回复提示仅在显示层去掉末尾 `.dhttp.net`；完整名称、证书与 owner_hash 校验保持。桌面使用左侧个人信息/导航、右侧双列卡片，宽屏正文与留言并排；手机保留单列。真实 WASM 浏览器验证1440px桌面、820px平板和390px手机均无横向溢出，留言及回复的短身份显示通过；组件重建、校验、原子安装及现有进程正常重启完成。实际身份的页面/context/entries/已加载目录均 HTTP/3 200，版本0.1.1、is_owner=true，原有4篇手记保留。证据在 target/journal-live/desktop-update-verification.json。
+
+2026-10-10 用户要求安装部署并重启：使用新版 CLI 将 `journal` 原子安装到默认身份 `alice.smith`，沿用原 DHTTP_HOME 与日志级别正常停止原进程并启动新版宿主。真实具名 QUIC/H3 验证页面、context、entries 和已加载目录均200，caller/owner 为 alice.smith.dhttp.net 且 is_owner=true；匿名 context 返回403。安装字节与构建产物一致，私有 journal.db 完整性检查为 ok、没有测试动态；现有 ACL 未增加或扩大。入口 `https://alice.smith.dhttp.net/std/api/journal/`，部署与校验证据在 `target/journal-live/`。下述“尚未部署”描述的是此前组件构建阶段，由本段部署记录更新。
+
+- 用户选择 Apple「手记」形式的图文卡片，并明确批准 `pishoo:identity/request-identity@0.1.0` 的 local-name、caller-name、caller-is-owner 三个只读函数。StoreData 直接读取已有握手，owner 同时核对规范化名称与证书 owner_hash；不新增状态字段或 Request 身份头，sign/verify、daccess、dhttp/h3x 接口保持。
+- 新增独立 guest `pishoo/examples/journal`，一个组件内包含页面、API、JPEG 照片处理、SQLite 持久存储、发布/编辑/删除、具名留言与一层回复。匿名拒绝，作者只来自 WIT；主人写入与评论署名分别验证，API 完整路径仍由 daccess 授权。照片去掉全部 APPn/COM，内容转义显示、响应 no-store、不加载外部资源。版本竞争、墓碑和事务沿用 Note 的既有 SQLite unix-dotfile 路径。
+- component 编译、wasm-tools validate、check-lib 的7条清单路径通过。三个独立专项测试通过，使用真实证书/OCSP 校验的内存 TLS 取得 RemoteAuthority，覆盖身份伪造、同名不同 owner、跨站写入、CRUD、评论/回复、照片元数据清理、持久化/隔离/完整性和并发版本竞争；原 Sandbox 的29项非忽略回归通过。
+- 本机临时浏览器服务由真实 Invocation 执行，验证照片发布、中文/emoji/HTML字符的具名留言、回复、刷新后持久化及390px手机布局无横向溢出。使用临时测试身份/数据库，不修改生产身份或授权。构建产物为 `pishoo/examples/journal/dist/lib.wasm`；功能、接口、安装和重启说明见 guest README，尚未部署到实际身份。
+
 ### 2026-10-09 联系人申请的提前响应与上传停止
 
 - Workspace/Chat 出站的上传与响应通过 `try_join!` 并发推进；远端提前丢弃请求体会发出 `H3_NO_ERROR (0x100)`，旧实现把它当作上传失败并丢弃响应，掩盖真实 HTTP 状态。现有两个 request 方法仅将上传方向的该流错误视为停止发送，继续读取、验证并交付响应；其他传输错误仍失败，无有效响应也仍失败。直接依赖已有 h3x 错误类型做精确匹配，不修改 h3x、冻结接口或生产状态。
