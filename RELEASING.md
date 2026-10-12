@@ -37,3 +37,12 @@ The legacy gateway stub is not published. pishoo-common tracks 0.9.0
 (0.9.0-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0 from wit/
 on the same release tag; configure CARGO_REGISTRY_TOKEN for its first upload,
 then configure Trusted Publishing for genmeta/pishoo and publish-sdk.yml.
+
+## Tag-triggered artifacts
+
+Pushing `v0.9.0` to this repository triggers release.yml for DEB, RPM and Homebrew.
+The tag must match the main package version. Packaging creates a draft GitHub
+Release, uploads artifacts, and publishes that Release after all package jobs
+succeed. Release builds keep `--locked`; refresh the registry lockfile after
+upstream publication before tagging. The existing S3, signing and tap/bucket
+credentials must be configured in repository Actions settings.
