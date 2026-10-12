@@ -66,8 +66,6 @@ PISHOO_WORKSPACE_E2E_BACKEND=http://127.0.0.1:3100 bun run e2e
 The E2E backend must be an isolated profile fixture and must not use a daily
 development database. `e2e/navigation.spec.ts`, `e2e/settings.spec.ts` and
 `e2e/contacts-directory.spec.ts` and `e2e/outbound.spec.ts` mock their API requests and can be run without
-a live profile backend. The original dual-profile DHTTP/mTLS tests are preserved in
-`pishoo/tests/deferred/workspace_network.rs`. Production outbound wiring is
-pending the transport interface update; the current Rust application tests use
-injected transports. See [the integration notes](../DACCESS.md) for this rebase's
-scope and current limits.
+a live profile backend. Rust application and transport tests run from the repository root with
+`cargo test --locked --workspace -- --test-threads=1`. Keep test identities and
+databases separate from profiles used by the installed service.

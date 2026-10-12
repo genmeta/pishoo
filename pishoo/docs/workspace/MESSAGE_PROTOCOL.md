@@ -1,8 +1,5 @@
 # pishoo `/std/message` 协议（v1）
 
-状态：push-only 实施版  
-更新时间：2026-09-24
-
 这份文档定义一对一纯文本消息投递。消息历史属于各自 profile 的本地数据，不通过远端
 消息读取接口复制。
 
@@ -29,7 +26,7 @@ GET /std/profile/avatar
 - `/std/message` 通过 daccess 的正常授权流程；访问者由已验证的 DHTTP/mTLS 身份解析；
 - `sender` 来自 `Visitor`，`recipient` 是当前 profile，二者都不能由请求 JSON 指定；
 - 接收方只需为发送方授予 `POST /std/message`，不需要授予消息读取权限；
-- 消息历史由 owner-only 的本地 `/chat-api/conversations/{name}/messages` 查询；
+- 消息历史由 owner-only 的本地 `/std/chat-api/conversations/{name}/messages` 查询；
 - 浏览器不能直接调用远端标准端点，也不能提交 sender、recipient、状态或重试字段。
 
 ## 3. 远端投递请求
@@ -66,10 +63,10 @@ Content-Type: application/json
 浏览器只访问当前 profile 的本地接口：
 
 ```text
-GET  /chat-api/conversations/{name}/messages
-POST /chat-api/conversations/{name}/messages
-POST /chat-api/conversations/{name}/messages/{id}/requeue
-GET  /chat-api/conversations/{name}/capability
+GET  /std/chat-api/conversations/{name}/messages
+POST /std/chat-api/conversations/{name}/messages
+POST /std/chat-api/conversations/{name}/messages/{id}/requeue
+GET  /std/chat-api/conversations/{name}/capability
 ```
 
 这些接口读取或写入当前 profile 的 Chat 数据库。`POST` 本地接口返回 `202 Accepted` 表示
