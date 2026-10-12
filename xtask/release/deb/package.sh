@@ -84,6 +84,8 @@ export HOME=/tmp
 : "${CARGO_HOME:=/usr/local/cargo}"
 export RUSTUP_HOME CARGO_HOME
 export PATH="$CARGO_HOME/bin:/usr/local/zig:$PATH"
+# Use the toolchain for which the container installed this cross target.
+export RUSTUP_TOOLCHAIN="$(rustup default | awk '{ print $1 }')"
 export TRIPLE=$target
 export ZIG_TARGET=$target
 export BUILD_PROFILE=$profile
