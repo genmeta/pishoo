@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.2-1f6feb?style=flat-square" alt="Version 0.8.2">
+  <img src="https://img.shields.io/badge/version-0.9.0-1f6feb?style=flat-square" alt="Version 0.9.0">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -32,17 +32,17 @@ The packaged-release installation instructions below describe the earlier releas
 
 ### Local development build
 
-The `feat/pishoo-integration` branch pins DHTTP, DQUIC, DDNS, H3X and daccess to full Git revisions. Cargo fetches them automatically; no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+The 0.9.0 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
-git clone --branch feat/pishoo-integration https://github.com/genmeta/pishoo.git
+git clone --branch feat/release-pishoo-0.9.0 https://github.com/genmeta/pishoo.git
 cd pishoo
 cargo build --locked -p pishoo --bin pishoo
 cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Exact revisions, prerequisites, optional transport tests and current validation results are listed in [the dependency snapshot notes](pishoo/docs/testing-snapshot.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). The [dependency snapshot notes](pishoo/docs/testing-snapshot.md) record the earlier Git snapshot validation. Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
