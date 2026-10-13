@@ -264,7 +264,10 @@ async fn websocket_real_h3_ha_roundtrip() {
         let mut server = Server::load(profile.clone(), runtime.clone())
             .await
             .unwrap();
-        assert_eq!(server.sandbox.libs.contains_key("note"), loaded_lib);
+        assert_eq!(
+            server.sandbox.read().unwrap().libs.contains_key("note"),
+            loaded_lib
+        );
         server
             .access
             .set_policy(
@@ -811,7 +814,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     ));
     let lib = profile(root.path(), "bad-lib");
     std::fs::create_dir_all(lib.join("lib/broken")).unwrap();
-    std::fs::write(lib.join("lib/broken/lib.wasm"), b"not WASM").unwrap();
+    std::fs::write(lib.join("lib/broken/lib.webc"), b"not WASM").unwrap();
     assert!(matches!(
         load_profile(lib, runtime).await,
         Err(Error::InvalidComponent(_))
@@ -915,7 +918,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["id"], "note");
-    assert!(!server.sandbox.libs.contains_key("note"));
+    assert!(!server.sandbox.read().unwrap().libs.contains_key("note"));
     assert_eq!(
         owner_request(
             &server,
@@ -1030,7 +1033,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     );
     assert_eq!(server.config.proxy_locations[0].location, "/service/");
     *app.write().unwrap() = server.router.read().unwrap().clone();
-    assert!(server.sandbox.libs.contains_key("note"));
+    assert!(server.sandbox.read().unwrap().libs.contains_key("note"));
     use http_body_util::BodyExt;
     use tokio::io::AsyncWriteExt;
     let (mut upload, response) = server
@@ -1107,7 +1110,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .0,
         StatusCode::NO_CONTENT
     );
-    assert!(server.sandbox.libs.contains_key("note"));
+    assert!(server.sandbox.read().unwrap().libs.contains_key("note"));
     assert!(!server.profile.join("lib/note").exists());
     assert!(server.profile.join("db/note").is_dir());
     // Even an explicit daccess allow cannot make another TLS identity the profile owner.
@@ -1773,7 +1776,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
 
         // A broken new profile is retried without preventing a later valid one from loading.
         std::fs::create_dir_all(root.path().join(".broken/lib/bad")).unwrap();
-        std::fs::write(root.path().join(".broken/lib/bad/lib.wasm"), b"broken").unwrap();
+        std::fs::write(root.path().join(".broken/lib/bad/lib.webc"), b"broken").unwrap();
         std::fs::rename(root.path().join(".broken"), root.path().join("broken")).unwrap();
         std::fs::rename(root.path().join(".late"), root.path().join("late")).unwrap();
         let late_profile = IdentityProfile::try_from(root.path().join("late")).unwrap();

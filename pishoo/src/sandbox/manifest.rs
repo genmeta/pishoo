@@ -60,8 +60,17 @@ pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
     if let Some((signed_end, envelope)) = signature {
         verify_component_signature(bytes, signed_end, envelope, document)?;
     }
+    validate_openapi(document)
+}
+
+/// Validate an independent OpenAPI document without requiring a WASM section.
+pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
+    let invalid = |s: &str| Error::InvalidComponent(s.into());
+    if bytes.len() > 1024 * 1024 {
+        return Err(invalid("OpenAPI exceeds 1 MiB"));
+    }
     let openapi: oas3::OpenApiV3Spec =
-        serde_json::from_slice(document).map_err(|e| Error::InvalidComponent(e.to_string()))?;
+        serde_json::from_slice(bytes).map_err(|e| Error::InvalidComponent(e.to_string()))?;
     if !openapi.openapi.starts_with("3.1.") {
         return Err(invalid("only OpenAPI 3.1.x is supported"));
     }

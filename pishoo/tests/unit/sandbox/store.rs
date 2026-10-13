@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::super::WasmRuntime;
 use super::*;
 
 fn section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
@@ -44,32 +45,20 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
         vec![1],
     )
     .unwrap();
-    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Store test","version":version},
+    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Store test","version":version,"description":"Test","license":{"name":"MIT"}},
         "x-pishoo":{"publisher":publisher,"name":"note","host":{}},
-        "paths":{"/upload":{"post":{"responses":{"200":{"description":"ok"}}}}}});
-    let mut bytes =
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
-    section(
-        &mut bytes,
-        "pishoo:openapi",
-        &serde_json::to_vec(&document).unwrap(),
+        "paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}});
+    let bytes = super::super::tests::package_fixture(
+        &document,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &local,
     );
-    let mut input = b"pishoo-lib-signature-v1\0".to_vec();
-    input.extend_from_slice(&Sha256::digest(&bytes));
-    let signature = local
-        .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
-        .unwrap();
     let certificates = local
         .certificates()
         .iter()
         .map(|c| STANDARD.encode(c.as_ref()))
         .collect::<Vec<_>>();
-    let envelope = serde_json::json!({"version":1,"certificates":certificates,"signature":STANDARD.encode(signature)});
-    section(
-        &mut bytes,
-        "pishoo:signature",
-        &serde_json::to_vec(&envelope).unwrap(),
-    );
     let metadata = serde_json::json!({"id":"alice.dhttp.net/note","publisher":publisher,"name":"note","version":version,
         "publisher_owner_hash":owner.to_string().repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "openapi":document,"signer_certificates":certificates});
@@ -106,10 +95,10 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
     let mut forged = metadata.clone();
     forged["package_sha256"] = format!("{:x}", Sha256::digest(&tampered)).into();
     assert!(verify_release(&tampered, &forged, "alice.dhttp.net", "note", "1.2.3").is_err());
-    assert!(validate_lib(&tampered).is_err());
+    assert!(read_package(&tampered).is_err());
     let mut suffix = bytes.clone();
     section(&mut suffix, "extra", b"suffix");
-    assert!(validate_lib(&suffix).is_err());
+    assert!(read_package(&suffix).is_err());
 }
 
 #[test]
@@ -141,13 +130,13 @@ fn complete_ids_keep_legacy_resources_separate_and_refuse_publisher_takeover() {
     let (takeover, _) = release('b', "2.0.0");
     assert!(install_lib(&profile, id, &takeover, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/note/lib.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/alice.dhttp.net/note/lib.webc")).unwrap(),
         rotated
     );
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(profile.join("lib/note/lib.wasm").is_file());
+    assert!(profile.join("lib/note/lib.webc").is_file());
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();

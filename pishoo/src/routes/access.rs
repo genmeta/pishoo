@@ -23,23 +23,32 @@ pub(crate) async fn authorize(
     next: axum::middleware::Next,
 ) -> Response {
     request.extensions_mut().remove::<Visitor>();
-    let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() else {
-        return reject(Error::MissingHandshake);
-    };
-    if handshake.local.is_none() {
-        return reject(Error::MissingHandshake);
-    }
-    let visitor = match &handshake.remote {
-        Some(remote) => match dhttp_home::certificate::extract_dhttp_subject_key_identifier(
-            remote.certificates(),
-        )
-        .ok()
-        .and_then(|ski| SubjectId::new(ski.owner_hash().as_str().as_bytes()).ok())
+    let visitor = if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
+        if handshake.local.is_none() {
+            return reject(Error::MissingHandshake);
+        }
+        match &handshake.remote {
+            Some(remote) => match dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                remote.certificates(),
+            )
+            .ok()
+            .and_then(|ski| SubjectId::new(ski.owner_hash().as_str().as_bytes()).ok())
+            {
+                Some(subject) => Some(Visitor::new(remote.name(), subject)),
+                None => return reject(Error::Denied),
+            },
+            None => None,
+        }
+    } else if let Some(local) = request.extensions().get::<dhttp::LocalAuthority>() {
+        match dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+            .ok()
+            .and_then(|ski| SubjectId::new(ski.owner_hash().as_str().as_bytes()).ok())
         {
-            Some(subject) => Some(Visitor::new(remote.name(), subject)),
+            Some(subject) => Some(Visitor::new(local.name(), subject)),
             None => return reject(Error::Denied),
-        },
-        None => None,
+        }
+    } else {
+        return reject(Error::MissingHandshake);
     };
     if let Some(visitor) = &visitor {
         request.extensions_mut().insert(visitor.clone());

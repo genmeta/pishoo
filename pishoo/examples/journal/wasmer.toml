@@ -1,0 +1,13 @@
+[package]
+name = "alice.smith.dhttp.net/journal"
+version = "0.1.0"
+description = "记下生活小事，用文字和照片留住日常，与朋友留言交流"
+license = "Apache-2.0"
+
+[[module]]
+name = "backend"
+source = "lib.wasm"
+
+[fs]
+"/public" = "public"
+"/metadata" = "metadata"

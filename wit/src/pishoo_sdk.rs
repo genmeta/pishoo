@@ -12,3 +12,14 @@ mod bindings {
 }
 
 pub use bindings::pishoo::identity::{request_identity, signatures};
+
+mod bindings_v2 {
+    wit_bindgen::generate!({
+        path: "pishoo-identity-v2",
+        inline: "package pishoo:sdk-v2; world pishoo-sdk-v2 { import pishoo:identity/request-identity@0.2.0; }",
+        generate_all,
+    });
+}
+
+/// Current identity API; compare both tuple elements to identify the owner.
+pub use bindings_v2::pishoo::identity::request_identity as identity;

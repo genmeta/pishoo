@@ -30,7 +30,7 @@ fn component(bytes: &[u8]) -> Vec<u8> {
     bytes.push(0);
     leb(section.len(), &mut bytes);
     bytes.extend(section);
-    bytes
+    package_component(&bytes)
 }
 
 fn authority(name: &str) -> dhttp::LocalAuthority {
@@ -67,6 +67,7 @@ async fn invoke(lib: Arc<Lib>, tasks: &TaskTracker) -> Invocation {
             remote: None,
         },
         tasks.clone(),
+        Outgoing::Denied,
     )
     .unwrap()
 }
@@ -113,3 +114,6 @@ mod note;
 mod policy;
 #[path = "execution/streaming.rs"]
 mod streaming;
+
+#[path = "execution/host_client.rs"]
+mod host_client;

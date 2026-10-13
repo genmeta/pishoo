@@ -36,7 +36,8 @@ def main() -> int:
             for filename in ["Cargo.toml", "Cargo.lock", "README.md"]:
                 shutil.copy2(repo / "wit" / filename, sdk / filename)
             shutil.copytree(repo / "wit/src", sdk / "src")
-            shutil.copytree(repo / "wit/pishoo-identity", sdk / "pishoo-identity")
+            for interface in ["pishoo-identity", "pishoo-identity-v2"]:
+                shutil.copytree(repo / "wit" / interface, sdk / interface)
             shutil.copy2(repo / "LICENSE", sdk / "LICENSE")
 
             # Cargo verifies that the crate builds using only its packaged files.
@@ -49,7 +50,7 @@ def main() -> int:
                 command.append("--offline")
             subprocess.run(command, check=True)
 
-            for example in ["identity", "journal"]:
+            for example in ["journal"]:
                 source = repo / "pishoo/examples" / example
                 destination = bundle / "examples" / example
                 destination.mkdir(parents=True)
@@ -57,7 +58,8 @@ def main() -> int:
                     shutil.copy2(source / filename, destination / filename)
                 shutil.copytree(source / "src", destination / "src")
                 if example == "journal":
-                    shutil.copy2(source / "page.html", destination / "page.html")
+                    shutil.copytree(source / "public", destination / "public")
+                    shutil.copy2(source / "wasmer.toml", destination / "wasmer.toml")
                 cargo_manifest = destination / "Cargo.toml"
                 text = cargo_manifest.read_text()
                 original = 'path = "../../../wit"'
@@ -74,6 +76,11 @@ def main() -> int:
             tools.mkdir()
             shutil.copy2(repo / "pishoo/tools/package-lib.py", tools / "package-lib.py")
             shutil.copy2(repo / "pishoo/docs/sdk.md", bundle / "README.md")
+            shutil.copy2(repo / "pishoo/docs/host-capabilities.md", bundle / "host-capabilities.md")
+            guide = repo / "pishoo/docs/developing-wasm.md"
+            (bundle / "developing-wasm.md").write_text(
+                guide.read_text().replace("[SDK 文档](sdk.md)", "[SDK 文档](README.md)"),
+            )
             shutil.copy2(repo / "LICENSE", bundle / "LICENSE")
             crate_name = f"{archive_name}.crate"
             crate = stage / "target/package" / crate_name

@@ -10,7 +10,7 @@ use super::*;
 fn component(version: &str) -> Vec<u8> {
     let mut bytes =
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
-    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
+    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
     let mut section = vec![14];
     section.extend_from_slice(b"pishoo:openapi");
     section.extend_from_slice(document.as_bytes());
@@ -25,7 +25,7 @@ fn component(version: &str) -> Vec<u8> {
         }
     }
     bytes.extend(section);
-    bytes
+    package_component(&bytes)
 }
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
@@ -43,7 +43,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
     assert_eq!(
         saved["openapi"],
-        serde_json::to_value(validate_lib(&component("1")).unwrap()).unwrap()
+        serde_json::to_value(check_lib(&component("1"), &runtime).unwrap()).unwrap()
     );
     assert!(!profile.join("db/note").exists());
     assert_eq!(
@@ -51,7 +51,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         0o700
     );
     assert_eq!(
-        std::fs::metadata(profile.join("lib/note/lib.wasm"))
+        std::fs::metadata(profile.join("lib/note/lib.webc"))
             .unwrap()
             .mode()
             & 0o777,
@@ -60,32 +60,29 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     std::fs::write(profile.join("db/note/saved.db"), b"keep").unwrap();
-    let before = std::fs::read(profile.join("lib/note/lib.wasm")).unwrap();
+    let before = std::fs::read(profile.join("lib/note/lib.webc")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
-    let mut metadata_only = b"\0asm\x0d\0\x01\0".to_vec();
-    let full = component("broken");
-    // Append only the final custom section (the fixture has no pishoo manifest).
-    let marker = full
-        .windows(14)
-        .position(|w| w == b"pishoo:openapi")
-        .unwrap();
-    let length_bytes = if full.len() - marker + 1 >= 128 { 2 } else { 1 };
-    metadata_only.extend_from_slice(&full[marker - 1 - length_bytes - 1..]);
-    assert!(validate_lib(&metadata_only).is_ok());
+    let metadata_only = package_fixture(
+        &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
+        b"\0asm\x0d\0\x01\0",
+        webc::v3::write::Directory::default(),
+        &publisher("alice.dhttp.net", 'a'),
+    );
+    assert!(read_package(&metadata_only).is_ok());
     assert!(install_lib(&profile, "note", &metadata_only, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/note/lib.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/note/lib.webc")).unwrap(),
         before
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
-    assert_eq!(sandbox.libs["note"].openapi.info.version, "1");
+    assert_eq!(sandbox.libs["note"].openapi.info.version, "1.0.0");
     assert_eq!(
         installed_libs(&profile, Some("note")).unwrap()["openapi"]["info"]["version"],
-        "2"
+        "2.0.0"
     );
     assert_eq!(
         installed_libs(&profile, Some("note")).unwrap()["version"],
-        "2"
+        "2.0.0"
     );
     assert_eq!(
         std::fs::read_dir(profile.join("lib/note")).unwrap().count(),
@@ -102,7 +99,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert!(sandbox.libs.is_empty());
     install_lib(&profile, "note", &component("3"), &runtime).unwrap();
     sandbox.load_libs(&profile).unwrap();
-    assert_eq!(sandbox.libs["note"].openapi.info.version, "3");
+    assert_eq!(sandbox.libs["note"].openapi.info.version, "3.0.0");
     assert_eq!(
         std::fs::read(profile.join("db/note/saved.db")).unwrap(),
         b"keep"
@@ -115,7 +112,7 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     let runtime = WasmRuntime::new().unwrap();
     install_lib(&profile, "valid", &component("1"), &runtime).unwrap();
     std::fs::create_dir(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/lib.wasm"), b"bad").unwrap();
+    std::fs::write(profile.join("lib/broken/lib.webc"), b"bad").unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert!(list[0].get("error").is_some());
     assert!(list[0].get("title").is_none());
@@ -126,32 +123,32 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     ));
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::fs::write(outside.join("lib.wasm"), b"do not change").unwrap();
+    std::fs::write(outside.join("lib.webc"), b"do not change").unwrap();
     std::os::unix::fs::symlink(&outside, profile.join("lib/escape")).unwrap();
     assert!(install_lib(&profile, "escape", &component("1"), &runtime).is_err());
     assert!(remove_lib(&profile, "escape").is_err());
     std::fs::remove_file(profile.join("lib/escape")).unwrap();
     std::os::unix::fs::symlink(
-        outside.join("lib.wasm"),
-        profile.join("lib/broken/lib.wasm-link"),
+        outside.join("lib.webc"),
+        profile.join("lib/broken/lib.webc-link"),
     )
     .unwrap();
-    std::fs::remove_file(profile.join("lib/broken/lib.wasm")).unwrap();
+    std::fs::remove_file(profile.join("lib/broken/lib.webc")).unwrap();
     std::fs::rename(
-        profile.join("lib/broken/lib.wasm-link"),
-        profile.join("lib/broken/lib.wasm"),
+        profile.join("lib/broken/lib.webc-link"),
+        profile.join("lib/broken/lib.webc"),
     )
     .unwrap();
     assert!(install_lib(&profile, "broken", &component("1"), &runtime).is_err());
     assert!(remove_lib(&profile, "broken").is_err());
     assert_eq!(
-        std::fs::read(outside.join("lib.wasm")).unwrap(),
+        std::fs::read(outside.join("lib.webc")).unwrap(),
         b"do not change"
     );
     // Cleanup must unlink nested symlinks without following them.
     std::os::unix::fs::symlink(&outside, profile.join("lib/valid/foreign")).unwrap();
     remove_lib(&profile, "valid").unwrap();
-    assert!(outside.join("lib.wasm").exists());
+    assert!(outside.join("lib.webc").exists());
     for id in ["../outside", "A", "", "note.wasm", "%6Eote"] {
         assert!(remove_lib(&profile, id).is_err());
     }
@@ -244,7 +241,7 @@ fn request(method: Method, path: &str, body: AxumBody) -> Request<AxumBody> {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
-        .header("content-type", "application/wasm")
+        .header("content-type", "application/webc")
         .body(body)
         .unwrap();
     request
@@ -263,7 +260,9 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
     let app = lib_management_router(
         profile.clone(),
         endpoint(),
-        Arc::new(WasmRuntime::new().unwrap()),
+        Arc::new(RwLock::new(Sandbox::new(Arc::new(
+            WasmRuntime::new().unwrap(),
+        )))),
     );
     let path = "/std/pishoo/libs/alice.dhttp.net/note";
     let response = app
@@ -292,7 +291,7 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
         value["endpoints"][0]["path"],
         "/std/api/alice.dhttp.net/note/upload"
     );
-    assert!(!profile.join("db/alice.dhttp.net/note").exists());
+    assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     for bad in [
         "/std/pishoo/libs/alice.dhttp.net%2Fnote",
         "/std/pishoo/libs/alice.dhttp.net/note%2Fextra",
@@ -364,7 +363,9 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     let app = lib_management_router(
         profile.clone(),
         endpoint(),
-        Arc::new(WasmRuntime::new().unwrap()),
+        Arc::new(RwLock::new(Sandbox::new(Arc::new(
+            WasmRuntime::new().unwrap(),
+        )))),
     );
     for (method, path, body, expected) in [
         (
@@ -548,4 +549,230 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         .status(),
         StatusCode::CONFLICT
     );
+}
+
+#[tokio::test]
+async fn legacy_wasm_cannot_be_uploaded_as_a_webc_release() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let app = lib_management_router(
+        profile.clone(),
+        endpoint(),
+        Arc::new(RwLock::new(Sandbox::new(Arc::new(
+            WasmRuntime::new().unwrap(),
+        )))),
+    );
+    let legacy = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
+    for (content_type, expected) in [
+        ("application/wasm", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ("application/webc", StatusCode::BAD_REQUEST),
+    ] {
+        let mut input = request(
+            Method::PUT,
+            "/std/pishoo/libs/note",
+            AxumBody::from(legacy.as_slice()),
+        );
+        input
+            .headers_mut()
+            .insert("content-type", content_type.parse().unwrap());
+        let response = app.clone().oneshot(input).await.unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert!(!profile.join("lib/note").exists());
+}
+
+#[tokio::test]
+async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let endpoint = endpoint();
+    let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
+        WasmRuntime::new().unwrap(),
+    ))));
+    let app = Sandbox::api_router(sandbox.clone(), endpoint.clone()).merge(lib_management_router(
+        profile.clone(),
+        endpoint.clone(),
+        sandbox.clone(),
+    ));
+    let package = |version: &str, text: &'static str, backend: &[u8]| {
+        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Live app","version":version,"description":"Test","license":{"name":"MIT"}},
+            "x-pishoo":{"publisher":"alice.dhttp.net","name":"note","entry":"/","host":{}},
+            "paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"pageHead","summary":"Page headers","x-pishoo":{"static-file":"/public/index.html"}}},
+            "/run":{"post":{"operationId":"run","summary":"Backend"}}}});
+        package_fixture(
+            &document,
+            backend,
+            webc::v3::write::Directory::new(
+                std::collections::BTreeMap::from([(
+                    "index.html".parse().unwrap(),
+                    text.as_bytes().to_vec().into(),
+                )]),
+                webc::v3::Timestamps::default(),
+            ),
+            &publisher("alice.dhttp.net", 'a'),
+        )
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let first = package(
+        "1.0.0",
+        "old page",
+        include_bytes!("../../fixtures/wasi-http-stream-response-until-cancelled.wasm"),
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                "/std/pishoo/libs/note",
+                AxumBody::from(first)
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let old_page = app
+        .clone()
+        .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+        .await
+        .unwrap();
+    let mut incoming = request(Method::POST, "/std/api/note/run", AxumBody::empty());
+    *incoming.uri_mut() = "https://alice.dhttp.net/std/api/note/run".parse().unwrap();
+    incoming.extensions_mut().insert(dhttp::HandshakeSummary {
+        alpn: None,
+        local: Some(endpoint.local_authority().unwrap()),
+        remote: None,
+    });
+    let mut old_guest = app.clone().oneshot(incoming).await.unwrap().into_body();
+    let tasks = sandbox.read().unwrap().tasks.clone();
+    assert!(!tasks.is_empty());
+    std::fs::write(profile.join("db/note/private.db"), b"keep data").unwrap();
+
+    let second = package(
+        "2.0.0",
+        "new page",
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                "/std/pishoo/libs/note",
+                AxumBody::from(second.clone())
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let new_page = app
+        .clone()
+        .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+        .await
+        .unwrap();
+    assert_eq!(
+        new_page.into_body().collect().await.unwrap().to_bytes(),
+        "new page"
+    );
+    assert_eq!(
+        old_page.into_body().collect().await.unwrap().to_bytes(),
+        "old page"
+    );
+    let catalog = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/std/workspace-api/libs",
+            AxumBody::empty(),
+        ))
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let catalog: Value = serde_json::from_slice(&catalog).unwrap();
+    assert_eq!(catalog[0]["version"], "2.0.0");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                "/std/pishoo/libs/note",
+                AxumBody::from("broken")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        std::fs::read(profile.join("lib/note/lib.webc")).unwrap(),
+        second
+    );
+    assert_eq!(
+        sandbox.read().unwrap().libs["note"].openapi.info.version,
+        "2.0.0"
+    );
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::DELETE,
+                "/std/pishoo/libs/note",
+                AxumBody::empty()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(sandbox.read().unwrap().libs.is_empty());
+    assert_eq!(
+        std::fs::read(profile.join("db/note/private.db")).unwrap(),
+        b"keep data"
+    );
+    assert!(!tasks.is_empty());
+    assert!(old_guest.frame().await.unwrap().unwrap().is_data());
+    drop(old_guest);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tasks.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    sandbox.write().unwrap().close();
+    let third = package(
+        "3.0.0",
+        "closed",
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+    );
+    assert_eq!(
+        app.oneshot(request(
+            Method::PUT,
+            "/std/pishoo/libs/note",
+            AxumBody::from(third)
+        ))
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(!profile.join("lib/note").exists());
 }

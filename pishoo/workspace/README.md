@@ -27,7 +27,7 @@ both spellings address the same pending request. Workspace displays identity
 labels without the `.dhttp.net` suffix, while requests, links and editable
 access-rule values keep the canonical full name.
 The apps page merges the loaded Sandbox catalog with the disk catalog by local
-Lib ID. It shows running, saved/restart-required, removed/restart-required and
+Lib ID. It shows running, saved-but-not-active, missing-on-disk and
 invalid disk resources separately. A declared `x-pishoo.entry` in the running
 manifest enables Open in a new tab; legacy components keep their individual GET
 API links in the Interfaces section. Details are full pages with bookmarkable
@@ -39,7 +39,7 @@ Connected app APIs:
   OpenAPI snapshots, including the optional frontend `LibSummary.openapi`.
 - `POST /std/pishoo/lib-check` inspects/compiles a chosen file before confirmation;
   `PUT /std/pishoo/libs/<id>` saves it and `DELETE` removes the component.
-  Both take effect after restart and preserve data and access rules.
+  Online installation and removal take effect immediately and preserve data and access rules.
 - `GET /std/acl/access` provides the saved rules shared by visitor, feature and API
   views; `/std/contacts` provides paginated subject suggestions. PATCH/DELETE on
   `/std/acl/allow/<grantee>` submit individual changes with read-back after each
@@ -64,7 +64,7 @@ hash from the deployment record, fetches the exact published release, verifies
 the package size/digest, original manifest, historical signer proof and signature,
 then compiles and atomically saves it. Browser proxy metadata is for browsing;
 the browser does not download and re-upload a package as a trusted installation.
-Saving preserves data and rules and requires restart. Installation never applies
+Online installation preserves data and rules and activates the release immediately. Installation never applies
 suggested access rules.
 
 Complete IDs are `<publisher>/<name>` and have separate lib/db directories and
@@ -144,3 +144,17 @@ installation. Screenshots are generated in `output/playwright/workspace` at the
 repository root; `output/playwright/workspace-review.html` indexes the acceptance
 captures from this implementation run. Other E2E specs may need the isolated
 backend described above.
+
+The App store tab also exposes Upload app. It accepts a single signed `lib.webc`
+(up to 64 MiB), then uses the host `lib-check` endpoint to verify the entire
+WEBC signature, independent OpenAPI and static file mappings and compile only
+the backend atom. The browser sends `application/webc` and preserves exact package bytes. Publisher/name/version come from that manifest. The publisher must
+match the current Workspace identity; no publisher can be entered on behalf of
+another identity. Confirmation PUTs the unchanged file through the owner-only
+DHTTP proxy to the exact store version. The store verifies the authenticated
+certificate chain, namespace binding and publishing manifest. A failed request
+keeps the file and shows the error; uncertain results direct the user to check
+the exact version before retrying. A repeated withdrawn release remains withdrawn.
+The upload does not install the component locally.
+
+Install/publish previews collapse business API operations by default and summarize static GET/HEAD routes as page resources. Cards show Open for declared running entries; after installation the page refreshes both the disk and running catalogs.

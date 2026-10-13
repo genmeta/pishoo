@@ -23,7 +23,11 @@ use wasmtime_wasi_http::{
     },
 };
 
-use super::{DenyOutgoing, Invocation, Lib, StoreData, WasmRuntime, host::identity, validate_lib};
+use super::{
+    Invocation, Lib, Outgoing, StoreData, WasmRuntime,
+    host::{identity, identity_v2},
+    package_file, read_package, validate_openapi,
+};
 use crate::{Body, Error, Result};
 
 // Component compilation, per-version filesystem grants, and Store limits.
@@ -72,6 +76,11 @@ impl WasmRuntime {
             |state| state,
         )
         .map_err(Error::Guest)?;
+        identity_v2::IdentityHost::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            &mut linker,
+            |state| state,
+        )
+        .map_err(Error::Guest)?;
         Ok(Self { engine, linker })
     }
 
@@ -95,7 +104,8 @@ impl Lib {
         data_dir: &Path,
     ) -> Result<Self> {
         super::valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
-        let openapi = validate_lib(bytes)?;
+        let package = read_package(bytes)?;
+        let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
         if let Some((publisher, name)) = id.split_once('/') {
             let manifest = serde_json::to_value(&openapi)
                 .map_err(|error| Error::InvalidComponent(error.to_string()))?;
@@ -121,7 +131,7 @@ impl Lib {
                 }
             }
         }
-        let component = runtime.compile(bytes)?;
+        let component = runtime.compile(&package.get_atom("backend").unwrap())?;
         match std::fs::symlink_metadata(data_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => {
@@ -163,6 +173,7 @@ impl Lib {
         Ok(Self {
             openapi,
             component,
+            package,
             runtime,
             filesystem,
         })
@@ -183,7 +194,7 @@ impl WasiHttpView for StoreData {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.deny_outgoing,
+            hooks: &mut self.outgoing,
         }
     }
 }
@@ -196,16 +207,48 @@ impl Invocation {
         endpoint: dhttp::Endpoint,
         handshake: &dhttp::HandshakeSummary,
         tasks: TaskTracker,
+        mut outgoing: Outgoing,
     ) -> Result<Self> {
         let local = handshake.local.as_ref().ok_or(Error::MissingHandshake)?;
         if local.name() != endpoint.name() {
             return Err(Error::IdentityMismatch);
+        }
+        if let Outgoing::Granted {
+            endpoint: granted,
+            api,
+            ..
+        } = &mut outgoing
+        {
+            check_endpoint(&endpoint, granted)?;
+            let actual = endpoint.local_authority()?;
+            let actual = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                actual.certificates(),
+            )
+            .map_err(|_| Error::InvalidIdentity("invalid execution owner".into()))?;
+            let invoked =
+                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                    .map_err(|_| Error::InvalidIdentity("invalid invocation owner".into()))?;
+            if actual.owner_hash() != invoked.owner_hash() {
+                return Err(Error::IdentityMismatch);
+            }
+            let handshake = handshake.clone();
+            *api = api.clone().layer(axum::middleware::from_fn(
+                move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let handshake = handshake.clone();
+                    async move {
+                        request.extensions_mut().clear();
+                        request.extensions_mut().insert(handshake);
+                        next.run(request).await
+                    }
+                },
+            ));
         }
         Ok(Self {
             lib,
             local: local.clone(),
             remote: handshake.remote.clone(),
             tasks,
+            outgoing,
         })
     }
 
@@ -215,6 +258,7 @@ impl Invocation {
             local,
             remote,
             tasks,
+            outgoing,
         } = self;
 
         // Each invocation owns its WASI state.
@@ -228,7 +272,7 @@ impl Invocation {
             // memories, and tables, with no extra per-memory byte or per-table
             // element ceiling. Use StoreLimitsBuilder for explicit ceilings.
             memory: StoreLimits::default(),
-            deny_outgoing: DenyOutgoing,
+            outgoing,
             local,
             remote,
         };
@@ -292,4 +336,100 @@ impl Invocation {
                 .boxed_unsync()
         }))
     }
+
+    pub(crate) async fn run(
+        lib: Arc<Lib>,
+        endpoint: dhttp::Endpoint,
+        tasks: TaskTracker,
+        mut outgoing: Outgoing,
+    ) -> Result<()> {
+        let local = endpoint.local_authority()?.clone();
+        if let Outgoing::Granted {
+            endpoint: granted,
+            api,
+            ..
+        } = &mut outgoing
+        {
+            check_endpoint(&endpoint, granted)?;
+            let authority = local.clone();
+            *api = api.clone().layer(axum::middleware::from_fn(
+                move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let authority = authority.clone();
+                    async move {
+                        request.extensions_mut().clear();
+                        request.extensions_mut().insert(authority);
+                        next.run(request).await
+                    }
+                },
+            ));
+        }
+        let mut wasi = WasiCtx::builder().build();
+        *wasi.filesystem() = lib.filesystem.clone();
+        let mut task = scopeguard::guard(
+            tasks.spawn(async move {
+                let mut store = Store::new(
+                    &lib.runtime.engine,
+                    StoreData {
+                        table: ResourceTable::new(),
+                        wasi,
+                        http: WasiHttpCtx::new(),
+                        memory: StoreLimits::default(),
+                        outgoing,
+                        local,
+                        remote: None,
+                    },
+                );
+                store.limiter(|state| &mut state.memory);
+                store.set_fuel(100_000_000).map_err(Error::Guest)?;
+                store
+                    .fuel_async_yield_interval(Some(10_000))
+                    .map_err(Error::Guest)?;
+                let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
+                    &mut store,
+                    &lib.component,
+                    &lib.runtime.linker,
+                )
+                .await
+                .map_err(Error::Guest)?;
+                command
+                    .wasi_cli_run()
+                    .call_run(&mut store)
+                    .await
+                    .map_err(Error::Guest)?
+                    .map_err(|()| {
+                        Error::Guest(wasmtime::Error::msg(
+                            "background component returned an error",
+                        ))
+                    })
+            }),
+            |task| task.abort(),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(15), &mut *task).await {
+            Ok(result) => result.map_err(Error::Task)?,
+            Err(_) => {
+                task.abort();
+                let _ = (&mut *task).await;
+                Err(Error::Deadline)
+            }
+        }
+    }
+}
+
+// Endpoint ownership is validated before moving a granted capability into a Store.
+fn check_endpoint(actual: &dhttp::Endpoint, granted: &dhttp::Endpoint) -> Result<()> {
+    if actual.name() != granted.name() {
+        return Err(Error::IdentityMismatch);
+    }
+    let actual = actual.local_authority()?;
+    let granted = granted.local_authority()?;
+    let actual =
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(actual.certificates())
+            .map_err(|_| Error::InvalidIdentity("invalid execution owner".into()))?;
+    let granted =
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(granted.certificates())
+            .map_err(|_| Error::InvalidIdentity("invalid outgoing owner".into()))?;
+    if actual.owner_hash() != granted.owner_hash() {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(())
 }

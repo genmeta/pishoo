@@ -16,8 +16,9 @@ fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
             }
         }
     }
-    let manifest =
-        format!(r#"{{"openapi":"3.1.0","info":{{"title":"HTTP","version":"1"}},"paths":{paths}}}"#);
+    let manifest = format!(
+        r#"{{"openapi":"3.1.0","info":{{"title":"HTTP","version":"1.0.0"}},"paths":{paths}}}"#
+    );
     let mut section = Vec::new();
     leb(b"pishoo:openapi".len(), &mut section);
     section.extend_from_slice(b"pishoo:openapi");
@@ -27,7 +28,17 @@ fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
     bytes.push(0);
     leb(section.len(), &mut bytes);
     bytes.extend(section);
-    Arc::new(Lib::load(sandbox.runtime.clone(), "test".into(), &bytes, directory).unwrap())
+    let mut lib = Lib::load(
+        sandbox.runtime.clone(),
+        "test".into(),
+        &package_component(&bytes),
+        directory,
+    )
+    .unwrap();
+    // Catalog fallback semantics are tested with the original metadata after
+    // the production loader has validated the signed fixture package.
+    lib.openapi = validate_lib(&bytes).unwrap();
+    Arc::new(lib)
 }
 
 fn request(method: Method, path: &str) -> Request<AxumBody> {
@@ -76,7 +87,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
     );
     let owner = Visitor::new(name, SubjectId::new(subject.as_bytes()).unwrap());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
-    let empty_router = sandbox.api_router(endpoint.clone());
+    let empty_router = api_router(&sandbox, endpoint.clone());
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
         &sandbox,
@@ -96,7 +107,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
     let openapi = serde_json::to_value(&lib.openapi).unwrap();
     sandbox.libs.insert("z-demo".into(), lib.clone());
     sandbox.libs.insert("a-demo".into(), lib);
-    let router = sandbox.api_router(endpoint);
+    let router = api_router(&sandbox, endpoint);
     sandbox.close();
 
     for (app, expected) in [
@@ -104,14 +115,14 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
         (
             &router,
             serde_json::json!([
-                {"openapi":openapi,"id":"a-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                {"openapi":openapi,"id":"a-demo","title":"HTTP","version":"1.0.0","description":null,"endpoints":[
                     {"method":"GET","path":"/std/api/a-demo/","description":"Note page"},
                     {"method":"POST","path":"/std/api/a-demo/","description":"Created"},
                     {"method":"GET","path":"/std/api/a-demo/run","description":"Read run"},
                     {"method":"OPTIONS","path":"/std/api/a-demo/run","description":null},
                     {"method":"POST","path":"/std/api/a-demo/run","description":"Create run"}
                 ]},
-                {"openapi":openapi,"id":"z-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                {"openapi":openapi,"id":"z-demo","title":"HTTP","version":"1.0.0","description":null,"endpoints":[
                     {"method":"GET","path":"/std/api/z-demo/","description":"Note page"},
                     {"method":"POST","path":"/std/api/z-demo/","description":"Created"},
                     {"method":"GET","path":"/std/api/z-demo/run","description":"Read run"},
@@ -169,7 +180,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         r#"{"/run":{"get":{},"post":{}},"/explicit":{"head":{},"options":{}}}"#,
     );
     sandbox.libs.insert("test".into(), lib);
-    let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, expected) in [
         (
             Method::GET,
@@ -231,7 +242,14 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         ] {
             assert_eq!(
                 status(&router, method.clone(), path).await,
-                StatusCode::IM_A_TEAPOT,
+                if path
+                    .strip_prefix("/std/api/")
+                    .is_some_and(|tail| !tail.is_empty())
+                {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::IM_A_TEAPOT
+                },
                 "{path}"
             );
         }
@@ -252,12 +270,14 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         status(&router, Method::CONNECT, "/std/api/test/run").await,
         StatusCode::METHOD_NOT_ALLOWED
     );
-    let empty = Sandbox::new(sandbox.runtime.clone())
-        .api_router(crate::test_identity::endpoint("alice"))
-        .fallback(|| async { StatusCode::IM_A_TEAPOT });
+    let empty = api_router(
+        &Sandbox::new(sandbox.runtime.clone()),
+        crate::test_identity::endpoint("alice"),
+    )
+    .fallback(|| async { StatusCode::IM_A_TEAPOT });
     assert_eq!(
         status(&empty, Method::GET, "/std/api/test/run").await,
-        StatusCode::IM_A_TEAPOT
+        StatusCode::NOT_FOUND
     );
     assert!(sandbox.tasks.is_empty());
 }
@@ -279,7 +299,7 @@ async fn lib_page_roots_support_relative_urls_without_a_guest_mount_prefix() {
     ] {
         sandbox.libs.insert(id.into(), lib.clone());
     }
-    let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for id in [
         "test",
         "renamed",
@@ -331,10 +351,10 @@ async fn routers_keep_their_lib_snapshot() {
     let old = load(&sandbox, directory.path(), r#"{"/old":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), old);
     let endpoint = crate::test_identity::endpoint("alice");
-    let old_router = sandbox.api_router(endpoint.clone());
+    let old_router = api_router(&sandbox, endpoint.clone());
     let new = load(&sandbox, directory.path(), r#"{"/new":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), new);
-    let new_router = sandbox.api_router(endpoint);
+    let new_router = api_router(&sandbox, endpoint);
     for (router, present, absent) in [
         (&old_router, "/std/api/test/old", "/std/api/test/new"),
         (&new_router, "/std/api/test/new", "/std/api/test/old"),
@@ -358,7 +378,7 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), lib);
-    let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     assert_eq!(
         status(&router, Method::POST, "/std/api/test/run").await,
         StatusCode::INTERNAL_SERVER_ERROR
