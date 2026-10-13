@@ -1,15 +1,17 @@
-import { For, Show, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal, on } from 'solid-js'
 
 import { ApiError, api } from '../api/client'
 import type { CapabilityDescriptor } from '../api/types'
 import { ErrorState, LoadingState } from '../components/Ui'
 import { capabilityLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
-import { errorMessage } from '../lib/format'
+import { displayIdentityName, errorMessage, normalizeIdentityName } from '../lib/format'
 
 export default function AddContactPage(props: {
   notify: (message: string, tone?: 'success' | 'error') => void
   navigate: (path: string) => void
+  ownerName: string
+  initialTarget?: string
 }) {
   const { t } = useI18n()
   const load = abortable((_source: boolean, signal: AbortSignal) => api.capabilities(signal))
@@ -25,17 +27,28 @@ export default function AddContactPage(props: {
   let targetInput: HTMLInputElement | undefined
   let descriptionInput: HTMLTextAreaElement | undefined
 
-  const validTarget = () => target().trim().length > 0 && !/[\s/?#:@]/u.test(target())
+  createEffect(on(() => props.initialTarget, (value) => {
+    setTarget(displayIdentityName(normalizeIdentityName(value ?? '') ?? value ?? ''))
+    setTargetError(null)
+  }))
+
+  const targetValidationError = (): string | null => {
+    const name = normalizeIdentityName(target())
+    if (!name) return t('outbound.invalidTarget')
+    if (name === normalizeIdentityName(props.ownerName)) return t('outbound.ownIdentity')
+    return null
+  }
   const validDescription = () => [...description().trim()].length <= 80 && !/\p{Cc}/u.test(description())
 
   const send = async () => {
     if (sending()) return
-    const targetIsValid = validTarget()
+    const targetName = normalizeIdentityName(target())
+    const targetMessage = targetValidationError()
     const descriptionIsValid = validDescription()
-    setTargetError(targetIsValid ? null : t('outbound.invalidTarget'))
+    setTargetError(targetMessage)
     setDescriptionError(descriptionIsValid ? null : t('outbound.invalidDescription'))
-    if (!targetIsValid || !descriptionIsValid) {
-      if (!targetIsValid) targetInput?.focus()
+    if (!targetName || targetMessage || !descriptionIsValid) {
+      if (targetMessage) targetInput?.focus()
       else if (!descriptionIsValid) descriptionInput?.focus()
       return
     }
@@ -43,7 +56,7 @@ export default function AddContactPage(props: {
     setSubmitError(null)
     try {
       await api.sendContactRequest({
-        target_name: target().trim(),
+        target_name: targetName,
         description: description().trim(),
         requested_capabilities: requestedCapabilities(),
         offered_capabilities: offeredCapabilities(),
@@ -52,7 +65,10 @@ export default function AddContactPage(props: {
       props.navigate('#/contacts/requests')
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) setTargetError(t('outbound.duplicate'))
-      else if (error instanceof ApiError && error.status === 400 && error.message.includes('target name')) {
+      else if (error instanceof ApiError && error.status === 400 && error.message.includes('own identity')) {
+        setTargetError(t('outbound.ownIdentity'))
+        targetInput?.focus()
+      } else if (error instanceof ApiError && error.status === 400 && error.message.includes('target name')) {
         setTargetError(t('outbound.invalidTarget'))
         targetInput?.focus()
       } else setSubmitError(errorMessage(error, t('common.unexpectedError')))
@@ -86,7 +102,7 @@ export default function AddContactPage(props: {
           <label class="field"><span>{t('outbound.target')}</span>
             <input ref={targetInput} value={target()} aria-invalid={targetError() !== null} aria-required="true"
               onInput={(event) => { setTarget(event.currentTarget.value); setTargetError(null) }}
-              onBlur={() => setTargetError(validTarget() ? null : t('outbound.invalidTarget'))} />
+              onBlur={() => setTargetError(targetValidationError())} />
             <Show when={targetError()}><span class="field-error" role="alert">{targetError()}</span></Show>
           </label>
           <label class="field"><span>{t('outbound.description')}</span>

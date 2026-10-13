@@ -152,7 +152,10 @@ export default function App() {
               onSaved={(value: ProfileSettings) => profileActions.mutate(value)} notify={notify} />
           </Match>
           <Match when={route().page === 'apps' || route().page === 'app-detail'}><AppsPage /></Match>
-          <Match when={route().page === 'contact-new'}><AddContactPage notify={notify} navigate={navigate} /></Match>
+          <Match when={route().page === 'contact-new'}>
+            <AddContactPage notify={notify} navigate={navigate} ownerName={ownerName()}
+              initialTarget={new URLSearchParams(pathname().split('?')[1] ?? '').get('target') ?? undefined} />
+          </Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>
             <a href="#/" onClick={(event) => follow(event, '#/')}>{t('page.backHome')}</a>

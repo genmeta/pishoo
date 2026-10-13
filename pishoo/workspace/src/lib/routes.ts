@@ -1,3 +1,5 @@
+import { normalizeIdentityName } from './format'
+
 export type WorkspacePage =
   | 'home' | 'contacts' | 'contact-new' | 'contact-requests'
   | 'chat'
@@ -52,4 +54,13 @@ export function contactChatPath(name: string): string {
 
 export function workspacePath(path: string): string {
   return path.startsWith('#') ? path : '#' + (path || '/')
+}
+
+export function addContactUrl(viewerName: string, targetName: string): string | null {
+  const viewer = normalizeIdentityName(viewerName)
+  const target = normalizeIdentityName(targetName)
+  if (!viewer || !target || viewer === target) return null
+  const url = new URL(`https://${viewer}/app/workspace/`)
+  url.hash = `/contacts/new?${new URLSearchParams({ target })}`
+  return url.href
 }

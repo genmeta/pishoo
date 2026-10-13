@@ -2,6 +2,7 @@ import { Show, createEffect, createSignal } from 'solid-js'
 
 import { ApiError, api } from '../api/client'
 import type { ProfileSettings } from '../api/types'
+import IntroductionShare from '../components/IntroductionShare'
 import { Avatar, ErrorState, LoadingState } from '../components/Ui'
 import { useI18n } from '../i18n'
 import { displayIdentityName, errorMessage, profileAvatarUrl } from '../lib/format'
@@ -176,6 +177,7 @@ export default function ProfileSettingsPage(props: {
             </form>
           </div>
         </section>
+        <IntroductionShare />
       </Show>
     </>
   )

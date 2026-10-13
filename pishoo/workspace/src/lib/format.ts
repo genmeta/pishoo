@@ -29,6 +29,16 @@ export function displayIdentityName(value: string): string {
     : value
 }
 
+export function normalizeIdentityName(value: string): string | null {
+  const input = value.trim().replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+  const name = input.endsWith(DHTTP_NAME_SUFFIX)
+    ? input
+    : `${input.replace(/~$/, '')}${DHTTP_NAME_SUFFIX}`
+  const valid = name.length <= 253 && name.split('.').every((label) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+  return valid ? name : null
+}
+
 export function contactDisplayName(name: string, alias?: string | null, remoteName?: string | null): string {
   return alias || remoteName || displayIdentityName(name)
 }

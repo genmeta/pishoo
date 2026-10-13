@@ -118,6 +118,12 @@ export interface PublicProfile {
   updated_at: number
 }
 
+export interface Introduction extends PublicProfile {
+  identity_name: string
+  viewer_name: string | null
+  is_owner: boolean
+}
+
 export interface CapabilityDescriptor {
   id: string
   version: string

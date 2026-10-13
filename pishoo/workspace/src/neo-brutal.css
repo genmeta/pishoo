@@ -31,6 +31,50 @@ body {
   background: var(--bg);
 }
 
+.public-introduction {
+  --intro-card: #ffad86;
+  --intro-card-accent: #ed777f;
+  --intro-card-glow: #fff0cf;
+  --intro-card-iridescence: #b8c3f5;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--border) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--border) 5%, transparent) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.introduction-card-stage::before {
+  border: 3px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.introduction-card {
+  border: 3px solid var(--border);
+  box-shadow: 7px 7px 0 var(--border);
+}
+
+.introduction-card .avatar-large {
+  border: 3px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 4px 4px 0 var(--border);
+}
+
+.introduction-card h1 {
+  text-transform: none;
+}
+
+.introduction-card-bottom {
+  border-top: 2px solid var(--border);
+}
+
+.introduction-connect .button {
+  border: 3px solid var(--border);
+  box-shadow: 5px 5px 0 var(--border);
+}
+
+.introduction-footer {
+  border-top: 2px solid var(--border);
+}
+
 body {
   color: var(--text);
   font-weight: 550;

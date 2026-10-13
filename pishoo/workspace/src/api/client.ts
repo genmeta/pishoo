@@ -4,6 +4,7 @@ import type {
   CapabilityDescriptor,
   Contact,
   DirectoryEntry,
+  Introduction,
   LibSummary,
   OutboundContactInput,
   OutboundContactRequest,
@@ -57,6 +58,8 @@ export function backendPath(path: string): string {
 
 export const api = {
   context: () => request<RuntimeContext>(backendPath('/context')),
+
+  introduction: (signal?: AbortSignal) => request<Introduction>(backendPath('/intro/context'), { signal }),
 
   libs: (signal?: AbortSignal) => request<LibSummary[]>('/std/pishoo/loaded-libs', { signal }),
 

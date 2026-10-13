@@ -122,6 +122,347 @@ code {
   grid-template-columns: 224px minmax(0, 1fr);
 }
 
+.public-introduction {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  --intro-card: var(--primary-soft);
+  --intro-card-accent: var(--primary-soft);
+  --intro-card-glow: var(--surface);
+  --intro-card-iridescence: var(--primary-soft);
+}
+
+.introduction-header {
+  width: min(100%, 1080px);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 24px 28px;
+}
+
+.introduction-header .language-switch {
+  margin: 0;
+}
+
+.introduction-main {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 40px 28px 64px;
+}
+
+.introduction-content {
+  width: min(100%, 760px);
+  min-width: 0;
+}
+
+.introduction-content > .state-block {
+  min-height: 320px;
+  padding: 32px;
+  background: var(--surface);
+  border: 2px solid var(--border);
+}
+
+.introduction-card-stage {
+  position: relative;
+  isolation: isolate;
+  perspective: 1400px;
+}
+
+.introduction-card-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: 2px solid var(--border);
+  background: var(--surface-strong);
+  transform: translate(7px, 7px) rotate(2deg);
+}
+
+.introduction-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 396px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 40px;
+  padding: clamp(24px, 4vw, 36px);
+  border: 2px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  background-color: var(--intro-card);
+  background-image:
+    radial-gradient(ellipse at 96% 4%, var(--intro-card-iridescence), transparent 50%),
+    radial-gradient(ellipse at 58% 32%, var(--intro-card-glow), transparent 54%),
+    radial-gradient(ellipse at 4% 108%, var(--intro-card-glow), transparent 62%),
+    linear-gradient(125deg, var(--intro-card-accent), var(--intro-card) 38%, var(--intro-card-accent) 78%, var(--intro-card-iridescence));
+  box-shadow: var(--shadow);
+  transform: rotateX(var(--intro-rotate-x, 0deg)) rotateY(var(--intro-rotate-y, 0deg)) rotate(-1deg);
+  transition: transform 220ms ease-out;
+}
+
+.introduction-card-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--surface) 65%, transparent);
+}
+
+.introduction-card-art::before {
+  content: "";
+  position: absolute;
+  width: 150%;
+  height: 170%;
+  right: -42%;
+  bottom: -114%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse,
+    transparent 42%,
+    color-mix(in srgb, var(--intro-card-glow) 12%, transparent) 47%,
+    color-mix(in srgb, var(--surface) 52%, transparent) 53%,
+    color-mix(in srgb, var(--intro-card-glow) 28%, transparent) 57%,
+    transparent 65%);
+  transform: rotate(-24deg);
+}
+
+.introduction-card-art::after {
+  content: "";
+  position: absolute;
+  inset: -80% -30%;
+  background: linear-gradient(115deg,
+    transparent 38%,
+    color-mix(in srgb, var(--intro-card-glow) 12%, transparent) 43%,
+    color-mix(in srgb, var(--surface) 42%, transparent) 49%,
+    color-mix(in srgb, var(--intro-card-iridescence) 16%, transparent) 54%,
+    transparent 63%);
+  transform: translateX(var(--intro-shine-offset, 0px)) rotate(-12deg);
+  transition: transform 220ms ease-out;
+}
+
+.introduction-card-top,
+.introduction-card-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.introduction-card-brand {
+  font-size: 21px;
+  font-weight: 900;
+}
+
+.introduction-person {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding-block: 12px;
+  min-width: 0;
+}
+
+.introduction-card .avatar-large {
+  width: 108px;
+  height: 108px;
+  flex: 0 0 108px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 42px;
+  transform: rotate(3deg);
+}
+
+.introduction-person-name {
+  min-width: 0;
+}
+
+.introduction-card h1 {
+  font-size: clamp(36px, 5.4vw, 64px);
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+}
+
+.introduction-handle {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  margin-top: 14px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(16px, 2.2vw, 21px);
+  font-weight: 650;
+}
+
+.introduction-card h1,
+.introduction-identity {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.introduction-identity {
+  min-width: 0;
+  color: inherit;
+}
+
+.introduction-card-bottom {
+  padding-top: 18px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 32%, transparent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.introduction-connect {
+  width: min(100%, 480px);
+  margin: 48px auto 0;
+  text-align: center;
+}
+
+.introduction-connect h2 {
+  font-size: clamp(30px, 4vw, 42px);
+  line-height: 1.2;
+  letter-spacing: -0.04em;
+}
+
+.introduction-connect-hint {
+  margin-top: 14px;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.introduction-actions,
+.introduction-identity-form {
+  width: 100%;
+  display: grid;
+  gap: 16px;
+}
+
+.introduction-actions {
+  justify-items: center;
+  margin-top: 28px;
+}
+
+.introduction-actions .button {
+  min-width: 220px;
+  max-width: 100%;
+  gap: 28px;
+  padding: 16px 26px;
+  font-size: 16px;
+}
+
+.introduction-action-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.introduction-actions .button,
+.introduction-identity-form .button,
+.introduction-header .language-switch button {
+  min-height: 44px;
+}
+
+.introduction-content a:focus-visible,
+.introduction-share a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.introduction-identity-form {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  text-align: left;
+}
+
+.introduction-footer {
+  width: min(calc(100% - 56px), 1024px);
+  margin-inline: auto;
+  padding: 24px 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 600px) {
+  .introduction-header {
+    padding: 20px 24px;
+  }
+
+  .introduction-main {
+    padding: 28px 24px 40px;
+  }
+
+  .introduction-card {
+    min-height: 336px;
+    gap: 28px;
+    padding: 22px;
+  }
+
+  .introduction-person {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 22px;
+    padding: 4px 0;
+  }
+
+  .introduction-card .avatar-large {
+    width: 80px;
+    height: 80px;
+    flex-basis: 80px;
+    font-size: 32px;
+  }
+
+  .introduction-card-top {
+    gap: 10px;
+  }
+
+  .introduction-person-name {
+    max-width: 100%;
+  }
+
+  .introduction-connect {
+    margin-top: 44px;
+  }
+
+  .introduction-actions .button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .introduction-footer {
+    width: calc(100% - 48px);
+  }
+}
+
+@media (hover: none), (pointer: coarse), (prefers-reduced-motion: reduce) {
+  .introduction-card {
+    transform: none;
+  }
+
+  .introduction-card-art::after {
+    transform: rotate(-12deg);
+  }
+}
+
+.introduction-share {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.introduction-share-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .sidebar {
   position: sticky;
   top: 0;
