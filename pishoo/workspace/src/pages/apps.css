@@ -151,6 +151,38 @@
   background: var(--primary-soft);
   line-height: 1.6;
 }
+.app-notice-dismissible {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 1em 0;
+}
+.app-notice-dismissible > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.app-notice-dismissible > button {
+  flex-shrink: 0;
+}
+.app-update-list {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+}
+.app-update-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 16px 0;
+}
+.app-update-list > li > div {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .app-detail-header {
   display: flex;
   justify-content: space-between;

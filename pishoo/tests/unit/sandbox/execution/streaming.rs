@@ -117,7 +117,7 @@ async fn large_echo_reports_fuel_exhaustion() {
     let lib = Lib::load(
         runtime,
         "echo".into(),
-        include_bytes!("../../../../assets/tcp-demo-echo.wasm"),
+        &package_component(include_bytes!("../../../../assets/tcp-demo-echo.wasm")),
         directory.path(),
     )
     .unwrap();
@@ -130,7 +130,7 @@ async fn large_echo_reports_fuel_exhaustion() {
             wasi,
             http: WasiHttpCtx::new(),
             memory: StoreLimits::default(),
-            deny_outgoing: DenyOutgoing,
+            outgoing: Outgoing::Denied,
             local: authority("alice.dhttp.net"),
             remote: None,
         },

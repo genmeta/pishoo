@@ -21,7 +21,7 @@ async fn identity_signatures_enforce_bounds_and_handshake_scope() {
         wasi: WasiCtx::builder().build(),
         http: WasiHttpCtx::new(),
         memory: StoreLimits::default(),
-        deny_outgoing: DenyOutgoing,
+        outgoing: Outgoing::Denied,
         local: authority("alice.dhttp.net"),
         remote: None,
     };

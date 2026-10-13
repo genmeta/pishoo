@@ -66,3 +66,23 @@ fn manifest_uses_oas3_deserialization_for_duplicate_keys_and_external_refs() {
 
     assert!(validate_lib(&component("{ invalid JSON }")).is_err());
 }
+
+#[test]
+fn independent_openapi_uses_the_same_rules_as_component_documents() {
+    let document = r#"{"openapi":"3.1.0","info":{"title":"test","version":"1"},"paths":{"/echo":{"get":{"operationId":"echo","responses":{"200":{"description":"ok"}}}}}}"#;
+    assert!(crate::validate_openapi(document.as_bytes()).is_ok());
+    assert_eq!(
+        serde_json::to_value(crate::validate_openapi(document.as_bytes()).unwrap()).unwrap(),
+        serde_json::to_value(validate_lib(&component(document)).unwrap()).unwrap()
+    );
+    for broken in [
+        document.replace("/echo", "/std/workspace"),
+        document.replace("3.1.0", "3.0.0"),
+        "invalid JSON".into(),
+    ] {
+        assert!(crate::validate_openapi(broken.as_bytes()).is_err());
+        assert!(validate_lib(&component(&broken)).is_err());
+    }
+    assert!(crate::validate_openapi(&vec![b' '; 1024 * 1024 + 1]).is_err());
+    assert!(validate_lib(b"\0asm\x0d\0\x01\0").is_err());
+}

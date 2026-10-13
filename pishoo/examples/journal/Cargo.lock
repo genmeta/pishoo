@@ -174,7 +174,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "journal"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "base64",
  "form_urlencoded",
@@ -557,19 +557,19 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[patch.unused]]
 name = "dhttp"
-version = "0.6.2"
+version = "0.7.0"
 
 [[patch.unused]]
 name = "dhttp-access"
-version = "0.4.2"
-
-[[patch.unused]]
-name = "dhttp-home"
 version = "0.5.0"
 
 [[patch.unused]]
+name = "dhttp-home"
+version = "0.6.0"
+
+[[patch.unused]]
 name = "dhttp-log"
-version = "0.1.0"
+version = "0.2.0"
 
 [[patch.unused]]
 name = "dshell"
@@ -577,11 +577,11 @@ version = "0.6.2"
 
 [[patch.unused]]
 name = "dyns"
-version = "0.7.2"
+version = "0.8.0"
 
 [[patch.unused]]
 name = "h3x"
-version = "0.6.2"
+version = "0.7.0"
 
 [[patch.unused]]
 name = "qbase"
@@ -625,4 +625,4 @@ version = "0.8.0"
 
 [[patch.unused]]
 name = "rankey"
-version = "0.2.2"
+version = "0.3.0"

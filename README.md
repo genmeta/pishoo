@@ -99,9 +99,9 @@ The same-identity DHTTP forwarding route streams request bytes through the nativ
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities, proxy routes, Libs, configuration, and certificate/key credentials are loaded at startup; restart Pishoo to apply changes. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
+Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities and configuration load at startup; the running process automatically discovers new identities and applies enabled, listen, and proxy changes. Disabling a Server preserves its listening scope and data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
 
-Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried at the next startup. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
+Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried by the periodic identity scan. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
 
 The `pishoo` executable appends runtime diagnostics to `<DHTTP_HOME>/logs/error.log` (default `~/.dhttp/logs/error.log`) and also writes them to stderr. This process-wide log includes shared network diagnostics and identity failures. The default level is `warn`; set `RUST_LOG=debug` for more detail in the same file. New log directories and files use permissions 0700 and 0600 on Unix. Failure to open the log stops startup with a stderr diagnostic. Per-identity `logs/cert.log` remains the certificate-operation history written by gmutils.
 
@@ -143,19 +143,24 @@ anonymous authorization rules. Older named clients that omit OCSP must upgrade.
 
 ### Build your own Lib
 
-For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [minimal identity example](pishoo/examples/identity/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with the Identity and Journal examples. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
+The selected WEBC distribution design, independent frontend and metadata OpenAPI
+are documented in the [Pishoo WASM developer guide](pishoo/docs/developing-wasm.md).
+The guide includes a minimal WASI HTTP backend and standard WEBC packaging steps,
+and describes the implemented WEBC v3 host installation and package signature protocol.
 
-1. Write a WASI HTTP component exporting `wasi:http/incoming-handler@0.2.12#handle`. The [Echo source](pishoo/examples/wasm-demo/echo/src/lib.rs) is a working Rust example. Build it for `wasm32-unknown-unknown`, then turn the core WASM into a component with `wasm-tools component new` as shown in [build-wasm-demo.sh](pishoo/tools/build-wasm-demo.sh).
-2. Write an OpenAPI 3.1 JSON document declaring the paths and HTTP methods the Lib accepts. See [echo/openapi.json](pishoo/examples/wasm-demo/echo/openapi.json). The handler's actual response statuses should match the document.
-3. Attach that JSON to the component, check it with Pishoo, and place the result in the identity profile's `lib/<id>/lib.wasm`:
+For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [Journal example](pishoo/examples/journal/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with Journal. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
+
+1. Build a standard WASI HTTP backend component, keep the browser frontend in `public/`, and declare the API in `openapi.json`.
+2. Use `package-webc` as documented in the guide to check package identity/version, generate static GET/HEAD operations and sign the complete release.
+3. Check and install the resulting package:
 
 ```sh
-./pishoo/tools/package-lib.py component.wasm openapi.json /path/to/identity/lib/echo/lib.wasm
-wasm-tools validate /path/to/identity/lib/echo/lib.wasm
-cargo run --locked -p pishoo --example check-lib -- /path/to/identity/lib/echo/lib.wasm
+pishoo lib check hello-0.1.0.webc
+pishoo lib --id installer.dhttp.net install alice.smith.dhttp.net/hello hello-0.1.0.webc
+pishoo restart
 ```
 
-The file must be one WASM component with exactly one top-level `pishoo:openapi` custom section. Pishoo reads this section without executing the guest. It routes `POST /std/api/echo/echo` to Lib `echo` only when its manifest declares `POST /echo`. Lib loading does not create access rules. Grant access through daccess; the OpenAPI declaration itself does not grant access.
+The saved artifact is `lib/<publisher>/<name>/lib.webc`. The host serves declared frontend files and invokes only the backend atom for API operations, with daccess authorization on both. Online installation/update/removal takes effect immediately and preserves data and access rules; offline CLI changes load at the next startup. Old single-WASM releases require rebuilding as WEBC and are not automatically migrated.
 
 ### Access
 

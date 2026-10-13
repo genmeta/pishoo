@@ -33,9 +33,9 @@ Components:
   lib [list|ls]                List installed Libs on disk
   lib --loaded                 Query Libs loaded by the running service
   lib info ID                  Inspect an installed Lib
-  lib install ID FILE.wasm     Install or update a Lib
+  lib install ID FILE.webc     Install or update a Lib
   lib remove|rm ID             Remove a Lib; preserve its data
-  lib check FILE.wasm          Validate a component without selecting an identity
+  lib check FILE.webc          Validate a WEBC package without selecting an identity
 
 Service:
   start                        Start the installed Pishoo service
@@ -97,7 +97,7 @@ Queries are written to stdout; context and status messages to stderr."
     }
     if command == "lib" && args.first().is_some_and(|s| s == "check") {
         if name.is_some() || args.len() != 2 {
-            return Err(usage("lib check FILE.wasm does not accept --id"));
+            return Err(usage("lib check FILE.webc does not accept --id"));
         }
         let path = std::path::PathBuf::from(&args[1]);
         let value = tokio::task::spawn_blocking(move || {
