@@ -397,11 +397,16 @@ impl fmt::Display for PeerResolver {
 impl Resolve for PeerResolver {
     fn lookup<'a>(&'a self, name: &'a str, _: &'a str, _: Option<Family>) -> ResolveFuture<'a> {
         async move {
-            assert!(matches!(
+            let peer = matches!(
                 name,
-                "receiver.dhttp.net" | "alice.dhttp.net" | "bob.dhttp.net" | "usopp.li.dhttp.net"
-            ));
-            Ok(futures::stream::iter([(Source::System, self.0)]).boxed())
+                "receiver.dhttp.net"
+                    | "alice.dhttp.net"
+                    | "bob.dhttp.net"
+                    | "usopp.li.dhttp.net"
+                    | "late.dhttp.net"
+                    | "broken.dhttp.net"
+            );
+            Ok(futures::stream::iter(peer.then_some((Source::System, self.0))).boxed())
         }
         .boxed()
     }
@@ -411,7 +416,7 @@ fn profile(root: &std::path::Path, name: &str) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join(name)).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
 
@@ -766,6 +771,16 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         .expect("a valid identity after invalid profiles must load");
     assert_eq!(valid.name(), "valid.dhttp.net");
     valid.close().await.unwrap();
+    // A real empty v1 bootstrap is still supported through the run loop's loader.
+    let empty_profile = IdentityProfile::try_from(root.path().join("valid")).unwrap();
+    std::fs::write(empty_profile.config_db_path(), []).unwrap();
+    let mut recovered = load_profile(empty_profile, runtime.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(recovered.config.enabled);
+    assert_eq!(recovered.config.listen, 3);
+    recovered.close().await.unwrap();
 
     // A corrected identity must not be remembered as permanently invalid.
     #[cfg(unix)]
@@ -972,7 +987,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"listen":0}));
+    assert_eq!(settings, serde_json::json!({"enabled":true,"listen":0}));
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
@@ -981,14 +996,17 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"listen":1}));
+    assert_eq!(settings, serde_json::json!({"enabled":true,"listen":1}));
     assert_eq!(
         crate::setup::load_server_config(&server.profile)
             .unwrap()
             .listen,
         1
     );
-    assert_eq!(server.config.listen, 0, "writing settings requires restart");
+    assert_eq!(
+        server.config.listen, 0,
+        "settings remain desired until the run loop applies them"
+    );
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
@@ -997,7 +1015,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert_eq!(saved, proxies);
     assert!(
         server.config.proxy_locations.is_empty(),
-        "writing proxies requires restart"
+        "proxies remain desired until the run loop applies them"
     );
     server.close().await.unwrap();
     server = Server::load(
@@ -1604,4 +1622,243 @@ async fn workspace_chat_real_quic_delivery_and_pre_send_identity_check() {
     receiver.close().await.unwrap();
     alice.close().await.unwrap();
     bob.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run alone; exercises the live run loop with OpenSSL/local HTTP+QUIC, process TLS/DNS/home and SIGTERM"]
+async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart() {
+    let local = tokio::task::LocalSet::new();
+    let scenario = async {
+        let root = tempfile::tempdir().unwrap();
+        credentials::generate(
+            root.path(),
+            &[
+                ("receiver", "receiver.dhttp.net"),
+                ("late", "late.dhttp.net"),
+                ("broken", "broken.dhttp.net"),
+            ],
+        );
+        let old_home = std::env::var_os("DHTTP_HOME");
+        unsafe {
+            std::env::set_var("DHTTP_HOME", root.path());
+        }
+        let _environment = scopeguard::guard(old_home, |previous| unsafe {
+            match previous {
+                Some(value) => std::env::set_var("DHTTP_HOME", value),
+                None => std::env::remove_var("DHTTP_HOME"),
+            }
+        });
+        dhttp::DhttpNetwork::init().await.unwrap();
+        qtls::RootCerts::set([dhttp::CertificateDer::from(
+            std::fs::read(root.path().join("ca.der")).unwrap(),
+        )])
+        .unwrap();
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter("warn,pishoo=info")
+            .try_init();
+        let bindings = qprotocol::AddressBook::global().inner_bindings();
+        let (address, _) = bindings
+            .iter()
+            .find(|(address, device)| {
+                address.is_ipv4() && (device.name() == "en0" || device.name() == "eth0")
+            })
+            .or_else(|| bindings.iter().find(|(address, _)| address.is_ipv4()))
+            .expect("a local internal IPv4 binding");
+        dhttp::resolve::Resolver::add(Arc::new(PeerResolver(EndpointAddr::direct(*address))));
+        let receiver_profile = profile(root.path(), "receiver");
+        let db = rusqlite::Connection::open(receiver_profile.config_db_path()).unwrap();
+        db.execute("UPDATE settings SET listen=1", []).unwrap();
+        for name in ["late", "broken"] {
+            let identity = profile(root.path(), name);
+            rusqlite::Connection::open(identity.config_db_path())
+                .unwrap()
+                .execute("UPDATE settings SET listen=1", [])
+                .unwrap();
+            std::fs::rename(identity.path(), root.path().join(format!(".{name}"))).unwrap();
+        }
+        std::fs::create_dir_all(receiver_profile.join("file")).unwrap();
+        std::fs::write(receiver_profile.join("file/keep.txt"), b"kept").unwrap();
+        let receiver = dhttp::Endpoint::load("receiver").await.unwrap();
+        let mut running = scopeguard::guard(tokio::task::spawn_local(run()), |task| task.abort());
+        wait_live_body(&receiver, "/std/file/keep.txt", b"kept").await;
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let _upstream = scopeguard::guard(
+            tokio::spawn(async move {
+                loop {
+                    let (socket, _) = upstream.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        hyper::server::conn::http1::Builder::new()
+                            .serve_connection(
+                                hyper_util::rt::TokioIo::new(socket),
+                                hyper::service::service_fn(
+                                    |request: Request<hyper::body::Incoming>| async move {
+                                        Ok::<_, std::convert::Infallible>(http::Response::new(
+                                            http_body_util::Full::new(Bytes::from(format!(
+                                                "live {}",
+                                                request.uri()
+                                            ))),
+                                        ))
+                                    },
+                                ),
+                            )
+                            .await
+                            .unwrap();
+                    });
+                }
+            }),
+            |task| task.abort(),
+        );
+        // HTTP writes return the desired settings; the run loop applies them asynchronously.
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri("https://receiver.dhttp.net/std/pishoo/proxies")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(dhttp::WndBuf::new(64 * 1024))
+            .unwrap();
+        let (mut writer, response) = receiver.from_request(request).await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        writer.write_all(serde_json::to_string(&serde_json::json!({"location":"/live", "proxy_pass":format!("http://{upstream_address}")})).unwrap().as_bytes()).await.unwrap();
+        writer.shutdown().await.unwrap();
+        assert_eq!(response.await.unwrap().status(), StatusCode::OK);
+        wait_live_body(&receiver, "/live", b"live /live").await;
+        // Scope changes unregister and re-register this same Server without worker reload.
+        crate::setup::config_database(
+            &receiver_profile,
+            &Method::PATCH,
+            &"/std/pishoo/settings".parse().unwrap(),
+            Some(serde_json::json!({"listen":0})),
+        )
+        .unwrap();
+        wait_live_rejection(&receiver, "/std/file/keep.txt").await;
+        assert!(
+            db.query_row("SELECT enabled FROM settings", [], |row| row
+                .get::<_, bool>(0))
+                .unwrap()
+        );
+        crate::setup::config_database(
+            &receiver_profile,
+            &Method::PATCH,
+            &"/std/pishoo/settings".parse().unwrap(),
+            Some(serde_json::json!({"listen":1})),
+        )
+        .unwrap();
+        wait_live_body(&receiver, "/live", b"live /live").await;
+        // Same Endpoint/connection pool before and after disable; persisted scope survives.
+        crate::setup::config_database(
+            &receiver_profile,
+            &Method::PATCH,
+            &"/std/pishoo/settings".parse().unwrap(),
+            Some(serde_json::json!({"enabled":false})),
+        )
+        .unwrap();
+        wait_live_rejection(&receiver, "/std/file/keep.txt").await;
+        assert_eq!(
+            db.query_row("SELECT listen FROM settings", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        crate::setup::config_database(
+            &receiver_profile,
+            &Method::PATCH,
+            &"/std/pishoo/settings".parse().unwrap(),
+            Some(serde_json::json!({"enabled":true})),
+        )
+        .unwrap();
+        wait_live_body(&receiver, "/std/file/keep.txt", b"kept").await;
+        wait_live_body(&receiver, "/live", b"live /live").await;
+
+        // A broken new profile is retried without preventing a later valid one from loading.
+        std::fs::create_dir_all(root.path().join(".broken/lib/bad")).unwrap();
+        std::fs::write(root.path().join(".broken/lib/bad/lib.wasm"), b"broken").unwrap();
+        std::fs::rename(root.path().join(".broken"), root.path().join("broken")).unwrap();
+        std::fs::rename(root.path().join(".late"), root.path().join("late")).unwrap();
+        let late_profile = IdentityProfile::try_from(root.path().join("late")).unwrap();
+        std::fs::create_dir_all(late_profile.join("file")).unwrap();
+        std::fs::write(late_profile.join("file/late.txt"), b"discovered").unwrap();
+        let late = dhttp::Endpoint::load("late").await.unwrap();
+        wait_live_body(&late, "/std/file/late.txt", b"discovered").await;
+        wait_live_body(&receiver, "/live", b"live /live").await;
+        std::fs::rename(late_profile.path(), root.path().join(".late")).unwrap();
+        wait_live_rejection(&late, "/std/file/late.txt").await;
+        wait_live_body(&receiver, "/live", b"live /live").await;
+
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(Duration::from_secs(20), &mut *running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Shutdown releases the original listener registration as well.
+        let listener = receiver
+            .listen(
+                dhttp::Scope::Internal.into(),
+                tower::service_fn(|_: Request<Body>| async {
+                    Ok::<_, std::convert::Infallible>(http::Response::new(http_body_util::Empty::<
+                        Bytes,
+                    >::new(
+                    )))
+                }),
+            )
+            .await
+            .unwrap();
+        drop(listener);
+    };
+    local.run_until(scenario).await;
+}
+
+async fn wait_live_body(endpoint: &dhttp::Endpoint, path: &str, expected: &[u8]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let uri = format!("https://{}{path}", endpoint.name())
+            .parse()
+            .unwrap();
+        if let Ok(Ok(response)) =
+            tokio::time::timeout(Duration::from_secs(2), endpoint.get(uri)).await
+        {
+            if response.status() == StatusCode::OK {
+                if let Ok(Ok(bytes)) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    axum::body::to_bytes(AxumBody::new(response.into_body()), 64 * 1024),
+                )
+                .await
+                {
+                    if bytes.as_ref() == expected {
+                        return;
+                    }
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{path} did not return expected body"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_live_rejection(endpoint: &dhttp::Endpoint, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let uri = format!("https://{}{path}", endpoint.name())
+            .parse()
+            .unwrap();
+        if let Ok(Err(_)) = tokio::time::timeout(Duration::from_secs(2), endpoint.get(uri)).await {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{path} still accepts requests after disable/removal"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

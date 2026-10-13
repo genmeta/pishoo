@@ -17,6 +17,7 @@ use crate::{Error, Result, routes::reserved};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServerConfig {
+    pub(crate) enabled: bool,
     pub(crate) listen: u8,
     pub(crate) proxy_locations: Vec<ProxyLocation>,
 }
@@ -99,8 +100,9 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
         [], |row| row.get::<_, bool>(0),
     )?;
+    let current = !empty && has_enabled_column(&conn)?;
     drop(conn);
-    if !empty {
+    if current {
         return Ok(());
     }
     let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -113,14 +115,15 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     if empty {
         tx.execute_batch(
             "CREATE TABLE settings (
-                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3)
+                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3),
+                enabled INTEGER NOT NULL CHECK(typeof(enabled) = 'integer' AND enabled IN (0, 1))
              );
-             INSERT INTO settings(listen) VALUES(3);
+             INSERT INTO settings(listen, enabled) VALUES(3, 1);
              CREATE TABLE proxy_locations(location TEXT NOT NULL PRIMARY KEY, proxy_pass TEXT NOT NULL);
              PRAGMA user_version=1;",
         )?;
     }
-    read_config(&tx)?;
+    upgrade_settings(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -144,7 +147,12 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
             "unsupported schema {version}"
         )));
     }
-    let mut stmt = conn.prepare("SELECT listen FROM settings")?;
+    let has_enabled = has_enabled_column(conn)?;
+    let mut stmt = conn.prepare(if has_enabled {
+        "SELECT listen, enabled FROM settings"
+    } else {
+        "SELECT listen FROM settings"
+    })?;
     let mut rows = stmt.query([])?;
     let Some(row) = rows.next()? else {
         return Err(Error::InvalidConfig(
@@ -158,6 +166,25 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
                 "listen must be an integer in 0..=3".into(),
             ));
         }
+    };
+    let enabled = if has_enabled {
+        match row.get_ref(1)? {
+            ValueRef::Integer(0) => false,
+            ValueRef::Integer(1) => true,
+            _ => {
+                return Err(Error::InvalidConfig(
+                    "enabled must be an integer 0 or 1".into(),
+                ));
+            }
+        }
+    } else {
+        listen != 0
+    };
+    // Legacy off meant disabled, and retained no previous listening scope.
+    let listen = if !has_enabled && listen == 0 {
+        3
+    } else {
+        listen
     };
     if rows.next()?.is_some() {
         return Err(Error::InvalidConfig(
@@ -174,9 +201,32 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(ServerConfig {
+        enabled,
         listen,
         proxy_locations: parse_proxies(values)?,
     })
+}
+
+fn has_enabled_column(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .prepare("PRAGMA table_info(settings)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "enabled"))
+}
+
+// Called only inside an IMMEDIATE transaction. Validate before modifying legacy v1.
+fn upgrade_settings(conn: &Connection) -> Result<()> {
+    let config = read_config(conn)?;
+    if !has_enabled_column(conn)? {
+        conn.execute_batch("ALTER TABLE settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(typeof(enabled) = 'integer' AND enabled IN (0, 1));")?;
+        conn.execute(
+            "UPDATE settings SET enabled=?1, listen=?2",
+            rusqlite::params![config.enabled, config.listen],
+        )?;
+    }
+    Ok(())
 }
 
 fn parse_proxies(values: Vec<(String, String)>) -> Result<Vec<ProxyLocation>> {
@@ -415,12 +465,21 @@ pub(crate) fn config_database(
         };
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        read_config(&tx)?;
+        upgrade_settings(&tx)?;
         if settings {
-            tx.execute(
-                "UPDATE settings SET listen=?1",
-                [payload.as_ref().unwrap()["listen"].as_u64().unwrap() as u8],
-            )?;
+            let payload = payload.as_ref().unwrap();
+            if let Some(listen) = payload.get("listen") {
+                tx.execute(
+                    "UPDATE settings SET listen=?1",
+                    [listen.as_u64().unwrap() as u8],
+                )?;
+            }
+            if let Some(enabled) = payload.get("enabled") {
+                tx.execute(
+                    "UPDATE settings SET enabled=?1",
+                    [enabled.as_bool().unwrap()],
+                )?;
+            }
         } else if *method == Method::DELETE {
             tx.execute(
                 "DELETE FROM proxy_locations WHERE location=?1",
@@ -450,7 +509,7 @@ pub(crate) fn config_database(
         return Ok(Value::Null);
     }
     if settings {
-        return Ok(json!({"listen": config.listen}));
+        return Ok(json!({"enabled": config.enabled, "listen": config.listen}));
     }
     let values = config
         .proxy_locations
@@ -480,6 +539,7 @@ fn validate_settings_patch(payload: &Value) -> Result<()> {
     for (key, value) in object {
         let valid = match key.as_str() {
             "listen" => value.as_u64().is_some_and(|value| value <= 3),
+            "enabled" => value.is_boolean(),
             _ => false,
         };
         if !valid {
