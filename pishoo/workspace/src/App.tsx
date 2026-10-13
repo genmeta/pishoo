@@ -33,7 +33,7 @@ const SETTINGS_NAV: NavItem[] = [
 
 const PAGE_TITLES: Record<WorkspacePage, MessageKey> = {
   home: 'home.title', contacts: 'nav.contacts', 'contact-new': 'nav.contactNew',
-  'contact-requests': 'nav.contactRequests', extensions: 'nav.extensions', apps: 'nav.apps',
+  'contact-requests': 'nav.contactRequests', apps: 'nav.apps',
   chat: 'chat.title', 'app-detail': 'nav.apps', approvals: 'nav.reviews', profile: 'nav.profile',
   access: 'nav.policies', capabilities: 'nav.capabilities', 'not-found': 'page.notFound',
 }
@@ -150,12 +150,6 @@ export default function App() {
               onSaved={(value: ProfileSettings) => profileActions.mutate(value)} notify={notify} />
           </Match>
           <Match when={route().page === 'apps' || route().page === 'app-detail'}><AppsPage /></Match>
-          <Match when={route().page === 'extensions'}>
-            <header class="page-header"><h1>{t(PAGE_TITLES[route().page])}</h1></header>
-            <section class="overview-panel placeholder-panel" role="status">
-              <h2>{t('page.notEnabled')}</h2>
-            </section>
-          </Match>
           <Match when={route().page === 'contact-new'}><AddContactPage notify={notify} navigate={navigate} /></Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>

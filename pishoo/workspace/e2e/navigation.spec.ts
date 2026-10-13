@@ -53,7 +53,7 @@ test('shell paths support navigation, refresh and browser history', async ({ pag
   await expect(page.getByRole('heading', { name: 'Workspace' })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('home.png'), fullPage: true })
   const primary = page.getByRole('navigation', { name: 'Primary navigation' })
-  await expect(primary.getByRole('link')).toHaveCount(5)
+  await expect(primary.getByRole('link')).toHaveCount(4)
   await expect(primary.getByRole('link', { name: /Approval center/ })).toContainText('2')
 
   await primary.getByRole('link', { name: 'Contacts' }).focus()
@@ -75,15 +75,15 @@ test('shell paths support navigation, refresh and browser history', async ({ pag
   await expect(page).toHaveURL(/\/std\/workspace\/settings\/access$/)
   await expect(primary.getByRole('link', { name: /Quick settings/ })).toHaveAttribute('aria-current', 'page')
   await page.goto('./extensions')
-  await expect(page.getByText('Not enabled yet')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Page not found' })).toBeVisible()
   await expect(page.getByRole('button', { name: /Install|Enable|Chat/ })).toHaveCount(0)
 })
 
-test('five labeled navigation targets fit on a narrow screen', async ({ page }, testInfo) => {
+test('four labeled navigation targets fit on a narrow screen', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'mobile')
   await page.goto('./apps')
   const primary = page.getByRole('navigation', { name: 'Primary navigation' })
-  await expect(primary.getByRole('link')).toHaveCount(5)
+  await expect(primary.getByRole('link')).toHaveCount(4)
   await expect(primary.getByRole('link', { name: 'Apps' })).toHaveAttribute('aria-current', 'page')
   await page.screenshot({ path: testInfo.outputPath('apps-mobile.png'), fullPage: true })
   const widths = await page.evaluate(() => ({

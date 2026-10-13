@@ -1,7 +1,7 @@
 export type WorkspacePage =
   | 'home' | 'contacts' | 'contact-new' | 'contact-requests'
   | 'chat'
-  | 'extensions' | 'apps' | 'app-detail' | 'approvals' | 'profile'
+  | 'apps' | 'app-detail' | 'approvals' | 'profile'
   | 'access' | 'capabilities' | 'not-found'
 
 export interface WorkspaceRoute {
@@ -16,7 +16,6 @@ export function routeFromPath(pathname: string): WorkspaceRoute {
     case '/std/workspace/contacts': return { page: 'contacts' }
     case '/std/workspace/contacts/new': return { page: 'contact-new' }
     case '/std/workspace/contacts/requests': return { page: 'contact-requests' }
-    case '/std/workspace/extensions': return { page: 'extensions' }
     case '/std/workspace/apps': return { page: 'apps' }
     case '/std/workspace/approvals': return { page: 'approvals' }
     case '/std/workspace/settings/approvals': return { page: 'approvals' }
