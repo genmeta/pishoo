@@ -1,7 +1,7 @@
 # pishoo Workspace
 
 This Solid/Vite application is the profile Workspace served by pishoo at
-`/std/workspace/`. The shell exposes contacts, API extensions, apps, approvals and quick settings.
+`/std/workspace/`. The shell exposes contacts, apps, approvals and quick settings.
 The approval center is a primary navigation destination at `/std/workspace/approvals`,
 with its own pending count. The existing contacts, approvals and advanced access-control
 pages consume daccess APIs mounted by the same pishoo profile server. Outbound
@@ -71,7 +71,7 @@ Complete IDs are `<publisher>/<name>` and have separate lib/db directories and
 API mounts. Old-resource migration, external template resources and version
 precondition headers remain outside this implementation.
 Local metadata and declared publisher/capabilities are not presented as signature
-or import verification. The extension page remains unavailable.
+or import verification.
 
 The contact directory shows usable, saved, and blocked identities. Incoming Chat
 capability requests appear in the approval center, alongside access reviews;

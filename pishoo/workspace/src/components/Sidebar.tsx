@@ -14,7 +14,6 @@ type NavItem = {
 
 const PRIMARY_NAV: NavItem[] = [
   { page: 'contacts', href: '/std/workspace/contacts', label: 'nav.contacts', mobileLabel: 'nav.mobileContacts' },
-  { page: 'extensions', href: '/std/workspace/extensions', label: 'nav.extensions', mobileLabel: 'nav.mobileExtensions' },
   { page: 'apps', href: '/std/workspace/apps', label: 'nav.apps', mobileLabel: 'nav.mobileApps' },
   { page: 'approvals', href: '/std/workspace/approvals', label: 'nav.reviews', mobileLabel: 'nav.mobileReviews' },
   { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.settings', mobileLabel: 'nav.mobileSettings' },
