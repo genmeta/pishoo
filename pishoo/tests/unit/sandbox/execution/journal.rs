@@ -126,17 +126,29 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
         wasi: wasmtime_wasi::WasiCtx::builder().build(),
         http: wasmtime_wasi_http::WasiHttpCtx::new(),
         memory: StoreLimits::default(),
-        deny_outgoing: DenyOutgoing,
+        outgoing: Outgoing::Denied,
         local: local.clone(),
         remote: None,
     };
+    use crate::sandbox::host::identity_v2::pishoo::identity::request_identity::Host as HostV2;
+    let verified_local = HostV2::local(&mut state).await.unwrap();
+    assert_eq!(verified_local.0, "alice.dhttp.net");
+    assert_eq!(HostV2::caller(&mut state).await.unwrap(), None);
     assert_eq!(Host::local_name(&mut state).await, "alice.dhttp.net");
     assert_eq!(Host::caller_name(&mut state).await, None);
     assert!(!Host::caller_is_owner(&mut state).await);
     state.remote = Some(owner.clone());
     assert!(Host::caller_is_owner(&mut state).await);
+    assert_eq!(
+        HostV2::caller(&mut state).await.unwrap(),
+        Some(verified_local.clone())
+    );
     state.local = journal_authority("alice.dhttp.net", 'b');
     assert!(!Host::caller_is_owner(&mut state).await);
+    assert_ne!(
+        HostV2::caller(&mut state).await.unwrap(),
+        Some(HostV2::local(&mut state).await.unwrap())
+    );
     state.local = local;
     state.remote = Some(bob);
     assert_eq!(
@@ -144,20 +156,36 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
         Some("bob.dhttp.net".into())
     );
     assert!(!Host::caller_is_owner(&mut state).await);
+    assert_eq!(
+        HostV2::caller(&mut state).await.unwrap().unwrap().0,
+        "bob.dhttp.net"
+    );
+    assert_ne!(
+        HostV2::caller(&mut state).await.unwrap(),
+        Some(verified_local)
+    );
     state.local = authority("alice.dhttp.net");
     state.remote = Some(owner);
     assert!(!Host::caller_is_owner(&mut state).await);
+    assert!(HostV2::local(&mut state).await.is_err());
 }
 
 fn journal_lib(directory: &Path) -> Arc<Lib> {
-    let bytes =
-        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal/dist/lib.wasm"))
-            .expect("build Journal WASM first");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal");
+    let bytes = std::fs::read(root.join("lib.wasm")).expect("build Journal backend first");
+    let document: Value =
+        serde_json::from_slice(&std::fs::read(root.join("openapi.json")).unwrap()).unwrap();
+    let package = package_fixture(
+        &document,
+        &bytes,
+        webc::v3::write::Directory::from_path(root.join("public")).unwrap(),
+        &publisher("alice.smith.dhttp.net", 'a'),
+    );
     Arc::new(
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
             "journal".into(),
-            &bytes,
+            &package,
             directory,
         )
         .unwrap(),
@@ -213,6 +241,7 @@ async fn journal_call(
             remote: remote.cloned(),
         },
         tasks.clone(),
+        Outgoing::Denied,
     )
     .unwrap();
     let response = tokio::time::timeout(Duration::from_secs(20), invocation.execute(request))
@@ -248,7 +277,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
             &local,
             None,
             "GET",
-            "/",
+            "/context",
             Value::Null,
             None,
             &spoof
@@ -275,30 +304,22 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         serde_json::from_slice::<Value>(&context).unwrap(),
         json!({"owner_name":"alice.dhttp.net","caller_name":"bob.dhttp.net","is_owner":false})
     );
-    let (status, headers, page) = journal_call(
-        &lib,
-        &tasks,
-        &local,
-        Some(&owner),
-        "GET",
-        "/",
-        Value::Null,
-        None,
-        &[],
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(headers["cache-control"], "no-store");
-    assert!(
-        headers["content-security-policy"]
-            .to_str()
-            .unwrap()
-            .contains("frame-ancestors 'none'")
-    );
-    assert!(
-        std::str::from_utf8(&page)
-            .unwrap()
-            .contains("仅获准访问的身份可见")
+    // The backend owns APIs only; the root page is served from the WEBC volume.
+    assert_eq!(
+        journal_call(
+            &lib,
+            &tasks,
+            &local,
+            Some(&owner),
+            "GET",
+            "/",
+            Value::Null,
+            None,
+            &[]
+        )
+        .await
+        .0,
+        404
     );
     let id = "a".repeat(32);
     let doc = json!({"id":id,"title":"周末","body":"中文与 <script> 内容按文字保存"});
@@ -952,9 +973,8 @@ async fn journal_browser_preview() {
     let lib = journal_lib(data.path());
     let mut sandbox = Sandbox::new(lib.runtime.clone());
     sandbox.libs.insert("journal".into(), lib);
-    let app = sandbox
-        .api_router(crate::test_identity::endpoint("alice.dhttp.net"))
-        .layer(axum::middleware::from_fn(
+    let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
+        axum::middleware::from_fn(
             move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
                 let local = local.clone();
                 let remote = owner.clone();
@@ -970,7 +990,8 @@ async fn journal_browser_preview() {
                     next.run(request).await
                 }
             },
-        ));
+        ),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:18747")
         .await
         .unwrap();
@@ -995,4 +1016,121 @@ async fn journal_browser_preview() {
     tokio::select! {_ = serving => (),_ = tokio::time::sleep(Duration::from_secs(300))=>()}
     sandbox.close();
     sandbox.wait().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "build Journal backend first; run alone with process-wide TLS roots"]
+async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
+    use access_control::{Effect, Grantee, SubjectId};
+    use http::{Method, StatusCode};
+    use tower::ServiceExt;
+
+    let credentials = tempfile::tempdir().unwrap();
+    let (local, _, bob) = journal_credentials(credentials.path()).await;
+    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+        .unwrap();
+    let access = Arc::new(
+        access_control::AccessService::load_from_db(
+            "sqlite::memory:",
+            local.name(),
+            &SubjectId::new(ski.owner_hash().as_str().as_bytes()).unwrap(),
+        )
+        .await
+        .unwrap(),
+    );
+    let data = tempfile::tempdir().unwrap();
+    let lib = journal_lib(data.path());
+    let mut sandbox = Sandbox::new(lib.runtime.clone());
+    let id = "alice.smith.dhttp.net/journal";
+    sandbox.libs.insert(id.into(), lib.clone());
+    let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
+        axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
+    );
+    let public = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal/public");
+    for (suffix, file, media) in [
+        ("/", "index.html", "text/html"),
+        ("/assets/app.js", "assets/app.js", "text/javascript"),
+        ("/assets/app.css", "assets/app.css", "text/css"),
+    ] {
+        let path = format!("/std/api/{id}{suffix}");
+        for grantee in [Grantee::Anony, Grantee::Named] {
+            access
+                .set_policy(
+                    access_control::Method::Unspecified,
+                    &path,
+                    Effect::Deny,
+                    grantee,
+                )
+                .await
+                .unwrap();
+        }
+        for remote in [None, Some(bob.clone())] {
+            let mut request = Request::builder()
+                .uri(&path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(local.clone()),
+                remote,
+            });
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        access
+            .set_policy(
+                access_control::Method::Unspecified,
+                &path,
+                Effect::Allow,
+                Grantee::Named,
+            )
+            .await
+            .unwrap();
+        let expected = std::fs::read(public.join(file)).unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri(&path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(dhttp::HandshakeSummary {
+                alpn: None,
+                local: Some(local.clone()),
+                remote: Some(bob.clone()),
+            });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["content-type"], media);
+            assert_eq!(
+                response.headers()["content-length"],
+                expected.len().to_string()
+            );
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+            assert_eq!(
+                response.headers()["cross-origin-resource-policy"],
+                "same-origin"
+            );
+            assert_eq!(response.headers()["x-frame-options"], "DENY");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                bytes.as_ref(),
+                if method == Method::HEAD {
+                    b""
+                } else {
+                    expected.as_slice()
+                }
+            );
+        }
+    }
+    assert!(
+        sandbox.tasks.is_empty(),
+        "static files must not invoke WASM"
+    );
+    assert!(!data.path().join("journal.db").exists());
+    let index = std::fs::read_to_string(public.join("index.html")).unwrap();
+    assert!(index.contains("./assets/app.js") && index.contains("./assets/app.css"));
+    assert!(!index.contains("<script>") && !index.contains("<style>"));
 }

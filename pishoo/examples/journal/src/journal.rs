@@ -29,20 +29,6 @@ impl wasip2::exports::http::incoming_handler::Guest for Handler {
         let local = request_identity::local_name();
         let target = request.path_with_query().unwrap_or_else(|| "/".into());
         let path = target.split('?').next().unwrap_or("/");
-        if path == "/" && matches!(request.method(), Method::Get | Method::Head) {
-            respond(
-                out,
-                200,
-                "text/html; charset=utf-8",
-                if matches!(request.method(), Method::Head) {
-                    &[]
-                } else {
-                    include_bytes!("../page.html")
-                },
-                None,
-            );
-            return;
-        }
         if path == "/photo" && matches!(request.method(), Method::Get) {
             let result = (|| {
                 let id = parameter(&target, "id")?
@@ -340,7 +326,7 @@ fn dispatch(
             tx.commit().map_err(|_| (500, "commit_uncertain"))?;
             Ok((204, Value::Null, None))
         }
-        ("/" | "/context" | "/entries" | "/entry" | "/comments" | "/comment" | "/photo", _) => {
+        ("/context" | "/entries" | "/entry" | "/comments" | "/comment" | "/photo", _) => {
             Err((405, "method_not_allowed"))
         }
         _ => Err((404, "not_found")),

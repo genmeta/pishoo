@@ -13,7 +13,7 @@ fn note_lib(directory: &Path) -> Arc<Lib> {
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
             "note".into(),
-            &std::fs::read(path).expect("build Note WASM first"),
+            &package_component(&std::fs::read(path).expect("build Note WASM first")),
             directory,
         )
         .unwrap(),
@@ -314,7 +314,7 @@ async fn note_sandbox_mounts_only_its_named_database_directory() {
     for id in ["note", "other"] {
         let dir = profile.join(format!("lib/{id}"));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("lib.wasm"), &bytes).unwrap();
+        std::fs::write(dir.join("lib.webc"), package_component(&bytes)).unwrap();
     }
     std::fs::create_dir_all(profile.join("db")).unwrap();
     std::fs::write(profile.join("db/config.db"), b"host-private").unwrap();
@@ -392,9 +392,8 @@ async fn note_browser_preview() {
     let mut sandbox = Sandbox::new(lib.runtime.clone());
     sandbox.libs.insert("note".into(), lib);
     let local = authority("alice.dhttp.net");
-    let app = sandbox
-        .api_router(crate::test_identity::endpoint("alice.dhttp.net"))
-        .layer(axum::middleware::from_fn(
+    let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
+        axum::middleware::from_fn(
             move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
                 let local = local.clone();
                 async move {
@@ -409,7 +408,8 @@ async fn note_browser_preview() {
                     next.run(request).await
                 }
             },
-        ));
+        ),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:18743")
         .await
         .unwrap();

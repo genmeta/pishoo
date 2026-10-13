@@ -1398,14 +1398,14 @@ async fn transport_large_duplex_concurrency_acceptance() {
             }
             let survivor = download(client, &small_uri, small.1, &small.2).await?;
             timeout(Duration::from_secs(10), async {
-                while !receiver.sandbox.tasks.is_empty() {
+                while !receiver.sandbox.read().unwrap().tasks.is_empty() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await
             .map_err(|_| io::Error::other("WASM tasks remain after cancellation"))?;
             Ok(
-                serde_json::json!({"cancelled_streams": 16, "survivor": survivor, "remaining_wasm_tasks": receiver.sandbox.tasks.len()}),
+                serde_json::json!({"cancelled_streams": 16, "survivor": survivor, "remaining_wasm_tasks": receiver.sandbox.read().unwrap().tasks.len()}),
             )
         };
         record(
@@ -1537,7 +1537,7 @@ async fn transport_large_duplex_concurrency_acceptance() {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Ok(
-            serde_json::json!({"requests": requests, "elapsed_s": started.elapsed().as_secs_f64(), "max_request_s": maximum, "remaining_wasm_tasks": receiver.sandbox.tasks.len()}),
+            serde_json::json!({"requests": requests, "elapsed_s": started.elapsed().as_secs_f64(), "max_request_s": maximum, "remaining_wasm_tasks": receiver.sandbox.read().unwrap().tasks.len()}),
         )
     };
     record(&mut results, "mixed_soak", soak.await, started);
@@ -1545,7 +1545,9 @@ async fn transport_large_duplex_concurrency_acceptance() {
     let close = async {
         receiver.close().await?;
         alice.close().await?;
-        Ok(serde_json::json!({"remaining_wasm_tasks": receiver.sandbox.tasks.len()}))
+        Ok(
+            serde_json::json!({"remaining_wasm_tasks": receiver.sandbox.read().unwrap().tasks.len()}),
+        )
     };
     record(&mut results, "application_shutdown", close.await, started);
     let failures = results

@@ -1,6 +1,10 @@
 //! Per-identity WASM components, host capabilities, and execution resources.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use dhttp_home::identity::IdentityProfile;
 use http_body_util::BodyExt;
@@ -17,12 +21,14 @@ use crate::{Error, Result};
 mod files;
 mod host;
 mod manifest;
+mod package;
 mod runtime;
 mod store;
 
 use files::{disk_bytes, disk_ids, lib_root, valid_id};
 pub(crate) use files::{install_lib, installed_libs, remove_lib};
-pub use manifest::validate_lib;
+pub use manifest::{validate_lib, validate_openapi};
+use package::{package_file, read_package};
 pub(crate) use store::install_store_lib;
 
 pub(crate) struct Sandbox {
@@ -39,6 +45,7 @@ pub struct WasmRuntime {
 pub(crate) struct Lib {
     pub(crate) openapi: oas3::OpenApiV3Spec,
     component: Component,
+    package: webc::Container,
     runtime: Arc<WasmRuntime>,
     filesystem: WasiFilesystemCtx,
 }
@@ -48,7 +55,7 @@ struct StoreData {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     memory: StoreLimits,
-    deny_outgoing: DenyOutgoing,
+    outgoing: Outgoing,
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
 }
@@ -58,9 +65,17 @@ pub(crate) struct Invocation {
     local: dhttp::LocalAuthority,
     remote: Option<dhttp::RemoteAuthority>,
     tasks: TaskTracker,
+    outgoing: Outgoing,
 }
 
-struct DenyOutgoing;
+pub(crate) enum Outgoing {
+    Denied,
+    Granted {
+        endpoint: dhttp::Endpoint,
+        access: Arc<access_control::AccessService>,
+        api: axum::Router,
+    },
+}
 
 impl Sandbox {
     pub(crate) fn new(runtime: Arc<WasmRuntime>) -> Self {
@@ -111,14 +126,21 @@ impl Sandbox {
         Ok(())
     }
 
-    pub(crate) fn api_router(&self, endpoint: dhttp::Endpoint) -> axum::Router {
-        let catalog_libs = self.libs.clone();
+    pub(crate) fn api_router(
+        sandbox: Arc<RwLock<Self>>,
+        endpoint: dhttp::Endpoint,
+    ) -> axum::Router {
+        let catalog_sandbox = sandbox.clone();
         let catalog_endpoint = endpoint.clone();
         let catalog = axum::routing::get(move |request: http::Request<axum::body::Body>| {
-            let (libs, endpoint) = (catalog_libs.clone(), catalog_endpoint.clone());
+            let (sandbox, endpoint) = (catalog_sandbox.clone(), catalog_endpoint.clone());
             async move {
                 use axum::response::IntoResponse;
-                let mut response = list_libs(&libs, &endpoint, &request)
+                let result = {
+                    let sandbox = sandbox.read().unwrap();
+                    list_libs(&sandbox.libs, &endpoint, &request)
+                };
+                let mut response = result
                     .map(IntoResponse::into_response)
                     .unwrap_or_else(reject_api);
                 response.headers_mut().insert(
@@ -128,10 +150,8 @@ impl Sandbox {
                 response
             }
         });
-        let libs = self.libs.clone();
-        let tasks = self.tasks.clone();
         let api = axum::routing::any(move |request: http::Request<axum::body::Body>| {
-            let (endpoint, libs, tasks) = (endpoint.clone(), libs.clone(), tasks.clone());
+            let (endpoint, sandbox) = (endpoint.clone(), sandbox.clone());
             async move {
                 let result: Result<axum::response::Response> = async {
                     let tail = request
@@ -139,36 +159,41 @@ impl Sandbox {
                         .path()
                         .strip_prefix("/std/api/")
                         .ok_or(Error::RouteNotFound)?;
-                    let id = libs
-                        .keys()
-                        .find(|id| {
-                            tail == id.as_str()
-                                || tail
-                                    .strip_prefix(id.as_str())
-                                    .is_some_and(|suffix| suffix.starts_with('/'))
-                        })
-                        .ok_or(Error::RouteNotFound)?;
+                    let (id, lib, tasks) = {
+                        let sandbox = sandbox.read().unwrap();
+                        let id = sandbox
+                            .libs
+                            .keys()
+                            .find(|id| {
+                                tail == id.as_str()
+                                    || tail
+                                        .strip_prefix(id.as_str())
+                                        .is_some_and(|suffix| suffix.starts_with('/'))
+                            })
+                            .ok_or(Error::RouteNotFound)?;
+                        (id.clone(), sandbox.libs[id].clone(), sandbox.tasks.clone())
+                    };
+                    // The request owns its exact Lib snapshot before releasing
+                    // the collection lock. Updates cannot mix frontend/backend.
                     let suffix = tail.strip_prefix(id.as_str()).unwrap();
                     let at_root = suffix.is_empty();
                     let suffix = if at_root {
-                        "/".to_string()
+                        "/".to_owned()
                     } else {
-                        suffix.to_string()
+                        suffix.to_owned()
                     };
-                    let lib = libs.get(id).ok_or(Error::RouteNotFound)?.clone();
                     let item = lib
                         .openapi
                         .paths
                         .as_ref()
                         .and_then(|paths| paths.get(&suffix))
                         .ok_or(Error::RouteNotFound)?;
-                    if !item
+                    let operation = item
                         .methods()
                         .into_iter()
-                        .any(|(method, _)| method == *request.method())
-                    {
-                        return Err(Error::MethodNotAllowed);
-                    }
+                        .find(|(method, _)| method == *request.method())
+                        .map(|(_, operation)| operation)
+                        .ok_or(Error::MethodNotAllowed)?;
                     // Canonicalize only declared page roots so browser-relative
                     // URLs stay inside this Lib's mount, regardless of its name.
                     if at_root
@@ -183,11 +208,39 @@ impl Sandbox {
                             axum::response::Redirect::temporary(&location),
                         ));
                     }
+                    // Static operations read the same immutable package snapshot as
+                    // this Lib's backend. Server applies daccess to both paths.
+                    let operation = serde_json::to_value(operation)
+                        .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+                    if let Some(path) = operation["x-pishoo"]["static-file"].as_str() {
+                        let bytes = package_file(&lib.package, path)?;
+                        let content_type = mime_guess::from_path(path)
+                            .first_or_octet_stream()
+                            .to_string();
+                        let length = bytes.len();
+                        let body = if request.method() == http::Method::HEAD {
+                            axum::body::Body::empty()
+                        } else {
+                            axum::body::Body::from(bytes)
+                        };
+                        return http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .header(http::header::CONTENT_TYPE, content_type)
+                            .header(http::header::CONTENT_LENGTH, length)
+                            .header(http::header::CACHE_CONTROL, "no-store")
+                            .header("x-content-type-options", "nosniff")
+                            .header("referrer-policy", "no-referrer")
+                            .header("cross-origin-resource-policy", "same-origin")
+                            .header("x-frame-options", "DENY")
+                            .body(body)
+                            .map_err(Error::Http);
+                    }
                     let handshake = request
                         .extensions()
                         .get::<dhttp::HandshakeSummary>()
                         .ok_or(Error::MissingHandshake)?;
-                    let invocation = Invocation::new(lib, endpoint, handshake, tasks)?;
+                    let invocation =
+                        Invocation::new(lib, endpoint, handshake, tasks, Outgoing::Denied)?;
                     let mut request = request.map(|body| body.map_err(Into::into).boxed_unsync());
                     let mut parts = request.uri().clone().into_parts();
                     let path = match request.uri().query() {
@@ -209,17 +262,11 @@ impl Sandbox {
                 result.unwrap_or_else(reject_api)
             }
         });
-        // Own every method inside loaded Lib prefixes. The enclosing Server
-        // rejects all other /std paths before its ordinary proxy fallback.
-        let mut router = axum::Router::new().route("/std/workspace-api/libs", catalog);
-        for id in self.libs.keys() {
-            let prefix = format!("/std/api/{id}");
-            router = router
-                .route(&prefix, api.clone())
-                .route(&format!("{prefix}/"), api.clone())
-                .route(&format!("{prefix}/{{*path}}"), api.clone());
-        }
-        router
+        // The reserved namespace is fixed; Lib lookup changes immediately with
+        // the shared collection, without rebuilding the Server router.
+        axum::Router::new()
+            .route("/std/workspace-api/libs", catalog)
+            .route("/std/api/{*path}", api)
     }
 }
 
@@ -315,21 +362,22 @@ fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::
 }
 
 pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::OpenApiV3Spec> {
-    let openapi = validate_lib(bytes)?;
-    runtime.compile(bytes)?;
+    let package = read_package(bytes)?;
+    let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
+    runtime.compile(&package.get_atom("backend").unwrap())?;
     Ok(openapi)
 }
 
 pub(crate) fn lib_management_router(
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
-    runtime: Arc<WasmRuntime>,
+    sandbox: Arc<RwLock<Sandbox>>,
 ) -> axum::Router {
     use axum::{response::IntoResponse, routing::any};
     let handler = move |request: http::Request<axum::body::Body>| {
-        let (profile, endpoint, runtime) = (profile.clone(), endpoint.clone(), runtime.clone());
+        let (profile, endpoint, sandbox) = (profile.clone(), endpoint.clone(), sandbox.clone());
         async move {
-            let mut response = lib_management_request(profile, endpoint, runtime, request)
+            let mut response = lib_management_request(profile, endpoint, sandbox, request)
                 .await
                 .unwrap_or_else(|error| {
                     let status = match &error {
@@ -366,7 +414,7 @@ pub(crate) fn lib_management_router(
 async fn lib_management_request(
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
-    runtime: Arc<WasmRuntime>,
+    sandbox: Arc<RwLock<Sandbox>>,
     request: http::Request<axum::body::Body>,
 ) -> Result<axum::response::Response> {
     use axum::response::IntoResponse;
@@ -447,7 +495,7 @@ async fn lib_management_request(
                 v.trim().eq_ignore_ascii_case(if store_install {
                     "application/json"
                 } else {
-                    "application/wasm"
+                    "application/webc"
                 })
             })
     {
@@ -488,7 +536,7 @@ async fn lib_management_request(
                 }
                 .into_response());
             }
-            return Err(Error::BadRequest("failed to read component body".into()));
+            return Err(Error::BadRequest("failed to read WEBC body".into()));
         }
     };
     if store_install {
@@ -511,20 +559,44 @@ async fn lib_management_request(
             text("publisher")?,
             text("name")?,
             text("version")?,
-            &runtime,
+            &sandbox,
         )
         .await?;
         return Ok(axum::Json(value).into_response());
     }
+    let runtime = sandbox.read().unwrap().runtime.clone();
     let value = tokio::task::spawn_blocking(move || {
         if checking {
             return check_lib(&bytes, &runtime).map(|api| lib_metadata(&api, None));
         }
         match method {
             Method::GET => installed_libs(&profile, id.as_deref()),
-            Method::PUT => install_lib(&profile, id.as_deref().unwrap(), &bytes, &runtime),
+            Method::PUT => {
+                let id = id.as_deref().unwrap();
+                // Prepare the full executable/resource snapshot before commit.
+                let lib = Lib::load(
+                    runtime.clone(),
+                    id.to_owned(),
+                    &bytes,
+                    &profile.join("db").join(id),
+                )?;
+                let mut sandbox = sandbox.write().unwrap();
+                if sandbox.tasks.is_closed() {
+                    return Err(Error::Denied);
+                }
+                let value = install_lib(&profile, id, &bytes, &runtime)?;
+                sandbox.libs.insert(id.to_owned(), Arc::new(lib));
+                Ok(value)
+            }
             Method::DELETE => {
-                remove_lib(&profile, id.as_deref().unwrap()).map(|()| serde_json::Value::Null)
+                let mut sandbox = sandbox.write().unwrap();
+                if sandbox.tasks.is_closed() {
+                    return Err(Error::Denied);
+                }
+                let id = id.as_deref().unwrap();
+                remove_lib(&profile, id)?;
+                sandbox.libs.remove(id);
+                Ok(serde_json::Value::Null)
             }
             _ => Err(Error::MethodNotAllowed),
         }
@@ -539,4 +611,4 @@ async fn lib_management_request(
 
 #[cfg(test)]
 #[path = "../tests/unit/sandbox.rs"]
-mod tests;
+pub(crate) mod tests;

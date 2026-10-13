@@ -101,6 +101,12 @@ function operations(lib: LibSummary | undefined) {
     )
 }
 
+function pageResource(op: ReturnType<typeof operations>[number]) {
+  const extension = op.operation?.['x-pishoo']
+  return extension && 'static-file' in extension && typeof extension['static-file'] === 'string'
+    ? extension['static-file'] : undefined
+}
+
 function entry(lib: LibSummary | undefined) {
   const path = lib?.openapi?.['x-pishoo']?.entry
   if (
@@ -354,7 +360,10 @@ export default function AppsPage() {
     return ''
   }
   const [feedback, setFeedback] = createSignal('')
-  const [dialog, setDialog] = createSignal<'file' | 'uninstall' | StoreDetail | null>(null)
+  const [dismissedStateNotice, setDismissedStateNotice] = createSignal('')
+  const stateNoticeKey = () => `${identity()?.id}:${identity() ? stateText(identity()!.id) : ''}`
+  const detailNotice = () => feedback() || (dismissedStateNotice() !== stateNoticeKey() && identity() ? stateText(identity()!.id) : '')
+  const [dialog, setDialog] = createSignal<'file' | 'publish' | 'uninstall' | StoreDetail | null>(null)
   const storeSelection = () => {
     const value = dialog()
     return value && typeof value === 'object' ? value : undefined
@@ -368,13 +377,13 @@ export default function AppsPage() {
     'idle',
   )
   const [actionError, setActionError] = createSignal('')
-  const openFile = (id = '') => {
+  const openFile = (id = '', mode: 'file' | 'publish' = 'file') => {
     setTarget(id)
     setFile(undefined)
     setInspected(undefined)
     setAccepted(false)
     setActionError('')
-    setDialog('file')
+    setDialog(mode)
   }
   const openUninstall = (id: string) => {
     setTarget(id)
@@ -443,12 +452,15 @@ export default function AppsPage() {
           results.push(...expected.map(id => ({ id, status: 'failed' as const, message: errorMessage(error, t('common.unexpectedError')) })))
         }
       }
+      if (results.some(result => result.status === 'failed')) setFeedback(t('apps.checkFailed'))
+      else if (!results.some(result => result.status === 'update')) setFeedback(t('apps.current'))
       return results
     }),
   )
   createEffect(on(diskItems, () => setUpdateInputs(undefined), { defer: true }))
   const checkUpdates = () => {
     if (disk.loading || disk.error || updates.loading) return
+    setFeedback('')
     setUpdateInputs(eligible().map(lib => {
       const [publisher, name] = lib.id.split('/')
       return { publisher, name, version: lib.version }
@@ -467,10 +479,12 @@ export default function AppsPage() {
     }
     setWriting('checking')
     setActionError('')
+    setInspected(undefined)
+    setAccepted(false)
     try {
       const result = await request<LibSummary>('/std/pishoo/lib-check', {
         method: 'POST',
-        headers: { 'content-type': 'application/wasm' },
+        headers: { 'content-type': 'application/webc' },
         body: input,
       })
       if (
@@ -478,6 +492,15 @@ export default function AppsPage() {
         'templates' in result.openapi['x-pishoo']
       )
         throw new Error(t('apps.templatesUnsupported'))
+      if (dialog() === 'publish') {
+        const extension = result.openapi?.['x-pishoo']
+        const id = `${extension?.publisher}/${extension?.name}`
+        if (!validId(id) || !validVersion(result.version))
+          throw new Error(t('apps.publishInvalid'))
+        if (context.error || !context()?.owner_name || extension?.publisher !== context()?.owner_name)
+          throw new Error(t('apps.publishIdentity'))
+        setTarget(id)
+      }
       setInspected(result)
     } catch (error) {
       setActionError(errorMessage(error, t('common.unexpectedError')))
@@ -488,6 +511,34 @@ export default function AppsPage() {
   const saveComponent = async (event: SubmitEvent) => {
     event.preventDefault()
     if (writing() !== 'idle') return
+    if (dialog() === 'publish') {
+      const manifest = inspected(), input = file()
+      if (!manifest || !input || !accepted()) return
+      const extension = manifest.openapi?.['x-pishoo']
+      if (!extension || context.error || !context()?.owner_name || extension.publisher !== context()?.owner_name) {
+        setActionError(t('apps.publishIdentity'))
+        return
+      }
+      const id = `${extension.publisher}/${extension.name}`, version = manifest.version
+      if (!validId(id) || !validVersion(version)) return
+      setWriting('saving')
+      setActionError('')
+      try {
+        const result = await request<StoreDetail>(`${storeBase}/libs/${id}/versions/${version}`, {
+          method: 'PUT', headers: { 'content-type': 'application/webc' }, body: input,
+          signal: AbortSignal.timeout(180_000),
+        })
+        if (result.id !== id || result.version !== version || !['published', 'yanked'].includes(result.status))
+          throw new Error(t('apps.publishUnknown'))
+        setFeedback(t(result.status === 'published' ? 'apps.publishSuccess' : 'apps.publishYanked'))
+        setDialog(null)
+        navigate(storeHref(id, version))
+        void catalogActions.refetch()
+      } catch (error) {
+        setActionError(`${errorMessage(error, t('common.unexpectedError'))}${!(error instanceof ApiError) || error.status >= 500 ? ` · ${t('apps.publishUnknown')}` : ''}`)
+      } finally { setWriting('idle') }
+      return
+    }
     const release = storeSelection()
     const id = release?.id ?? target()
     if (!validId(id)) {
@@ -504,21 +555,22 @@ export default function AppsPage() {
         release ? { method: 'POST', body: JSON.stringify({ publisher: release.publisher, name: release.name, version: release.version }) } : dialog() === 'file'
           ? {
               method: 'PUT',
-              headers: { 'content-type': 'application/wasm' },
+              headers: { 'content-type': 'application/webc' },
               body: file()!,
             }
           : { method: 'DELETE' },
       )
       if (release && (result.id !== id || result.version !== release.version))
         throw new Error(t('apps.verifyHint'))
-      setFeedback(t(dialog() !== 'uninstall' ? 'apps.pending' : 'apps.removed'))
+      setFeedback(t(dialog() !== 'uninstall' ? 'apps.active' : 'apps.uninstalled'))
+      setDismissedStateNotice('')
       setDialog(null)
-      await diskActions.refetch()
+      await Promise.all([diskActions.refetch(), loadedActions.refetch()])
     } catch (error) {
       setActionError(
         `${errorMessage(error, t('common.unexpectedError'))}${!(error instanceof ApiError) || error.status >= 500 ? ` · ${t('apps.verifyHint')}` : ''}`,
       )
-      void diskActions.refetch()
+      refresh()
     } finally {
       setWriting('idle')
     }
@@ -816,12 +868,12 @@ export default function AppsPage() {
         </a>
       </Show>
       <Show when={saved(id) && !disk.error}>
-        <button class="button button-secondary" onClick={() => openFile(id)}>
+        <button class="button button-secondary" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); openFile(id) }}>
           {t('apps.update')}
         </button>
       </Show>
       <Show when={!saved(id) && disk.state === 'ready'}>
-        <button class="button button-secondary" onClick={() => openFile(id)}>
+        <button class="button button-secondary" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); openFile(id) }}>
           {t('apps.file')}
         </button>
       </Show>
@@ -837,7 +889,7 @@ export default function AppsPage() {
       <Show when={saved(id) && !disk.error}>
         <button
           class="button button-danger-quiet"
-          onClick={() => openUninstall(id)}
+          onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); openUninstall(id) }}
         >
           {t('apps.uninstall')}
         </button>
@@ -846,7 +898,11 @@ export default function AppsPage() {
   )
   const actions = (id: string, showDetails = false) => (
     <div class="button-group app-actions">
-      <Show when={entry(running(id))} keyed>
+      <Show when={entry(running(id))} keyed fallback={
+        <button class="button button-primary" disabled title={t(entry(metadata(id)) ? 'apps.notRunning' : 'apps.noEntry')}>
+          {t('apps.open')} ↗
+        </button>
+      }>
         {(href) => (
           <a
             class="button button-primary"
@@ -893,8 +949,12 @@ export default function AppsPage() {
     </div>
   )
   const interfaces = (lib: LibSummary | undefined, links = false) => (
+    <>
+    <Show when={operations(lib).some(pageResource)}>
+      <p class="muted app-page-resources">{t('apps.pageResources', { count: new Set(operations(lib).map(pageResource).filter(Boolean)).size })}</p>
+    </Show>
     <ul class="app-operations">
-      <For each={operations(lib)}>
+      <For each={operations(lib).filter(op => !pageResource(op))}>
         {(op) => (
           <li>
             <span class="method">{op.method}</span>
@@ -921,6 +981,7 @@ export default function AppsPage() {
         )}
       </For>
     </ul>
+    </>
   )
   const suggestions = (lib: LibSummary | undefined) => (
     <Show
@@ -1080,15 +1141,14 @@ export default function AppsPage() {
                       {release => storeActions(release)}
                     </Show>
                   </header>
-                  <Show when={stateText(identity()!.id)}>
-                    <p class="app-notice" role="status">
-                      {stateText(identity()!.id)}
-                    </p>
-                  </Show>
-                  <Show when={feedback()}>
-                    <p class="app-notice" role="status">
-                      {feedback()}
-                    </p>
+                  <Show when={detailNotice()}>
+                    <div class="app-notice app-notice-dismissible" role="status">
+                      <span>{detailNotice()}</span>
+                      <button class="icon-button" type="button" aria-label={t('common.dismissMessage')} onClick={() => {
+                        setDismissedStateNotice(stateNoticeKey())
+                        setFeedback('')
+                      }}>×</button>
+                    </div>
                   </Show>
                   <nav class="section-nav app-tabs" aria-label={t('apps.details')}>
                     <For
@@ -1120,7 +1180,7 @@ export default function AppsPage() {
                         <p class="app-prose">
                           {current()?.description || t('apps.notProvided')}
                         </p>
-                        <Show when={!entry(currentRunning())}>
+                        <Show when={!entry(current())}>
                           <p class="app-notice">{t('apps.noEntry')}</p>
                         </Show>
                       </section>
@@ -1189,7 +1249,7 @@ export default function AppsPage() {
                     <section class="app-panel">
                       <h2>
                         {t('apps.endpoints', {
-                          count: current()?.endpoints.length ?? 0,
+                          count: operations(current()).filter(op => !pageResource(op)).length,
                         })}
                       </h2>
                       {interfaces(current(), !!currentRunning())}
@@ -1198,7 +1258,6 @@ export default function AppsPage() {
                   <Show when={section() === 'trust'}>
                     <section class="app-panel">
                       <h2>{t('apps.trust')}</h2>
-                      <p>{t(selectedStore() ? 'apps.storeProof' : 'apps.signatureHint')}</p>
                       <Show when={selectedStore()} keyed>
                         {release => <dl class="app-facts">
                           <dt>{t('apps.chosenVersion')}</dt><dd>{release.version}</dd>
@@ -1208,8 +1267,6 @@ export default function AppsPage() {
                           <dt>{t('apps.publishedAt')}</dt><dd>{new Date(release.published_at * 1000).toLocaleString()}</dd>
                         </dl>}
                       </Show>
-                      <p>{t('apps.browserTrust')}</p>
-                      <p>{t('apps.hostHint')}</p>
                       <dl>
                         <For
                           each={Object.entries(
@@ -1464,8 +1521,8 @@ export default function AppsPage() {
       >
         <header class="page-header">
           <h1>{t('nav.apps')}</h1>
-          <button class="button button-primary" onClick={() => openFile()}>
-            {t('apps.file')}
+          <button class="button button-primary" disabled={writing() !== 'idle'} onClick={() => tab() === 'store' ? openFile('', 'publish') : openFile()}>
+            {t(tab() === 'store' ? 'apps.publish' : 'apps.file')}
           </button>
         </header>
         <nav class="section-nav app-tabs" aria-label={t('nav.apps')}>
@@ -1535,11 +1592,11 @@ export default function AppsPage() {
             </button>
           </Show>
         </form>
-        <p class="muted">{t('apps.updatePrivacy')}</p>
         <Show when={feedback()}>
-          <p class="app-notice" role="status">
-            {feedback()}
-          </p>
+          <div class="app-notice app-notice-dismissible" role="status">
+            <span>{feedback()}</span>
+            <button class="icon-button" type="button" aria-label={t('common.dismissMessage')} onClick={() => setFeedback('')}>×</button>
+          </div>
         </Show>
         <Show when={tab() === 'store'}>
           {sourceErrors()}
@@ -1550,7 +1607,6 @@ export default function AppsPage() {
           <Show when={!catalog.loading && !catalog.error && catalog()}>
             <Show when={catalog()!.libs.length} fallback={<section class="app-panel"><EmptyState
               title={t(params().get('q') || params().get('publisher') ? 'apps.noMatch' : 'apps.storeEmpty')}
-              detail={t('apps.storeEmptyHint')}
             /></section>}>
               <section class="app-grid" aria-label={t('apps.store')}>
                 <For each={catalog()!.libs}>
@@ -1583,44 +1639,26 @@ export default function AppsPage() {
           </Show>
         </Show>
         <Show when={tab() === 'mine' && params().get('updates') === '1'}>
-          <h2>{t('apps.updateResults')}</h2>
-          <Show when={(diskItems()?.length ?? 0) > eligible().length}><p class="muted">{t('apps.legacyUpdates')}</p></Show>
-          <Show when={updates.loading}><LoadingState label={t('apps.check')} /></Show>
-          <Show when={!updateInputs()}><section class="app-panel"><EmptyState title={t('apps.notChecked')} detail={t('apps.checkHint')} /></section></Show>
-          <Show when={updates.error}><ErrorState message={errorMessage(updates.error, t('common.unexpectedError'))} onRetry={checkUpdates} /></Show>
-          <Show when={!updates.loading && !updates.error && updateInputs()}>
-            <Show when={updates()?.length} fallback={<section class="app-panel"><EmptyState title={t('apps.noEligible')} /></section>}>
-              <section class="app-grid" aria-label={t('apps.updateResults')}>
-                <For each={updates()}>
-                  {result => <article class="app-card">
-                    <h2>{metadata(result.id)?.title ?? result.id}</h2>
-                    <code>{result.id}</code>
-                    <p class="app-meta">{t('apps.savedVersion')}: {(() => {
-                      const lib = saved(result.id)
-                      return lib && !('error' in lib) ? lib.version : '—'
-                    })()}</p>
-                    <Show when={result.status === 'update'} fallback={<p class="app-notice">
-                      {result.status === 'failed' ? `${t('apps.checkFailed')}: ${result.message}` : t(`apps.${result.status as 'current' | 'not_found' | 'unavailable'}`)}
-                    </p>}>
-                      {(() => {
-                        if (result.status !== 'update') return null
-                        return <>
-                          <p>{t('apps.updateAvailable', { version: result.version })}</p>
-                          <p class="app-prose">{result.changelog}</p>
-                          <div class="button-group app-actions">
-                            <button class="button button-primary" disabled={writing() !== 'idle' || disk.loading || !!disk.error} onClick={() => void prepareStoreInstall(result)}>{t('apps.installVersion', { version: result.version })}</button>
-                            <a class="button button-secondary" href={storeHref(result.id, result.version)} onClick={event => follow(event, storeHref(result.id, result.version))}>{t('apps.details')}</a>
-                          </div>
-                        </>
-                      })()}
-                    </Show>
-                    <Show when={entry(running(result.id))} keyed>
-                      {href => <a class="button button-secondary" href={href} target="_blank" rel="noopener noreferrer">{t('apps.open')} ↗</a>}
-                    </Show>
-                  </article>}
-                </For>
-              </section>
-            </Show>
+          <Show when={updates.loading}><p class="muted" role="status">{t('apps.check')}…</p></Show>
+          <Show when={updates.error}><p class="field-error" role="alert">{t('apps.checkFailed')}</p></Show>
+          <Show when={updateInputs() && !updates.loading && !updates.error && updates()?.some(result => result.status === 'update')}>
+            <ul class="app-update-list" aria-label={t('apps.updateResults')}>
+              <For each={updates()?.filter(result => result.status === 'update')}>
+                {result => {
+                  if (result.status !== 'update') return null
+                  return <li>
+                    <div>
+                      <a class="text-link" href={storeHref(result.id, result.version)} onClick={event => follow(event, storeHref(result.id, result.version))}>
+                        {metadata(result.id)?.title ?? result.id}
+                      </a>
+                      <p class="app-meta">{t('apps.updateAvailable', { version: result.version })}</p>
+                      <Show when={result.changelog}><p class="app-prose">{result.changelog}</p></Show>
+                    </div>
+                    <button class="button button-primary" disabled={writing() !== 'idle' || disk.loading || !!disk.error} onClick={() => void prepareStoreInstall(result)}>{t('apps.updateAvailable', { version: result.version })}</button>
+                  </li>
+                }}
+              </For>
+            </ul>
           </Show>
         </Show>
         <Show when={tab() === 'mine'}>
@@ -1698,7 +1736,7 @@ export default function AppsPage() {
       </Show>
       <Dialog
         open={dialog() !== null}
-        title={t(dialog() === 'file' ? 'apps.file' : dialog() === 'uninstall' ? 'apps.confirmUninstall' : 'apps.storeConfirm')}
+        title={t(dialog() === 'publish' ? 'apps.publish' : dialog() === 'file' ? 'apps.file' : dialog() === 'uninstall' ? 'apps.confirmUninstall' : 'apps.storeConfirm')}
         wide
         onClose={() => writing() === 'idle' && setDialog(null)}
       >
@@ -1722,6 +1760,7 @@ export default function AppsPage() {
               </>
             }
           >
+            <Show when={dialog() === 'file' || dialog() === 'publish'}>
             <Show when={dialog() === 'file'}>
             <label class="field field-wide">
               <span>{t('apps.fileId')}</span>
@@ -1737,11 +1776,16 @@ export default function AppsPage() {
               />
             </label>
             <p class="muted field-wide">{t('apps.fileIdHint')}</p>
+            </Show>
+            <Show when={dialog() === 'publish'}>
+              <p class="field-wide">{t('apps.publishArtifact')}</p>
+              <p class="field-wide">{t('apps.publishIdentityHint')}</p>
+            </Show>
             <label class="field field-wide">
               <span>{t('apps.component')}</span>
               <input
                 type="file"
-                accept=".wasm,application/wasm"
+                accept=".webc,application/webc"
                 required
                 disabled={writing() !== 'idle'}
                 onChange={(event) => {
@@ -1752,7 +1796,7 @@ export default function AppsPage() {
                 }}
               />
             </label>
-            <p class="field-wide">{t('apps.fileInspectHint')}</p>
+            <p class="field-wide">{t(dialog() === 'publish' ? 'apps.publishCheckHint' : 'apps.fileInspectHint')}</p>
             <button
               class="button button-secondary"
               type="button"
@@ -1773,16 +1817,19 @@ export default function AppsPage() {
                   {installPreview()!.openapi?.['x-pishoo']?.changelog ??
                     installPreview()!.description}
                 </p>
-                <p>
+                <Show when={dialog() !== 'publish'}><p>
                   {t('apps.savedVersion')}:{' '}
                   {(() => {
                     const value = saved(installId())
                     return value && !('error' in value) ? value.version : '—'
                   })()}
-                </p>
-                {interfaces(installPreview())}
+                </p></Show>
+                <details class="app-preview-interfaces">
+                  <summary>{t('apps.endpoints', { count: operations(installPreview()).filter(op => !pageResource(op)).length })}</summary>
+                  {interfaces(installPreview())}
+                </details>
                 {suggestions(installPreview())}
-                <Show when={metadata(installId())}>
+                <Show when={dialog() !== 'publish' && metadata(installId())}>
                   <details>
                     <summary>{t('apps.compare')}</summary>
                     <ul class="app-operations">
@@ -1826,8 +1873,9 @@ export default function AppsPage() {
                 </Show>
               </section>
             </Show>
-            <p class="field-wide">{t(storeSelection() ? 'apps.storeInstallHint' : 'apps.fileHint')}</p>
-            <p class="field-wide">{t('apps.browserTrust')}</p>
+            <Show when={dialog() !== 'publish'}>
+              <p class="field-wide">{t(storeSelection() ? 'apps.storeInstallHint' : 'apps.fileHint')}</p>
+            </Show>
             <Show when={installPreview()?.openapi?.['x-pishoo']?.host?.signatures}>
               <p class="app-notice field-wide">{t('apps.signatureCapability')}</p>
             </Show>
@@ -1841,7 +1889,7 @@ export default function AppsPage() {
                 onChange={(event) => setAccepted(event.currentTarget.checked)}
                 disabled={writing() !== 'idle'}
               />
-              {t('apps.accept')}
+              {t(dialog() === 'publish' ? 'apps.publishAccept' : 'apps.accept')}
             </label>
           </Show>
           <Show when={actionError()}>
@@ -1865,12 +1913,13 @@ export default function AppsPage() {
                 writing() !== 'idle' ||
                 (dialog() !== 'uninstall' && (!accepted() || !installPreview()))
                 || !!storeSelection() && (disk.loading || !!disk.error || !!context.error || !context()?.owner_name)
+                || dialog() === 'publish' && (!!context.error || !context()?.owner_name)
               }
             >
               {writing() !== 'idle'
                 ? t('common.saving')
                 : t(
-                    dialog() !== 'uninstall'
+                    dialog() === 'publish' ? 'apps.publishConfirm' : dialog() !== 'uninstall'
                       ? saved(installId())
                         ? 'apps.confirmUpdate'
                         : 'apps.confirmInstall'

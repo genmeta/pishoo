@@ -1,0 +1,9 @@
+package pishoo:identity@0.2.0;
+
+/// Verified invocation identity. Tuple order is (name, owner-hash from SKI).
+/// No HTTP headers or guest-supplied values contribute to these facts.
+interface request-identity {
+    local: func() -> tuple<string, string>;
+    /// Anonymous HTTP requests and background runs have no caller.
+    caller: func() -> option<tuple<string, string>>;
+}

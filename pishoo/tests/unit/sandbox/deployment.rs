@@ -25,7 +25,7 @@ fn component(version: &str) -> Vec<u8> {
     bytes.push(0);
     leb(section.len(), &mut bytes);
     bytes.extend(section);
-    bytes
+    package_component(&bytes)
 }
 
 fn profile(root: &Path) -> IdentityProfile {
@@ -33,7 +33,7 @@ fn profile(root: &Path) -> IdentityProfile {
     for id in ["alpha", "beta"] {
         std::fs::create_dir_all(profile.join("lib").join(id)).unwrap();
         std::fs::write(
-            profile.join("lib").join(id).join("lib.wasm"),
+            profile.join("lib").join(id).join("lib.webc"),
             component("1"),
         )
         .unwrap();
@@ -52,7 +52,7 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
     let task = sandbox.tasks.token();
 
     std::fs::remove_dir_all(profile.join("lib/beta")).unwrap();
-    std::fs::write(profile.join("lib/alpha/lib.wasm"), component("2")).unwrap();
+    std::fs::write(profile.join("lib/alpha/lib.webc"), component("2")).unwrap();
     sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
     assert!(!Arc::ptr_eq(&alpha, &replacement));
@@ -76,7 +76,7 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
     let original = sandbox.libs["alpha"].clone();
-    std::fs::write(profile.join("lib/alpha/lib.wasm"), b"invalid wasm").unwrap();
+    std::fs::write(profile.join("lib/alpha/lib.webc"), b"invalid wasm").unwrap();
     assert!(matches!(
         sandbox.load_libs(&profile),
         Err(Error::InvalidComponent(_))

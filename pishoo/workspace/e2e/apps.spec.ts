@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import type { LibSummary, RulesByApi, StoreDetail, StoreSummary } from '../src/api/types'
 
 const journal: LibSummary = {
@@ -36,7 +37,7 @@ function release(version = '1.2.0', status: 'published' | 'yanked' = 'published'
   return { id: fullId, publisher: 'alice.smith.dhttp.net', name: 'journal', version, status,
     publisher_owner_hash: 'a'.repeat(64), status_reason: status === 'yanked' ? 'Withdrawn by publisher' : '',
     package_sha256: 'b'.repeat(64), size: 4096, published_at: 1791850000,
-    download_path: `/store/v1/libs/${fullId}/versions/${version}/lib.wasm`,
+    download_path: `/store/v1/libs/${fullId}/versions/${version}/lib.webc`,
     openapi: completeJournal(version).openapi!, signer_certificates: ['test-certificate'],
   }
 }
@@ -114,20 +115,26 @@ test('live-shaped empty store, retry and update action preserve filters', async 
   await expect(page.getByRole('textbox', { name: 'Publisher', exact: true })).toHaveValue('alice.smith.dhttp.net')
   await page.screenshot({ path: testInfo.outputPath('03-store-connected-empty.png'), fullPage: true })
   await page.getByRole('button', { name: 'Check for updates' }).click()
-  await expect(page.getByText('No saved applications have a complete store ID and supported version.', { exact: true })).toBeVisible()
+  await expect(page.getByText('No updates available', { exact: true })).toBeVisible()
+  await expect(page.locator('.app-update-list')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Update check results', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await expect(page.getByText('No updates available', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Updates', exact: true })).toHaveCount(0)
   await page.reload()
-  await expect(page.getByText('Updates have not been checked', { exact: true })).toBeVisible()
+  await expect(page.getByText('Updates have not been checked', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.app-update-list')).toHaveCount(0)
   await page.getByRole('navigation', { name: 'Primary navigation' }).getByRole('link', { name: 'Apps', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Personal journal' })).toBeVisible()
 })
 
-test('store details, exact release confirmation and native save preserve the running version', async ({ page }, testInfo) => {
+test('store details, exact release confirmation and native save activate without restarting', async ({ page }, testInfo) => {
   let disk = [completeJournal()]
+  let live = [...disk]
   const writes: unknown[] = []
   const downloads: string[] = []
-  page.on('request', req => { if (req.url().endsWith('/lib.wasm')) downloads.push(req.url()) })
-  await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [completeJournal()] }))
+  page.on('request', req => { if (req.url().endsWith('/lib.webc')) downloads.push(req.url()) })
+  await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
   await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
   await page.route(storeApi + '/libs?*', route => route.fulfill({ json: { libs: [summary()], total: 1, page: 1, page_size: 20 } }))
   await page.route(storeApi + `/libs/${fullId}/versions/1.2.0`, route => route.fulfill({ json: release() }))
@@ -135,6 +142,7 @@ test('store details, exact release confirmation and native save preserve the run
     expect(route.request().method()).toBe('POST')
     writes.push(route.request().postDataJSON())
     disk = [completeJournal('1.2.0')]
+    live = [...disk]
     return route.fulfill({ json: disk[0] })
   })
   await page.goto('./apps?tab=store&q=journal')
@@ -154,10 +162,17 @@ test('store details, exact release confirmation and native save preserve the run
   await expect(dialog).toHaveCount(0)
   expect(writes).toEqual([{ publisher: 'alice.smith.dhttp.net', name: 'journal', version: '1.2.0' }])
   expect(downloads).toEqual([])
-  await expect(page.getByText('Saved · restart Pishoo to activate', { exact: true })).toBeVisible()
+  const notice = page.locator('.app-notice-dismissible')
+  await expect(notice).toHaveCount(1)
+  await expect(notice).toContainText('Installed and ready to open')
+  await notice.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await expect(notice).toHaveCount(0)
+  await page.getByRole('button', { name: 'About', exact: true }).click()
+  await expect(notice).toHaveCount(0)
   await page.getByRole('link', { name: 'Back to apps', exact: true }).click()
   await page.getByRole('button', { name: 'My apps', exact: true }).click()
-  await expect(page.locator('.app-card')).toContainText('v1.1.0')
+  await expect(page.locator('.app-card')).not.toContainText('v1.1.0')
+  await expect(page.locator('.app-card').getByRole('link', { name: 'Open ↗', exact: true })).toBeVisible()
   await expect(page.locator('.app-card')).toContainText('v1.2.0')
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
 })
@@ -193,38 +208,40 @@ test('update checks batch only saved complete IDs and preserve failure and absen
   })
   await page.goto('./apps')
   await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
-  const results = page.getByRole('region', { name: 'Update check results', exact: true })
-  await expect(results.getByText('Update check failed: First batch unavailable', { exact: true })).toHaveCount(100)
-  await expect(results.getByText('Not registered in the store', { exact: true })).toHaveCount(1)
-  await expect(results.getByText('No published version available', { exact: true })).toHaveCount(1)
-  await expect(results.getByText('No newer published version', { exact: true })).toHaveCount(3)
+  await expect(page.locator('.app-update-list')).toHaveCount(0)
+  await expect(page.locator('.app-notice-dismissible')).toContainText('Update check failed')
+  await page.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await expect(page.locator('.app-notice-dismissible')).toHaveCount(0)
   expect(batches.map(batch => batch.length)).toEqual([100, 5])
   expect(batches.flat().every(lib => lib.publisher === 'alice.smith.dhttp.net' && lib.version === '1.0.0')).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('15-update-batch-results.png') })
 })
 
-test('update recommendations use the saved version and open an exact release confirmation', async ({ page }) => {
+test('update recommendations use the saved version and open an exact release confirmation', async ({ page }, testInfo) => {
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [completeJournal('1.0.0')] }))
   await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [completeJournal('1.1.0')] }))
   await page.route(storeApi + '/updates', route => {
     expect(route.request().postDataJSON()).toEqual({ libs: [{ publisher: 'alice.smith.dhttp.net', name: 'journal', version: '1.1.0' }] })
     return route.fulfill({ json: { libs: [{ id: fullId, status: 'update', version: '1.2.0',
       detail_path: `/store/v1/libs/${fullId}/versions/1.2.0`,
-      download_path: `/store/v1/libs/${fullId}/versions/1.2.0/lib.wasm`, changelog: 'New release', host: {},
+      download_path: `/store/v1/libs/${fullId}/versions/1.2.0/lib.webc`, changelog: 'New release', host: {},
     }] } })
   })
   await page.route(storeApi + `/libs/${fullId}/versions/1.2.0`, route => route.fulfill({ json: release() }))
   await page.goto('./apps')
   await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
-  const results = page.getByRole('region', { name: 'Update check results', exact: true })
+  const results = page.getByRole('list', { name: 'Update check results', exact: true })
   await expect(results).toContainText('Update to v1.2.0')
-  await results.getByRole('button', { name: 'Install v1.2.0', exact: true }).click()
+  await expect(results.getByRole('listitem')).toHaveCount(1)
+  await expect(results.locator('.app-card, .app-panel, .state-block')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('inline-updates.png') })
+  await results.getByRole('button', { name: 'Update to v1.2.0', exact: true }).click()
   await expect(page.getByRole('dialog')).toContainText('Personal journal · v1.2.0')
   await expect(page.getByRole('dialog')).toContainText('Saved version: 1.1.0')
 })
 
 test('loaded and saved versions stay separate, including removal and disk corruption', async ({ page }, testInfo) => {
-  let disk: Array<LibSummary | { id: string; error: string }> = [{ ...journal, version: '1.2.0' }, { id: 'broken', error: 'missing lib.wasm' }]
+  let disk: Array<LibSummary | { id: string; error: string }> = [{ ...journal, version: '1.2.0' }, { id: 'broken', error: 'missing lib.webc' }]
   await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
   await page.route('**/std/pishoo/libs/journal', route => {
     expect(route.request().method()).toBe('DELETE')
@@ -234,15 +251,27 @@ test('loaded and saved versions stay separate, including removal and disk corrup
   await page.goto('./apps')
   const card = page.locator('.app-card').filter({ hasText: 'Personal journal' })
   await expect(card).toContainText('v1.1.0')
-  await expect(card).toContainText('Saved · restart Pishoo to activate · v1.2.0')
-  await expect(page.getByText('Saved component error: missing lib.wasm')).toBeVisible()
-  await card.getByRole('button', { name: 'Uninstall', exact: true }).click()
+  await expect(card).toContainText('Saved · not active · v1.2.0')
+  await expect(page.getByText('Saved component error: missing lib.webc')).toBeVisible()
+  await card.getByRole('link', { name: 'Details', exact: true }).click()
+  const notice = page.locator('.app-notice-dismissible')
+  await expect(notice).toContainText('Saved · not active · v1.2.0')
+  await notice.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await expect(notice).toHaveCount(0)
+  await page.locator('.app-more > summary').click()
+  await page.getByRole('button', { name: 'Uninstall', exact: true }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog).toContainText('keeping application data and access rules')
+  await expect(dialog).toContainText('keeping its data and access rules')
   await page.screenshot({ path: testInfo.outputPath('04-uninstall.png'), fullPage: true })
   await dialog.getByRole('button', { name: 'Confirm uninstall' }).click()
   await expect(dialog).toHaveCount(0)
-  await expect(card).toContainText('Removed · takes effect after restart')
+  await expect(notice).toHaveCount(1)
+  await expect(notice).toContainText('Uninstalled')
+  await notice.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await expect(notice).toHaveCount(0)
+  await page.getByRole('link', { name: 'Back to apps', exact: true }).click()
+  await expect(notice).toHaveCount(0)
+  await expect(card).toContainText('Not saved locally')
   await expect(card.getByRole('link', { name: 'Open ↗' })).toBeVisible()
   await expect(card.getByRole('button', { name: 'Uninstall', exact: true })).toHaveCount(0)
 })
@@ -257,22 +286,64 @@ test('legacy APIs are not guessed to be a page, disk-only apps cannot open', asy
   await expect(page.getByRole('link', { name: 'Open GET /std/api/journal/page in a new tab' })).toBeVisible()
 })
 
+test('declared root entry comes from the displayed release before activation', async ({ page }) => {
+  const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(
+    new URL('../../examples/journal/openapi.json', import.meta.url), 'utf8',
+  ))
+  const app: LibSummary = {
+    id: fullId, title: manifest.info.title, version: manifest.info.version,
+    description: manifest.info.description ?? null, openapi: manifest,
+    endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) =>
+      Object.entries(methods).map(([method, operation]) => ({
+        method: method.toUpperCase(), path: `/std/api/${fullId}${path}`,
+        description: operation?.summary ?? null,
+      })),
+    ),
+  }
+  let saved: LibSummary[] = []
+  await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [] }))
+  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: saved }))
+  const storeRelease = { ...release(app.version), openapi: manifest }
+  await page.route(storeApi + `/libs/${fullId}/versions/${app.version}`, route => route.fulfill({ json: storeRelease }))
+
+  // A store release declares its entry even when it has never been installed.
+  await page.goto(`./apps/store/${fullId}?version=${app.version}`)
+  await expect(page.getByRole('heading', { name: app.title, exact: true })).toBeVisible()
+  await expect(page.locator('.app-about')).not.toContainText('API app · no page entry declared')
+  await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveCount(0)
+
+  // A saved release retains its entry while waiting for a restart to activate.
+  saved = [app]
+  await page.goto(`./apps/local/${fullId}`)
+  await expect(page.getByRole('heading', { name: app.title, exact: true })).toBeVisible()
+  await expect(page.locator('.app-about')).not.toContainText('API app · no page entry declared')
+  await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveCount(0)
+
+  // The warning still appears when the displayed manifest has no page entry.
+  saved = [{ ...app, openapi: { ...manifest, 'x-pishoo': { ...manifest['x-pishoo'], entry: undefined } } }]
+  await page.reload()
+  await expect(page.locator('.app-about')).toContainText('API app · no page entry declared')
+})
+
 test('local file inspection, update confirmation, save and failed save', async ({ page }, testInfo) => {
   let disk = [journal]
+  let live = [...disk]
+  await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
   let fail = true
   await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
   await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: { ...journal, version: '1.2.0' } }))
   await page.route('**/std/pishoo/libs/journal', route => {
-    expect(route.request().headers()['content-type']).toBe('application/wasm')
+    expect(route.request().headers()['content-type']).toBe('application/webc')
     if (fail) return route.fulfill({ status: 500, body: 'Compilation or save failed' })
     disk = [{ ...journal, version: '1.2.0' }]
+    live = [...disk]
     return route.fulfill({ json: disk[0] })
   })
   await page.goto('./apps')
   await page.getByRole('button', { name: 'Update from file' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByLabel('Local component ID')).toHaveValue('journal')
-  await dialog.getByLabel('WASM component file').setInputFiles({ name: 'journal.wasm', mimeType: 'application/wasm', buffer: Buffer.from('fixture') })
+  await dialog.getByLabel('WEBC package file').setInputFiles({ name: 'journal.webc', mimeType: 'application/webc', buffer: Buffer.from('fixture') })
   await expect(dialog.getByRole('button', { name: 'Confirm update' })).toBeDisabled()
   await dialog.getByRole('button', { name: 'Inspect component' }).click()
   await expect(dialog.getByRole('heading', { name: 'Personal journal · v1.2.0' })).toBeVisible()
@@ -283,7 +354,7 @@ test('local file inspection, update confirmation, save and failed save', async (
   fail = false
   await dialog.getByRole('button', { name: 'Confirm update' }).click()
   await expect(dialog).toHaveCount(0)
-  await expect(page.locator('.app-card')).toContainText('v1.1.0')
+  await expect(page.locator('.app-card')).not.toContainText('v1.1.0')
   await expect(page.locator('.app-card')).toContainText('v1.2.0')
   await page.getByRole('button', { name: 'Install from file' }).click()
   await dialog.getByLabel('Local component ID').fill('new')
@@ -403,4 +474,102 @@ test('permission editing pre-fills actual effects and removal keeps explicit den
   await expect(dialog.getByRole('region', { name: 'Rule submission results' })).toContainText('Succeeded')
   expect(deleted).toEqual(['/std/api/journal/entries', '/std/api/journal/page'])
   expect(rules['/std/api/journal/comments'].POST.deny).toEqual([bob])
+})
+
+// Bytes are passed intact to the host; package signature verification is server-side.
+function uploadComponent(signed = true) {
+  return { name: 'lib.webc', mimeType: 'application/webc', buffer: Buffer.from(signed ? 'signed WEBC fixture' : 'unsigned WEBC fixture') }
+}
+
+test('store upload rejects unsigned artifacts and a different publisher identity', async ({ page }) => {
+  let checks = 0, uploads = 0
+  await page.route(`${storeApi}/libs?*`, route => route.fulfill({ json: { libs: [], page: 1, page_size: 20, total: 0 } }))
+  await page.route('**/std/pishoo/lib-check', route => { checks++; return checks === 1 ? route.fulfill({ status: 400, body: 'Missing publisher signature volume' }) : route.fulfill({ json: completeJournal() }) })
+  await page.route(`${storeApi}/libs/${fullId}/versions/*`, route => { uploads++; return route.fulfill({ json: release() }) })
+  await page.goto('./apps?tab=store')
+  await page.getByRole('button', { name: 'Upload app', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.locator('input[type=file]').setInputFiles(uploadComponent(false))
+  await dialog.getByRole('button', { name: 'Inspect component' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Missing publisher signature volume')
+  expect(checks).toBe(1)
+  await dialog.locator('input[type=file]').setInputFiles(uploadComponent())
+  await dialog.getByRole('button', { name: 'Inspect component' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('differs from this Workspace')
+  await expect(dialog.getByRole('button', { name: 'Publish version', exact: true })).toBeDisabled()
+  expect(checks).toBe(2)
+  expect(uploads).toBe(0)
+})
+
+test('store upload confirms the package version, keeps a failed upload and retries exact bytes', async ({ page }, testInfo) => {
+  let failed = true, uploads = 0
+  const artifact = uploadComponent()
+  await page.route('**/std/workspace-api/context', route => route.fulfill({ json: {
+    profile: 'alice.smith.dhttp.net', owner_name: 'alice.smith.dhttp.net', badges: { pending_reviews: 0, incoming_contacts: 0 },
+  } }))
+  await page.route(`${storeApi}/libs?*`, route => route.fulfill({ json: { libs: [], page: 1, page_size: 20, total: 0 } }))
+  await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: completeJournal() }))
+  await page.route(`${storeApi}/libs/${fullId}/versions/1.1.0`, async route => {
+    if (route.request().method() === 'PUT') {
+      uploads++
+      expect(route.request().headers()['content-type']).toBe('application/webc')
+      expect(route.request().postDataBuffer()).toEqual(artifact.buffer)
+      if (failed) return route.fulfill({ status: 409, body: 'This version already has different content' })
+    }
+    return route.fulfill({ json: release('1.1.0') })
+  })
+  await page.goto('./apps?tab=store')
+  await page.getByRole('button', { name: 'Upload app', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.locator('input[type=file]').setInputFiles(artifact)
+  await dialog.getByRole('button', { name: 'Inspect component' }).click()
+  await expect(dialog.getByRole('heading', { name: 'Personal journal · v1.1.0' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Publish version', exact: true })).toBeDisabled()
+  await dialog.getByRole('checkbox').check()
+  await page.screenshot({ path: testInfo.outputPath('upload-confirmation.png'), fullPage: true })
+  await dialog.getByRole('button', { name: 'Publish version', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('different content')
+  await expect(dialog.getByRole('checkbox')).toBeChecked()
+  failed = false
+  await dialog.getByRole('button', { name: 'Publish version', exact: true }).click()
+  await expect(page).toHaveURL(/apps\/store\/alice.smith.dhttp.net\/journal\?.*version=1.1.0/)
+  await expect(dialog).not.toBeVisible()
+  expect(uploads).toBe(2)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+})
+
+test('preview folds business APIs, groups page files and enables Open immediately after install', async ({ page }) => {
+  const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(new URL('../../examples/journal/openapi.json', import.meta.url), 'utf8'))
+  const installed: LibSummary = { id: fullId, title: manifest.info.title, version: manifest.info.version, description: manifest.info.description ?? null, openapi: manifest,
+    endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) => Object.entries(methods).map(([method, operation]) => ({ method: method.toUpperCase(), path: `/std/api/${fullId}${path}`, description: operation?.summary ?? null }))),
+  }
+  let live: LibSummary[] = [], disk: LibSummary[] = []
+  await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
+  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
+  await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: installed }))
+  await page.route(`**/std/pishoo/libs/${fullId}`, route => {
+    if (route.request().method() === 'DELETE') { live = []; disk = []; return route.fulfill({ status: 204 }) }
+    live = [installed]; disk = [installed]; return route.fulfill({ json: installed })
+  })
+  await page.goto('./apps')
+  await page.getByRole('button', { name: 'Install from file', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Local component ID').fill(fullId)
+  await dialog.getByLabel('WEBC package file').setInputFiles({ name: 'journal.webc', mimeType: 'application/webc', buffer: Buffer.from('fixture') })
+  await dialog.getByRole('button', { name: 'Inspect component' }).click()
+  const preview = dialog.locator('details.app-preview-interfaces')
+  await expect(preview.locator('.app-operations')).not.toBeVisible()
+  await preview.locator('summary').click()
+  await expect(preview.locator('.app-operations')).toBeVisible()
+  await expect(preview).toContainText('Page resources (3 files)')
+  await expect(preview).not.toContainText('/assets/app.js')
+  await expect(preview).not.toContainText('/assets/app.css')
+  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('button', { name: 'Confirm installation', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  const card = page.locator('.app-card').filter({ hasText: manifest.info.title })
+  await expect(card.getByRole('link', { name: 'Open ↗', exact: true })).toHaveAttribute('href', `/std/api/${fullId}/`)
+  await card.getByRole('button', { name: 'Uninstall', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirm uninstall', exact: true }).click()
+  await expect(card).toHaveCount(0)
 })

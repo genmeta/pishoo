@@ -1,24 +1,8 @@
-//! WASI HTTP denial hook and identity capabilities exposed to WASM guests.
+//! Standard WASI HTTP and verified identity capabilities for WASM guests.
 
-use http::Request;
-use wasmtime_wasi_http::p2::{
-    HttpResult, WasiHttpHooks,
-    bindings::http::types,
-    body::HyperOutgoingBody,
-    types::{HostFutureIncomingResponse, OutgoingRequestConfig},
-};
+use super::StoreData;
 
-use super::{DenyOutgoing, StoreData};
-
-impl WasiHttpHooks for DenyOutgoing {
-    fn send_request(
-        &mut self,
-        _request: Request<HyperOutgoingBody>,
-        _config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
-        Err(types::ErrorCode::HttpRequestDenied.into())
-    }
-}
+mod http;
 
 // Existing identity WIT bindings and capability-checked host operations.
 
@@ -28,6 +12,40 @@ pub(super) mod identity {
         inline: "package pishoo:host; world identity-host { import pishoo:identity/signatures@0.1.0; import pishoo:identity/request-identity@0.1.0; }",
         imports: { default: async },
     });
+}
+
+pub(super) mod identity_v2 {
+    wasmtime::component::bindgen!({
+        path: "../wit/pishoo-identity-v2",
+        inline: "package pishoo:host; world identity-host { import pishoo:identity/request-identity@0.2.0; }",
+        imports: { default: async | trappable },
+    });
+}
+
+impl identity_v2::pishoo::identity::request_identity::Host for StoreData {
+    async fn local(&mut self) -> wasmtime::Result<(String, String)> {
+        let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+            self.local.certificates(),
+        )
+        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+        Ok((
+            self.local.name().to_owned(),
+            ski.owner_hash().as_str().to_owned(),
+        ))
+    }
+
+    async fn caller(&mut self) -> wasmtime::Result<Option<(String, String)>> {
+        let Some(remote) = &self.remote else {
+            return Ok(None);
+        };
+        let ski =
+            dhttp_home::certificate::extract_dhttp_subject_key_identifier(remote.certificates())
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+        Ok(Some((
+            remote.name().to_owned(),
+            ski.owner_hash().as_str().to_owned(),
+        )))
+    }
 }
 
 impl identity::pishoo::identity::request_identity::Host for StoreData {

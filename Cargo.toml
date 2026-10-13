@@ -2,3 +2,6 @@
 resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
+
+[patch.crates-io]
+daccess = { path = "../daccess" }

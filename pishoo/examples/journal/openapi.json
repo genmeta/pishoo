@@ -2,41 +2,45 @@
   "openapi": "3.1.0",
   "info": {
     "title": "手记",
-    "version": "0.1.2",
-    "description": "个人图文手记与具名评论；页面、API、照片和私有 SQLite 存储均由同一个 WASM 提供。"
+    "version": "0.1.0",
+    "description": "记下生活里的小事，留住值得回看的瞬间。用文字和照片写手记，按月份翻阅往日记录，与朋友留言交流。简洁的阅读与写作界面，适合在手机和电脑上随时记录。",
+    "license": {
+      "name": "Apache-2.0"
+    }
   },
   "paths": {
     "/": {
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          },
-          "400": {
-            "description": "输入无效"
-          },
-          "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "手记主页",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
+        },
+        "operationId": "openPage",
+        "summary": "打开手记主页",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/index.html"
         }
       },
       "head": {
         "responses": {
           "200": {
-            "description": "操作成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          },
-          "400": {
-            "description": "输入无效"
-          },
-          "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "无正文的主页响应头"
           }
+        },
+        "operationId": "headPage",
+        "summary": "读取手记主页响应头",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/index.html"
         }
       }
     },
@@ -44,17 +48,50 @@
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Context"
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
+        },
+        "operationId": "readContext",
+        "summary": "读取当前可信身份和主人判断",
+        "x-pishoo": {
+          "access-group": "read"
         }
       }
     },
@@ -62,47 +99,215 @@
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "entries",
+                    "next_offset"
+                  ],
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/EntrySummary"
+                      },
+                      "maxItems": 20
+                    },
+                    "next_offset": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "operationId": "listEntries",
+        "summary": "分页读取记录列表",
+        "x-pishoo": {
+          "access-group": "read"
+        },
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "分页起点",
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 100000
+            }
+          }
+        ]
       },
       "post": {
         "responses": {
           "201": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "供编辑与删除时 If-Match 使用的强版本标签",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "413": {
-            "description": "内容超过限制"
+            "description": "内容超过限制",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "415": {
-            "description": "需要 JSON"
+            "description": "需要 JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "409": {
-            "description": "编号已使用或留言达到上限"
+            "description": "编号已使用或留言达到上限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "createEntry",
+        "summary": "主人发布记录",
+        "parameters": [
+          {
+            "name": "x-journal-write",
+            "in": "header",
+            "required": true,
+            "description": "同源写入标记；不用于身份认证",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEntry"
+              }
+            }
           }
         }
       }
@@ -111,56 +316,247 @@
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "供编辑与删除时 If-Match 使用的强版本标签",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "operationId": "readEntry",
+        "summary": "读取单篇记录",
+        "x-pishoo": {
+          "access-group": "read"
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "记录或留言编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ]
       },
       "put": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Entry"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "供编辑与删除时 If-Match 使用的强版本标签",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "413": {
-            "description": "内容超过限制"
+            "description": "内容超过限制",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "415": {
-            "description": "需要 JSON"
+            "description": "需要 JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "412": {
-            "description": "版本冲突"
+            "description": "版本冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "428": {
-            "description": "缺少 If-Match"
+            "description": "缺少 If-Match",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "updateEntry",
+        "summary": "主人编辑记录",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "记录或留言编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "x-journal-write",
+            "in": "header",
+            "required": true,
+            "description": "同源写入标记；不用于身份认证",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "当前记录的强 ETag",
+            "schema": {
+              "type": "string",
+              "pattern": "^\"[1-9][0-9]*\"$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditEntry"
+              }
+            }
           }
         }
       },
@@ -170,80 +566,344 @@
             "description": "操作成功"
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "412": {
-            "description": "版本冲突"
+            "description": "版本冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "428": {
-            "description": "缺少 If-Match"
+            "description": "缺少 If-Match",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "operationId": "deleteEntry",
+        "summary": "主人删除记录",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "记录或留言编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "x-journal-write",
+            "in": "header",
+            "required": true,
+            "description": "同源写入标记；不用于身份认证",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "当前记录的强 ETag",
+            "schema": {
+              "type": "string",
+              "pattern": "^\"[1-9][0-9]*\"$"
+            }
+          }
+        ]
       }
     },
     "/comments": {
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "comments"
+                  ],
+                  "properties": {
+                    "comments": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Comment"
+                      },
+                      "maxItems": 500
+                    }
+                  }
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "operationId": "listComments",
+        "summary": "读取记录留言和回复",
+        "x-pishoo": {
+          "access-group": "read"
+        },
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "query",
+            "required": true,
+            "description": "手记编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ]
       },
       "post": {
         "responses": {
           "201": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Comment"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "entry_id"
+                      ],
+                      "properties": {
+                        "entry_id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{32}$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "413": {
-            "description": "内容超过限制"
+            "description": "内容超过限制",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "415": {
-            "description": "需要 JSON"
+            "description": "需要 JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "409": {
-            "description": "编号已使用或留言达到上限"
+            "description": "编号已使用或留言达到上限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "addComment",
+        "summary": "具名访客留言或回复",
+        "x-pishoo": {
+          "access-group": "comment"
+        },
+        "parameters": [
+          {
+            "name": "x-journal-write",
+            "in": "header",
+            "required": true,
+            "description": "同源写入标记；不用于身份认证",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewComment"
+              }
+            }
           }
         }
       }
@@ -255,43 +915,553 @@
             "description": "操作成功"
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "operationId": "deleteComment",
+        "summary": "主人删除留言",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "记录或留言编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          },
+          {
+            "name": "x-journal-write",
+            "in": "header",
+            "required": true,
+            "description": "同源写入标记；不用于身份认证",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          }
+        ]
       }
     },
     "/photo": {
       "get": {
         "responses": {
           "200": {
-            "description": "操作成功"
+            "description": "操作成功",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
           },
           "403": {
-            "description": "身份或权限不符"
+            "description": "身份或权限不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "400": {
-            "description": "输入无效"
+            "description": "输入无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "500": {
-            "description": "存储失败或提交结果未确认"
+            "description": "存储失败或提交结果未确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
-            "description": "内容不存在"
+            "description": "内容不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "503": {
-            "description": "数据库忙，请保留输入后重试"
+            "description": "数据库忙，请保留输入后重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "readPhoto",
+        "summary": "读取记录照片",
+        "x-pishoo": {
+          "access-group": "read"
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "记录或留言编号",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            }
+          }
+        ]
+      }
+    },
+    "/assets/app.js": {
+      "get": {
+        "operationId": "readScript",
+        "summary": "读取手记脚本",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/assets/app.js"
+        },
+        "responses": {
+          "200": {
+            "description": "脚本",
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "operationId": "headScript",
+        "summary": "读取手记脚本响应头",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/assets/app.js"
+        },
+        "responses": {
+          "200": {
+            "description": "无正文的响应头"
+          }
+        }
+      }
+    },
+    "/assets/app.css": {
+      "get": {
+        "operationId": "readStyles",
+        "summary": "读取手记样式",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/assets/app.css"
+        },
+        "responses": {
+          "200": {
+            "description": "样式",
+            "content": {
+              "text/css": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "operationId": "headStyles",
+        "summary": "读取手记样式响应头",
+        "x-pishoo": {
+          "access-group": "read",
+          "static-file": "/public/assets/app.css"
+        },
+        "responses": {
+          "200": {
+            "description": "无正文的响应头"
+          }
+        }
+      }
+    }
+  },
+  "x-pishoo": {
+    "publisher": "alice.smith.dhttp.net",
+    "name": "journal",
+    "entry": "/",
+    "changelog": "首次发布：支持图文手记、月份归档、留言与回复，适配手机和电脑，跟随系统切换明暗模式。",
+    "access-groups": {
+      "read": {
+        "title": "阅读",
+        "operations": [
+          "openPage",
+          "headPage",
+          "readContext",
+          "listEntries",
+          "readEntry",
+          "listComments",
+          "readPhoto",
+          "readScript",
+          "headScript",
+          "readStyles",
+          "headStyles"
+        ]
+      },
+      "comment": {
+        "title": "评论",
+        "operations": [
+          "addComment"
+        ]
+      }
+    },
+    "host": {
+      "private-storage": "在本 Lib 私有 /db/journal.db 保存记录、照片、留言和回复，使用 SQLite 事务。",
+      "request-identity": "读取握手验证的主人和来访身份，拒绝匿名访问，限定主人写入并记录可信留言署名。"
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Context": {
+        "type": "object",
+        "required": [
+          "owner_name",
+          "caller_name",
+          "is_owner"
+        ],
+        "properties": {
+          "owner_name": {
+            "type": "string"
+          },
+          "caller_name": {
+            "type": "string"
+          },
+          "is_owner": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Entry": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "body",
+          "created_at",
+          "updated_at",
+          "version",
+          "has_photo"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳，毫秒"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳，毫秒"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "has_photo": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EntrySummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "preview",
+          "created_at",
+          "updated_at",
+          "version",
+          "has_photo",
+          "comment_count"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳，毫秒"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳，毫秒"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "has_photo": {
+            "type": "boolean"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "comment_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "Comment": {
+        "type": "object",
+        "required": [
+          "id",
+          "parent_id",
+          "author",
+          "body",
+          "created_at",
+          "deleted"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "parent_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "author": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳，毫秒"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NewEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "body"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "非空白，UTF-8 最多 64 KiB"
+          },
+          "photo": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^data:image/jpeg;base64,",
+                "description": "JPEG 数据 URL，解码后最多 1 MiB"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "省略时保留原图；null 移除照片"
+          }
+        }
+      },
+      "EditEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "body"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "非空白，UTF-8 最多 64 KiB"
+          },
+          "photo": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^data:image/jpeg;base64,",
+                "description": "JPEG 数据 URL，解码后最多 1 MiB"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "省略时保留原图；null 移除照片"
+          }
+        }
+      },
+      "NewComment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "entry_id",
+          "body"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "entry_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "parent_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "非空白，UTF-8 最多 8 KiB"
           }
         }
       }

@@ -28,7 +28,7 @@ struct Server {
     workspace: Arc<Workspace>,
     chat: Arc<Chat>,
     router: Arc<RwLock<axum::Router>>,
-    sandbox: Sandbox,
+    sandbox: Arc<RwLock<Sandbox>>,
     publisher: Option<Arc<ddns::H3Resolver>>,
     listener: Option<dhttp::ListenFuture>,
 }
@@ -826,11 +826,14 @@ fn current_router(server: &Server) -> Router {
         ))
         .merge(workspace::router(server.workspace.clone()))
         .merge(chat_router(server.chat.clone(), server.workspace.clone()))
-        .merge(server.sandbox.api_router(server.endpoint.clone()))
+        .merge(Sandbox::api_router(
+            server.sandbox.clone(),
+            server.endpoint.clone(),
+        ))
         .merge(crate::sandbox::lib_management_router(
             server.profile.clone(),
             server.endpoint.clone(),
-            server.sandbox.runtime.clone(),
+            server.sandbox.clone(),
         ))
         .merge(file_router(server.profile.join("file")))
         .merge(dhttp_router(server.endpoint.clone()))
@@ -915,7 +918,7 @@ impl Server {
             workspace,
             chat,
             router: Arc::new(RwLock::new(Router::new())),
-            sandbox,
+            sandbox: Arc::new(RwLock::new(sandbox)),
             publisher,
             listener: None,
         };
@@ -987,11 +990,16 @@ impl Server {
     pub(super) async fn close(&mut self) -> Result<()> {
         self.listener.take();
         self.publisher.take();
-        self.sandbox.close();
+        let tasks = {
+            let mut sandbox = self.sandbox.write().unwrap();
+            sandbox.close();
+            sandbox.tasks.clone()
+        };
         *self.router.write().unwrap() = axum::Router::new();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             tokio::join!(self.workspace.shutdown(), self.chat.shutdown());
-            self.sandbox.wait().await
+            tasks.wait().await;
+            Ok(())
         })
         .await
         .map_err(|_| Error::ShutdownDeadline)?

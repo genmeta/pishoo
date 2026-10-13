@@ -224,7 +224,7 @@ async fn failed_ocsp_refresh_preserves_loaded_credentials_and_cache() {
         std::fs::read(server.profile.ocsp_path()).unwrap(),
         b"existing cache"
     );
-    assert!(!server.sandbox.libs.is_empty());
+    assert!(!server.sandbox.read().unwrap().libs.is_empty());
     server.close().await.unwrap();
 }
 
@@ -259,7 +259,11 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
-    std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
+    std::fs::write(
+        profile.join("lib/echo/lib.webc"),
+        crate::sandbox::tests::package_component(&component("1")),
+    )
+    .unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = crate::test_identity::endpoint(profile.name());
     let certificates = endpoint.local_authority().unwrap();
@@ -310,7 +314,7 @@ async fn server(root: &std::path::Path) -> Server {
         workspace,
         chat,
         router: Arc::new(RwLock::new(Router::new())),
-        sandbox,
+        sandbox: Arc::new(RwLock::new(sandbox)),
         publisher: None,
         listener: None,
     };
@@ -434,7 +438,10 @@ async fn close_clears_router_and_execution_resources() {
     let root = tempfile::tempdir().unwrap();
     let mut server = server(root.path()).await;
     server.close().await.unwrap();
-    assert!(server.sandbox.libs.is_empty() && server.sandbox.tasks.is_closed());
+    assert!(
+        server.sandbox.read().unwrap().libs.is_empty()
+            && server.sandbox.read().unwrap().tasks.is_closed()
+    );
     let router = server.router.read().unwrap().clone();
     let response = router
         .oneshot(
@@ -453,11 +460,18 @@ async fn close_clears_router_and_execution_resources() {
 #[tokio::test]
 async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     let root = tempfile::tempdir().unwrap();
-    let mut server = server(root.path()).await;
+    let server = server(root.path()).await;
     let path = server.profile.join("lib");
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
-    assert!(server.sandbox.load_libs(&server.profile).is_err());
+    assert!(
+        server
+            .sandbox
+            .write()
+            .unwrap()
+            .load_libs(&server.profile)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -477,7 +491,7 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
     let profile = IdentityProfile::try_from(root.path().join("disabled")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/lib.wasm"), b"broken").unwrap();
+    std::fs::write(profile.join("lib/broken/lib.webc"), b"broken").unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
     assert!(
@@ -497,8 +511,16 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     let server = server(root.path()).await;
     let name = server.name().to_owned();
     let profile = server.profile.clone();
-    let sandbox_lib = server.sandbox.libs.values().next().unwrap().clone();
-    let runtime = server.sandbox.runtime.clone();
+    let sandbox_lib = server
+        .sandbox
+        .read()
+        .unwrap()
+        .libs
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
     let old_router = server.router.read().unwrap().clone();
     let home = DhttpHome::new(root.path().to_path_buf());
     let mut servers = BTreeMap::from([(name.clone(), server)]);
@@ -522,7 +544,14 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     assert_eq!(servers[&name].config.proxy_locations[0].location, "/live");
     assert!(Arc::ptr_eq(
         &sandbox_lib,
-        servers[&name].sandbox.libs.values().next().unwrap()
+        servers[&name]
+            .sandbox
+            .read()
+            .unwrap()
+            .libs
+            .values()
+            .next()
+            .unwrap()
     ));
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute("UPDATE settings SET listen=99", []).unwrap();
@@ -556,7 +585,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
 async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
     let root = tempfile::tempdir().unwrap();
     let server = server(root.path()).await;
-    let runtime = server.sandbox.runtime.clone();
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
     let mut servers = BTreeMap::from([(server.name().to_owned(), server)]);
     let missing_home = DhttpHome::new(root.path().join("missing"));
     assert!(

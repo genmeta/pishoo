@@ -1,13 +1,16 @@
 //! Pinned online publishing proof and per-request trusted Lib installation.
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dhttp_home::identity::IdentityProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{WasmRuntime, install_lib, validate_lib};
+use super::{Lib, Sandbox, install_lib, package_file, read_package};
 use crate::{Error, Result};
 
 const STORE_NAME: &str = "store.dhttp.net";
@@ -20,7 +23,7 @@ pub(crate) async fn install_store_lib(
     publisher: &str,
     name: &str,
     version: &str,
-    runtime: &WasmRuntime,
+    sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
     let id = format!("{publisher}/{name}");
     super::valid_id(&id)?;
@@ -41,7 +44,7 @@ pub(crate) async fn install_store_lib(
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 2 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
-    let download = format!("{path}/lib.wasm");
+    let download = format!("{path}/lib.webc");
     if metadata["id"] != id
         || metadata["publisher"] != publisher
         || metadata["name"] != name
@@ -61,7 +64,22 @@ pub(crate) async fn install_store_lib(
     verify_release(&bytes, &metadata, publisher, name, version)?;
     // Save via the existing synchronous validator/compiler and atomic commit.
     // The operation stays in this request; disconnect does not imply rollback.
-    tokio::task::block_in_place(|| install_lib(profile, &id, &bytes, runtime))
+    tokio::task::block_in_place(|| {
+        let runtime = sandbox.read().unwrap().runtime.clone();
+        let lib = Lib::load(
+            runtime.clone(),
+            id.clone(),
+            &bytes,
+            &profile.join("db").join(&id),
+        )?;
+        let mut sandbox = sandbox.write().unwrap();
+        if sandbox.tasks.is_closed() {
+            return Err(Error::Denied);
+        }
+        let value = install_lib(profile, &id, &bytes, &runtime)?;
+        sandbox.libs.insert(id, Arc::new(lib));
+        Ok(value)
+    })
 }
 
 async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Result<Vec<u8>> {
@@ -71,8 +89,8 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
             .map_err(|_| Error::BadRequest("invalid store URI".into()))?;
         let owner = dhttp_home::certificate::OwnerHash::try_from(STORE_OWNER)
             .map_err(|_| Error::InvalidIdentity("invalid pinned store identity".into()))?;
-        let content_type = if path.ends_with("/lib.wasm") {
-            "application/wasm"
+        let content_type = if path.ends_with("/lib.webc") {
+            "application/webc"
         } else {
             "application/json"
         };
@@ -154,34 +172,18 @@ fn verify_release(
     {
         return Err(invalid("store package digest or size mismatch"));
     }
-    // validate_lib verifies the signature bytes, position and signer binding.
-    validate_lib(bytes)?;
-    let mut depth = 0;
-    let mut envelope = None;
-    let mut document = None;
-    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-        match payload.map_err(|_| invalid("malformed store component"))? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
-            wasmparser::Payload::CustomSection(section) if depth == 0 => {
-                if section.name() == "pishoo:signature" {
-                    envelope = Some(
-                        serde_json::from_slice::<Value>(section.data())
-                            .map_err(|_| invalid("invalid signature envelope"))?,
-                    );
-                } else if section.name() == "pishoo:openapi" {
-                    document = Some(
-                        serde_json::from_slice::<Value>(section.data())
-                            .map_err(|_| invalid("invalid store manifest"))?,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-    let envelope = envelope.ok_or_else(|| invalid("store component is unsigned"))?;
-    let document = document.ok_or_else(|| invalid("missing store manifest"))?;
+    // Validate the entire signed container, not only the backend atom.
+    let package = read_package(bytes)?;
+    let document: Value =
+        serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
+            .map_err(|_| invalid("invalid package OpenAPI"))?;
+    let (data, _) = package
+        .get_volume("pishoo-signature")
+        .unwrap()
+        .read_file("/signature.json")
+        .unwrap();
+    let envelope: Value =
+        serde_json::from_slice(&data).map_err(|_| invalid("invalid signature envelope"))?;
     if document != metadata["openapi"]
         || document["x-pishoo"]["publisher"] != publisher
         || document["x-pishoo"]["name"] != name

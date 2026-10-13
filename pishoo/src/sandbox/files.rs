@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 
 use dhttp_home::identity::IdentityProfile;
 
-use super::{WasmRuntime, check_lib, lib_metadata, validate_lib};
+use super::{WasmRuntime, check_lib, lib_metadata, package_file, read_package, validate_openapi};
 use crate::{Error, Result};
 
 fn child_dir(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File> {
@@ -118,33 +118,19 @@ fn check_resource_identity(openapi: &oas3::OpenApiV3Spec, id: &str) -> Result<()
 
 fn signed_owner(bytes: &[u8]) -> Result<Option<dhttp_home::certificate::OwnerHash>> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let mut depth = 0;
-    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-        match payload.map_err(|error| Error::InvalidComponent(error.to_string()))? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
-            wasmparser::Payload::CustomSection(section)
-                if depth == 0 && section.name() == "pishoo:signature" =>
-            {
-                validate_lib(bytes)?;
-                let envelope: serde_json::Value = serde_json::from_slice(section.data())
-                    .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-                let certificate = STANDARD
-                    .decode(envelope["certificates"][0].as_str().ok_or_else(|| {
-                        Error::InvalidComponent("missing signer certificate".into())
-                    })?)
-                    .map_err(|_| Error::InvalidComponent("invalid signer certificate".into()))?;
-                let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&[
-                    qtls::CertificateDer::from(certificate),
-                ])
-                .map_err(|_| Error::InvalidComponent("invalid signer owner_hash".into()))?;
-                return Ok(Some(ski.owner_hash().clone()));
-            }
-            _ => {}
-        }
-    }
-    Ok(None)
+    let package = read_package(bytes)?;
+    let volume = package.get_volume("pishoo-signature").unwrap();
+    let (data, _) = volume.read_file("/signature.json").unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&data)
+        .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+    let certificate = STANDARD
+        .decode(envelope["certificates"][0].as_str().unwrap())
+        .map_err(|_| Error::InvalidComponent("invalid signer certificate".into()))?;
+    let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&[
+        qtls::CertificateDer::from(certificate),
+    ])
+    .map_err(|_| Error::InvalidComponent("invalid signer owner_hash".into()))?;
+    Ok(Some(ski.owner_hash().clone()))
 }
 
 fn check_publisher_update(dir: &std::fs::File, id: &str, bytes: &[u8]) -> Result<()> {
@@ -226,7 +212,7 @@ fn component_file(dir: &std::fs::File) -> Result<std::fs::File> {
     let file = std::fs::File::from(
         openat(
             dir,
-            "lib.wasm",
+            "lib.webc",
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -235,7 +221,7 @@ fn component_file(dir: &std::fs::File) -> Result<std::fs::File> {
     if !file.metadata()?.is_file() {
         return Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "lib.wasm must be a regular file",
+            "lib.webc must be a regular file",
         )));
     }
     Ok(file)
@@ -250,7 +236,9 @@ pub(super) fn disk_bytes(root: &std::fs::File, id: &str) -> Result<Vec<u8>> {
         .take(64 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 * 1024 {
-        return Err(Error::InvalidComponent("component exceeds 64 MiB".into()));
+        return Err(Error::InvalidComponent(
+            "WEBC package exceeds 64 MiB".into(),
+        ));
     }
     Ok(bytes)
 }
@@ -270,21 +258,23 @@ pub(crate) fn installed_libs(
             Error::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound => Error::RouteNotFound,
             _ => error,
         })?;
-        let openapi = validate_lib(&bytes)?;
+        let package = read_package(&bytes)?;
+        let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
         check_resource_identity(&openapi, id)?;
         return Ok(lib_metadata(&openapi, Some(id)));
     }
     let mut values = Vec::new();
     for id in disk_ids(&root)? {
         let value = match disk_bytes(&root, &id).and_then(|bytes| {
-            let openapi = validate_lib(&bytes)?;
+            let package = read_package(&bytes)?;
+            let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
             check_resource_identity(&openapi, &id)?;
             Ok(openapi)
         }) {
             Ok(openapi) => lib_metadata(&openapi, Some(&id)),
             Err(Error::InvalidComponent(message)) => serde_json::json!({"id":id,"error":message}),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                serde_json::json!({"id":id,"error":"missing lib.wasm"})
+                serde_json::json!({"id":id,"error":"missing lib.webc"})
             }
             Err(error) => return Err(error),
         };
@@ -432,7 +422,7 @@ pub(crate) fn install_lib(
                 }
                 check_component_target(&current)?;
                 check_publisher_update(&current, id, bytes)?;
-                renameat(&dir, &name, &dir, "lib.wasm").map_err(layout_error)?;
+                renameat(&dir, &name, &dir, "lib.webc").map_err(layout_error)?;
                 dir.sync_all()?;
                 drop(cleanup);
                 break;
@@ -450,7 +440,7 @@ pub(crate) fn install_lib(
                     let _ = cleanup_dir.remove_dir_all(&name);
                 });
                 let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-                write_component(&stage, "lib.wasm", bytes)?;
+                write_component(&stage, "lib.webc", bytes)?;
                 stage.sync_all()?;
                 flock(&root, FlockOperation::Unlock).map_err(std::io::Error::from)?;
                 flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;

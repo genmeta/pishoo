@@ -1,10 +1,22 @@
 # Pishoo Rust SDK
 
-`pishoo-sdk` provides guest bindings for the existing
-`pishoo:identity/request-identity@0.1.0` and
-`pishoo:identity/signatures@0.1.0` interfaces. It directly re-exports the generated
-bindings without introducing identity objects or wrapper functions. The crate
-shares this directory's WIT source with the Pishoo host.
+`pishoo-sdk` exports `identity` for the two-function
+`pishoo:identity/request-identity@0.2.0` interface. The host reads verified
+identity facts directly; the tuple is `(name, owner_hash from certificate SKI)`.
+The old `request_identity` export (@0.1.0) remains available for existing Libs.
+`signatures` keeps its @0.1.0 interface.
+
+```rust
+use pishoo_sdk::identity;
+
+let local: (String, String) = identity::local();
+let caller: Option<(String, String)> = identity::caller();
+let owner = caller.as_ref() == Some(&local);
+```
+
+Both name and hash must match. Anonymous HTTP requests and background runs return
+`None` for caller. Invalid SKI on a named identity traps rather than returning an
+empty hash. Outgoing calls do not change these invocation facts.
 
 The SDK is currently distributed as source and a Cargo `.crate` archive; it has
 not been published to crates.io. In an extracted developer bundle, a Lib under

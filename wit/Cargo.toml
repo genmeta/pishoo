@@ -5,7 +5,7 @@ edition = "2024"
 description = "Guest bindings for Pishoo WASM identity interfaces"
 license = "Apache-2.0"
 readme = "README.md"
-include = ["src/pishoo_sdk.rs", "pishoo-identity/*.wit", "README.md", "Cargo.lock", "LICENSE"]
+include = ["src/pishoo_sdk.rs", "pishoo-identity/*.wit", "pishoo-identity-v2/*.wit", "README.md", "Cargo.lock", "LICENSE"]
 
 [workspace]
 
