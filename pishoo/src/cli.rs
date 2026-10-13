@@ -21,6 +21,8 @@ Usage:
   pishoo <command> [arguments] [--id NAME]
 
 Configuration:
+  enable                      Enable this identity
+  disable                     Disable this identity; preserve its listening scope
   listen [SCOPE]               Show or update the saved listening scope
   proxy [LOCATION [TARGET]]    List, inspect, or update proxy rules
   proxy remove|rm LOCATION     Remove a proxy rule
@@ -53,7 +55,8 @@ The default identity is read from settings.toml [default].name in DHTTP_HOME
 (default: ~/.dhttp). Service commands and lib check do not accept --id.
 
 With no command, Pishoo runs all identities in the foreground.
-Resource changes are saved to disk and take effect after restarting Pishoo.
+Configuration changes are saved to disk and picked up by a running Pishoo automatically.
+Offline Lib changes take effect after restarting Pishoo.
 Queries are written to stdout; context and status messages to stderr."
         );
         return Ok(());
@@ -112,6 +115,7 @@ Queries are written to stdout; context and status messages to stderr."
         None
     };
     match command.as_str() {
+        "enable" | "disable" if args.is_empty() => {}
         "listen" if args.len() <= 1 => {
             if let Some(value) = args.first() {
                 listen_value(value)?;
@@ -173,9 +177,20 @@ Queries are written to stdout; context and status messages to stderr."
         mdns.shutdown().await.map_err(std::io::Error::other)?;
         return result;
     }
+    let live_config = matches!(command.as_str(), "enable" | "disable" | "listen" | "proxy");
     let args = args.to_vec();
     let (value, saving) = tokio::task::spawn_blocking(move || -> Result<_> {
         match command.as_str() {
+            "enable" | "disable" => {
+                let value = config_database(
+                    &profile,
+                    &Method::PATCH,
+                    &Uri::from_static("/std/pishoo/settings"),
+                    Some(json!({"enabled": command == "enable"})),
+                )?;
+                println!("Enabled:    {}", value["enabled"]);
+                Ok((None, true))
+            }
             "listen" => {
                 let payload = args
                     .first()
@@ -190,6 +205,7 @@ Queries are written to stdout; context and status messages to stderr."
                     payload,
                 )?;
                 let listen = value["listen"].as_u64().unwrap();
+                println!("Enabled:    {}", value["enabled"]);
                 println!(
                     "Listen:     {} ({listen})",
                     ["off", "internal", "external", "both"][listen as usize]
@@ -233,7 +249,13 @@ Queries are written to stdout; context and status messages to stderr."
         print_json(&value)?;
     }
     if saving {
-        eprintln!("Status:     Saved to disk. Restart Pishoo to apply changes.");
+        if live_config {
+            eprintln!(
+                "Status:     Saved to disk. A running Pishoo applies configuration automatically; check its logs for activation errors."
+            );
+        } else {
+            eprintln!("Status:     Saved to disk. Restart Pishoo to apply changes.");
+        }
     }
     Ok(())
 }

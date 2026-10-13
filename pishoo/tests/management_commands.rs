@@ -27,7 +27,7 @@ fn initialize(home: &Path, name: &str) {
     std::fs::create_dir_all(dir.join("db")).unwrap();
     std::fs::create_dir(dir.join("lib")).unwrap();
     let db = rusqlite::Connection::open(dir.join("db/config.db")).unwrap();
-    db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
+    db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
 }
 fn component() -> Vec<u8> {
     let mut bytes = include_bytes!("fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
@@ -218,4 +218,39 @@ fn service_commands_use_the_installed_manager_without_shell_or_escalation() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(!root.path().join("logs").exists());
+}
+
+#[test]
+fn enable_disable_commands_preserve_scope_and_report_saved_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    initialize(root.path(), "alice");
+    success(root.path(), &["listen", "--id", "alice", "external"]);
+    let db = rusqlite::Connection::open(root.path().join("alice/db/config.db")).unwrap();
+    for command in ["disable", "disable", "enable", "enable"] {
+        let output = success(root.path(), &[command, "--id", "alice"]);
+        let (listen, enabled) = db
+            .query_row("SELECT listen, enabled FROM settings", [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+            })
+            .unwrap();
+        assert_eq!(listen, 2);
+        assert_eq!(enabled, command == "enable");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("applies configuration automatically")
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Restart Pishoo"));
+        assert!(!root.path().join("alice/db/chat.db").exists());
+    }
+    assert_eq!(
+        run(root.path(), &["enable", "extra", "--id", "alice"])
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(root.path(), &["disable", "extra", "--id", "alice"])
+            .status
+            .code(),
+        Some(2)
+    );
 }

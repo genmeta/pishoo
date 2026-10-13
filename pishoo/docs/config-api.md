@@ -6,7 +6,7 @@
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/std/pishoo/settings` | GET | 读取数据库中的 listen | 设置对象 |
+| `/std/pishoo/settings` | GET | 读取数据库中的 enabled/listen | 设置对象 |
 | `/std/pishoo/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
 | `/std/pishoo/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
 | `/std/pishoo/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
@@ -16,10 +16,10 @@
 设置对象示例：
 
 ```json
-{"listen": 3}
+{"enabled": true, "listen": 3}
 ```
 
-`listen` 仅接受整数 0、1、2、3，依次表示关闭、内网、外网、两者。宿主命令 exec 已移除；新库的 settings 只含 listen，已有库的旧 exec 列保留但不读取或更新，PATCH 提交 exec 字段返回400。PATCH 省略的字段保持原值；并发更新通过 SQLite 即时事务串行执行，避免丢失其他字段的更新。
+`enabled` 仅接受 JSON 布尔值，控制是否加载整个 Server；disable 保留 listen 和代理配置。`listen` 仅接受整数 0、1、2、3，依次表示关闭、内网、外网、两者。宿主命令 exec 已移除；新库的 settings 含 enabled 和 listen，已有库的旧 exec 列保留但不读取或更新，PATCH 提交 exec 字段返回400。PATCH 省略的字段保持原值；并发更新通过 SQLite 即时事务串行执行，避免丢失其他字段的更新。
 
 代理规则数组示例：
 
@@ -31,7 +31,7 @@
 
 每条规则必须且只能包含字符串字段 `location`、`proxy_pass`。沿用路径、重复规则和回环 HTTP/TCP 上游校验。`location` 是唯一键，不增加数据库 ID。`= /path` 表示精确匹配，其余位置按路径段前缀匹配。仅 `/std` 根及子路径是系统保留路径，禁止显式代理 location 占用，包含 `/std/file` 和 `/std/api`，没有例外；`/std-extra` 等无关名称可代理。
 
-系统静态文件使用 `/std/file/*`，磁盘仍为身份目录 `file/`。旧 `/file` 和 `/api/*` 使用普通代理，与加载 Lib 无关；HA 可以配置 `/` 或 `/api` 代理，OpenCode 可以配置 `/file` 代理。Lib 执行入口为 `/std/api/<LibId>`，未声明操作404、方法不匹配405，未注册系统路径也不回退上游。配置与 Lib 变化仍需重启。旧系统路径不提供兼容别名或重定向，已有 ACL 不自动改写，详见 [系统路径迁移](system-paths.md)。
+系统静态文件使用 `/std/file/*`，磁盘仍为身份目录 `file/`。旧 `/file` 和 `/api/*` 使用普通代理，与加载 Lib 无关；HA 可以配置 `/` 或 `/api` 代理，OpenCode 可以配置 `/file` 代理。Lib 执行入口为 `/std/api/<LibId>`，未声明操作404、方法不匹配405，未注册系统路径也不回退上游。配置变化由运行进程自动应用；离线 Lib 文件变化仍需重启。旧系统路径不提供兼容别名或重定向，已有 ACL 不自动改写，详见 [系统路径迁移](system-paths.md)。
 
 裸上游地址规范化为 `http://` URI。未写路径的 `http://127.0.0.1:8080` 保留原请求路径；显式路径 `/` 或 `/api/` 替换匹配前缀，两者不会在读写中合并。
 
@@ -51,7 +51,7 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 ## 生效规则与 H3 调用
 
-成功写入表示数据库已保存。GET 展示数据库配置；正在运行的配置不会自动更新。代理和 listen 变更均需重启生效；不提供 SIGHUP 重载。
+成功写入表示期望配置已保存，GET 展示数据库配置。运行进程每秒扫描并串行应用 enabled、listen 和代理配置，新身份目录也自动发现；不提供 SIGHUP 重载。扫描等待当前 DNS/OCSP 批结束，身份加载、编译及关闭也可能增加生效延迟；接口不承诺一秒内完成。生效和失败在服务日志中记录。详见 [运行时生命周期](server-lifecycle.md)。
 
 使用原生 H3 示例客户端；设置 DHTTP_HOME 指向客户端身份目录，并以目标身份的同名凭据连接：
 
@@ -63,7 +63,7 @@ cargo run --locked -p pishoo --example pishoo-client -- put /std/pishoo/proxies 
 cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 ```
 
-接口随身份服务启动提供。配置修改保存到磁盘后，需重启服务生效。
+接口随身份监听提供。禁用 Server 或 listen=0 后该身份的 HTTP 管理入口不可达，使用本机 `pishoo enable --id NAME` 或 `pishoo listen --id NAME internal` 恢复相应能力。
 
 ## 启动初始化与数据库兼容
 
@@ -73,7 +73,7 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
-| config.db | schema v1；settings 一行 listen=3（内外网均监听）；代理为空 | 校验版本、配置和值；不补默认设置 |
+| config.db | schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
 | access.db | 由 daccess 建库，并写入 POST /std/contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | workspace.db | schema8；默认资料一行；联系人投递、收藏和能力决定为空 | 只接受当前版本及必要表结构；资料和队列保留 |
 | chat.db | schema4；会话、消息、投递作业和授权观察为空 | 只接受当前版本及必要表结构；历史数据保留 |
@@ -89,3 +89,9 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 四库独立初始化，不建立跨库事务或初始化标记表；全部加载成功后才注册监听。某库失败可使本次启动结束，已完成的库在下次启动被正常复用。升级失败不自动删库、重置授权或回退版本。
 
 磁盘 Lib 管理与离线命令见[管理命令与 API](management.md)。本机资源命令不启动 Server，也不自动重启。
+
+### enabled 的 v1 兼容
+
+不增加 schema v2。GET 只读兼容缺少 enabled 列的有效 v1：旧 listen=0 返回 enabled=false/listen=3，旧 1/2/3 返回 enabled=true并保留范围；旧0未保存之前的范围，因此启用默认 both。首次正常加载或配置写入在 SQLite 即时事务中完整验证并补 enabled 列，保留代理、旧 exec 列及其他数据。无效版本、损坏配置或写入失败不提交补列。已有 enabled 列严格校验为整数0/1；enabled=true/listen=0仍可运行出站 worker，enabled=false则不加载 Server。
+
+旧版 gmutils 的 ensite/dissite 仍只写 listen，不能操作新增的完整 Server 开关；本版使用 Pishoo 的 enable/disable CLI 或 settings API。gmutils 适配需要使用同一 enabled 语义。

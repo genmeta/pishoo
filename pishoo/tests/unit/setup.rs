@@ -118,7 +118,8 @@ fn config_requires_one_row_and_local_http_upstreams() {
             .unwrap();
     }
     db.execute("DELETE FROM proxy_locations", []).unwrap();
-    db.execute("INSERT INTO settings VALUES(1)", []).unwrap();
+    db.execute("INSERT INTO settings(listen) VALUES(1)", [])
+        .unwrap();
     assert!(load_server_config(&profile).is_err());
 }
 #[test]
@@ -225,11 +226,11 @@ fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
     assert_eq!(saved[1]["proxy_pass"], "http://127.0.0.1:8080/");
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"listen":1})
+        json!({"enabled":true,"listen":1})
     );
     assert_eq!(
         config_database(&profile, true, Some(json!({"listen":3}))).unwrap(),
-        json!({"listen":3})
+        json!({"enabled":true,"listen":3})
     );
     assert_eq!(config_database(&profile, false, None).unwrap(), saved);
     assert_eq!(
@@ -269,7 +270,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         ));
         assert_eq!(
             config_database(&profile, true, None).unwrap(),
-            json!({"listen":1})
+            json!({"enabled":true,"listen":1})
         );
     }
     for payload in [
@@ -378,7 +379,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
                 .unwrap()
         )
         .unwrap(),
-        json!({"listen":1})
+        json!({"enabled":true,"listen":1})
     );
     for (versions, expected) in [
         ("v2, v1", StatusCode::OK),
@@ -460,7 +461,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     }
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"listen":1})
+        json!({"enabled":true,"listen":1})
     );
 }
 
@@ -674,4 +675,85 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[test]
+fn enabled_is_independent_of_listen_and_legacy_v1_upgrades_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch("ALTER TABLE settings ADD COLUMN exec INTEGER DEFAULT 7; INSERT INTO proxy_locations VALUES('/keep', '127.0.0.1:8080');").unwrap();
+    for scope in [1, 2, 3] {
+        config_database(&profile, true, Some(json!({"listen":scope}))).unwrap();
+        for enabled in [false, false, true, true] {
+            assert_eq!(
+                config_database(&profile, true, Some(json!({"enabled":enabled}))).unwrap(),
+                json!({"enabled":enabled,"listen":scope})
+            );
+        }
+    }
+    assert_eq!(
+        db.query_row("SELECT exec FROM settings", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        config_database(&profile, false, None)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        config_database(&profile, true, Some(json!({"enabled":true,"listen":0}))).unwrap(),
+        json!({"enabled":true,"listen":0})
+    );
+    for value in [Value::Null, json!(0), json!(1), json!("true"), json!([])] {
+        assert!(matches!(
+            config_database(&profile, true, Some(json!({"enabled":value}))),
+            Err(Error::BadRequest(_))
+        ));
+    }
+    assert_eq!(
+        config_database(&profile, true, None).unwrap(),
+        json!({"enabled":true,"listen":0})
+    );
+}
+
+#[test]
+fn legacy_disabled_v1_maps_to_disabled_with_default_scope_without_a_read_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute("UPDATE settings SET listen=0", []).unwrap();
+    assert_eq!(
+        config_database(&profile, true, None).unwrap(),
+        json!({"enabled":false,"listen":3})
+    );
+    assert!(!has_enabled_column(&db).unwrap());
+    assert_eq!(
+        db.query_row("SELECT listen FROM settings", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        config_database(&profile, true, Some(json!({"enabled":true}))).unwrap(),
+        json!({"enabled":true,"listen":3})
+    );
+    assert!(has_enabled_column(&db).unwrap());
+}
+
+#[test]
+fn invalid_legacy_v1_is_not_modified_by_enabled_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute("INSERT INTO settings(listen) VALUES(1)", [])
+        .unwrap();
+    assert!(config_database(&profile, true, Some(json!({"enabled":false}))).is_err());
+    assert!(!has_enabled_column(&db).unwrap());
+    assert!(load_server_config(&profile).is_err());
+    assert!(!has_enabled_column(&db).unwrap());
 }
