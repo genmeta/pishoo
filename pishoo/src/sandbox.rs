@@ -18,10 +18,12 @@ mod files;
 mod host;
 mod manifest;
 mod runtime;
+mod store;
 
 use files::{disk_bytes, disk_ids, lib_root, valid_id};
 pub(crate) use files::{install_lib, installed_libs, remove_lib};
 pub use manifest::validate_lib;
+pub(crate) use store::install_store_lib;
 
 pub(crate) struct Sandbox {
     pub(crate) libs: HashMap<String, Arc<Lib>>,
@@ -29,7 +31,7 @@ pub(crate) struct Sandbox {
     pub(crate) tasks: TaskTracker,
 }
 
-pub(crate) struct WasmRuntime {
+pub struct WasmRuntime {
     engine: Engine,
     linker: Linker<StoreData>,
 }
@@ -137,9 +139,22 @@ impl Sandbox {
                         .path()
                         .strip_prefix("/std/api/")
                         .ok_or(Error::RouteNotFound)?;
-                    let (id, suffix) = tail
-                        .split_once('/')
-                        .map_or((tail, "/".to_string()), |(id, p)| (id, format!("/{p}")));
+                    let id = libs
+                        .keys()
+                        .find(|id| {
+                            tail == id.as_str()
+                                || tail
+                                    .strip_prefix(id.as_str())
+                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
+                        .ok_or(Error::RouteNotFound)?;
+                    let suffix = tail.strip_prefix(id.as_str()).unwrap();
+                    let at_root = suffix.is_empty();
+                    let suffix = if at_root {
+                        "/".to_string()
+                    } else {
+                        suffix.to_string()
+                    };
                     let lib = libs.get(id).ok_or(Error::RouteNotFound)?.clone();
                     let item = lib
                         .openapi
@@ -156,7 +171,7 @@ impl Sandbox {
                     }
                     // Canonicalize only declared page roots so browser-relative
                     // URLs stay inside this Lib's mount, regardless of its name.
-                    if !tail.contains('/')
+                    if at_root
                         && (request.method() == http::Method::GET
                             || request.method() == http::Method::HEAD)
                     {
@@ -292,7 +307,7 @@ fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::
             .cmp(&b["path"].as_str())
             .then_with(|| a["method"].as_str().cmp(&b["method"].as_str()))
     });
-    let mut value = serde_json::json!({"title":openapi.info.title, "version":openapi.info.version, "description":openapi.info.description, "endpoints":endpoints});
+    let mut value = serde_json::json!({"title":openapi.info.title, "version":openapi.info.version, "description":openapi.info.description, "endpoints":endpoints, "openapi":openapi});
     if let Some(id) = id {
         value["id"] = id.into();
     }
@@ -343,7 +358,9 @@ pub(crate) fn lib_management_router(
     axum::Router::new()
         .route("/std/pishoo/libs", any(handler.clone()))
         .route("/std/pishoo/libs/{id}", any(handler.clone()))
-        .route("/std/pishoo/lib-check", any(handler))
+        .route("/std/pishoo/libs/{publisher}/{name}", any(handler.clone()))
+        .route("/std/pishoo/lib-check", any(handler.clone()))
+        .route("/std/pishoo/store-install", any(handler))
 }
 
 async fn lib_management_request(
@@ -381,28 +398,37 @@ async fn lib_management_request(
     }
     let path = request.uri().path();
     let checking = path == "/std/pishoo/lib-check";
+    let store_install = path == "/std/pishoo/store-install";
     let id = path
         .strip_prefix("/std/pishoo/libs/")
         .map(|id| {
-            percent_encoding::percent_decode_str(id)
-                .decode_utf8()
-                .map(|s| s.into_owned())
-                .map_err(|_| Error::BadRequest("invalid id encoding".into()))
+            id.split('/')
+                .map(|part| {
+                    let part = percent_encoding::percent_decode_str(part)
+                        .decode_utf8()
+                        .map_err(|_| Error::BadRequest("invalid id encoding".into()))?;
+                    if part.contains('/') {
+                        return Err(Error::BadRequest("encoded path separator in Lib ID".into()));
+                    }
+                    Ok(part.into_owned())
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(|parts| parts.join("/"))
         })
         .transpose()?;
     if let Some(id) = &id {
         valid_id(id)?;
     }
     let method = request.method().clone();
-    let allow = if checking {
+    let allow = if checking || store_install {
         "POST"
     } else if id.is_none() {
         "GET"
     } else {
         "GET, PUT, DELETE"
     };
-    if !(checking && method == Method::POST
-        || !checking && method == Method::GET
+    if !((checking || store_install) && method == Method::POST
+        || !checking && !store_install && method == Method::GET
         || id.is_some() && (method == Method::PUT || method == Method::DELETE))
     {
         return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response());
@@ -410,22 +436,43 @@ async fn lib_management_request(
     if request.uri().query().is_some() {
         return Err(Error::BadRequest("unsupported query parameters".into()));
     }
-    let writing = method == Method::PUT || checking;
+    let writing = method == Method::PUT || checking || store_install;
     if writing
         && !request
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/wasm"))
+            .is_some_and(|v| {
+                v.trim().eq_ignore_ascii_case(if store_install {
+                    "application/json"
+                } else {
+                    "application/wasm"
+                })
+            })
     {
         return Ok(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
     }
-    let bytes = match axum::body::to_bytes(
-        request.into_body(),
-        if writing { 64 * 1024 * 1024 } else { 0 },
+    if request.headers().contains_key(header::TRAILER) {
+        return Err(Error::BadRequest(
+            "Lib management trailers are unsupported".into(),
+        ));
+    }
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(if store_install { 15 } else { 120 }),
+        axum::body::to_bytes(
+            request.into_body(),
+            if store_install {
+                4096
+            } else if writing {
+                64 * 1024 * 1024
+            } else {
+                0
+            },
+        ),
     )
     .await
+    .map_err(|_| Error::Deadline)?
     {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -444,6 +491,31 @@ async fn lib_management_request(
             return Err(Error::BadRequest("failed to read component body".into()));
         }
     };
+    if store_install {
+        let input: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::BadRequest("invalid store installation JSON".into()))?;
+        if input.as_object().is_none_or(|value| value.len() != 3) {
+            return Err(Error::BadRequest(
+                "store installation requires only publisher, name and version".into(),
+            ));
+        }
+        let text = |key: &str| {
+            input
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::BadRequest(format!("missing {key}")))
+        };
+        let value = install_store_lib(
+            &profile,
+            &endpoint,
+            text("publisher")?,
+            text("name")?,
+            text("version")?,
+            &runtime,
+        )
+        .await?;
+        return Ok(axum::Json(value).into_response());
+    }
     let value = tokio::task::spawn_blocking(move || {
         if checking {
             return check_lib(&bytes, &runtime).map(|api| lib_metadata(&api, None));

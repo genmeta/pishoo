@@ -287,9 +287,9 @@ export default function ContactsPage(props: {
         </div>
       </header>
 
-      <div class="contact-category-filters" role="group" aria-label={t('contacts.category.label')}>
+      <div class="section-nav" role="group" aria-label={t('contacts.category.label')}>
         <For each={CONTACT_CATEGORIES}>{(item) =>
-          <button class="button button-secondary" type="button"
+          <button type="button"
             classList={{ active: category() === item }} aria-pressed={category() === item}
             aria-label={`${t(CATEGORY_LABEL_KEYS[item])} ${categoryCount(item)}`}
             onClick={() => changeCategory(item)}>
@@ -319,6 +319,7 @@ export default function ContactsPage(props: {
           <label>
             <span class="sr-only">{t('contacts.sortBy')}</span>
             <select
+              class="view-select"
               value={sort()}
               onChange={(event) => {
                 setSort(event.currentTarget.value)
@@ -335,6 +336,7 @@ export default function ContactsPage(props: {
           <label>
             <span class="sr-only">{t('contacts.sortDirection')}</span>
             <select
+              class="view-select"
               value={order()}
               onChange={(event) => {
                 setOrder(event.currentTarget.value)

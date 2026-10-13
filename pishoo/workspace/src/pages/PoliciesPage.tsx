@@ -185,26 +185,11 @@ export default function PoliciesPage(props: {
         </div>
       </header>
       <div class="toolbar">
-        <div class="segmented" role="tablist" aria-label={t('policies.organization')}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view() === 'api'}
-            classList={{ active: view() === 'api' }}
-            onClick={() => changeView('api')}
-          >
-            {t('policies.byApi')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view() === 'grantee'}
-            classList={{ active: view() === 'grantee' }}
-            onClick={() => changeView('grantee')}
-          >
-            {t('policies.byGrantee')}
-          </button>
-        </div>
+        <select class="view-select" aria-label={t('policies.organization')}
+          value={view()} onChange={(event) => changeView(event.currentTarget.value === 'api' ? 'api' : 'grantee')}>
+          <option value="api">{t('policies.byApi')}</option>
+          <option value="grantee">{t('policies.byGrantee')}</option>
+        </select>
         <span class="toolbar-meta">{t('policies.explicitCount', { count: rows().length })}</span>
       </div>
 

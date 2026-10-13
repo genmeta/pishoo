@@ -67,8 +67,10 @@ PATCH 设置请求体示例：
 ## Lib 安装与数据
 
 组件位于 `<身份目录>/lib/<LibId>/lib.wasm`，私有数据位于
-`<身份目录>/db/<LibId>/`。LibId 长度为 1～63 字节，以小写 ASCII 字母开头，
-后续可使用小写字母、数字和连字符。
+`<身份目录>/db/<LibId>/`。LibId 可以是旧短名，也可以是 `<publisher>/<name>`。
+name 长度为 1～63 字节，以小写 ASCII 字母开头，后续可使用小写字母、数字和连字符；
+publisher 必须是规范化完整 DHTTP 名称。完整 ID 使用两层目录和两段管理/API 路径，
+不自动迁移旧短名的组件、数据或规则。
 
 安装前校验组件及其 OpenAPI 清单。安装成功表示磁盘文件已保存，需重启后加载。
 删除 Lib 保留其数据目录与 ACL 规则；重复删除不存在的 Lib 仍成功。
@@ -78,6 +80,17 @@ JSON 写请求使用 `Content-Type: application/json`，最大 64 KiB；
 组件上传和校验使用 `Content-Type: application/wasm`，最大 64 MiB。
 写请求成功返回 200 和 JSON，删除返回 204。
 请求中断时应查询资源确认结果，再决定是否重试。
+
+商店安装使用 `POST /std/pishoo/store-install`，请求为
+`{"publisher":"alice.smith.dhttp.net","name":"note","version":"1.2.0"}`，
+`Content-Type: application/json`，最多 4 KiB，接收期限 15 秒。
+入口在 daccess 后复核同名同 owner；宿主从固定的 `store.dhttp.net` 下载精确版本，
+在发送前及响应时核对部署 owner_hash，并核验完整包摘要、大小、原始 OpenAPI、
+发布者证书、签名和本机编译兼容性。下载不跟随第三方跳转，每个远端读取期限 120 秒。
+已有有效签名完整 ID 的更新须保持 publisher owner_hash；证书轮换可用相同 owner。
+成功返回既有磁盘目录条目，不运行 guest、不设置访问规则，仍需重启生效。
+版本下架、签名或摘要不匹配时停止安装；保存结果未知时读取磁盘详情核实。
+原始文件 PUT 不产生商店在线来源证明；旧无签名组件保持兼容，带签名组件校验内容完整性。
 
 ## 服务管理
 

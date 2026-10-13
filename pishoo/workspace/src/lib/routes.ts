@@ -1,7 +1,7 @@
 export type WorkspacePage =
   | 'home' | 'contacts' | 'contact-new' | 'contact-requests'
   | 'chat'
-  | 'extensions' | 'apps' | 'approvals' | 'profile'
+  | 'extensions' | 'apps' | 'app-detail' | 'approvals' | 'profile'
   | 'access' | 'capabilities' | 'not-found'
 
 export interface WorkspaceRoute {
@@ -19,10 +19,14 @@ export function routeFromPath(pathname: string): WorkspaceRoute {
     case '/std/workspace/extensions': return { page: 'extensions' }
     case '/std/workspace/apps': return { page: 'apps' }
     case '/std/workspace/approvals': return { page: 'approvals' }
+    case '/std/workspace/settings/approvals': return { page: 'approvals' }
     case '/std/workspace/settings/profile': return { page: 'profile' }
     case '/std/workspace/settings/access': return { page: 'access' }
     case '/std/workspace/settings/capabilities': return { page: 'capabilities' }
   }
+
+  // Resource validation belongs to the detail page; malformed IDs never become API requests.
+  if (path.startsWith('/std/workspace/apps/')) return { page: 'app-detail' }
 
   const chatMatch = /^\/std\/workspace\/contacts\/([^/]+)\/chat$/.exec(path)
   const match = chatMatch ?? /^\/std\/workspace\/contacts\/(?:requests\/)?([^/]+)$/.exec(path)

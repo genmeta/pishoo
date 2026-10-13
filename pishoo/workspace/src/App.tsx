@@ -27,14 +27,14 @@ type NavItem = { page: WorkspacePage; href: string; label: MessageKey }
 
 const SETTINGS_NAV: NavItem[] = [
   { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.profile' },
-  { page: 'capabilities', href: '/std/workspace/settings/capabilities', label: 'nav.capabilities' },
   { page: 'access', href: '/std/workspace/settings/access', label: 'nav.policies' },
+  { page: 'capabilities', href: '/std/workspace/settings/capabilities', label: 'nav.capabilities' },
 ]
 
 const PAGE_TITLES: Record<WorkspacePage, MessageKey> = {
   home: 'home.title', contacts: 'nav.contacts', 'contact-new': 'nav.contactNew',
   'contact-requests': 'nav.contactRequests', extensions: 'nav.extensions', apps: 'nav.apps',
-  chat: 'chat.title', approvals: 'nav.reviews', profile: 'nav.profile',
+  chat: 'chat.title', 'app-detail': 'nav.apps', approvals: 'nav.reviews', profile: 'nav.profile',
   access: 'nav.policies', capabilities: 'nav.capabilities', 'not-found': 'page.notFound',
 }
 
@@ -42,6 +42,7 @@ function primaryPage(page: WorkspacePage): WorkspacePage {
   if (page === 'contacts' || page === 'contact-new' || page === 'contact-requests') return 'contacts'
   if (page === 'chat') return 'contacts'
   if (page === 'profile' || page === 'access' || page === 'capabilities') return 'profile'
+  if (page === 'app-detail') return 'apps'
   return page
 }
 
@@ -65,7 +66,7 @@ export default function App() {
   const navigate = (next: string) => {
     if (next === currentPath()) return
     window.history.pushState({}, '', next)
-    setPathname(currentPath())
+    window.dispatchEvent(new PopStateEvent('popstate'))
     window.scrollTo(0, 0)
   }
 
@@ -148,7 +149,7 @@ export default function App() {
               ownerName={ownerName()} refresh={() => void profileActions.refetch()}
               onSaved={(value: ProfileSettings) => profileActions.mutate(value)} notify={notify} />
           </Match>
-          <Match when={route().page === 'apps'}><AppsPage /></Match>
+          <Match when={route().page === 'apps' || route().page === 'app-detail'}><AppsPage /></Match>
           <Match when={route().page === 'extensions'}>
             <header class="page-header"><h1>{t(PAGE_TITLES[route().page])}</h1></header>
             <section class="overview-panel placeholder-panel" role="status">
