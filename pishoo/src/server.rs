@@ -30,6 +30,7 @@ struct Server {
     router: Arc<RwLock<axum::Router>>,
     sandbox: Sandbox,
     publisher: Option<Arc<ddns::H3Resolver>>,
+    listener: Option<dhttp::ListenFuture>,
 }
 
 fn ocsp_ticks() -> tokio::time::Interval {
@@ -58,10 +59,15 @@ pub async fn run() -> Result<()> {
                 servers.insert(server.name().to_owned(), server);
             }
         }
-        for server in servers.values().filter(|s| s.config.listen != 0) {
-            tokio::spawn(server.listen().await?);
+        for server in servers.values_mut().filter(|s| s.config.listen != 0) {
+            server.listener = Some(server.listen().await?);
             tracing::trace!(endpoint = server.name(), listen = server.config.listen, "Pishoo listener ready");
         }
+        let mut config_ticks = tokio::time::interval_at(
+            Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        config_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut ocsp_ticks = ocsp_ticks();
         let mut ocsp_updates = FuturesUnordered::new();
         let interrupt = tokio::signal::ctrl_c();
@@ -94,6 +100,14 @@ pub async fn run() -> Result<()> {
                     result = jobs.next(), if !jobs.is_empty() => {
                         if let Some(Some(due)) = result {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
+                        }
+                    }
+                    _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
+                        match reconcile_profiles(&home, &mut servers, runtime.clone()).await {
+                            Ok(true) => break,
+                            Ok(false) => {},
+                            Err(error) => tracing::warn!(%error,
+                                "Server discovery failed; retaining active identities"),
                         }
                     }
                     _ = ocsp_ticks.tick(), if ocsp_updates.is_empty() => {
@@ -158,7 +172,36 @@ async fn load_profile(
     runtime: Arc<WasmRuntime>,
 ) -> Result<Option<Server>> {
     let name = profile.name().to_owned();
+    // An explicitly disabled identity needs no credentials, WASM or background workers.
+    if profile.config_db_path().try_exists()? {
+        match crate::setup::config_database(
+            &profile,
+            &http::Method::GET,
+            &http::Uri::from_static("/std/pishoo/settings"),
+            None,
+        ) {
+            Ok(settings) if settings["enabled"] == false => return Ok(None),
+            Ok(_) => {}
+            Err(error) => {
+                // Preserve startup recovery of a genuinely empty database, but do not
+                // initialize it before validating this identity's credentials.
+                let empty = profile.config_db_path().symlink_metadata()?.file_type().is_file()
+                    && rusqlite::Connection::open_with_flags(profile.config_db_path(),
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .ok().is_some_and(|conn| conn.query_row(
+                            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
+                            [], |row| row.get::<_, bool>(0)).unwrap_or(false));
+                if !empty {
+                    return Err(error);
+                }
+            }
+        }
+    }
     match Server::load(profile, runtime).await {
+        Ok(mut server) if !server.config.enabled => {
+            server.close().await?;
+            Ok(None)
+        }
         Ok(server) => Ok(Some(server)),
         Err(error @ Error::InvalidIdentity(_)) => {
             tracing::warn!(identity = %name, %error, "skipping identity");
@@ -166,6 +209,147 @@ async fn load_profile(
         }
         Err(error) => Err(error),
     }
+}
+
+// Reconcile each identity serially; a failed discovery never removes active resources.
+async fn reconcile_profiles(
+    home: &DhttpHome,
+    servers: &mut BTreeMap<String, Server>,
+    runtime: Arc<WasmRuntime>,
+) -> Result<bool> {
+    let profiles = home.discover_identity_profiles()?;
+    let mut changed = false;
+    let removed = servers
+        .keys()
+        .filter(|name| {
+            !profiles
+                .iter()
+                .any(|profile| profile.name() == name.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in removed {
+        let mut server = servers.remove(&name).unwrap();
+        changed = true;
+        if let Err(error) = server.close().await {
+            tracing::warn!(identity = %name, %error, "Server removal cleanup failed");
+        }
+        tracing::info!(identity = %name, "Server removed");
+    }
+    for profile in profiles {
+        let name = profile.name().to_owned();
+        let result = async {
+            if servers.contains_key(&name) {
+                // Validate without initialization first: missing/corrupt active databases
+                // must not be silently recreated by the startup initializer.
+                crate::setup::config_database(
+                    &profile,
+                    &http::Method::GET,
+                    &http::Uri::from_static("/std/pishoo/settings"),
+                    None,
+                )?;
+                let config = load_server_config(&profile)?;
+                if !config.enabled {
+                    let mut server = servers.remove(&name).unwrap();
+                    changed = true;
+                    server.close().await?;
+                    tracing::info!(identity = %name, "Server disabled");
+                } else {
+                    let server = servers.get_mut(&name).unwrap();
+                    if !same_config(&server.config, &config) {
+                        let result = apply_config(server, config).await;
+                        // If re-registration and rollback both fail, release the resources
+                        // and retry loading this identity on the next scan.
+                        if server.config.listen != 0 && server.listener.is_none() {
+                            let mut server = servers.remove(&name).unwrap();
+                            changed = true;
+                            if let Err(error) = server.close().await {
+                                tracing::warn!(identity = %name, %error, "Server cleanup failed");
+                            }
+                        }
+                        result?;
+                        changed = true;
+                        tracing::info!(identity = %name, "Server configuration applied");
+                    }
+                }
+            } else if let Some(mut server) = load_profile(profile, runtime.clone()).await? {
+                if server.config.listen != 0 {
+                    match server.listen().await {
+                        Ok(listener) => server.listener = Some(listener),
+                        Err(error) => {
+                            server.close().await?;
+                            return Err(error);
+                        }
+                    }
+                }
+                servers.insert(name.clone(), server);
+                changed = true;
+                tracing::info!(identity = %name, "Server enabled");
+            }
+            Ok::<_, Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(identity = %name, %error, "Server configuration was not applied; retrying on next scan");
+        }
+    }
+    Ok(changed)
+}
+
+fn same_config(a: &ServerConfig, b: &ServerConfig) -> bool {
+    a.enabled == b.enabled
+        && a.listen == b.listen
+        && a.proxy_locations.len() == b.proxy_locations.len()
+        && a.proxy_locations
+            .iter()
+            .zip(&b.proxy_locations)
+            .all(|(a, b)| {
+                a.location == b.location
+                    && a.proxy_pass.scheme == b.proxy_pass.scheme
+                    && a.proxy_pass.authority == b.proxy_pass.authority
+                    && a.proxy_pass.path_and_query == b.proxy_pass.path_and_query
+            })
+}
+
+async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
+    let scope_changed = server.config.listen != config.listen;
+    let publisher = if scope_changed && config.listen != 0 {
+        dns::authority(&server.endpoint)
+            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
+        if config.listen & 2 != 0 {
+            Some(dns::publisher(&server.endpoint)?)
+        } else {
+            None
+        }
+    } else if scope_changed {
+        None
+    } else {
+        server.publisher.clone()
+    };
+    let previous = std::mem::replace(&mut server.config, config);
+    if scope_changed {
+        // Dropping the resource unregisters this name without closing shared connections.
+        server.listener.take();
+        if server.config.listen != 0 {
+            match server.listen().await {
+                Ok(listener) => server.listener = Some(listener),
+                Err(error) => {
+                    server.config = previous;
+                    if server.config.listen != 0 {
+                        match server.listen().await {
+                            Ok(listener) => server.listener = Some(listener),
+                            Err(rollback) => tracing::error!(identity = server.name(), %rollback,
+                                "could not restore previous listener"),
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+    server.publisher = publisher;
+    *server.router.write().unwrap() = current_router(server);
+    Ok(())
 }
 
 async fn renew_ocsp(
@@ -733,6 +917,7 @@ impl Server {
             router: Arc::new(RwLock::new(Router::new())),
             sandbox,
             publisher,
+            listener: None,
         };
         *server.router.write().unwrap() = current_router(&server);
         server.chat.start_worker();
@@ -800,6 +985,7 @@ impl Server {
     }
 
     pub(super) async fn close(&mut self) -> Result<()> {
+        self.listener.take();
         self.publisher.take();
         self.sandbox.close();
         *self.router.write().unwrap() = axum::Router::new();

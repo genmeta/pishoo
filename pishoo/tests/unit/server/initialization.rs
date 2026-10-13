@@ -46,7 +46,8 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
         .unwrap()
         .collect::<std::result::Result<_, _>>()
         .unwrap();
-    assert_eq!(columns, ["listen"]);
+    assert_eq!(columns, ["listen", "enabled"]);
+    assert!(config.enabled);
     assert!(config.proxy_locations.is_empty());
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await

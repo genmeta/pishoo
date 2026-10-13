@@ -258,7 +258,7 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
     std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER); INSERT INTO settings VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     std::fs::write(profile.join("lib/echo/lib.wasm"), component("1")).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = crate::test_identity::endpoint(profile.name());
@@ -312,6 +312,7 @@ async fn server(root: &std::path::Path) -> Server {
         router: Arc::new(RwLock::new(Router::new())),
         sandbox,
         publisher: None,
+        listener: None,
     };
     *server.router.write().unwrap() = current_router(&server);
     server
@@ -468,4 +469,125 @@ async fn disabled_listener_is_rejected_before_network_registration() {
         Err(Error::InvalidConfig(_))
     ));
     assert!(server.publisher.is_none());
+}
+
+#[tokio::test]
+async fn disabled_profile_skips_credentials_libs_and_workers() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("disabled")).unwrap();
+    std::fs::create_dir_all(profile.db_dir()).unwrap();
+    std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
+    std::fs::write(profile.join("lib/broken/lib.wasm"), b"broken").unwrap();
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
+    assert!(
+        load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for name in ["access.db", "workspace.db", "chat.db"] {
+        assert!(!profile.db_dir().join(name).exists());
+    }
+}
+
+#[tokio::test]
+async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server(root.path()).await;
+    let name = server.name().to_owned();
+    let profile = server.profile.clone();
+    let sandbox_lib = server.sandbox.libs.values().next().unwrap().clone();
+    let runtime = server.sandbox.runtime.clone();
+    let old_router = server.router.read().unwrap().clone();
+    let home = DhttpHome::new(root.path().to_path_buf());
+    let mut servers = BTreeMap::from([(name.clone(), server)]);
+    crate::setup::config_database(
+        &profile,
+        &http::Method::PATCH,
+        &"/std/pishoo/proxies".parse().unwrap(),
+        Some(serde_json::json!({"location":"/live", "proxy_pass":"127.0.0.1:8080"})),
+    )
+    .unwrap();
+    assert!(
+        reconcile_profiles(&home, &mut servers, runtime.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !reconcile_profiles(&home, &mut servers, runtime.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(servers[&name].config.proxy_locations[0].location, "/live");
+    assert!(Arc::ptr_eq(
+        &sandbox_lib,
+        servers[&name].sandbox.libs.values().next().unwrap()
+    ));
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute("UPDATE settings SET listen=99", []).unwrap();
+    reconcile_profiles(&home, &mut servers, runtime.clone())
+        .await
+        .unwrap();
+    assert_eq!(servers[&name].config.listen, 0);
+    db.execute("UPDATE settings SET listen=0", []).unwrap();
+    std::fs::remove_file(profile.config_db_path()).unwrap();
+    reconcile_profiles(&home, &mut servers, runtime.clone())
+        .await
+        .unwrap();
+    assert!(servers.contains_key(&name));
+    assert!(!profile.config_db_path().exists());
+    drop(db);
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(0, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
+    reconcile_profiles(&home, &mut servers, runtime.clone())
+        .await
+        .unwrap();
+    assert!(servers.is_empty());
+    // Subsequent scans keep a disabled profile unloaded, even with unusable credentials.
+    reconcile_profiles(&home, &mut servers, runtime)
+        .await
+        .unwrap();
+    assert!(servers.is_empty());
+    drop(old_router);
+}
+
+#[tokio::test]
+async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server(root.path()).await;
+    let runtime = server.sandbox.runtime.clone();
+    let mut servers = BTreeMap::from([(server.name().to_owned(), server)]);
+    let missing_home = DhttpHome::new(root.path().join("missing"));
+    assert!(
+        reconcile_profiles(&missing_home, &mut servers, runtime.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(servers.len(), 1);
+    std::fs::rename(root.path().join("alice"), root.path().join(".removed")).unwrap();
+    reconcile_profiles(
+        &DhttpHome::new(root.path().to_path_buf()),
+        &mut servers,
+        runtime,
+    )
+    .await
+    .unwrap();
+    assert!(servers.is_empty());
+}
+
+#[tokio::test]
+async fn unloaded_empty_configuration_waits_for_credential_validation_before_initializing() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("empty")).unwrap();
+    std::fs::create_dir_all(profile.db_dir()).unwrap();
+    std::fs::write(profile.config_db_path(), []).unwrap();
+    assert!(
+        load_profile(profile.clone(), Arc::new(WasmRuntime::new().unwrap()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
+    assert!(!profile.access_db_path().exists());
 }

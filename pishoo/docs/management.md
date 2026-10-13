@@ -1,7 +1,7 @@
 # Pishoo 管理命令与 API
 
 资源命令操作指定身份的配置与组件文件；服务命令管理整个 Pishoo 进程。
-配置和 Lib 修改保存到磁盘后，重启 Pishoo 才会生效。
+配置修改由运行中的 Pishoo 自动应用；离线 Lib 修改保存到磁盘后，重启 Pishoo 才会加载。
 
 ## 身份与目录
 
@@ -104,7 +104,7 @@ pishoo status
 Linux 使用已安装的 `pishoo.service`；macOS 使用当前用户的 Homebrew 服务。
 这些操作影响服务加载的全部身份，权限不足或服务未安装时返回错误。
 无参数运行 `pishoo` 会在前台启动身份 home 中的身份。
-资源命令不自动重启服务。
+资源命令不自动重启服务；enabled、listen 和代理配置由运行进程自动应用。
 
 ## 完整示例
 
@@ -118,3 +118,13 @@ pishoo --id alice.smith lib --loaded
 
 查询结果输出到 stdout；身份、目录、保存提示与诊断输出到 stderr。
 成功退出码为 0，输入或用法错误为 2，存储、权限、连接及服务管理错误为 1。
+
+## Server 启用与禁用
+
+```sh
+pishoo enable --id alice.smith
+pishoo disable --id alice.smith
+pishoo listen --id alice.smith
+```
+
+enable/disable 只修改 settings.enabled，重复执行保持相同结果，不清空 listen、代理或用户数据。listen 查询展示保存的 enabled 和范围；listen off 只停监听，disable 则回收整个 Server。新身份在运行时自动发现，不需要重启。CLI 的成功提示表示数据库已保存；生效失败及重试在 Pishoo 日志中查看。完整行为见 [运行时生命周期](server-lifecycle.md)。
