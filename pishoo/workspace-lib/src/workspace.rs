@@ -16,7 +16,8 @@ impl wasip2::exports::http::incoming_handler::Guest for Handler {
         let target = request.path_with_query().unwrap_or_else(|| "/".into());
         let path = target.split('?').next().unwrap();
         let public = matches!(request.method(), Method::Get)
-            && matches!(path, "/profile" | "/profile/avatar");
+            && matches!(path, "/profile" | "/profile/avatar" | "/intro/context")
+            || matches!(request.method(), Method::Head) && path == "/intro/context";
         let result = if !public && caller.as_ref() != Some(&local) {
             Err(fail(403, "owner required"))
         } else if mutating(&request.method())
@@ -190,7 +191,9 @@ fn respond(out: ResponseOutparam, result: Result<Reply, Failure>) {
     fields
         .append("content-type", content_type.as_bytes())
         .unwrap();
-    fields.append("cache-control", b"no-store").unwrap();
+    if !extra.iter().any(|(key, _)| key == "cache-control") {
+        fields.append("cache-control", b"no-store").unwrap();
+    }
     fields.append("x-content-type-options", b"nosniff").unwrap();
     for (key, value) in extra {
         let _ = fields.append(&key, &value);
@@ -417,12 +420,28 @@ fn dispatch(
     request: &IncomingRequest,
     target: &str,
     local: &(String, String),
-    _caller: Option<&(String, String)>,
+    caller: Option<&(String, String)>,
 ) -> Result<Reply, Failure> {
     let path = target.split('?').next().unwrap();
     let method = request.method();
     let mut db = database("workspace")?;
     match (path, method) {
+        ("/intro/context", Method::Get | Method::Head) => {
+            let profile = profile(&db, local)?;
+            let mut reply = json_reply(200, json!({
+                "identity_name": local.0,
+                "display_name": profile["display_name"],
+                "avatar_url": profile["avatar_url"],
+                "updated_at": profile["updated_at"],
+                "viewer_name": caller.map(|identity| &identity.0),
+                "is_owner": caller == Some(local),
+            }))?;
+            reply.3.push(("cache-control".into(), b"private, no-store".to_vec()));
+            if matches!(request.method(), Method::Head) {
+                reply.2.clear();
+            }
+            Ok(reply)
+        }
         ("/context", Method::Get) => {
             let reviews = api(Method::Get, "/std/acl/reviews?page=1&page_size=1", None)?;
             let incoming = capability_requests(&db, false)?.len();

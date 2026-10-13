@@ -23,3 +23,5 @@ Workspace 遵循普通应用规则，入口为 `/app/workspace/#/`，业务 API 
 启动以 config.db 登记为准，制品须通过签名、身份、版本与依赖核对；未登记文件不会启用。卸载前端保留后端及数据，显式卸载后端也保留数据。
 
 旧 `/std/app/*`、`/std/api/*` 不提供兼容别名。权限路径变更通过显式原生 API 按原有选择迁移，不在启动自动添加授权；普通代理的 `/api/*` 规则不能整体替换。签名制品、数据目录与完整包身份不随访问路径改变。
+
+公开名片是 Workspace App 的 `/app/workspace/#/intro` 页面，数据接口为 Workspace Lib 的 `/api/workspace/intro/context`（GET/HEAD）。好友链接打开访客身份的 `/app/workspace/#/contacts/new?target=<完整名称>`。这些资源没有原生路由或权限豁免；公开访问需由主人显式配置普通 daccess ACL。旧 `/std/intro` 不提供别名。

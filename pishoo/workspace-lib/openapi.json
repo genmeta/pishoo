@@ -331,6 +331,32 @@
           }
         }
       }
+    },
+    "/intro/context": {
+      "get": {
+        "operationId": "getIntroduction",
+        "summary": "公开名片及真实访客身份",
+        "responses": {
+          "200": {
+            "description": "公开资料、访客名称和主人校验；private, no-store"
+          },
+          "403": {
+            "description": "普通 daccess ACL 拒绝访问"
+          }
+        }
+      },
+      "head": {
+        "operationId": "headIntroduction",
+        "summary": "公开名片及真实访客身份",
+        "responses": {
+          "200": {
+            "description": "公开资料、访客名称和主人校验；private, no-store"
+          },
+          "403": {
+            "description": "普通 daccess ACL 拒绝访问"
+          }
+        }
+      }
     }
   }
 }

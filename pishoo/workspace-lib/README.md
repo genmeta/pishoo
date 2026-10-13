@@ -39,3 +39,5 @@ API 保留字面量路径和 query 参数：`/context`、`/capabilities`、`/set
 旧合包制品和旧数据不自动拆分、改签或迁移。请从源码重建发布。旧 ACL 也不自动改写；聊天双方需安装 Chat 并明确申请、批准 `/api/chat/message` 的权限。
 
 真实验收先构建两个后端，再单独运行 `workspace_user_lib_real_quic_workflow_persistence_and_uninstall --ignored`。该测试使用临时身份与生产 Server，验证联系人申请、审批、后台消息、幂等、撤销、并发、重载、数据隔离和卸载；不访问实际身份数据。
+
+公开名片数据由 `/intro/context` 的 GET/HEAD 返回：identity_name、display_name、avatar_url、updated_at、viewer_name、is_owner。访客名称来自标准身份能力，主人核对名称与 owner hash 的完整 tuple；匿名 viewer_name 为 null。响应为 `Cache-Control: private, no-store`，不返回主人摘要、联系人、审批或私有资料。该接口仍经过普通 daccess ACL；主人需显式允许公开读取，不在升级时自动添加或重置权限。
