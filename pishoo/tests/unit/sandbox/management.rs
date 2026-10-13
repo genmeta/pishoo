@@ -10,7 +10,7 @@ use super::*;
 fn component(version: &str) -> Vec<u8> {
     let mut bytes =
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
-    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"paths":{"/upload":{"post":{"summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
+    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":version},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note"},"paths":{"/upload":{"post":{"summary":"Upload","responses":{"200":{"description":"ok"}}}}}}).to_string();
     let mut section = vec![14];
     section.extend_from_slice(b"pishoo:openapi");
     section.extend_from_slice(document.as_bytes());
@@ -41,6 +41,10 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
     assert_eq!(saved["endpoints"][0]["path"], "/std/api/note/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
+    assert_eq!(
+        saved["openapi"],
+        serde_json::to_value(validate_lib(&component("1")).unwrap()).unwrap()
+    );
     assert!(!profile.join("db/note").exists());
     assert_eq!(
         std::fs::metadata(profile.join("lib/note")).unwrap().mode() & 0o777,
@@ -75,6 +79,10 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
     assert_eq!(sandbox.libs["note"].openapi.info.version, "1");
+    assert_eq!(
+        installed_libs(&profile, Some("note")).unwrap()["openapi"]["info"]["version"],
+        "2"
+    );
     assert_eq!(
         installed_libs(&profile, Some("note")).unwrap()["version"],
         "2"
@@ -246,6 +254,108 @@ fn request(method: Method, path: &str, body: AxumBody) -> Request<AxumBody> {
             access_control::SubjectId::new("a".repeat(64).as_bytes()).unwrap(),
         ));
     request
+}
+
+#[tokio::test]
+async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediate() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let app = lib_management_router(
+        profile.clone(),
+        endpoint(),
+        Arc::new(WasmRuntime::new().unwrap()),
+    );
+    let path = "/std/pishoo/libs/alice.dhttp.net/note";
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            path,
+            AxumBody::from(component("1.2.3")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(request(Method::GET, path, AxumBody::empty()))
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["id"], "alice.dhttp.net/note");
+    assert_eq!(
+        value["endpoints"][0]["path"],
+        "/std/api/alice.dhttp.net/note/upload"
+    );
+    assert!(!profile.join("db/alice.dhttp.net/note").exists());
+    for bad in [
+        "/std/pishoo/libs/alice.dhttp.net%2Fnote",
+        "/std/pishoo/libs/alice.dhttp.net/note%2Fextra",
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::GET, bad, AxumBody::empty()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let path = "/std/pishoo/store-install";
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    for (payload, status) in [
+        (
+            serde_json::json!({"publisher":"alice.dhttp.net","name":"note","version":"01.2.3"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"publisher":"alice.dhttp.net","name":"../note","version":"1.2.3"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"publisher":"alice.dhttp.net","name":"note","version":"1.2.3","url":"https://example.com"}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut req = request(Method::POST, path, AxumBody::from(payload.to_string()));
+        req.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let mut req = request(Method::POST, path, AxumBody::from("{}"));
+    req.extensions_mut().remove::<access_control::Visitor>();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::POST, path, AxumBody::from("{}")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let mut req = request(Method::POST, path, AxumBody::from("x".repeat(4097)));
+    req.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
 }
 #[tokio::test]
 async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {

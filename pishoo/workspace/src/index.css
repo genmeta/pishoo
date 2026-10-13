@@ -303,6 +303,27 @@ code {
 
 .skip-link:focus { transform: none; }
 
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-weight: 600;
+}
+.text-link:hover {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.text-link:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .section-nav {
   display: flex;
   flex-wrap: wrap;
@@ -311,19 +332,23 @@ code {
   border-bottom: 1px solid var(--border);
 }
 
-.section-nav a {
+.section-nav :is(a, button) {
   display: inline-flex;
   align-items: center;
+  gap: 8px;
   min-height: 44px;
   padding: 8px 12px;
   color: var(--text);
   text-decoration: none;
 }
 
-.section-nav a:hover,
-.section-nav a.active { background: var(--primary-soft); }
+.section-nav button { border: 0; background: transparent; }
+.section-nav :is(a, button):focus-visible { outline-offset: -3px; }
 
-.section-nav a.active { border-bottom: 3px solid var(--primary); font-weight: 750; }
+.section-nav :is(a, button):hover,
+.section-nav :is(a, button).active { background: var(--primary-soft); }
+
+.section-nav :is(a, button).active { border-bottom: 3px solid var(--primary); font-weight: 750; }
 
 .workspace-overview {
   display: grid;
@@ -485,8 +510,7 @@ code {
 .contacts-page-header .button { white-space: nowrap; }
 
 .button,
-.icon-button,
-.segmented button {
+.icon-button {
   min-height: 38px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -594,28 +618,6 @@ a.button {
   font-size: 13px;
 }
 
-.segmented {
-  display: inline-grid;
-  grid-auto-flow: column;
-  padding: 3px;
-  border-radius: 6px;
-  background: var(--surface-strong);
-}
-
-.segmented button {
-  min-height: 32px;
-  padding: 0 13px;
-  color: var(--text-muted);
-  background: transparent;
-}
-
-.segmented button.active {
-  color: var(--text);
-  background: var(--surface);
-  border-color: var(--border);
-  box-shadow: 0 1px 2px rgba(24, 34, 41, 0.08);
-}
-
 .header-actions,
 .row-actions,
 .filter-group,
@@ -633,14 +635,6 @@ a.button {
   white-space: nowrap;
 }
 
-.contact-category-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0 0 18px;
-}
-.contact-category-filters .button { display: inline-flex; align-items: center; min-height: 42px; gap: 8px; }
-.contact-category-filters .active { background: var(--primary-soft); }
 .contact-category-count { font-size: 12px; font-weight: 800; }
 .contact-row-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .contact-status-note,
@@ -930,7 +924,9 @@ tbody tr.selected {
 
 .button-group {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .state-block {
@@ -1811,7 +1807,7 @@ tbody tr.selected {
   .settings-panel { padding: 14px; }
 
   .section-nav { flex-wrap: nowrap; overflow-x: auto; }
-  .section-nav a { flex: 0 0 auto; }
+  .section-nav :is(a, button) { flex: 0 0 auto; }
 
   .workspace {
     padding: 22px 14px 204px;

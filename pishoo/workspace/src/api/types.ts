@@ -21,6 +21,27 @@ export interface LibSummary {
   version: string
   description: string | null
   endpoints: Array<{ method: string; path: string; description: string | null }>
+  openapi?: {
+    openapi: string
+    info: { title: string; version: string; description?: string; license?: { name: string } }
+    'x-pishoo'?: {
+      publisher?: string
+      name?: string
+      entry?: string
+      changelog?: string
+      host?: Partial<Record<'private-storage' | 'request-identity' | 'signatures', string>>
+      'access-groups'?: Record<string, { title: string; operations: string[] }>
+    }
+    paths?: Record<string, Partial<Record<'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'trace', {
+      operationId?: string
+      summary?: string
+      description?: string
+      'x-pishoo'?: {
+        'access-group'?: string
+        'initial-access'?: Array<{ grantee: string; effect: Effect }>
+      }
+    }>>>
+  }
 }
 
 export interface Page<T> {
@@ -29,6 +50,49 @@ export interface Page<T> {
   page: number
   page_size: number
 }
+
+export interface StoreLib {
+  id: string
+  publisher: string
+  publisher_owner_hash: string
+  name: string
+  version: string
+  status: 'published' | 'yanked'
+  status_reason: string
+  published_at: number
+  package_sha256: string
+  size: number
+  download_path: string
+}
+
+export interface StoreSummary extends StoreLib {
+  title: string
+  description: string | null
+  changelog: string | null
+  host: NonNullable<NonNullable<LibSummary['openapi']>['x-pishoo']>['host'] | null
+}
+
+export interface StoreDetail extends StoreLib {
+  openapi: NonNullable<LibSummary['openapi']>
+  signer_certificates: string[]
+}
+
+export interface StoreCatalog {
+  libs: StoreSummary[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface StoreVersions {
+  versions: StoreSummary[]
+  page: number
+  page_size: number
+}
+
+export type StoreUpdate =
+  | { id: string; status: 'current' | 'not_found' | 'unavailable' }
+  | { id: string; status: 'update'; version: string; detail_path: string; download_path: string; changelog: string | null; host: StoreSummary['host'] }
 
 export interface ProfileSettings {
   identity_name: string

@@ -75,7 +75,7 @@ export default function AddContactPage(props: {
       <header class="page-header contacts-page-header contact-new-header">
         <h1>{t('nav.contactNew')}</h1>
         <div class="header-actions">
-          <button class="button button-secondary" type="button"
+          <button class="text-link" type="button"
             onClick={() => props.navigate('/std/workspace/contacts/requests')}>
             {t('nav.contactRequests')}
           </button>

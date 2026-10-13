@@ -138,7 +138,7 @@ export default function ReviewsPage(props: {
         </button>
       </header>
 
-      <div class="segmented approval-tabs" role="group" aria-label={t('reviews.tabs')}>
+      <div class="section-nav" role="group" aria-label={t('reviews.tabs')}>
         <button type="button" aria-pressed={tab() === 'pending'}
           classList={{ active: tab() === 'pending' }} onClick={() => changeTab('pending')}>
           {t('reviews.pendingTab')}

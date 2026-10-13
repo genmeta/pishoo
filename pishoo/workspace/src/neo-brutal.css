@@ -41,8 +41,7 @@ h2,
 h3,
 .brand strong,
 .button,
-.primary-nav a,
-.segmented button {
+.primary-nav a {
   font-family: "Arial Black", Arial, Helvetica, sans-serif;
 }
 
@@ -160,7 +159,7 @@ textarea:focus-visible,
 .nav-count { background: #ffffff; }
 
 .section-nav { border-bottom: 3px solid var(--border); }
-.section-nav a.active { background: #62d6ff; border-bottom-color: var(--border); }
+.section-nav :is(a, button).active { background: #62d6ff; border-bottom-color: var(--border); }
 .overview-panel { border: 3px solid var(--border); box-shadow: var(--shadow-small); }
 .chat-state-panel,
 .chat-workspace {
@@ -322,57 +321,6 @@ textarea { border: 2px solid var(--border); border-radius: 0; }
   font-weight: 700;
 }
 
-.segmented {
-  gap: 3px;
-  padding: 3px;
-  border: 2px solid var(--border);
-  border-radius: 0;
-  background: var(--border);
-}
-
-.segmented button {
-  min-height: 44px;
-  border: 0;
-  border-radius: 0;
-  color: #ffffff;
-  background: var(--border);
-  box-shadow: none;
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.segmented button.active {
-  border: 0;
-  color: var(--text);
-  background: #62d6ff;
-  box-shadow: none;
-}
-
-.approval-tabs {
-  display: flex;
-  width: fit-content;
-  gap: 10px;
-  margin-bottom: 16px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.approval-tabs button,
-.approval-tabs button.active {
-  min-width: 92px;
-  padding: 0 18px;
-  border: 3px solid var(--border);
-  color: var(--text);
-  background: #ffffff;
-  box-shadow: 3px 3px 0 var(--border);
-}
-
-.approval-tabs button.active {
-  background: #62d6ff;
-}
-
 .contact-capability-card,
 .capability-direction-row {
   border-width: 2px;
@@ -390,9 +338,100 @@ input:not([type="checkbox"]) {
   box-shadow: 2px 2px 0 var(--border);
 }
 
+select {
+  appearance: none;
+  padding: 8px 40px 8px 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='%23111111' stroke-width='2' stroke-linecap='square'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
+select:hover:not(:disabled) {
+  background-color: var(--surface-subtle);
+}
+
+.view-select {
+  width: auto;
+}
+
 select:focus,
 input:not([type="checkbox"]):focus {
-  background: #fffbe8;
+  background-color: #fffbe8;
+}
+
+/* Style both the trigger and its popup while retaining select keyboard/form behavior. */
+@supports (appearance: base-select) {
+  select,
+  select::picker(select) {
+    appearance: base-select;
+  }
+
+  select {
+    align-items: center;
+    gap: 16px;
+    padding: 8px 12px;
+    background-image: none;
+  }
+
+  select::picker-icon {
+    content: "▾";
+    color: var(--text);
+    font-size: 16px;
+  }
+
+  select:open::picker-icon {
+    rotate: 180deg;
+  }
+
+  select:open {
+    background-color: var(--surface-subtle);
+  }
+
+  select::picker(select) {
+    margin-block: 6px;
+    padding: 4px;
+    border: 2px solid var(--border);
+    border-radius: 0;
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow-small);
+    max-height: min(320px, 60dvh);
+    overflow-y: auto;
+  }
+
+  select option {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 0;
+    border-radius: 0;
+    background: var(--surface);
+    color: var(--text);
+  }
+
+  select option:checked {
+    background: #62d6ff;
+    font-weight: 750;
+  }
+
+  select option:hover:not(:disabled),
+  select option:focus-visible {
+    background: var(--primary-soft);
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+
+  select option::checkmark {
+    color: var(--text);
+  }
+
+  select option:disabled {
+    color: var(--text-muted);
+    opacity: 0.56;
+    cursor: not-allowed;
+  }
 }
 
 input[type="checkbox"] {
@@ -409,7 +448,6 @@ input[type="checkbox"] {
   box-shadow: var(--shadow);
 }
 
-.contact-category-filters .active { background: #62d6ff; }
 .contact-status-note,
 .contact-saved-note { border: 2px solid var(--border); border-radius: 0; font-weight: 900; }
 

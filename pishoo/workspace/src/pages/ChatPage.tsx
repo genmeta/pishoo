@@ -167,7 +167,7 @@ export default function ChatPage(props: {
           <StatusBadge value={contactStatus(contact()!.status)} />
           <h2>{t('chat.unavailableTitle')}</h2>
           <p>{t(capability()?.status === 'blocked' ? 'chat.blockedDetail' : 'chat.waitingDetail')}</p>
-          <button class="button button-secondary" type="button" onClick={back}>{t('chat.backToContact')}</button>
+          <button class="text-link" type="button" onClick={back}>{t('chat.backToContact')}</button>
         </section>
       </Show>
 

@@ -111,6 +111,7 @@ export function Dialog(props: {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!props.open || !dialog) return
       if (event.key === 'Escape') {
+        if (CSS.supports('selector(select:open)') && dialog.querySelector('select:open')) return
         props.onClose()
         return
       }
@@ -140,7 +141,8 @@ export function Dialog(props: {
       previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
       queueMicrotask(() => dialog?.focus())
     } else if (!props.open && wasOpen) {
-      queueMicrotask(() => previouslyFocused?.focus())
+      const target = previouslyFocused
+      queueMicrotask(() => target?.focus())
       previouslyFocused = null
     }
     wasOpen = props.open

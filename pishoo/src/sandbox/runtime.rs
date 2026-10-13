@@ -29,7 +29,7 @@ use crate::{Body, Error, Result};
 // Component compilation, per-version filesystem grants, and Store limits.
 
 impl WasmRuntime {
-    pub(crate) fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config
             .wasm_component_model(true)
@@ -75,7 +75,7 @@ impl WasmRuntime {
         Ok(Self { engine, linker })
     }
 
-    pub(crate) fn compile(&self, bytes: &[u8]) -> Result<Component> {
+    pub fn compile(&self, bytes: &[u8]) -> Result<Component> {
         let component = Component::from_binary(&self.engine, bytes)
             .map_err(|error| Error::InvalidComponent(error.to_string()))?;
         let pre = self
@@ -94,15 +94,33 @@ impl Lib {
         bytes: &[u8],
         data_dir: &Path,
     ) -> Result<Self> {
-        if id.len() > 63
-            || !id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-            || !id
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
-            return Err(Error::InvalidComponent("invalid Lib id".into()));
-        }
+        super::valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
         let openapi = validate_lib(bytes)?;
+        if let Some((publisher, name)) = id.split_once('/') {
+            let manifest = serde_json::to_value(&openapi)
+                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+            if manifest["x-pishoo"]["publisher"] != publisher
+                || manifest["x-pishoo"]["name"] != name
+            {
+                return Err(Error::InvalidComponent(
+                    "Lib ID and manifest identity disagree".into(),
+                ));
+            }
+            // Both identity levels must be real directories. In particular,
+            // canonicalizing only the leaf would follow a publisher symlink.
+            for directory in [data_dir.parent().unwrap(), data_dir] {
+                match std::fs::symlink_metadata(directory) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                    Ok(_) => {
+                        return Err(Error::InvalidComponent(
+                            "Lib data must be a real directory".into(),
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(Error::Io(error)),
+                }
+            }
+        }
         let component = runtime.compile(bytes)?;
         match std::fs::symlink_metadata(data_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
