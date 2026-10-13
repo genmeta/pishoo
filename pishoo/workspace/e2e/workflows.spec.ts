@@ -73,7 +73,7 @@ test('access rules can be added, edited and deleted', async ({ page }) => {
   await expect(editor).toHaveCount(0)
   await expect(rule).toContainText('deny')
 
-  await page.getByRole('tab', { name: 'By grantee', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Rule organization', exact: true }).selectOption('grantee')
   await page.locator('.master-list-items > button').filter({ hasText: '**' }).click()
   const byGrantee = page.locator('.rule-detail tbody tr').filter({ hasText: '/workspace-qa/manual-rule' })
   await expect(byGrantee).toContainText('deny')

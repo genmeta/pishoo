@@ -12,6 +12,8 @@ export default defineConfig({
       '/std/chat-api': backend,
       '/std/profile': backend,
       '/std/api': backend,
+      '/std/pishoo': backend,
+      '/std/dhttp': backend,
       '/std/acl': backend,
       '/std/contact': backend,
       '/std/contacts': backend,

@@ -362,9 +362,18 @@ fn lib_operation(args: &[OsString]) -> Result<()> {
         _ => return Err(usage("invalid lib arguments; use --help")),
     }
     let id = text(&args[1])?;
-    if id.len() > 63
-        || !id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-        || !id
+    let name = match id.split_once('/') {
+        Some((publisher, name))
+            if dhttp_home::normalize_name(publisher).as_deref() == Some(publisher) =>
+        {
+            name
+        }
+        Some(_) => return Err(usage("invalid Lib publisher")),
+        None => id,
+    };
+    if name.len() > 63
+        || !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        || !name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {

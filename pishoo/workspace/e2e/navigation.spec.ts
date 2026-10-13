@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
+  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [] }))
   await page.route('**/std/workspace-api/libs', (route) => route.fulfill({ json: [] }))
   await page.route('**/std/workspace-api/context', (route) => route.fulfill({ json: {
     profile: 'spike.liu.dhttp.net', owner_name: 'spike.liu.dhttp.net',
@@ -69,10 +70,10 @@ test('shell paths support navigation, refresh and browser history', async ({ pag
   await expect(page.getByRole('complementary', { name: 'Contact details' })).toBeVisible()
   await page.getByRole('button', { name: 'Close contact details' }).click()
 
-  await primary.getByRole('link', { name: 'Quick settings' }).click()
+  await primary.getByRole('link', { name: /Quick settings/ }).click()
   await page.getByRole('link', { name: 'Access rules' }).click()
   await expect(page).toHaveURL(/\/std\/workspace\/settings\/access$/)
-  await expect(primary.getByRole('link', { name: 'Quick settings' })).toHaveAttribute('aria-current', 'page')
+  await expect(primary.getByRole('link', { name: /Quick settings/ })).toHaveAttribute('aria-current', 'page')
   await page.goto('./extensions')
   await expect(page.getByText('Not enabled yet')).toBeVisible()
   await expect(page.getByRole('button', { name: /Install|Enable|Chat/ })).toHaveCount(0)
@@ -161,7 +162,7 @@ test('identity labels omit the domain suffix while routes and rule data retain i
   await ruleEditor.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeVisible()
-  await page.getByRole('tab', { name: 'By API' }).click()
+  await page.getByRole('combobox', { name: 'Rule organization' }).selectOption('api')
   await expect(page.locator('tbody tr').first()).toContainText('friend')
   await expect(page.locator('tbody tr').first()).not.toContainText(name)
 

@@ -93,6 +93,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
             }
         }"#,
     );
+    let openapi = serde_json::to_value(&lib.openapi).unwrap();
     sandbox.libs.insert("z-demo".into(), lib.clone());
     sandbox.libs.insert("a-demo".into(), lib);
     let router = sandbox.api_router(endpoint);
@@ -103,14 +104,14 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
         (
             &router,
             serde_json::json!([
-                {"id":"a-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                {"openapi":openapi,"id":"a-demo","title":"HTTP","version":"1","description":null,"endpoints":[
                     {"method":"GET","path":"/std/api/a-demo/","description":"Note page"},
                     {"method":"POST","path":"/std/api/a-demo/","description":"Created"},
                     {"method":"GET","path":"/std/api/a-demo/run","description":"Read run"},
                     {"method":"OPTIONS","path":"/std/api/a-demo/run","description":null},
                     {"method":"POST","path":"/std/api/a-demo/run","description":"Create run"}
                 ]},
-                {"id":"z-demo","title":"HTTP","version":"1","description":null,"endpoints":[
+                {"openapi":openapi,"id":"z-demo","title":"HTTP","version":"1","description":null,"endpoints":[
                     {"method":"GET","path":"/std/api/z-demo/","description":"Note page"},
                     {"method":"POST","path":"/std/api/z-demo/","description":"Created"},
                     {"method":"GET","path":"/std/api/z-demo/run","description":"Read run"},
@@ -270,11 +271,21 @@ async fn lib_page_roots_support_relative_urls_without_a_guest_mount_prefix() {
         directory.path(),
         r#"{"/":{"get":{},"head":{},"post":{}},"/notes":{"get":{}}}"#,
     );
-    for id in ["test", "renamed"] {
+    for id in [
+        "test",
+        "renamed",
+        "alice.dhttp.net/note",
+        "alice.dhttp.net/notebook",
+    ] {
         sandbox.libs.insert(id.into(), lib.clone());
     }
     let router = sandbox.api_router(crate::test_identity::endpoint("alice"));
-    for id in ["test", "renamed"] {
+    for id in [
+        "test",
+        "renamed",
+        "alice.dhttp.net/note",
+        "alice.dhttp.net/notebook",
+    ] {
         for method in [Method::GET, Method::HEAD] {
             for query in ["", "?view=full&search=a%2Fb"] {
                 let response = router

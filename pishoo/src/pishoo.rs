@@ -15,7 +15,7 @@ mod test_identity;
 
 pub use cli::run_command;
 pub use error::Error;
-pub use sandbox::validate_lib;
+pub use sandbox::{WasmRuntime, validate_lib};
 pub use server::run;
 
 type Body = dhttp::Body;
