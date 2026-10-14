@@ -29,6 +29,9 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
     for broken in [
         document.replace("/echo", "/std/workspace"),
         document.replace("/echo", "/std/file/a"),
+        document.replace("/echo", "/file/a"),
+        document.replace("/echo", "/contact"),
+        document.replace("/echo", "/acl"),
         document.replace("/echo", "/{id}"),
         document.replace(
             "\"get\":",
@@ -37,14 +40,7 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
     ] {
         assert!(validate_lib(&component(&broken)).is_err());
     }
-    for path in [
-        "/file/a",
-        "/contact",
-        "/acl",
-        "/workspace",
-        "/api",
-        "/std-extra",
-    ] {
+    for path in ["/workspace", "/api", "/std-extra"] {
         assert!(
             validate_lib(&component(&document.replace("/echo", path))).is_ok(),
             "{path}"

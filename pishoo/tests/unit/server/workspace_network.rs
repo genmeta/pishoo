@@ -768,7 +768,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_bytes(
             &server,
             Method::POST,
-            "/std/pishoo/lib-check",
+            "/std/sys/package/lib-check",
             &wasm,
             "application/wasm"
         )
@@ -779,7 +779,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_bytes(
         &server,
         Method::PUT,
-        "/std/pishoo/libs/note",
+        "/std/sys/package/libs/note",
         &wasm,
         "application/wasm",
     )
@@ -791,7 +791,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/pishoo/libs",
+            "/std/sys/package/libs",
             serde_json::Value::Null
         )
         .await
@@ -802,7 +802,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/pishoo/loaded-libs",
+            "/std/sys/package/loaded-libs",
             serde_json::Value::Null
         )
         .await
@@ -960,7 +960,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/pishoo/loaded-libs",
+            "/std/sys/package/loaded-libs",
             serde_json::Value::Null
         )
         .await
@@ -971,7 +971,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/std/pishoo/libs/note",
+            "/std/sys/package/libs/note",
             serde_json::Value::Null
         )
         .await
@@ -1005,7 +1005,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = alice
         .get(
-            format!("https://{}/std/pishoo/libs", server.name())
+            format!("https://{}/std/sys/package/libs", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1048,30 +1048,37 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run alone; exercises the live run loop with OpenSSL/local HTTP+QUIC, process TLS/DNS/home and SIGTERM"]
 async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart() {
+    #[cfg(target_os = "linux")]
+    assert!(
+        !rustix::process::geteuid().is_root(),
+        "run this isolated user-home scenario as an ordinary user"
+    );
     let local = tokio::task::LocalSet::new();
     let scenario = async {
         let root = tempfile::tempdir().unwrap();
+        let identity_home = root.path().join(".dhttp");
+        std::fs::create_dir(&identity_home).unwrap();
         credentials::generate(
-            root.path(),
+            identity_home.as_path(),
             &[
                 ("receiver", "receiver.dhttp.net"),
                 ("late", "late.dhttp.net"),
                 ("broken", "broken.dhttp.net"),
             ],
         );
-        let old_home = std::env::var_os("DHTTP_HOME");
+        let old_home = std::env::var_os("HOME");
         unsafe {
-            std::env::set_var("DHTTP_HOME", root.path());
+            std::env::set_var("HOME", root.path());
         }
         let _environment = scopeguard::guard(old_home, |previous| unsafe {
             match previous {
-                Some(value) => std::env::set_var("DHTTP_HOME", value),
-                None => std::env::remove_var("DHTTP_HOME"),
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
             }
         });
         dhttp::DhttpNetwork::init().await.unwrap();
         qtls::RootCerts::set([dhttp::CertificateDer::from(
-            std::fs::read(root.path().join("ca.der")).unwrap(),
+            std::fs::read(identity_home.as_path().join("ca.der")).unwrap(),
         )])
         .unwrap();
         let _ = tracing_subscriber::fmt()
@@ -1087,16 +1094,23 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
             .or_else(|| bindings.iter().find(|(address, _)| address.is_ipv4()))
             .expect("a local internal IPv4 binding");
         dhttp::resolve::Resolver::add(Arc::new(PeerResolver(EndpointAddr::direct(*address))));
-        let receiver_profile = profile(root.path(), "receiver");
+        let receiver_profile = profile(identity_home.as_path(), "receiver");
         let db = rusqlite::Connection::open(receiver_profile.config_db_path()).unwrap();
         db.execute("UPDATE settings SET listen=1", []).unwrap();
         for name in ["late", "broken"] {
-            let identity = profile(root.path(), name);
+            let identity = profile(identity_home.as_path(), name);
             rusqlite::Connection::open(identity.config_db_path())
                 .unwrap()
                 .execute("UPDATE settings SET listen=1", [])
                 .unwrap();
-            std::fs::rename(identity.path(), root.path().join(format!(".{name}"))).unwrap();
+            std::fs::rename(
+                identity.path(),
+                root.path()
+                    .join(".dhttp")
+                    .as_path()
+                    .join(format!(".{name}")),
+            )
+            .unwrap();
         }
         std::fs::create_dir_all(receiver_profile.join("file")).unwrap();
         std::fs::write(receiver_profile.join("file/keep.txt"), b"kept").unwrap();
@@ -1193,17 +1207,32 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         wait_live_body(&receiver, "/live", b"live /live").await;
 
         // A broken new profile is retried without preventing a later valid one from loading.
-        std::fs::create_dir_all(root.path().join(".broken/lib/bad")).unwrap();
-        std::fs::write(root.path().join(".broken/lib/bad/lib.webc"), b"broken").unwrap();
-        std::fs::rename(root.path().join(".broken"), root.path().join("broken")).unwrap();
-        std::fs::rename(root.path().join(".late"), root.path().join("late")).unwrap();
-        let late_profile = IdentityProfile::try_from(root.path().join("late")).unwrap();
+        std::fs::create_dir_all(identity_home.as_path().join(".broken/lib/bad")).unwrap();
+        std::fs::write(
+            root.path()
+                .join(".dhttp")
+                .as_path()
+                .join(".broken/lib/bad/lib.webc"),
+            b"broken",
+        )
+        .unwrap();
+        std::fs::rename(
+            identity_home.as_path().join(".broken"),
+            identity_home.as_path().join("broken"),
+        )
+        .unwrap();
+        std::fs::rename(
+            identity_home.as_path().join(".late"),
+            identity_home.as_path().join("late"),
+        )
+        .unwrap();
+        let late_profile = IdentityProfile::try_from(identity_home.as_path().join("late")).unwrap();
         std::fs::create_dir_all(late_profile.join("file")).unwrap();
         std::fs::write(late_profile.join("file/late.txt"), b"discovered").unwrap();
         let late = dhttp::Endpoint::load("late").await.unwrap();
         wait_live_body(&late, "/std/file/late.txt", b"discovered").await;
         wait_live_body(&receiver, "/live", b"live /live").await;
-        std::fs::rename(late_profile.path(), root.path().join(".late")).unwrap();
+        std::fs::rename(late_profile.path(), identity_home.as_path().join(".late")).unwrap();
         wait_live_rejection(&late, "/std/file/late.txt").await;
         wait_live_body(&receiver, "/live", b"live /live").await;
 

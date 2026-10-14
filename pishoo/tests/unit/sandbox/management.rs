@@ -39,7 +39,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let profile = profile(root.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
-    assert_eq!(saved["endpoints"][0]["path"], "/api/note/upload");
+    assert_eq!(saved["endpoints"][0]["path"], "/std/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
     assert_eq!(
         saved["openapi"],
@@ -275,7 +275,7 @@ fn request(method: Method, path: &str, body: AxumBody) -> Request<AxumBody> {
 }
 
 #[tokio::test]
-async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediate() {
+async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let app = lib_management_router(
@@ -285,7 +285,7 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
             WasmRuntime::new().unwrap(),
         )))),
     );
-    let path = "/std/pishoo/libs/alice.dhttp.net/note";
+    let path = "/std/sys/package/libs/note";
     let response = app
         .clone()
         .oneshot(request(
@@ -308,11 +308,55 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
     )
     .unwrap();
     assert_eq!(value["id"], "alice.dhttp.net/note");
-    assert_eq!(value["endpoints"][0]["path"], "/api/note/upload");
+    assert_eq!(value["endpoints"][0]["path"], "/std/upload");
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
-    for bad in [
-        "/std/pishoo/libs/alice.dhttp.net%2Fnote",
-        "/std/pishoo/libs/alice.dhttp.net/note%2Fextra",
+    assert!(!profile.join("db/note").exists());
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                "/std/sys/package/libs/other",
+                AxumBody::from(component("1.2.3"))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let other_publisher = publisher("bob.dhttp.net", 'b');
+    let conflicting = package_fixture(
+        &serde_json::json!({"openapi":"3.1.0","info":{"title":"Other publisher","version":"1.2.3","description":"Other publisher","license":{"name":"MIT"}},"x-pishoo":{"publisher":"bob.dhttp.net","name":"note","host":{}},"paths":{"/other":{"post":{"operationId":"other","summary":"Other operation","responses":{"200":{"description":"ok"}}}}}}),
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &other_publisher,
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::PUT, path, AxumBody::from(conflicting)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        installed_libs(&profile, Some("alice.dhttp.net/note")).unwrap()["version"],
+        "1.2.3"
+    );
+    assert!(!profile.join("lib/bob.dhttp.net/note").exists());
+    std::fs::write(profile.join("db/alice.dhttp.net/note/keep.db"), b"keep").unwrap();
+    for (bad, expected) in [
+        (
+            "/std/sys/package/libs/alice.dhttp.net%2Fnote",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/std/sys/package/libs/alice.dhttp.net/note",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/std/sys/package/libs/alice.dhttp.net/note%2Fextra",
+            StatusCode::NOT_FOUND,
+        ),
     ] {
         assert_eq!(
             app.clone()
@@ -320,10 +364,41 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::BAD_REQUEST
+            expected
         );
     }
-    let path = "/std/pishoo/store-install";
+    // Removal resolves registration even when the installed file is corrupt.
+    std::fs::write(profile.join("lib/alice.dhttp.net/note/lib.webc"), b"broken").unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::DELETE, path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        std::fs::read(profile.join("db/alice.dhttp.net/note/keep.db")).unwrap(),
+        b"keep"
+    );
+    assert!(!profile.join("lib/alice.dhttp.net/note").exists());
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::DELETE, path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let path = "/std/sys/package/store-install";
     assert_eq!(
         app.clone()
             .oneshot(request(Method::GET, path, AxumBody::empty()))
@@ -385,64 +460,70 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
             WasmRuntime::new().unwrap(),
         )))),
     );
+    let check = package_fixture(
+        &serde_json::json!({"openapi":"3.1.0","info":{"title":"Check","version":"1.0.0","description":"Check fixture","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"check","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &publisher("alice.dhttp.net", 'a'),
+    );
     for (method, path, body, expected) in [
         (
             Method::POST,
-            "/std/pishoo/lib-check",
+            "/std/sys/package/lib-check",
             AxumBody::from(component("1")),
             StatusCode::OK,
         ),
         (
             Method::PUT,
-            "/std/pishoo/libs/check",
-            AxumBody::from(component("1")),
+            "/std/sys/package/libs/check",
+            AxumBody::from(check),
             StatusCode::OK,
         ),
         (
             Method::GET,
-            "/std/pishoo/libs/check",
+            "/std/sys/package/libs/check",
             AxumBody::empty(),
             StatusCode::OK,
         ),
         (
             Method::DELETE,
-            "/std/pishoo/libs/check",
+            "/std/sys/package/libs/check",
             AxumBody::empty(),
             StatusCode::NO_CONTENT,
         ),
         (
             Method::DELETE,
-            "/std/pishoo/libs/check",
+            "/std/sys/package/libs/check",
             AxumBody::empty(),
             StatusCode::NO_CONTENT,
         ),
         (
             Method::GET,
-            "/std/pishoo/libs/check",
+            "/std/sys/package/libs/check",
             AxumBody::empty(),
             StatusCode::NOT_FOUND,
         ),
         (
             Method::PUT,
-            "/std/pishoo/libs/note",
+            "/std/sys/package/libs/note",
             AxumBody::from("bad"),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/std/pishoo/libs?extra=x",
+            "/std/sys/package/libs?extra=x",
             AxumBody::empty(),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/std/pishoo/libs",
+            "/std/sys/package/libs",
             AxumBody::from("x"),
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/std/pishoo/libs/%2Fescape",
+            "/std/sys/package/libs/%2Fescape",
             AxumBody::empty(),
             StatusCode::BAD_REQUEST,
         ),
@@ -455,7 +536,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         assert_eq!(response.status(), expected, "{path}");
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(response.headers()["supported-versions"], "v1");
-        if path == "/std/pishoo/lib-check" {
+        if path == "/std/sys/package/lib-check" {
             let value: Value = serde_json::from_slice(
                 &axum::body::to_bytes(response.into_body(), 65536)
                     .await
@@ -463,13 +544,17 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
             )
             .unwrap();
             assert_eq!(value["id"], "alice.dhttp.net/note");
-            assert_eq!(value["endpoints"][0]["path"], "/upload");
+            assert_eq!(value["endpoints"][0]["path"], "/std/upload");
         }
     }
     for (path, method, allow) in [
-        ("/std/pishoo/libs", Method::POST, "GET"),
-        ("/std/pishoo/libs/note", Method::PATCH, "GET, PUT, DELETE"),
-        ("/std/pishoo/lib-check", Method::GET, "POST"),
+        ("/std/sys/package/libs", Method::POST, "GET"),
+        (
+            "/std/sys/package/libs/note",
+            Method::PATCH,
+            "GET, PUT, DELETE",
+        ),
+        ("/std/sys/package/lib-check", Method::GET, "POST"),
     ] {
         let response = app
             .clone()
@@ -480,7 +565,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         assert_eq!(response.headers()["allow"], allow);
     }
     for version in ["v2", "v2, v1"] {
-        let mut req = request(Method::GET, "/std/pishoo/libs", AxumBody::empty());
+        let mut req = request(Method::GET, "/std/sys/package/libs", AxumBody::empty());
         req.headers_mut()
             .insert("accept-versions", version.parse().unwrap());
         assert_eq!(
@@ -503,7 +588,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
             access_control::SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut req = request(Method::GET, "/std/pishoo/libs", AxumBody::empty());
+        let mut req = request(Method::GET, "/std/sys/package/libs", AxumBody::empty());
         req.extensions_mut().remove::<access_control::Visitor>();
         if let Some(visitor) = visitor {
             req.extensions_mut().insert(visitor);
@@ -515,7 +600,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     }
     let mut req = request(
         Method::PUT,
-        "/std/pishoo/libs/note",
+        "/std/sys/package/libs/note",
         AxumBody::from(component("1")),
     );
     req.headers_mut()
@@ -529,7 +614,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     );
     let mut req = request(
         Method::PUT,
-        "/std/pishoo/libs/note",
+        "/std/sys/package/libs/note",
         AxumBody::from_stream(chunks),
     );
     req.headers_mut()
@@ -546,7 +631,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
         app.clone()
             .oneshot(request(
                 Method::PUT,
-                "/std/pishoo/libs/note",
+                "/std/sys/package/libs/note",
                 AxumBody::from_stream(broken)
             ))
             .await
@@ -559,7 +644,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
     assert_eq!(
         app.oneshot(request(
             Method::PUT,
-            "/std/pishoo/libs/escape",
+            "/std/sys/package/libs/note",
             AxumBody::from(component("1"))
         ))
         .await
@@ -587,7 +672,7 @@ async fn legacy_wasm_cannot_be_uploaded_as_a_webc_release() {
     ] {
         let mut input = request(
             Method::PUT,
-            "/std/pishoo/libs/note",
+            "/std/sys/package/libs/note",
             AxumBody::from(legacy.as_slice()),
         );
         input
@@ -635,7 +720,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     };
     assert_eq!(
         app.clone()
-            .oneshot(request(Method::GET, "/api/note/", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/std/", AxumBody::empty()))
             .await
             .unwrap()
             .status(),
@@ -650,7 +735,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         app.clone()
             .oneshot(request(
                 Method::PUT,
-                "/std/pishoo/libs/note",
+                "/std/sys/package/libs/note",
                 AxumBody::from(first)
             ))
             .await
@@ -658,8 +743,8 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
             .status(),
         StatusCode::OK
     );
-    let mut incoming = request(Method::POST, "/api/note/run", AxumBody::empty());
-    *incoming.uri_mut() = "https://alice.dhttp.net/api/note/run".parse().unwrap();
+    let mut incoming = request(Method::POST, "/std/run", AxumBody::empty());
+    *incoming.uri_mut() = "https://alice.dhttp.net/std/run".parse().unwrap();
     incoming.extensions_mut().insert(dhttp::HandshakeSummary {
         alpn: None,
         local: Some(endpoint.local_authority().unwrap()),
@@ -668,7 +753,11 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     let mut old_guest = app.clone().oneshot(incoming).await.unwrap().into_body();
     let tasks = sandbox.read().unwrap().tasks.clone();
     assert!(!tasks.is_empty());
-    std::fs::write(profile.join("db/note/private.db"), b"keep data").unwrap();
+    std::fs::write(
+        profile.join("db/alice.dhttp.net/note/private.db"),
+        b"keep data",
+    )
+    .unwrap();
 
     let second = package(
         "2.0.0",
@@ -679,7 +768,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         app.clone()
             .oneshot(request(
                 Method::PUT,
-                "/std/pishoo/libs/note",
+                "/std/sys/package/libs/note",
                 AxumBody::from(second.clone())
             ))
             .await
@@ -691,7 +780,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         .clone()
         .oneshot(request(
             Method::GET,
-            "/std/pishoo/loaded-libs",
+            "/std/sys/package/loaded-libs",
             AxumBody::empty(),
         ))
         .await
@@ -707,7 +796,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         app.clone()
             .oneshot(request(
                 Method::PUT,
-                "/std/pishoo/libs/note",
+                "/std/sys/package/libs/note",
                 AxumBody::from("broken")
             ))
             .await
@@ -716,11 +805,14 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        std::fs::read(profile.join("lib/note/lib.webc")).unwrap(),
+        std::fs::read(profile.join("lib/alice.dhttp.net/note/lib.webc")).unwrap(),
         second
     );
     assert_eq!(
-        sandbox.read().unwrap().libs["note"].openapi.info.version,
+        sandbox.read().unwrap().libs["alice.dhttp.net/note"]
+            .openapi
+            .info
+            .version,
         "2.0.0"
     );
 
@@ -728,7 +820,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         app.clone()
             .oneshot(request(
                 Method::DELETE,
-                "/std/pishoo/libs/note",
+                "/std/sys/package/libs/note",
                 AxumBody::empty()
             ))
             .await
@@ -738,7 +830,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     );
     assert_eq!(
         app.clone()
-            .oneshot(request(Method::GET, "/api/note/", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/std/", AxumBody::empty()))
             .await
             .unwrap()
             .status(),
@@ -746,7 +838,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     );
     assert!(sandbox.read().unwrap().libs.is_empty());
     assert_eq!(
-        std::fs::read(profile.join("db/note/private.db")).unwrap(),
+        std::fs::read(profile.join("db/alice.dhttp.net/note/private.db")).unwrap(),
         b"keep data"
     );
     assert!(!tasks.is_empty());
@@ -769,7 +861,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     assert_eq!(
         app.oneshot(request(
             Method::PUT,
-            "/std/pishoo/libs/note",
+            "/std/sys/package/libs/note",
             AxumBody::from(third)
         ))
         .await
@@ -777,7 +869,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         .status(),
         StatusCode::FORBIDDEN
     );
-    assert!(!profile.join("lib/note").exists());
+    assert!(!profile.join("lib/alice.dhttp.net/note").exists());
 }
 
 #[tokio::test]
@@ -826,8 +918,8 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
             &publisher,
         )
     };
-    let app_path = "/std/pishoo/apps/alice.dhttp.net/note";
-    let lib_path = "/std/pishoo/libs/alice.dhttp.net/note";
+    let app_path = "/std/sys/package/apps/note";
+    let lib_path = "/std/sys/package/libs/note";
     assert_eq!(
         app.clone()
             .oneshot(request(
@@ -874,7 +966,7 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
     );
     let old = app
         .clone()
-        .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+        .oneshot(request(Method::GET, "/std/note/", AxumBody::empty()))
         .await
         .unwrap();
     assert_eq!(
@@ -891,7 +983,7 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
     );
     let current = app
         .clone()
-        .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+        .oneshot(request(Method::GET, "/std/note/", AxumBody::empty()))
         .await
         .unwrap();
     assert_eq!(
@@ -908,7 +1000,7 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
         .clone()
         .oneshot(request(
             Method::GET,
-            "/std/pishoo/loaded-apps",
+            "/std/sys/package/loaded-apps",
             AxumBody::empty(),
         ))
         .await
@@ -921,7 +1013,11 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
     .unwrap();
     assert_eq!(catalog[0]["version"], "2.0.0");
     assert_eq!(catalog[0]["kind"], "app");
-    let mut denied = request(Method::GET, "/std/pishoo/loaded-apps", AxumBody::empty());
+    let mut denied = request(
+        Method::GET,
+        "/std/sys/package/loaded-apps",
+        AxumBody::empty(),
+    );
     denied.extensions_mut().remove::<access_control::Visitor>();
     assert_eq!(
         app.clone().oneshot(denied).await.unwrap().status(),
@@ -945,7 +1041,7 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
     );
     assert_eq!(
         app.clone()
-            .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/std/note/", AxumBody::empty()))
             .await
             .unwrap()
             .status(),

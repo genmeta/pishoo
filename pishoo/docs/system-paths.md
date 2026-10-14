@@ -1,25 +1,28 @@
 # HTTP 路径
 
-2026-10-14 起，`/std` 保留给宿主原生 API；普通安装的前端 App 使用 `/app/<name>/`，后端 Lib 使用 `/api/<name>/`。同一身份下 App、Lib 分别按 name 唯一。完整 publisher/name 继续用于签名、商店、依赖、管理资源、制品与数据目录。
+`/std` 是标准协议命名空间，既包含 Pishoo 原生服务，也包含安装的普通 WASM 业务。原生服务不作为 WASM 能力登记。包类型、完整 publisher/name 身份和 App/Lib 安装操作仍保留。
 
-| 路径 | 用途 |
+| 路径 | 提供者与用途 |
 | --- | --- |
-| `/std/contact/*`、`/std/contacts` | 原生联系人资源 |
-| `/std/acl/*` | 原生授权与审批 |
-| `/std/pishoo/*` | 配置、代理、App/Lib 安装管理及已加载目录 |
-| `/std/dhttp/<target>/*` | 宿主 DHTTP 正向代理 |
-| `/std/file/*` | 宿主文件资源 |
-| `/app/<name>/*` | 已登记前端 App |
-| `/api/<name>/*` | 已登记后端 Lib |
+| `/std/contact`、`/std/contact/*`、`/std/contacts` | 内置 daccess 联系人资源 |
+| `/std/acl/*` | 内置 daccess 授权与请求审批 |
+| `/std/acl/capabilities` | 内置 Pishoo 处理器读取已安装 Lib 的业务能力登记 |
+| `/std/sys/package/libs/<name>`、`/std/sys/package/apps/<name>` | 按同类唯一短名查看、安装、更新与卸载；发布者仍属于包身份 |
+| `/std/sys/package/*` 其他资源 | 内置包检查、商店安装与目录 |
+| `/std/pishoo/settings`、`/std/pishoo/proxies` | 原生配置与代理基础设施 |
+| `/std/dhttp/<target>/*`、`/std/file/*` | 宿主转发与文件基础设施 |
+| `/std/<name>/` | 普通 App 的实际静态文件 GET/HEAD |
+| `/std/profile`、`/std/profile/avatar`、`/std/profile/context` | 安装的 Profile Lib |
+| `/std/message`、`/std/message/*` | 安装的 Message Lib，能力展示“1v1聊天” |
 
-Workspace 遵循普通应用规则，入口为 `/app/workspace/#/`，业务 API 为 `/api/workspace/*`。它的联系人、ACL、配置、商店转发仍直接调用相应原生 API。不存在原生 Workspace/Chat 业务路由或特殊权限。
+Lib OpenAPI 声明 `/message`、`/profile`、`/workspace/context` 等业务路径，宿主仅加 `/std`；guest 收到去掉该前缀的业务路径和原 query。App 入口按短名派生，Workspace 为 `/std/workspace/#/`。App 与同名 Lib 按实际方法和路径共同分派，不由静态目录前缀遮蔽业务操作。
 
-已登记应用的具体挂载范围不能配置单独代理，安装时也检查已有代理并报冲突；上级 /、/api、/app 及其他未安装名称允许代理。两类写操作由 config.db 事务串行核验。
+安装、更新、加载均验证提供者冲突：不同 Lib 不共享同一业务路径，原生服务不能被包占用，App 的 GET/HEAD 与业务操作冲突拒绝。同路径不同方法可由 App/Lib 共同提供。不存在路径404，未声明方法405；`/std` 内不回退代理。
 
-全部请求继续经过 daccess。已加载名称占有整个挂载范围；未声明操作返回404，方法不匹配返回405，不能回退给代理。未加载名称按普通代理配置处理，因此 Home Assistant 的 `/api/states`、`/api/websocket` 等仍可代理。仅精确 `/std` 和 `/std/` 子路径保留，显式代理不能占用它们；未注册 `/std` 路径返回404。
+旧 `/app/*`、`/api/*` 正常按代理规则处理，不提供别名。Home Assistant `/api/states`、`/api/websocket` 等仍可代理。仅 `/std` 根及其路径段子路径保留，`/std-extra` 独立使用。
 
-清单仍声明组件内路径，例如 `/notes`。宿主把 `/api/note/notes` 去掉挂载前缀后交给 guest `/notes`。已声明 GET/HEAD 的无尾斜杠根入口307跳转到带尾斜杠入口，保留 query，支持相对资源和请求；其他操作不重定向。
+启动以 config.db 登记为准，验证签名、身份、版本、依赖与能力登记；未登记文件忽略。缺少或不一致能力登记时须正常重新安装，不扫描反写数据库。卸载 App 保留后端，卸载 Lib 保留数据与 ACL。路径权限不自动迁移，换提供者前明确处理旧路径规则。
 
-启动以 config.db 登记为准，制品须通过签名、身份、版本与依赖核对；未登记文件不会启用。卸载前端保留后端及数据，显式卸载后端也保留数据。
+具体边界及 schema 见 [std 服务与业务能力边界](std-capabilities-design.md)。
 
-旧 `/std/app/*`、`/std/api/*` 不提供兼容别名。权限路径变更通过显式原生 API 按原有选择迁移，不在启动自动添加授权；普通代理的 `/api/*` 规则不能整体替换。签名制品、数据目录与完整包身份不随访问路径改变。
+Workspace App 介绍页：`/std/workspace/#/intro`。对应 Profile Lib 公开上下文：`GET/HEAD /std/profile/context`；真实访客身份来自握手，响应 `private, no-store`，仍经过普通 daccess 授权。

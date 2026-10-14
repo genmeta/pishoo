@@ -59,7 +59,7 @@ test.beforeEach(async ({ page }) => {
     identity_name: 'home.alice.smith.dhttp.net', display_name: 'Alice Smith', avatar_url: null, updated_at: 0,
   } }))
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [journal] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [journal] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [journal] }))
   await page.route('**/std/acl/access', route => route.fulfill({ json: {} }))
   await page.route('**/std/contacts?*', route => route.fulfill({ json: {
     items: [{ name: bob, alias: 'Bob', subject_id: 'bob', status: 'active' }], total: 1, page: 1, page_size: 100,
@@ -137,10 +137,10 @@ test('store details, exact release confirmation and native save activate without
   const downloads: string[] = []
   page.on('request', req => { if (req.url().endsWith('/lib.webc')) downloads.push(req.url()) })
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: disk }))
   await page.route(storeApi + '/libs?*', route => route.fulfill({ json: { libs: [summary()], total: 1, page: 1, page_size: 20 } }))
   await page.route(storeApi + `/libs/${fullId}/versions/1.2.0`, route => route.fulfill({ json: release() }))
-  await page.route('**/std/pishoo/store-install', route => {
+  await page.route('**/std/sys/package/store-install', route => {
     expect(route.request().method()).toBe('POST')
     writes.push(route.request().postDataJSON())
     disk = [completeJournal('1.2.0')]
@@ -183,7 +183,7 @@ test('release history shows withdrawn versions and failed install keeps confirma
   await page.route(storeApi + `/libs/${fullId}/versions?*`, route => route.fulfill({ json: { versions: [summary(), summary('1.0.0', 'yanked')], page: 1, page_size: 20 } }))
   await page.route(storeApi + `/libs/${fullId}/versions/1.0.0`, route => route.fulfill({ json: release('1.0.0', 'yanked') }))
   await page.route(storeApi + `/libs/${fullId}/versions/1.2.0`, route => route.fulfill({ json: release() }))
-  await page.route('**/std/pishoo/store-install', route => route.fulfill({ status: 400, body: 'Publisher signature verification failed' }))
+  await page.route('**/std/sys/package/store-install', route => route.fulfill({ status: 400, body: 'Publisher signature verification failed' }))
   await page.goto(`./apps/store/${fullId}?tab=store&version=1.2.0&section=changes`)
   await expect(page.getByText('Withdrawn by publisher')).toBeVisible()
   await page.getByRole('link', { name: 'v1.0.0', exact: true }).click()
@@ -201,7 +201,7 @@ test('update checks batch only saved complete IDs and preserve failure and absen
   const many = Array.from({ length: 105 }, (_, index) => ({ ...completeJournal(), id: `alice.smith.dhttp.net/app-${index}`, version: '1.0.0' }))
   const batches: Array<Array<{ publisher: string; name: string; version: string }>> = []
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [journal] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [journal, ...many, { id: 'broken', error: 'corrupt' }] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [journal, ...many, { id: 'broken', error: 'corrupt' }] }))
   await page.route(storeApi + '/updates', route => {
     const libs = route.request().postDataJSON().libs
     batches.push(libs)
@@ -221,7 +221,7 @@ test('update checks batch only saved complete IDs and preserve failure and absen
 
 test('update recommendations use the saved version and open an exact release confirmation', async ({ page }, testInfo) => {
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [completeJournal('1.0.0')] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [completeJournal('1.1.0')] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [completeJournal('1.1.0')] }))
   await page.route(storeApi + '/updates', route => {
     expect(route.request().postDataJSON()).toEqual({ libs: [{ publisher: 'alice.smith.dhttp.net', name: 'journal', version: '1.1.0' }] })
     return route.fulfill({ json: { libs: [{ id: fullId, status: 'update', version: '1.2.0',
@@ -244,8 +244,8 @@ test('update recommendations use the saved version and open an exact release con
 
 test('loaded and saved versions stay separate, including removal and disk corruption', async ({ page }, testInfo) => {
   let disk: Array<LibSummary | { id: string; error: string }> = [{ ...journal, version: '1.2.0' }, { id: 'broken', error: 'missing lib.webc' }]
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
-  await page.route('**/std/pishoo/libs/journal', route => {
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: disk }))
+  await page.route('**/std/sys/package/libs/journal', route => {
     expect(route.request().method()).toBe('DELETE')
     disk = disk.filter(lib => lib.id !== 'journal')
     return route.fulfill({ status: 204 })
@@ -280,7 +280,7 @@ test('loaded and saved versions stay separate, including removal and disk corrup
 
 test('legacy APIs are not guessed to be a page, disk-only apps cannot open', async ({ page }) => {
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [{ ...journal, openapi: undefined }] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [journal, { ...journal, id: 'new', title: 'New app' }] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [journal, { ...journal, id: 'new', title: 'New app' }] }))
   await page.goto('./apps')
   await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveCount(0)
   await page.locator('.app-card').filter({ hasText: 'Personal journal' }).getByRole('link', { name: 'Details', exact: true }).click()
@@ -290,7 +290,7 @@ test('legacy APIs are not guessed to be a page, disk-only apps cannot open', asy
 
 test('declared root entry comes from the displayed release before activation', async ({ page }) => {
   const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(
-    new URL('../../examples/journal/openapi.json', import.meta.url), 'utf8',
+    new URL('../../../../pishoo/examples/journal/openapi.json', import.meta.url), 'utf8',
   ))
   const app: LibSummary = {
     id: fullId, title: manifest.info.title, version: manifest.info.version,
@@ -304,7 +304,7 @@ test('declared root entry comes from the displayed release before activation', a
   }
   let saved: LibSummary[] = []
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: saved }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: saved }))
   const storeRelease = { ...release(app.version), openapi: manifest }
   await page.route(storeApi + `/libs/${fullId}/versions/${app.version}`, route => route.fulfill({ json: storeRelease }))
 
@@ -316,7 +316,7 @@ test('declared root entry comes from the displayed release before activation', a
 
   // A saved release retains its entry while waiting for a restart to activate.
   saved = [app]
-  await page.goto(`./apps/local/${fullId}`)
+  await page.goto(`./apps/local/${fullId.split('/').at(-1)}`)
   await expect(page.getByRole('heading', { name: app.title, exact: true })).toBeVisible()
   await expect(page.locator('.app-about')).not.toContainText('API app · no page entry declared')
   await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveCount(0)
@@ -332,9 +332,9 @@ test('local file inspection, update confirmation, save and failed save', async (
   let live = [...disk]
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
   let fail = true
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
-  await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: { ...journal, version: '1.2.0' } }))
-  await page.route('**/std/pishoo/libs/journal', route => {
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: disk }))
+  await page.route('**/std/sys/package/lib-check', route => route.fulfill({ json: { ...journal, version: '1.2.0' } }))
+  await page.route('**/std/sys/package/libs/journal', route => {
     expect(route.request().headers()['content-type']).toBe('application/webc')
     if (fail) return route.fulfill({ status: 500, body: 'Compilation or save failed' })
     disk = [{ ...journal, version: '1.2.0' }]
@@ -419,7 +419,7 @@ test('three permission views use refreshed rules and partial results remain in d
 test('empty catalogs and query failure are distinct and retry works', async ({ page }, testInfo) => {
   let fail = true
   await page.route('**/std/workspace-api/libs', route => fail ? route.fulfill({ status: 503, body: 'Runtime unavailable' }) : route.fulfill({ json: [] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [] }))
   await page.goto('./apps')
   await expect(page.getByRole('alert')).toContainText('Runtime unavailable')
   await expect(page.getByText('No apps installed', { exact: true })).toHaveCount(0)
@@ -432,7 +432,7 @@ test('empty catalogs and query failure are distinct and retry works', async ({ p
 
 test('invalid identities cannot construct component requests', async ({ page }) => {
   const reads: string[] = []
-  page.on('request', request => { if (request.url().includes('/std/pishoo/libs/')) reads.push(request.url()) })
+  page.on('request', request => { if (request.url().includes('/std/sys/package/libs/')) reads.push(request.url()) })
   await page.goto('./apps/local/alice.dhttp.net%2Fjournal?section=access')
   await expect(page.getByText('Invalid application identity')).toBeVisible()
   expect(reads).toEqual([])
@@ -442,7 +442,7 @@ test('card grid and long names fit every viewport', async ({ page }, testInfo) =
   const legacy = { ...journal, id: 'archive', title: 'Personal research and reading archive', openapi: undefined }
   const pending = { ...journal, id: 'notebook', title: 'Notebook', version: '2.0.0', openapi: undefined }
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: [journal, legacy] }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: [{ ...journal, version: '1.2.0' }, legacy, pending] }))
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: [{ ...journal, version: '1.2.0' }, legacy, pending] }))
   await page.goto('./apps')
   await expect(page.locator('.app-card')).toHaveCount(3)
   await page.screenshot({ path: testInfo.outputPath('13-card-grid.png'), fullPage: true })
@@ -486,7 +486,7 @@ function uploadComponent(signed = true) {
 test('store upload rejects unsigned artifacts and a different publisher identity', async ({ page }) => {
   let checks = 0, uploads = 0
   await page.route(`${storeApi}/libs?*`, route => route.fulfill({ json: { libs: [], page: 1, page_size: 20, total: 0 } }))
-  await page.route('**/std/pishoo/lib-check', route => { checks++; return checks === 1 ? route.fulfill({ status: 400, body: 'Missing publisher signature volume' }) : route.fulfill({ json: completeJournal() }) })
+  await page.route('**/std/sys/package/lib-check', route => { checks++; return checks === 1 ? route.fulfill({ status: 400, body: 'Missing publisher signature volume' }) : route.fulfill({ json: completeJournal() }) })
   await page.route(`${storeApi}/libs/${fullId}/versions/*`, route => { uploads++; return route.fulfill({ json: release() }) })
   await page.goto('./apps?tab=store')
   await page.getByRole('button', { name: 'Upload app', exact: true }).click()
@@ -510,7 +510,7 @@ test('store upload confirms the package version, keeps a failed upload and retri
     profile: 'alice.smith.dhttp.net', owner_name: 'alice.smith.dhttp.net', badges: { pending_reviews: 0, incoming_contacts: 0 },
   } }))
   await page.route(`${storeApi}/libs?*`, route => route.fulfill({ json: { libs: [], page: 1, page_size: 20, total: 0 } }))
-  await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: completeJournal() }))
+  await page.route('**/std/sys/package/lib-check', route => route.fulfill({ json: completeJournal() }))
   await page.route(`${storeApi}/libs/${fullId}/versions/1.1.0`, async route => {
     if (route.request().method() === 'PUT') {
       uploads++
@@ -541,15 +541,15 @@ test('store upload confirms the package version, keeps a failed upload and retri
 })
 
 test('preview folds business APIs, groups page files and enables Open immediately after install', async ({ page }) => {
-  const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(new URL('../../examples/journal/openapi.json', import.meta.url), 'utf8'))
+  const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(new URL('../../../../pishoo/examples/journal/openapi.json', import.meta.url), 'utf8'))
   const installed: LibSummary = { id: fullId, title: manifest.info.title, version: manifest.info.version, description: manifest.info.description ?? null, openapi: manifest,
     endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) => Object.entries(methods).map(([method, operation]) => ({ method: method.toUpperCase(), path: `/api/${fullId}${path}`, description: operation?.summary ?? null }))),
   }
   let live: LibSummary[] = [], disk: LibSummary[] = []
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
-  await page.route('**/std/pishoo/libs', route => route.fulfill({ json: disk }))
-  await page.route('**/std/pishoo/lib-check', route => route.fulfill({ json: installed }))
-  await page.route(`**/std/pishoo/libs/${fullId}`, route => {
+  await page.route('**/std/sys/package/libs', route => route.fulfill({ json: disk }))
+  await page.route('**/std/sys/package/lib-check', route => route.fulfill({ json: installed }))
+  await page.route(`**/std/sys/package/libs/${fullId.split('/').at(-1)}`, route => {
     if (route.request().method() === 'DELETE') { live = []; disk = []; return route.fulfill({ status: 204 }) }
     live = [installed]; disk = [installed]; return route.fulfill({ json: installed })
   })

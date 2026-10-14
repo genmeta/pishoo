@@ -139,15 +139,15 @@ Lib 保留 OpenAPI 3.1，`info.version` 与包版本一致。只写组件内部�
 
 ## 独立前端
 
-前端可使用 HTML/JS 或 Vite、React、Vue 等构建工具，最终生成 `public/index.html` 和资源文件。Vite `base` 使用 `./`，页面用 `./assets/app.js` 等相对资源 URL，业务调用则使用声明依赖对应的 `/api/<name>/...`，例如：
+前端可使用 HTML/JS 或 Vite、React、Vue 等构建工具，最终生成 `public/index.html` 和资源文件。Vite `base` 使用 `./`，页面用 `./assets/app.js` 等相对资源 URL，业务调用则使用声明依赖对应的 `/std/<业务路径>`，例如：
 
 ```javascript
-const response = await fetch('/api/hello/hello', {
+const response = await fetch('/std/hello', {
   headers: { Accept: 'application/json' },
 })
 ```
 
-App 安装于 `/app/hello/`；它与 `/api/hello/` 是独立挂载。资源目录直接生成静态 GET/HEAD 路由，不生成 OpenAPI、operationId 或 static-file 注解。不存在的资源404，不支持的方法405；SPA 使用 hash 路由，没有隐式 index.html fallback。所有资源仍经过 daccess，public 不代表匿名公开。
+App 安装于 `/std/hello/`；它与 `/std/hello` 是独立挂载。资源目录直接生成静态 GET/HEAD 路由，不生成 OpenAPI、operationId 或 static-file 注解。不存在的资源404，不支持的方法405；SPA 使用 hash 路由，没有隐式 index.html fallback。所有资源仍经过 daccess，public 不代表匿名公开。
 
 ## 打包、签名和发布
 
@@ -162,7 +162,7 @@ App 安装于 `/app/hello/`；它与 `/api/hello/` 是独立挂载。资源目�
 
 ## 安装和卸载
 
-商店安装继续调用 `POST /std/pishoo/store-install`，例如：
+商店安装继续调用 `POST /std/sys/package/store-install`，例如：
 
 ```json
 {"kind":"app","publisher":"alice.smith.dhttp.net","name":"hello","version":"1.0.0"}
@@ -170,7 +170,7 @@ App 安装于 `/app/hello/`；它与 `/api/hello/` 是独立挂载。资源目�
 
 kind 选择 app/lib；省略时仍按 lib 处理。两种包都递归解析精确 Lib 依赖，复用匹配版本，补装缺失版本；循环、版本冲突、同类短名冲突或代理范围冲突时拒绝。缺少依赖的本地文件安装不自动联网补装。
 
-安装事实以 config.db 为准，启动不扫描导入未登记文件。完整包身份用于签名、依赖、管理地址和磁盘，普通访问使用 `/app/<name>/`、`/api/<name>/`。在线操作即时生效，离线 CLI 修改下次加载生效；单制品原子保存，不承诺跨包事务。
+安装事实以 config.db 为准，启动不扫描导入未登记文件。完整包身份用于签名、依赖、管理地址和磁盘，普通访问使用 `/std/<name>/`、`/std/<业务路径>`。在线操作即时生效，离线 CLI 修改下次加载生效；单制品原子保存，不承诺跨包事务。
 
 卸载 App 保留后端；被 App/Lib 依赖的 Lib 不允许单独卸载或不兼容更新。显式卸载也保留后端数据和既有权限。不增加自动清理、级联删除或 purge；不自动授予页面/API 权限。
 
@@ -209,7 +209,7 @@ Lib 不获得通用宿主目录或命令执行能力。已批准的标准 WASI H
 
 App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version，最多100；Lib省略时为[]）。config.db 的 app_dependencies 与 lib_dependencies 分别保存关联。宿主拒绝循环和不匹配版本，启动核对签名制品与登记；依赖被使用时不能卸载或修改其内容/版本。正常移除父制品只删除其关联，保留依赖制品和数据。商店安装递归补齐并按依赖顺序提交，一次最多解析100个Lib，父安装失败不撤销已成功安装的有效依赖。
 
-Lib 间调用通过标准 WASI HTTP 向 https://~/api/<name>/... 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
+Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
 
 前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。
 
@@ -221,4 +221,4 @@ cargo run --locked -p pishoo --example package-webc -- WASMER.toml OUTPUT.webc -
 
 `wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向不嵌入 OpenAPI/签名的 Component。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、包级签名、调用宿主检查后原子写入输出，不生成 App OpenAPI 或改写源清单。
 
-Workspace 的构建与三包依赖顺序见 [Workspace 后端](../workspace-lib/README.md)。
+Workspace 的构建与三包依赖顺序见 [Profile 后端](../../std/libs/profile/README.md)。

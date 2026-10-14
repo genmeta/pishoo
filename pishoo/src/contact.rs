@@ -695,3 +695,7 @@ async fn deliver(
         Ok(())
     }).await.map_err(|e|fail(500,e.to_string()))?
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/contact.rs"]
+mod tests;

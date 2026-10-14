@@ -2,6 +2,19 @@
 
 2026-10-13：启用开关、监听范围、代理规则以及身份目录增删在运行时串行应用。
 
+## 身份目录发现
+
+Linux root 启动和每次定期扫描都发现 DHTTP 全局 home（默认 `/etc/dhttp`）以及
+系统账户实际 home 下的 `.dhttp`。账户由 `getent passwd`/NSS 枚举；缺少 getent 时
+读取 `/etc/passwd`，支持 `/root`、`/home`、`/var/home` 和其他发行版/自定义 home。
+缺失的默认目录忽略，新增账户下次扫描可见。其他运行使用当前账户的 `~/.dhttp`。
+Pishoo 不读取 DHTTP_HOME。本地 CLI 和打包命令使用当前账户的 `.dhttp`。
+不跟随用户 home、.dhttp 或身份目录的符号链接。各身份保持原凭据、配置和数据目录。
+重复规范化身份名会报告名称与两个路径，启动失败；运行中则保留所有现有 Server，
+消除冲突后重试。身份移动到其他 home 时先关闭旧目录的 Server，再从新目录加载，
+不会把新目录的配置应用到旧目录的资源。
+Linux root 进程日志默认写入 `/etc/dhttp/logs/error.log`。
+
 ## 配置与操作
 
 `settings.enabled` 保存是否启动 Server，`listen` 保存范围0/1/2/3；两者独立。`ServerConfig.enabled: bool` 是持久配置的内存值。Server 直接持有实际登记资源 `listener: Option<dhttp::ListenFuture>`；丢弃该 future 撤销名称/Service 登记，不关闭共享连接池、socket 或已有请求。未监听、加载和关闭阶段没有 listener。没有额外 active、failed、registered 标志、状态容器、通知信号或后台编译协调器。

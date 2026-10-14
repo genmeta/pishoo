@@ -993,7 +993,7 @@ export default function AppsPage() {
         <ul class="app-operations">
           <For each={lib?.dependencies}>{dependency => (
             <li>
-              <a href={workspacePath(`/apps/${identity()?.source === 'store' ? `store/${encodeURIComponent(dependency.publisher)}` : 'local'}/${encodeURIComponent(dependency.name)}?kind=lib&version=${encodeURIComponent(dependency.version)}`)}>
+              <a class="text-link" href={workspacePath(`/apps/${identity()?.source === 'store' ? `store/${encodeURIComponent(dependency.publisher)}` : 'local'}/${encodeURIComponent(dependency.name)}?kind=lib&version=${encodeURIComponent(dependency.version)}`)}>
                 <code>{dependency.publisher}/{dependency.name}</code>
               </a>
               <p>v{dependency.version}</p>

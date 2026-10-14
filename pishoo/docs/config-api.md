@@ -53,7 +53,7 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 成功写入表示期望配置已保存，GET 展示数据库配置。运行进程每秒扫描并串行应用 enabled、listen 和代理配置，新身份目录也自动发现；不提供 SIGHUP 重载。扫描等待当前 DNS/OCSP 批结束，身份加载、编译及关闭也可能增加生效延迟；接口不承诺一秒内完成。生效和失败在服务日志中记录。详见 [运行时生命周期](server-lifecycle.md)。
 
-使用原生 H3 示例客户端；设置 DHTTP_HOME 指向客户端身份目录，并以目标身份的同名凭据连接：
+使用原生 H3 示例客户端，在客户端身份所属账户下运行，并以目标身份的同名凭据连接：
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
@@ -67,9 +67,9 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 
 ## 启动初始化与数据库兼容
 
-初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。默认 home 为运行用户的 `~/.dhttp`，`DHTTP_HOME` 可覆盖。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
-新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。服务应以身份所属用户运行；systemd 部署应通过服务覆盖文件设置 User 和 DHTTP_HOME，配置变更后重启、SIGTERM 退出。Homebrew 按当前用户启动服务。
+新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。Linux systemd 服务默认以 root 运行并加载多用户身份；管理员可通过服务覆盖文件修改 User；非 root 运行只加载当前账户的 `.dhttp`。服务用户修改后重启，SIGTERM 退出。Homebrew 按当前用户启动服务。
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |

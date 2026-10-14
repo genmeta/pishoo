@@ -36,8 +36,19 @@ fn ocsp_ticks() -> tokio::time::Interval {
 }
 
 pub async fn run() -> Result<()> {
-    let home = DhttpHome::load(dhttp_home::HomeScope::User)
-        .map_err(|e| Error::InvalidConfig(e.to_string()))?;
+    #[cfg(target_os = "linux")]
+    let multiuser = rustix::process::geteuid().is_root();
+    #[cfg(not(target_os = "linux"))]
+    let multiuser = false;
+    let home = if multiuser {
+        DhttpHome::load(dhttp_home::HomeScope::Global)
+            .map_err(|e| Error::InvalidConfig(e.to_string()))?
+    } else {
+        DhttpHome::for_user_home_dir(
+            dirs::home_dir()
+                .ok_or_else(|| Error::InvalidConfig("cannot locate user home directory".into()))?,
+        )
+    };
     let runtime = Arc::new(WasmRuntime::new()?);
     let mdns = dns::install()?;
     let addresses = qprotocol::AddressBook::global();
@@ -49,7 +60,8 @@ pub async fn run() -> Result<()> {
     let result = async {
         // OCSP bootstrap uses ordinary HTTPS and qtls's configured trust roots.
         dhttp::DhttpNetwork::init().await?;
-        for profile in home.discover_identity_profiles()? {
+        let user_homes = multiuser.then(account_homes).transpose()?;
+        for profile in discover_profiles(&home, user_homes.as_deref())? {
             if let Some(server) = load_profile(profile, runtime.clone()).await? {
                 servers.insert(server.name().to_owned(), server);
             }
@@ -117,7 +129,11 @@ pub async fn run() -> Result<()> {
                     }
                     _ = runs.next(), if !runs.is_empty() => {},
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
-                        match reconcile_profiles(&home, &mut servers, runtime.clone()).await {
+                        let result = async {
+                            let user_homes = multiuser.then(account_homes).transpose()?;
+                            reconcile_profiles(&home, user_homes.as_deref(), &mut servers, runtime.clone()).await
+                        }.await;
+                        match result {
                             Ok(true) => break,
                             Ok(false) => {},
                             Err(error) => tracing::warn!(%error,
@@ -225,20 +241,97 @@ async fn load_profile(
     }
 }
 
+// getent uses the distribution's configured account sources (including NSS).
+// Minimal systems without getent still have their local passwd database.
+fn account_homes() -> Result<Vec<std::path::PathBuf>> {
+    let records = match std::process::Command::new("getent").arg("passwd").output() {
+        Ok(output) if output.status.success() => String::from_utf8(output.stdout)
+            .map_err(|error| Error::InvalidConfig(format!("invalid account database: {error}")))?,
+        Ok(output) => {
+            return Err(Error::InvalidConfig(format!(
+                "account discovery failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::read_to_string("/etc/passwd")?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(parse_account_homes(&records))
+}
+
+fn parse_account_homes(records: &str) -> Vec<std::path::PathBuf> {
+    let mut homes = records
+        .lines()
+        .filter_map(|line| line.split(':').nth(5))
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .collect::<Vec<_>>();
+    homes.sort();
+    homes.dedup();
+    homes
+}
+
+// Paths and discovery results are local to each scan; Server retains the actual profile.
+fn discover_profiles(
+    home: &DhttpHome,
+    user_homes: Option<&[std::path::PathBuf]>,
+) -> Result<Vec<IdentityProfile>> {
+    let Some(user_homes) = user_homes else {
+        return home.discover_identity_profiles().map_err(Into::into);
+    };
+    let mut homes = vec![home.clone()];
+    for user_home in user_homes {
+        match user_home.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                homes.push(DhttpHome::for_user_home_dir(user_home));
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    homes.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+    homes.dedup_by(|a, b| a.as_path() == b.as_path());
+    let mut profiles = BTreeMap::<String, IdentityProfile>::new();
+    for home in homes {
+        match home.as_path().symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        for profile in home.discover_identity_profiles()? {
+            if let Some(previous) = profiles.get(profile.name()) {
+                return Err(Error::InvalidConfig(format!(
+                    "duplicate identity {} in {} and {}",
+                    profile.name(),
+                    previous.path().display(),
+                    profile.path().display()
+                )));
+            }
+            profiles.insert(profile.name().to_owned(), profile);
+        }
+    }
+    Ok(profiles.into_values().collect())
+}
+
 // Reconcile each identity serially; a failed discovery never removes active resources.
 async fn reconcile_profiles(
     home: &DhttpHome,
+    user_homes: Option<&[std::path::PathBuf]>,
     servers: &mut BTreeMap<String, Server>,
     runtime: Arc<WasmRuntime>,
 ) -> Result<bool> {
-    let profiles = home.discover_identity_profiles()?;
+    let profiles = discover_profiles(home, user_homes)?;
     let mut changed = false;
     let removed = servers
         .keys()
         .filter(|name| {
-            !profiles
-                .iter()
-                .any(|profile| profile.name() == name.as_str())
+            !profiles.iter().any(|profile| {
+                profile.name() == name.as_str() && profile.path() == servers[*name].profile.path()
+            })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1087,7 +1180,7 @@ impl Server {
             }
         }
         let endpoint =
-            dhttp::Endpoint::load(profile.name())
+            dhttp::Endpoint::load_from(profile.path())
                 .await
                 .map_err(|error| match error {
                     dhttp::Error::InvalidName { .. }

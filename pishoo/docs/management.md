@@ -14,7 +14,8 @@ pishoo --id alice.smith proxy /test 127.0.0.1:8080
 
 未指定身份时读取身份 home 的 `settings.toml` 中 `[default].name`。
 未设置默认身份时须显式提供 `--id`。home 默认是运行用户的 `~/.dhttp`，
-可通过 `DHTTP_HOME` 指定；CLI 与系统服务必须使用同一个 home。
+Pishoo 不读取 DHTTP_HOME。Linux root 服务自动加载系统全局 home 和各账户的实际 home；
+本地命令在身份所属账户下执行，例如 `sudo -u alice pishoo --id NAME enable`。
 服务启停与 `lib check` 不接受 `--id`。
 
 ## 命令与 HTTP API
@@ -66,31 +67,39 @@ PATCH 设置请求体示例：
 
 ## Lib 安装与数据
 
-组件位于 `<身份目录>/lib/<LibId>/lib.wasm`，私有数据位于
-`<身份目录>/db/<LibId>/`。LibId 可以是旧短名，也可以是 `<publisher>/<name>`。
-name 长度为 1～63 字节，以小写 ASCII 字母开头，后续可使用小写字母、数字和连字符；
-publisher 必须是规范化完整 DHTTP 名称。完整 ID 使用两层目录和两段管理/API 路径，
-不自动迁移旧短名的组件、数据或规则。
+Lib 制品位于 `<身份目录>/lib/<publisher>/<name>/lib.webc`，App 制品位于
+`<身份目录>/app/<publisher>/<name>/app.webc`，Lib 私有数据位于
+`<身份目录>/db/<publisher>/<name>/`。旧短 ID 数据不自动迁移。
 
-安装前校验组件及其 OpenAPI 清单。安装成功表示磁盘文件已保存，需重启后加载。
-删除 Lib 保留其数据目录与 ACL 规则；重复删除不存在的 Lib 仍成功。
-磁盘列表读取组件清单，损坏条目显示 `id` 和 `error`；列表成功不保证组件能编译。
+本机资源地址统一使用短名：
 
-JSON 写请求使用 `Content-Type: application/json`，最大 64 KiB；
-组件上传和校验使用 `Content-Type: application/wasm`，最大 64 MiB。
-写请求成功返回 200 和 JSON，删除返回 204。
-请求中断时应查询资源确认结果，再决定是否重试。
+| 操作 | Lib | App |
+| --- | --- | --- |
+| 列出安装登记 | `GET /std/sys/package/libs` | `GET /std/sys/package/apps` |
+| 查看单个制品 | `GET /std/sys/package/libs/<name>` | `GET /std/sys/package/apps/<name>` |
+| 安装或更新 | `PUT /std/sys/package/libs/<name>` | `PUT /std/sys/package/apps/<name>` |
+| 卸载 | `DELETE /std/sys/package/libs/<name>` | `DELETE /std/sys/package/apps/<name>` |
+| 校验上传 | `POST /std/sys/package/lib-check` | `POST /std/sys/package/app-check` |
+| 已加载目录 | `GET /std/sys/package/loaded-libs` | `GET /std/sys/package/loaded-apps` |
 
-商店安装使用 `POST /std/pishoo/store-install`，请求为
-`{"publisher":"alice.smith.dhttp.net","name":"note","version":"1.2.0"}`，
-`Content-Type: application/json`，最多 4 KiB，接收期限 15 秒。
-入口在 daccess 后复核同名同 owner；宿主从固定的 `store.dhttp.net` 下载精确版本，
-在发送前及响应时核对部署 owner_hash，并核验完整包摘要、大小、原始 OpenAPI、
-发布者证书、签名和本机编译兼容性。下载不跟随第三方跳转，每个远端读取期限 120 秒。
-已有有效签名完整 ID 的更新须保持 publisher owner_hash；证书轮换可用相同 owner。
-成功返回既有磁盘目录条目，不运行 guest、不设置访问规则，仍需重启生效。
-版本下架、签名或摘要不匹配时停止安装；保存结果未知时读取磁盘详情核实。
-原始文件 PUT 不产生商店在线来源证明；旧无签名组件保持兼容，带签名组件校验内容完整性。
+name 以小写 ASCII 字母开头，只含小写字母、数字和连字符，最长63字节。
+每个身份内同类短名唯一，跨发布者同名安装返回409；App 与 Lib 可以同名。
+GET/DELETE 从 config.db 解析完整包 ID；PUT 从验签后的包读取完整 ID，短名与 URL 不符返回400。
+带 `<publisher>/<name>` 的管理路径返回404，不提供别名；百分号编码的路径分隔符返回400。
+响应仍包含完整包 ID，更新核对原发布者及 owner_hash。磁盘、包身份、依赖与商店资源保留 publisher。
+
+安装、更新、卸载在线即时生效，在途请求继续使用原资源；离线 CLI 修改下次加载生效。
+卸载 App 保留 Lib；Lib 被 App/Lib 依赖时拒绝卸载。卸载 Lib 保留私有数据与 ACL，重复删除未安装短名返回204。
+目录以登记为准，逐项核验签名、版本与依赖；Lib 损坏条目返回 `id` 和 `error`。
+
+制品上传与校验使用 `Content-Type: application/webc`，最大64 MiB；成功返回200和JSON，删除返回204。
+GET/DELETE 不接受非空 Body，未知 query 参数返回400；管理接口仍经 daccess 与同名同 owner 复核。
+请求中断时查询短名资源确认保存结果，再决定是否重试。
+
+商店安装使用 `POST /std/sys/package/store-install`，请求为
+`{"kind":"lib","publisher":"alice.smith.dhttp.net","name":"note","version":"1.2.0"}`；kind 可为 app/lib，省略时按 lib。
+`Content-Type: application/json`，最多4 KiB，接收期限15秒。商店仍使用完整 publisher/name 和精确版本。
+宿主核验固定商店身份、发布者签名、包摘要及依赖，安装不自动设置访问规则；原始文件 PUT 不产生商店来源证明。
 
 ## 服务管理
 
@@ -102,8 +111,15 @@ pishoo status
 ```
 
 Linux 使用已安装的 `pishoo.service`；macOS 使用当前用户的 Homebrew 服务。
+Linux 包默认以 root 运行服务，系统身份目录使用 DHTTP 全局目录解析（默认 `/etc/dhttp`），
+用户身份从系统账户数据库的实际 home 下 `.dhttp` 发现，不固定 `/home` 前缀。
+优先使用 `getent passwd`/NSS，缺少 getent 时读取 `/etc/passwd`；支持 `/root`、`/var/home`
+及管理员自定义的 home。Pishoo 不读取 DHTTP_HOME。
+升级删除旧版自动生成且未经修改的 `identity-home.conf`，管理员的 unit、其他覆盖文件
+和修改过的配置保留。不创建或依赖 `dhttp` 用户组，也不读取 `pishoo.conf`。
+用户的身份、证书、数据库和应用数据始终保留。
 这些操作影响服务加载的全部身份，权限不足或服务未安装时返回错误。
-无参数运行 `pishoo` 会在前台启动身份 home 中的身份。
+无参数运行 `pishoo` 会在前台启动：Linux root 加载上述多用户目录；其他情况加载当前账户的 `.dhttp`。
 资源命令不自动重启服务；enabled、listen 和代理配置由运行进程自动应用。
 
 ## 完整示例

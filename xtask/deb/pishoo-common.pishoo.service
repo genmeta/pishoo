@@ -1,5 +1,5 @@
-# Initialization belongs to the process that owns DHTTP_HOME.
-# Configure User= and Environment=DHTTP_HOME= in a service override when using a user's identities.
+# Root discovers the DHTTP global home and system-account homes by default.
+# Administrator service overrides remain authoritative.
 [Unit]
 Description=A modern, secure, QUIC-powered, peer-to-peer web/proxy engine
 After=network-online.target remote-fs.target nss-lookup.target
@@ -7,6 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=root
 ExecStart=/usr/bin/pishoo
 TimeoutStopSec=infinity
 KillMode=mixed

@@ -142,8 +142,9 @@ export default function AddContactPage(props: {
       <Dialog open={!recipientReady()} title={t('outbound.searchTitle')}
         onClose={() => props.navigate('#/contacts')}>
         <form onSubmit={(event) => { event.preventDefault(); search() }}>
-          <label class="field"><span>{t('outbound.target')}</span>
-            <input ref={targetInput} value={target()} aria-invalid={targetError() !== null} aria-required="true"
+          <label class="field">
+            <input ref={targetInput} value={target()} aria-label={t('outbound.target')}
+              aria-invalid={targetError() !== null} aria-required="true"
               disabled={recipient.loading} autocomplete="off"
               onInput={(event) => { setTarget(event.currentTarget.value); setTargetError(null) }} />
             <Show when={targetError()}><span class="field-error" role="alert">{targetError()}</span></Show>

@@ -41,7 +41,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. Workspace is an ordinary user App with separate Workspace and Chat WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](pishoo/workspace-lib/README.md); release packages deliver the three signed artifacts by default. First-time host builds need access to GitHub and crates.io. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](std/libs/profile/README.md); release packages deliver the three signed artifacts by default. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -64,6 +64,19 @@ sudo apt update
 sudo apt install pishoo gmutils
 ```
 
+The Linux package runs `pishoo.service` as root. It loads the DHTTP global home
+(default `/etc/dhttp`) and `.dhttp` under each account's actual home from the
+system account database. This supports `/root`, `/home`, `/var/home` and custom
+home locations across distributions. Account discovery uses `getent passwd`
+(NSS), with `/etc/passwd` as the fallback on systems without `getent`.
+
+Each identity keeps its configuration, credentials and data in its original
+directory. New accounts and identities are discovered while the service runs.
+Duplicate normalized identity names are rejected with both paths in the diagnostic.
+Upgrades remove the previous unmodified package-generated single-user override;
+administrator unit files and customized overrides are preserved. Pishoo no longer
+uses `DHTTP_HOME`. No `dhttp` group membership is required.
+
 #### macOS
 
 ```sh
@@ -83,7 +96,7 @@ genmeta identity apply
 
 ### Current development configuration
 
-Pishoo uses the running user's `~/.dhttp` by default; set `DHTTP_HOME` to use another identity home. Each Server reads its own `<DHTTP_HOME>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, enabled)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. The running process discovers identities and applies enabled/listen/proxy configuration changes automatically. Disabling a Server preserves its listening scope and data; use `pishoo enable --id NAME` or `pishoo disable --id NAME`. See [Server lifecycle](pishoo/docs/server-lifecycle.md). Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's `~/.dhttp`. Each Server reads its own `<identity-home>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, enabled)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. The running process discovers identities and applies enabled/listen/proxy configuration changes automatically. Disabling a Server preserves its listening scope and data; use `pishoo enable --id NAME` or `pishoo disable --id NAME`. See [Server lifecycle](pishoo/docs/server-lifecycle.md). Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
@@ -91,24 +104,24 @@ Database configuration is available over H3 through `GET/PATCH /std/pishoo/setti
 
 First startup with valid identity credentials creates `db/`, `file/`, `lib/`, `logs/`, `repo/`, `templates/`, and `assets/profile/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
-Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Run services as the identity owner; systemd installations need an appropriate `User=` and `Environment=DHTTP_HOME=...` override.
+Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
-Static files under `<DHTTP_HOME>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
+Static files under `<identity-home>/<identity>/file/` are served at `/std/file/{path}`. The `/std/file` path itself is unavailable. Ordinary `/file/*` paths use configured proxies; there is no static-file proxy override.
 
 The same-identity DHTTP forwarding route streams request bytes through the native request writer. Request trailers are currently unsupported: declared trailers are rejected before forwarding, and trailers discovered during upload cancel that upload. Response bodies and trailers retain their native streaming behavior.
 
 ### Run
 
-Start the development build with `DHTTP_HOME` pointing to the instance directory. Identities and configuration load at startup; the running process automatically discovers new identities and applies enabled, listen, and proxy changes. Disabling a Server preserves its listening scope and data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
+Start the development build as the account that owns the identities in `~/.dhttp`. Identities and configuration load at startup; the running process automatically discovers new identities and applies enabled, listen, and proxy changes. Disabling a Server preserves its listening scope and data. Loaded identities require restart or disable/enable to replace certificate/key credentials. Libs load at startup, while online installation/update/removal changes the running Lib collection immediately. SIGHUP reload is not supported. Every 72 hours after startup, Pishoo fetches and validates fresh OCSP proofs for loaded identities, atomically updates their caches, and refreshes TLS registration, DNS publishers, and application outbound credentials. A failed refresh logs the identity and reason and retains its previous in-memory credentials; the next attempt is at the next scheduled refresh. Refreshes do not renew expired identity certificates.
 
 Startup skips identities with invalid credentials, including expired certificates, and logs the identity name and reason. Other identities continue loading. A skipped identity is retried by the periodic identity scan. Invalid configuration, database, or Lib errors still stop startup. Missing or invalid local OCSP caches are prepared during startup; the running process refreshes OCSP every 72 hours, while certificate/key changes require restart.
 
-The `pishoo` executable appends runtime diagnostics to `<DHTTP_HOME>/logs/error.log` (default `~/.dhttp/logs/error.log`) and also writes them to stderr. This process-wide log includes shared network diagnostics and identity failures. The default level is `warn`; set `RUST_LOG=debug` for more detail in the same file. New log directories and files use permissions 0700 and 0600 on Unix. Failure to open the log stops startup with a stderr diagnostic. Per-identity `logs/cert.log` remains the certificate-operation history written by gmutils.
+The `pishoo` executable appends runtime diagnostics to `<identity-home>/logs/error.log` (Linux root default `/etc/dhttp/logs/error.log`; other runs `~/.dhttp/logs/error.log`) and also writes them to stderr. This process-wide log includes shared network diagnostics and identity failures. The default level is `warn`; set `RUST_LOG=debug` for more detail in the same file. New log directories and files use permissions 0700 and 0600 on Unix. Failure to open the log stops startup with a stderr diagnostic. Per-identity `logs/cert.log` remains the certificate-operation history written by gmutils.
 
 For an interactive Echo over QUIC, use an already running Pishoo endpoint and a configured local DHTTP identity:
 
 ```sh
-DHTTP_HOME=/path/to/home ./pishoo/examples/echo-interactive.py \
+./pishoo/examples/echo-interactive.py \
   --transport quic --identity client.dhttp.net \
   --url https://server.dhttp.net/std/api/echo/echo
 ```
@@ -176,7 +189,7 @@ For directive reference and additional reverse-proxy examples, see the official 
 
 ### Management commands
 
-Local commands use `DHTTP_HOME` (otherwise `~/.dhttp`) and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Resource changes require a service restart.
+Local commands use the current account’s `~/.dhttp` and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Resource changes require a service restart.
 
 ```sh
 pishoo listen -i alice.smith internal
