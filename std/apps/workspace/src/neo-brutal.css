@@ -394,6 +394,39 @@ select:hover:not(:disabled) {
   background-color: var(--surface-subtle);
 }
 
+input[type="file"] {
+  padding: 8px 11px;
+}
+
+input[type="file"]:not(:disabled) {
+  cursor: pointer;
+}
+
+input[type="file"]::file-selector-button {
+  min-height: 44px;
+  margin: 0 14px 3px 0;
+  padding: 0 14px;
+  border: 2px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow-small);
+  font-family: "Arial Black", Arial, Helvetica, sans-serif;
+  font-size: inherit;
+  font-weight: 850;
+  cursor: inherit;
+  transition: transform 120ms linear, box-shadow 120ms linear, background 120ms linear;
+}
+
+input[type="file"]:not(:disabled)::file-selector-button:hover {
+  background: var(--primary-soft);
+}
+
+input[type="file"]:not(:disabled)::file-selector-button:active {
+  box-shadow: none;
+  transform: translate(3px, 3px);
+}
+
 .view-select {
   width: auto;
 }
@@ -675,6 +708,41 @@ tbody tr.selected {
 .dialog-header {
   border-bottom: 3px solid var(--border);
   background: #dff4ff;
+}
+
+.contact-search-form {
+  display: grid;
+  gap: 16px;
+}
+
+.contact-search-form .dialog-actions { margin-top: 4px; }
+
+.contact-search-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 2px solid var(--danger);
+  color: var(--danger);
+  background: #fff0f0;
+  line-height: 1.5;
+}
+
+.contact-search-error > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-top: 1px;
+}
+
+.contact-search-error > div { min-width: 0; overflow-wrap: anywhere; }
+.contact-search-error p { margin: 0; font-size: 13px; font-weight: 650; }
+.contact-search-error small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .decision-summary {

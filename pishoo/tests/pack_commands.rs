@@ -35,7 +35,7 @@ fn identity(home: &Path) {
         )
         .unwrap();
     }
-    std::fs::write(ssl.join("ocsp.der"), [1]).unwrap();
+    // Offline package signing needs certificate + private key, not transport OCSP.
 }
 
 fn project(path: &Path, kind: &str, repository: &str) {
@@ -193,6 +193,23 @@ fn compatible_lib_is_signed_and_compiled_without_executing_guest() {
     assert_eq!(result["kind"], "lib");
     let metadata = checked(&home, "lib", &lib.join("dist/hello-1.0.0-lib.webc"));
     assert_eq!(metadata["version"], "1.0.0");
+}
+
+#[cfg(unix)]
+#[test]
+fn mismatched_signing_key_without_ocsp_cannot_publish_a_package() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home/.dhttp");
+    identity(&home);
+    let app = dir.path().join("app");
+    project(&app, "app", "");
+    let key = home.join("alice/ssl/privkey.pem");
+    std::fs::remove_file(&key).unwrap();
+    std::fs::write(&key, rcgen::KeyPair::generate().unwrap().serialize_pem()).unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).unwrap();
+    fails(&pack(&home, &app, &[]), "signature verification failed");
+    clean(&app.join("dist"));
 }
 
 #[test]

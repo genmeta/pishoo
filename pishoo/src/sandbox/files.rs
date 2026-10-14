@@ -49,7 +49,7 @@ fn profile_dir(profile: &IdentityProfile) -> Result<std::fs::File> {
 }
 
 pub(super) fn lib_root(profile: &IdentityProfile) -> Result<std::fs::File> {
-    child_dir(&profile_dir(profile)?, std::ffi::OsStr::new("lib"))
+    child_dir(&profile_dir(profile)?, std::ffi::OsStr::new("libs"))
 }
 
 pub(super) fn valid_id(id: &str) -> Result<()> {
@@ -75,31 +75,32 @@ pub(super) fn valid_id(id: &str) -> Result<()> {
 
 fn resource_dir(root: &std::fs::File, id: &str) -> Result<std::fs::File> {
     valid_id(id)?;
-    match id.split_once('/') {
-        Some((publisher, name)) => {
-            let publisher = child_dir(root, std::ffi::OsStr::new(publisher))?;
-            child_dir(&publisher, std::ffi::OsStr::new(name))
-        }
-        None => child_dir(root, std::ffi::OsStr::new(id)),
-    }
+    let parent = resource_parent(root, id, false)?;
+    child_dir(
+        &parent,
+        std::ffi::OsStr::new(id.rsplit('/').next().unwrap()),
+    )
 }
 
 // Called under the root's exclusive commit lock. The returned handle is the
 // actual target parent; no unchecked slash-containing path reaches openat.
 fn resource_parent(root: &std::fs::File, id: &str, create: bool) -> Result<std::fs::File> {
-    match id.split_once('/') {
-        Some((publisher, _)) => {
-            if create {
-                use rustix::fs::{Mode, mkdirat};
-                match mkdirat(root, publisher, Mode::from_raw_mode(0o700)) {
-                    Ok(()) => root.sync_all()?,
-                    Err(rustix::io::Errno::EXIST) => {}
-                    Err(error) => return Err(layout_error(error)),
-                }
+    valid_id(id)?;
+    // Placement follows the signed publisher identity. It grants no privileges.
+    if id
+        .split_once('/')
+        .is_some_and(|(publisher, _)| publisher == "std.dhttp.net")
+    {
+        if create {
+            match rustix::fs::mkdirat(root, "std", rustix::fs::Mode::from_raw_mode(0o700)) {
+                Ok(()) => root.sync_all()?,
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(e) => return Err(layout_error(e)),
             }
-            child_dir(root, std::ffi::OsStr::new(publisher))
         }
-        None => Ok(root.try_clone()?),
+        child_dir(root, std::ffi::OsStr::new("std"))
+    } else {
+        Ok(root.try_clone()?)
     }
 }
 
@@ -137,13 +138,22 @@ fn check_publisher_update(dir: &std::fs::File, id: &str, bytes: &[u8], kind: &st
     if !id.contains('/') {
         return Ok(());
     }
-    let file = match artifact_file(dir, kind) {
-        Ok(file) => file,
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+    let previous = match expanded_file(dir, ".webc-proof") {
+        Ok(_) => expanded_bytes(dir)?,
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            let file = match artifact_file(dir, kind) {
+                Ok(file) => file,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            let mut previous = Vec::new();
+            file.take(64 * 1024 * 1024 + 1).read_to_end(&mut previous)?;
+            previous
+        }
+        Err(e) => return Err(e),
     };
-    let mut previous = Vec::new();
-    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut previous)?;
     // An unsigned/corrupt legacy file has no authenticated publisher owner to
     // inherit. A valid signed resource cannot be replaced by another owner.
     if let Ok(Some(owner)) = signed_owner(&previous)
@@ -175,6 +185,9 @@ pub(super) fn disk_ids(root: &std::fs::File) -> Result<Vec<String>> {
             .file_name()
             .into_string()
             .map_err(|_| Error::BadRequest("invalid Lib id".into()))?;
+        if id == "std" {
+            continue;
+        }
         if id.contains('.') && dhttp_home::normalize_name(&id).as_deref() == Some(&id) {
             let publisher = child_dir(root, std::ffi::OsStr::new(&id))?;
             let publisher = cap_std::fs::Dir::from_std_file(publisher);
@@ -430,7 +443,10 @@ fn check_routes(
             if other_kind == kind && other == id {
                 continue;
             }
-            let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
+            let root = child_dir(
+                &profile_dir(profile)?,
+                std::ffi::OsStr::new(&format!("{other_kind}s")),
+            )?;
             let other_package = read_package(&artifact_bytes(&root, &other, other_kind)?)?;
             let metadata = package_metadata(&other_package)?;
             check_resource_identity(&metadata, &other)?;
@@ -467,7 +483,10 @@ fn check_existing_rules(
     let old = registered_packages(conn, kind, Some(id));
     let previous = match old {
         Ok(_) => {
-            let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(kind))?;
+            let root = child_dir(
+                &profile_dir(profile)?,
+                std::ffi::OsStr::new(&format!("{kind}s")),
+            )?;
             package_routes(&read_package(&artifact_bytes(&root, id, kind)?)?, id, kind)?
         }
         Err(Error::RouteNotFound) => std::collections::BTreeMap::new(),
@@ -665,6 +684,259 @@ fn check_registration_dependencies(
     Ok(())
 }
 
+fn expanded_error() -> Error {
+    Error::InvalidComponent("invalid or modified expanded package".into())
+}
+
+fn expanded_file(dir: &std::fs::File, path: &str) -> Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let mut parent = dir.try_clone()?;
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if part.is_empty() || matches!(part, "." | "..") || part.contains('\\') {
+            return Err(expanded_error());
+        }
+        if parts.peek().is_some() {
+            parent = child_dir(&parent, std::ffi::OsStr::new(part))?;
+        } else {
+            let file = std::fs::File::from(
+                openat(
+                    &parent,
+                    part,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(layout_error)?,
+            );
+            if !file.metadata()?.is_file() {
+                return Err(expanded_error());
+            }
+            return Ok(file);
+        }
+    }
+    Err(expanded_error())
+}
+
+// Keep the original signed binary headers, but store all file/atom payloads
+// separately. These transient spans are not installation facts or runtime state.
+fn expanded_layout(bytes: &[u8]) -> Result<Vec<(String, webc::v3::Span)>> {
+    let package = read_package(bytes)?;
+    let metadata = package_metadata(&package)?;
+    let mappings = package
+        .manifest()
+        .filesystem()
+        .map_err(|_| expanded_error())?
+        .unwrap();
+    let mapping = &mappings[0];
+    let mapped_root = mapping
+        .host_path
+        .as_deref()
+        .unwrap_or("/")
+        .trim_end_matches('/');
+    let reader =
+        webc::v3::read::OwnedReader::parse(bytes.to_vec()).map_err(|_| expanded_error())?;
+    let index = reader.index();
+    let atom = &index.atoms;
+    let section = webc::v3::read::Section::parse(
+        3,
+        Some(
+            bytes[atom.span.start + 1..atom.span.start + 33]
+                .try_into()
+                .unwrap(),
+        ),
+        bytes[atom.span.start + 41..atom.span.end()].to_vec().into(),
+    )
+    .map_err(|_| expanded_error())?;
+    let mut files = Vec::new();
+    for entry in section.as_atoms().unwrap().iter_with_offsets() {
+        let (_, _, _, span) = entry.map_err(|_| expanded_error())?;
+        files.push((
+            format!("{}.wasm", metadata["name"].as_str().unwrap()),
+            span.with_offset(atom.span.start),
+        ));
+    }
+    for entry in reader.iter_volumes() {
+        let (volume_name, volume) = entry.map_err(|_| expanded_error())?;
+        let offset = index.volumes[volume_name].span.start;
+        let mut pending = vec![(String::new(), volume.root().map_err(|_| expanded_error())?)];
+        while let Some((parent, directory)) = pending.pop() {
+            for entry in directory.entries() {
+                let (name, _, entry) = entry.map_err(|_| expanded_error())?;
+                let path = format!("{parent}/{name}");
+                match entry {
+                    webc::v3::read::DirEntry::Dir(dir) => pending.push((path, dir)),
+                    webc::v3::read::DirEntry::File(file) => {
+                        let destination = if volume_name == "pishoo-signature" {
+                            "signature.json".to_owned()
+                        } else if volume_name == mapping.volume_name
+                            && path
+                                .strip_prefix(mapped_root)
+                                .is_some_and(|tail| tail.starts_with('/'))
+                        {
+                            let relative = path
+                                .strip_prefix(mapped_root)
+                                .unwrap()
+                                .trim_start_matches('/');
+                            if metadata["kind"] == "app" {
+                                format!("public/{relative}")
+                            } else if relative == "openapi.json" {
+                                relative.to_owned()
+                            } else {
+                                format!("metadata/{relative}")
+                            }
+                        } else {
+                            // Preserve signed files outside the logical mount too.
+                            format!(
+                                ".volumes/{}{path}",
+                                volume_name
+                                    .as_bytes()
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<String>()
+                            )
+                        };
+                        files.push((destination, file.span().with_offset(offset)));
+                    }
+                    _ => return Err(expanded_error()),
+                }
+            }
+        }
+    }
+    files.sort_by_key(|(_, span)| (span.start, span.len));
+    let mut position = 0;
+    let mut paths = std::collections::HashSet::new();
+    for (path, span) in &files {
+        if path
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | "..") || part.contains('\\'))
+            || !paths.insert(path)
+            || span.start < position
+            || span.end() > bytes.len()
+        {
+            return Err(expanded_error());
+        }
+        position = span.end();
+    }
+    Ok(files)
+}
+
+fn write_expanded(dir: &std::fs::File, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{Mode, mkdirat};
+    let files = expanded_layout(bytes)?;
+    let header = serde_json::to_vec(&(bytes.len(), &files)).map_err(|_| expanded_error())?;
+    let mut proof = b"pishoo-expanded-webc-v1\0".to_vec();
+    proof.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    proof.extend_from_slice(&header);
+    let mut position = 0;
+    for (path, span) in files {
+        proof.extend_from_slice(&bytes[position..span.start]);
+        position = span.end();
+        let mut parent = dir.try_clone()?;
+        let mut parts = path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                match mkdirat(&parent, part, Mode::from_raw_mode(0o700)) {
+                    Ok(()) => parent.sync_all()?,
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(e) => return Err(layout_error(e)),
+                }
+                parent = child_dir(&parent, std::ffi::OsStr::new(part))?;
+            } else {
+                write_component(&parent, part, &bytes[span.start..span.end()])?;
+            }
+        }
+    }
+    proof.extend_from_slice(&bytes[position..]);
+    write_component(dir, ".webc-proof", &proof)?;
+    let package = read_package(bytes)?;
+    write_component(
+        dir,
+        "manifest.json",
+        &serde_json::to_vec_pretty(package.manifest()).map_err(|_| expanded_error())?,
+    )?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+fn expanded_bytes(dir: &std::fs::File) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut proof = Vec::new();
+    expanded_file(dir, ".webc-proof")?
+        .take(80 * 1024 * 1024 + 1)
+        .read_to_end(&mut proof)?;
+    let magic = b"pishoo-expanded-webc-v1\0";
+    if proof.len() > 80 * 1024 * 1024 || !proof.starts_with(magic) {
+        return Err(expanded_error());
+    }
+    let raw = proof
+        .get(magic.len()..magic.len() + 8)
+        .ok_or_else(expanded_error)?;
+    let header_len = usize::try_from(u64::from_le_bytes(raw.try_into().unwrap()))
+        .map_err(|_| expanded_error())?;
+    if header_len > 16 * 1024 * 1024 {
+        return Err(expanded_error());
+    }
+    let header_start = magic.len() + 8;
+    let header_end = header_start
+        .checked_add(header_len)
+        .ok_or_else(expanded_error)?;
+    let (length, files): (usize, Vec<(String, webc::v3::Span)>) = serde_json::from_slice(
+        proof
+            .get(header_start..header_end)
+            .ok_or_else(expanded_error)?,
+    )
+    .map_err(|_| expanded_error())?;
+    if length > 64 * 1024 * 1024 || files.len() > 10001 {
+        return Err(expanded_error());
+    }
+    let mut bytes = Vec::with_capacity(length);
+    let mut cursor = header_end;
+    for (path, span) in &files {
+        let end = span
+            .start
+            .checked_add(span.len)
+            .filter(|end| *end <= length)
+            .ok_or_else(expanded_error)?;
+        let gap = span
+            .start
+            .checked_sub(bytes.len())
+            .ok_or_else(expanded_error)?;
+        let stop = cursor.checked_add(gap).ok_or_else(expanded_error)?;
+        bytes.extend_from_slice(proof.get(cursor..stop).ok_or_else(expanded_error)?);
+        cursor = stop;
+        let before = bytes.len();
+        expanded_file(dir, path)?
+            .take(span.len as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != end || bytes.len() - before != span.len {
+            return Err(expanded_error());
+        }
+    }
+    let remaining = length.checked_sub(bytes.len()).ok_or_else(expanded_error)?;
+    if proof.len().checked_sub(cursor) != Some(remaining) {
+        return Err(expanded_error());
+    }
+    bytes.extend_from_slice(&proof[cursor..]);
+    // Verify both the original publisher signature and canonical file placement.
+    // A modified proof cannot redirect a signed payload to a different pathname.
+    if expanded_layout(&bytes)? != files {
+        return Err(expanded_error());
+    }
+    let package = read_package(&bytes)?;
+    let mut manifest = Vec::new();
+    expanded_file(dir, "manifest.json")?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut manifest)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&manifest).map_err(|_| expanded_error())?;
+    if manifest.len() > 16 * 1024 * 1024
+        || value != serde_json::to_value(package.manifest()).map_err(|_| expanded_error())?
+    {
+        return Err(expanded_error());
+    }
+    Ok(bytes)
+}
+
 fn artifact_file(dir: &std::fs::File, kind: &str) -> Result<std::fs::File> {
     use rustix::fs::{Mode, OFlags, openat};
     let file = std::fs::File::from(
@@ -689,10 +961,33 @@ pub(super) fn disk_bytes(root: &std::fs::File, id: &str) -> Result<Vec<u8>> {
     artifact_bytes(root, id, "lib")
 }
 
+// Registered previous WEBC installations remain readable until an explicit
+// reinstall. No startup relocation, package discovery, or data migration occurs.
+fn legacy_parent(root: &std::fs::File, id: &str, kind: &str) -> Result<std::fs::File> {
+    let identity = child_dir(root, std::ffi::OsStr::new(".."))?;
+    let legacy = child_dir(&identity, std::ffi::OsStr::new(kind))?;
+    match id.split_once('/') {
+        Some((publisher, _)) => child_dir(&legacy, std::ffi::OsStr::new(publisher)),
+        None => Ok(legacy),
+    }
+}
+
 fn artifact_bytes(root: &std::fs::File, id: &str, kind: &str) -> Result<Vec<u8>> {
     use std::io::Read;
     valid_id(id)?;
-    let dir = resource_dir(root, id)?;
+    let dir = match resource_dir(root, id) {
+        Ok(dir) => dir,
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => child_dir(
+            &legacy_parent(root, id, kind)?,
+            std::ffi::OsStr::new(id.rsplit('/').next().unwrap()),
+        )?,
+        Err(e) => return Err(e),
+    };
+    match expanded_file(&dir, ".webc-proof") {
+        Ok(_) => return expanded_bytes(&dir),
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut bytes = Vec::new();
     artifact_file(&dir, kind)?
         .take(64 * 1024 * 1024 + 1)
@@ -777,13 +1072,18 @@ fn initialized_profile(profile: &IdentityProfile) -> Result<std::fs::File> {
     crate::setup::config_database(
         profile,
         &http::Method::GET,
-        &http::Uri::from_static("/std/pishoo/settings"),
+        &http::Uri::from_static("/std/sys/settings"),
         None,
     )?;
     Ok(dir)
 }
 
 fn check_component_target(dir: &std::fs::File, kind: &str) -> Result<()> {
+    match expanded_file(dir, ".webc-proof") {
+        Ok(_) => return Ok(()),
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     match artifact_file(dir, kind) {
         Ok(_) => Ok(()),
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -798,7 +1098,7 @@ fn check_lib_root(
     kind: &str,
 ) -> Result<()> {
     let current_parent = profile_dir(profile)?;
-    let current_root = child_dir(parent, std::ffi::OsStr::new(kind))?;
+    let current_root = child_dir(parent, std::ffi::OsStr::new(&format!("{kind}s")))?;
     if parent.metadata()?.dev() != current_parent.metadata()?.dev()
         || parent.metadata()?.ino() != current_parent.metadata()?.ino()
         || root.metadata()?.dev() != current_root.metadata()?.dev()
@@ -867,8 +1167,13 @@ fn install_artifact(
     runtime: Option<&WasmRuntime>,
     kind: &str,
 ) -> Result<serde_json::Value> {
-    use rustix::fs::{AtFlags, FlockOperation, Mode, flock, mkdirat, renameat, unlinkat};
+    use rustix::fs::{FlockOperation, Mode, flock, mkdirat, renameat};
     valid_id(id)?;
+    if id.rsplit('/').next() == Some("std") {
+        return Err(Error::BadRequest(
+            "std is reserved for standard package directories".into(),
+        ));
+    }
     if kind == "app" && !id.contains('/') {
         return Err(Error::BadRequest(
             "frontend app requires publisher/name ID".into(),
@@ -876,14 +1181,14 @@ fn install_artifact(
     }
     let parent = initialized_profile(profile)?;
     flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    if kind == "app" {
-        match mkdirat(&parent, "app", Mode::from_raw_mode(0o700)) {
+    {
+        match mkdirat(&parent, format!("{kind}s"), Mode::from_raw_mode(0o700)) {
             Ok(()) => parent.sync_all()?,
             Err(rustix::io::Errno::EXIST) => {}
             Err(error) => return Err(layout_error(error)),
         }
     }
-    let root = child_dir(&parent, std::ffi::OsStr::new(kind))?;
+    let root = child_dir(&parent, std::ffi::OsStr::new(&format!("{kind}s")))?;
     // Layout inspection is only part of an explicit install, never discovery.
     flock(&root, FlockOperation::LockShared).map_err(std::io::Error::from)?;
     disk_ids(&root)?;
@@ -927,125 +1232,75 @@ fn install_artifact(
             )));
         }
     }
-    // No guest/data grant is created. Prepare under a shared lock, then recheck
-    // under the exclusive commit lock. A competing removal/install retries only
-    // preparation, using the same validated bytes and compilation result.
-    loop {
-        flock(&root, FlockOperation::LockShared).map_err(std::io::Error::from)?;
-        let name = temporary_name()?;
-        match resource_dir(&root, id) {
-            Ok(dir) => {
-                check_component_target(&dir, kind)?;
-                write_component(&dir, &name, bytes)?;
-                let cleanup = scopeguard::guard((), |_| {
-                    let _ = unlinkat(&dir, &name, AtFlags::empty());
-                });
-                flock(&root, FlockOperation::Unlock).map_err(std::io::Error::from)?;
-                flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-                check_lib_root(profile, &parent, &root, kind)?;
-                check_name(&database, id, kind)?;
-                let current = match resource_dir(&root, id) {
-                    Ok(current) => current,
-                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                        drop(cleanup);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if dir.metadata()?.dev() != current.metadata()?.dev()
-                    || dir.metadata()?.ino() != current.metadata()?.ino()
-                {
-                    drop(cleanup);
-                    continue;
-                }
-                check_component_target(&current, kind)?;
-                check_publisher_update(&current, id, bytes, kind)?;
-                let tx =
-                    database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                check_routes(profile, &tx, id, kind, &package)?;
-                check_existing_rules(profile, &tx, id, kind, &package)?;
-                save_registration(&tx, id, kind, &metadata, &package)?;
-                let artifact = format!("{kind}.webc");
-                let backup = temporary_name()?;
-                let previous =
-                    match rustix::fs::linkat(&dir, &artifact, &dir, &backup, AtFlags::empty()) {
-                        Ok(()) => Some(backup),
-                        Err(rustix::io::Errno::NOENT) => None,
-                        Err(error) => return Err(layout_error(error)),
-                    };
-                let rollback = scopeguard::guard(previous, |previous| {
-                    if let Some(backup) = previous {
-                        let _ = renameat(&dir, backup, &dir, &artifact);
-                    } else {
-                        let _ = unlinkat(&dir, &artifact, AtFlags::empty());
-                    }
-                    let _ = dir.sync_all();
-                });
-                renameat(&dir, &name, &dir, &artifact).map_err(layout_error)?;
-                dir.sync_all()?;
-                tx.commit()?;
-                if let Some(backup) = scopeguard::ScopeGuard::into_inner(rollback) {
-                    let _ = unlinkat(&dir, backup, AtFlags::empty());
-                }
-                drop(cleanup);
-                break;
-            }
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                if parent.metadata()?.dev() != root.metadata()?.dev() {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "lib root must share the identity filesystem for atomic publication",
-                    )));
-                }
-                let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
-                mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-                let cleanup = scopeguard::guard((), |_| {
-                    let _ = cleanup_dir.remove_dir_all(&name);
-                });
-                let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-                write_component(&stage, &format!("{kind}.webc"), bytes)?;
-                stage.sync_all()?;
-                flock(&root, FlockOperation::Unlock).map_err(std::io::Error::from)?;
-                flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-                check_lib_root(profile, &parent, &root, kind)?;
-                check_name(&database, id, kind)?;
-                match resource_dir(&root, id) {
-                    Ok(_) => {
-                        drop(cleanup);
-                        continue;
-                    }
-                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                let target_parent = resource_parent(&root, id, true)?;
-                if target_parent.metadata()?.dev() != parent.metadata()?.dev() {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Lib publisher directory must share the identity filesystem",
-                    )));
-                }
-                let leaf = id.rsplit('/').next().unwrap();
-                let tx =
-                    database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                check_routes(profile, &tx, id, kind, &package)?;
-                check_existing_rules(profile, &tx, id, kind, &package)?;
-                save_registration(&tx, id, kind, &metadata, &package)?;
-                renameat(&parent, &name, &target_parent, leaf).map_err(layout_error)?;
-                let rollback = scopeguard::guard((), |_| {
-                    let _ = renameat(&target_parent, leaf, &parent, &name);
-                    let _ = target_parent.sync_all();
-                });
-                target_parent.sync_all()?;
-                root.sync_all()?;
-                parent.sync_all()?;
-                tx.commit()?;
-                scopeguard::ScopeGuard::into_inner(rollback);
-                drop(cleanup);
-                break;
-            }
-            Err(error) => return Err(error),
+    // Prepare a complete immutable directory before taking the publication lock.
+    // All readers use this root lock; the identity lock serializes management.
+    let name = temporary_name()?;
+    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+    let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
+    let cleanup = scopeguard::guard((), |_| {
+        let _ = cleanup_dir.remove_dir_all(&name);
+    });
+    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
+    write_expanded(&stage, bytes)?;
+    flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+    check_lib_root(profile, &parent, &root, kind)?;
+    check_name(&database, id, kind)?;
+    let target_parent = resource_parent(&root, id, true)?;
+    if target_parent.metadata()?.dev() != parent.metadata()?.dev() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "package directory must share the identity filesystem",
+        )));
+    }
+    let leaf = id.rsplit('/').next().unwrap();
+    let previous = match resource_dir(&root, id) {
+        Ok(dir) => {
+            check_component_target(&dir, kind)?;
+            check_publisher_update(&dir, id, bytes, kind)?;
+            Some(dir)
+        }
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    if previous.is_none() && registered_packages(&database, kind, Some(id)).is_ok() {
+        let old = artifact_bytes(&root, id, kind)?;
+        if signed_owner(&old)? != signed_owner(bytes)? {
+            return Err(Error::InvalidComponent(
+                "publisher owner_hash changed; ordinary update is refused".into(),
+            ));
         }
     }
+    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    check_routes(profile, &tx, id, kind, &package)?;
+    check_existing_rules(profile, &tx, id, kind, &package)?;
+    save_registration(&tx, id, kind, &metadata, &package)?;
+    if previous.is_some() {
+        renameat(&target_parent, leaf, &stage, ".previous").map_err(layout_error)?;
+    }
+    let restore = scopeguard::guard((), |_| {
+        if previous.is_some() {
+            let _ = renameat(&stage, ".previous", &target_parent, leaf);
+            let _ = target_parent.sync_all();
+        }
+    });
+    stage.sync_all()?;
+    renameat(&parent, &name, &target_parent, leaf).map_err(layout_error)?;
+    let rollback = scopeguard::guard((), |_| {
+        let _ = renameat(&target_parent, leaf, &parent, &name);
+        let _ = target_parent.sync_all();
+        let _ = parent.sync_all();
+    });
+    target_parent.sync_all()?;
+    parent.sync_all()?;
+    tx.commit()?;
+    scopeguard::ScopeGuard::into_inner(rollback);
+    scopeguard::ScopeGuard::into_inner(restore);
+    if previous.is_some() {
+        let published = cap_std::fs::Dir::from_std_file(stage);
+        let _ = published.remove_dir_all(".previous");
+        let _ = published.into_std_file().sync_all();
+    }
+    drop(cleanup);
     Ok(lib_metadata(&package, Some(id)))
 }
 
@@ -1077,14 +1332,24 @@ fn remove_artifact(profile: &IdentityProfile, id: &str, kind: &str) -> Result<()
             )));
         }
     }
-    let root = match child_dir(&parent, std::ffi::OsStr::new(kind)) {
+    let root = match child_dir(&parent, std::ffi::OsStr::new(&format!("{kind}s"))) {
         Ok(root) => root,
 
         Err(e) => return Err(e),
     };
     flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
     check_lib_root(profile, &parent, &root, kind)?;
-    match resource_dir(&root, id) {
+    let target_parent = match resource_dir(&root, id) {
+        Ok(_) => resource_parent(&root, id, false)?,
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            legacy_parent(&root, id, kind)?
+        }
+        Err(e) => return Err(e),
+    };
+    match child_dir(
+        &target_parent,
+        std::ffi::OsStr::new(id.rsplit('/').next().unwrap()),
+    ) {
         Ok(dir) => {
             check_component_target(&dir, kind)?;
             if parent.metadata()?.dev() != root.metadata()?.dev() {
@@ -1100,7 +1365,6 @@ fn remove_artifact(profile: &IdentityProfile, id: &str, kind: &str) -> Result<()
                 let _ = cleanup_dir.remove_dir_all(&name);
             });
             let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-            let target_parent = resource_parent(&root, id, false)?;
             let leaf = id.rsplit('/').next().unwrap();
             let tx =
                 database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1133,7 +1397,7 @@ pub(crate) fn installed_apps(
     if let Some(id) = id {
         valid_id(id)?;
     }
-    let root = match child_dir(&profile_dir(profile)?, std::ffi::OsStr::new("app")) {
+    let root = match child_dir(&profile_dir(profile)?, std::ffi::OsStr::new("apps")) {
         Ok(root) => root,
         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             let conn = installation_database(profile, false)?;

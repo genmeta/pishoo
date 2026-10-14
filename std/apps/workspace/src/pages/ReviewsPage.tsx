@@ -129,6 +129,11 @@ export default function ReviewsPage(props: {
   }
   const applicant = (item: Approval) =>
     displayIdentityName(item.kind === 'capability' ? item.contact_name : item.visitor)
+  const capabilityTitle = (item: Approval) =>
+    catalog()?.find((capability) => item.kind === 'capability'
+      ? capability.id === item.capability_id
+      : capability.endpoints.some((endpoint) => endpoint.method === item.method && endpoint.path === item.api))?.title
+      ?? t('reviews.unlistedCapability')
 
   return (
     <>
@@ -174,7 +179,7 @@ export default function ReviewsPage(props: {
                 <tr>
                   <th>{t('reviews.type')}</th>
                   <th>{t('reviews.requester')}</th>
-                  <th>{t('reviews.request')}</th>
+                  <th>{t('capabilities.title')}</th>
                   <th>{t('reviews.requestedAt')}</th>
                   <th>{t('reviews.expiry')}</th>
                   <th><span class="sr-only">{t('common.actions')}</span></th>
@@ -195,13 +200,8 @@ export default function ReviewsPage(props: {
                             </button>
                           : <strong>{applicant(item)}</strong>}
                       </td>
-                      <td class="approval-request-cell" data-label={t('reviews.request')}>
-                        {item.kind === 'capability'
-                          ? <div><strong>{catalog()?.find((c) => c.id === item.capability_id)?.title ?? item.capability_id}</strong>
-                              <For each={catalog()?.find((c) => c.id === item.capability_id)?.endpoints}>{(endpoint) => <div><code>{endpoint.method} {endpoint.path}</code></div>}</For></div>
-                          : <div class="approval-target">
-                              <div><strong>{catalog()?.find((c) => c.endpoints.some((e) => e.method === item.method && e.path === item.api))?.title}</strong><span class="method">{item.method}</span> <code>{item.api}</code></div>
-                            </div>}
+                      <td class="approval-request-cell" data-label={t('capabilities.title')}>
+                        <strong>{capabilityTitle(item)}</strong>
                       </td>
                       <td class="approval-time-cell" data-label={t('reviews.requestedAt')}>{date(item.requested_at)}</td>
                       <td class="approval-expiry-cell" data-label={t('reviews.expiry')}>{date(item.expired_after)}</td>
@@ -269,8 +269,7 @@ export default function ReviewsPage(props: {
         onClose={() => !submitting() && setDecision(null)}
       >
         <div class="decision-summary">
-          <span class="method">{decision()?.review.method}</span>
-          <code>{decision()?.review.api}</code>
+          <strong>{decision() ? capabilityTitle(decision()!.review) : ''}</strong>
           <span>{displayIdentityName(decision()?.review.visitor ?? '')}</span>
         </div>
         <label class="field">

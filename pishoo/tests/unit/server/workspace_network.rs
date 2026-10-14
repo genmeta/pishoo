@@ -20,6 +20,9 @@ mod lib_http;
 #[path = "workspace_split.rs"]
 mod workspace_split;
 
+#[path = "std_workflow.rs"]
+mod std_workflow;
+
 #[tokio::test]
 #[ignore = "run alone; requires OpenSSL/local TCP+UDP and owns global TLS/DNS/DHTTP_HOME"]
 async fn websocket_real_h3_ha_roundtrip() {
@@ -88,8 +91,8 @@ async fn websocket_real_h3_ha_roundtrip() {
                 }
             }
             wasm.extend(section);
-            std::fs::create_dir_all(profile.join("lib/note")).unwrap();
-            std::fs::write(profile.join("lib/note/lib.wasm"), wasm).unwrap();
+            std::fs::create_dir_all(profile.join("libs/note")).unwrap();
+            std::fs::write(profile.join("libs/note/lib.wasm"), wasm).unwrap();
             for location in [
                 "/api/note",
                 "/api/note/",
@@ -413,10 +416,10 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
             "1",
         ])
     };
-    sign_ocsp("receiver/ssl/ocsp.der");
+    sign_ocsp("receiver/ssl/stapling.ocsp");
     sign_ocsp("renewed.ocsp");
     let renewed = std::fs::read(root.path().join("renewed.ocsp")).unwrap();
-    let before = std::fs::read(root.path().join("receiver/ssl/ocsp.der")).unwrap();
+    let before = std::fs::read(root.path().join("receiver/ssl/stapling.ocsp")).unwrap();
     assert_ne!(renewed, before);
 
     let response_bytes = renewed.clone();
@@ -504,7 +507,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/std/pishoo/settings",
+        "/std/sys/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -526,7 +529,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/std/pishoo/settings",
+        "/std/sys/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -537,7 +540,8 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
         .body(http_body_util::Empty::<Bytes>::new())
         .unwrap();
     let response = dhttp::Request::new(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    // TLS succeeds with the renewed staple; native ACL still denies anonymous access.
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
         response
             .extensions()
@@ -594,7 +598,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         format!("{}{}", expired.pem(), expired.pem()),
     )
     .unwrap();
-    std::fs::write(root.path().join("expired/ssl/ocsp.der"), [1]).unwrap();
+    std::fs::write(root.path().join("expired/ssl/stapling.ocsp"), [1]).unwrap();
     let bad_key = root.path().join("bad-key/ssl/privkey.pem");
     let original_key = std::fs::read(&bad_key).unwrap();
     #[cfg(unix)]
@@ -681,8 +685,8 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         Err(Error::InvalidConfig(_))
     ));
     let lib = profile(root.path(), "bad-lib");
-    std::fs::create_dir_all(lib.join("lib/broken")).unwrap();
-    std::fs::write(lib.join("lib/broken/lib.webc"), b"not WASM").unwrap();
+    std::fs::create_dir_all(lib.join("libs/broken")).unwrap();
+    std::fs::write(lib.join("libs/broken/.webc-proof"), b"not WASM").unwrap();
     assert!(matches!(
         load_profile(lib, runtime).await,
         Err(Error::InvalidComponent(_))
@@ -819,7 +823,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
             owner_request(
                 &server,
                 Method::PATCH,
-                "/std/pishoo/proxies",
+                "/std/sys/proxies",
                 serde_json::json!({"location":location,"proxy_pass":upstream})
             )
             .await
@@ -831,7 +835,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/pishoo/proxies?location=%2Fone",
+            "/std/sys/proxies?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -842,7 +846,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/std/pishoo/proxies?location=%2Fone",
+            "/std/sys/proxies?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -853,7 +857,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/std/pishoo/settings",
+        "/std/sys/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -862,7 +866,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
-        "/std/pishoo/settings",
+        "/std/sys/settings",
         serde_json::json!({"listen":1}),
     )
     .await;
@@ -881,7 +885,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
-        owner_request(&server, Method::PUT, "/std/pishoo/proxies", proxies.clone()).await;
+        owner_request(&server, Method::PUT, "/std/sys/proxies", proxies.clone()).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved, proxies);
     assert!(
@@ -930,7 +934,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_request(
         &server,
         Method::GET,
-        "/std/pishoo/proxies",
+        "/std/sys/proxies",
         serde_json::Value::Null,
     )
     .await;
@@ -939,8 +943,8 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::PUT,
-        "/std/pishoo/proxies",
-        serde_json::json!([{"location":"/std/pishoo/settings","proxy_pass":"127.0.0.1:8080"}]),
+        "/std/sys/proxies",
+        serde_json::json!([{"location":"/std/sys/settings","proxy_pass":"127.0.0.1:8080"}]),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -948,7 +952,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/pishoo/proxies",
+            "/std/sys/proxies",
             serde_json::Value::Null
         )
         .await
@@ -979,7 +983,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         StatusCode::NO_CONTENT
     );
     assert!(server.sandbox.read().unwrap().libs.contains_key("note"));
-    assert!(!server.profile.join("lib/note").exists());
+    assert!(!server.profile.join("libs/note").exists());
     assert!(server.profile.join("db/note").is_dir());
     // Even an explicit daccess allow cannot make another TLS identity the profile owner.
     server
@@ -995,7 +999,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let alice = dhttp::Endpoint::load("alice").await.unwrap();
     let response = alice
         .get(
-            format!("https://{}/std/pishoo/settings", server.name())
+            format!("https://{}/std/sys/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1015,7 +1019,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
 
     let response = dhttp::Anonymous
         .get(
-            format!("https://{}/std/pishoo/settings", server.name())
+            format!("https://{}/std/sys/settings", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1037,7 +1041,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/std/pishoo/settings",
+        "/std/sys/settings",
         serde_json::Value::Null,
     )
     .await;
@@ -1149,7 +1153,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         // HTTP writes return the desired settings; the run loop applies them asynchronously.
         let request = Request::builder()
             .method(Method::PATCH)
-            .uri("https://receiver.dhttp.net/std/pishoo/proxies")
+            .uri("https://receiver.dhttp.net/std/sys/proxies")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(dhttp::WndBuf::new(64 * 1024))
             .unwrap();
@@ -1163,7 +1167,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/pishoo/settings".parse().unwrap(),
+            &"/std/sys/settings".parse().unwrap(),
             Some(serde_json::json!({"listen":0})),
         )
         .unwrap();
@@ -1176,7 +1180,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/pishoo/settings".parse().unwrap(),
+            &"/std/sys/settings".parse().unwrap(),
             Some(serde_json::json!({"listen":1})),
         )
         .unwrap();
@@ -1185,7 +1189,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/pishoo/settings".parse().unwrap(),
+            &"/std/sys/settings".parse().unwrap(),
             Some(serde_json::json!({"enabled":false})),
         )
         .unwrap();
@@ -1199,7 +1203,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/pishoo/settings".parse().unwrap(),
+            &"/std/sys/settings".parse().unwrap(),
             Some(serde_json::json!({"enabled":true})),
         )
         .unwrap();
@@ -1207,12 +1211,12 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         wait_live_body(&receiver, "/live", b"live /live").await;
 
         // A broken new profile is retried without preventing a later valid one from loading.
-        std::fs::create_dir_all(identity_home.as_path().join(".broken/lib/bad")).unwrap();
+        std::fs::create_dir_all(identity_home.as_path().join(".broken/libs/bad")).unwrap();
         std::fs::write(
             root.path()
                 .join(".dhttp")
                 .as_path()
-                .join(".broken/lib/bad/lib.webc"),
+                .join(".broken/libs/bad/.webc-proof"),
             b"broken",
         )
         .unwrap();

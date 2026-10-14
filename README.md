@@ -41,15 +41,16 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](std/libs/profile/README.md); release packages deliver the three signed artifacts by default. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](std/apps/workspace/README.md) for independent publication to the store. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
-Pishoo supports mainstream Linux distributions and macOS on both Arm and x86 architectures. For a quick deployment, we recommend installing the `gmutils` operations toolkit alongside Pishoo.
+Pishoo supports mainstream Linux distributions and macOS on both Arm and x86 architectures. Install the `gmutils` operations toolkit alongside Pishoo to manage identities and install Apps from the store. The two host packages can be installed in either order; Pishoo has no runtime dependency on gmutils.
 
 #### Linux (Debian 11+)
 
 ```sh
+sudo install -d -m 0755 /etc/apt/keyrings
 wget -qO- https://download.dhttp.net/ppa/key/public.key | gpg --dearmor | sudo tee /etc/apt/keyrings/genmeta.gpg > /dev/null
 
 sudo tee /etc/apt/sources.list.d/genmeta.sources > /dev/null <<'EOF'
@@ -94,15 +95,50 @@ You can purchase a name and certificate, then place them in the appropriate loca
 genmeta identity apply
 ```
 
+### Install Workspace from the store
+
+Install a gmutils version that provides `genmeta install`, configure your identity,
+then check or start the Pishoo service:
+
+```sh
+# Debian/Ubuntu: the package normally enables and starts the system service.
+systemctl status pishoo
+
+# macOS (current user's service)
+brew services start pishoo
+```
+
+On Debian/Ubuntu, manual startup is only needed if the service is disabled or
+installation-time startup was prevented by system policy. Use
+`sudo systemctl enable --now pishoo` when you want to enable and start it.
+
+Once Pishoo has loaded the identity and is reachable, run the following **as the
+account that owns the identity**, replacing `alice.smith` with its name:
+
+```sh
+genmeta install std.dhttp.net/workspace --id alice.smith
+```
+
+The command calls the running identity's Pishoo installation API. Pishoo downloads
+and verifies the published Workspace App and installs its exact Profile and Message
+Lib dependencies. The App is available at `https://<identity>/std/workspace/`
+immediately after installation. The selected App and dependency versions must
+already be published to the store; this command does not publish them.
+
+Pishoo package installation and startup initialize native services and databases
+without downloading business Apps or invoking gmutils. Store unavailability does
+not prevent host installation or startup. Installing an App is an explicit step
+for each identity; it preserves the normal ACL and dependency rules.
+
 ### Current development configuration
 
 Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's `~/.dhttp`. Each Server reads its own `<identity-home>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, enabled)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. The running process discovers identities and applies enabled/listen/proxy configuration changes automatically. Disabling a Server preserves its listening scope and data; use `pishoo enable --id NAME` or `pishoo disable --id NAME`. See [Server lifecycle](pishoo/docs/server-lifecycle.md). Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
-Database configuration is available over H3 through `GET/PATCH /std/pishoo/settings` and `GET/PUT/PATCH/DELETE /std/pishoo/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
+Database configuration is available over H3 through `GET/PATCH /std/sys/settings` and `GET/PUT/PATCH/DELETE /std/sys/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
 
-First startup with valid identity credentials creates `db/`, `file/`, `lib/`, `logs/`, `repo/`, `templates/`, and `assets/profile/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
+First startup with valid identity credentials creates `db/`, `file/`, `libs/std/`, `apps/std/`, `logs/`, `repo/`, and `templates/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
@@ -175,7 +211,7 @@ pishoo lib --id installer.dhttp.net install alice.smith.dhttp.net/hello hello-0.
 pishoo restart
 ```
 
-The saved artifact is `lib/<publisher>/<name>/lib.webc`. The host serves declared frontend files and invokes only the backend atom for API operations, with daccess authorization on both. Online installation/update/removal takes effect immediately and preserves data and access rules; offline CLI changes load at the next startup. Old single-WASM releases require rebuilding as WEBC and are not automatically migrated.
+WEBC packages are expanded after installation into `libs/<name>/` or `apps/<name>/`; packages signed by `std.dhttp.net` live under `libs/std/` or `apps/std/`. The expanded WASM/resources, manifest, signature and `.webc-proof` retain the original publisher signature without storing another complete archive. OCSP is cached at `ssl/stapling.ocsp`. The host serves declared frontend files and invokes only the backend atom for API operations, with daccess authorization on both. Online installation/update/removal takes effect immediately and preserves data and access rules; offline CLI changes load at the next startup. Old single-WASM releases require rebuilding as WEBC and are not automatically migrated.
 
 ### Access
 

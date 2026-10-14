@@ -108,7 +108,41 @@ App 从实际 `/public` 文件树派生静态路由：`index.html` 对应 `/`，
 
 本机管理 API 仅使用短名：`GET/PUT/DELETE /std/sys/package/libs/<name>` 和 `/std/sys/package/apps/<name>`。GET/DELETE 从同类安装登记解析完整 ID，PUT 从已验签包取得 publisher/name 并核对短名与 URL；不接受带发布者的旧管理路径。响应仍返回完整包 ID，更新继续核对发布者 owner_hash。商店路径和精确依赖继续使用完整包身份。
 
-磁盘使用完整身份：`app/<publisher>/<name>/app.webc`、`lib/<publisher>/<name>/lib.webc`、后端数据 `db/<publisher>/<name>/`。同一用户身份内 App、Lib 各自按短名唯一；同类跨发布者同名不能共存，两个类型名称空间独立。
+WEBC 是发布、下载及安装格式，安装后展开保存，不再保存完整 WEBC 文件。普通制品位于 `apps/<name>/`、`libs/<name>/`，已验签发布者为 `std.dhttp.net` 的制品位于 `apps/std/<name>/`、`libs/std/<name>/`；不创建发布者目录。`std` 为制品目录保留名，App、Lib 各自按短名唯一，同类跨发布者同名不能共存；两类名称空间独立。
+
+```text
+<身份>/
+├── libs/
+│   ├── std/
+│   │   ├── message/
+│   │   │   ├── message.wasm
+│   │   │   ├── openapi.json
+│   │   │   ├── manifest.json
+│   │   │   ├── signature.json
+│   │   │   └── .webc-proof
+│   │   └── profile/ ...
+│   └── <其他Lib>/ ...
+├── apps/
+│   ├── std/
+│   │   └── workspace/
+│   │       ├── manifest.json
+│   │       ├── signature.json
+│   │       ├── .webc-proof
+│   │       └── public/
+│   │           ├── index.html
+│   │           └── assets/
+│   └── <其他App>/ ...
+└── ssl/
+    ├── fullchain.crt
+    ├── privkey.pem
+    └── stapling.ocsp
+```
+
+完整 publisher/name 仍保存在已签 manifest 和 config.db 登记，用于身份、依赖与能力校验；后端私有数据仍为 `db/<publisher>/<name>/`。标准目录不增加授权或执行特权；只按已签发布者分类，安装来源与短名不会使其他发布者进入 std。
+
+现有包签名绑定原始 WEBC 段，不能只对展开后的 JSON 重新序列化验签。`.webc-proof` 保存原始头部、文件位置和非文件字节，WASM/资源/签名 payload 只存于各自展开文件；加载时有界还原原包，复用原验签并核对规范文件位置，拒绝文件缺失、篡改和符号链接。`manifest.json` 是原签名 manifest 的可读投影，加载核对一致性；文件摘要仍位于签名覆盖的原始头部中，不增加另一份独立权威。其他 Lib 元数据放入 `metadata/`；签名覆盖但未映射的原始卷文件保存在隐藏 `.volumes/`，不对外提供。
+
+更新先在同一文件系统准备完整展开目录，经现有身份/制品文件锁和 SQLite 事务整体发布；提交失败恢复旧目录。运行资源仍使用已验签的内存快照，在途请求保留旧版本。已登记的旧 WEBC 制品可读兼容；显式重装会写入新展开路径并核对原发布者 owner_hash，旧制品与数据保留。启动不自动迁移或删除。
 
 安装事实以现有 `config.db` 登记为准，登记依赖必须与已验签包清单一致。未登记文件忽略，已登记文件缺失或不一致时报错，不扫描导入。更新不得破坏已登记 App/Lib 的依赖约束；`/std` 全部保留且不回退代理；旧 `/api`、`/app` 正常代理，无兼容别名。
 

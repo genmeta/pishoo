@@ -50,5 +50,22 @@ credentials must be configured in repository Actions settings.
 Windows publication is deferred for this release. Tag-triggered binary
 artifacts cover Linux DEB/RPM and macOS Homebrew.
 
+## Business App/Lib publication
+
+Host DEB, RPM and Homebrew packages deliver the native binaries and service files.
+They do not require or bundle Workspace, Profile or Message WEBC files, invoke
+gmutils, or install business packages at first startup. `pishoo-common` carries
+the Linux service and shared infrastructure files; its version remains paired
+with the host package.
+
+Publish the signed business Libs and App independently to the store, with the
+exact dependencies declared by the App available before users install it.
+After installing Pishoo and a gmutils version with `genmeta install`, configuring
+an identity and starting its Pishoo service, that identity's account runs
+`genmeta install std.dhttp.net/workspace --id NAME`. Installation calls the running
+Pishoo API and recursively installs exact Lib dependencies. Host package install
+order does not matter, and Pishoo has no gmutils package dependency. Store
+publication and this user-triggered install remain separate from the host release.
+
 Pishoo, pishoo-common and pishoo-sdk are preview prereleases. DEB/RPM and
 Homebrew publication selects the preview channel from each package version.

@@ -75,11 +75,6 @@ fn rpm_hooks() -> (String, String) {
     let root = TestDir::new();
     let bin = root.path().join("bin");
     let out = root.path().join("out");
-    let defaults = root.path().join("defaults");
-    fs::create_dir(&defaults).unwrap();
-    for name in ["profile-lib", "workspace-app", "message-lib"] {
-        fs::write(defaults.join(format!("{name}.webc")), b"fixture").unwrap();
-    }
     executable(&bin, "install", "exit 0");
     executable(&bin, "rpmbuild", "exit 0");
     let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -91,11 +86,18 @@ fn rpm_hooks() -> (String, String) {
         .env("XTASK_RELEASE_SOURCE_VERSION", "0.9.0-preview.1")
         .env("XTASK_RELEASE_REPO_ROOT", xtask.parent().unwrap())
         .env("XTASK_RELEASE_OUT_DIR", &out)
-        .env("PISHOO_DEFAULT_ARTIFACTS_INPUT", &defaults)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let spec = fs::read_to_string(out.join("rpmbuild/SPECS/pishoo-common.spec")).unwrap();
+    assert!(
+        !spec.contains(".webc"),
+        "host RPM must not bundle business packages"
+    );
+    assert!(
+        !spec.contains("gmutils"),
+        "host installation is independent of gmutils"
+    );
     let setup = spec
         .split_once("\n%post\n")
         .unwrap()
@@ -113,6 +115,100 @@ fn rpm_hooks() -> (String, String) {
         .0
         .replace("%%", "%");
     (setup, cleanup)
+}
+
+#[test]
+fn deb_common_packages_without_business_artifacts_or_gmutils() {
+    let root = TestDir::new();
+    let bin = root.path().join("bin");
+    let out = root.path().join("out");
+    executable(&bin, "dpkg-buildpackage", "test \"$1\" = -A");
+    let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("/bin/bash")
+        .arg(xtask.join("release/deb/package.sh"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("XTASK_RELEASE_PACKAGE_ID", "pishoo-common")
+        .env("XTASK_RELEASE_PACKAGE_VERSION", "0.9.0~preview.1-1")
+        .env("XTASK_RELEASE_SOURCE_VERSION", "0.9.0-preview.1")
+        .env("XTASK_RELEASE_TARGET", "common")
+        .env("XTASK_RELEASE_PROFILE", "release")
+        .env("XTASK_RELEASE_REPO_ROOT", xtask.parent().unwrap())
+        .env("XTASK_RELEASE_OUT_DIR", &out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let debian = out.join("src/debian");
+    assert!(debian.join("pishoo-common.pishoo.service").is_file());
+    assert!(debian.join("common/etc/dhttp/mime.types").is_file());
+    assert!(!debian.join("common/usr/share/pishoo").exists());
+    let control = fs::read_to_string(debian.join("control")).unwrap();
+    assert!(!control.contains("gmutils"));
+    assert!(!control.contains("{{PISHOO_COMMON_DEPENDS}}"));
+}
+
+#[test]
+fn brew_archive_packages_only_host_binaries_without_business_artifacts() {
+    let root = TestDir::new();
+    let bin = root.path().join("bin");
+    let out = root.path().join("out");
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("pishoo")).unwrap();
+    fs::write(
+        source.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"gateway\", \"pishoo\"]\n",
+    )
+    .unwrap();
+    executable(
+        &bin,
+        "cargo",
+        r#"
+test "$1" = build
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --manifest-path) shift; manifest=$1 ;;
+        --target) shift; target=$1 ;;
+    esac
+    shift
+done
+release="$(dirname "$(dirname "$manifest")")/target/$target/release"
+mkdir -p "$release"
+for binary in pishoo pishoo-pack; do
+    printf '#!/bin/sh\nexit 0\n' > "$release/$binary"
+    chmod +x "$release/$binary"
+done
+"#,
+    );
+    let output = Command::new("/bin/bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("release/brew/pishoo.sh"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("XTASK_RELEASE_SOURCE_VERSION", "0.9.0-preview.1")
+        .env("XTASK_RELEASE_TARGET", "aarch64-apple-darwin")
+        .env("XTASK_RELEASE_REPO_ROOT", &source)
+        .env("XTASK_RELEASE_OUT_DIR", &out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let archive = out.join("pishoo_0.9.0-preview.1-aarch64-apple-darwin.tar.gz");
+    let listing = Command::new("tar")
+        .arg("-tzf")
+        .arg(archive)
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    let mut files: Vec<_> = String::from_utf8(listing.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.ends_with('/'))
+        .map(str::to_owned)
+        .collect();
+    files.sort();
+    assert_eq!(files, ["./pishoo", "./pishoo-pack"]);
+    let formula =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/pishoo.rb.in"))
+            .unwrap();
+    assert!(!formula.contains("default-artifacts"));
+    assert!(!formula.contains("depends_on \"gmutils\""));
+    assert!(formula.contains("genmeta install std.dhttp.net/workspace"));
 }
 
 #[test]

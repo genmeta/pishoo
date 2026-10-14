@@ -1,12 +1,9 @@
 FROM fedora:40
 
 ARG XTASK_RELEASE_TARGET
-ARG XTASK_RELEASE_BUN_VERSION=1.4.2
 ENV CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \
     PATH=/opt/cargo/bin:/usr/local/zig:$PATH
-
-COPY --from=node:24-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 
 RUN set -eux; \
     dnf install -y --setopt=install_weak_deps=False \
@@ -59,22 +56,6 @@ RUN set -eux; \
         done; \
         rm -rf /tmp/rpms; \
         chmod -R a+rX /opt/sysroots; \
-    fi
-
-RUN set -eux; \
-    if [ "$XTASK_RELEASE_TARGET" != "common" ]; then \
-        case "$(uname -m)" in \
-            x86_64) bun_target=linux-x64 ;; \
-            aarch64) bun_target=linux-aarch64 ;; \
-            *) echo "unsupported Bun build host: $(uname -m)" >&2; exit 1 ;; \
-        esac; \
-        curl -fsSL --retry 5 -o /tmp/bun.zip \
-            "https://github.com/oven-sh/bun/releases/download/bun-v${XTASK_RELEASE_BUN_VERSION}/bun-${bun_target}.zip"; \
-        unzip -q /tmp/bun.zip -d /tmp; \
-        install -m 0755 "/tmp/bun-${bun_target}/bun" /usr/local/bin/bun; \
-        rm -rf /tmp/bun.zip "/tmp/bun-${bun_target}"; \
-        bun --version; \
-        node --version; \
     fi
 
 COPY xtask/release/rpm/package.sh /opt/genmeta-release/package

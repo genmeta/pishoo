@@ -1,4 +1,4 @@
-import { normalizeIdentityName } from '../lib/format'
+import { contactStatus, normalizeIdentityName } from '../lib/format'
 
 import type {
   ApiSummary,
@@ -60,19 +60,23 @@ export function backendPath(path: string): string {
   if (path.startsWith('/chat/')) return `/std/message/${path.slice(6)}`
   return `/std${path}`
 }
-function capabilityRequests(contacts: Contact[], catalog: CapabilityDescriptor[], expired: boolean): CapabilityApproval[] {
+function capabilityRequests(contacts: Contact[], catalog: CapabilityDescriptor[], rules: RulesByGrantee, expired: boolean): CapabilityApproval[] {
   const time = Date.now() / 1000
   return contacts.flatMap(contact => {
-    if ((contact.expired_after <= time) !== expired || !['pending', 'transfered', 'active', 'expired'].includes(String(contact.status))) return []
+    const status = contactStatus(contact.status)
+    if ((contact.expired_after <= time) !== expired || !['pending', 'transfered', 'active', 'expired'].includes(status)) return []
     const requestId = Number(Reflect.get(contact, 'id'))
     if (!Number.isSafeInteger(requestId) || requestId <= 0) throw new ApiError(502, 'Invalid contact request ID')
     return catalog.filter(capability => {
       const requested = capability.endpoints.some(endpoint => contact.requested_access[endpoint.path]?.includes(endpoint.method))
       const decided = capability.endpoints.every(endpoint => {
-        const methods = contact.granted_access[endpoint.path]
+        // Capability decisions are written to native ACL rules, not contact.grants.
+        const methods = rules[contact.name]?.[endpoint.path]
         return methods?.allow.includes(endpoint.method) || methods?.deny.includes(endpoint.method)
       })
-      return requested && !decided
+      const awaitingAcceptance = ['pending', 'transfered'].includes(status)
+        && capability.endpoints.some(endpoint => rules[contact.name]?.[endpoint.path]?.allow.includes(endpoint.method))
+      return requested && (!decided || awaitingAcceptance)
     }).map(capability => ({ kind: 'capability' as const, request_id: requestId,
       contact_name: contact.name, capability_id: capability.id, capability_version: capability.version,
       requested_at: contact.created_at, expired_after: contact.expired_after }))
@@ -81,13 +85,13 @@ function capabilityRequests(contacts: Contact[], catalog: CapabilityDescriptor[]
 
 export const api = {
   context: async (): Promise<RuntimeContext> => {
-    const [profile, reviews, contacts, catalog] = await Promise.all([
+    const [profile, reviews, contacts, catalog, rules] = await Promise.all([
       request<ProfileSettings>('/std/profile'),
       request<Page<AccessApproval[]>>('/std/acl/reviews?page=1&page_size=1'),
-      api.allContacts('name', 'asc'), api.capabilities(),
+      api.allContacts('name', 'asc'), api.capabilities(), api.rulesByGrantee(),
     ])
     return { profile: profile.identity_name, owner_name: profile.identity_name,
-      badges: { pending_reviews: reviews.total, incoming_contacts: capabilityRequests(contacts, catalog, false).length } }
+      badges: { pending_reviews: reviews.total, incoming_contacts: capabilityRequests(contacts, catalog, rules, false).length } }
   },
 
   introduction: (signal?: AbortSignal) => request<Introduction>('/std/profile/context', { signal }),
@@ -101,8 +105,10 @@ export const api = {
   },
 
   approvals: async (status: 'pending' | 'expired', page: number, signal?: AbortSignal): Promise<Page<Approval[]>> => {
-    const [contacts, catalog] = await Promise.all([api.allContacts('name', 'asc', signal), api.capabilities(signal)])
-    const items: Approval[] = capabilityRequests(contacts, catalog, status === 'expired')
+    const [contacts, catalog, rules] = await Promise.all([
+      api.allContacts('name', 'asc', signal), api.capabilities(signal), api.rulesByGrantee(signal),
+    ])
+    const items: Approval[] = capabilityRequests(contacts, catalog, rules, status === 'expired')
     let sourcePage = 1
     while (true) {
       const result = await request<Page<AccessApproval[]>>(`/std/acl/reviews?${query({ status, page: sourcePage, page_size: 100 })}`, { signal })
@@ -131,8 +137,30 @@ export const api = {
   outboundRequest: (id: number, signal?: AbortSignal) =>
     request<OutboundContactRequest>(`/std/contact/local/requests?${query({ id })}`, { signal }),
 
-  sendContactRequest: (value: OutboundContactInput) =>
-    request<OutboundContactRequest>('/std/contact/local/requests', { method: 'POST', body: JSON.stringify(value) }),
+  sendContactRequest: async (value: OutboundContactInput) => {
+    const target = normalizeIdentityName(value.target_name)
+    if (!target) throw new ApiError(400, 'Invalid target name')
+    if ([...value.description].length > 80 || /\p{Cc}/u.test(value.description)) {
+      throw new ApiError(400, 'Invalid description')
+    }
+    if (value.offered_capabilities.length) {
+      const catalog = await api.capabilities()
+      const offered = value.offered_capabilities.map(id => catalog.find(capability => capability.id === id && capability.selectable))
+      if (offered.some(capability => !capability) || new Set(value.offered_capabilities).size !== offered.length) {
+        throw new ApiError(400, 'Invalid offered capability')
+      }
+      // The owner's submitted selections authorize these native ACL writes now.
+      // The delivery queue and the peer's later acceptance are not permission sources.
+      for (const capability of offered) {
+        for (const endpoint of capability!.endpoints) {
+          await api.setRule({ api: endpoint.path, method: endpoint.method, effect: 'allow', grantee: target })
+        }
+      }
+    }
+    return request<OutboundContactRequest>('/std/contact/local/requests', {
+      method: 'POST', body: JSON.stringify({ ...value, target_name: target }),
+    })
+  },
 
   refreshOutboundRequest: (id: number) =>
     request<OutboundContactRequest>(`/std/contact/local/requests/refresh?${query({ id })}`, { method: 'POST' }),
