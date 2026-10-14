@@ -1,13 +1,22 @@
 [package]
 name = "alice.smith.dhttp.net/journal"
 version = "0.1.0"
-description = "记下生活小事，用文字和照片留住日常，与朋友留言交流"
+description = "手记后端：保存图文记录、照片、留言与回复"
 license = "Apache-2.0"
+
+[package.pishoo]
+kind = "lib"
+title = "手记"
+changelog = "首次发布独立 Lib：图文手记、照片、留言和回复；提供阅读与评论能力组，使用 schema v1 私有数据库。"
+dependencies = []
+
+[package.pishoo.host]
+private-storage = "在本 Lib 私有 /db/journal.db 保存记录、照片、留言和回复，使用 SQLite 事务。"
+request-identity = "读取握手验证的主人和来访身份，拒绝匿名访问，限定主人写入并记录可信留言署名。"
 
 [[module]]
 name = "backend"
 source = "lib.wasm"
 
 [fs]
-"/public" = "public"
 "/metadata" = "metadata"

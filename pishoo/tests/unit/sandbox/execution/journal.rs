@@ -178,22 +178,56 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
     assert!(HostV2::local(&mut state).await.is_err());
 }
 
-fn journal_lib(directory: &Path) -> Arc<Lib> {
+fn journal_package(kind: &str) -> Vec<u8> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal");
-    let bytes = std::fs::read(root.join("lib.wasm")).expect("build Journal backend first");
-    let document: Value =
-        serde_json::from_slice(&std::fs::read(root.join("openapi.json")).unwrap()).unwrap();
-    let package = package_fixture(
-        &document,
-        &bytes,
-        webc::v3::write::Directory::from_path(root.join("public")).unwrap(),
-        &publisher("alice.smith.dhttp.net", 'a'),
-    );
+    let manifest: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join(if kind == "app" {
+            "app.toml"
+        } else {
+            "wasmer.toml"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let package = &manifest["package"];
+    let (publisher_name, name) = package["name"].as_str().unwrap().split_once('/').unwrap();
+    let mut document: Value = if kind == "app" {
+        json!({"info":{},"paths":{}})
+    } else {
+        serde_json::from_slice(&std::fs::read(root.join("openapi.json")).unwrap()).unwrap()
+    };
+    document["info"] = json!({"title":package["pishoo"]["title"],"version":package["version"],
+        "description":package["description"],"license":{"name":package["license"]}});
+    let groups = document["x-pishoo"].get("access-groups").cloned();
+    document["x-pishoo"] = serde_json::to_value(&package["pishoo"]).unwrap();
+    document["x-pishoo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("title");
+    document["x-pishoo"]["publisher"] = publisher_name.into();
+    document["x-pishoo"]["name"] = name.into();
+    if let Some(groups) = groups {
+        document["x-pishoo"]["access-groups"] = groups;
+    }
+    let bytes = if kind == "app" {
+        Vec::new()
+    } else {
+        std::fs::read(root.join("lib.wasm")).expect("build Journal backend first")
+    };
+    let public = if kind == "app" {
+        webc::v3::write::Directory::from_path(root.join("public")).unwrap()
+    } else {
+        webc::v3::write::Directory::default()
+    };
+    package_fixture(&document, &bytes, public, &publisher(publisher_name, 'a'))
+}
+
+fn journal_lib(directory: &Path) -> Arc<Lib> {
     Arc::new(
         Lib::load(
             Arc::new(WasmRuntime::new().unwrap()),
-            "journal".into(),
-            &package,
+            "alice.smith.dhttp.net/journal".into(),
+            &journal_package("lib"),
             directory,
         )
         .unwrap(),
@@ -213,7 +247,7 @@ async fn journal_call(
 ) -> (u16, http::HeaderMap, Bytes) {
     let mut builder = Request::builder()
         .method(method)
-        .uri(format!("https://alice.dhttp.net{path}"));
+        .uri(format!("https://alice.dhttp.net/journal{path}"));
     if !document.is_null() {
         builder = builder.header("content-type", "application/json");
     }
@@ -980,7 +1014,13 @@ async fn journal_browser_preview() {
     let data = tempfile::tempdir().unwrap();
     let lib = journal_lib(data.path());
     let mut sandbox = Sandbox::new(lib.runtime.clone());
-    sandbox.libs.insert("journal".into(), lib);
+    sandbox
+        .libs
+        .insert("alice.smith.dhttp.net/journal".into(), lib);
+    sandbox.apps.insert(
+        "alice.smith.dhttp.net/journal".into(),
+        read_package(&journal_package("app")).unwrap(),
+    );
     let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
         axum::middleware::from_fn(
             move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
@@ -1004,7 +1044,7 @@ async fn journal_browser_preview() {
         .await
         .unwrap();
     eprintln!(
-        "Journal real WASM browser fixture: http://127.0.0.1:18747/api/journal/ (test owner, temporary data)"
+        "Journal real WASM browser fixture: http://127.0.0.1:18747/std/journal/ (test owner, temporary data)"
     );
     use tower::ServiceExt;
     let serving = async {
@@ -1051,6 +1091,9 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
     let mut sandbox = Sandbox::new(lib.runtime.clone());
     let id = "alice.smith.dhttp.net/journal";
     sandbox.libs.insert(id.into(), lib.clone());
+    sandbox
+        .apps
+        .insert(id.into(), read_package(&journal_package("app")).unwrap());
     let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
         axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
     );
@@ -1060,7 +1103,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
         ("/assets/app.js", "assets/app.js", "text/javascript"),
         ("/assets/app.css", "assets/app.css", "text/css"),
     ] {
-        let path = format!("/api/{}{suffix}", id.rsplit('/').next().unwrap());
+        let path = format!("/std/{}{suffix}", id.rsplit('/').next().unwrap());
         for grantee in [Grantee::Anony, Grantee::Named] {
             access
                 .set_policy(
@@ -1141,4 +1184,129 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
     let index = std::fs::read_to_string(public.join("index.html")).unwrap();
     assert!(index.contains("./assets/app.js") && index.contains("./assets/app.css"));
     assert!(!index.contains("<script>") && !index.contains("<style>"));
+}
+
+#[tokio::test]
+#[ignore = "build examples/journal/build.sh before testing the release packages"]
+async fn journal_release_registers_capabilities_and_pins_backend() {
+    use tower::ServiceExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let id = "alice.smith.dhttp.net/journal";
+    let backend = journal_package("lib");
+    let frontend = journal_package("app");
+    let app_package = read_package(&frontend).unwrap();
+    assert!(app_package.atoms().is_empty());
+    assert!(app_package.get_volume("metadata").is_none());
+    assert!(
+        read_package(&backend)
+            .unwrap()
+            .get_volume("public")
+            .is_none()
+    );
+    assert!(
+        install_app(&profile, id, &frontend).is_err(),
+        "missing pinned Lib must fail"
+    );
+    install_lib(&profile, id, &backend, &runtime).unwrap();
+    install_app(&profile, id, &frontend).unwrap();
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    let groups = db.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_id=?1 ORDER BY capability_id")
+        .unwrap().query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(
+        groups,
+        [
+            ("comment".into(), "评论".into()),
+            ("read".into(), "阅读".into())
+        ]
+    );
+    let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operations WHERE lib_id=?1 ORDER BY capability_id,method,path")
+        .unwrap().query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(
+        operations,
+        vec![
+            (
+                "comment".into(),
+                "POST".into(),
+                "/std/journal/comments".into()
+            ),
+            ("read".into(), "GET".into(), "/std/journal/comments".into()),
+            ("read".into(), "GET".into(), "/std/journal/context".into()),
+            ("read".into(), "GET".into(), "/std/journal/entries".into()),
+            ("read".into(), "GET".into(), "/std/journal/entry".into()),
+            ("read".into(), "GET".into(), "/std/journal/photo".into()),
+        ]
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT lib_id,version FROM app_dependencies WHERE app_id=?1",
+            [id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )
+        .unwrap(),
+        (id.into(), "0.1.0".into())
+    );
+    let mut sandbox = Sandbox::new(runtime);
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.libs.len(), 1);
+    assert_eq!(sandbox.apps.len(), 1);
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
+    for path in [
+        "/std/journal/",
+        "/std/journal/assets/app.js",
+        "/std/journal/assets/app.css",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+    for (method, path, status) in [
+        ("GET", "/std/journal/missing", 404),
+        ("POST", "/std/journal/assets/app.js", 405),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    assert!(
+        remove_lib(&profile, id).is_err(),
+        "installed App protects its Lib"
+    );
+    remove_app(&profile, id).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM lib_capabilities", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    remove_lib(&profile, id).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM lib_capabilities", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }

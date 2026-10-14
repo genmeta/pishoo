@@ -9,42 +9,7 @@
     }
   },
   "paths": {
-    "/": {
-      "get": {
-        "responses": {
-          "200": {
-            "description": "手记主页",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "operationId": "openPage",
-        "summary": "打开手记主页",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/index.html"
-        }
-      },
-      "head": {
-        "responses": {
-          "200": {
-            "description": "无正文的主页响应头"
-          }
-        },
-        "operationId": "headPage",
-        "summary": "读取手记主页响应头",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/index.html"
-        }
-      }
-    },
-    "/context": {
+    "/journal/context": {
       "get": {
         "responses": {
           "200": {
@@ -95,7 +60,7 @@
         }
       }
     },
-    "/entries": {
+    "/journal/entries": {
       "get": {
         "responses": {
           "200": {
@@ -312,7 +277,7 @@
         }
       }
     },
-    "/entry": {
+    "/journal/entry": {
       "get": {
         "responses": {
           "200": {
@@ -674,7 +639,7 @@
         ]
       }
     },
-    "/comments": {
+    "/journal/comments": {
       "get": {
         "responses": {
           "200": {
@@ -908,7 +873,7 @@
         }
       }
     },
-    "/comment": {
+    "/journal/comment": {
       "delete": {
         "responses": {
           "204": {
@@ -993,7 +958,7 @@
         ]
       }
     },
-    "/photo": {
+    "/journal/photo": {
       "get": {
         "responses": {
           "200": {
@@ -1076,98 +1041,18 @@
           }
         ]
       }
-    },
-    "/assets/app.js": {
-      "get": {
-        "operationId": "readScript",
-        "summary": "读取手记脚本",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/assets/app.js"
-        },
-        "responses": {
-          "200": {
-            "description": "脚本",
-            "content": {
-              "text/javascript": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "operationId": "headScript",
-        "summary": "读取手记脚本响应头",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/assets/app.js"
-        },
-        "responses": {
-          "200": {
-            "description": "无正文的响应头"
-          }
-        }
-      }
-    },
-    "/assets/app.css": {
-      "get": {
-        "operationId": "readStyles",
-        "summary": "读取手记样式",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/assets/app.css"
-        },
-        "responses": {
-          "200": {
-            "description": "样式",
-            "content": {
-              "text/css": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "operationId": "headStyles",
-        "summary": "读取手记样式响应头",
-        "x-pishoo": {
-          "access-group": "read",
-          "static-file": "/public/assets/app.css"
-        },
-        "responses": {
-          "200": {
-            "description": "无正文的响应头"
-          }
-        }
-      }
     }
   },
   "x-pishoo": {
-    "publisher": "alice.smith.dhttp.net",
-    "name": "journal",
-    "entry": "/",
-    "changelog": "首次发布：支持图文手记、月份归档、留言与回复，适配手机和电脑，跟随系统切换明暗模式。",
     "access-groups": {
       "read": {
         "title": "阅读",
         "operations": [
-          "openPage",
-          "headPage",
           "readContext",
           "listEntries",
           "readEntry",
           "listComments",
-          "readPhoto",
-          "readScript",
-          "headScript",
-          "readStyles",
-          "headStyles"
+          "readPhoto"
         ]
       },
       "comment": {
@@ -1176,10 +1061,6 @@
           "addComment"
         ]
       }
-    },
-    "host": {
-      "private-storage": "在本 Lib 私有 /db/journal.db 保存记录、照片、留言和回复，使用 SQLite 事务。",
-      "request-identity": "读取握手验证的主人和来访身份，拒绝匿名访问，限定主人写入并记录可信留言署名。"
     }
   },
   "components": {
