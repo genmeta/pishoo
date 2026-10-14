@@ -49,7 +49,7 @@ cp -r xtask/deb/. "$src/debian/"
 
 if [ "$package" = "pishoo-common" ]; then
     defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
-    for artifact in chat-lib.webc workspace-lib.webc workspace-app.webc; do
+    for artifact in message-lib.webc profile-lib.webc workspace-app.webc; do
         [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
         install -D -m 0644 "$defaults/$artifact" "$src/debian/common/usr/share/pishoo/default-artifacts/$artifact"
     done

@@ -1,0 +1,17 @@
+[package]
+name = "profile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+[workspace]
+[lib]
+path = "src/profile.rs"
+crate-type = ["cdylib"]
+[dependencies]
+pishoo-sdk = { path = "../../../wit" }
+wasip2 = "=1.0.4"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde_json = "1"
+imagesize = "0.14"
+sha2 = "0.10"

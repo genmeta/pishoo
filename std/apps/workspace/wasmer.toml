@@ -1,0 +1,18 @@
+[package]
+name = "dev.dhttp.net/workspace"
+version = "0.1.0"
+description = "用户工作台前端"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "app"
+title = "Workspace"
+entry = "/"
+changelog = "初始版本，精确依赖 Profile 和 Message 后端。"
+dependencies = [
+  { publisher = "dev.dhttp.net", name = "profile", version = "0.1.0" },
+  { publisher = "dev.dhttp.net", name = "message", version = "0.1.0" },
+]
+
+[fs]
+"/public" = "."

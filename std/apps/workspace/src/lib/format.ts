@@ -1,0 +1,56 @@
+import type { ContactStatus, PublicProfile } from '../api/types'
+
+const DHTTP_NAME_SUFFIX = '.dhttp.net'
+
+const CONTACT_STATUS: Record<number, ContactStatus> = {
+  0: 'pending',
+  1: 'pending',
+  2: 'active',
+  3: 'transfered',
+  4: 'expired',
+  5: 'blocked',
+}
+
+export function contactStatus(status: ContactStatus | number): ContactStatus {
+  return typeof status === 'number' ? (CONTACT_STATUS[status] ?? 'pending') : status
+}
+
+export function initials(value: string): string {
+  const parts = value.split(/[.@\s_-]+/).filter(Boolean)
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('')
+}
+
+export function displayIdentityName(value: string): string {
+  return value.endsWith(DHTTP_NAME_SUFFIX)
+    ? value.slice(0, -DHTTP_NAME_SUFFIX.length)
+    : value
+}
+
+export function normalizeIdentityName(value: string): string | null {
+  const input = value.trim().replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+  const name = input.endsWith(DHTTP_NAME_SUFFIX)
+    ? input
+    : `${input.replace(/~$/, '')}${DHTTP_NAME_SUFFIX}`
+  const valid = name.length <= 253 && name.split('.').every((label) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+  return valid ? name : null
+}
+
+export function contactDisplayName(name: string, alias?: string | null, remoteName?: string | null): string {
+  return alias || remoteName || displayIdentityName(name)
+}
+
+export function profileAvatarUrl(profile: PublicProfile | null | undefined): string | null {
+  if (!profile?.avatar_url) return null
+  const [path, search] = profile.avatar_url.split('?')
+  const params = new URLSearchParams(search)
+  params.set('v', String(profile.updated_at))
+  return `${path}?${params}`
+}
+
+export function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback
+}
