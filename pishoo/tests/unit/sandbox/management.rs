@@ -29,7 +29,7 @@ fn component(version: &str) -> Vec<u8> {
 }
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     profile
 }
@@ -47,11 +47,11 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     );
     assert!(!profile.join("db/note").exists());
     assert_eq!(
-        std::fs::metadata(profile.join("lib/note")).unwrap().mode() & 0o777,
+        std::fs::metadata(profile.join("libs/note")).unwrap().mode() & 0o777,
         0o700
     );
     assert_eq!(
-        std::fs::metadata(profile.join("lib/note/lib.webc"))
+        std::fs::metadata(profile.join("libs/note/.webc-proof"))
             .unwrap()
             .mode()
             & 0o777,
@@ -60,7 +60,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
     std::fs::write(profile.join("db/note/saved.db"), b"keep").unwrap();
-    let before = std::fs::read(profile.join("lib/note/lib.webc")).unwrap();
+    let before = std::fs::read(profile.join("libs/note/.webc-proof")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
     let metadata_only = package_fixture(
         &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
@@ -71,7 +71,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert!(read_package(&metadata_only).is_ok());
     assert!(install_lib(&profile, "note", &metadata_only, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/note/lib.webc")).unwrap(),
+        std::fs::read(profile.join("libs/note/.webc-proof")).unwrap(),
         before
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
@@ -85,8 +85,10 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         "2.0.0"
     );
     assert_eq!(
-        std::fs::read_dir(profile.join("lib/note")).unwrap().count(),
-        1
+        std::fs::read_dir(profile.join("libs/note"))
+            .unwrap()
+            .count(),
+        5
     );
     remove_lib(&profile, "note").unwrap();
     remove_lib(&profile, "note").unwrap();
@@ -111,8 +113,8 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     let profile = profile(root.path());
     let runtime = WasmRuntime::new().unwrap();
     install_lib(&profile, "valid", &component("1"), &runtime).unwrap();
-    std::fs::create_dir(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/lib.webc"), b"bad").unwrap();
+    std::fs::create_dir(profile.join("libs/broken")).unwrap();
+    std::fs::write(profile.join("libs/broken/.webc-proof"), b"bad").unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["id"], "valid");
@@ -136,45 +138,45 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     ));
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::fs::write(outside.join("lib.webc"), b"do not change").unwrap();
-    std::os::unix::fs::symlink(&outside, profile.join("lib/escape")).unwrap();
+    std::fs::write(outside.join(".webc-proof"), b"do not change").unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("libs/escape")).unwrap();
     assert!(install_lib(&profile, "escape", &component("1"), &runtime).is_err());
     remove_lib(&profile, "escape").unwrap();
     assert!(
         profile
-            .join("lib/escape")
+            .join("libs/escape")
             .symlink_metadata()
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    std::fs::remove_file(profile.join("lib/escape")).unwrap();
+    std::fs::remove_file(profile.join("libs/escape")).unwrap();
     std::os::unix::fs::symlink(
-        outside.join("lib.webc"),
-        profile.join("lib/broken/lib.webc-link"),
+        outside.join(".webc-proof"),
+        profile.join("libs/broken/.webc-proof-link"),
     )
     .unwrap();
-    std::fs::remove_file(profile.join("lib/broken/lib.webc")).unwrap();
+    std::fs::remove_file(profile.join("libs/broken/.webc-proof")).unwrap();
     std::fs::rename(
-        profile.join("lib/broken/lib.webc-link"),
-        profile.join("lib/broken/lib.webc"),
+        profile.join("libs/broken/.webc-proof-link"),
+        profile.join("libs/broken/.webc-proof"),
     )
     .unwrap();
     assert!(install_lib(&profile, "broken", &component("1"), &runtime).is_err());
     assert!(remove_lib(&profile, "broken").is_err());
     assert_eq!(
-        std::fs::read(outside.join("lib.webc")).unwrap(),
+        std::fs::read(outside.join(".webc-proof")).unwrap(),
         b"do not change"
     );
     // Cleanup must unlink nested symlinks without following them.
-    std::os::unix::fs::symlink(&outside, profile.join("lib/valid/foreign")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("libs/valid/foreign")).unwrap();
     remove_lib(&profile, "valid").unwrap();
-    assert!(outside.join("lib.webc").exists());
+    assert!(outside.join(".webc-proof").exists());
     for id in ["../outside", "A", "", "note.wasm", "%6Eote"] {
         assert!(remove_lib(&profile, id).is_err());
     }
-    std::fs::rename(profile.join("lib"), profile.join("real-lib")).unwrap();
-    std::os::unix::fs::symlink(profile.join("real-lib"), profile.join("lib")).unwrap();
+    std::fs::rename(profile.join("libs"), profile.join("real-lib")).unwrap();
+    std::os::unix::fs::symlink(profile.join("real-lib"), profile.join("libs")).unwrap();
     assert!(install_lib(&profile, "valid", &component("1"), &runtime).is_err());
     assert!(installed_libs(&profile, None).is_err());
 }
@@ -342,7 +344,7 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
         installed_libs(&profile, Some("alice.dhttp.net/note")).unwrap()["version"],
         "1.2.3"
     );
-    assert!(!profile.join("lib/bob.dhttp.net/note").exists());
+    assert!(installed_libs(&profile, Some("bob.dhttp.net/note")).is_err());
     std::fs::write(profile.join("db/alice.dhttp.net/note/keep.db"), b"keep").unwrap();
     for (bad, expected) in [
         (
@@ -368,7 +370,7 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
         );
     }
     // Removal resolves registration even when the installed file is corrupt.
-    std::fs::write(profile.join("lib/alice.dhttp.net/note/lib.webc"), b"broken").unwrap();
+    std::fs::write(profile.join("libs/note/.webc-proof"), b"broken").unwrap();
     assert_eq!(
         app.clone()
             .oneshot(request(Method::DELETE, path, AxumBody::empty()))
@@ -381,7 +383,7 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
         std::fs::read(profile.join("db/alice.dhttp.net/note/keep.db")).unwrap(),
         b"keep"
     );
-    assert!(!profile.join("lib/alice.dhttp.net/note").exists());
+    assert!(!profile.join("libs/note").exists());
     assert_eq!(
         app.clone()
             .oneshot(request(Method::GET, path, AxumBody::empty()))
@@ -639,8 +641,8 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
             .status(),
         StatusCode::BAD_REQUEST
     );
-    assert!(!profile.join("lib/note").exists());
-    std::os::unix::fs::symlink(root.path(), profile.join("lib/escape")).unwrap();
+    assert!(!profile.join("libs/note").exists());
+    std::os::unix::fs::symlink(root.path(), profile.join("libs/escape")).unwrap();
     assert_eq!(
         app.oneshot(request(
             Method::PUT,
@@ -681,7 +683,7 @@ async fn legacy_wasm_cannot_be_uploaded_as_a_webc_release() {
         let response = app.clone().oneshot(input).await.unwrap();
         assert_eq!(response.status(), expected);
     }
-    assert!(!profile.join("lib/note").exists());
+    assert!(!profile.join("libs/note").exists());
 }
 
 #[tokio::test]
@@ -805,7 +807,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/note/lib.webc")).unwrap(),
+        files::disk_bytes(&files::lib_root(&profile).unwrap(), "alice.dhttp.net/note").unwrap(),
         second
     );
     assert_eq!(
@@ -869,7 +871,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         .status(),
         StatusCode::FORBIDDEN
     );
-    assert!(!profile.join("lib/alice.dhttp.net/note").exists());
+    assert!(!profile.join("libs/note").exists());
 }
 
 #[tokio::test]
@@ -1047,7 +1049,7 @@ async fn independent_frontend_management_is_live_and_preserves_shared_backends()
             .status(),
         StatusCode::NOT_FOUND
     );
-    assert!(profile.join("lib/alice.dhttp.net/note/lib.webc").is_file());
+    assert!(profile.join("libs/note/.webc-proof").is_file());
     assert_eq!(
         app.oneshot(request(Method::DELETE, lib_path, AxumBody::empty()))
             .await

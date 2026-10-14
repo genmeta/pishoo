@@ -166,7 +166,7 @@ fn pishoo_common_package_version_follows_pishoo() {
 }
 
 #[test]
-fn pishoo_linux_requirements_keep_matching_default_artifact_release() {
+fn pishoo_linux_requirements_keep_matching_common_service_release() {
     let root = repository_root();
     let contract = release_contract(&root);
     let pishoo = contract.package("pishoo").expect("pishoo should exist");

@@ -48,13 +48,28 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     assert_eq!(columns, ["listen", "enabled"]);
     assert!(config.enabled);
     assert!(config.proxy_locations.is_empty());
+    for table in [
+        "libs",
+        "apps",
+        "app_dependencies",
+        "lib_dependencies",
+        "lib_capabilities",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "new identities install business packages only on explicit request"
+        );
+    }
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await
         .unwrap();
     for file in ["config.db", "access.db"] {
         assert!(profile.db_dir().join(file).is_file());
     }
-    for directory in ["db", "file", "lib", "logs", "repo", "templates"] {
+    for directory in ["db", "file", "libs", "apps", "logs", "repo", "templates"] {
         assert!(profile.join(directory).is_dir());
     }
     assert!(!profile.join("server.conf").exists());

@@ -8,14 +8,14 @@ sh "$repo/std/libs/message/build.sh" --publisher "$publisher"
 sh "$repo/std/libs/profile/build.sh" --publisher "$publisher"
 sh "$project/build.sh" --publisher "$publisher"
 output=${PISHOO_WORKSPACE_DIST:-"$repo/target/workspace-dist"}
-mkdir -p "$output/default-artifacts"
+mkdir -p "$output"
 if [ -n "${PISHOO_PACKAGE_WEBC:-}" ]; then tool=$PISHOO_PACKAGE_WEBC
 else
   cd "${TMPDIR:-/tmp}"
   cargo build --locked --manifest-path "$repo/Cargo.toml" -p pishoo --example package-webc
   tool="$repo/target/debug/examples/package-webc"
 fi
-"$tool" "$repo/std/libs/message/dist/wasmer.toml" "$output/default-artifacts/message-lib.webc" --publisher "$publisher"
-"$tool" "$repo/std/libs/profile/dist/wasmer.toml" "$output/default-artifacts/profile-lib.webc" --publisher "$publisher"
-"$tool" "$project/package-dist/wasmer.toml" "$output/default-artifacts/workspace-app.webc" --publisher "$publisher"
-echo "Three ordinary artifacts: $output/default-artifacts"
+"$tool" "$repo/std/libs/message/dist/wasmer.toml" "$output/message-lib.webc" --publisher "$publisher"
+"$tool" "$repo/std/libs/profile/dist/wasmer.toml" "$output/profile-lib.webc" --publisher "$publisher"
+"$tool" "$project/package-dist/wasmer.toml" "$output/workspace-app.webc" --publisher "$publisher"
+echo "Three ordinary artifacts: $output"

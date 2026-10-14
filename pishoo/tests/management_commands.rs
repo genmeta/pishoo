@@ -26,7 +26,7 @@ fn success(home: &Path, args: &[&str]) -> Output {
 fn initialize(home: &Path, name: &str) {
     let dir = home.join(name);
     std::fs::create_dir_all(dir.join("db")).unwrap();
-    std::fs::create_dir(dir.join("lib")).unwrap();
+    std::fs::create_dir(dir.join("libs")).unwrap();
     let db = rusqlite::Connection::open(dir.join("db/config.db")).unwrap();
     db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
 }

@@ -491,16 +491,6 @@ jobs:
           restore-keys: |
             pishoo-macos-cargo-
 
-      - name: Install Node.js for Workspace
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Install Bun for Workspace
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.2'
-
       - name: Package Homebrew artifacts
         run: |
           cargo xtask package --overwrite-manifest \

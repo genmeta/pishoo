@@ -11,7 +11,7 @@ if replacement:
     control = control.replace('{{PISHOO_COMMON_DEPENDS}}', replacement)
 else:
     control = control.replace('{{PISHOO_COMMON_DEPENDS}}, ', '')
-Path(sys.argv[2] if len(sys.argv) > 2 else '/dev/stdout').write_text(control)
+sys.stdout.write(control)
 PY
 }
 
@@ -48,11 +48,6 @@ mkdir -p "$src/debian"
 cp -r xtask/deb/. "$src/debian/"
 
 if [ "$package" = "pishoo-common" ]; then
-    defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
-    for artifact in message-lib.webc profile-lib.webc workspace-app.webc; do
-        [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
-        install -D -m 0644 "$defaults/$artifact" "$src/debian/common/usr/share/pishoo/default-artifacts/$artifact"
-    done
     render_control "" > "$src/debian/control"
     printf 'pishoo (%s) unstable; urgency=low\n\n  * release %s\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
         "${XTASK_RELEASE_PACKAGE_VERSION:?}" "${XTASK_RELEASE_SOURCE_VERSION:?}" "$(date -R)" > "$src/debian/changelog"

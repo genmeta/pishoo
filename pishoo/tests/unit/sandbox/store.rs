@@ -112,7 +112,7 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
 fn complete_ids_conflict_with_legacy_names_and_refuse_publisher_takeover() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let (bytes, _) = release('a', "1.2.3");
@@ -139,18 +139,18 @@ fn complete_ids_conflict_with_legacy_names_and_refuse_publisher_takeover() {
     let (takeover, _) = release('b', "2.0.0");
     assert!(install_lib(&profile, id, &takeover, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/note/lib.webc")).unwrap(),
+        super::super::files::disk_bytes(&super::super::files::lib_root(&profile).unwrap(), id)
+            .unwrap(),
         rotated
     );
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(!profile.join("lib/note/lib.webc").exists());
+    assert!(!profile.join("libs/note/.webc-proof").exists());
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::fs::remove_dir(profile.join("lib/alice.dhttp.net")).unwrap();
-    std::os::unix::fs::symlink(&outside, profile.join("lib/alice.dhttp.net")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("libs/note")).unwrap();
     assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);

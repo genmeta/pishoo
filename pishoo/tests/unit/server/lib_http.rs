@@ -99,7 +99,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
         &authority,
     );
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     crate::sandbox::install_lib(&profile, &format!("{publisher}/message"), &chat, &runtime)

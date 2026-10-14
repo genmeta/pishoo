@@ -95,7 +95,7 @@ fn offline_app_check_install_query_update_and_remove_need_no_workspace() {
     let home = &dir.path().join(".dhttp");
     let profile = home.join("alice");
     std::fs::create_dir_all(profile.join("db")).unwrap();
-    std::fs::create_dir(profile.join("lib")).unwrap();
+    std::fs::create_dir(profile.join("libs")).unwrap();
     let db = rusqlite::Connection::open(profile.join("db/config.db")).unwrap();
     db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL, enabled INTEGER NOT NULL); INSERT INTO settings VALUES(0,1); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
     std::fs::write(
@@ -129,8 +129,8 @@ fn offline_app_check_install_query_update_and_remove_need_no_workspace() {
     assert_eq!(info["entry"], "/");
     assert_eq!(info["endpoints"], json!([]));
     assert!(info.get("openapi").is_none());
-    assert!(profile.join("app/alice.dhttp.net/hello/app.webc").is_file());
-    assert!(!profile.join("lib/alice.dhttp.net/hello").exists());
+    assert!(profile.join("apps/hello/.webc-proof").is_file());
+    assert!(!profile.join("libs/hello").exists());
     assert!(!profile.join("db/alice.dhttp.net/hello").exists());
     let items: serde_json::Value = serde_json::from_slice(&run(&["app", "list"]).stdout).unwrap();
     assert_eq!(items[0]["id"], id);

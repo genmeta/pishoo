@@ -9,7 +9,7 @@
 | `/std/acl/capabilities` | 内置 Pishoo 处理器读取已安装 Lib 的业务能力登记 |
 | `/std/sys/package/libs/<name>`、`/std/sys/package/apps/<name>` | 按同类唯一短名查看、安装、更新与卸载；发布者仍属于包身份 |
 | `/std/sys/package/*` 其他资源 | 内置包检查、商店安装与目录 |
-| `/std/pishoo/settings`、`/std/pishoo/proxies` | 原生配置与代理基础设施 |
+| `/std/sys/settings`、`/std/sys/proxies` | 原生配置与代理基础设施 |
 | `/std/dhttp/<target>/*`、`/std/file/*` | 宿主转发与文件基础设施 |
 | `/std/<name>/` | 普通 App 的实际静态文件 GET/HEAD |
 | `/std/profile`、`/std/profile/avatar`、`/std/profile/context` | 安装的 Profile Lib |

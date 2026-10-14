@@ -451,10 +451,7 @@ fn dispatch(
         ("/message", Method::Post) => {
             let caller = caller.ok_or_else(|| fail(403, "verified sender required"))?;
             let c = api(Method::Get, "/std/contact/self", None)?;
-            if c["status"] != "active"
-                || c["name"] != caller.0
-                || c["subject_id"] != caller.1
-            {
+            if c["status"] != "active" || c["name"] != caller.0 || c["subject_id"] != caller.1 {
                 return Err(fail(403, "chat capability not approved"));
             }
             let doc = input(request, &["client_message_id", "text"])?;
@@ -542,7 +539,13 @@ fn chat_capability(_db: &Connection, chat: &Connection, c: &Value) -> Result<Val
         }
         remote = remote_grant(chat, c)?;
     }
-    let receive = active && has_message(&c["granted_access"]);
+    // Contact records retain a grant snapshot. Native ACL writes are the current authority.
+    let receive = if active {
+        let rules = api(Method::Get, "/std/acl/allow", None)?;
+        has_message(&rules[string(c, "name")?])
+    } else {
+        false
+    };
     let send = active && remote == Some(true);
     Ok(
         json!({"capability":"message","status":if c["status"]=="blocked" {"blocked"} else if send||receive {"available"} else {"waiting"},"contact_status":c["status"],"can_send":send,"can_receive":receive,"remote_grant":remote,"endpoints":[{"method":"POST","path":message_path()}]}),

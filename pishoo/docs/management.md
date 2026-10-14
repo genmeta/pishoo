@@ -26,14 +26,14 @@ HTTP API 操作 URI 所指定的身份，先经过 daccess 授权，再核对已
 
 | 操作 | 命令 | HTTP API |
 | --- | --- | --- |
-| 查看监听设置 | `pishoo listen --id NAME` | `GET /std/pishoo/settings` |
-| 修改监听范围 | `pishoo listen --id NAME internal` | `PATCH /std/pishoo/settings` |
-| 查看代理列表 | `pishoo proxy --id NAME` | `GET /std/pishoo/proxies` |
-| 查看单条代理 | `pishoo proxy --id NAME /test` | `GET /std/pishoo/proxies?location=%2Ftest` |
-| 添加或更新代理 | `pishoo proxy --id NAME /test 127.0.0.1:8080` | `PATCH /std/pishoo/proxies` |
-| 删除代理 | `pishoo proxy --id NAME remove /test` | `DELETE /std/pishoo/proxies?location=%2Ftest` |
-| 清空代理 | `pishoo proxy --id NAME clear` | `PUT /std/pishoo/proxies`，请求体 `[]` |
-| 替换代理列表 | `pishoo proxy --id NAME replace ./proxies.json` | `PUT /std/pishoo/proxies` |
+| 查看监听设置 | `pishoo listen --id NAME` | `GET /std/sys/settings` |
+| 修改监听范围 | `pishoo listen --id NAME internal` | `PATCH /std/sys/settings` |
+| 查看代理列表 | `pishoo proxy --id NAME` | `GET /std/sys/proxies` |
+| 查看单条代理 | `pishoo proxy --id NAME /test` | `GET /std/sys/proxies?location=%2Ftest` |
+| 添加或更新代理 | `pishoo proxy --id NAME /test 127.0.0.1:8080` | `PATCH /std/sys/proxies` |
+| 删除代理 | `pishoo proxy --id NAME remove /test` | `DELETE /std/sys/proxies?location=%2Ftest` |
+| 清空代理 | `pishoo proxy --id NAME clear` | `PUT /std/sys/proxies`，请求体 `[]` |
+| 替换代理列表 | `pishoo proxy --id NAME replace ./proxies.json` | `PUT /std/sys/proxies` |
 | 列出磁盘 Lib | `pishoo lib --id NAME` | `GET /std/pishoo/libs` |
 | 查看 Lib | `pishoo lib --id NAME info note` | `GET /std/pishoo/libs/note` |
 | 列出已加载 Lib | `pishoo lib --id NAME --loaded` | `GET /std/workspace-api/libs` |
@@ -67,9 +67,11 @@ PATCH 设置请求体示例：
 
 ## Lib 安装与数据
 
-Lib 制品位于 `<身份目录>/lib/<publisher>/<name>/lib.webc`，App 制品位于
-`<身份目录>/app/<publisher>/<name>/app.webc`，Lib 私有数据位于
-`<身份目录>/db/<publisher>/<name>/`。旧短 ID 数据不自动迁移。
+WEBC 安装包会展开到 `libs/<name>/` 或 `apps/<name>/`；已验签发布者为 `std.dhttp.net` 的制品放在
+`libs/std/<name>/`、`apps/std/<name>/`。Lib 保存 `<name>.wasm`、OpenAPI、清单和签名，
+App 保存 public 前端资源、清单和签名；隐藏 `.webc-proof` 用于复用原包完整验签。
+完整包身份仍保存在签名清单与安装登记中，Lib 私有数据仍位于
+`<身份目录>/db/<publisher>/<name>/`，旧数据不自动迁移。详情见[包规范](package-spec.md#6-安装更新卸载和数据)。
 
 本机资源地址统一使用短名：
 
@@ -100,6 +102,14 @@ GET/DELETE 不接受非空 Body，未知 query 参数返回400；管理接口仍
 `{"kind":"lib","publisher":"alice.smith.dhttp.net","name":"note","version":"1.2.0"}`；kind 可为 app/lib，省略时按 lib。
 `Content-Type: application/json`，最多4 KiB，接收期限15秒。商店仍使用完整 publisher/name 和精确版本。
 宿主核验固定商店身份、发布者签名、包摘要及依赖，安装不自动设置访问规则；原始文件 PUT 不产生商店来源证明。
+
+宿主安装包不携带业务 App/Lib，首次启动仅初始化原生服务及数据库。Pishoo 和提供 `genmeta install` 的新版 gmutils 可以按任意顺序安装；身份配置完成、运行中的 Pishoo 已加载该身份并可达后，由身份所属账户执行：
+
+```sh
+genmeta install std.dhttp.net/workspace --id NAME
+```
+
+命令调用上述商店安装 API，在线安装 Workspace 和其精确 Profile、Message 依赖，所需版本须已发布。Pishoo 不强依赖或自动调用 gmutils；系统包安装脚本不选择用户身份、不调用在线业务安装。
 
 ## 服务管理
 

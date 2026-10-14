@@ -207,7 +207,7 @@ async fn load_profile(
         match crate::setup::config_database(
             &profile,
             &http::Method::GET,
-            &http::Uri::from_static("/std/pishoo/settings"),
+            &http::Uri::from_static("/std/sys/settings"),
             None,
         ) {
             Ok(settings) if settings["enabled"] == false => return Ok(None),
@@ -352,7 +352,7 @@ async fn reconcile_profiles(
                 crate::setup::config_database(
                     &profile,
                     &http::Method::GET,
-                    &http::Uri::from_static("/std/pishoo/settings"),
+                    &http::Uri::from_static("/std/sys/settings"),
                     None,
                 )?;
                 let config = load_server_config(&profile)?;
@@ -490,7 +490,17 @@ fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
 }
 
 fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
-    for directory in ["db", "file", "lib", "logs", "repo", "templates"] {
+    for directory in [
+        "db",
+        "file",
+        "libs",
+        "libs/std",
+        "apps",
+        "apps/std",
+        "logs",
+        "repo",
+        "templates",
+    ] {
         let path = profile.join(directory);
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -983,165 +993,6 @@ fn native_router(server: &Server) -> Router {
         }))
 }
 
-// Defaults are delivered artifacts, installed once into the same user-owned
-// directories as any other App/Lib. The existing config file is the bootstrap
-// commit point; deleting an App later cannot cause it to reappear on restart.
-fn install_default_artifacts(profile: &IdentityProfile, runtime: &WasmRuntime) -> Result<()> {
-    if profile.config_db_path().exists() {
-        return Ok(());
-    }
-    let directory = match std::env::var_os("PISHOO_DEFAULT_ARTIFACTS") {
-        Some(path) => std::path::PathBuf::from(path),
-        None => std::env::current_exe()?
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or_else(|| Error::InvalidConfig("executable has no installation prefix".into()))?
-            .join("share/pishoo/default-artifacts"),
-    };
-    if !directory.exists() {
-        return Ok(());
-    }
-    let mut artifacts = Vec::new();
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.path().extension().is_none_or(|ext| ext != "webc") {
-            continue;
-        }
-        if !entry.file_type()?.is_file() {
-            return Err(Error::InvalidConfig(
-                "default artifacts must be regular files".into(),
-            ));
-        }
-        let bytes = std::fs::read(entry.path())?;
-        let container =
-            webc::Container::from_bytes_and_version(bytes.clone().into(), webc::Version::V3)
-                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-        let metadata = crate::sandbox::package_metadata(&container)?;
-        let kind = metadata["kind"].as_str().unwrap().to_owned();
-        let id = metadata["id"].as_str().unwrap().to_owned();
-        artifacts.push((kind, id, bytes));
-    }
-    if artifacts.is_empty() {
-        return Err(Error::InvalidConfig(
-            "default artifacts directory is empty".into(),
-        ));
-    }
-    let mut ordered = Vec::new();
-    while !artifacts.is_empty() {
-        let mut ready = None;
-        for (index, (_, _, bytes)) in artifacts.iter().enumerate() {
-            let package = crate::sandbox::read_package(bytes)?;
-            let metadata = crate::sandbox::package_metadata(&package)?;
-            if metadata["dependencies"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|dependency| {
-                    let id = format!(
-                        "{}/{}",
-                        dependency["publisher"].as_str().unwrap(),
-                        dependency["name"].as_str().unwrap()
-                    );
-                    ordered
-                        .iter()
-                        .any(|(kind, key, bytes): &(String, String, Vec<u8>)| {
-                            kind == "lib"
-                                && key == &id
-                                && crate::sandbox::read_package(bytes)
-                                    .and_then(|p| crate::sandbox::package_metadata(&p))
-                                    .is_ok_and(|m| m["version"] == dependency["version"])
-                        })
-                })
-            {
-                ready = Some(index);
-                break;
-            }
-        }
-        let index = ready.ok_or_else(|| {
-            Error::InvalidComponent(
-                "default artifact dependencies missing, conflicting or cyclic".into(),
-            )
-        })?;
-        ordered.push(artifacts.remove(index));
-    }
-    let artifacts = ordered;
-    let temporary = tempfile::Builder::new()
-        .prefix("default-artifacts-")
-        .tempdir_in(profile.path())?;
-    let staged = IdentityProfile::try_from(temporary.path().join("staging"))
-        .map_err(|error| Error::InvalidConfig(error.to_string()))?;
-    std::fs::create_dir(staged.path())?;
-    initialize_directories(&staged)?;
-    load_server_config(&staged)?;
-    for (kind, id, bytes) in &artifacts {
-        if kind == "lib" {
-            crate::sandbox::install_lib(&staged, &id, &bytes, runtime)?;
-        } else {
-            crate::sandbox::install_app(&staged, &id, &bytes)?;
-        }
-    }
-    // Preparation uses the ordinary installer. Publish each already-verified
-    // artifact atomically; an interrupted first install can safely retry the
-    // same bytes, and a pre-existing different user artifact is never replaced.
-    for (kind, id, bytes) in artifacts {
-        let root = profile.join(&kind);
-        let publisher = root.join(id.split('/').next().unwrap());
-        let target = root.join(&id);
-        for directory in [&root, &publisher, &target] {
-            match directory.symlink_metadata() {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-                Ok(_) => {
-                    return Err(Error::InvalidConfig(
-                        "artifact directory must be a real directory".into(),
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let mut builder = std::fs::DirBuilder::new();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::DirBuilderExt;
-                        builder.mode(0o700);
-                    }
-                    builder.create(directory)?;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        let destination = target.join(format!("{kind}.webc"));
-        match destination.symlink_metadata() {
-            Ok(metadata)
-                if metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && std::fs::read(&destination)? == bytes =>
-            {
-                continue;
-            }
-            Ok(_) => {
-                return Err(Error::InvalidConfig(format!(
-                    "default artifact {id} conflicts with an existing user artifact"
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut file = tempfile::NamedTempFile::new_in(&target)?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        file.as_file().sync_all()?;
-        file.persist_noclobber(&destination)
-            .map_err(|error| Error::Io(error.error))?;
-    }
-    let mut config = tempfile::NamedTempFile::new_in(profile.db_dir())?;
-    std::io::copy(
-        &mut std::fs::File::open(staged.config_db_path())?,
-        &mut config,
-    )?;
-    config.as_file().sync_all()?;
-    config
-        .persist_noclobber(profile.config_db_path())
-        .map_err(|error| Error::Io(error.error))?;
-    Ok(())
-}
-
 fn current_router(server: &Server) -> Router {
     let proxies = server.config.proxy_locations.clone();
     let native = native_router(server);
@@ -1189,7 +1040,6 @@ impl Server {
                     error => Error::Dhttp(error),
                 })?;
         initialize_directories(&profile)?;
-        install_default_artifacts(&profile, &runtime)?;
         let config = load_server_config(&profile)?;
         if config.listen != 0 {
             dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;

@@ -141,7 +141,7 @@ export default function AddContactPage(props: {
       </Show>
       <Dialog open={!recipientReady()} title={t('outbound.searchTitle')}
         onClose={() => props.navigate('#/contacts')}>
-        <form onSubmit={(event) => { event.preventDefault(); search() }}>
+        <form class="contact-search-form" onSubmit={(event) => { event.preventDefault(); search() }}>
           <label class="field">
             <input ref={targetInput} value={target()} aria-label={t('outbound.target')}
               aria-invalid={targetError() !== null} aria-required="true"
@@ -151,7 +151,16 @@ export default function AddContactPage(props: {
           </label>
           <Show when={recipient.loading}><LoadingState label={t('outbound.searching')} /></Show>
           <Show when={recipient.error}>
-            <p class="field-error" role="alert">{t('outbound.searchFailed')}: {errorMessage(recipient.error, t('common.unexpectedError'))}</p>
+            <div class="contact-search-error" role="alert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M12 3 2 21h20L12 3Z" stroke-linejoin="round" />
+                <path d="M12 9v5m0 3v1" />
+              </svg>
+              <div>
+                <p>{t('outbound.searchFailed')}</p>
+                <small>{errorMessage(recipient.error, t('common.unexpectedError'))}</small>
+              </div>
+            </div>
           </Show>
           <div class="dialog-actions">
             <button class="button button-secondary" type="button" onClick={() => props.navigate('#/contacts')}>{t('common.cancel')}</button>

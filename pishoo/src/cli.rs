@@ -208,7 +208,7 @@ Queries are written to stdout; context and status messages to stderr."
                 let value = config_database(
                     &profile,
                     &Method::PATCH,
-                    &Uri::from_static("/std/pishoo/settings"),
+                    &Uri::from_static("/std/sys/settings"),
                     Some(json!({"enabled": command == "enable"})),
                 )?;
                 println!("Enabled:    {}", value["enabled"]);
@@ -224,7 +224,7 @@ Queries are written to stdout; context and status messages to stderr."
                 let value = config_database(
                     &profile,
                     if saving { &Method::PATCH } else { &Method::GET },
-                    &Uri::from_static("/std/pishoo/settings"),
+                    &Uri::from_static("/std/sys/settings"),
                     payload,
                 )?;
                 let listen = value["listen"].as_u64().unwrap();
@@ -386,7 +386,7 @@ fn proxy_operation(args: &[OsString]) -> Result<(Method, Uri, Option<Value>)> {
         let value = serde_json::from_slice(&bytes).map_err(|_| usage("invalid proxies JSON"))?;
         return Ok((
             Method::PUT,
-            Uri::from_static("/std/pishoo/proxies"),
+            Uri::from_static("/std/sys/proxies"),
             Some(value),
         ));
     }
@@ -395,11 +395,11 @@ fn proxy_operation(args: &[OsString]) -> Result<(Method, Uri, Option<Value>)> {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("location", location)
             .finish();
-        format!("/std/pishoo/proxies?{query}")
+        format!("/std/sys/proxies?{query}")
             .parse()
             .map_err(|_| usage("invalid proxy location"))
     };
-    let uri = Uri::from_static("/std/pishoo/proxies");
+    let uri = Uri::from_static("/std/sys/proxies");
     match words.as_slice() {
         [] | ["list" | "ls"] => Ok((Method::GET, uri, None)),
         ["clear"] => Ok((Method::PUT, uri, Some(json!([])))),

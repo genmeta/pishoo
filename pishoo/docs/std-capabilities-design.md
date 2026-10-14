@@ -134,7 +134,7 @@ CREATE TABLE lib_capability_operations (
 
 ## 六、ACL 审批使用能力名称
 
-联系人 requested_access 和普通 access_reviews 沿用已有 method/path 数据。Workspace 用能力目录为申请标注“1v1聊天”，列出实际端点，再调用原生 daccess API；目录匹配同时核对方法，不仅匹配路径。
+联系人 requested_access 和普通 access_reviews 沿用已有 method/path 数据。Workspace 审批列表和确认弹窗只展示能力目录中的名称（如“1v1聊天”），不展示 API 方法或路径；未匹配目录时显示“未登记能力”。调用原生 daccess API 仍使用实际 method/path，目录匹配同时核对方法，不仅匹配路径。
 
 主人允许 Message 能力时，使用已有 `PATCH /std/acl/allow/{name}` 写入 POST `/std/message` 的 Allow；拒绝或撤销通过已有 Deny/移除规则语义执行。联系人激活仍是联系人资源的独立操作，不因联系人建立就自动允许消息。
 
