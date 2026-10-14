@@ -41,7 +41,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The build installs Workspace frontend dependencies with `bun install --frozen-lockfile` and embeds its production build. First-time builds need access to GitHub, crates.io and the frontend package registry. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. Workspace is an ordinary user App with separate Workspace and Chat WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](pishoo/workspace-lib/README.md); release packages deliver the three signed artifacts by default. First-time host builds need access to GitHub and crates.io. Run `DHTTP_HOME=/path/to/identity-home ./target/debug/pishoo` with your own identity credentials. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -142,6 +142,8 @@ chains, names and handshake signatures. Anonymous callers follow the configured
 anonymous authorization rules. Older named clients that omit OCSP must upgrade.
 
 ### Build your own Lib
+
+The revised [App/Lib package specification](pishoo/docs/package-spec.md) moves package metadata and runtime dependencies into the WEBC manifest. App packages no longer require OpenAPI; Lib OpenAPI describes business APIs. This specification revision is pending implementation and deployment.
 
 The selected WEBC distribution design, independent frontend and metadata OpenAPI
 are documented in the [Pishoo WASM developer guide](pishoo/docs/developing-wasm.md).

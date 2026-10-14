@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
-import { api } from '../api/client'
+import { api, backendPath } from '../api/client'
 import type { Contact, DirectoryEntry } from '../api/types'
 import { chatApi } from '../chat/api'
 import { Avatar, Dialog, EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
@@ -58,7 +58,7 @@ export default function ContactsPage(props: {
   const selectedName = () => props.contactName ?? null
   const openContact = (name: string) => props.navigate(contactPath(name))
   const openChat = (name: string) => props.navigate(contactChatPath(name))
-  const closeContact = () => props.navigate(props.returnTo ?? '/std/workspace/contacts')
+  const closeContact = () => props.navigate(props.returnTo ?? '#/contacts')
   const [selected, setSelected] = createSignal<Set<string>>(new Set())
   const [confirmDelete, setConfirmDelete] = createSignal<ConfirmDelete>(null)
   const [alias, setAlias] = createSignal('')
@@ -93,7 +93,7 @@ export default function ContactsPage(props: {
     if (contactStatus(contact.status) !== 'active') return null
     const entry = directoryEntries().get(contact.name)
     if (!entry) return 'unlisted'
-    if (!Object.prototype.hasOwnProperty.call(contact.requested_access, '/std/message')
+    if (!Object.prototype.hasOwnProperty.call(contact.requested_access, backendPath('/message'))
       || entry.remote_chat_granted === true) return null
     return entry.remote_chat_granted === false ? 'remote-not-granted' : 'remote-unknown'
   }
@@ -263,7 +263,7 @@ export default function ContactsPage(props: {
     const status = contactStatus(contact.status)
     return {
       canGrantChat: ['pending', 'transfered', 'active'].includes(status)
-        && Object.prototype.hasOwnProperty.call(contact.requested_access, '/std/message')
+        && Object.prototype.hasOwnProperty.call(contact.requested_access, backendPath('/message'))
         && chatCapability()?.can_receive !== true,
       canRevokeChat: status === 'active' && chatCapability()?.can_receive === true,
       canBlock: ['active', 'transfered'].includes(status),
@@ -278,7 +278,7 @@ export default function ContactsPage(props: {
         <h1>{t('contacts.title')}</h1>
         <div class="header-actions">
           <button class="button button-primary" type="button"
-            onClick={() => props.navigate('/std/workspace/contacts/new')}>
+            onClick={() => props.navigate('#/contacts/new')}>
             {t('nav.contactNew')}
           </button>
           <button class="button button-secondary" type="button" onClick={refresh} disabled={contacts.loading}>

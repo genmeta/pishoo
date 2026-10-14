@@ -76,3 +76,5 @@ pishoo.pid
 /pishoo/docs/workspace/BRANCH_MIGRATION_*.md
 /pishoo/docs/workspace/VM_*.md
 /pishoo/docs/workspace/source/
+
+pishoo/workspace/package-dist/

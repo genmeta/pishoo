@@ -5,9 +5,9 @@ import type { LibSummary, RulesByApi, StoreDetail, StoreSummary } from '../src/a
 const journal: LibSummary = {
   id: 'journal', title: 'Personal journal', version: '1.1.0', description: 'Keep your stories, photos and conversations together. Share reading and commenting with the people you choose.',
   endpoints: [
-    { method: 'GET', path: '/std/api/journal/page', description: 'Open journal' },
-    { method: 'GET', path: '/std/api/journal/entries', description: 'Read entries' },
-    { method: 'POST', path: '/std/api/journal/comments', description: 'Write comments' },
+    { method: 'GET', path: '/api/journal/page', description: 'Open journal' },
+    { method: 'GET', path: '/api/journal/entries', description: 'Read entries' },
+    { method: 'POST', path: '/api/journal/comments', description: 'Write comments' },
   ],
   openapi: {
     openapi: '3.1.0', info: { title: 'Personal journal', version: '1.1.0', license: { name: 'MIT' } },
@@ -29,7 +29,7 @@ const fullId = 'alice.smith.dhttp.net/journal'
 
 function completeJournal(version = '1.1.0'): LibSummary {
   return { ...journal, id: fullId, version,
-    endpoints: journal.endpoints.map(op => ({ ...op, path: op.path.replace('/std/api/journal', `/std/api/${fullId}`) })),
+    endpoints: journal.endpoints.map(op => ({ ...op, path: op.path.replace('/api/journal', `/api/${fullId}`) })),
     openapi: { ...journal.openapi!, info: { ...journal.openapi!.info, version } },
   }
 }
@@ -38,13 +38,15 @@ function release(version = '1.2.0', status: 'published' | 'yanked' = 'published'
     publisher_owner_hash: 'a'.repeat(64), status_reason: status === 'yanked' ? 'Withdrawn by publisher' : '',
     package_sha256: 'b'.repeat(64), size: 4096, published_at: 1791850000,
     download_path: `/store/v1/libs/${fullId}/versions/${version}/lib.webc`,
-    openapi: completeJournal(version).openapi!, signer_certificates: ['test-certificate'],
+    kind: 'lib', dependencies: [], title: journal.title, description: journal.description,
+    changelog: 'A place for notes and memories. Existing journal data is preserved.',
+    host: journal.openapi!['x-pishoo']!.host!, openapi: completeJournal(version).openapi!, signer_certificates: ['test-certificate'],
   }
 }
 function summary(version = '1.2.0', status: 'published' | 'yanked' = 'published'): StoreSummary {
   const { openapi, signer_certificates: _certificates, ...metadata } = release(version, status)
-  return { ...metadata, title: openapi.info.title, description: journal.description,
-    changelog: openapi['x-pishoo']!.changelog!, host: openapi['x-pishoo']!.host! }
+  return { ...metadata, title: openapi!.info.title, description: journal.description,
+    changelog: openapi!['x-pishoo']!.changelog!, host: openapi!['x-pishoo']!.host! }
 }
 
 test.beforeEach(async ({ page }) => {
@@ -65,10 +67,10 @@ test.beforeEach(async ({ page }) => {
 })
 
 test('cards, full detail, history, declared entry and language', async ({ page, context }, testInfo) => {
-  await context.route('**/std/api/journal/page', route => route.fulfill({ contentType: 'text/html', body: '<h1>Journal</h1>' }))
+  await context.route('**/api/journal/page', route => route.fulfill({ contentType: 'text/html', body: '<h1>Journal</h1>' }))
   await page.goto('./apps?tab=mine&q=journal')
   await expect(page.getByRole('heading', { name: 'Personal journal' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveAttribute('href', '/std/api/journal/page')
+  await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveAttribute('href', '/api/journal/page')
   await page.screenshot({ path: testInfo.outputPath('01-my-apps.png'), fullPage: true })
   const popup = page.waitForEvent('popup')
   await page.getByRole('link', { name: 'Open ↗', exact: true }).click()
@@ -81,7 +83,7 @@ test('cards, full detail, history, declared entry and language', async ({ page, 
   await expect(page.locator('.app-about')).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('02-detail.png'), fullPage: true })
   await page.getByRole('button', { name: 'Interfaces', exact: true }).click()
-  await expect(page.getByRole('link', { name: 'Open GET /std/api/journal/entries in a new tab' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open GET /api/journal/entries in a new tab' })).toBeVisible()
   await page.reload()
   await expect(page.getByRole('heading', { name: 'API endpoints (3)' })).toBeVisible()
   await page.goBack()
@@ -283,7 +285,7 @@ test('legacy APIs are not guessed to be a page, disk-only apps cannot open', asy
   await expect(page.getByRole('link', { name: 'Open ↗', exact: true })).toHaveCount(0)
   await page.locator('.app-card').filter({ hasText: 'Personal journal' }).getByRole('link', { name: 'Details', exact: true }).click()
   await page.getByRole('button', { name: 'Interfaces', exact: true }).click()
-  await expect(page.getByRole('link', { name: 'Open GET /std/api/journal/page in a new tab' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open GET /api/journal/page in a new tab' })).toBeVisible()
 })
 
 test('declared root entry comes from the displayed release before activation', async ({ page }) => {
@@ -295,7 +297,7 @@ test('declared root entry comes from the displayed release before activation', a
     description: manifest.info.description ?? null, openapi: manifest,
     endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) =>
       Object.entries(methods).map(([method, operation]) => ({
-        method: method.toUpperCase(), path: `/std/api/${fullId}${path}`,
+        method: method.toUpperCase(), path: `/api/${fullId}${path}`,
         description: operation?.summary ?? null,
       })),
     ),
@@ -400,7 +402,7 @@ test('three permission views use refreshed rules and partial results remain in d
   await dialog.getByRole('button', { name: 'Save rule', exact: true }).click()
   await expect(dialog.getByRole('region', { name: 'Rule submission results' })).not.toContainText('Failed')
   expect(writes).toHaveLength(4) // Read-back avoids resubmitting the already saved entry rule.
-  expect(writes[3]).toMatchObject({ api: '/std/api/journal/comments', effect: 'deny' })
+  expect(writes[3]).toMatchObject({ api: '/api/journal/comments', effect: 'deny' })
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.locator('.app-visitors')).toContainText('deny')
   await page.getByRole('combobox', { name: 'Access permissions', exact: true }).selectOption('feature')
@@ -408,7 +410,7 @@ test('three permission views use refreshed rules and partial results remain in d
   await expect(page.locator('.app-rule-list')).toHaveCount(2)
   await page.screenshot({ path: testInfo.outputPath('09-access-features.png'), fullPage: true })
   await page.getByRole('combobox', { name: 'Access permissions', exact: true }).selectOption('api')
-  await page.getByRole('button', { name: 'POST /std/api/journal/comments', exact: true }).click()
+  await page.getByRole('button', { name: 'POST /api/journal/comments', exact: true }).click()
   await expect(page.locator('.app-rule-list')).toContainText('deny')
   await page.screenshot({ path: testInfo.outputPath('10-access-api.png'), fullPage: true })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
@@ -451,9 +453,9 @@ test('card grid and long names fit every viewport', async ({ page }, testInfo) =
 
 test('permission editing pre-fills actual effects and removal keeps explicit denies', async ({ page }) => {
   const rules: RulesByApi = {
-    '/std/api/journal/page': { GET: { allow: [bob], review: [], deny: [] } },
-    '/std/api/journal/entries': { GET: { allow: [bob], review: [], deny: [] } },
-    '/std/api/journal/comments': { POST: { allow: [], review: [], deny: [bob] } },
+    '/api/journal/page': { GET: { allow: [bob], review: [], deny: [] } },
+    '/api/journal/entries': { GET: { allow: [bob], review: [], deny: [] } },
+    '/api/journal/comments': { POST: { allow: [], review: [], deny: [bob] } },
   }
   const deleted: string[] = []
   await page.route('**/std/acl/access', route => route.fulfill({ json: rules }))
@@ -472,8 +474,8 @@ test('permission editing pre-fills actual effects and removal keeps explicit den
   await expect(dialog).toContainText('Changes to submit (2)')
   await dialog.getByRole('button', { name: 'Save rule', exact: true }).click()
   await expect(dialog.getByRole('region', { name: 'Rule submission results' })).toContainText('Succeeded')
-  expect(deleted).toEqual(['/std/api/journal/entries', '/std/api/journal/page'])
-  expect(rules['/std/api/journal/comments'].POST.deny).toEqual([bob])
+  expect(deleted).toEqual(['/api/journal/entries', '/api/journal/page'])
+  expect(rules['/api/journal/comments'].POST.deny).toEqual([bob])
 })
 
 // Bytes are passed intact to the host; package signature verification is server-side.
@@ -541,7 +543,7 @@ test('store upload confirms the package version, keeps a failed upload and retri
 test('preview folds business APIs, groups page files and enables Open immediately after install', async ({ page }) => {
   const manifest: NonNullable<LibSummary['openapi']> = JSON.parse(readFileSync(new URL('../../examples/journal/openapi.json', import.meta.url), 'utf8'))
   const installed: LibSummary = { id: fullId, title: manifest.info.title, version: manifest.info.version, description: manifest.info.description ?? null, openapi: manifest,
-    endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) => Object.entries(methods).map(([method, operation]) => ({ method: method.toUpperCase(), path: `/std/api/${fullId}${path}`, description: operation?.summary ?? null }))),
+    endpoints: Object.entries(manifest.paths ?? {}).flatMap(([path, methods]) => Object.entries(methods).map(([method, operation]) => ({ method: method.toUpperCase(), path: `/api/${fullId}${path}`, description: operation?.summary ?? null }))),
   }
   let live: LibSummary[] = [], disk: LibSummary[] = []
   await page.route('**/std/workspace-api/libs', route => route.fulfill({ json: live }))
@@ -568,7 +570,7 @@ test('preview folds business APIs, groups page files and enables Open immediatel
   await dialog.getByRole('button', { name: 'Confirm installation', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   const card = page.locator('.app-card').filter({ hasText: manifest.info.title })
-  await expect(card.getByRole('link', { name: 'Open ↗', exact: true })).toHaveAttribute('href', `/std/api/${fullId}/`)
+  await expect(card.getByRole('link', { name: 'Open ↗', exact: true })).toHaveAttribute('href', `/api/${fullId}/`)
   await card.getByRole('button', { name: 'Uninstall', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm uninstall', exact: true }).click()
   await expect(card).toHaveCount(0)

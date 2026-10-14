@@ -1,0 +1,165 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Chat",
+    "version": "0.2.0",
+    "description": "独立聊天、能力决定与消息投递后端",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "paths": {
+    "/capability-requests": {
+      "get": {
+        "operationId": "getCapability-Requests",
+        "summary": "capability-requests",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/grant": {
+      "post": {
+        "operationId": "postContactsCapabilitiesGrant",
+        "summary": "contacts capabilities grant",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/revoke": {
+      "post": {
+        "operationId": "postContactsCapabilitiesRevoke",
+        "summary": "contacts capabilities revoke",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/deny": {
+      "post": {
+        "operationId": "postContactsCapabilitiesDeny",
+        "summary": "contacts capabilities deny",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/chat/context": {
+      "get": {
+        "operationId": "getChatContext",
+        "summary": "chat context",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/chat/capability": {
+      "get": {
+        "operationId": "getChatCapability",
+        "summary": "chat capability",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/chat/messages": {
+      "get": {
+        "operationId": "getChatMessages",
+        "summary": "chat messages",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "post": {
+        "operationId": "postChatMessages",
+        "summary": "chat messages",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/chat/messages/retry": {
+      "post": {
+        "operationId": "postChatMessagesRetry",
+        "summary": "chat messages retry",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/message": {
+      "post": {
+        "operationId": "postMessage",
+        "summary": "message",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/approvals": {
+      "delete": {
+        "operationId": "deleteApprovals",
+        "summary": "approvals",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    }
+  }
+}

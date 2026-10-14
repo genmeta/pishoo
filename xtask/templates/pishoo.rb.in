@@ -8,6 +8,7 @@ class {{homebrew.class}} < Formula
 
   def install
     bin.install "pishoo"
+    (share/"pishoo/default-artifacts").install Dir["default-artifacts/*.webc"]
   end
 
   def caveats

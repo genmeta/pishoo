@@ -119,7 +119,7 @@ async fn setup_tcp_demo() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = std::fs::read(entry.path().join("lib.wasm"))?;
         let openapi = pishoo::validate_lib(&bytes)?;
         for (path, item) in openapi.paths.ok_or("validated Lib has no paths")? {
-            let api = format!("/std/api/{id}{path}");
+            let api = format!("/api/{}{path}", id.rsplit('/').next().unwrap());
             for (method, _) in item.methods() {
                 access
                     .set_policy(

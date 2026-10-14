@@ -1,0 +1,18 @@
+[package]
+name = "dev.dhttp.net/workspace"
+version = "0.2.0"
+description = "用户工作台前端"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "app"
+title = "Workspace"
+entry = "/"
+changelog = "前端独立交付，精确依赖 Workspace 和 Chat 后端；原合包数据不自动迁移。"
+dependencies = [
+  { publisher = "dev.dhttp.net", name = "workspace", version = "0.2.0" },
+  { publisher = "dev.dhttp.net", name = "chat", version = "0.2.0" },
+]
+
+[fs]
+"/public" = "."

@@ -48,6 +48,11 @@ mkdir -p "$src/debian"
 cp -r xtask/deb/. "$src/debian/"
 
 if [ "$package" = "pishoo-common" ]; then
+    defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
+    for artifact in chat-lib.webc workspace-lib.webc workspace-app.webc; do
+        [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
+        install -D -m 0644 "$defaults/$artifact" "$src/debian/common/usr/share/pishoo/default-artifacts/$artifact"
+    done
     render_control "" > "$src/debian/control"
     printf 'pishoo (%s) unstable; urgency=low\n\n  * release %s\n\n -- Genmeta Tech Limited <developer@genmeta.net>  %s\n' \
         "${XTASK_RELEASE_PACKAGE_VERSION:?}" "${XTASK_RELEASE_SOURCE_VERSION:?}" "$(date -R)" > "$src/debian/changelog"

@@ -81,7 +81,7 @@ async fn note_component_page_crud_sqlite_persistence_input_and_identity_isolatio
     assert!(page.contains("我的便签"));
     assert!(page.contains("fetch(path,"));
     assert!(page.contains("api('notes?q='"));
-    assert!(!page.contains("/std/api/"));
+    assert!(!page.contains("/api/"));
     assert!(!page.contains("/api/note"));
     let (status, _, bytes) = call(&lib, &tasks, "GET", "/notes", Value::Null, None).await;
     assert_eq!(status, 200);
@@ -413,7 +413,7 @@ async fn note_browser_preview() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:18743")
         .await
         .unwrap();
-    eprintln!("Note real WASM browser fixture: http://127.0.0.1:18743/std/api/note/");
+    eprintln!("Note real WASM browser fixture: http://127.0.0.1:18743/api/note/");
     use tower::ServiceExt;
     let serving = async {
         loop {

@@ -5,7 +5,7 @@ test.beforeEach(({}, testInfo) => {
 })
 
 test('switches between English and Chinese and remembers the choice', async ({ page }) => {
-  await page.goto('./approvals')
+  await page.goto('./#/approvals')
   await expect(page.getByRole('heading', { name: 'Approval center' })).toBeVisible()
 
   await page.getByRole('button', { name: 'Chinese' }).click()
@@ -37,7 +37,7 @@ test.describe('browser language default', () => {
   test.use({ locale: 'zh-CN' })
 
   test('uses Chinese for a first-time Chinese browser', async ({ page }) => {
-    await page.goto('./approvals')
+    await page.goto('./#/approvals')
     await expect(page.getByRole('heading', { name: '审批中心' })).toBeVisible()
     await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
   })

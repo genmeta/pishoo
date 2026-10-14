@@ -6,7 +6,7 @@ test.beforeEach(({}, testInfo) => {
 })
 
 test('review decisions update the pending queue', async ({ page }) => {
-  await page.goto('./approvals')
+  await page.goto('./#/approvals')
   const firstRow = page.locator('tbody tr').filter({ has: page.getByRole('button', { name: 'Allow', exact: true }) }).first()
   await expect(firstRow).toBeVisible()
   await firstRow.getByRole('button', { name: 'Allow' }).click()
@@ -22,7 +22,7 @@ test('review decisions update the pending queue', async ({ page }) => {
 })
 
 test('contact editing and status actions can be restored', async ({ page }) => {
-  await page.goto('./contacts')
+  await page.goto('./#/contacts')
   await page.getByRole('button', { name: /Alice Chen/ }).click()
   const alias = page.getByLabel('Local alias')
   await alias.fill('Alice QA')
@@ -53,7 +53,7 @@ test('contact editing and status actions can be restored', async ({ page }) => {
 })
 
 test('access rules can be added, edited and deleted', async ({ page }) => {
-  await page.goto('./settings/access')
+  await page.goto('./#/settings/access')
   await page.getByRole('button', { name: 'Add rule', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Access rules', exact: true })
   await editor.getByLabel('API path', { exact: true }).fill('/workspace-qa/manual-rule')

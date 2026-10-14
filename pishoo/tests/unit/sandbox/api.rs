@@ -104,44 +104,31 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
             }
         }"#,
     );
-    let openapi = serde_json::to_value(&lib.openapi).unwrap();
     sandbox.libs.insert("z-demo".into(), lib.clone());
     sandbox.libs.insert("a-demo".into(), lib);
     let router = api_router(&sandbox, endpoint);
     sandbox.close();
-
-    for (app, expected) in [
-        (&empty_router, serde_json::json!([])),
-        (
-            &router,
-            serde_json::json!([
-                {"openapi":openapi,"id":"a-demo","title":"HTTP","version":"1.0.0","description":null,"endpoints":[
-                    {"method":"GET","path":"/std/api/a-demo/","description":"Note page"},
-                    {"method":"POST","path":"/std/api/a-demo/","description":"Created"},
-                    {"method":"GET","path":"/std/api/a-demo/run","description":"Read run"},
-                    {"method":"OPTIONS","path":"/std/api/a-demo/run","description":null},
-                    {"method":"POST","path":"/std/api/a-demo/run","description":"Create run"}
-                ]},
-                {"openapi":openapi,"id":"z-demo","title":"HTTP","version":"1.0.0","description":null,"endpoints":[
-                    {"method":"GET","path":"/std/api/z-demo/","description":"Note page"},
-                    {"method":"POST","path":"/std/api/z-demo/","description":"Created"},
-                    {"method":"GET","path":"/std/api/z-demo/run","description":"Read run"},
-                    {"method":"OPTIONS","path":"/std/api/z-demo/run","description":null},
-                    {"method":"POST","path":"/std/api/z-demo/run","description":"Create run"}
-                ]}
-            ]),
-        ),
-    ] {
-        let mut request = request(Method::GET, "/std/workspace-api/libs");
+    for (app, count) in [(&empty_router, 0), (&router, 2)] {
+        let mut request = request(Method::GET, "/std/pishoo/loaded-libs");
         request.extensions_mut().insert(owner.clone());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["cache-control"], "no-store");
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            expected
-        );
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), count);
+        if count > 0 {
+            assert_eq!(value[0]["id"], "a-demo");
+            assert_eq!(value[1]["id"], "z-demo");
+            assert_eq!(value[0]["title"], "HTTP");
+            assert_eq!(value[0]["description"], "Test fixture");
+            assert_eq!(value[0]["kind"], "lib");
+            assert_eq!(value[0]["dependencies"], serde_json::json!([]));
+            assert_eq!(value[0]["endpoints"].as_array().unwrap().len(), 5);
+            assert_eq!(value[0]["endpoints"][2]["path"], "/api/a-demo/run");
+            assert_eq!(value[0]["openapi"]["info"]["version"], "1.0.0");
+            assert!(value[0]["openapi"]["x-pishoo"].get("publisher").is_none());
+        }
     }
     for visitor in [
         None,
@@ -154,7 +141,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
             SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut request = request(Method::GET, "/std/workspace-api/libs");
+        let mut request = request(Method::GET, "/std/pishoo/loaded-libs");
         if let Some(visitor) = visitor {
             request.extensions_mut().insert(visitor);
         }
@@ -164,7 +151,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
         );
     }
     assert_eq!(
-        status(&router, Method::POST, "/std/workspace-api/libs").await,
+        status(&router, Method::POST, "/std/pishoo/loaded-libs").await,
         StatusCode::METHOD_NOT_ALLOWED
     );
     assert!(sandbox.tasks.is_empty());
@@ -184,43 +171,38 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     for (method, path, expected) in [
         (
             Method::GET,
-            "/std/api/test/run",
+            "/api/test/run",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::POST,
-            "/std/api/test/run?value=1",
+            "/api/test/run?value=1",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::HEAD,
-            "/std/api/test/run",
+            "/api/test/run",
             StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
             Method::OPTIONS,
-            "/std/api/test/run",
+            "/api/test/run",
             StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
             Method::HEAD,
-            "/std/api/test/explicit",
+            "/api/test/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::OPTIONS,
-            "/std/api/test/explicit",
+            "/api/test/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     ] {
         assert_eq!(status(&router, method, path).await, expected, "{path}");
     }
-    for path in [
-        "/std/api",
-        "/std/api/",
-        "/std/api/missing",
-        "/std/api/test/missing",
-    ] {
+    for path in ["/std/api", "/api/", "/api/missing", "/api/test/missing"] {
         for method in [Method::GET, Method::POST, Method::HEAD, Method::OPTIONS] {
             assert_eq!(status(&router, method, path).await, StatusCode::NOT_FOUND);
         }
@@ -235,15 +217,15 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     ] {
         for path in [
             "/std/api",
-            "/std/api/",
-            "/std/api/missing",
-            "/std/api/test-other/run",
-            "/api/test/run",
+            "/api/",
+            "/api/missing",
+            "/api/test-other/run",
+            "/std/api/test/run",
         ] {
             assert_eq!(
                 status(&router, method.clone(), path).await,
                 if path
-                    .strip_prefix("/std/api/")
+                    .strip_prefix("/api/")
                     .is_some_and(|tail| !tail.is_empty())
                 {
                     StatusCode::NOT_FOUND
@@ -254,10 +236,10 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
             );
         }
         for path in [
-            "/std/api/test",
-            "/std/api/test/",
-            "/std/api/test/missing",
-            "/std/api/test/missing/deep",
+            "/api/test",
+            "/api/test/",
+            "/api/test/missing",
+            "/api/test/missing/deep",
         ] {
             assert_eq!(
                 status(&router, method.clone(), path).await,
@@ -267,7 +249,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
         }
     }
     assert_eq!(
-        status(&router, Method::CONNECT, "/std/api/test/run").await,
+        status(&router, Method::CONNECT, "/api/test/run").await,
         StatusCode::METHOD_NOT_ALLOWED
     );
     let empty = api_router(
@@ -276,7 +258,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     )
     .fallback(|| async { StatusCode::IM_A_TEAPOT });
     assert_eq!(
-        status(&empty, Method::GET, "/std/api/test/run").await,
+        status(&empty, Method::GET, "/api/test/run").await,
         StatusCode::NOT_FOUND
     );
     assert!(sandbox.tasks.is_empty());
@@ -310,13 +292,16 @@ async fn lib_page_roots_support_relative_urls_without_a_guest_mount_prefix() {
             for query in ["", "?view=full&search=a%2Fb"] {
                 let response = router
                     .clone()
-                    .oneshot(request(method.clone(), &format!("/std/api/{id}{query}")))
+                    .oneshot(request(
+                        method.clone(),
+                        &format!("/api/{}{query}", id.rsplit('/').next().unwrap()),
+                    ))
                     .await
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
                 assert_eq!(
                     response.headers()[http::header::LOCATION],
-                    format!("/std/api/{id}/{query}")
+                    format!("/api/{}/{query}", id.rsplit('/').next().unwrap())
                 );
             }
         }
@@ -328,17 +313,27 @@ async fn lib_page_roots_support_relative_urls_without_a_guest_mount_prefix() {
             (Method::POST, ""),
         ] {
             assert_eq!(
-                status(&router, method, &format!("/std/api/{id}{tail}")).await,
+                status(
+                    &router,
+                    method,
+                    &format!("/api/{}{tail}", id.rsplit('/').next().unwrap())
+                )
+                .await,
                 StatusCode::INTERNAL_SERVER_ERROR
             );
         }
         assert_eq!(
-            status(&router, Method::DELETE, &format!("/std/api/{id}")).await,
+            status(
+                &router,
+                Method::DELETE,
+                &format!("/api/{}", id.rsplit('/').next().unwrap())
+            )
+            .await,
             StatusCode::METHOD_NOT_ALLOWED
         );
     }
     assert_eq!(
-        status(&router, Method::GET, "/std/api/missing").await,
+        status(&router, Method::GET, "/api/missing").await,
         StatusCode::NOT_FOUND
     );
     assert!(sandbox.tasks.is_empty());
@@ -356,8 +351,8 @@ async fn routers_keep_their_lib_snapshot() {
     sandbox.libs.insert("test".into(), new);
     let new_router = api_router(&sandbox, endpoint);
     for (router, present, absent) in [
-        (&old_router, "/std/api/test/old", "/std/api/test/new"),
-        (&new_router, "/std/api/test/new", "/std/api/test/old"),
+        (&old_router, "/api/test/old", "/api/test/new"),
+        (&new_router, "/api/test/new", "/api/test/old"),
     ] {
         assert_eq!(
             status(router, Method::POST, present).await,
@@ -378,25 +373,17 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let directory = tempfile::tempdir().unwrap();
     let lib = load(&sandbox, directory.path(), r#"{"/run":{"post":{}}}"#);
     sandbox.libs.insert("test".into(), lib);
-    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    let endpoint = crate::test_identity::endpoint("alice");
+    let router = api_router(&sandbox, endpoint.clone());
     assert_eq!(
-        status(&router, Method::POST, "/std/api/test/run").await,
+        status(&router, Method::POST, "/api/test/run").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(sandbox.tasks.is_empty());
-    let name = "alice.dhttp.net";
-    let certificate = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
-    let local = dhttp::LocalAuthority::new(
-        &qtls::default_provider(),
-        Arc::from(name),
-        vec![certificate.cert.der().clone()],
-        qtls::PrivateKeyDer::try_from(certificate.signing_key.serialize_der()).unwrap(),
-        vec![1],
-    )
-    .unwrap();
+    let local = endpoint.local_authority().unwrap();
     let mut responses = Vec::new();
     for index in 0..8 {
-        let mut request = request(Method::POST, &format!("/std/api/test/run?index={index}"));
+        let mut request = request(Method::POST, &format!("/api/test/run?index={index}"));
         request.extensions_mut().insert(dhttp::HandshakeSummary {
             alpn: None,
             local: Some(local.clone()),

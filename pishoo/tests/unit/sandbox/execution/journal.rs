@@ -164,7 +164,15 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
         HostV2::caller(&mut state).await.unwrap(),
         Some(verified_local)
     );
-    state.local = authority("alice.dhttp.net");
+    let invalid = rcgen::generate_simple_self_signed(vec!["alice.dhttp.net".into()]).unwrap();
+    state.local = dhttp::LocalAuthority::new(
+        &qtls::default_provider(),
+        Arc::from("alice.dhttp.net"),
+        vec![invalid.cert.der().clone()],
+        qtls::PrivateKeyDer::try_from(invalid.signing_key.serialize_der()).unwrap(),
+        vec![1],
+    )
+    .unwrap();
     state.remote = Some(owner);
     assert!(!Host::caller_is_owner(&mut state).await);
     assert!(HostV2::local(&mut state).await.is_err());
@@ -996,7 +1004,7 @@ async fn journal_browser_preview() {
         .await
         .unwrap();
     eprintln!(
-        "Journal real WASM browser fixture: http://127.0.0.1:18747/std/api/journal/ (test owner, temporary data)"
+        "Journal real WASM browser fixture: http://127.0.0.1:18747/api/journal/ (test owner, temporary data)"
     );
     use tower::ServiceExt;
     let serving = async {
@@ -1052,7 +1060,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
         ("/assets/app.js", "assets/app.js", "text/javascript"),
         ("/assets/app.css", "assets/app.css", "text/css"),
     ] {
-        let path = format!("/std/api/{id}{suffix}");
+        let path = format!("/api/{}{suffix}", id.rsplit('/').next().unwrap());
         for grantee in [Grantee::Anony, Grantee::Named] {
             access
                 .set_policy(

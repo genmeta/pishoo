@@ -39,7 +39,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let profile = profile(root.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
-    assert_eq!(saved["endpoints"][0]["path"], "/std/api/note/upload");
+    assert_eq!(saved["endpoints"][0]["path"], "/api/note/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
     assert_eq!(
         saved["openapi"],
@@ -114,6 +114,19 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     std::fs::create_dir(profile.join("lib/broken")).unwrap();
     std::fs::write(profile.join("lib/broken/lib.webc"), b"bad").unwrap();
     let list = installed_libs(&profile, None).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], "valid");
+    assert!(matches!(
+        installed_libs(&profile, Some("broken")),
+        Err(Error::RouteNotFound)
+    ));
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute(
+        "INSERT INTO libs(id,name,version) VALUES('broken','broken','1.0.0')",
+        [],
+    )
+    .unwrap();
+    let list = installed_libs(&profile, None).unwrap();
     assert!(list[0].get("error").is_some());
     assert!(list[0].get("title").is_none());
     assert_eq!(list[1]["id"], "valid");
@@ -126,7 +139,15 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     std::fs::write(outside.join("lib.webc"), b"do not change").unwrap();
     std::os::unix::fs::symlink(&outside, profile.join("lib/escape")).unwrap();
     assert!(install_lib(&profile, "escape", &component("1"), &runtime).is_err());
-    assert!(remove_lib(&profile, "escape").is_err());
+    remove_lib(&profile, "escape").unwrap();
+    assert!(
+        profile
+            .join("lib/escape")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     std::fs::remove_file(profile.join("lib/escape")).unwrap();
     std::os::unix::fs::symlink(
         outside.join("lib.webc"),
@@ -287,10 +308,7 @@ async fn complete_id_routes_and_store_install_inputs_are_owner_only_and_immediat
     )
     .unwrap();
     assert_eq!(value["id"], "alice.dhttp.net/note");
-    assert_eq!(
-        value["endpoints"][0]["path"],
-        "/std/api/alice.dhttp.net/note/upload"
-    );
+    assert_eq!(value["endpoints"][0]["path"], "/api/note/upload");
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     for bad in [
         "/std/pishoo/libs/alice.dhttp.net%2Fnote",
@@ -444,7 +462,7 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
                     .unwrap(),
             )
             .unwrap();
-            assert!(value.get("id").is_none());
+            assert_eq!(value["id"], "alice.dhttp.net/note");
             assert_eq!(value["endpoints"][0]["path"], "/upload");
         }
     }
@@ -589,32 +607,35 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
         WasmRuntime::new().unwrap(),
     ))));
-    let app = Sandbox::api_router(sandbox.clone(), endpoint.clone()).merge(lib_management_router(
+    let app = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        axum::Router::new(),
+    )
+    .merge(lib_management_router(
         profile.clone(),
         endpoint.clone(),
         sandbox.clone(),
     ));
     let package = |version: &str, text: &'static str, backend: &[u8]| {
-        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Live app","version":version,"description":"Test","license":{"name":"MIT"}},
-            "x-pishoo":{"publisher":"alice.dhttp.net","name":"note","entry":"/","host":{}},
-            "paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"pageHead","summary":"Page headers","x-pishoo":{"static-file":"/public/index.html"}}},
-            "/run":{"post":{"operationId":"run","summary":"Backend"}}}});
+        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Live backend","version":version,"description":"Test","license":{"name":"MIT"}},
+            "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"note","host":{}},
+            "paths":{"/run":{"post":{"operationId":"run","summary":"Backend"}}}});
+        let _ = text;
         package_fixture(
             &document,
             backend,
-            webc::v3::write::Directory::new(
-                std::collections::BTreeMap::from([(
-                    "index.html".parse().unwrap(),
-                    text.as_bytes().to_vec().into(),
-                )]),
-                webc::v3::Timestamps::default(),
-            ),
+            webc::v3::write::Directory::default(),
             &publisher("alice.dhttp.net", 'a'),
         )
     };
     assert_eq!(
         app.clone()
-            .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/api/note/", AxumBody::empty()))
             .await
             .unwrap()
             .status(),
@@ -637,13 +658,8 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
             .status(),
         StatusCode::OK
     );
-    let old_page = app
-        .clone()
-        .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
-        .await
-        .unwrap();
-    let mut incoming = request(Method::POST, "/std/api/note/run", AxumBody::empty());
-    *incoming.uri_mut() = "https://alice.dhttp.net/std/api/note/run".parse().unwrap();
+    let mut incoming = request(Method::POST, "/api/note/run", AxumBody::empty());
+    *incoming.uri_mut() = "https://alice.dhttp.net/api/note/run".parse().unwrap();
     incoming.extensions_mut().insert(dhttp::HandshakeSummary {
         alpn: None,
         local: Some(endpoint.local_authority().unwrap()),
@@ -671,24 +687,11 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
             .status(),
         StatusCode::OK
     );
-    let new_page = app
-        .clone()
-        .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
-        .await
-        .unwrap();
-    assert_eq!(
-        new_page.into_body().collect().await.unwrap().to_bytes(),
-        "new page"
-    );
-    assert_eq!(
-        old_page.into_body().collect().await.unwrap().to_bytes(),
-        "old page"
-    );
     let catalog = app
         .clone()
         .oneshot(request(
             Method::GET,
-            "/std/workspace-api/libs",
+            "/std/pishoo/loaded-libs",
             AxumBody::empty(),
         ))
         .await
@@ -735,7 +738,7 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
     );
     assert_eq!(
         app.clone()
-            .oneshot(request(Method::GET, "/std/api/note/", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/api/note/", AxumBody::empty()))
             .await
             .unwrap()
             .status(),
@@ -775,4 +778,185 @@ async fn live_install_update_and_uninstall_share_one_router_and_keep_inflight_re
         StatusCode::FORBIDDEN
     );
     assert!(!profile.join("lib/note").exists());
+}
+
+#[tokio::test]
+async fn independent_frontend_management_is_live_and_preserves_shared_backends() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let endpoint = endpoint();
+    let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
+        WasmRuntime::new().unwrap(),
+    ))));
+    let access = Arc::new(access_control::AccessService::new(
+        sea_orm::DatabaseConnection::default(),
+        endpoint.name(),
+    ));
+    let app = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        access,
+        axum::Router::new(),
+    )
+    .merge(lib_management_router(
+        profile.clone(),
+        endpoint,
+        sandbox.clone(),
+    ));
+    let publisher = publisher("alice.dhttp.net", 'a');
+    let backend_doc = serde_json::json!({"openapi":"3.1.0","info":{"title":"Backend","version":"1.0.0","description":"Backend","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/run":{"post":{"operationId":"run","summary":"Run"}}}});
+    let backend = package_fixture(
+        &backend_doc,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &publisher,
+    );
+    let frontend = |version: &str, text: &str| {
+        let doc = serde_json::json!({"openapi":"3.1.0","info":{"title":"Frontend","version":version,"description":"Frontend","license":{"name":"MIT"}},"x-pishoo":{"kind":"app","publisher":"alice.dhttp.net","name":"note","host":{},"entry":"/","dependencies":[{"publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}]},"paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"pageHead","summary":"Page header","x-pishoo":{"static-file":"/public/index.html"}}}}});
+        package_fixture(
+            &doc,
+            &[],
+            webc::v3::write::Directory::new(
+                std::collections::BTreeMap::from([(
+                    "index.html".parse().unwrap(),
+                    text.as_bytes().to_vec().into(),
+                )]),
+                webc::v3::Timestamps::default(),
+            ),
+            &publisher,
+        )
+    };
+    let app_path = "/std/pishoo/apps/alice.dhttp.net/note";
+    let lib_path = "/std/pishoo/libs/alice.dhttp.net/note";
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                app_path,
+                AxumBody::from(frontend("1.0.0", "old page"))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::PUT, lib_path, AxumBody::from(backend)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                app_path,
+                AxumBody::from(frontend("1.0.0", "old page"))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                lib_path,
+                AxumBody::from(frontend("1.0.0", "old page"))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let old = app
+        .clone()
+        .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::PUT,
+                app_path,
+                AxumBody::from(frontend("2.0.0", "new page"))
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let current = app
+        .clone()
+        .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+        .await
+        .unwrap();
+    assert_eq!(
+        axum::body::to_bytes(old.into_body(), 1024).await.unwrap(),
+        "old page"
+    );
+    assert_eq!(
+        axum::body::to_bytes(current.into_body(), 1024)
+            .await
+            .unwrap(),
+        "new page"
+    );
+    let catalog = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/std/pishoo/loaded-apps",
+            AxumBody::empty(),
+        ))
+        .await
+        .unwrap();
+    let catalog: Value = serde_json::from_slice(
+        &axum::body::to_bytes(catalog.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(catalog[0]["version"], "2.0.0");
+    assert_eq!(catalog[0]["kind"], "app");
+    let mut denied = request(Method::GET, "/std/pishoo/loaded-apps", AxumBody::empty());
+    denied.extensions_mut().remove::<access_control::Visitor>();
+    assert_eq!(
+        app.clone().oneshot(denied).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::DELETE, lib_path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::DELETE, app_path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, "/app/note/", AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(profile.join("lib/alice.dhttp.net/note/lib.webc").is_file());
+    assert_eq!(
+        app.oneshot(request(Method::DELETE, lib_path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
 }

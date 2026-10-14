@@ -31,7 +31,7 @@ fn webc_u64(bytes: &[u8], offset: usize) -> Result<usize> {
     usize::try_from(u64::from_le_bytes(raw)).map_err(|_| invalid("WEBC length overflow"))
 }
 
-pub(super) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
+pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
     // The dependency has lazy readers. Bound and authenticate every top-level span
     // before using them, including rejecting unindexed sections and trailing bytes.
     if bytes.len() > PACKAGE_LIMIT
@@ -126,28 +126,35 @@ pub(super) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
         || !manifest.commands.is_empty()
         || manifest.entrypoint.is_some()
         || !manifest.bindings.is_empty()
-        || manifest.atoms.len() != 1
-        || !manifest.atoms.contains_key("backend")
-        || container.atoms().len() != 1
-        || container.get_atom("backend").is_none()
+        || manifest.atoms.len() > 1
+        || manifest.atoms.keys().any(|name| name != "backend")
+        || manifest.atoms.len() != container.atoms().len()
     {
         return Err(invalid(
             "package must contain one backend atom without commands, bindings or dependencies",
         ));
     }
+    let metadata = package_metadata(&container)?;
     let mappings = manifest
         .filesystem()
         .map_err(|_| invalid("invalid WEBC filesystem mappings"))?
         .ok_or_else(|| invalid("missing WEBC filesystem mappings"))?;
-    if mappings.len() != 2
-        || !mappings.iter().any(|m| m.mount_path == "/public")
-        || !mappings.iter().any(|m| m.mount_path == "/metadata")
-        || mappings
-            .iter()
-            .any(|m| m.from.is_some() || m.volume_name == "pishoo-signature")
+    let mount = if metadata["kind"] == "app" {
+        "/public"
+    } else {
+        "/metadata"
+    };
+    if mappings.len() != 1
+        || mappings[0].mount_path != mount
+        || mappings[0].from.is_some()
+        || mappings[0].volume_name == "pishoo-signature"
+        || container
+            .volumes()
+            .keys()
+            .any(|name| name != &mappings[0].volume_name && name != "pishoo-signature")
     {
         return Err(invalid(
-            "require exactly local /public and /metadata directory mappings",
+            "require exactly the package type's local content mapping",
         ));
     }
     for mapping in mappings.iter() {
@@ -161,27 +168,34 @@ pub(super) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
             return Err(invalid("invalid mapped WEBC directory"));
         }
     }
-    let backend = container.get_atom("backend").unwrap();
-    if backend.get(..8) != Some(b"\0asm\x0d\0\x01\0") {
-        return Err(invalid("backend must be a WASM component"));
-    }
-    for item in wasmparser::Parser::new(0).parse_all(&backend) {
-        if let wasmparser::Payload::CustomSection(section) =
-            item.map_err(|_| invalid("malformed backend"))?
-            && matches!(section.name(), "pishoo:openapi" | "pishoo:signature")
-        {
-            return Err(invalid(
-                "backend must not embed a second OpenAPI or publisher signature",
-            ));
+    if let Some(backend) = container.get_atom("backend") {
+        if backend.get(..8) != Some(b"\0asm\x0d\0\x01\0") {
+            return Err(invalid("backend must be a WASM component"));
+        }
+        for item in wasmparser::Parser::new(0).parse_all(&backend) {
+            if let wasmparser::Payload::CustomSection(section) =
+                item.map_err(|_| invalid("malformed backend"))?
+                && matches!(section.name(), "pishoo:openapi" | "pishoo:signature")
+            {
+                return Err(invalid(
+                    "backend must not embed a second OpenAPI or publisher signature",
+                ));
+            }
         }
     }
-    let raw = package_file(&container, "/metadata/openapi.json")?;
-    super::validate_openapi(&raw)?;
-    let document: Value =
-        serde_json::from_slice(&raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;
-    validate_content(&container, &document)?;
-    validate_declarations(&container.get_atom("backend").unwrap(), &document)?;
-    verify_signature(bytes, &container, &document)?;
+    validate_content(&container, &metadata)?;
+    if metadata["kind"] == "lib" {
+        let raw = package_file(&container, "/metadata/openapi.json")?;
+        super::validate_openapi(&raw)?;
+        let document: Value =
+            serde_json::from_slice(&raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;
+        if document["info"]["version"] != metadata["version"] {
+            return Err(invalid("OpenAPI version differs from package version"));
+        }
+        validate_declarations(&document)?;
+        validate_imports(&container.get_atom("backend").unwrap(), &metadata["host"])?;
+    }
+    verify_signature(bytes, &container, &metadata)?;
     Ok(container)
 }
 
@@ -359,7 +373,7 @@ fn verify_signature(bytes: &[u8], container: &webc::Container, document: &Value)
     if !remaining.is_empty() {
         return Err(invalid("trailing signer certificate data"));
     }
-    let publisher = document["x-pishoo"]["publisher"].as_str().unwrap();
+    let publisher = document["publisher"].as_str().unwrap();
     dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certificates)
         .map_err(|_| invalid("invalid signer owner_hash"))?;
     if certificate.subject_alternative_name().map_err(|_| invalid("invalid signer names"))?
@@ -380,98 +394,128 @@ fn verify_signature(bytes: &[u8], container: &webc::Container, document: &Value)
     Ok(())
 }
 
-fn validate_content(container: &webc::Container, document: &Value) -> Result<()> {
-    let info = container
-        .manifest()
-        .wapm()
-        .map_err(|_| invalid("invalid package metadata"))?
-        .ok_or_else(|| invalid("missing package metadata"))?;
-    let extension = &document["x-pishoo"];
-    let publisher = text(extension, "publisher")?;
-    let name = text(extension, "name")?;
-    super::valid_id(&format!("{publisher}/{name}"))
-        .map_err(|_| invalid("invalid package identity"))?;
-    let version = text(&document["info"], "version")?;
-    let parts = version.split('.').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts.iter().any(|p| {
-            p.parse::<u64>().is_err()
-                || !p.bytes().all(|b| b.is_ascii_digit())
-                || p.len() > 1 && p.starts_with('0')
-        })
-    {
+/// Derive package metadata from the signed manifest; never fall back to OpenAPI.
+pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
+    let manifest = serde_json::to_value(container.manifest())
+        .map_err(|_| invalid("invalid package manifest"))?;
+    let wapm = &manifest["package"]["wapm"];
+    let annotation = &manifest["package"]["pishoo"];
+    let id = text(wapm, "name")?;
+    super::valid_id(id).map_err(|_| invalid("invalid full package identity"))?;
+    let (publisher, name) = id
+        .split_once('/')
+        .ok_or_else(|| invalid("package requires publisher/name"))?;
+    if dhttp_home::normalize_name(publisher).as_deref() != Some(publisher) {
+        return Err(invalid("publisher must be normalized"));
+    }
+    let version = text(wapm, "version")?;
+    if !release_version(version) {
         return Err(invalid("version must be MAJOR.MINOR.PATCH"));
     }
-    if extension.get("templates").is_some() {
-        return Err(invalid("external templates are unsupported"));
+    let kind = text(annotation, "kind")?;
+    if !matches!(kind, "app" | "lib") {
+        return Err(invalid("kind must be app or lib"));
     }
-    let id = format!(
-        "{}/{}",
-        text(extension, "publisher")?,
-        text(extension, "name")?
-    );
-    if info.name.as_deref() != Some(&id)
-        || info.version.as_deref() != document["info"]["version"].as_str()
+    let allowed = [
+        "kind",
+        "title",
+        "dependencies",
+        "changelog",
+        "entry",
+        "host",
+    ];
+    if annotation
+        .as_object()
+        .is_none_or(|o| o.keys().any(|k| !allowed.contains(&k.as_str())))
     {
-        return Err(invalid("WEBC and OpenAPI identity/version disagree"));
+        return Err(invalid("unknown package.pishoo field"));
+    }
+    let dependencies = annotation["dependencies"]
+        .as_array()
+        .filter(|v| v.len() <= 100)
+        .ok_or_else(|| invalid("dependencies requires an explicit array with at most 100 Libs"))?;
+    let mut ids = HashSet::new();
+    for dep in dependencies {
+        let publisher = text(dep, "publisher")?;
+        let name = text(dep, "name")?;
+        let id_dep = format!("{publisher}/{name}");
+        if dep.as_object().is_none_or(|o| o.len() != 3)
+            || super::valid_id(&id_dep).is_err()
+            || dhttp_home::normalize_name(publisher).as_deref() != Some(publisher)
+            || !release_version(text(dep, "version")?)
+            || !ids.insert(id_dep.clone())
+            || (kind == "lib" && id_dep == id)
+        {
+            return Err(invalid("invalid, duplicate or self Lib dependency"));
+        }
+    }
+    let mut value = serde_json::json!({"id":id,"publisher":publisher,"name":name,"version":version,
+        "kind":kind,"title":text(annotation,"title")?,"description":text(wapm,"description")?,
+        "license":text(wapm,"license")?,"changelog":text(annotation,"changelog")?,"dependencies":dependencies});
+    if kind == "app" {
+        if annotation["entry"] != "/" || annotation.get("host").is_some() {
+            return Err(invalid("app requires entry / and forbids host"));
+        }
+        value["entry"] = "/".into();
+    } else {
+        if annotation.get("entry").is_some() {
+            return Err(invalid("lib forbids entry"));
+        }
+        let host = annotation["host"]
+            .as_object()
+            .ok_or_else(|| invalid("lib requires explicit host purposes"))?;
+        for (key, purpose) in host {
+            if !matches!(
+                key.as_str(),
+                "private-storage" | "request-identity" | "signatures"
+            ) || purpose.as_str().is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(invalid("unknown or unexplained host capability"));
+            }
+        }
+        value["host"] = annotation["host"].clone();
+    }
+    Ok(value)
+}
+
+fn release_version(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && part.parse::<u64>().is_ok()
+                && (part.len() == 1 || !part.starts_with('0'))
+        })
+}
+
+fn validate_content(container: &webc::Container, metadata: &Value) -> Result<()> {
+    let app = metadata["kind"] == "app";
+    if app != container.atoms().is_empty() {
+        return Err(invalid("app requires zero atoms; lib requires one backend"));
     }
     let mappings = container
         .manifest()
         .filesystem()
         .map_err(|_| invalid("invalid mappings"))?
         .unwrap();
-    let mapping = mappings.iter().find(|m| m.mount_path == "/public").unwrap();
-    let volume = container.get_volume(&mapping.volume_name).unwrap();
+    let mapping = &mappings[0];
     let root = mapping.host_path.as_deref().unwrap_or("/");
     let mut count = 0;
-    let files = volume_files(&volume, root, &mut count)?;
-    let mut routes = BTreeMap::new();
-    for file in files.keys() {
-        let relative = file.strip_prefix(root.trim_end_matches('/')).unwrap();
-        let logical = format!("/public{relative}");
-        routes.insert(
-            if relative == "/index.html" {
-                "/".to_owned()
-            } else {
-                relative.to_owned()
-            },
-            logical,
-        );
+    let files = volume_files(
+        &container.get_volume(&mapping.volume_name).unwrap(),
+        root,
+        &mut count,
+    )?;
+    if app && !files.contains_key(&format!("{}/index.html", root.trim_end_matches('/'))) {
+        return Err(invalid("app requires public/index.html"));
     }
-    for (path, item) in document["paths"]
-        .as_object()
-        .ok_or_else(|| invalid("missing paths"))?
+    if app
+        && files
+            .keys()
+            .any(|file| file.ends_with("/metadata/openapi.json"))
     {
-        for method in METHODS {
-            if let Some(operation) = item.get(method) {
-                let file = operation["x-pishoo"].get("static-file");
-                if let Some(expected) = routes.get(path) {
-                    if !matches!(method, "get" | "head")
-                        || file.and_then(Value::as_str) != Some(expected.as_str())
-                    {
-                        return Err(invalid("static file and backend route conflict"));
-                    }
-                } else if file.is_some() {
-                    return Err(invalid("static operation has no matching public file"));
-                }
-            }
-        }
-    }
-    for (path, file) in routes {
-        for method in ["get", "head"] {
-            if document["paths"][&path][method]["x-pishoo"]["static-file"] != file {
-                return Err(invalid(
-                    "every public file requires matching GET and HEAD operations",
-                ));
-            }
-        }
-    }
-    if files
-        .keys()
-        .any(|f| f == &format!("{}/index.html", root.trim_end_matches('/')))
-        && extension["entry"] != "/"
-    {
-        return Err(invalid("public/index.html requires entry /"));
+        return Err(invalid("app cannot contain metadata/openapi.json"));
     }
     Ok(())
 }
@@ -483,58 +527,18 @@ fn valid_name(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
-fn validate_declarations(bytes: &[u8], document: &Value) -> Result<()> {
+fn validate_declarations(document: &Value) -> Result<()> {
     let info = &document["info"];
     text(info, "title")?;
-    text(info, "description")?;
-    text(&info["license"], "name")?;
     let extension = &document["x-pishoo"];
     if extension.get("templates").is_some() {
         return Err(invalid("external templates are not part of store v1"));
     }
-    let host = extension["host"]
+    if extension
         .as_object()
-        .ok_or_else(|| invalid("host capability descriptions are required"))?;
-    for (key, value) in host {
-        if !matches!(
-            key.as_str(),
-            "private-storage" | "request-identity" | "signatures"
-        ) || value.as_str().is_none_or(|s| s.trim().is_empty())
-        {
-            return Err(invalid("unknown or unexplained host capability"));
-        }
-    }
-    let mut depth = 0;
-    for item in wasmparser::Parser::new(0).parse_all(bytes) {
-        match item.map_err(|_| invalid("malformed component imports"))? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
-            wasmparser::Payload::ComponentImportSection(imports) if depth == 0 => {
-                for import in imports {
-                    let import = import.map_err(|_| invalid("malformed import"))?;
-                    let capability = if import.name.name.starts_with("wasi:filesystem/") {
-                        Some("private-storage")
-                    } else if import
-                        .name
-                        .name
-                        .starts_with("pishoo:identity/request-identity@")
-                    {
-                        Some("request-identity")
-                    } else if import.name.name.starts_with("pishoo:identity/signatures@") {
-                        Some("signatures")
-                    } else {
-                        None
-                    };
-                    if capability.is_some_and(|key| !host.contains_key(key)) {
-                        return Err(invalid(
-                            "imported host capability has no purpose declaration",
-                        ));
-                    }
-                }
-            }
-            _ => {}
-        }
+        .is_some_and(|o| o.keys().any(|k| k != "access-groups"))
+    {
+        return Err(invalid("OpenAPI cannot declare package metadata"));
     }
     let paths = document["paths"]
         .as_object()
@@ -542,6 +546,16 @@ fn validate_declarations(bytes: &[u8], document: &Value) -> Result<()> {
     let mut operations = BTreeMap::new();
     let mut annotated = BTreeMap::<String, HashSet<String>>::new();
     for (path, item) in paths {
+        if ["/api", "/app"].iter().any(|mount| {
+            path == mount
+                || path
+                    .strip_prefix(mount)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        }) {
+            return Err(invalid(
+                "business API cannot contain host mounting prefixes",
+            ));
+        }
         for method in METHODS {
             let Some(operation) = item.get(method) else {
                 continue;
@@ -552,7 +566,10 @@ fn validate_declarations(bytes: &[u8], document: &Value) -> Result<()> {
                 return Err(invalid("duplicate operationId"));
             }
             let op_extension = &operation["x-pishoo"];
-            if op_extension.get("template").is_some() {
+            if op_extension.as_object().is_some_and(|o| {
+                o.keys()
+                    .any(|key| !matches!(key.as_str(), "access-group" | "initial-access"))
+            }) {
                 return Err(invalid("template operations are unsupported"));
             }
             if let Some(group) = op_extension.get("access-group") {
@@ -624,20 +641,42 @@ fn validate_declarations(bytes: &[u8], document: &Value) -> Result<()> {
     if declared != annotated {
         return Err(invalid("access-groups disagree with operation annotations"));
     }
-    if let Some(entry) = extension.get("entry") {
-        let path = entry
-            .as_str()
-            .ok_or_else(|| invalid("entry must be a fixed GET path"))?;
-        if paths.get(path).and_then(|p| p.get("get")).is_none() {
-            return Err(invalid("entry must name a declared GET"));
+    Ok(())
+}
+
+fn validate_imports(bytes: &[u8], host: &Value) -> Result<()> {
+    let host = host.as_object().unwrap();
+    let mut depth = 0;
+    for item in wasmparser::Parser::new(0).parse_all(bytes) {
+        match item.map_err(|_| invalid("malformed component imports"))? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
+            wasmparser::Payload::ComponentImportSection(imports) if depth == 0 => {
+                for import in imports {
+                    let import = import.map_err(|_| invalid("malformed import"))?;
+                    let capability = if import.name.name.starts_with("wasi:filesystem/") {
+                        Some("private-storage")
+                    } else if import
+                        .name
+                        .name
+                        .starts_with("pishoo:identity/request-identity@")
+                    {
+                        Some("request-identity")
+                    } else if import.name.name.starts_with("pishoo:identity/signatures@") {
+                        Some("signatures")
+                    } else {
+                        None
+                    };
+                    if capability.is_some_and(|key| !host.contains_key(key)) {
+                        return Err(invalid(
+                            "imported host capability has no purpose declaration",
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
-    }
-    if let Some(changelog) = extension.get("changelog")
-        && changelog.as_str().is_none_or(|s| s.trim().is_empty())
-    {
-        return Err(invalid(
-            "changelog must explain changes and data compatibility",
-        ));
     }
     Ok(())
 }

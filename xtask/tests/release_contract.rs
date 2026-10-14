@@ -166,7 +166,7 @@ fn pishoo_common_package_version_follows_pishoo() {
 }
 
 #[test]
-fn pishoo_linux_requirements_keep_published_floor_and_current_ceiling() {
+fn pishoo_linux_requirements_keep_matching_default_artifact_release() {
     let root = repository_root();
     let contract = release_contract(&root);
     let pishoo = contract.package("pishoo").expect("pishoo should exist");
@@ -195,7 +195,9 @@ fn pishoo_linux_requirements_keep_published_floor_and_current_ceiling() {
     ] {
         assert_eq!(
             branch.version.minimum,
-            Some(VersionBoundSourceContract::Literal("0.5.1-1".to_owned()))
+            Some(VersionBoundSourceContract::Source(
+                VersionBoundSource::SelfPackage
+            ))
         );
         assert_eq!(
             branch.version.maximum,
@@ -209,18 +211,18 @@ fn pishoo_linux_requirements_keep_published_floor_and_current_ceiling() {
         let common = requirements
             .get("pishoo-common")
             .expect("pishoo-common bounds should resolve");
-        assert_eq!(common.minimum.as_deref(), Some("0.5.1-1"));
+        assert_eq!(common.minimum.as_deref(), Some("0.9.0~preview.1-1"));
         assert_eq!(common.maximum.as_deref(), Some("0.9.0~preview.1-1"));
 
         let entries = linux_requirement_entries(system, "pishoo-common", common.clone())
             .expect("pishoo-common requirement entries should render");
         let expected = match system {
             PackageSystem::Deb => vec![
-                "pishoo-common (>= 0.5.1-1)",
+                "pishoo-common (>= 0.9.0~preview.1-1)",
                 "pishoo-common (<= 0.9.0~preview.1-1)",
             ],
             PackageSystem::Rpm => vec![
-                "pishoo-common >= 0.5.1-1",
+                "pishoo-common >= 0.9.0~preview.1-1",
                 "pishoo-common <= 0.9.0~preview.1-1",
             ],
             PackageSystem::Brew | PackageSystem::Scoop => unreachable!(),

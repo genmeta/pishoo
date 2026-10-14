@@ -1,0 +1,22 @@
+[package]
+name = "dev.dhttp.net/chat"
+version = "0.2.0"
+description = "独立聊天、能力决定与消息投递后端"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "lib"
+title = "Chat"
+changelog = "拆分为独立后端；原合包数据不自动迁移。"
+dependencies = []
+
+[package.pishoo.host]
+private-storage = "消息、投递队列与聊天能力决定"
+request-identity = "核对真实发送者和主人身份"
+
+[[module]]
+name = "backend"
+source = "lib.wasm"
+
+[fs]
+"/metadata" = "metadata"

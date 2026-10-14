@@ -21,6 +21,7 @@ import {
 import { useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { errorMessage } from '../lib/format'
+import { workspacePath } from '../lib/routes'
 import './apps.css'
 
 function validId(id: string) {
@@ -47,15 +48,16 @@ async function storeRead<T>(path: string, signal?: AbortSignal) {
   })
 }
 
-async function readStoreDetail(id: string, version: string, signal?: AbortSignal) {
+async function readStoreDetail(id: string, version: string, signal?: AbortSignal, kind: 'app' | 'lib' = 'lib') {
   if (!validId(id) || !id.includes('/') || version && !validVersion(version))
     throw new Error('Invalid store release identity')
-  const result = await storeRead<StoreDetail>(`/libs/${id}${version ? `/versions/${version}` : ''}`, signal)
+  const result = await storeRead<StoreDetail>(`/${kind === 'app' ? 'apps' : 'libs'}/${id}${version ? `/versions/${version}` : ''}`, signal)
   if (result.id !== id || result.publisher + '/' + result.name !== id
     || !validVersion(result.version) || version && result.version !== version
-    || !result.openapi?.info || result.openapi.info.version !== result.version
-    || result.openapi['x-pishoo']?.publisher !== result.publisher
-    || result.openapi['x-pishoo']?.name !== result.name
+    || result.kind !== kind || !result.title || !result.description || !result.changelog
+    || !Array.isArray(result.dependencies)
+    || (kind === 'lib' && (!result.openapi?.info || result.openapi.info.version !== result.version))
+    || (kind === 'app' && result.openapi !== undefined)
     || !['published', 'yanked'].includes(result.status))
     throw new Error('Store release metadata does not match the requested identity')
   return result
@@ -72,20 +74,21 @@ function newerVersion(next: string, previous: string) {
 function storeManifest(release: StoreDetail | undefined): LibSummary | undefined {
   if (!release) return undefined
   const endpoints: LibSummary['endpoints'] = []
-  for (const [path, item] of Object.entries(release.openapi.paths ?? {})) {
+  for (const [path, item] of Object.entries(release.openapi?.paths ?? {})) {
     for (const [method, op] of Object.entries(item)) {
       if (['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'].includes(method) && op)
-        endpoints.push({ method: method.toUpperCase(), path: `/std/api/${release.id}${path}`, description: op.summary ?? op.description ?? null })
+        endpoints.push({ method: method.toUpperCase(), path: `/${release.kind === 'app' ? 'app' : 'api'}/${release.id.split('/').at(-1)}${path}`, description: op.summary ?? op.description ?? null })
     }
   }
-  return { id: release.id, title: release.openapi.info.title, version: release.version,
-    description: release.openapi.info.description ?? null, endpoints, openapi: release.openapi }
+  return { kind: release.kind, dependencies: release.dependencies, id: release.id, title: release.title, version: release.version,
+    description: release.description, changelog: release.changelog ?? undefined, host: release.host ?? undefined,
+    entry: release.kind === 'app' ? '/' : undefined, endpoints, openapi: release.openapi }
 }
 
 function operations(lib: LibSummary | undefined) {
   return (lib?.endpoints ?? [])
     .map((endpoint) => {
-      const prefix = `/std/api/${lib!.id}`
+      const prefix = `/${lib!.kind === 'app' ? 'app' : 'api'}/${lib!.id.split('/').at(-1)}`
       const path = endpoint.path.startsWith(prefix + '/')
         ? endpoint.path.slice(prefix.length)
         : endpoint.path
@@ -108,7 +111,7 @@ function pageResource(op: ReturnType<typeof operations>[number]) {
 }
 
 function entry(lib: LibSummary | undefined) {
-  const path = lib?.openapi?.['x-pishoo']?.entry
+  const path = lib?.entry
   if (
     !lib ||
     !validId(lib.id) ||
@@ -118,12 +121,8 @@ function entry(lib: LibSummary | undefined) {
     path.split('/').some((part) => part === '.' || part === '..')
   )
     return undefined
-  const target = `/std/api/${lib.id}${path}`
-  return lib.endpoints.some(
-    (endpoint) => endpoint.method === 'GET' && endpoint.path === target,
-  )
-    ? target
-    : undefined
+  const target = `/${lib.kind === 'app' ? 'app' : 'api'}/${lib.id.split('/').at(-1)}${path}`
+  return lib.kind === 'app' ? target : undefined
 }
 
 // Compare actual manifests without creating a second version or permission model.
@@ -133,17 +132,19 @@ function manifestChanges(
 ) {
   const manifest = (lib: LibSummary | undefined) => {
     const items: Record<string, string> = {}
-    for (const op of operations(lib)) {
-      const path = op.path.replace(`/std/api/${lib?.id}`, '')
+    for (const op of lib?.kind === 'app' ? [] : operations(lib)) {
+      const path = op.path.replace(`/${lib?.kind === 'app' ? 'app' : 'api'}/${lib?.id?.split('/').at(-1)}`, '')
       items[`${op.method} ${path}`] = JSON.stringify(
         op.operation ?? op.description,
       )
     }
-    const extension = lib?.openapi?.['x-pishoo']
+    for (const dependency of lib?.dependencies ?? [])
+      items[`dependency: ${dependency.publisher}/${dependency.name}`] = dependency.version
+    const extension = lib
     for (const [name, purpose] of Object.entries(extension?.host ?? {}))
       items[`host: ${name}`] = purpose ?? ''
     for (const [name, group] of Object.entries(
-      extension?.['access-groups'] ?? {},
+      lib?.openapi?.['x-pishoo']?.['access-groups'] ?? {},
     ))
       items[`group: ${name}`] = JSON.stringify(group)
     if (extension?.entry) items.entry = extension.entry
@@ -159,8 +160,11 @@ function manifestChanges(
 
 export default function AppsPage() {
   const { t } = useI18n()
-  const [url, setUrl] = createSignal(new URL(window.location.href))
+  const locationUrl = () => new URL(window.location.hash.slice(1) || '/apps', window.location.origin)
+  const [url, setUrl] = createSignal(locationUrl())
   const params = () => url().searchParams
+  const kind = () => params().get('kind') === 'lib' ? 'lib' as const : 'app' as const
+  const collection = () => kind() === 'app' ? 'apps' : 'libs'
   const tab = () => params().get('tab') === 'store' ? 'store' : 'mine'
   const section = () =>
     ['changes', 'interfaces', 'access', 'trust'].includes(
@@ -169,10 +173,10 @@ export default function AppsPage() {
       ? params().get('section')!
       : 'about'
   const detail = () =>
-    url().pathname !== '/std/workspace/apps' &&
-    url().pathname !== '/std/workspace/apps/'
+    url().pathname !== '/apps' &&
+    url().pathname !== '/apps/'
   const identity = () => {
-    const match = /^\/std\/workspace\/apps\/(local|store)\/(.+?)\/?$/.exec(
+    const match = /^\/apps\/(local|store)\/(.+?)\/?$/.exec(
       url().pathname,
     )
     if (!match) return null
@@ -206,16 +210,16 @@ export default function AppsPage() {
       },
     ),
   )
-  const updateUrl = () => setUrl(new URL(window.location.href))
-  onMount(() => window.addEventListener('popstate', updateUrl))
-  onCleanup(() => window.removeEventListener('popstate', updateUrl))
+  const updateUrl = () => setUrl(locationUrl())
+  onMount(() => { window.addEventListener('popstate', updateUrl); window.addEventListener('hashchange', updateUrl) })
+  onCleanup(() => { window.removeEventListener('popstate', updateUrl); window.removeEventListener('hashchange', updateUrl) })
   const navigate = (href: string, scroll = 0) => {
     window.history.replaceState(
       { ...window.history.state, appsScroll: window.scrollY },
       '',
       window.location.href,
     )
-    window.history.pushState({ appsScroll: scroll }, '', href)
+    window.history.pushState({ appsScroll: scroll }, '', workspacePath(href))
     window.dispatchEvent(new PopStateEvent('popstate'))
     window.scrollTo(0, scroll)
   }
@@ -234,7 +238,7 @@ export default function AppsPage() {
   const changeQuery = (key: string, value: string) => {
     const next = new URL(url())
     next.searchParams.set(key, value)
-    if (key === 'q' || key === 'publisher' || key === 'tab')
+    if (key === 'q' || key === 'publisher' || key === 'tab' || key === 'kind')
       next.searchParams.delete('page')
     navigate(next.pathname + next.search)
   }
@@ -242,13 +246,13 @@ export default function AppsPage() {
     const query = new URLSearchParams(params())
     for (const key of ['section', 'grantee', 'view', 'selected', 'scroll'])
       query.delete(key)
-    return `/std/workspace/apps?${query}`
+    return workspacePath(`/apps${query.size ? '?' + query : ''}`)
   }
   const detailHref = (id: string, selectedSection = 'about') => {
     const query = new URLSearchParams(params())
     query.set('section', selectedSection)
     query.set('scroll', String(window.scrollY))
-    return `/std/workspace/apps/local/${id.split('/').map(encodeURIComponent).join('/')}?${query}`
+    return workspacePath(`/apps/local/${id.split('/').map(encodeURIComponent).join('/')}?${query}`)
   }
   const storeHref = (id: string, version = '', selectedSection = 'about') => {
     const query = new URLSearchParams(params())
@@ -257,45 +261,49 @@ export default function AppsPage() {
     query.delete('history_page')
     if (version) query.set('version', version)
     else query.delete('version')
-    return `/std/workspace/apps/store/${id.split('/').map(encodeURIComponent).join('/')}?${query}`
+    return workspacePath(`/apps/store/${id.split('/').map(encodeURIComponent).join('/')}?${query}`)
   }
   const requestedPage = () => Math.max(1, Math.min(2147483647, Math.floor(Number(params().get('page')) || 1)))
   const [catalog, catalogActions] = createResource(
     () => !detail() && tab() === 'store' ? new URLSearchParams({
-      q: params().get('q') ?? '', publisher: params().get('publisher') ?? '', page: String(requestedPage()), page_size: '20',
+      kind: kind(), q: params().get('q') ?? '', publisher: params().get('publisher') ?? '', page: String(requestedPage()), page_size: '20',
     }).toString() : false,
     abortable(async (query: string, signal) => {
-      const result = await storeRead<StoreCatalog>(`/libs?${query}`, signal)
-      if (!Array.isArray(result.libs) || !Number.isSafeInteger(result.total) || result.total < 0
-        || result.libs.some(lib => !validId(lib.id) || lib.id !== `${lib.publisher}/${lib.name}` || !validVersion(lib.version)))
+      const selected = new URLSearchParams(query)
+      const kind = selected.get('kind') === 'app' ? 'app' : 'lib'
+      selected.delete('kind')
+      const result = await storeRead<StoreCatalog>(`/${kind === 'app' ? 'apps' : 'libs'}?${selected}`, signal)
+      const items = kind === 'app' ? result.apps : result.libs
+      if (!Array.isArray(items) || !Number.isSafeInteger(result.total) || result.total < 0
+        || items.some(lib => (lib.kind ?? 'lib') !== kind || !validId(lib.id) || lib.id !== `${lib.publisher}/${lib.name}` || !validVersion(lib.version)))
         throw new Error('Invalid store catalogue response')
-      return result
+      return { ...result, libs: items }
     }),
   )
   const [storeDetail, storeDetailActions] = createResource(
     () => detail() && identity()?.source === 'store'
-      ? `${identity()!.id}|${params().get('version') ?? ''}` : false,
+      ? `${identity()!.id}|${params().get('version') ?? ''}|${kind()}` : false,
     abortable((source: string, signal) => {
-      const [id, version] = source.split('|')
-      return readStoreDetail(id, version, signal)
+      const [id, version, kind] = source.split('|')
+      return readStoreDetail(id, version, signal, kind as 'app' | 'lib')
     }),
   )
   const [loaded, loadedActions] = createResource(
-    () => true,
-    abortable((_s: boolean, signal) => api.libs(signal)),
+    kind,
+    abortable((kind: 'app' | 'lib', signal) => request<LibSummary[]>(`/std/pishoo/loaded-${kind === 'app' ? 'apps' : 'libs'}`, { signal })),
   )
   const [disk, diskActions] = createResource(
-    () => true,
-    abortable((_s: boolean, signal) =>
+    kind,
+    abortable((kind: 'app' | 'lib', signal) =>
       request<Array<LibSummary | { id: string; error: string }>>(
-        '/std/pishoo/libs',
+        `/std/pishoo/${kind === 'app' ? 'apps' : 'libs'}`,
         { signal },
       ),
     ),
   )
   const [context] = createResource(api.context)
-  const loadedItems = () => (loaded.error ? undefined : loaded.latest)
-  const diskItems = () => (disk.error ? undefined : disk.latest)
+  const loadedItems = () => (loaded.error ? undefined : loaded.latest?.filter(lib => (lib.kind ?? 'lib') === kind()))
+  const diskItems = () => (disk.error ? undefined : disk.latest?.filter(lib => 'error' in lib || (lib.kind ?? 'lib') === kind()))
   const refresh = () => {
     void loadedActions.refetch()
     void diskActions.refetch()
@@ -312,7 +320,7 @@ export default function AppsPage() {
   const selectedStore = () => {
     if (storeDetail.error) return undefined
     const result = storeDetail()
-    return result && result.id === identity()?.id && (!params().get('version') || result.version === params().get('version')) ? result : undefined
+    return result && (result.kind ?? 'lib') === kind() && result.id === identity()?.id && (!params().get('version') || result.version === params().get('version')) ? result : undefined
   }
   const current = () => identity()?.source === 'store' ? storeManifest(selectedStore()) : identity() ? metadata(identity()!.id) : undefined
   const currentRunning = () =>
@@ -328,7 +336,7 @@ export default function AppsPage() {
     ids()
       .filter((id) => {
         const lib = metadata(id)
-        return `${id} ${lib?.title ?? ''} ${lib?.openapi?.['x-pishoo']?.publisher ?? ''}`
+        return `${id} ${lib?.title ?? ''} ${lib?.id.includes('/') ? lib.id.split('/')[0] : ''}`
           .toLowerCase()
           .includes((params().get('q') ?? '').toLowerCase())
       })
@@ -343,7 +351,7 @@ export default function AppsPage() {
       Math.max(1, Math.ceil(filtered().length / 20)),
     )
   const publisher = (lib: LibSummary | undefined) =>
-    lib?.openapi?.['x-pishoo']?.publisher ?? t('apps.local')
+    lib?.id.includes('/') ? lib.id.split('/')[0] : t('apps.local')
   const stateText = (id: string) => {
     const installed = saved(id)
     if (disk.error) return t('apps.unknownDisk')
@@ -401,7 +409,7 @@ export default function AppsPage() {
     setWriting('checking')
     setFeedback('')
     try {
-      const detail = await readStoreDetail(release.id, release.version)
+      const detail = await readStoreDetail(release.id, release.version, undefined, kind())
       if (detail.status !== 'published') throw new Error(t('apps.yanked'))
       setWriting('idle')
       openStoreInstall(detail)
@@ -415,10 +423,10 @@ export default function AppsPage() {
   const historyPage = () => Math.max(1, Math.floor(Number(params().get('history_page')) || 1))
   const [history, historyActions] = createResource(
     () => detail() && identity()?.id.includes('/') && section() === 'changes'
-      ? `${identity()!.id}|${historyPage()}` : false,
+      ? `${identity()!.id}|${historyPage()}|${kind()}` : false,
     abortable(async (source: string, signal) => {
-      const [id, page] = source.split('|')
-      const result = await storeRead<StoreVersions>(`/libs/${id}/versions?page=${page}&page_size=20`, signal)
+      const [id, page, kind] = source.split('|')
+      const result = await storeRead<StoreVersions>(`/${kind === 'app' ? 'apps' : 'libs'}/${id}/versions?page=${page}&page_size=20`, signal)
       if (!Array.isArray(result.versions) || result.versions.some(release => release.id !== id || !validVersion(release.version)))
         throw new Error('Invalid store version history')
       return result
@@ -431,15 +439,17 @@ export default function AppsPage() {
   const [updates] = createResource(
     updateInputs,
     abortable(async (inputs: Array<Pick<StoreLib, 'publisher' | 'name' | 'version'>>, signal) => {
+      const selectedCollection = collection()
       const results: Array<StoreUpdate | { id: string; status: 'failed'; message: string }> = []
       for (let offset = 0; offset < inputs.length; offset += 100) {
         const batch = inputs.slice(offset, offset + 100)
         const expected = batch.map(lib => `${lib.publisher}/${lib.name}`)
         try {
-          const response = await request<{ libs: StoreUpdate[] }>(storeBase + '/updates', {
-            method: 'POST', body: JSON.stringify({ libs: batch }),
+          const reply = await request<Partial<Record<'apps' | 'libs', StoreUpdate[]>>>(storeBase + '/updates', {
+            method: 'POST', body: JSON.stringify({ [selectedCollection]: batch }),
             signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
           })
+          const response = { libs: reply[selectedCollection] }
           if (!Array.isArray(response.libs) || response.libs.length !== expected.length
             || new Set(response.libs.map(lib => lib.id)).size !== expected.length
             || response.libs.some(lib => !expected.includes(lib.id) || !['current', 'update', 'not_found', 'unavailable'].includes(lib.status)
@@ -458,6 +468,13 @@ export default function AppsPage() {
     }),
   )
   createEffect(on(diskItems, () => setUpdateInputs(undefined), { defer: true }))
+  createEffect(on(kind, () => {
+    setFeedback('')
+    setUpdateInputs(undefined)
+    setDialog(null)
+    setInspected(undefined)
+    setAccepted(false)
+  }, { defer: true }))
   const checkUpdates = () => {
     if (disk.loading || disk.error || updates.loading) return
     setFeedback('')
@@ -482,22 +499,23 @@ export default function AppsPage() {
     setInspected(undefined)
     setAccepted(false)
     try {
-      const result = await request<LibSummary>('/std/pishoo/lib-check', {
+      const result = await request<LibSummary>(`/std/pishoo/${kind()}-check`, {
         method: 'POST',
         headers: { 'content-type': 'application/webc' },
         body: input,
       })
+      if ((result.kind ?? 'lib') !== kind()) throw new Error(t('apps.kindMismatch'))
       if (
         result.openapi?.['x-pishoo'] &&
         'templates' in result.openapi['x-pishoo']
       )
         throw new Error(t('apps.templatesUnsupported'))
       if (dialog() === 'publish') {
-        const extension = result.openapi?.['x-pishoo']
-        const id = `${extension?.publisher}/${extension?.name}`
+        const id = result.id
+        const publisher = id.split('/')[0]
         if (!validId(id) || !validVersion(result.version))
           throw new Error(t('apps.publishInvalid'))
-        if (context.error || !context()?.owner_name || extension?.publisher !== context()?.owner_name)
+        if (context.error || !context()?.owner_name || publisher !== context()?.owner_name)
           throw new Error(t('apps.publishIdentity'))
         setTarget(id)
       }
@@ -514,17 +532,17 @@ export default function AppsPage() {
     if (dialog() === 'publish') {
       const manifest = inspected(), input = file()
       if (!manifest || !input || !accepted()) return
-      const extension = manifest.openapi?.['x-pishoo']
-      if (!extension || context.error || !context()?.owner_name || extension.publisher !== context()?.owner_name) {
+      const publisher = manifest.id.split('/')[0]
+      if (context.error || !context()?.owner_name || publisher !== context()?.owner_name) {
         setActionError(t('apps.publishIdentity'))
         return
       }
-      const id = `${extension.publisher}/${extension.name}`, version = manifest.version
+      const id = manifest.id, version = manifest.version
       if (!validId(id) || !validVersion(version)) return
       setWriting('saving')
       setActionError('')
       try {
-        const result = await request<StoreDetail>(`${storeBase}/libs/${id}/versions/${version}`, {
+        const result = await request<StoreDetail>(`${storeBase}/${collection()}/${id}/versions/${version}`, {
           method: 'PUT', headers: { 'content-type': 'application/webc' }, body: input,
           signal: AbortSignal.timeout(180_000),
         })
@@ -551,8 +569,8 @@ export default function AppsPage() {
     setActionError('')
     try {
       const result = await request<LibSummary>(
-        release ? '/std/pishoo/store-install' : `/std/pishoo/libs/${id.split('/').map(encodeURIComponent).join('/')}`,
-        release ? { method: 'POST', body: JSON.stringify({ publisher: release.publisher, name: release.name, version: release.version }) } : dialog() === 'file'
+        release ? '/std/pishoo/store-install' : `/std/pishoo/${collection()}/${id.split('/').map(encodeURIComponent).join('/')}`,
+        release ? { method: 'POST', body: JSON.stringify({ kind: release.kind ?? kind(), publisher: release.publisher, name: release.name, version: release.version }) } : dialog() === 'file'
           ? {
               method: 'PUT',
               headers: { 'content-type': 'application/webc' },
@@ -560,7 +578,7 @@ export default function AppsPage() {
             }
           : { method: 'DELETE' },
       )
-      if (release && (result.id !== id || result.version !== release.version))
+      if (release && ((result.kind ?? 'lib') !== (release.kind ?? kind()) || result.id !== id || result.version !== release.version))
         throw new Error(t('apps.verifyHint'))
       setFeedback(t(dialog() !== 'uninstall' ? 'apps.active' : 'apps.uninstalled'))
       setDismissedStateNotice('')
@@ -651,8 +669,8 @@ export default function AppsPage() {
   const appRules = () =>
     allRules().filter(
       (rule) =>
-        rule.api === `/std/api/${identity()?.id}` ||
-        rule.api.startsWith(`/std/api/${identity()?.id}/`),
+        rule.api === `/${kind() === 'app' ? 'app' : 'api'}/${identity()?.id?.split('/').at(-1)}` ||
+        rule.api.startsWith(`/${kind() === 'app' ? 'app' : 'api'}/${identity()?.id?.split('/').at(-1)}/`),
     )
   const visitors = () =>
     [
@@ -948,7 +966,25 @@ export default function AppsPage() {
       </Show>
     </div>
   )
+  const backendDependencies = (lib: LibSummary | undefined) => (
+    <>
+      <p class="muted">{t('apps.dependenciesHint')}</p>
+      <Show when={lib?.dependencies?.length} fallback={<p class="muted">{t('apps.noDependencies')}</p>}>
+        <ul class="app-operations">
+          <For each={lib?.dependencies}>{dependency => (
+            <li>
+              <a href={workspacePath(`/apps/${identity()?.source === 'store' ? 'store' : 'local'}/${encodeURIComponent(dependency.publisher)}/${encodeURIComponent(dependency.name)}?kind=lib&version=${encodeURIComponent(dependency.version)}`)}>
+                <code>{dependency.publisher}/{dependency.name}</code>
+              </a>
+              <p>v{dependency.version}</p>
+            </li>
+          )}</For>
+        </ul>
+      </Show>
+    </>
+  )
   const interfaces = (lib: LibSummary | undefined, links = false) => (
+    <Show when={lib?.kind !== 'app'} fallback={backendDependencies(lib)}>
     <>
     <Show when={operations(lib).some(pageResource)}>
       <p class="muted app-page-resources">{t('apps.pageResources', { count: new Set(operations(lib).map(pageResource).filter(Boolean)).size })}</p>
@@ -963,7 +999,7 @@ export default function AppsPage() {
                 links &&
                 op.method === 'GET' &&
                 validId(lib?.id ?? '') &&
-                op.path.startsWith(`/std/api/${lib!.id}/`)
+                op.path.startsWith(`/${lib!.kind === 'app' ? 'app' : 'api'}/${lib!.id.split('/').at(-1)}/`)
               }
               fallback={<code>{op.path}</code>}
             >
@@ -981,7 +1017,12 @@ export default function AppsPage() {
         )}
       </For>
     </ul>
+    <Show when={lib?.dependencies?.length}>
+      <h3>{t('apps.dependencies')}</h3>
+      {backendDependencies(lib)}
+    </Show>
     </>
+    </Show>
   )
   const suggestions = (lib: LibSummary | undefined) => (
     <Show
@@ -1045,7 +1086,7 @@ export default function AppsPage() {
                 )}
                 fallback={
                   <a
-                    href={`/std/workspace/settings/access?api=${encodeURIComponent(rule.api)}`}
+                    href={workspacePath(`/settings/access?api=${encodeURIComponent(rule.api)}`)}
                   >
                     {t('nav.policies')}
                   </a>
@@ -1168,7 +1209,7 @@ export default function AppsPage() {
                           classList={{ active: section() === item }}
                           onClick={() => changeQuery('section', item)}
                         >
-                          {t(`apps.${item}`)}
+                          {t(item === 'interfaces' && kind() === 'app' ? 'apps.dependencies' : `apps.${item}`)}
                         </button>
                       )}
                     </For>
@@ -1207,7 +1248,7 @@ export default function AppsPage() {
                           </Show>
                           <dt>{t('apps.license')}</dt>
                           <dd>
-                            {current()?.openapi?.info.license?.name ??
+                            {current()?.license ??
                               t('apps.notProvided')}
                           </dd>
                         </dl>
@@ -1218,7 +1259,7 @@ export default function AppsPage() {
                     <section class="app-panel">
                       <h2>{t('apps.changes')}</h2>
                       <p class="app-prose">
-                        {current()?.openapi?.['x-pishoo']?.changelog ??
+                        {current()?.changelog ??
                           t('apps.notProvided')}
                       </p>
                       <Show when={identity()!.id.includes('/')}>
@@ -1248,7 +1289,7 @@ export default function AppsPage() {
                   <Show when={section() === 'interfaces'}>
                     <section class="app-panel">
                       <h2>
-                        {t('apps.endpoints', {
+                        {kind() === 'app' ? t('apps.dependencies') : t('apps.endpoints', {
                           count: operations(current()).filter(op => !pageResource(op)).length,
                         })}
                       </h2>
@@ -1270,7 +1311,7 @@ export default function AppsPage() {
                       <dl>
                         <For
                           each={Object.entries(
-                            current()?.openapi?.['x-pishoo']?.host ?? {},
+                            current()?.host ?? {},
                           )}
                         >
                           {([name, purpose]) => (
@@ -1324,11 +1365,11 @@ export default function AppsPage() {
                         <div class="app-access-actions">
                           <a
                             class="text-link"
-                            href={`/std/workspace/settings/access?api=${encodeURIComponent(`/std/api/${identity()!.id}`)}`}
+                            href={workspacePath(`/settings/access?api=${encodeURIComponent(`/${kind() === 'app' ? 'app' : 'api'}/${identity()!.id.split('/').at(-1)}`)}`)}
                           >
                             {t('nav.policies')}
                           </a>
-                          <a class="text-link" href="/std/workspace/approvals">
+                          <a class="text-link" href={workspacePath("/approvals")}>
                             {t('nav.reviews')}
                           </a>
                           <button
@@ -1554,6 +1595,10 @@ export default function AppsPage() {
             navigate(next.pathname + next.search)
           }}
         >
+          <select aria-label={t('apps.artifactKind')} value={kind()} disabled={writing() !== 'idle'} onChange={event => changeQuery('kind',event.currentTarget.value)}>
+            <option value="app">{t('apps.frontend')}</option>
+            <option value="lib">{t('apps.backend')}</option>
+          </select>
           <input
             name="q"
             type="search"
@@ -1617,7 +1662,7 @@ export default function AppsPage() {
                     </a>
                     <p class="app-meta">{release.publisher}</p>
                     <p class="app-description">{release.description ?? t('apps.notProvided')}</p>
-                    <p class="app-meta">v{release.version} · WASM</p>
+                    <p class="app-meta">v{release.version} · {t(release.kind === 'app' ? 'apps.frontend' : 'apps.backend')}</p>
                     <Show when={saved(release.id) || running(release.id)}>
                       <p class="app-meta">{t('apps.savedVersion')}: {(() => {
                         const lib = saved(release.id)
@@ -1715,7 +1760,7 @@ export default function AppsPage() {
                   <p class="app-description">
                     {metadata(id)?.description ?? t('apps.notProvided')}
                   </p>
-                  <p class="app-meta">v{metadata(id)?.version ?? '—'} · WASM</p>
+                  <p class="app-meta">v{metadata(id)?.version ?? '—'} · {t(kind() === 'app' ? 'apps.frontend' : 'apps.backend')}</p>
                   <Show when={stateText(id)}>
                     <p class="app-notice">{stateText(id)}</p>
                   </Show>
@@ -1812,9 +1857,10 @@ export default function AppsPage() {
                   {installPreview()!.title} · v{installPreview()!.version}
                 </h3>
                 <code>{installId()}</code>
+
                 <p>{publisher(installPreview())}</p>
                 <p class="app-prose">
-                  {installPreview()!.openapi?.['x-pishoo']?.changelog ??
+                  {installPreview()!.changelog ??
                     installPreview()!.description}
                 </p>
                 <Show when={dialog() !== 'publish'}><p>
@@ -1825,7 +1871,7 @@ export default function AppsPage() {
                   })()}
                 </p></Show>
                 <details class="app-preview-interfaces">
-                  <summary>{t('apps.endpoints', { count: operations(installPreview()).filter(op => !pageResource(op)).length })}</summary>
+                  <summary>{installPreview()?.kind === 'app' ? t('apps.dependencies') : t('apps.endpoints', { count: operations(installPreview()).filter(op => !pageResource(op)).length })}</summary>
                   {interfaces(installPreview())}
                 </details>
                 {suggestions(installPreview())}
@@ -1854,7 +1900,7 @@ export default function AppsPage() {
                 <dl>
                   <For
                     each={Object.entries(
-                      installPreview()!.openapi?.['x-pishoo']?.host ?? {},
+                      installPreview()!.host ?? {},
                     )}
                   >
                     {([name, purpose]) => (
@@ -1876,7 +1922,7 @@ export default function AppsPage() {
             <Show when={dialog() !== 'publish'}>
               <p class="field-wide">{t(storeSelection() ? 'apps.storeInstallHint' : 'apps.fileHint')}</p>
             </Show>
-            <Show when={installPreview()?.openapi?.['x-pishoo']?.host?.signatures}>
+            <Show when={installPreview()?.host?.signatures}>
               <p class="app-notice field-wide">{t('apps.signatureCapability')}</p>
             </Show>
             <Show when={storeSelection()} keyed>

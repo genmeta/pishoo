@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS libs (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    version TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS apps (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    version TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_dependencies (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    lib_id TEXT NOT NULL REFERENCES libs(id) ON DELETE RESTRICT,
+    version TEXT NOT NULL,
+    PRIMARY KEY(app_id, lib_id)
+);
+CREATE TABLE IF NOT EXISTS lib_dependencies (
+    lib_id TEXT NOT NULL REFERENCES libs(id) ON DELETE CASCADE,
+    dependency_id TEXT NOT NULL REFERENCES libs(id) ON DELETE RESTRICT,
+    version TEXT NOT NULL,
+    PRIMARY KEY(lib_id, dependency_id)
+);

@@ -11,25 +11,39 @@ pub(crate) async fn forward_dhttp(
     request: Request<AxumBody>,
 ) -> Response {
     let result: Result<Response> = async {
-        let handshake = request
-            .extensions()
-            .get::<dhttp::HandshakeSummary>()
-            .ok_or(Error::MissingHandshake)?;
-        let local = handshake.local.as_ref().ok_or(Error::MissingHandshake)?;
-        let remote = handshake.remote.as_ref().ok_or(Error::Denied)?;
-        if dhttp_home::normalize_name(local.name()).as_deref() != Some(endpoint.name())
-            || dhttp_home::normalize_name(remote.name()).as_deref() != Some(endpoint.name())
-        {
-            return Err(Error::Denied);
-        }
-        let local_ski =
-            dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
-                .map_err(|_| Error::Denied)?;
-        let remote_ski =
-            dhttp_home::certificate::extract_dhttp_subject_key_identifier(remote.certificates())
-                .map_err(|_| Error::Denied)?;
-        if local_ski.owner_hash() != remote_ski.owner_hash() {
-            return Err(Error::Denied);
+        if let Some(handshake) = request.extensions().get::<dhttp::HandshakeSummary>() {
+            let local = handshake.local.as_ref().ok_or(Error::MissingHandshake)?;
+            let remote = handshake.remote.as_ref().ok_or(Error::Denied)?;
+            if dhttp_home::normalize_name(local.name()).as_deref() != Some(endpoint.name())
+                || dhttp_home::normalize_name(remote.name()).as_deref() != Some(endpoint.name())
+            {
+                return Err(Error::Denied);
+            }
+            let local_ski =
+                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                    .map_err(|_| Error::Denied)?;
+            let remote_ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                remote.certificates(),
+            )
+            .map_err(|_| Error::Denied)?;
+            if local_ski.owner_hash() != remote_ski.owner_hash() {
+                return Err(Error::Denied);
+            }
+        } else if let Some(local) = request.extensions().get::<dhttp::LocalAuthority>() {
+            let actual = endpoint.local_authority()?;
+            let local_ski =
+                dhttp_home::certificate::extract_dhttp_subject_key_identifier(local.certificates())
+                    .map_err(|_| Error::Denied)?;
+            let actual_ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(
+                actual.certificates(),
+            )
+            .map_err(|_| Error::Denied)?;
+            if local.name() != endpoint.name() || local_ski.owner_hash() != actual_ski.owner_hash()
+            {
+                return Err(Error::Denied);
+            }
+        } else {
+            return Err(Error::MissingHandshake);
         }
         if request.headers().contains_key(header::TRAILER) {
             return Err(Error::BadRequest(

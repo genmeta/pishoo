@@ -49,60 +49,66 @@ export function query(values: Record<string, string | number>): string {
   ).toString()
 }
 
-export const api = {
-  context: () => request<RuntimeContext>('/std/workspace-api/context'),
+export function backendPath(path: string): string {
+  const chat = path === '/message' || path.startsWith('/chat/')
+    || path.startsWith('/contacts/capabilities/') || path.startsWith('/capability-requests')
+  return `/api/${chat ? 'chat' : 'workspace'}${path}`
+}
 
-  libs: (signal?: AbortSignal) => request<LibSummary[]>('/std/workspace-api/libs', { signal }),
+export const api = {
+  context: () => request<RuntimeContext>(backendPath('/context')),
+
+  libs: (signal?: AbortSignal) => request<LibSummary[]>('/std/pishoo/loaded-libs', { signal }),
 
   capabilities: (signal?: AbortSignal) =>
-    request<CapabilityDescriptor[]>('/std/workspace-api/capabilities', { signal }),
+    request<CapabilityDescriptor[]>(backendPath('/capabilities'), { signal }),
 
   approvals: (status: 'pending' | 'expired', page: number, signal?: AbortSignal) =>
-    request<Page<Approval[]>>(`/std/workspace-api/approvals?${query({ status, page, page_size: 20 })}`, { signal }),
+    request<Page<Approval[]>>(backendPath(`/approvals?${query({ status, page, page_size: 20 })}`), { signal }),
 
   deleteExpiredApproval: (approval: Approval) => {
     const id = approval.kind === 'capability' ? approval.request_id : approval.id
-    return request<void>(`/std/workspace-api/approvals/${approval.kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    return request<void>(backendPath(`/approvals?${query({ kind: approval.kind, id })}`), { method: 'DELETE' })
   },
 
   outboundRequests: (page: number, signal?: AbortSignal) =>
-    request<Page<OutboundContactRequest[]>>(`/std/workspace-api/contact-requests?${query({ page, page_size: 20 })}`, { signal }),
+    request<Page<OutboundContactRequest[]>>(backendPath(`/contact-requests?${query({ page, page_size: 20 })}`), { signal }),
 
   outboundRequest: (id: number, signal?: AbortSignal) =>
-    request<OutboundContactRequest>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}`, { signal }),
+    request<OutboundContactRequest>(backendPath(`/contact-requests?${query({ id })}`), { signal }),
 
   sendContactRequest: (value: OutboundContactInput) =>
-    request<OutboundContactRequest>('/std/workspace-api/contact-requests', { method: 'POST', body: JSON.stringify(value) }),
+    request<OutboundContactRequest>(backendPath('/contact-requests'), { method: 'POST', body: JSON.stringify(value) }),
 
   refreshOutboundRequest: (id: number) =>
-    request<OutboundContactRequest>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+    request<OutboundContactRequest>(backendPath(`/contact-requests/refresh?${query({ id })}`), { method: 'POST' }),
 
   deleteOutboundRequest: (id: number) =>
-    request<void>(`/std/workspace-api/contact-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    request<void>(backendPath(`/contact-requests?${query({ id })}`), { method: 'DELETE' }),
 
   profileSettings: (signal?: AbortSignal) =>
-    request<ProfileSettings>('/std/workspace-api/settings/profile', { signal }),
+    request<ProfileSettings>(backendPath('/settings/profile'), { signal }),
 
   saveProfile: (displayName: string) =>
-    request<ProfileSettings>('/std/workspace-api/settings/profile', {
+    request<ProfileSettings>(backendPath('/settings/profile'), {
       method: 'PATCH',
       body: JSON.stringify({ display_name: displayName }),
     }),
 
   saveAvatar: (file: File) =>
-    request<ProfileSettings>('/std/workspace-api/settings/profile/avatar', {
+    request<ProfileSettings>(backendPath('/settings/profile/avatar'), {
       method: 'PUT',
       headers: { 'content-type': file.type },
       body: file,
     }),
 
   deleteAvatar: () =>
-    request<ProfileSettings>('/std/workspace-api/settings/profile/avatar', { method: 'DELETE' }),
+    request<ProfileSettings>(backendPath('/settings/profile/avatar'), { method: 'DELETE' }),
 
   publicProfile: (name: string, signal?: AbortSignal) => {
     const deadline = AbortSignal.timeout(2500)
     const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
-    return request<PublicProfile>(`/std/workspace-api/profiles/${encodeURIComponent(name)}`, { signal: requestSignal })
+    return request<PublicProfile>(backendPath(`/profiles?${query({ name })}`), { signal: requestSignal })
   },
 
   decideReview: (
@@ -137,13 +143,13 @@ export const api = {
   },
 
   contactDirectory: (signal?: AbortSignal) =>
-    request<DirectoryEntry[]>('/std/workspace-api/contact-directory', { signal }),
+    request<DirectoryEntry[]>(backendPath('/contact-directory'), { signal }),
 
   saveContactIdentity: (name: string) =>
-    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'PUT' }),
+    request<void>(backendPath(`/contacts/saved?${query({ name })}`), { method: 'PUT' }),
 
   unsaveContactIdentity: (name: string) =>
-    request<void>(`/std/workspace-api/contacts/${encodeURIComponent(name)}/saved`, { method: 'DELETE' }),
+    request<void>(backendPath(`/contacts/saved?${query({ name })}`), { method: 'DELETE' }),
 
   contact: (name: string, signal?: AbortSignal) =>
     request<Contact>(`/std/contact/${encodeURIComponent(name)}`, { signal }),

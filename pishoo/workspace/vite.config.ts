@@ -4,14 +4,11 @@ import solid from 'vite-plugin-solid'
 const backend = process.env.PISHOO_WORKSPACE_BACKEND ?? 'http://127.0.0.1:3000'
 
 export default defineConfig({
-  base: '/std/workspace/',
+  base: './',
   plugins: [solid()],
   server: {
     proxy: {
-      '/std/workspace-api': backend,
-      '/std/chat-api': backend,
-      '/std/profile': backend,
-      '/std/api': backend,
+      '/api': backend,
       '/std/pishoo': backend,
       '/std/dhttp': backend,
       '/std/acl': backend,

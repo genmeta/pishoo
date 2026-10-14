@@ -11,13 +11,10 @@ use tokio::time::Instant;
 use tower::ServiceExt;
 
 use crate::{
-    Body, Error, Result,
-    chat::{self, Chat, store::ChatStore},
-    dns,
+    Body, Error, Result, dns,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, config_router, load_server_config},
-    workspace::{self, Workspace, store::WorkspaceStore},
 };
 
 struct Server {
@@ -25,8 +22,6 @@ struct Server {
     endpoint: dhttp::Endpoint,
     config: ServerConfig,
     access: Arc<access_control::AccessService>,
-    workspace: Arc<Workspace>,
-    chat: Arc<Chat>,
     router: Arc<RwLock<axum::Router>>,
     sandbox: Arc<RwLock<Sandbox>>,
     publisher: Option<Arc<ddns::H3Resolver>>,
@@ -68,6 +63,9 @@ pub async fn run() -> Result<()> {
             std::time::Duration::from_secs(1),
         );
         config_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut wasi_ticks = tokio::time::interval(std::time::Duration::from_secs(3));
+        wasi_ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut runs = FuturesUnordered::new();
         let mut ocsp_ticks = ocsp_ticks();
         let mut ocsp_updates = FuturesUnordered::new();
         let interrupt = tokio::signal::ctrl_c();
@@ -102,6 +100,16 @@ pub async fn run() -> Result<()> {
                             next_due = Some(next_due.map_or(due, |previous| previous.min(due)));
                         }
                     }
+                    _ = wasi_ticks.tick(), if runs.is_empty() => {
+                        for server in servers.values() {
+                            let sandbox = server.sandbox.clone();
+                            let endpoint = server.endpoint.clone();
+                            let access = server.access.clone();
+                            let api = native_router(server).layer(axum::middleware::from_fn_with_state(access.clone(),authorize));
+                            runs.push(async move { Sandbox::run(sandbox,endpoint,access,api).await });
+                        }
+                    }
+                    _ = runs.next(), if !runs.is_empty() => {},
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
                         match reconcile_profiles(&home, &mut servers, runtime.clone()).await {
                             Ok(true) => break,
@@ -369,14 +377,6 @@ async fn apply_ocsp(server: &mut Server, endpoint: dhttp::Endpoint) -> Result<()
     } else {
         None
     };
-    server
-        .workspace
-        .configure_outbound(Arc::new(endpoint.clone()))
-        .await;
-    server
-        .chat
-        .configure_outbound(Arc::new(endpoint.clone()))
-        .await;
     server.endpoint = endpoint;
     server.publisher = publisher;
     *server.router.write().unwrap() = current_router(server);
@@ -388,32 +388,6 @@ fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
         &format!("{DHTTP_PREFIX}{{*path}}"),
         any(move |request: Request<AxumBody>| forward_dhttp(endpoint.clone(), request)),
     )
-}
-
-fn chat_router(chat: Arc<Chat>, workspace: Arc<Workspace>) -> Router {
-    chat::router(chat).layer(axum::middleware::from_fn(
-        move |request: Request<AxumBody>, next: axum::middleware::Next| {
-            let workspace = workspace.clone();
-            async move {
-                if request.method() == http::Method::POST && request.uri().path() == "/std/message"
-                {
-                    let Some(visitor) = request.extensions().get::<access_control::Visitor>()
-                    else {
-                        return http::StatusCode::FORBIDDEN.into_response();
-                    };
-                    match workspace::directory::approved_chat_grant(&workspace, visitor).await {
-                        Ok(true) => {}
-                        Ok(false) => return http::StatusCode::FORBIDDEN.into_response(),
-                        Err(error) => {
-                            tracing::error!(%error, "Chat capability authorization failed");
-                            return http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                        }
-                    }
-                }
-                next.run(request).await
-            }
-        },
-    ))
 }
 
 fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
@@ -816,18 +790,14 @@ async fn load_access(
     load().await
 }
 
-fn current_router(server: &Server) -> Router {
-    let proxies = server.config.proxy_locations.clone();
+fn native_router(server: &Server) -> Router {
+    let endpoint = server.endpoint.clone();
+    let sandbox = server.sandbox.clone();
+    let local_router = Arc::downgrade(&server.router);
     Router::new()
         .merge(access_router(server.access.clone()))
         .merge(config_router(
             server.profile.clone(),
-            server.endpoint.clone(),
-        ))
-        .merge(workspace::router(server.workspace.clone()))
-        .merge(chat_router(server.chat.clone(), server.workspace.clone()))
-        .merge(Sandbox::api_router(
-            server.sandbox.clone(),
             server.endpoint.clone(),
         ))
         .merge(crate::sandbox::lib_management_router(
@@ -837,9 +807,267 @@ fn current_router(server: &Server) -> Router {
         ))
         .merge(file_router(server.profile.join("file")))
         .merge(dhttp_router(server.endpoint.clone()))
+        .fallback(any(move |mut request: Request<AxumBody>| {
+            let endpoint = endpoint.clone();
+            let sandbox = sandbox.clone();
+            let local_router = local_router.clone();
+            async move {
+                let Some(tail) = request.uri().path().strip_prefix("/api/") else {
+                    return http::StatusCode::NOT_FOUND.into_response();
+                };
+                let name = tail.split('/').next().unwrap();
+                if !sandbox
+                    .read()
+                    .unwrap()
+                    .libs
+                    .keys()
+                    .any(|id| id.rsplit('/').next() == Some(name))
+                {
+                    return http::StatusCode::NOT_FOUND.into_response();
+                }
+                if request
+                    .extensions()
+                    .get::<dhttp::HandshakeSummary>()
+                    .is_none()
+                    && request
+                        .extensions()
+                        .get::<dhttp::LocalAuthority>()
+                        .is_some()
+                {
+                    // CLI HTTP is a new authenticated owner request. Use the
+                    // actual transport to obtain genuine caller facts; the CLI
+                    // invocation itself continues to expose caller=None.
+                    let query = request.uri().path_and_query().unwrap().as_str();
+                    let mut parts = request.uri().clone().into_parts();
+                    parts.path_and_query = Some(
+                        format!("{DHTTP_PREFIX}{}{query}", endpoint.name())
+                            .parse()
+                            .unwrap(),
+                    );
+                    *request.uri_mut() = http::Uri::from_parts(parts).unwrap();
+                    return forward_dhttp(endpoint, request).await;
+                }
+                let Some(router) = local_router.upgrade() else {
+                    return http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                };
+                let router = router.read().unwrap().clone();
+                // Preserve the calling request's verified handshake across Libs.
+                router.oneshot(request).await.expect("Router is infallible")
+            }
+        }))
+}
+
+// Defaults are delivered artifacts, installed once into the same user-owned
+// directories as any other App/Lib. The existing config file is the bootstrap
+// commit point; deleting an App later cannot cause it to reappear on restart.
+fn install_default_artifacts(profile: &IdentityProfile, runtime: &WasmRuntime) -> Result<()> {
+    if profile.config_db_path().exists() {
+        return Ok(());
+    }
+    let directory = match std::env::var_os("PISHOO_DEFAULT_ARTIFACTS") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_exe()?
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| Error::InvalidConfig("executable has no installation prefix".into()))?
+            .join("share/pishoo/default-artifacts"),
+    };
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut artifacts = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.path().extension().is_none_or(|ext| ext != "webc") {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            return Err(Error::InvalidConfig(
+                "default artifacts must be regular files".into(),
+            ));
+        }
+        let bytes = std::fs::read(entry.path())?;
+        let container =
+            webc::Container::from_bytes_and_version(bytes.clone().into(), webc::Version::V3)
+                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        let metadata = crate::sandbox::package_metadata(&container)?;
+        let kind = metadata["kind"].as_str().unwrap().to_owned();
+        let id = metadata["id"].as_str().unwrap().to_owned();
+        artifacts.push((kind, id, bytes));
+    }
+    if artifacts.is_empty() {
+        return Err(Error::InvalidConfig(
+            "default artifacts directory is empty".into(),
+        ));
+    }
+    let mut ordered = Vec::new();
+    while !artifacts.is_empty() {
+        let mut ready = None;
+        for (index, (_, _, bytes)) in artifacts.iter().enumerate() {
+            let package = crate::sandbox::read_package(bytes)?;
+            let metadata = crate::sandbox::package_metadata(&package)?;
+            if metadata["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|dependency| {
+                    let id = format!(
+                        "{}/{}",
+                        dependency["publisher"].as_str().unwrap(),
+                        dependency["name"].as_str().unwrap()
+                    );
+                    ordered
+                        .iter()
+                        .any(|(kind, key, bytes): &(String, String, Vec<u8>)| {
+                            kind == "lib"
+                                && key == &id
+                                && crate::sandbox::read_package(bytes)
+                                    .and_then(|p| crate::sandbox::package_metadata(&p))
+                                    .is_ok_and(|m| m["version"] == dependency["version"])
+                        })
+                })
+            {
+                ready = Some(index);
+                break;
+            }
+        }
+        let index = ready.ok_or_else(|| {
+            Error::InvalidComponent(
+                "default artifact dependencies missing, conflicting or cyclic".into(),
+            )
+        })?;
+        ordered.push(artifacts.remove(index));
+    }
+    let artifacts = ordered;
+    let temporary = tempfile::Builder::new()
+        .prefix("default-artifacts-")
+        .tempdir_in(profile.path())?;
+    let staged = IdentityProfile::try_from(temporary.path().join("staging"))
+        .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+    std::fs::create_dir(staged.path())?;
+    initialize_directories(&staged)?;
+    load_server_config(&staged)?;
+    for (kind, id, bytes) in &artifacts {
+        if kind == "lib" {
+            crate::sandbox::install_lib(&staged, &id, &bytes, runtime)?;
+        } else {
+            crate::sandbox::install_app(&staged, &id, &bytes)?;
+        }
+    }
+    // Preparation uses the ordinary installer. Publish each already-verified
+    // artifact atomically; an interrupted first install can safely retry the
+    // same bytes, and a pre-existing different user artifact is never replaced.
+    for (kind, id, bytes) in artifacts {
+        let root = profile.join(&kind);
+        let publisher = root.join(id.split('/').next().unwrap());
+        let target = root.join(&id);
+        for directory in [&root, &publisher, &target] {
+            match directory.symlink_metadata() {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(Error::InvalidConfig(
+                        "artifact directory must be a real directory".into(),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut builder = std::fs::DirBuilder::new();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::DirBuilderExt;
+                        builder.mode(0o700);
+                    }
+                    builder.create(directory)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let destination = target.join(format!("{kind}.webc"));
+        match destination.symlink_metadata() {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && std::fs::read(&destination)? == bytes =>
+            {
+                continue;
+            }
+            Ok(_) => {
+                return Err(Error::InvalidConfig(format!(
+                    "default artifact {id} conflicts with an existing user artifact"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&target)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(&destination)
+            .map_err(|error| Error::Io(error.error))?;
+    }
+    let mut config = tempfile::NamedTempFile::new_in(profile.db_dir())?;
+    std::io::copy(
+        &mut std::fs::File::open(staged.config_db_path())?,
+        &mut config,
+    )?;
+    config.as_file().sync_all()?;
+    config
+        .persist_noclobber(profile.config_db_path())
+        .map_err(|error| Error::Io(error.error))?;
+    Ok(())
+}
+
+fn current_router(server: &Server) -> Router {
+    let proxies = server.config.proxy_locations.clone();
+    let dispatch_proxies = proxies.clone();
+    let dispatch_sandbox = server.sandbox.clone();
+    let native = native_router(server);
+    let outgoing = native.clone().layer(axum::middleware::from_fn_with_state(
+        server.access.clone(),
+        authorize,
+    ));
+    native
+        .merge(Sandbox::api_router(
+            server.sandbox.clone(),
+            server.endpoint.clone(),
+            server.access.clone(),
+            outgoing,
+        ))
         .fallback(any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)
         }))
+        .layer(axum::middleware::from_fn(
+            move |request: Request<AxumBody>, next: axum::middleware::Next| {
+                let proxies = dispatch_proxies.clone();
+                let sandbox = dispatch_sandbox.clone();
+                async move {
+                    // Installed names own their entire mount. Other /api and /app
+                    // paths retain ordinary proxy behavior, including HA endpoints.
+                    let passthrough = {
+                        let sandbox = sandbox.read().unwrap();
+                        if let Some(tail) = request.uri().path().strip_prefix("/api/") {
+                            let name = tail.split('/').next().unwrap();
+                            !sandbox
+                                .libs
+                                .keys()
+                                .any(|id| id.rsplit('/').next() == Some(name))
+                        } else if let Some(tail) = request.uri().path().strip_prefix("/app/") {
+                            let name = tail.split('/').next().unwrap();
+                            !sandbox
+                                .apps
+                                .keys()
+                                .any(|id| id.rsplit('/').next() == Some(name))
+                        } else {
+                            false
+                        }
+                    };
+                    if passthrough {
+                        proxy_pass(proxies, request).await
+                    } else {
+                        next.run(request).await
+                    }
+                }
+            },
+        ))
         .layer(axum::middleware::from_fn_with_state(
             server.access.clone(),
             authorize,
@@ -870,6 +1098,7 @@ impl Server {
                     error => Error::Dhttp(error),
                 })?;
         initialize_directories(&profile)?;
+        install_default_artifacts(&profile, &runtime)?;
         let config = load_server_config(&profile)?;
         if config.listen != 0 {
             dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;
@@ -886,44 +1115,17 @@ impl Server {
         let access = load_access(&profile, &subject).await?;
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
-        let workspace_store = WorkspaceStore::open(&profile)
-            .await
-            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
-        let chat_store = ChatStore::open(&profile)
-            .await
-            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
-        let workspace = Arc::new(Workspace::new(
-            profile.name().to_owned(),
-            endpoint.name().to_owned(),
-            subject.clone(),
-            workspace_store,
-            access.clone(),
-        ));
-        let chat = Arc::new(Chat::new(
-            endpoint.name().to_owned(),
-            subject,
-            chat_store,
-            access.clone(),
-        ));
-        workspace.configure_chat(chat.clone()).await;
-        workspace
-            .configure_outbound(Arc::new(endpoint.clone()))
-            .await;
-        chat.configure_outbound(Arc::new(endpoint.clone())).await;
         let server = Self {
             profile,
             endpoint,
             config,
             access,
-            workspace,
-            chat,
             router: Arc::new(RwLock::new(Router::new())),
             sandbox: Arc::new(RwLock::new(sandbox)),
             publisher,
             listener: None,
         };
         *server.router.write().unwrap() = current_router(&server);
-        server.chat.start_worker();
         Ok(server)
     }
 
@@ -997,7 +1199,6 @@ impl Server {
         };
         *self.router.write().unwrap() = axum::Router::new();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            tokio::join!(self.workspace.shutdown(), self.chat.shutdown());
             tasks.wait().await;
             Ok(())
         })

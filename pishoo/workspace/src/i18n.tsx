@@ -4,9 +4,16 @@ import { createContext, createEffect, createSignal, useContext } from 'solid-js'
 export type Locale = 'en' | 'zh-CN'
 
 const EN = {
+  'apps.kindMismatch': 'The signed artifact does not match the selected install type.',
+  'apps.artifactKind': 'Install type',
+  'apps.frontend': 'Frontend App',
+  'apps.backend': 'Backend Lib',
+  'apps.dependencies': 'Backend dependencies',
+  'apps.noDependencies': 'No backend dependencies.',
+  'apps.dependenciesHint': 'Store installation adds missing exact versions and reuses matching Libs. Version conflicts must be resolved before installation.',
   'apps.publishCheckHint': 'Check the signed WEBC package and review its release information before publishing. The store will verify the publisher and publishing requirements on upload.',
   "apps.publish": "Upload app",
-  "apps.publishArtifact": "Choose a signed lib.webc (up to 64 MiB). It must contain the WASM backend, public frontend, independent OpenAPI and package-level publisher signature. ZIP files, source code, private keys and databases are not uploaded.",
+  "apps.publishArtifact": "Choose a signed app.webc for the frontend or lib.webc for the backend (up to 64 MiB). Each artifact has its own manifest, version and publisher signature. ZIP files, source code, private keys and databases are not uploaded.",
   "apps.publishIdentityHint": "The manifest publisher and signing certificate must match this Workspace identity. To publish under another name, open that identity’s Workspace. The store verifies the certificate chain against the authenticated connection.",
   "apps.publishUnsigned": "This file has no valid signature envelope. Build and sign lib.webc with the publisher identity before uploading.",
   "apps.publishInvalid": "The file must declare a complete publisher/name and a MAJOR.MINOR.PATCH version.",
@@ -452,9 +459,16 @@ export type MessageKey = keyof typeof EN
 type Params = Record<string, string | number>
 
 const ZH_CN: Record<MessageKey, string> = {
+  'apps.kindMismatch': '签名制品与所选安装类型不一致。',
+  'apps.artifactKind': '安装类型',
+  'apps.frontend': '前端 App',
+  'apps.backend': '后端 Lib',
+  'apps.dependencies': '后端依赖',
+  'apps.noDependencies': '无后端依赖。',
+  'apps.dependenciesHint': '商店安装会补装缺少的精确版本并复用匹配的 Lib；版本冲突需先解决。',
   'apps.publishCheckHint': '先检查签名 WEBC 包并核对发布信息，再确认发布。商店会在上传时核验发布者和发布要求。',
   "apps.publish": "上传应用",
-  "apps.publishArtifact": "选择签名后的 lib.webc（最大 64 MiB），其中须包含 WASM 后端、public 前端资源、独立 OpenAPI 及包级发布者签名。不上传 ZIP、源码、私钥或数据库。",
+  "apps.publishArtifact": "选择签名后的前端 app.webc 或后端 lib.webc（最大 64 MiB）；两类制品各有独立清单、版本和发布者签名。不上传 ZIP、源码、私钥或数据库。",
   "apps.publishIdentityHint": "清单发布者和签名证书必须与当前工作台身份一致。使用其他名称发布时，请打开该身份的工作台。商店会将包内证书链与已认证连接核对。",
   "apps.publishUnsigned": "文件缺少有效签名信封，请先用发布者身份构建并签名 lib.webc。",
   "apps.publishInvalid": "文件必须声明完整发布者/名称及 MAJOR.MINOR.PATCH 版本号。",

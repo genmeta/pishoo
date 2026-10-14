@@ -50,7 +50,7 @@ Build HTTP components for `wasm32-wasip2`, exporting the standard
 `wasip2::exports::http::incoming_handler::Guest` handler with
 `wasip2::http::proxy::export!`. The SDK identity functions are WASM imports supplied
 by Pishoo. They cannot run as a native client or authenticate a caller themselves.
-WASI HTTP outgoing requests remain denied, and daccess still authorizes each
+Ordinary installed Libs use standard WASI HTTP through their Endpoint and native API resources; daccess still authorizes each
 complete HTTP method/path. Use a Pishoo host with the request-identity interface.
 
 The developer bundle contains a minimal `examples/identity` component, the full

@@ -16,15 +16,23 @@ export interface RuntimeContext {
 }
 
 export interface LibSummary {
+  kind?: 'app' | 'lib'
+  dependencies?: Array<{ publisher: string; name: string; version: string }>
   id: string
   title: string
   version: string
   description: string | null
   endpoints: Array<{ method: string; path: string; description: string | null }>
+  license?: string
+  entry?: string
+  changelog?: string
+  host?: Partial<Record<'private-storage' | 'request-identity' | 'signatures', string>>
   openapi?: {
     openapi: string
     info: { title: string; version: string; description?: string; license?: { name: string } }
     'x-pishoo'?: {
+      kind?: 'app' | 'lib'
+      dependencies?: Array<{ publisher: string; name: string; version: string }>
       publisher?: string
       name?: string
       entry?: string
@@ -52,6 +60,8 @@ export interface Page<T> {
 }
 
 export interface StoreLib {
+  kind?: 'app' | 'lib'
+  dependencies?: Array<{ publisher: string; name: string; version: string }>
   id: string
   publisher: string
   publisher_owner_hash: string
@@ -72,13 +82,14 @@ export interface StoreSummary extends StoreLib {
   host: NonNullable<NonNullable<LibSummary['openapi']>['x-pishoo']>['host'] | null
 }
 
-export interface StoreDetail extends StoreLib {
-  openapi: NonNullable<LibSummary['openapi']>
+export interface StoreDetail extends StoreSummary {
+  openapi?: NonNullable<LibSummary['openapi']>
   signer_certificates: string[]
 }
 
 export interface StoreCatalog {
-  libs: StoreSummary[]
+  libs?: StoreSummary[]
+  apps?: StoreSummary[]
   page: number
   page_size: number
   total: number
