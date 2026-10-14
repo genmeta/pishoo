@@ -19,9 +19,9 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 原生资源 API 增强：联系人列表直接返回 id/incoming；详情和自身状态返回 id；PUT /std/contact/{name} 为 owner 专用本机资源写入。GET /std/acl/reviews 支持 pending/expired 与 requested_at；DELETE /std/acl/review/{id} 仅删除已过期 pending 记录。数据库 schema、授权模型和公共 ContactRecord/ReviewRecord 不变。
 
-普通入口为 `/api/<name>/` 和 `/app/<name>/`，前端 hash 导航、后端字面量路径/query。通用已加载目录位于 `/std/pishoo/loaded-libs`、`/std/pishoo/loaded-apps`。
+普通入口为 `/std/<业务路径>` 和 `/std/<name>/`，前端 hash 导航、后端字面量路径/query。通用已加载目录位于 `/std/sys/package/loaded-libs`、`/std/sys/package/loaded-apps`。
 
-默认制品从发行 share/pishoo/default-artifacts 交付，首次初始化通过普通安装器保存到用户目录。配置文件存在后不重装、不自动升级；卸载和依赖保护同其他 App/Lib。来源不授予额外权限。构建与安装详见 [Workspace 后端](../workspace-lib/README.md)。
+默认制品从发行 share/pishoo/default-artifacts 交付，首次初始化通过普通安装器保存到用户目录。配置文件存在后不重装、不自动升级；卸载和依赖保护同其他 App/Lib。来源不授予额外权限。构建与安装详见 [Profile 后端](../../std/libs/profile/README.md)。
 
 安装登记存入身份的 config.db：libs 与 apps 分开，各自 name 唯一；app_dependencies 保存完整后端 ID 和精确版本。签名制品保留在原有 publisher/name 目录。启动只加载数据库登记项，核对制品身份、版本、依赖；不扫描或自动导入其他文件。旧安装使用正常安装命令显式登记。
 
@@ -29,6 +29,6 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version，最多100；Lib省略时为[]）。config.db 的 app_dependencies 与 lib_dependencies 分别保存关联。宿主拒绝循环和不匹配版本，启动核对签名制品与登记；依赖被使用时不能卸载或修改其内容/版本。正常移除父制品只删除其关联，保留依赖制品和数据。商店安装递归补齐并按依赖顺序提交，一次最多解析100个Lib，父安装失败不撤销已成功安装的有效依赖。
 
-Lib 间调用通过标准 WASI HTTP 向 https://~/api/<name>/... 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
+Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
 
 前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。

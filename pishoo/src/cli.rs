@@ -61,8 +61,7 @@ Options:
 Listening scopes: off (0), internal (1), external (2), both (3).
 Proxy listing also accepts list or ls.
 Identity selection may appear before or after a resource command.
-The default identity is read from settings.toml [default].name in DHTTP_HOME
-(default: ~/.dhttp). Service commands and lib check do not accept --id.
+The default identity is read from ~/.dhttp/settings.toml [default].name. Service commands and lib check do not accept --id.
 
 With no command, Pishoo runs all identities in the foreground.
 Configuration changes are saved to disk and picked up by a running Pishoo automatically.
@@ -145,8 +144,10 @@ Queries are written to stdout; context and status messages to stderr."
         }
         _ => return Err(usage("invalid command; use --help")),
     }
-    let home =
-        dhttp_home::DhttpHome::load(dhttp_home::HomeScope::User).map_err(std::io::Error::other)?;
+    let home = dhttp_home::DhttpHome::for_user_home_dir(
+        dirs::home_dir()
+            .ok_or_else(|| std::io::Error::other("cannot locate user home directory"))?,
+    );
     let profile = tokio::task::spawn_blocking(move || select_profile(&home, name)).await??;
     eprintln!(
         "Identity:   {}\nDirectory:  {}",
@@ -154,7 +155,7 @@ Queries are written to stdout; context and status messages to stderr."
         profile.path().display()
     );
     if matches!(command.as_str(), "lib" | "app") && args.first().is_some_and(|s| s == "--loaded") {
-        let endpoint = dhttp::Endpoint::load(profile.name()).await?;
+        let endpoint = dhttp::Endpoint::load_from(profile.path()).await?;
         let mdns = crate::dns::install()?;
         let result = async {
             dhttp::DhttpNetwork::init().await?;

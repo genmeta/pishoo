@@ -95,14 +95,14 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         (
             "/",
             "/api/echo/not-declared",
-            http::StatusCode::NOT_FOUND,
-            "Not Found",
+            http::StatusCode::OK,
+            "upstream /api/echo/not-declared",
         ),
         (
             "/",
             "/api/echo/upload",
-            http::StatusCode::METHOD_NOT_ALLOWED,
-            "Method Not Allowed",
+            http::StatusCode::OK,
+            "upstream /api/echo/upload",
         ),
         (
             "/",
@@ -548,12 +548,12 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     )
     .unwrap();
     assert!(
-        reconcile_profiles(&home, &mut servers, runtime.clone())
+        reconcile_profiles(&home, None, &mut servers, runtime.clone())
             .await
             .unwrap()
     );
     assert!(
-        !reconcile_profiles(&home, &mut servers, runtime.clone())
+        !reconcile_profiles(&home, None, &mut servers, runtime.clone())
             .await
             .unwrap()
     );
@@ -571,13 +571,13 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     ));
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute("UPDATE settings SET listen=99", []).unwrap();
-    reconcile_profiles(&home, &mut servers, runtime.clone())
+    reconcile_profiles(&home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert_eq!(servers[&name].config.listen, 0);
     db.execute("UPDATE settings SET listen=0", []).unwrap();
     std::fs::remove_file(profile.config_db_path()).unwrap();
-    reconcile_profiles(&home, &mut servers, runtime.clone())
+    reconcile_profiles(&home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert!(servers.contains_key(&name));
@@ -585,12 +585,12 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     drop(db);
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(0, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
-    reconcile_profiles(&home, &mut servers, runtime.clone())
+    reconcile_profiles(&home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert!(servers.is_empty());
     // Subsequent scans keep a disabled profile unloaded, even with unusable credentials.
-    reconcile_profiles(&home, &mut servers, runtime)
+    reconcile_profiles(&home, None, &mut servers, runtime)
         .await
         .unwrap();
     assert!(servers.is_empty());
@@ -605,7 +605,7 @@ async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
     let mut servers = BTreeMap::from([(server.name().to_owned(), server)]);
     let missing_home = DhttpHome::new(root.path().join("missing"));
     assert!(
-        reconcile_profiles(&missing_home, &mut servers, runtime.clone())
+        reconcile_profiles(&missing_home, None, &mut servers, runtime.clone())
             .await
             .is_err()
     );
@@ -613,6 +613,7 @@ async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
     std::fs::rename(root.path().join("alice"), root.path().join(".removed")).unwrap();
     reconcile_profiles(
         &DhttpHome::new(root.path().to_path_buf()),
+        None,
         &mut servers,
         runtime,
     )
@@ -717,5 +718,256 @@ fn default_artifacts_install_as_user_resources_and_are_not_reinstalled_after_rem
             .unwrap()
             .next()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn native_capability_catalog_is_installed_business_metadata_and_uses_daccess() {
+    use http::{Method, StatusCode};
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let server = server(root.path()).await;
+    let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"},"access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}}},
+        "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
+    let package = crate::sandbox::tests::package_fixture(
+        &doc,
+        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &crate::sandbox::tests::publisher("alice.dhttp.net", 'a'),
+    );
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
+    crate::sandbox::install_lib(
+        &server.profile,
+        "alice.dhttp.net/message",
+        &package,
+        &runtime,
+    )
+    .unwrap();
+    let request = || {
+        let mut request = Request::builder()
+            .uri("/std/acl/capabilities")
+            .body(AxumBody::empty())
+            .unwrap();
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(server.endpoint.local_authority().unwrap()),
+            remote: None,
+        });
+        request
+    };
+    assert_eq!(
+        server
+            .router
+            .read()
+            .unwrap()
+            .clone()
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/std/acl/capabilities",
+            access_control::Effect::Allow,
+            access_control::Grantee::Anony,
+        )
+        .await
+        .unwrap();
+    let response = server
+        .router
+        .read()
+        .unwrap()
+        .clone()
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let values: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        values,
+        json!([{"id":"alice.dhttp.net/message#message","title":"1v1聊天","version":"1.0.0","visibility":"contact","approval_mode":"capability","selectable":true,"endpoints":[{"method":"POST","path":"/std/message"}]}])
+    );
+    // Builtin ACL, Contact and Package do not become WASM capabilities.
+    assert_eq!(values.as_array().unwrap().len(), 1);
+    crate::sandbox::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
+    let response = server
+        .router
+        .read()
+        .unwrap()
+        .clone()
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+        "[]"
+    );
+    let db = rusqlite::Connection::open(server.profile.config_db_path()).unwrap();
+    db.execute_batch("DROP TABLE lib_capability_operations; DROP TABLE lib_capabilities;")
+        .unwrap();
+    let response = server
+        .router
+        .read()
+        .unwrap()
+        .clone()
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("reinstall"));
+}
+
+#[test]
+fn discovery_combines_system_and_user_homes_and_rescans_new_users() {
+    let root = tempfile::tempdir().unwrap();
+    let home = DhttpHome::new(root.path().join("etc/.dhttp"));
+    let users = root.path().join("home");
+    assert!(
+        discover_profiles(
+            &home,
+            Some(&[users.join("alice"), users.join("bob"), users.join("late")])
+        )
+        .unwrap()
+        .is_empty()
+    );
+    for path in [
+        home.join("system/ssl"),
+        users.join("alice/.dhttp/alice/ssl"),
+        users.join("bob/.dhttp/bob/ssl"),
+        users.join("empty"),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let profiles = discover_profiles(
+        &home,
+        Some(&[users.join("alice"), users.join("bob"), users.join("late")]),
+    )
+    .unwrap();
+    assert_eq!(
+        profiles.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        ["alice.dhttp.net", "bob.dhttp.net", "system.dhttp.net"]
+    );
+    assert_eq!(profiles[0].path(), users.join("alice/.dhttp/alice"));
+    assert_eq!(profiles[2].path(), home.join("system"));
+    std::fs::create_dir_all(users.join("late/.dhttp/late/ssl")).unwrap();
+    assert_eq!(
+        discover_profiles(
+            &home,
+            Some(&[users.join("alice"), users.join("bob"), users.join("late")])
+        )
+        .unwrap()
+        .len(),
+        4
+    );
+    std::fs::remove_dir_all(users.join("bob")).unwrap();
+    assert_eq!(
+        discover_profiles(
+            &home,
+            Some(&[users.join("alice"), users.join("bob"), users.join("late")])
+        )
+        .unwrap()
+        .len(),
+        3
+    );
+    // Ordinary user runs retain single-home behavior and discovery errors.
+    assert_eq!(discover_profiles(&home, None).unwrap().len(), 1);
+    assert!(discover_profiles(&DhttpHome::new(root.path().join("missing")), None).is_err());
+}
+
+#[test]
+fn duplicate_identity_across_homes_reports_both_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let home = DhttpHome::new(root.path().join("etc/.dhttp"));
+    let users = root.path().join("home");
+    let system = home.join("alice");
+    let user = users.join("alice/.dhttp/alice");
+    std::fs::create_dir_all(system.join("ssl")).unwrap();
+    std::fs::create_dir_all(user.join("ssl")).unwrap();
+    let error = discover_profiles(&home, Some(&[users.join("alice")]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("alice.dhttp.net"), "{error}");
+    assert!(error.contains(system.to_str().unwrap()), "{error}");
+    assert!(error.contains(user.to_str().unwrap()), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn multiuser_discovery_skips_symlinked_homes_and_profiles() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let home = DhttpHome::new(root.path().join("etc/.dhttp"));
+    let users = root.path().join("home");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(outside.join(".dhttp/alice/ssl")).unwrap();
+    std::fs::create_dir_all(users.join("bob/.dhttp")).unwrap();
+    std::fs::create_dir_all(users.join("carol")).unwrap();
+    symlink(&outside, users.join("alice")).unwrap();
+    symlink(outside.join(".dhttp"), users.join("carol/.dhttp")).unwrap();
+    symlink(outside.join(".dhttp/alice"), users.join("bob/.dhttp/alice")).unwrap();
+    assert!(
+        discover_profiles(
+            &home,
+            Some(&[users.join("alice"), users.join("bob"), users.join("carol")])
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn multiuser_discovery_conflict_preserves_running_server() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server(root.path()).await;
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
+    let mut servers = BTreeMap::from([(server.name().to_owned(), server)]);
+    let users = root.path().join("home");
+    std::fs::create_dir_all(users.join("other/.dhttp/alice/ssl")).unwrap();
+    assert!(
+        reconcile_profiles(
+            &DhttpHome::new(root.path().to_path_buf()),
+            Some(&[users.join("other")]),
+            &mut servers,
+            runtime
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(servers.len(), 1);
+    assert_eq!(
+        servers["alice.dhttp.net"].profile.path(),
+        root.path().join("alice")
+    );
+    servers
+        .get_mut("alice.dhttp.net")
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[test]
+fn account_database_uses_actual_homes_across_distributions() {
+    let homes = parse_account_homes(
+        "root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/var/home/bob:/bin/sh\ncustom:x:1002:1002::/srv/users/custom:/bin/sh\nshared:x:1003:1003::/srv/users/custom:/bin/sh\ninvalid:x:1004:1004::relative:/bin/sh\n",
+    );
+    assert_eq!(
+        homes,
+        ["/home/alice", "/root", "/srv/users/custom", "/var/home/bob"]
+            .map(std::path::PathBuf::from)
     );
 }

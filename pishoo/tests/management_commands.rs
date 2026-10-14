@@ -8,7 +8,8 @@ use serde_json::Value;
 
 fn run(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pishoo"))
-        .env("DHTTP_HOME", home)
+        .env("HOME", home.parent().unwrap())
+        .env("DHTTP_HOME", "/nonexistent-ignored-pishoo-home")
         .args(args)
         .output()
         .unwrap()
@@ -129,7 +130,8 @@ fn component() -> Vec<u8> {
 #[test]
 fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     let root = tempfile::tempdir().unwrap();
-    let home = root.path();
+    let home = &root.path().join(".dhttp");
+    std::fs::create_dir_all(home).unwrap();
     initialize(home, "alice.smith");
     initialize(home, "bob");
     std::fs::write(
@@ -182,7 +184,7 @@ fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     assert!(!String::from_utf8_lossy(&loaded.stderr).contains("Catalog:    installed (disk)"));
     let info: Value =
         serde_json::from_slice(&success(home, &["lib", "info", "note"]).stdout).unwrap();
-    assert_eq!(info["endpoints"][0]["path"], "/api/note/upload");
+    assert_eq!(info["endpoints"][0]["path"], "/std/upload");
     let libs: Value = serde_json::from_slice(&success(home, &["lib"]).stdout).unwrap();
     assert_eq!(libs[0]["id"], "note");
     std::fs::create_dir(home.join("alice.smith/db/note")).unwrap();
@@ -202,7 +204,8 @@ fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
 #[test]
 fn invalid_commands_and_defaults_fail_without_initializing_or_selecting_another_identity() {
     let root = tempfile::tempdir().unwrap();
-    let home = root.path();
+    let home = &root.path().join(".dhttp");
+    std::fs::create_dir_all(home).unwrap();
     initialize(home, "alice");
     for args in [
         vec!["listen"],
@@ -301,11 +304,13 @@ fn service_commands_use_the_installed_manager_without_shell_or_escalation() {
 #[test]
 fn enable_disable_commands_preserve_scope_and_report_saved_configuration() {
     let root = tempfile::tempdir().unwrap();
-    initialize(root.path(), "alice");
-    success(root.path(), &["listen", "--id", "alice", "external"]);
-    let db = rusqlite::Connection::open(root.path().join("alice/db/config.db")).unwrap();
+    let home = root.path().join(".dhttp");
+    std::fs::create_dir_all(&home).unwrap();
+    initialize(&home, "alice");
+    success(&home, &["listen", "--id", "alice", "external"]);
+    let db = rusqlite::Connection::open(home.join("alice/db/config.db")).unwrap();
     for command in ["disable", "disable", "enable", "enable"] {
-        let output = success(root.path(), &[command, "--id", "alice"]);
+        let output = success(&home, &[command, "--id", "alice"]);
         let (listen, enabled) = db
             .query_row("SELECT listen, enabled FROM settings", [], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
@@ -317,16 +322,16 @@ fn enable_disable_commands_preserve_scope_and_report_saved_configuration() {
             String::from_utf8_lossy(&output.stderr).contains("applies configuration automatically")
         );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("Restart Pishoo"));
-        assert!(!root.path().join("alice/db/chat.db").exists());
+        assert!(!home.join("alice/db/chat.db").exists());
     }
     assert_eq!(
-        run(root.path(), &["enable", "extra", "--id", "alice"])
+        run(&home, &["enable", "extra", "--id", "alice"])
             .status
             .code(),
         Some(2)
     );
     assert_eq!(
-        run(root.path(), &["disable", "extra", "--id", "alice"])
+        run(&home, &["disable", "extra", "--id", "alice"])
             .status
             .code(),
         Some(2)

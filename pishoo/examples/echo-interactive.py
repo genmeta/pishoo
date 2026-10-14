@@ -20,8 +20,6 @@ def main() -> int:
     parser.add_argument("--identity", help="local DHTTP identity used by the client")
     args = parser.parse_args()
     env = os.environ.copy()
-    if "DHTTP_HOME" not in env:
-        parser.error("set DHTTP_HOME when connecting to an existing server")
     identity = args.identity or urlsplit(args.url).hostname
     if not identity:
         parser.error("provide --identity or a URL with an identity host")

@@ -1,6 +1,6 @@
 # Pishoo App / Lib 软件包规范
 
-日期：2026-10-14。状态：本仓宿主、打包器与 Workspace/Chat 已按本规范实现；独立商店服务适配及线上部署须另行完成。本文是包元数据、依赖、文件布局和安装行为的当前规范；替代此前把这些信息放入 OpenAPI、为静态文件生成 OpenAPI 操作及迁移旧测试包的约定。WEBC 容器版本仍为 v3，包级签名算法不变，本仓打包入口为 `package-webc WASMER.toml OUTPUT.webc --publisher NAME`。
+日期：2026-10-14。状态：本仓宿主、打包器与 Workspace/Message 已按本规范实现；独立商店服务适配及线上部署须另行完成。本文是包元数据、依赖、文件布局和安装行为的当前规范；替代此前把这些信息放入 OpenAPI、为静态文件生成 OpenAPI 操作及迁移旧测试包的约定。WEBC 容器版本仍为 v3，包级签名算法不变，正式打包入口为 `genmeta pack [PATH] [-o FILE.webc] [--id PUBLISHER]`（需要安装 Pishoo 的 `pishoo-pack`）；独立工具同样支持此参数。原 `cargo run --example package-webc -- WASMER.toml OUTPUT.webc --publisher NAME` 调用继续兼容。
 
 ## 1. 职责和包类型
 
@@ -14,7 +14,7 @@
 | 必需文件 | `/public/index.html` | `/metadata/openapi.json` |
 | 文件映射 | 恰好一个本包 `/public` 映射 | 恰好一个本包 `/metadata` 映射 |
 | OpenAPI | 不使用，不生成静态文件操作 | 只描述后端业务接口及 API 访问声明 |
-| 安装后访问 | `/app/<name>/` | `/api/<name>/` |
+| 安装后访问 | `/std/<name>/` | `/std/<业务路径>` |
 | 运行依赖 | 零个或多个 Lib | 零个或多个其他 Lib |
 
 App 不包含后端或 `/metadata/openapi.json`；Lib 不包含 public 资源或 static-file 操作。WEBC manifest 的 atoms 声明必须与实际内容一致。禁止 `use` 依赖、commands、WEBC 命令 entrypoint 和 bindings；Pishoo 运行依赖不参与 WEBC 模块链接。一个 Component 仍是一个 Lib，不新增 App 运行时结构。
@@ -30,6 +30,7 @@ App 不包含后端或 `/metadata/openapi.json`；Lib 不包含 public 资源或
 | `package.wapm` | `name` | 必填，完整 `<publisher>/<name>`；不再另存 publisher 和短名副本 |
 | `package.wapm` | `version` | 必填，固定 `MAJOR.MINOR.PATCH` |
 | `package.wapm` | `description`、`license` | 必填，非空包说明和许可证标识 |
+| `package.wapm` | `repository` | 可选，非空 HTTPS URL，须有主机且不能包含用户名密码；原字符串参与签名 |
 | `package.pishoo` | `kind` | 必填，`app` 或 `lib`，必须与实际内容和上传集合一致 |
 | `package.pishoo` | `title` | 必填，非空展示名称，不承担包身份 |
 | `package.pishoo` | `dependencies` | 两种包均必填，数组；无依赖显式写 `[]` |
@@ -37,6 +38,8 @@ App 不包含后端或 `/metadata/openapi.json`；Lib 不包含 public 资源或
 | `package.pishoo` | `entry` | 仅 App 必填，固定 `/`；Lib 禁止声明 |
 | `package.pishoo` | `host` | 仅 Lib 必填，能力用途对象；无能力写 `{}`；App 禁止声明 |
 | `package.fs` | 文件映射 | 按包类型映射本包卷，不允许 `from` 指向外部包 |
+
+`[package].repository` 原样保留在签名 manifest 的 `package.wapm.repository`，由宿主 `package_metadata` 派生可选 `repository` 展示字段。省略时不生成空字符串或 null。链接只用于展示，不联网核验、下载或执行；不在 `package.pishoo` 存副本，也不从 OpenAPI 或商店未签名外链推测。
 
 `package.pishoo` 只接受表内字段，不保留扩展袋或重复身份字段。`host` 沿用已支持的 `private-storage`、`request-identity`、`signatures` 非空用途及真实 imports 核对规则；不产生授权或新增宿主能力。
 
@@ -97,15 +100,17 @@ OpenAPI 中的 `x-pishoo` 仅保留已有 API `access-groups`、操作 `access-g
 
 App 从实际 `/public` 文件树派生静态路由：`index.html` 对应 `/`，其他文件对应相对路径；每个文件原生支持 GET/HEAD，无需生成 OpenAPI、operationId 或 static-file 注解。不存在的文件404，存在文件的其他方法405，HEAD 不发送正文。无隐式目录索引或 SPA fallback；SPA 使用 hash 路由。
 
-静态路径拒绝空段、`.`、`..`、百分号、反斜杠、空白及路径歧义；禁止符号链接和重复条目。前端资源使用相对 URL，业务请求使用声明依赖对应的 `/api/<name>/...`。public 不表示匿名公开，所有前端文件和业务请求都经过现有 daccess。
+静态路径拒绝空段、`.`、`..`、百分号、反斜杠、空白及路径歧义；禁止符号链接和重复条目。前端资源使用相对 URL，业务请求使用声明依赖对应的 `/std/<业务路径>`。public 不表示匿名公开，所有前端文件和业务请求都经过现有 daccess。
 
 ## 6. 安装、更新、卸载和数据
 
 安装入口继续按 `kind` 区分 app/lib；省略 kind 的既有原生请求仍按 lib 处理。在线安装/更新/卸载即时生效，在途请求保留既有资源；离线 CLI 修改在下次加载生效。
 
+本机管理 API 仅使用短名：`GET/PUT/DELETE /std/sys/package/libs/<name>` 和 `/std/sys/package/apps/<name>`。GET/DELETE 从同类安装登记解析完整 ID，PUT 从已验签包取得 publisher/name 并核对短名与 URL；不接受带发布者的旧管理路径。响应仍返回完整包 ID，更新继续核对发布者 owner_hash。商店路径和精确依赖继续使用完整包身份。
+
 磁盘使用完整身份：`app/<publisher>/<name>/app.webc`、`lib/<publisher>/<name>/lib.webc`、后端数据 `db/<publisher>/<name>/`。同一用户身份内 App、Lib 各自按短名唯一；同类跨发布者同名不能共存，两个类型名称空间独立。
 
-安装事实以现有 `config.db` 登记为准，登记依赖必须与已验签包清单一致。未登记文件忽略，已登记文件缺失或不一致时报错，不扫描导入。更新不得破坏已登记 App/Lib 的依赖约束；已有代理与已安装具体挂载范围冲突时拒绝操作，不暗中遮蔽。
+安装事实以现有 `config.db` 登记为准，登记依赖必须与已验签包清单一致。未登记文件忽略，已登记文件缺失或不一致时报错，不扫描导入。更新不得破坏已登记 App/Lib 的依赖约束；`/std` 全部保留且不回退代理；旧 `/api`、`/app` 正常代理，无兼容别名。
 
 卸载 App 只移除前端制品、登记及其依赖关联，保留 Lib。任何仍被已安装 App/Lib 依赖的 Lib 不允许单独卸载或替换为不满足依赖的版本。显式卸载无引用 Lib 也保留私有数据，安装/更新/卸载均不自动改写 daccess。
 
@@ -119,10 +124,16 @@ App 从实际 `/public` 文件树派生静态路由：`index.html` 对应 `/`，
 
 按用户要求不迁移旧测试包：新格式不从旧 OpenAPI 元数据回退，不接受旧合包，不自动拆包、改签或重写数据库；开发者从源码重建发布。需要清理测试发布时另行执行明确的数据操作，本规范修订不删除线上或本地数据。
 
-本仓实施经用户逐项批准的接口差异见 design 清单：统一 manifest 读取、CLI 复用整包验签、前端展示字段以及独立 Chat 私有表归属。宿主安装关系仍复用现有 config.db 表，不新增状态容器或安装账本。独立商店服务适配与发布部署不由本次源码变更代替。
+本仓实施经用户逐项批准的接口差异见 design 清单：统一 manifest 读取、CLI 复用整包验签、前端展示字段以及独立 Message 数据归属和能力登记。宿主安装关系仍复用现有 config.db 表，不新增状态容器或安装账本。独立商店服务适配与发布部署不由本次源码变更代替。
 
 ## 参考
 
 - [Debian 包控制字段](https://www.debian.org/doc/debian-policy/ch-controlfields.html#debian-binary-package-control-files-debian-control)：包身份和 Depends 等关系属于包元数据。
 - [RPM 依赖字段](https://rpm.org/docs/4.20.x/manual/spec.html#dependencies)：区分 Requires 与 BuildRequires。
 - [APT 手册](https://manpages.debian.org/bookworm/apt/apt-get.8.en.html)：remove、purge 和 autoremove 是不同操作；本阶段仅保留已有安装/卸载范围。
+
+## 标准服务与能力登记
+
+`/std` 是协议命名空间，ACL、Contact、Package 和现有宿主基础设施原生实现，不作为 WASM 能力。Lib 声明 `/message`、`/profile`、`/workspace/context` 等业务路径，宿主仅加 `/std`；guest 收到去掉该前缀的业务路径与原 query。App 挂载 `/std/<name>/`，同名 App/Lib 可共存，按实际文件 GET/HEAD 和声明操作分派。不同 Lib 不共享路径，原生路径和静态操作冲突拒绝安装、更新或加载；不存在路径404，未声明方法405。
+
+访问组来自验签 OpenAPI 的 access-groups/access-group，与包版本一起登记 config.db 的 lib_capabilities/lib_capability_operations；无组写零行。GET `/std/acl/capabilities` 返回 `<完整Lib ID>#<组>`、title、所属包版本和实际端点，经 daccess 授权，不能代表联系人的授权或激活状态。普通安装事务更新能力并恢复失败发布；启动只核验登记，不扫描或隐式导入旧安装。卸载级联删除能力并保留数据和 ACL，换提供者前须明确处理旧路径规则。详见 [std 服务与业务能力边界](std-capabilities-design.md)。

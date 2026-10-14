@@ -13,9 +13,18 @@ async fn main() {
         }
         return;
     }
-    let subscriber = dhttp_home::DhttpHome::load(dhttp_home::HomeScope::User)
-        .map_err(std::io::Error::other)
-        .and_then(|home| logging(&home));
+    #[cfg(target_os = "linux")]
+    let multiuser = rustix::process::geteuid().is_root();
+    #[cfg(not(target_os = "linux"))]
+    let multiuser = false;
+    let home = if multiuser {
+        dhttp_home::DhttpHome::load(dhttp_home::HomeScope::Global).map_err(std::io::Error::other)
+    } else {
+        dirs::home_dir()
+            .map(dhttp_home::DhttpHome::for_user_home_dir)
+            .ok_or_else(|| std::io::Error::other("cannot locate user home directory"))
+    };
+    let subscriber = home.and_then(|home| logging(&home));
     match subscriber {
         Ok(subscriber) => subscriber.init(),
         Err(error) => {

@@ -169,7 +169,11 @@ async fn main() -> Result<()> {
     let mut remaining = 64 * 1024 * 1024 - backend.len();
     let content = public_directory(&directory, "", &mut count, &mut remaining, 0)?;
     // Local-only loading; do not refresh OCSP or initialize a network.
-    let endpoint = dhttp::Endpoint::load(publisher)
+    let home = dhttp_home::DhttpHome::for_user_home_dir(
+        dirs::home_dir().ok_or("cannot locate user home directory")?,
+    );
+    let profile = home.identity_profile(publisher)?;
+    let endpoint = dhttp::Endpoint::load_from(profile.path())
         .await
         .map_err(|e| format!("missing or invalid local credentials for {publisher}: {e}"))?;
     if endpoint.name() != publisher {
