@@ -6,11 +6,14 @@ version = "0.9.0-preview.1"
 edition = "2024"
 license = "Apache-2.0"
 autobins = false
+default-run = "pishoo"
 
 [lib]
 path = "src/pishoo.rs"
 
 [dependencies]
+clap = "4"
+url = "2"
 ddns = { version = "0.8.0", package = "dyns", features = ["h3", "mdns"] }
 qprotocol = { version = "0.7.0" }
 dhttp = { version = "0.7.0" }
@@ -53,7 +56,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 futures = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "signal", "net", "process"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 wasmtime = "47.0.4"
 wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
@@ -89,4 +92,8 @@ path = "examples/client.rs"
 
 [[example]]
 name = "package-webc"
+path = "tools/package-webc.rs"
+
+[[bin]]
+name = "pishoo-pack"
 path = "tools/package-webc.rs"

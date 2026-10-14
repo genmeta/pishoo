@@ -449,10 +449,10 @@ async fn run() -> Result<(), Failure> {
                 );
             }
         }
-        "get" | "post" | "put" | "patch" => {
+        "get" | "post" | "put" | "patch" | "delete" => {
             let target = args
                 .next()
-                .ok_or("usage: pishoo-client get|post|put|patch URL [BODY]")?;
+                .ok_or("usage: pishoo-client get|post|put|patch|delete URL [BODY]")?;
             let uri: http::Uri = if target.starts_with('/') {
                 format!("https://{identity}{target}").parse()?
             } else {

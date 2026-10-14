@@ -1,10 +1,12 @@
 //! Pishoo WEBC v3 profile: immutable container, publication signature and route binding.
 // Protocol matches the independent store's WEBC package validation.
-use crate::{Error, Result};
+use std::collections::{BTreeMap, HashSet};
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+
+use crate::{Error, Result};
 const PACKAGE_LIMIT: usize = 64 * 1024 * 1024;
 const METHODS: [&str; 8] = [
     "get", "head", "post", "put", "patch", "delete", "options", "trace",
@@ -135,6 +137,14 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
         ));
     }
     let metadata = package_metadata(&container)?;
+    if metadata["kind"] == "app"
+        && [
+            "acl", "contact", "contacts", "sys", "pishoo", "file", "dhttp",
+        ]
+        .contains(&metadata["name"].as_str().unwrap())
+    {
+        return Err(invalid("App name conflicts with a native std service"));
+    }
     let mappings = manifest
         .filesystem()
         .map_err(|_| invalid("invalid WEBC filesystem mappings"))?
@@ -452,6 +462,35 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     let mut value = serde_json::json!({"id":id,"publisher":publisher,"name":name,"version":version,
         "kind":kind,"title":text(annotation,"title")?,"description":text(wapm,"description")?,
         "license":text(wapm,"license")?,"changelog":text(annotation,"changelog")?,"dependencies":dependencies});
+    if let Some(repository) = wapm.get("repository") {
+        let raw = repository
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| invalid("repository must be a nonempty HTTPS URL"))?;
+        let url = url::Url::parse(raw).map_err(|_| invalid("invalid repository URL"))?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !raw
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+            || raw[8..]
+                .split(['/', '?', '#'])
+                .next()
+                .is_none_or(str::is_empty)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || raw[8..]
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|s| s.contains('@'))
+            || raw.chars().any(char::is_whitespace)
+        {
+            return Err(invalid(
+                "repository must be an HTTPS URL with a host and without credentials",
+            ));
+        }
+        value["repository"] = repository.clone();
+    }
     if kind == "app" {
         if annotation["entry"] != "/" || annotation.get("host").is_some() {
             return Err(invalid("app requires entry / and forbids host"));

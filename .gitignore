@@ -3,10 +3,10 @@
 debug/
 target/
 xtask/target/
-pishoo/workspace/node_modules/
-pishoo/workspace/dist/
-pishoo/workspace/playwright-report/
-pishoo/workspace/test-results/
+std/apps/workspace/node_modules/
+std/apps/workspace/dist/
+std/apps/workspace/playwright-report/
+std/apps/workspace/test-results/
 /output/playwright/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
@@ -77,4 +77,4 @@ pishoo.pid
 /pishoo/docs/workspace/VM_*.md
 /pishoo/docs/workspace/source/
 
-pishoo/workspace/package-dist/
+std/apps/workspace/package-dist/

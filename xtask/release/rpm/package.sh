@@ -84,9 +84,9 @@ URL:            https://www.dhttp.net
 Vendor:         Genmeta Tech Limited
 Source0:        mime.types
 Source1:        pishoo.service
-Source2:        workspace-lib.webc
+Source2:        profile-lib.webc
 Source3:        workspace-app.webc
-Source4:        chat-lib.webc
+Source4:        message-lib.webc
 BuildArch:      noarch
 AutoReqProv:    no
 Requires(pre):  shadow-utils
@@ -106,17 +106,17 @@ Common configuration files and the systemd unit for the pishoo proxy engine.
 rm -rf %{buildroot}
 install -D -m 0644 %{SOURCE0} %{buildroot}/etc/dhttp/mime.types
 install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/pishoo.service
-install -D -m 0644 %{SOURCE2} %{buildroot}/usr/share/pishoo/default-artifacts/workspace-lib.webc
-install -D -m 0644 %{SOURCE4} %{buildroot}/usr/share/pishoo/default-artifacts/chat-lib.webc
+install -D -m 0644 %{SOURCE2} %{buildroot}/usr/share/pishoo/default-artifacts/profile-lib.webc
+install -D -m 0644 %{SOURCE4} %{buildroot}/usr/share/pishoo/default-artifacts/message-lib.webc
 install -D -m 0644 %{SOURCE3} %{buildroot}/usr/share/pishoo/default-artifacts/workspace-app.webc
 
 %files
 %dir /etc/dhttp
 /etc/dhttp/mime.types
 %{_unitdir}/pishoo.service
-/usr/share/pishoo/default-artifacts/workspace-lib.webc
+/usr/share/pishoo/default-artifacts/profile-lib.webc
 /usr/share/pishoo/default-artifacts/workspace-app.webc
-/usr/share/pishoo/default-artifacts/chat-lib.webc
+/usr/share/pishoo/default-artifacts/message-lib.webc
 
 %pre
 if getent group dhttp >/dev/null; then
@@ -149,10 +149,13 @@ write_binary_spec() {
     local install_lines=''
     local file_lines=''
     source_lines+='Source0:        pishoo
+Source1:        pishoo-pack
 '
     install_lines+='install -D -m 0755 %{SOURCE0} %{buildroot}/usr/bin/pishoo
+install -D -m 0755 %{SOURCE1} %{buildroot}/usr/bin/pishoo-pack
 '
     file_lines+='/usr/bin/pishoo
+/usr/bin/pishoo-pack
 '
     cat > "$1" <<EOF_SPEC
 Name:           pishoo
@@ -205,7 +208,7 @@ run_common() {
     install -D -m 0644 xtask/deb/common/etc/dhttp/mime.types "$topdir/SOURCES/mime.types"
     install -D -m 0644 xtask/deb/pishoo-common.pishoo.service "$topdir/SOURCES/pishoo.service"
     defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
-    for artifact in chat-lib.webc workspace-lib.webc workspace-app.webc; do
+    for artifact in message-lib.webc profile-lib.webc workspace-app.webc; do
         [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
         install -m 0644 "$defaults/$artifact" "$topdir/SOURCES/$artifact"
     done
@@ -261,6 +264,7 @@ run_binary() {
     local spec="$topdir/SPECS/pishoo.spec"
     write_binary_spec "$spec"
     install -D -m 0755 "$release_dir/pishoo" "$topdir/SOURCES/pishoo"
+    install -D -m 0755 "$release_dir/pishoo-pack" "$topdir/SOURCES/pishoo-pack"
 
     rpmbuild -bb \
         --target="$arch" \

@@ -227,12 +227,20 @@ fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusq
     conn.pragma_update(None, "foreign_keys", true)?;
     if create {
         conn.pragma_update(None, "synchronous", "FULL")?;
-        let ready: bool = conn.query_row("SELECT count(*)=4 FROM sqlite_master WHERE type='table' AND name IN ('libs','apps','app_dependencies','lib_dependencies')",[],|row|row.get(0))?;
+        let ready: bool = conn.query_row("SELECT count(*)=6 FROM sqlite_master WHERE type='table' AND name IN ('libs','apps','app_dependencies','lib_dependencies','lib_capabilities','lib_capability_operations')",[],|row|row.get(0))?;
         if !ready {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(include_str!("install.sql"))?;
             tx.commit()?;
         }
+    }
+    let broken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if broken && !create {
+        return Err(Error::InvalidConfig("installed package/dependency/capability registration has broken references; reinstall the affected package or explicitly repair registration".into()));
     }
     Ok(conn)
 }
@@ -299,25 +307,201 @@ fn check_name(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_proxy_mount(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
-    let prefix = format!(
-        "/{}/{}",
-        if kind == "app" { "app" } else { "api" },
-        id.rsplit('/').next().unwrap()
-    );
-    let mut stmt = conn.prepare("SELECT location FROM proxy_locations")?;
-    for location in stmt.query_map([], |row| row.get::<_, String>(0))? {
-        let location = location?;
-        let path = location.strip_prefix("= ").unwrap_or(&location);
-        if path == prefix
-            || path
-                .strip_prefix(&prefix)
-                .is_some_and(|tail| tail.starts_with('/'))
-        {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("cannot install {id}: proxy {location} occupies {prefix}"),
-            )));
+// All values are derived from the authenticated container; no runtime registry.
+fn capability_rows(
+    package: &webc::Container,
+) -> Result<Vec<(String, String, Vec<(String, String)>)>> {
+    let document: serde_json::Value =
+        serde_json::from_slice(&super::package_file(package, "/metadata/openapi.json")?)
+            .map_err(|e| Error::InvalidComponent(e.to_string()))?;
+    let mut rows = Vec::new();
+    if let Some(groups) = document["x-pishoo"]["access-groups"].as_object() {
+        for (id, group) in groups {
+            let mut endpoints = Vec::new();
+            for (path, item) in document["paths"].as_object().unwrap() {
+                for method in [
+                    "get", "head", "post", "put", "patch", "delete", "options", "trace",
+                ] {
+                    if item[method]["x-pishoo"]["access-group"] == *id {
+                        endpoints.push((method.to_ascii_uppercase(), format!("/std{path}")));
+                    }
+                }
+            }
+            endpoints.sort();
+            rows.push((
+                id.clone(),
+                group["title"].as_str().unwrap().to_owned(),
+                endpoints,
+            ));
+        }
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+fn check_capabilities(
+    conn: &rusqlite::Connection,
+    id: &str,
+    package: &webc::Container,
+) -> Result<()> {
+    let ready: bool = conn.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('lib_capabilities','lib_capability_operations')", [], |r| r.get(0))?;
+    if !ready {
+        return Err(Error::InvalidConfig(format!(
+            "capability registration is missing; reinstall {id} using normal installation"
+        )));
+    }
+    let mut actual = Vec::new();
+    for row in conn.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_id=?1 ORDER BY capability_id")?
+        .query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))? {
+        let (capability, title) = row?;
+        let endpoints = conn.prepare("SELECT method,path FROM lib_capability_operations WHERE lib_id=?1 AND capability_id=?2 ORDER BY method,path")?
+            .query_map(rusqlite::params![id,capability], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>,_>>()?;
+        actual.push((capability,title,endpoints));
+    }
+    if actual != capability_rows(package)? {
+        return Err(Error::InvalidConfig(format!(
+            "capability registration differs from signed package; reinstall {id} using normal installation"
+        )));
+    }
+    Ok(())
+}
+
+fn package_routes(
+    package: &webc::Container,
+    id: &str,
+    kind: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut routes = std::collections::BTreeMap::new();
+    if kind == "lib" {
+        let api =
+            super::validate_openapi(&super::package_file(package, "/metadata/openapi.json")?)?;
+        for (path, item) in api.paths.as_ref().unwrap() {
+            routes.insert(
+                format!("/std{path}"),
+                item.methods()
+                    .into_iter()
+                    .map(|(m, _)| m.as_str().to_owned())
+                    .collect(),
+            );
+        }
+    } else {
+        let mappings = package.manifest().filesystem().unwrap().unwrap();
+        let mapping = &mappings[0];
+        let volume = package.get_volume(&mapping.volume_name).unwrap();
+        let root = mapping
+            .host_path
+            .as_deref()
+            .unwrap_or("/")
+            .trim_end_matches('/');
+        let mut pending = vec![format!("{root}/")];
+        while let Some(dir) = pending.pop() {
+            for (name, _, metadata) in volume.read_dir(dir.as_str()).unwrap() {
+                let child = format!("{}{name}", dir);
+                if matches!(metadata, webc::Metadata::Dir { .. }) {
+                    pending.push(format!("{child}/"));
+                } else {
+                    let suffix = child.strip_prefix(root).unwrap();
+                    let suffix = if suffix == "/index.html" { "/" } else { suffix };
+                    let path = format!("/std/{}{suffix}", id.rsplit('/').next().unwrap());
+                    routes.insert(path, vec!["GET".into(), "HEAD".into()]);
+                }
+            }
+        }
+        // The canonical root's redirect is also an actual static operation.
+        routes.insert(
+            format!("/std/{}", id.rsplit('/').next().unwrap()),
+            vec!["GET".into(), "HEAD".into()],
+        );
+    }
+    Ok(routes)
+}
+
+fn check_routes(
+    profile: &IdentityProfile,
+    conn: &rusqlite::Connection,
+    id: &str,
+    kind: &str,
+    package: &webc::Container,
+) -> Result<()> {
+    let routes = package_routes(package, id, kind)?;
+    for other_kind in ["lib", "app"] {
+        for (other, version) in registered_packages(conn, other_kind, None)? {
+            if other_kind == kind && other == id {
+                continue;
+            }
+            let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
+            let other_package = read_package(&artifact_bytes(&root, &other, other_kind)?)?;
+            let metadata = package_metadata(&other_package)?;
+            check_resource_identity(&metadata, &other)?;
+            if metadata["version"] != version {
+                return Err(Error::InvalidConfig(format!(
+                    "registered version differs from file for {other}"
+                )));
+            }
+            for (path, methods) in package_routes(&other_package, &other, other_kind)? {
+                if let Some(ours) = routes.get(&path)
+                    && ((kind == "lib" && other_kind == "lib")
+                        || methods.iter().any(|m| ours.contains(m)))
+                {
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("route {path} conflicts with installed {other_kind} {other}"),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ACL is path based, so a newly installed provider must not silently inherit
+// existing rules for its operations. Explicit rule cleanup precedes takeover.
+fn check_existing_rules(
+    profile: &IdentityProfile,
+    conn: &rusqlite::Connection,
+    id: &str,
+    kind: &str,
+    package: &webc::Container,
+) -> Result<()> {
+    let old = registered_packages(conn, kind, Some(id));
+    let previous = match old {
+        Ok(_) => {
+            let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(kind))?;
+            package_routes(&read_package(&artifact_bytes(&root, id, kind)?)?, id, kind)?
+        }
+        Err(Error::RouteNotFound) => std::collections::BTreeMap::new(),
+        Err(e) => return Err(e),
+    };
+    let path = profile.join("db/access.db");
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    if !path.symlink_metadata()?.is_file() {
+        return Err(Error::InvalidConfig(
+            "access.db must be a regular file".into(),
+        ));
+    }
+    let access =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    for (path, methods) in package_routes(package, id, kind)? {
+        for method in methods {
+            if previous.get(&path).is_some_and(|m| m.contains(&method)) {
+                continue;
+            }
+            let exists: bool = access.query_row(
+                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*'))",
+                rusqlite::params![path.trim_end_matches('/'), method],
+                |r| r.get(0),
+            )?;
+            if exists {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "existing ACL rules for {method} {path}; explicitly remove/review these rules before installing a new provider"
+                    ),
+                )));
+            }
         }
     }
     Ok(())
@@ -328,9 +512,9 @@ fn save_registration(
     id: &str,
     kind: &str,
     api: &serde_json::Value,
+    package: &webc::Container,
 ) -> Result<()> {
     check_name(conn, id, kind)?;
-    check_proxy_mount(conn, id, kind)?;
     if kind == "lib" {
         let incompatible: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_dependencies WHERE lib_id=?1 AND version<>?2) OR EXISTS(SELECT 1 FROM lib_dependencies WHERE dependency_id=?1 AND version<>?2)",rusqlite::params![id,api["version"].as_str().unwrap()],|row|row.get(0))?;
         if incompatible {
@@ -368,6 +552,29 @@ fn save_registration(
             &format!("INSERT INTO {edges}({source},{target},version) VALUES(?1,?2,?3)"),
             rusqlite::params![id, dependency, version],
         )?;
+    }
+
+    if kind == "lib" {
+        conn.execute("DELETE FROM lib_capabilities WHERE lib_id=?1", [id])?;
+        for (capability, title, endpoints) in capability_rows(package)? {
+            conn.execute(
+                "INSERT INTO lib_capabilities(lib_id,capability_id,title) VALUES(?1,?2,?3)",
+                rusqlite::params![id, capability, title],
+            )?;
+            for (method, path) in endpoints {
+                conn.execute("INSERT INTO lib_capability_operations(lib_id,capability_id,method,path) VALUES(?1,?2,?3,?4)",rusqlite::params![id,capability,method,path])?;
+            }
+        }
+    }
+    let broken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+        [],
+        |row| row.get(0),
+    )?;
+    if broken {
+        return Err(Error::InvalidConfig(
+            "installation would leave broken package/dependency/capability references".into(),
+        ));
     }
 
     Ok(())
@@ -531,6 +738,8 @@ pub(crate) fn installed_libs(
                 )));
             }
             check_registration_dependencies(&conn, &registered, "lib", &metadata)?;
+            check_capabilities(&conn, &registered, &package)?;
+            check_routes(profile, &conn, &registered, "lib", &package)?;
             Ok(package)
         }) {
             Ok(package) => lib_metadata(&package, Some(&registered)),
@@ -680,7 +889,6 @@ fn install_artifact(
     disk_ids(&root)?;
     let mut database = installation_database(profile, true)?;
     check_name(&database, id, kind)?;
-    check_proxy_mount(&database, id, kind)?;
     match resource_dir(&root, id) {
         Ok(dir) => check_component_target(&dir, kind)?,
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -754,7 +962,9 @@ fn install_artifact(
                 check_publisher_update(&current, id, bytes, kind)?;
                 let tx =
                     database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                save_registration(&tx, id, kind, &metadata)?;
+                check_routes(profile, &tx, id, kind, &package)?;
+                check_existing_rules(profile, &tx, id, kind, &package)?;
+                save_registration(&tx, id, kind, &metadata, &package)?;
                 let artifact = format!("{kind}.webc");
                 let backup = temporary_name()?;
                 let previous =
@@ -817,7 +1027,9 @@ fn install_artifact(
                 let leaf = id.rsplit('/').next().unwrap();
                 let tx =
                     database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                save_registration(&tx, id, kind, &metadata)?;
+                check_routes(profile, &tx, id, kind, &package)?;
+                check_existing_rules(profile, &tx, id, kind, &package)?;
+                save_registration(&tx, id, kind, &metadata, &package)?;
                 renameat(&parent, &name, &target_parent, leaf).map_err(layout_error)?;
                 let rollback = scopeguard::guard((), |_| {
                     let _ = renameat(&target_parent, leaf, &parent, &name);
@@ -950,6 +1162,7 @@ pub(crate) fn installed_apps(
             )));
         }
         check_registration_dependencies(&conn, &id, "app", &api)?;
+        check_routes(profile, &conn, &id, "app", &package)?;
         apps.insert(id, package);
     }
     Ok(apps)

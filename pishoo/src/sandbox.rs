@@ -108,6 +108,19 @@ impl Sandbox {
     }
 
     pub(crate) fn load_libs(&mut self, profile: &IdentityProfile) -> Result<()> {
+        let parent = std::fs::File::from(
+            rustix::fs::open(
+                profile.path(),
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        );
+        rustix::fs::flock(&parent, rustix::fs::FlockOperation::LockShared)
+            .map_err(std::io::Error::from)?;
         let mut candidates = HashMap::new();
         let registered = installed_libs(profile, None)?;
         match lib_root(profile) {
@@ -214,131 +227,103 @@ impl Sandbox {
                 response
             }
         });
-        let app_sandbox = sandbox.clone();
-        let frontend = axum::routing::any(move |request: http::Request<axum::body::Body>| {
-            let sandbox = app_sandbox.clone();
-            async move {
-                let result: Result<axum::response::Response> = (|| {
-                    let tail = request
-                        .uri()
-                        .path()
-                        .strip_prefix("/app/")
-                        .ok_or(Error::RouteNotFound)?;
-                    let name = tail.split('/').next().unwrap();
-                    let package = {
-                        let sandbox = sandbox.read().unwrap();
-                        let id = sandbox
-                            .apps
-                            .keys()
-                            .find(|id| id.rsplit('/').next() == Some(name))
-                            .ok_or(Error::RouteNotFound)?;
-                        sandbox.apps[id].clone()
-                    };
-                    let suffix = tail.strip_prefix(name).unwrap();
-                    let path = if suffix.is_empty() { "/" } else { suffix };
-                    if path == "/index.html" {
-                        return Err(Error::RouteNotFound);
-                    }
-                    let file = if path == "/" {
-                        "/public/index.html".to_owned()
-                    } else {
-                        format!("/public{path}")
-                    };
-                    let bytes = package_file(&package, &file).map_err(|_| Error::RouteNotFound)?;
-                    if !matches!(request.method(), &http::Method::GET | &http::Method::HEAD) {
-                        return Err(Error::MethodNotAllowed);
-                    }
-                    if suffix.is_empty()
-                        && matches!(request.method(), &http::Method::GET | &http::Method::HEAD)
-                    {
-                        let location = match request.uri().query() {
-                            Some(query) => format!("{}/?{query}", request.uri().path()),
-                            None => format!("{}/", request.uri().path()),
-                        };
-                        return Ok(axum::response::IntoResponse::into_response(
-                            axum::response::Redirect::temporary(&location),
-                        ));
-                    }
-                    let length = bytes.len();
-                    http::Response::builder()
-                        .status(http::StatusCode::OK)
-                        .header(
-                            http::header::CONTENT_TYPE,
-                            mime_guess::from_path(&file)
-                                .first_or_octet_stream()
-                                .to_string(),
-                        )
-                        .header(http::header::CONTENT_LENGTH, length)
-                        .header(http::header::CACHE_CONTROL, "no-store")
-                        .header("x-content-type-options", "nosniff")
-                        .header("referrer-policy", "no-referrer")
-                        .header("cross-origin-resource-policy", "same-origin")
-                        .header("x-frame-options", "DENY")
-                        .body(if request.method() == http::Method::HEAD {
-                            axum::body::Body::empty()
-                        } else {
-                            axum::body::Body::from(bytes)
-                        })
-                        .map_err(Error::Http)
-                })();
-                result.unwrap_or_else(reject_api)
-            }
-        });
         let api = axum::routing::any(move |request: http::Request<axum::body::Body>| {
-            let (endpoint, sandbox) = (endpoint.clone(), sandbox.clone());
-            let access = access.clone();
-            let native_api = native_api.clone();
+            let (endpoint, sandbox, access, native_api) = (
+                endpoint.clone(),
+                sandbox.clone(),
+                access.clone(),
+                native_api.clone(),
+            );
             async move {
                 let result: Result<axum::response::Response> = async {
-                    let tail = request
+                    let path = request
                         .uri()
                         .path()
-                        .strip_prefix("/api/")
-                        .ok_or(Error::RouteNotFound)?;
-                    let name = tail.split('/').next().unwrap();
-                    let (lib, tasks) = {
+                        .strip_prefix("/std")
+                        .ok_or(Error::RouteNotFound)?
+                        .to_owned();
+                    // One exact snapshot, then release the shared collection lock.
+                    let (lib, tasks, frontend) = {
                         let sandbox = sandbox.read().unwrap();
-                        let id = sandbox
+                        let lib = sandbox
                             .libs
-                            .keys()
-                            .find(|id| id.rsplit('/').next() == Some(name))
-                            .ok_or(Error::RouteNotFound)?;
-                        (sandbox.libs[id].clone(), sandbox.tasks.clone())
+                            .values()
+                            .find(|lib| {
+                                lib.openapi
+                                    .paths
+                                    .as_ref()
+                                    .is_some_and(|paths| paths.contains_key(&path))
+                            })
+                            .cloned();
+                        let tail = path.trim_start_matches('/');
+                        let name = tail.split('/').next().unwrap();
+                        let frontend = sandbox
+                            .apps
+                            .iter()
+                            .find(|(id, _)| id.rsplit('/').next() == Some(name))
+                            .and_then(|(_, package)| {
+                                let suffix = tail.strip_prefix(name).unwrap();
+                                let file = if suffix.is_empty() || suffix == "/" {
+                                    "/public/index.html".to_owned()
+                                } else {
+                                    format!("/public{suffix}")
+                                };
+                                if suffix == "/index.html" {
+                                    return None;
+                                }
+                                package_file(package, &file)
+                                    .ok()
+                                    .map(|bytes| (file, bytes, suffix.is_empty()))
+                            });
+                        (lib, sandbox.tasks.clone(), frontend)
                     };
-                    // The request owns its exact Lib snapshot before releasing
-                    // the collection lock. Package identity stays publisher/name.
-                    let suffix = tail.strip_prefix(name).unwrap();
-                    let at_root = suffix.is_empty();
-                    let suffix = if at_root {
-                        "/".to_owned()
-                    } else {
-                        suffix.to_owned()
+                    if let Some((file, bytes, redirect)) = &frontend
+                        && matches!(request.method(), &http::Method::GET | &http::Method::HEAD)
+                    {
+                        if *redirect {
+                            let location = match request.uri().query() {
+                                Some(query) => format!("{}/?{query}", request.uri().path()),
+                                None => format!("{}/", request.uri().path()),
+                            };
+                            return Ok(axum::response::IntoResponse::into_response(
+                                axum::response::Redirect::temporary(&location),
+                            ));
+                        }
+                        return http::Response::builder()
+                            .status(http::StatusCode::OK)
+                            .header(
+                                http::header::CONTENT_TYPE,
+                                mime_guess::from_path(file)
+                                    .first_or_octet_stream()
+                                    .to_string(),
+                            )
+                            .header(http::header::CONTENT_LENGTH, bytes.len())
+                            .header(http::header::CACHE_CONTROL, "no-store")
+                            .header("x-content-type-options", "nosniff")
+                            .header("referrer-policy", "no-referrer")
+                            .header("cross-origin-resource-policy", "same-origin")
+                            .header("x-frame-options", "DENY")
+                            .body(if request.method() == http::Method::HEAD {
+                                axum::body::Body::empty()
+                            } else {
+                                axum::body::Body::from(bytes.clone())
+                            })
+                            .map_err(Error::Http);
+                    }
+                    let Some(lib) = lib else {
+                        return Err(if frontend.is_some() {
+                            Error::MethodNotAllowed
+                        } else {
+                            Error::RouteNotFound
+                        });
                     };
-                    let item = lib
-                        .openapi
-                        .paths
-                        .as_ref()
-                        .and_then(|paths| paths.get(&suffix))
-                        .ok_or(Error::RouteNotFound)?;
-                    let _operation = item
+                    let item = &lib.openapi.paths.as_ref().unwrap()[&path];
+                    if !item
                         .methods()
                         .into_iter()
-                        .find(|(method, _)| method == *request.method())
-                        .map(|(_, operation)| operation)
-                        .ok_or(Error::MethodNotAllowed)?;
-                    // Canonicalize only declared page roots so browser-relative
-                    // URLs stay inside this Lib's mount, regardless of its name.
-                    if at_root
-                        && (request.method() == http::Method::GET
-                            || request.method() == http::Method::HEAD)
+                        .any(|(method, _)| method == *request.method())
                     {
-                        let location = match request.uri().query() {
-                            Some(query) => format!("{}/?{query}", request.uri().path()),
-                            None => format!("{}/", request.uri().path()),
-                        };
-                        return Ok(axum::response::IntoResponse::into_response(
-                            axum::response::Redirect::temporary(&location),
-                        ));
+                        return Err(Error::MethodNotAllowed);
                     }
                     let handshake = request
                         .extensions()
@@ -357,13 +342,13 @@ impl Sandbox {
                     )?;
                     let mut request = request.map(|body| body.map_err(Into::into).boxed_unsync());
                     let mut parts = request.uri().clone().into_parts();
-                    let path = match request.uri().query() {
-                        Some(query) => format!("{suffix}?{query}"),
-                        None => suffix,
-                    };
                     parts.path_and_query = Some(
-                        path.parse()
-                            .map_err(|_| Error::BadRequest("invalid API path".into()))?,
+                        match request.uri().query() {
+                            Some(query) => format!("{path}?{query}"),
+                            None => path,
+                        }
+                        .parse()
+                        .map_err(|_| Error::BadRequest("invalid API path".into()))?,
                     );
                     *request.uri_mut() = http::Uri::from_parts(parts)
                         .map_err(|_| Error::BadRequest("invalid request URI".into()))?;
@@ -376,13 +361,14 @@ impl Sandbox {
                 result.unwrap_or_else(reject_api)
             }
         });
-        // The reserved namespace is fixed; Lib lookup changes immediately with
-        // the shared collection, without rebuilding the Server router.
         axum::Router::new()
-            .route("/std/pishoo/loaded-apps", app_catalog)
-            .route("/std/pishoo/loaded-libs", catalog)
-            .route("/api/{*path}", api)
-            .route("/app/{*path}", frontend)
+            .route("/std/sys/package/loaded-apps", app_catalog)
+            .route("/std/sys/package/loaded-libs", catalog)
+            .route(
+                "/std",
+                axum::routing::any(|| async { reject_api(Error::RouteNotFound) }),
+            )
+            .route("/std/{*path}", api)
     }
 }
 
@@ -442,10 +428,7 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
         if let Some(paths) = &openapi.paths {
             for (path, item) in paths {
                 for (method, operation) in item.methods() {
-                    let path = id.map_or_else(
-                        || path.clone(),
-                        |id| format!("/api/{}{path}", id.rsplit('/').next().unwrap()),
-                    );
+                    let path = format!("/std{path}");
                     endpoints.push(serde_json::json!({"method":method.as_str(),"path":path,
                         "description":operation.summary.as_deref().or(operation.description.as_deref())}));
                 }
@@ -511,15 +494,13 @@ pub(crate) fn lib_management_router(
         }
     };
     axum::Router::new()
-        .route("/std/pishoo/libs", any(handler.clone()))
-        .route("/std/pishoo/libs/{id}", any(handler.clone()))
-        .route("/std/pishoo/libs/{publisher}/{name}", any(handler.clone()))
-        .route("/std/pishoo/apps", any(handler.clone()))
-        .route("/std/pishoo/apps/{id}", any(handler.clone()))
-        .route("/std/pishoo/apps/{publisher}/{name}", any(handler.clone()))
-        .route("/std/pishoo/app-check", any(handler.clone()))
-        .route("/std/pishoo/lib-check", any(handler.clone()))
-        .route("/std/pishoo/store-install", any(handler))
+        .route("/std/sys/package/libs", any(handler.clone()))
+        .route("/std/sys/package/libs/{name}", any(handler.clone()))
+        .route("/std/sys/package/apps", any(handler.clone()))
+        .route("/std/sys/package/apps/{name}", any(handler.clone()))
+        .route("/std/sys/package/app-check", any(handler.clone()))
+        .route("/std/sys/package/lib-check", any(handler.clone()))
+        .route("/std/sys/package/store-install", any(handler))
 }
 
 async fn lib_management_request(
@@ -556,30 +537,25 @@ async fn lib_management_request(
         }
     }
     let path = request.uri().path();
-    let app = path == "/std/pishoo/app-check"
-        || path == "/std/pishoo/apps"
-        || path.starts_with("/std/pishoo/apps/");
-    let checking = path == "/std/pishoo/lib-check" || path == "/std/pishoo/app-check";
-    let store_install = path == "/std/pishoo/store-install";
+    let app = path == "/std/sys/package/app-check"
+        || path == "/std/sys/package/apps"
+        || path.starts_with("/std/sys/package/apps/");
+    let checking = path == "/std/sys/package/lib-check" || path == "/std/sys/package/app-check";
+    let store_install = path == "/std/sys/package/store-install";
     let id = path
         .strip_prefix(if app {
-            "/std/pishoo/apps/"
+            "/std/sys/package/apps/"
         } else {
-            "/std/pishoo/libs/"
+            "/std/sys/package/libs/"
         })
-        .map(|id| {
-            id.split('/')
-                .map(|part| {
-                    let part = percent_encoding::percent_decode_str(part)
-                        .decode_utf8()
-                        .map_err(|_| Error::BadRequest("invalid id encoding".into()))?;
-                    if part.contains('/') {
-                        return Err(Error::BadRequest("encoded path separator in Lib ID".into()));
-                    }
-                    Ok(part.into_owned())
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(|parts| parts.join("/"))
+        .map(|name| {
+            let name = percent_encoding::percent_decode_str(name)
+                .decode_utf8()
+                .map_err(|_| Error::BadRequest("invalid package name encoding".into()))?;
+            if name.contains('/') {
+                return Err(Error::BadRequest("path separator in package name".into()));
+            }
+            Ok(name.into_owned())
         })
         .transpose()?;
     if let Some(id) = &id {
@@ -710,6 +686,70 @@ async fn lib_management_request(
     }
     let runtime = sandbox.read().unwrap().runtime.clone();
     let value = tokio::task::spawn_blocking(move || {
+        // The URL selects a local short name. Package identity remains the
+        // signed publisher/name, including its registration and private data.
+        let id = if checking {
+            None
+        } else if method == Method::PUT {
+            let package = read_package(&bytes)?;
+            let document = package_metadata(&package)?;
+            let signed_id = document["id"].as_str().unwrap();
+            if document["name"].as_str() != id.as_deref() {
+                return Err(Error::BadRequest(
+                    "package name does not match the management URL".into(),
+                ));
+            }
+            Some(signed_id.to_owned())
+        } else if let Some(name) = &id {
+            use rusqlite::OptionalExtension;
+            let path = profile.config_db_path();
+            if !path.symlink_metadata()?.file_type().is_file() {
+                return Err(Error::InvalidConfig(
+                    "config.db must be a regular file".into(),
+                ));
+            }
+            let conn = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            conn.busy_timeout(Duration::from_secs(3))?;
+            let table = if app { "apps" } else { "libs" };
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )?;
+            let registered: Option<String> = if exists {
+                conn.query_row(
+                    &format!("SELECT id FROM {table} WHERE name=?1"),
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            let Some(registered) = registered else {
+                return if method == Method::DELETE {
+                    if sandbox.read().unwrap().tasks.is_closed() {
+                        Err(Error::Denied)
+                    } else {
+                        Ok(serde_json::Value::Null)
+                    }
+                } else {
+                    Err(Error::RouteNotFound)
+                };
+            };
+            valid_id(&registered)?;
+            if registered.rsplit('/').next() != Some(name.as_str()) {
+                return Err(Error::InvalidConfig(
+                    "invalid installed package name".into(),
+                ));
+            }
+            Some(registered)
+        } else {
+            None
+        };
         if app {
             if checking || method == Method::PUT {
                 let package = read_package(&bytes)?;

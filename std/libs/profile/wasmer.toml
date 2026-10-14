@@ -1,0 +1,22 @@
+[package]
+name = "dev.dhttp.net/profile"
+version = "0.1.0"
+description = "身份资料与头像"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "lib"
+title = "Profile"
+changelog = "初始版本，提供身份资料与头像。"
+dependencies = []
+
+[package.pishoo.host]
+private-storage = "身份展示资料与头像"
+request-identity = "核对真实调用身份和主人身份"
+
+[[module]]
+name = "backend"
+source = "lib.wasm"
+
+[fs]
+"/metadata" = "metadata"
