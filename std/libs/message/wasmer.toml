@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [package.pishoo]
 kind = "lib"
-title = "1v1聊天"
+title = "message"
 changelog = "初始版本，提供聊天与消息投递。"
 dependencies = []
 

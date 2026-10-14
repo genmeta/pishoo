@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "daccess"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1464,9 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "dhttp-home"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06d27baa49bd85f6c358ac84032d3461e05dc7a8a465e2b7f95757f5542b7732"
+version = "0.6.1"
 dependencies = [
  "dirs",
  "futures",

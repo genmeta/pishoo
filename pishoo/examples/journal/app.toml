@@ -1,0 +1,15 @@
+[package]
+name = "alice.smith.dhttp.net/journal"
+version = "0.1.0"
+description = "记下生活小事，用文字和照片留住日常，与朋友留言交流"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "app"
+title = "手记"
+entry = "/"
+changelog = "首次发布手记 App，精确依赖手记 Lib 0.1.0；支持图文记录、月份归档、留言回复及明暗模式，入口 /std/journal/。数据库由 Lib 保存。"
+dependencies = [{ publisher = "alice.smith.dhttp.net", name = "journal", version = "0.1.0" }]
+
+[fs]
+"/public" = "public"

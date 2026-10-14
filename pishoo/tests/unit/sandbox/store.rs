@@ -80,6 +80,7 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
         "package_sha256",
         "publisher_owner_hash",
         "openapi",
+        "host",
         "signer_certificates",
         "size",
     ] {
@@ -176,6 +177,19 @@ fn frontend_release_proof_binds_kind_and_exact_backend_dependencies() {
         metadata[key] = value.clone();
     }
     verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").unwrap();
+    // The store projects App host capabilities as {}, while the signed App
+    // manifest must omit host entirely.
+    metadata["host"] = serde_json::json!({});
+    verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").unwrap();
+    for host in [
+        serde_json::json!({"private-storage": "Forged capability"}),
+        serde_json::json!([]),
+        serde_json::json!("invalid"),
+    ] {
+        let mut wrong = metadata.clone();
+        wrong["host"] = host;
+        assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
+    }
     let mut wrong = metadata.clone();
     wrong["kind"] = serde_json::json!("lib");
     assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
@@ -253,3 +267,33 @@ fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
 
 #[path = "store_network.rs"]
 mod network;
+
+#[test]
+#[ignore = "requires recorded real std publication packages and store metadata"]
+fn published_std_release_proofs_match_signed_packages() {
+    let root = std::path::PathBuf::from(std::env::var("PISHOO_PUBLISHED_STD_RECORDS").unwrap());
+    for (kind, name) in [
+        ("lib", "profile"),
+        ("lib", "message"),
+        ("lib", "calendar"),
+        ("app", "workspace"),
+        ("app", "calendar"),
+    ] {
+        let bytes = std::fs::read(
+            root.join("packages")
+                .join(format!("{name}-0.1.0-{kind}.webc")),
+        )
+        .unwrap();
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(
+                root.join("logs")
+                    .join(format!("diagnose-{name}-{kind}-store-metadata.stdout")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        verify_release(&bytes, &metadata, "std.dhttp.net", name, "0.1.0")
+            .unwrap_or_else(|error| panic!("{kind} {name}: {error}"));
+        println!("verified published {kind} std.dhttp.net/{name}@0.1.0");
+    }
+}

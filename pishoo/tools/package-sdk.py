@@ -60,6 +60,7 @@ def main() -> int:
                 if example == "journal":
                     shutil.copytree(source / "public", destination / "public")
                     shutil.copy2(source / "wasmer.toml", destination / "wasmer.toml")
+                    shutil.copy2(source / "app.toml", destination / "app.toml")
                 cargo_manifest = destination / "Cargo.toml"
                 text = cargo_manifest.read_text()
                 original = 'path = "../../../wit"'

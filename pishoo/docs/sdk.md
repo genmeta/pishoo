@@ -15,7 +15,7 @@ let caller = identity::caller(); // Option<(name, owner_hash)>
 let owner = caller.as_ref() == Some(&local);
 ```
 
-`identity` uses request-identity@0.2.0. Both tuple elements must match for an
+`identity` uses request-identity@0.1.0. Both tuple elements must match for an
 owner operation. Anonymous and background invocations have no caller; invalid
 SKI on a named identity traps. `signatures` retains @0.1.0; verification takes
 `local.0` or a verified caller name. The legacy `request_identity` export and
@@ -82,21 +82,25 @@ grant access. Identity comes from the verified handshake, never HTTP headers.
 Journal uses SQLite and additionally requires the official WASI SDK:
 
 ```sh
-WASI_SDK_PATH=/path/to/wasi-sdk PISHOO_PACKAGE_WEBC=/path/to/package-webc \
+WASI_SDK_PATH=/path/to/wasi-sdk PISHOO_PACKAGE_WEBC=/path/to/pishoo-pack \
   sh examples/journal/build.sh --publisher alice.smith.dhttp.net
-pishoo lib check examples/journal/dist/journal-0.1.0.webc
+pishoo lib check examples/journal/dist/journal-0.1.0-lib.webc
+pishoo app check examples/journal/dist/journal-0.1.0-app.webc
 ```
 
-Journal ships one signed WEBC release containing a standalone WASI HTTP backend,
-`public/index.html`, JS/CSS assets, and one metadata OpenAPI. The build script
-checks Cargo, wasmer.toml and OpenAPI versions, then uses `package-webc` to sign
-with the publisher’s local DHTTP credentials. Run without `--publisher` to build
-only the unsigned backend; use the signed `.webc` for host installation. See
-`examples/journal/README.md` for static access groups and release instructions.
+Journal ships two independently signed WEBC releases: a Lib with one WASI HTTP
+backend and metadata OpenAPI, and a pure frontend App containing HTML/JS/CSS.
+The App depends on the exact Journal Lib version. The build script checks Cargo,
+`wasmer.toml`, `app.toml`, OpenAPI and dependencies, then uses `pishoo-pack` with
+the publisher’s local DHTTP credentials. Run without `--publisher` to build the
+backend and metadata only. Publish the Lib first, then the App. The entry is
+`/std/journal/`; read/comment capability groups belong to the Lib, while static
+files remain separately subject to daccess. See `examples/journal/README.md`.
 
-Use the developer guide or `examples/journal` as the starting point for a new Lib. Preserve the standard
-WASI HTTP handler export, update the Cargo name and OpenAPI paths, and update the
-build script's WASM output filename. Keep the SDK dependency:
+Use the developer guide or `examples/journal` as the starting point for a new Lib.
+Preserve the standard WASI HTTP handler export, update the Cargo name, both
+package manifests and OpenAPI paths, and update the build script's WASM output
+filename. Keep the SDK dependency:
 
 ```toml
 [dependencies]
@@ -105,6 +109,8 @@ wasip2 = "=1.0.4"
 ```
 
 SDK 0.1.0 is not yet published to crates.io. Resolve the path relative to your own
-`Cargo.toml`. A Lib built for `wasm32-wasip2` is already a component; the included
-`package-lib.py` attaches its OpenAPI 3.1 manifest and `wasm-tools validate` checks
-the resulting legacy `lib.wasm`; that file is a binding example, not a current installable release. New installations use a signed `.webc` from `package-webc`. No custom HTTP or identity wrapper is required.
+`Cargo.toml`. A Lib built for `wasm32-wasip2` is already a component. Use
+`wasm-tools validate` to check it and `pishoo-pack` to produce the signed WEBC;
+OpenAPI stays in the Lib's metadata volume. The included `package-lib.py` is a
+legacy binding example and does not produce current installable releases.
+No custom HTTP or identity wrapper is required.
