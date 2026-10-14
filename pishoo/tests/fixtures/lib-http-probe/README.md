@@ -9,4 +9,4 @@ cd /tmp
 cargo build --locked --release --target wasm32-wasip2 --manifest-path /path/to/pishoo/pishoo/tests/fixtures/lib-http-probe/Cargo.toml
 ```
 
-Run `dependent_libs_use_standard_local_http_with_real_caller_identity` alone with `--ignored`, after building `workspace-lib` and `chat-lib`. `PISHOO_LIB_HTTP_PROBE` may override the component path. The test owns process-wide TLS roots, DNS and home, uses isolated credentials/databases, and never installs anything into the user's home.
+Run `dependent_libs_use_standard_local_http_with_real_caller_identity` alone with `--ignored`, after building `profile-lib` and `message-lib`. `PISHOO_LIB_HTTP_PROBE` may override the component path. The test owns process-wide TLS roots, DNS and home, uses isolated credentials/databases, and never installs anything into the user's home.

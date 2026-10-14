@@ -86,7 +86,7 @@ fn deb_packaging_disables_sparse_binary_copies() {
     let rules = std::fs::read_to_string(repository_root().join("xtask/deb/rules"))
         .expect("deb rules should be readable");
 
-    for binary in ["pishoo"] {
+    for binary in ["pishoo", "pishoo-pack"] {
         let copy =
             format!("cp --sparse=never $(SOURCE_ROOT)/target/$(TRIPLE)/$(BUILD_PROFILE)/{binary}");
         assert!(
@@ -229,4 +229,33 @@ fn pishoo_linux_requirements_keep_matching_default_artifact_release() {
         };
         assert_eq!(entries, expected);
     }
+}
+
+#[test]
+fn installed_pack_tool_is_in_every_release_format() {
+    let root = repository_root();
+    for (path, required) in [
+        (
+            "xtask/release/brew/pishoo.sh",
+            "cp \"$release_dir/pishoo-pack\" \"$out/staging/pishoo-pack\"",
+        ),
+        (
+            "xtask/templates/pishoo.rb.in",
+            "bin.install \"pishoo-pack\"",
+        ),
+        ("xtask/deb/rules", "/pishoo-pack debian/pishoo/usr/bin/"),
+        (
+            "xtask/release/rpm/package.sh",
+            "install -D -m 0755 %{SOURCE1} %{buildroot}/usr/bin/pishoo-pack",
+        ),
+        (
+            "xtask/release/rpm/package.sh",
+            "\"$release_dir/pishoo-pack\" \"$topdir/SOURCES/pishoo-pack\"",
+        ),
+    ] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap();
+        assert!(text.contains(required), "{path} must ship pishoo-pack");
+    }
+    let manifest = std::fs::read_to_string(root.join("pishoo/Cargo.toml")).unwrap();
+    assert!(manifest.contains("name = \"pishoo-pack\"\npath = \"tools/package-webc.rs\""));
 }

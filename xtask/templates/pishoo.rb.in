@@ -14,7 +14,7 @@ class {{homebrew.class}} < Formula
 
   def caveats
     <<~EOS
-      Run Pishoo as the user who owns ~/.dhttp, or set DHTTP_HOME explicitly.
+      Run Pishoo as the user who owns ~/.dhttp.
       Identity directories and current databases are initialized at first startup.
       Existing data is preserved; unsupported legacy databases stop startup with a diagnostic.
       To run as the current user, use: brew services start pishoo
@@ -31,5 +31,6 @@ class {{homebrew.class}} < Formula
 
   test do
     assert_predicate bin/"pishoo", :executable?
+    assert_match "pishoo-pack", shell_output("#{bin}/pishoo-pack --help")
   end
 end

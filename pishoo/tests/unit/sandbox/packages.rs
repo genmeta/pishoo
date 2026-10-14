@@ -420,7 +420,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
                 .oneshot(
                     Request::builder()
                         .method(method.clone())
-                        .uri(format!("/app/{}/?view=1", id.rsplit('/').next().unwrap()))
+                        .uri(format!("/std/{}/?view=1", id.rsplit('/').next().unwrap()))
                         .body(axum::body::Body::empty())
                         .unwrap(),
                 )
@@ -448,7 +448,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/app/{}?value=1", id.rsplit('/').next().unwrap()))
+                .uri(format!("/std/{}?value=1", id.rsplit('/').next().unwrap()))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -457,7 +457,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(
         response.headers()["location"],
-        format!("/app/{}/?value=1", id.rsplit('/').next().unwrap())
+        format!("/std/{}/?value=1", id.rsplit('/').next().unwrap())
     );
     for (method, path, status) in [
         (Method::POST, "/", StatusCode::METHOD_NOT_ALLOWED),
@@ -471,7 +471,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
             .oneshot(
                 Request::builder()
                     .method(method)
-                    .uri(format!("/app/{}{path}", id.rsplit('/').next().unwrap()))
+                    .uri(format!("/std/{}{path}", id.rsplit('/').next().unwrap()))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -485,7 +485,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     let response = old
         .oneshot(
             Request::builder()
-                .uri(format!("/app/{}/", id.rsplit('/').next().unwrap()))
+                .uri(format!("/std/{}/", id.rsplit('/').next().unwrap()))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -514,6 +514,8 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
         .as_object_mut()
         .unwrap()
         .retain(|path, _| path == "/hello");
+    backend["paths"]["/hello/run"] = backend["paths"]["/hello"].clone();
+    backend["paths"].as_object_mut().unwrap().remove("/hello");
     let lib_bytes = package_fixture(
         &backend,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -561,7 +563,7 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
             .oneshot(
                 Request::builder()
                     .method(method.clone())
-                    .uri("/app/hello/")
+                    .uri("/std/hello/")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -583,19 +585,19 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/app/hello?view=1")
+                .uri("/std/hello?view=1")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(response.headers()["location"], "/app/hello/?view=1");
+    assert_eq!(response.headers()["location"], "/std/hello/?view=1");
     let response = snapshot
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/app/hello/not-declared")
+                .uri("/std/hello/not-declared")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -820,11 +822,13 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         doc["x-pishoo"]["kind"] = json!("lib");
         doc["x-pishoo"]["name"] = json!(name);
         doc["x-pishoo"]["dependencies"] = dependencies;
+        doc["paths"][format!("/{name}")] = doc["paths"]["/hello"].clone();
+        doc["paths"].as_object_mut().unwrap().remove("/hello");
         doc["x-pishoo"].as_object_mut().unwrap().remove("entry");
         doc["paths"]
             .as_object_mut()
             .unwrap()
-            .retain(|path, _| path == "/hello");
+            .retain(|path, _| path == &format!("/{name}"));
         package_fixture(
             &doc,
             include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -941,31 +945,10 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
 }
 
 #[test]
-fn only_installed_mounts_conflict_with_proxies_in_both_orders() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+fn old_business_prefixes_remain_proxyable() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let runtime = WasmRuntime::new().unwrap();
-    let authority = publisher("alice.dhttp.net", 'a');
-    let mut backend = frontend_document("1.0.0");
-    backend["x-pishoo"]["kind"] = json!("lib");
-    backend["x-pishoo"].as_object_mut().unwrap().remove("entry");
-    backend["paths"]
-        .as_object_mut()
-        .unwrap()
-        .retain(|path, _| path == "/hello");
-    let lib = package_fixture(
-        &backend,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &authority,
-    );
-    let mut frontend = frontend_document("1.0.0");
-    frontend["x-pishoo"]["kind"] = json!("app");
-    frontend["x-pishoo"]["dependencies"] = json!([]);
-    frontend["paths"].as_object_mut().unwrap().remove("/hello");
-    let app = package_fixture(&frontend, &[], frontend_files("page"), &authority);
     let uri = "/std/pishoo/proxies".parse().unwrap();
     crate::setup::config_database(
         &profile,
@@ -973,59 +956,220 @@ fn only_installed_mounts_conflict_with_proxies_in_both_orders() {
         &uri,
         Some(json!([
             {"location":"/api/hello","proxy_pass":"127.0.0.1:8080"},
-            {"location":"/app/hello/","proxy_pass":"127.0.0.1:8080"}
+            {"location":"/app/hello","proxy_pass":"127.0.0.1:8080"}
         ])),
     )
     .unwrap();
-    assert!(install_lib(&profile, "alice.dhttp.net/hello", &lib, &runtime).is_err());
-    assert!(install_app(&profile, "alice.dhttp.net/hello", &app).is_err());
-    let parents = json!([
-        {"location":"/","proxy_pass":"127.0.0.1:8080"},
-        {"location":"/api","proxy_pass":"127.0.0.1:8080"},
-        {"location":"/api/hello-other","proxy_pass":"127.0.0.1:8080"},
-        {"location":"/app","proxy_pass":"127.0.0.1:8080"}
-    ]);
-    crate::setup::config_database(&profile, &http::Method::PUT, &uri, Some(parents.clone()))
-        .unwrap();
-    install_lib(&profile, "alice.dhttp.net/hello", &lib, &runtime).unwrap();
-    install_app(&profile, "alice.dhttp.net/hello", &app).unwrap();
-    let expected = crate::setup::config_database(&profile, &http::Method::GET, &uri, None).unwrap();
-    for location in [
-        "/api/hello",
-        "/api/hello/child",
-        "= /api/hello",
-        "/app/hello",
-        "= /app/hello/file",
-    ] {
+    for path in ["/std", "/std/message", "/std/workspace/"] {
         assert!(
             crate::setup::config_database(
                 &profile,
                 &http::Method::PATCH,
                 &uri,
-                Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"}))
+                Some(json!({"location":path,"proxy_pass":"127.0.0.1:8080"}))
             )
             .is_err()
         );
+    }
+}
+
+#[tokio::test]
+async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
+    use http::{Method, StatusCode};
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let authority = publisher("alice.dhttp.net", 'a');
+    let make_lib = |name: &str, version: &str, path: &str, method: &str, title: &str| {
+        let doc = json!({"openapi":"3.1.0","info":{"title":name,"version":version,"description":"test","license":{"name":"MIT"}},
+            "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":name,"dependencies":[],"host":{"request-identity":"identity"},
+                "access-groups":{"message":{"title":title,"operations":["receive"]}}},
+            "paths":{path:{method:{"operationId":"receive","summary":"test","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
+        package_fixture(
+            &doc,
+            include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+            Directory::default(),
+            &authority,
+        )
+    };
+    let id = "alice.dhttp.net/message";
+    let bytes = make_lib("message", "1.0.0", "/message", "post", "1v1聊天");
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT capability_id,title FROM lib_capabilities WHERE lib_id=?1",
+            [id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )
+        .unwrap(),
+        ("message".into(), "1v1聊天".into())
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT method,path FROM lib_capability_operations",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )
+        .unwrap(),
+        ("POST".into(), "/std/message".into())
+    );
+    // Another Lib cannot divide methods of the same business path.
+    assert!(
+        install_lib(
+            &profile,
+            "alice.dhttp.net/other",
+            &make_lib("other", "1.0.0", "/message", "get", "Other"),
+            &runtime
+        )
+        .is_err()
+    );
+    assert!(!profile.join("lib/alice.dhttp.net/other/lib.webc").exists());
+    // Native services cannot become WASM capabilities.
+    for path in [
+        "/acl/capabilities",
+        "/contact",
+        "/sys/package/libs",
+        "/pishoo/settings",
+        "/file/test",
+        "/dhttp/test",
+    ] {
+        assert!(read_package(&make_lib("other", "1.0.0", path, "post", "Other")).is_err());
+    }
+    db.execute_batch("CREATE TRIGGER reject_capability BEFORE INSERT ON lib_capability_operations BEGIN SELECT RAISE(ABORT,'injected registration failure'); END;").unwrap();
+    assert!(
+        install_lib(
+            &profile,
+            id,
+            &make_lib("message", "2.0.0", "/message", "post", "Changed"),
+            &runtime
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(profile.join("lib").join(id).join("lib.webc")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        db.query_row("SELECT title FROM lib_capabilities", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "1v1聊天"
+    );
+    db.execute_batch("DROP TRIGGER reject_capability").unwrap();
+    let mut sandbox = Sandbox::new(runtime.clone());
+    sandbox.load_libs(&profile).unwrap();
+    db.execute("UPDATE lib_capabilities SET title='tampered'", [])
+        .unwrap();
+    assert!(sandbox.load_libs(&profile).is_err());
+    assert_eq!(sandbox.libs.len(), 1);
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    // Static and business paths coexist by method; a competing GET is rejected.
+    let mut doc = frontend_document("1.0.0");
+    doc["x-pishoo"]["kind"] = json!("app");
+    doc["x-pishoo"]["name"] = json!("message");
+    doc["x-pishoo"]["dependencies"] = json!([]);
+    let app = package_fixture(&doc, &[], frontend_files("page"), &authority);
+    install_app(&profile, id, &app).unwrap();
+    assert!(
+        install_lib(
+            &profile,
+            id,
+            &make_lib("message", "2.0.0", "/message", "get", "1v1聊天"),
+            &runtime
+        )
+        .is_err()
+    );
+    sandbox.load_libs(&profile).unwrap();
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    for (method, path, status) in [
+        (Method::GET, "/std/message/", StatusCode::OK),
+        (
+            Method::POST,
+            "/std/message",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            Method::DELETE,
+            "/std/message",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (Method::GET, "/std/message/missing", StatusCode::NOT_FOUND),
+    ] {
         assert_eq!(
-            crate::setup::config_database(&profile, &http::Method::GET, &uri, None).unwrap(),
-            expected
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            status
         );
     }
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    remove_lib(&profile, id).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM lib_capabilities", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM lib_capability_operations", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    let access = access_control::AccessService::load_from_db(
+        &format!("sqlite://{}?mode=rwc", profile.access_db_path().display()),
+        "alice.dhttp.net",
+        &access_control::SubjectId::new(b"owner").unwrap(),
+    )
+    .await
+    .unwrap();
+    let grantee = access_control::Grantee::Named;
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::POST),
+            "/std/message",
+            access_control::Effect::Allow,
+            grantee.clone(),
+        )
+        .await
+        .unwrap();
+    // Uninstall kept the path ACL; a fresh provider cannot inherit it silently.
+    assert!(
+        install_lib(&profile, id, &bytes, &runtime)
+            .unwrap_err()
+            .to_string()
+            .contains("existing ACL")
+    );
+    access
+        .remove_policy(
+            access_control::Method::Specified(Method::POST),
+            "/std/message",
+            grantee,
+        )
+        .await
+        .unwrap();
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    // Startup also detects orphan capabilities after out-of-band DB edits.
+    db.pragma_update(None, "foreign_keys", false).unwrap();
     db.execute(
-        "INSERT INTO proxy_locations VALUES('/api/hello','127.0.0.1:8080')",
+        "INSERT INTO lib_capabilities VALUES('missing','test','Broken')",
         [],
     )
     .unwrap();
-    assert!(crate::setup::load_server_config(&profile).is_err());
-    crate::setup::config_database(
-        &profile,
-        &http::Method::DELETE,
-        &"/std/pishoo/proxies?location=%2Fapi%2Fhello"
-            .parse()
-            .unwrap(),
-        None,
-    )
-    .unwrap();
-    assert!(crate::setup::load_server_config(&profile).is_ok());
+    assert!(sandbox.load_libs(&profile).is_err());
+    db.execute("DELETE FROM lib_capabilities WHERE lib_id='missing'", [])
+        .unwrap();
 }

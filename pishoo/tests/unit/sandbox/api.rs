@@ -109,7 +109,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
     let router = api_router(&sandbox, endpoint);
     sandbox.close();
     for (app, count) in [(&empty_router, 0), (&router, 2)] {
-        let mut request = request(Method::GET, "/std/pishoo/loaded-libs");
+        let mut request = request(Method::GET, "/std/sys/package/loaded-libs");
         request.extensions_mut().insert(owner.clone());
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -125,7 +125,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
             assert_eq!(value[0]["kind"], "lib");
             assert_eq!(value[0]["dependencies"], serde_json::json!([]));
             assert_eq!(value[0]["endpoints"].as_array().unwrap().len(), 5);
-            assert_eq!(value[0]["endpoints"][2]["path"], "/api/a-demo/run");
+            assert_eq!(value[0]["endpoints"][2]["path"], "/std/run");
             assert_eq!(value[0]["openapi"]["info"]["version"], "1.0.0");
             assert!(value[0]["openapi"]["x-pishoo"].get("publisher").is_none());
         }
@@ -141,7 +141,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
             SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut request = request(Method::GET, "/std/pishoo/loaded-libs");
+        let mut request = request(Method::GET, "/std/sys/package/loaded-libs");
         if let Some(visitor) = visitor {
             request.extensions_mut().insert(visitor);
         }
@@ -151,7 +151,7 @@ async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
         );
     }
     assert_eq!(
-        status(&router, Method::POST, "/std/pishoo/loaded-libs").await,
+        status(&router, Method::POST, "/std/sys/package/loaded-libs").await,
         StatusCode::METHOD_NOT_ALLOWED
     );
     assert!(sandbox.tasks.is_empty());
@@ -169,174 +169,77 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     sandbox.libs.insert("test".into(), lib);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, expected) in [
-        (
-            Method::GET,
-            "/api/test/run",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ),
+        (Method::GET, "/std/run", StatusCode::INTERNAL_SERVER_ERROR),
         (
             Method::POST,
-            "/api/test/run?value=1",
+            "/std/run?value=1",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
+        (Method::HEAD, "/std/run", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::OPTIONS, "/std/run", StatusCode::METHOD_NOT_ALLOWED),
         (
             Method::HEAD,
-            "/api/test/run",
-            StatusCode::METHOD_NOT_ALLOWED,
-        ),
-        (
-            Method::OPTIONS,
-            "/api/test/run",
-            StatusCode::METHOD_NOT_ALLOWED,
-        ),
-        (
-            Method::HEAD,
-            "/api/test/explicit",
+            "/std/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::OPTIONS,
-            "/api/test/explicit",
+            "/std/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     ] {
         assert_eq!(status(&router, method, path).await, expected, "{path}");
     }
-    for path in ["/std/api", "/api/", "/api/missing", "/api/test/missing"] {
+    for path in ["/std", "/std/missing", "/std/missing/deep"] {
         for method in [Method::GET, Method::POST, Method::HEAD, Method::OPTIONS] {
             assert_eq!(status(&router, method, path).await, StatusCode::NOT_FOUND);
         }
     }
     let router = router.fallback(|| async { StatusCode::IM_A_TEAPOT });
-    for method in [
-        Method::GET,
-        Method::POST,
-        Method::HEAD,
-        Method::OPTIONS,
-        Method::CONNECT,
-    ] {
-        for path in [
-            "/std/api",
-            "/api/",
-            "/api/missing",
-            "/api/test-other/run",
-            "/std/api/test/run",
-        ] {
-            assert_eq!(
-                status(&router, method.clone(), path).await,
-                if path
-                    .strip_prefix("/api/")
-                    .is_some_and(|tail| !tail.is_empty())
-                {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::IM_A_TEAPOT
-                },
-                "{path}"
-            );
-        }
-        for path in [
-            "/api/test",
-            "/api/test/",
-            "/api/test/missing",
-            "/api/test/missing/deep",
-        ] {
-            assert_eq!(
-                status(&router, method.clone(), path).await,
-                StatusCode::NOT_FOUND,
-                "{path}"
-            );
-        }
+    for path in ["/api/test/run", "/app/workspace/", "/api/websocket"] {
+        assert_eq!(
+            status(&router, Method::GET, path).await,
+            StatusCode::IM_A_TEAPOT
+        );
     }
     assert_eq!(
-        status(&router, Method::CONNECT, "/api/test/run").await,
+        status(&router, Method::CONNECT, "/std/run").await,
         StatusCode::METHOD_NOT_ALLOWED
-    );
-    let empty = api_router(
-        &Sandbox::new(sandbox.runtime.clone()),
-        crate::test_identity::endpoint("alice"),
-    )
-    .fallback(|| async { StatusCode::IM_A_TEAPOT });
-    assert_eq!(
-        status(&empty, Method::GET, "/api/test/run").await,
-        StatusCode::NOT_FOUND
     );
     assert!(sandbox.tasks.is_empty());
 }
 
 #[tokio::test]
-async fn lib_page_roots_support_relative_urls_without_a_guest_mount_prefix() {
+async fn lib_paths_are_independent_of_package_identity() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
         &sandbox,
         directory.path(),
-        r#"{"/":{"get":{},"head":{},"post":{}},"/notes":{"get":{}}}"#,
+        r#"{"/profile":{"get":{},"post":{}},"/workspace/context":{"get":{}}}"#,
     );
-    for id in [
-        "test",
-        "renamed",
-        "alice.dhttp.net/note",
-        "alice.dhttp.net/notebook",
-    ] {
-        sandbox.libs.insert(id.into(), lib.clone());
-    }
+    sandbox
+        .libs
+        .insert("publisher.dhttp.net/workspace".into(), lib);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
-    for id in [
-        "test",
-        "renamed",
-        "alice.dhttp.net/note",
-        "alice.dhttp.net/notebook",
+    for path in [
+        "/std/profile",
+        "/std/profile?search=a%2Fb",
+        "/std/workspace/context",
     ] {
-        for method in [Method::GET, Method::HEAD] {
-            for query in ["", "?view=full&search=a%2Fb"] {
-                let response = router
-                    .clone()
-                    .oneshot(request(
-                        method.clone(),
-                        &format!("/api/{}{query}", id.rsplit('/').next().unwrap()),
-                    ))
-                    .await
-                    .unwrap();
-                assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-                assert_eq!(
-                    response.headers()[http::header::LOCATION],
-                    format!("/api/{}/{query}", id.rsplit('/').next().unwrap())
-                );
-            }
-        }
-        // Declared operations still execute normally; an absent handshake
-        // proves these requests were not replaced by a directory redirect.
-        for (method, tail) in [
-            (Method::GET, "/"),
-            (Method::GET, "/notes"),
-            (Method::POST, ""),
-        ] {
-            assert_eq!(
-                status(
-                    &router,
-                    method,
-                    &format!("/api/{}{tail}", id.rsplit('/').next().unwrap())
-                )
-                .await,
-                StatusCode::INTERNAL_SERVER_ERROR
-            );
-        }
         assert_eq!(
-            status(
-                &router,
-                Method::DELETE,
-                &format!("/api/{}", id.rsplit('/').next().unwrap())
-            )
-            .await,
-            StatusCode::METHOD_NOT_ALLOWED
+            status(&router, Method::GET, path).await,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
     assert_eq!(
-        status(&router, Method::GET, "/api/missing").await,
+        status(&router, Method::DELETE, "/std/profile").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(
+        status(&router, Method::GET, "/std/workspace/profile").await,
         StatusCode::NOT_FOUND
     );
-    assert!(sandbox.tasks.is_empty());
 }
 
 #[tokio::test]
@@ -351,8 +254,8 @@ async fn routers_keep_their_lib_snapshot() {
     sandbox.libs.insert("test".into(), new);
     let new_router = api_router(&sandbox, endpoint);
     for (router, present, absent) in [
-        (&old_router, "/api/test/old", "/api/test/new"),
-        (&new_router, "/api/test/new", "/api/test/old"),
+        (&old_router, "/std/old", "/std/new"),
+        (&new_router, "/std/new", "/std/old"),
     ] {
         assert_eq!(
             status(router, Method::POST, present).await,
@@ -376,14 +279,14 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let endpoint = crate::test_identity::endpoint("alice");
     let router = api_router(&sandbox, endpoint.clone());
     assert_eq!(
-        status(&router, Method::POST, "/api/test/run").await,
+        status(&router, Method::POST, "/std/run").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(sandbox.tasks.is_empty());
     let local = endpoint.local_authority().unwrap();
     let mut responses = Vec::new();
     for index in 0..8 {
-        let mut request = request(Method::POST, &format!("/api/test/run?index={index}"));
+        let mut request = request(Method::POST, &format!("/std/run?index={index}"));
         request.extensions_mut().insert(dhttp::HandshakeSummary {
             alpn: None,
             local: Some(local.clone()),

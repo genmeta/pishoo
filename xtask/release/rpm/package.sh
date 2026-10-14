@@ -74,6 +74,12 @@ split_package_version() {
 }
 
 write_common_spec() {
+    # Embed the same account/home setup as DEB, escaping literal RPM percent signs.
+    local service_setup service_cleanup
+    service_setup=$(sed -n '/# BEGIN service-home setup/,/# END service-home setup/p' xtask/deb/pishoo-common.postinst | sed 's/%/%%/g')
+    service_cleanup=$(sed -n '/# BEGIN service-home cleanup/,/# END service-home cleanup/p' xtask/deb/pishoo-common.postrm | sed 's/%/%%/g')
+    test -n "$service_setup"
+    test -n "$service_cleanup"
     cat > "$1" <<EOF_SPEC
 Name:           pishoo-common
 Version:        ${RPM_VERSION}
@@ -89,7 +95,6 @@ Source3:        workspace-app.webc
 Source4:        message-lib.webc
 BuildArch:      noarch
 AutoReqProv:    no
-Requires(pre):  shadow-utils
 Requires:       systemd
 BuildRequires:  systemd-rpm-macros
 
@@ -118,24 +123,18 @@ install -D -m 0644 %{SOURCE3} %{buildroot}/usr/share/pishoo/default-artifacts/wo
 /usr/share/pishoo/default-artifacts/workspace-app.webc
 /usr/share/pishoo/default-artifacts/message-lib.webc
 
-%pre
-if getent group dhttp >/dev/null; then
-    :
-else
-    status=\$?
-    if [ "\$status" -ne 2 ]; then
-        exit "\$status"
-    fi
-    groupadd --system dhttp
-fi
-
 %post
+set -e
+${service_setup}
 %systemd_post pishoo.service
 
 %preun
 %systemd_preun pishoo.service
 
 %postun
+if [ "\$1" -eq 0 ]; then
+${service_cleanup}
+fi
 %systemd_postun_with_restart pishoo.service
 
 %changelog

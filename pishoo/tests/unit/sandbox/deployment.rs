@@ -1,6 +1,6 @@
 use super::*;
 
-fn component(version: &str) -> Vec<u8> {
+fn component(id: &str, version: &str) -> Vec<u8> {
     let mut bytes =
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
     fn leb(mut n: usize, output: &mut Vec<u8>) {
@@ -15,7 +15,7 @@ fn component(version: &str) -> Vec<u8> {
     }
     let document = serde_json::json!({
         "openapi": "3.1.0", "info": { "title": "test", "version": version },
-        "paths": { "/upload": { "post": { "responses": { "200": {"description": "ok"} } } } }
+        "paths": { format!("/{id}/upload"): { "post": { "responses": { "200": {"description": "ok"} } } } }
     })
     .to_string();
     let mut section = Vec::new();
@@ -34,7 +34,7 @@ fn profile(root: &Path) -> IdentityProfile {
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = WasmRuntime::new().unwrap();
     for id in ["alpha", "beta"] {
-        install_lib(&profile, id, &component("1"), &runtime).unwrap();
+        install_lib(&profile, id, &component(id, "1"), &runtime).unwrap();
     }
     profile
 }
@@ -50,7 +50,7 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
     let task = sandbox.tasks.token();
 
     remove_lib(&profile, "beta").unwrap();
-    install_lib(&profile, "alpha", &component("2"), &runtime).unwrap();
+    install_lib(&profile, "alpha", &component("alpha", "2"), &runtime).unwrap();
     sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
     assert!(!Arc::ptr_eq(&alpha, &replacement));
@@ -100,14 +100,14 @@ fn database_registration_controls_loading_and_file_versions_must_match() {
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime);
     std::fs::create_dir_all(profile.join("lib/extra")).unwrap();
-    std::fs::write(profile.join("lib/extra/lib.webc"), component("1")).unwrap();
+    std::fs::write(profile.join("lib/extra/lib.webc"), component("extra", "1")).unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute("DELETE FROM libs WHERE id='beta'", []).unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
     assert!(profile.join("lib/beta/lib.webc").is_file());
-    std::fs::write(profile.join("lib/alpha/lib.webc"), component("2")).unwrap();
+    std::fs::write(profile.join("lib/alpha/lib.webc"), component("alpha", "2")).unwrap();
     assert!(sandbox.load_libs(&profile).is_err());
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
     assert_eq!(

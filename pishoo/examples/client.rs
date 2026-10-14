@@ -57,7 +57,11 @@ async fn run() -> Result<(), Failure> {
             }
         }
     }
-    let endpoint = dhttp::Endpoint::load(&identity).await?;
+    let home = dhttp_home::DhttpHome::for_user_home_dir(
+        dirs::home_dir().ok_or("cannot locate user home directory")?,
+    );
+    let profile = home.identity_profile(&identity)?;
+    let endpoint = dhttp::Endpoint::load_from(profile.path()).await?;
     match command.as_str() {
         "probe" | "nat-get" | "serve" => {
             let target = if command == "nat-get" {

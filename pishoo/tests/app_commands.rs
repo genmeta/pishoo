@@ -92,7 +92,7 @@ fn frontend(version: &str, text: &str) -> Vec<u8> {
 #[test]
 fn offline_app_check_install_query_update_and_remove_need_no_workspace() {
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let home = &dir.path().join(".dhttp");
     let profile = home.join("alice");
     std::fs::create_dir_all(profile.join("db")).unwrap();
     std::fs::create_dir(profile.join("lib")).unwrap();
@@ -107,7 +107,8 @@ fn offline_app_check_install_query_update_and_remove_need_no_workspace() {
     std::fs::write(&package, frontend("1.0.0", "old page")).unwrap();
     let run = |args: &[&str]| {
         let result = Command::new(env!("CARGO_BIN_EXE_pishoo"))
-            .env("DHTTP_HOME", home)
+            .env("HOME", home.parent().unwrap())
+            .env("DHTTP_HOME", "/nonexistent-ignored-pishoo-home")
             .args(args)
             .output()
             .unwrap();
@@ -126,7 +127,7 @@ fn offline_app_check_install_query_update_and_remove_need_no_workspace() {
     let info: serde_json::Value =
         serde_json::from_slice(&run(&["app", "info", id]).stdout).unwrap();
     assert_eq!(info["entry"], "/");
-    assert_eq!(info["endpoints"],json!([]));
+    assert_eq!(info["endpoints"], json!([]));
     assert!(info.get("openapi").is_none());
     assert!(profile.join("app/alice.dhttp.net/hello/app.webc").is_file());
     assert!(!profile.join("lib/alice.dhttp.net/hello").exists());
