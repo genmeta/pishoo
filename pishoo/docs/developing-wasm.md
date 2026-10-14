@@ -1,105 +1,51 @@
-# Pishoo WASM 开发指南
+# Pishoo App / Lib 开发指南
 
-使用标准 WASI HTTP component 编写后端，将页面、JavaScript、CSS 和图片构建到 `public/`，再把后端、前端和 OpenAPI 一起打包成标准 WEBC 制品。开发者交付一个 `.webc` 文件，Pishoo 负责验证发布来源、读取页面资源和执行后端。
+日期：2026-10-14。本文按 [App/Lib 软件包规范](package-spec.md) 调整。本仓打包器、宿主与 Workspace/Chat 已适配签名 WEBC manifest；独立商店服务须支持同一格式后才能发布安装，尚未部署本次改动。旧合包不自动迁移。
 
-本指南采用 WEBC 作为唯一发布格式，不要求兼容旧单 WASM 发布方式。一个发布包包含一个后端 component，对应一个 Lib；前后端共享发布者、名称和版本。
+## 文件职责
 
-**实施状态：Pishoo 宿主已接入签名 WEBC v3 安装、整包校验及原生页面分派；独立 store-server 源码也已接入 WEBC 协议。** 下文的 Rust 后端和静态页面独立构建，`package-webc` 生成最终静态操作并签名，Workspace 上传和原生安装使用完整包。商店生产服务是否已切换以其部署记录为准；普通 `wasmer package build` 输出是未签名制品，不能直接上传或安装。正式协议见 [WEBC 商店协议](../../../store-server/docs/webc-protocol.md)。
-
-## 文件各自负责什么
-
-| 文件 | 职责 |
+| 内容 | 职责 |
 | --- | --- |
-| `lib.wasm` | 标准 WASI HTTP 后端 component |
-| `public/` | 可供浏览器读取的构建产物，包括 HTML、JS、CSS 和图片 |
-| `openapi.json` | HTTP 接口、页面入口、访问分组和宿主能力用途的唯一权威清单 |
-| `wasmer.toml` | 开发时的 package manifest，描述包、代码模块和文件映射 |
-| `metadata/openapi.json` | 打包时生成的清单副本，随元数据文件卷进入 WEBC |
-| `hello.webc` | 完整发布制品，包含后端、文件卷和包元数据 |
+| WEBC manifest | 唯一包清单：标准 wapm/fs 注解，以及 pishoo 类型、依赖、入口、能力用途和更新说明 |
+| `lib.wasm` | 标准 WASI HTTP backend Component，不能是 core module |
+| Lib 的 `/metadata/openapi.json` | 唯一业务 API 描述，不承载安装元数据 |
+| App 的 `/public/` | 浏览器构建产物，必须含 `index.html`，不需要 OpenAPI |
+| `lib.webc` / `app.webc` | 两个独立版本、独立签名和独立发布的制品 |
 
-开发时编辑项目根的 `openapi.json`。打包时复制到 `metadata/openapi.json`，包内以映射后的 `/metadata/openapi.json` 为权威来源。不要手工维护两个不同的清单，也不在后端 component 中再嵌入一份。
+包字段的精确位置、必填要求和完整包注解示例以 [软件包规范](package-spec.md#2-唯一包清单) 为准。开发输入可用 `wasmer.toml`，最终必须生成标准 WEBC manifest，不增加第二份权威清单。
 
-WEBC 内部有 manifest、atoms 和 volumes。后端放在 atom，页面放在文件卷；下面的路径描述逻辑文件映射，不表示 WEBC 是 ZIP。这个组织方式沿用 [Wasmer 的 public 文件映射](https://docs.wasmer.io/edge/guides/cdn/)。
+## 项目和构建依赖
 
-## Manifest 和 OpenAPI
-
-`wasmer.toml` 就是开发时编写的包清单。Wasmer 打包工具将它转换成 WEBC 内置的 manifest；安装器从标准容器结构读取这份 manifest。项目不需要另写一份同义的 `manifest.json`。
-
-两份清单分别表达不同的内容：
-
-| 清单 | 描述什么 |
-| --- | --- |
-| WEBC manifest | 包名称、版本、模块，以及文件卷映射等包结构信息 |
-| OpenAPI | HTTP 方法与路径、输入输出、页面入口、访问分组和宿主能力用途 |
-
-WASI HTTP 的页面入口与 WEBC 的命令入口也属于不同层次。本指南的后端是 HTTP component，宿主调用 incoming-handler；不把页面入口写成一个 WASI CLI 命令。
-
-发布制品的逻辑结构如下：
-
-```text
-hello.webc
-├─ manifest                 由 wasmer.toml 转换生成的包清单
-├─ atoms/
-│  └─ backend               lib.wasm 的 component 字节
-└─ volumes/
-   ├─ public/
-   │  ├─ index.html
-   │  └─ assets/app.js
-   └─ metadata/
-      └─ openapi.json        独立 HTTP 清单
-```
-
-`/public` 与 `/metadata` 是文件映射后的虚拟位置，读取时依据 manifest 解析实际文件卷。包名称、版本和 OpenAPI 中的发布身份必须保持一致；构建工具应检查重复出现的值，发现矛盾就拒绝发布。包级签名应绑定 manifest、后端 atom 和全部文件卷，不能只保护 HTTP 清单。
-
-## 创建项目
-
-以一个返回问候语的 Lib 为例：
+后端和前端分别组织，例如：
 
 ```text
 hello/
-├─ Cargo.toml
-├─ Cargo.lock
-├─ src/
-│  └─ hello.rs
-├─ openapi.json
-├─ wasmer.toml
-├─ public/
-│  ├─ index.html
-│  └─ assets/
-│     └─ app.js
-├─ metadata/                 打包时生成
-│  └─ openapi.json
-├─ lib.wasm                  后端构建产物
-└─ dist/                     WEBC 构建产物
+├─ backend/
+│  ├─ Cargo.toml
+│  ├─ Cargo.lock
+│  ├─ src/hello.rs
+│  ├─ openapi.json
+│  └─ lib.wasm
+├─ frontend/
+│  ├─ package.json
+│  └─ public/
+│     ├─ index.html
+│     └─ assets/app.js
+└─ dist/
+   ├─ lib.webc
+   └─ app.webc
 ```
 
-准备 Rust、`wasm-tools`，以及提供 `wasmer package build` 的 Wasmer CLI。为 Rust 安装编译目标：
+Rust 库根使用与 crate 同名的 `.rs` 文件及 Cargo `[lib].path`，不使用 `lib.rs` 或 `mod.rs`。最小后端可用 `wasip2 = "=1.0.4"`、`serde_json = "1"`，库类型为 `cdylib`。保持锁文件并构建：
 
 ```sh
 rustup target add wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2
+wasm-tools validate target/wasm32-wasip2/release/hello.wasm
+wasm-tools component wit target/wasm32-wasip2/release/hello.wasm
 ```
 
-`wasm32-wasip2` 的输出已经是 component。普通 `wasm32-unknown-unknown` 输出不能直接作为本指南的后端。
-
-在 `Cargo.toml` 中声明：
-
-```toml
-[package]
-name = "hello"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[lib]
-path = "src/hello.rs"
-crate-type = ["cdylib"]
-
-[dependencies]
-wasip2 = "=1.0.4"
-serde_json = "1"
-```
-
-这个最小后端只使用标准 HTTP 接口，不需要 Pishoo 专用 SDK。需要读取可信身份或使用身份签名时，再添加相应 SDK 导入。
+Cargo/npm/Bun 依赖是构建依赖，保留在各自构建系统。运行时所需后端另写入 WEBC `package.pishoo.dependencies`；两者不混用。
 
 ## 编写 HTTP 后端
 
@@ -162,171 +108,71 @@ wasip2::http::proxy::export!(Handler);
 
 Pishoo 会按清单挂载方法和路径；handler 仍应按自身业务检查输入。不要把用户在请求头、query 或 JSON 中填写的身份当作可信来访者。
 
-## 编写 OpenAPI
+## 后端 OpenAPI
 
-使用 OpenAPI 3.1，路径写组件内部的 `/hello`。包版本、Cargo 项目版本和 `info.version` 在这个例子中均为 `0.1.0`。
+Lib 保留 OpenAPI 3.1，`info.version` 与包版本一致。只写组件内部业务路径，例如 `/hello`，每个操作提供唯一 operationId、非空 summary、真实参数与响应。固定路径不能包含宿主前缀、query 或路径模板；实际请求仍可携带已描述的 query 参数。
 
-下面是**后端 API 清单**。页面和静态资源的宿主操作需要由 WEBC 打包工具补齐，见后面的页面路由约定。
+最小业务描述示例：
 
 ```json
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "问候示例",
-    "version": "0.1.0",
-    "description": "一个具有独立页面和 WASI HTTP 后端的 Pishoo Lib。",
-    "license": { "name": "Apache-2.0" }
-  },
-  "x-pishoo": {
-    "publisher": "alice.smith.dhttp.net",
-    "name": "hello",
-    "host": {},
-    "changelog": "首次发布，提供问候接口，无既有数据迁移。"
+    "title": "问候 API",
+    "version": "1.0.0",
+    "description": "提供问候接口。",
+    "license": {"name": "MIT"}
   },
   "paths": {
     "/hello": {
       "get": {
         "operationId": "getHello",
         "summary": "读取问候语",
-        "responses": {
-          "200": {
-            "description": "返回问候语",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": ["message"],
-                  "properties": { "message": { "type": "string" } }
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "operationId": "headHello",
-        "summary": "读取问候接口响应头",
-        "responses": { "200": { "description": "不含正文的响应" } }
+        "responses": {"200": {"description": "问候语 JSON"}}
       }
     }
   }
 }
 ```
 
-用自己的规范化 DHTTP 名称替换 publisher；名称是发布身份，不是任意展示文字。Lib 名称以小写字母开头，后续使用小写字母、数字和连字符，最多 63 字符。版本使用无前导零的 `MAJOR.MINOR.PATCH`。
+需要时继续使用已有 API 访问组和初始授权建议；建议不会自动写入 daccess。OpenAPI 不再写 publisher、name、kind、dependencies、entry、host、changelog 或 static-file。这些包字段由 manifest 负责，不能从 OpenAPI 回退读取。
 
-每个操作提供唯一 `operationId` 和非空 `summary`。使用固定路径，不带宿主前缀、query 字符串或 `{id}` 路径模板；query 参数可以在实际请求中传入。清单应描述真实的输入、输出和业务错误，示例之外的接口需要补齐相应 schema 与响应。
+## 独立前端
 
-`host` 声明实际导入的宿主能力及其用途；本例不调用这些能力，因此为空。权限分组和初始授权建议可按既有 OpenAPI 发布格式声明，组成员须与操作注解一致且不重叠。清单中的建议不会自动变成访问规则。
-
-## 编写独立前端
-
-将下面的页面放进 `public/index.html`：
-
-```html
-<!doctype html>
-<html lang="zh-CN">
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>问候示例</title>
-  <h1>问候示例</h1>
-  <button id="hello" type="button">请求后端</button>
-  <p id="result" role="status"></p>
-  <script type="module" src="./assets/app.js"></script>
-</html>
-```
-
-把下面的代码放进 `public/assets/app.js`：
+前端可使用 HTML/JS 或 Vite、React、Vue 等构建工具，最终生成 `public/index.html` 和资源文件。Vite `base` 使用 `./`，页面用 `./assets/app.js` 等相对资源 URL，业务调用则使用声明依赖对应的 `/api/<name>/...`，例如：
 
 ```javascript
-const output = document.querySelector('#result')
-
-document.querySelector('#hello').addEventListener('click', async () => {
-  try {
-    const response = await fetch('./hello', {
-      headers: { Accept: 'application/json' },
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const result = await response.json()
-    output.textContent = result.message
-  } catch (error) {
-    output.textContent = `请求失败：${error.message}`
-  }
+const response = await fetch('/api/hello/hello', {
+  headers: { Accept: 'application/json' },
 })
 ```
 
-页面使用相对 URL。若 Lib 入口是 `/std/api/alice.smith.dhttp.net/hello/`，`./hello` 会请求 `/std/api/alice.smith.dhttp.net/hello/hello`；宿主将内部 `/hello` 交给 WASM。页面不写安装者身份、完整挂载前缀或外部 API 主机。
+App 安装于 `/app/hello/`；它与 `/api/hello/` 是独立挂载。资源目录直接生成静态 GET/HEAD 路由，不生成 OpenAPI、operationId 或 static-file 注解。不存在的资源404，不支持的方法405；SPA 使用 hash 路由，没有隐式 index.html fallback。所有资源仍经过 daccess，public 不代表匿名公开。
 
-对于 Vite、React 或 Vue 项目，把源码放在独立的 `frontend/`，构建结果输出到 `public/`。Vite 的 `base` 使用 `./`，避免生成从宿主根目录开始的 `/assets/...`。生成的 HTML、JS、CSS 和图片全部随同一版本发布。
+## 打包、签名和发布
 
-### 页面路由约定
+1. Lib 写入一个 `backend` atom，只映射 `/metadata`，包含唯一 OpenAPI；App 零 atom，只映射 `/public`。
+2. 两种包都填写 manifest 的 wapm/pishoo 注解和显式 dependencies；Lib 填写 host 用途，App 填写 entry=/。
+3. 构建工具核对包身份、版本、实际内容、路径、imports/exports 和文件限额；整包签名保护 manifest、atoms 及内容卷。
+4. 先发布依赖，再上传使用方。上传地址分别为 `/store/v1/libs/<publisher>/<name>/versions/<version>` 和 `/store/v1/apps/<publisher>/<name>/versions/<version>`，Content-Type 都是 `application/webc`。
 
-宿主按最终 OpenAPI 读取 public 文件卷：
+同一类型、发布者、名称、版本不可覆盖。修改前端或依赖只递增 App 自身版本；修改后端递增 Lib 版本，需要使用新后端的使用方再更新自身依赖。签名算法和限额见 [商店协议](../../../store-server/docs/webc-protocol.md)。旧测试包从源码重新构建，不拆包、改签或迁移历史记录。
 
-| 组件内 HTTP 路径 | 处理方式 |
-| --- | --- |
-| `/` | 宿主读取 `/public/index.html` |
-| `/assets/app.js` | 宿主读取 `/public/assets/app.js` |
-| `/hello` | 调用 WASM incoming-handler |
+当前打包工具尚未实现上述 manifest 输入；实现完成前不要通过手改旧签名包或伪造 App OpenAPI 生成所谓新格式。
 
-商店协议已规定机器映射：`index.html` 对应 `/`，其余 public 文件对应去掉 `/public` 的固定路径；每个文件都声明 GET 和 HEAD，操作的 `x-pishoo.static-file` 写映射后的 `/public/...` 文件路径。有 index.html 时入口 `x-pishoo.entry` 为 `/`。静态路径上不能同时声明后端操作。正式打包工具须将这些操作补入同一份最终 OpenAPI；上面的 API 示例不能被当作已经完整的可发布清单。宿主对静态 GET/HEAD 使用原生文件分派，其余操作进入 WASM；两者都经过 daccess。
+## 安装和卸载
 
-前端文件与业务 API 路径冲突时，打包检查应失败。SPA 可以先使用 hash 路由；其他外部路径需要明确声明，不假设宿主把任意缺失路径回退到 `index.html`。
+商店安装继续调用 `POST /std/pishoo/store-install`，例如：
 
-`public` 是资源目录名，不代表匿名可访问。页面、脚本、图片和业务 API 都经过 daccess。页面同源运行，也不代表浏览器已获得逐 Lib 隔离。
-
-## 构建后端
-
-在新项目目录执行：
-
-```sh
-cargo generate-lockfile
-cargo build --locked --release --target wasm32-wasip2
-cp target/wasm32-wasip2/release/hello.wasm lib.wasm
-wasm-tools validate lib.wasm
-wasm-tools component wit lib.wasm
+```json
+{"kind":"app","publisher":"alice.smith.dhttp.net","name":"hello","version":"1.0.0"}
 ```
 
-提交 `Cargo.lock` 并在后续构建中保留 `--locked`。检查输出是 component，包含标准 HTTP incoming-handler 导出；imports 必须能由 Pishoo 宿主满足。`wasm-tools validate` 校验二进制结构，宿主的链接与导出检查决定实际执行兼容性。
+kind 选择 app/lib；省略时仍按 lib 处理。两种包都递归解析精确 Lib 依赖，复用匹配版本，补装缺失版本；循环、版本冲突、同类短名冲突或代理范围冲突时拒绝。缺少依赖的本地文件安装不自动联网补装。
 
-前端修改时可以复用已有 `lib.wasm` 业务代码，重新构建 public、更新发布版本并重新打包签名。后端有修改时再重新编译。HTTP 清单和代码的版本、路径或行为不一致时应先修正，再发布。
+安装事实以 config.db 为准，启动不扫描导入未登记文件。完整包身份用于签名、依赖、管理地址和磁盘，普通访问使用 `/app/<name>/`、`/api/<name>/`。在线操作即时生效，离线 CLI 修改下次加载生效；单制品原子保存，不承诺跨包事务。
 
-## 构建 WEBC
-
-在项目根放置以下 `wasmer.toml`：
-
-```toml
-[package]
-name = "alice.smith.dhttp.net/hello"
-version = "0.1.0"
-description = "Pishoo HTTP component with an independent frontend"
-license = "Apache-2.0"
-
-[[module]]
-name = "backend"
-source = "lib.wasm"
-
-[fs]
-"/public" = "public"
-"/metadata" = "metadata"
-```
-
-这里选择一个名为 backend 的 atom，Pishoo 按标准 WASI HTTP 调用它。没有将它声明为一个 WASI 命令或依赖 `wasmer/static-web-server`：前端由 Pishoo 原生服务，后端执行仍交给 Pishoo 的 Wasmtime 宿主。包可被 WEBC 工具解析，与 component 能否在某个运行时执行，是两项分别检查的能力。
-
-准备映射目录并使用 Wasmer 的标准打包命令：
-
-```sh
-mkdir -p metadata dist
-cp openapi.json metadata/openapi.json
-wasmer package build . --check
-wasmer package build . --out dist/hello-0.1.0.webc
-```
-
-`metadata/openapi.json` 是自动准备的副本。`/public` 和 `/metadata` 是 manifest 中的虚拟文件映射，WEBC 实际包含相应文件卷；读取器需要遵循映射解析文件位置，不能把它当成普通 ZIP 目录。
-
-打包命令会检查包能否序列化为 WEBC，但不替代 Pishoo 对 OpenAPI、WASI HTTP imports/exports、文件完整性、访问声明和发布身份的检查。它也不会自动生成本例尚缺的页面 HTTP 操作。
-
-本示例沿用 [Wasmer 文件映射](https://docs.wasmer.io/edge/guides/cdn/)，命令参数以 [Wasmer package build 实现](https://github.com/wasmerio/wasmer/blob/main/lib/cli/src/commands/package/build.rs) 为依据。包读取结构见 [WEBC 库文档](https://docs.rs/webc/latest/webc/)。商店当前只接收 WEBC v3，固定使用 webc 12.0.1；其他 WEBC 版本拒绝。
+卸载 App 保留后端；被 App/Lib 依赖的 Lib 不允许单独卸载或不兼容更新。显式卸载也保留后端数据和既有权限。不增加自动清理、级联删除或 purge；不自动授予页面/API 权限。
 
 ## 身份和私有数据
 
@@ -349,55 +195,30 @@ let caller = request_identity::caller_name();
 let owner = request_identity::caller_is_owner();
 ```
 
-这些值来自宿主认证信息。匿名 caller 为 None；主人判断同时核对名称和 owner_hash。使用该导入时，在 `host` 中说明 request-identity 的具体用途；使用身份签名时说明 signatures 的用途。
+这些值来自宿主认证信息。匿名 caller 为 None；主人判断同时核对名称和 owner_hash。使用该导入时，在 WEBC `package.pishoo.host` 中说明 request-identity 的具体用途；使用身份签名时说明 signatures 的用途。
 
-持久数据写入当前 Lib 的 `/db`，对应身份目录下 `db/<publisher>/<name>/`。使用文件系统导入时，在 host 中说明 private-storage 的用途。业务数据不进入 public、metadata 或发布包，卸载不自动清除数据与访问规则。
+持久数据写入当前 Lib 的 `/db`，对应身份目录下 `db/<publisher>/<name>/`。使用文件系统导入时，在 WEBC `package.pishoo.host` 中说明 private-storage 的用途。业务数据不进入 public、metadata 或发布包，卸载不自动清除数据与访问规则。
 
-普通 Lib 不获得通用宿主目录、命令执行或默认 HTTP 出站能力。WEBC 的 public 文件映射也不意味着 WASM 自动获得该卷的读写权限。
+Lib 不获得通用宿主目录或命令执行能力。已批准的标准 WASI HTTP 出站仍经过既有宿主和 daccess，不由依赖或 host 用途声明授予权限；App 的 public 文件不作为 Lib 的预打开目录。
 
-## 预览和验收
+## 实施和验收边界
 
-可以先预览静态页面：
+当前后端 Component 编译、独立 App/Lib 发布和基本安装已经存在；本次清单调整尚未实现。后续需要同时适配打包器、包校验、宿主安装/静态分派、商店元数据索引与前端展示，验证签名篡改、身份一致性、依赖解析、卸载保护及真实 daccess 行为后才能发布新版。
 
-```sh
-python3 -m http.server 5173 --bind 127.0.0.1 --directory public
-```
+静态开发服务器只验证页面构建，不能证明实际宿主、身份、权限和依赖安装可用。新规范的字段和行为以 [package-spec.md](package-spec.md) 为准，生产服务版本以商店 DEPLOYMENT.md 为准。
 
-这一步只验证 HTML、JS 和布局，`/hello` 尚无后端，会返回 404。完整 API、可信身份和访问规则需要在支持该 WEBC 协议的隔离 Pishoo 环境中验收；前端开发 mock 不作为真实身份或权限验收。
+App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version，最多100；Lib省略时为[]）。config.db 的 app_dependencies 与 lib_dependencies 分别保存关联。宿主拒绝循环和不匹配版本，启动核对签名制品与登记；依赖被使用时不能卸载或修改其内容/版本。正常移除父制品只删除其关联，保留依赖制品和数据。商店安装递归补齐并按依赖顺序提交，一次最多解析100个Lib，父安装失败不撤销已成功安装的有效依赖。
 
-发布前依次确认：
+Lib 间调用通过标准 WASI HTTP 向 https://~/api/<name>/... 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
 
-1. 后端是有效 component，标准 incoming-handler 能被宿主链接。
-2. OpenAPI 与实际方法、路径、响应和宿主能力一致。
-3. public 中的全部构建依赖可读取，浏览器请求使用相对路径。
-4. 最终包包含一个 backend atom 和唯一 OpenAPI，版本一致，文件完整。
-5. 页面与 API 分别经过 daccess；主人操作和记录级检查在后端生效。
+前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。
 
-首次创建资源、并发更新、重复提交、输入错误和存储错误，应按具体业务补验收；示例的只读问候语不代表已验证这些业务行为。
-
-## 签名、检查和安装
-
-使用仓库的 `package-webc` 工具从独立后端、OpenAPI 和 public 目录构建完整签名包：
+## 本仓打包入口
 
 ```sh
-# 从 Pishoo 仓库执行，发布者须在本机 DHTTP_HOME 中持有有效凭据。
-cargo run --locked -p pishoo --example package-webc -- \
-  /path/to/hello/lib.wasm /path/to/hello/openapi.json \
-  /path/to/hello/public /path/to/hello/dist/hello-0.1.0.webc \
-  --publisher alice.smith.dhttp.net
-
-pishoo lib check /path/to/hello/dist/hello-0.1.0.webc
-pishoo lib --id installer.dhttp.net install alice.smith.dhttp.net/hello \
-  /path/to/hello/dist/hello-0.1.0.webc
-pishoo restart
+cargo run --locked -p pishoo --example package-webc -- WASMER.toml OUTPUT.webc --publisher NAME
 ```
 
-工具核对项目 Cargo.toml、wasmer.toml 与 OpenAPI 的名称/版本，检查 backend 的宿主兼容性并生成每个 public 文件的 GET/HEAD。已正确声明的静态操作保留 operationId、summary、access-group；映射不符或后端路径冲突会拒绝。工具随后用发布者身份签名，通过同一宿主检查后，原子写出包与 `metadata/openapi.json`。私钥不进入发布包。`wasmer package build` 可用于标准 WEBC 格式检查，不能替代最终清单与 Pishoo 包级签名。
+`wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向不嵌入 OpenAPI/签名的 Component。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、包级签名、调用宿主检查后原子写入输出，不生成 App OpenAPI 或改写源清单。
 
-包级签名放入未映射的标准 `pishoo-signature` 卷，唯一文件为 `/signature.json`，覆盖原始 manifest、backend atoms 和全部内容卷，具体算法见 [WEBC 商店协议](../../../store-server/docs/webc-protocol.md)。历史包仍验证签名内容和发布者身份，证书今日过期不删除旧发布；在线商店来源另经固定商店身份及发布证明核对。
-
-完整包最多64MiB，OpenAPI、WEBC manifest/index 各最多1MiB；卷内文件最多16MiB、条目最多4096、深度32、卷最多16。签名信封最多64KiB，签名最多8KiB。拒绝符号链接、未索引尾部字节、重叠段、外部卷依赖、多个后端 atom 和后端内重复 OpenAPI/签名。修改并重算 WEBC 内部摘要仍须通过发布者签名验证。
-
-HTTP `POST /std/pishoo/lib-check` 和 `PUT /std/pishoo/libs/<publisher>/<name>` 使用 `Content-Type: application/webc` 和完整包字节。商店上传使用同一格式，固定版本下载路径为 `.../versions/<version>/lib.webc`。原生商店安装仍调用 `POST /std/pishoo/store-install`，由宿主重新下载、核对发布证明、整包验签和编译。
-
-磁盘制品为 `<身份目录>/lib/<publisher>/<name>/lib.webc`，数据仍在独立 `/db`。Workspace 和 HTTP 管理 API 安装、更新后立即一起启用新版前后端，卸载后立即撤销新请求入口；已开始的请求保留旧 Lib 到自身结束。保存或候选准备失败保留原版。离线 CLI 只修改磁盘，其改动在下次启动加载。安装、更新和卸载不自动修改访问规则，卸载保留数据。旧 `lib.wasm` 不自动转换，须从项目重新构建 WEBC 并安装。
+Workspace 的构建与三包依赖顺序见 [Workspace 后端](../workspace-lib/README.md)。

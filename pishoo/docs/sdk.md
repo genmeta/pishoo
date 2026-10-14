@@ -22,8 +22,8 @@ SKI on a named identity traps. `signatures` retains @0.1.0; verification takes
 its @0.1.0 functions remain available for installed components.
 
 WASI HTTP request/response types and incoming/outgoing handler interfaces are
-standard. Ordinary installed Libs retain denied outgoing access. Host-granted
-calls and bounded standard CLI run are described in
+standard. Ordinary installed Libs use the same Endpoint/native API grants;
+local calls keep their real caller and remain authorized. Bounded standard CLI run is described in
 [host capabilities](host-capabilities.md).
 
 ## Create the distribution

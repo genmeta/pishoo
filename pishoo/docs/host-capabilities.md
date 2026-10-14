@@ -1,46 +1,34 @@
-# Workspace/Chat 宿主能力
+# 普通用户 Lib 的宿主能力
 
-本轮完成宿主接缝；Workspace/Chat 业务尚未迁入 WASM，默认 Lib/App 安装和后台周期驱动尚未接入。现有原生 Workspace/Chat 继续运行。
+Workspace 与其他用户应用使用相同的 App/Lib 机制。前端为独立零 atom WEBC，声明固定版本后端依赖；后端为一个 WASM component。宿主不再内嵌 Workspace 页面、资料、联系人队列或聊天模型。
 
-身份使用 `pishoo:identity/request-identity@0.2.0`：
+`pishoo:identity/request-identity@0.2.0` 的两个 getter：
 
 ```wit
 local: func() -> tuple<string, string>;
 caller: func() -> option<tuple<string, string>>;
 ```
 
-SDK 导出 `pishoo_sdk::identity`。tuple 为 `(name, owner_hash)`，hash 从可信 authority 的证书 SKI 提取，主人比较完整 tuple。匿名 HTTP 和标准 CLI 后台调用的 caller 都是 none；具名身份缺少合法 SKI 时 trap。旧 @0.1.0 接口兼容保留，signatures 不变。
+tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；匿名 HTTP 与 CLI 后台调用的 caller 为 none，无效具名 SKI trap。旧 @0.1.0 与 signatures 保留兼容。
 
-标准 WASI HTTP outgoing 的默认网络实现关闭。普通加载的 Lib 使用 Outgoing::Denied；只有原生调用方持有当前 Endpoint、AccessService 与 API Router 时才能构造 Granted。清单、Lib 名字与 HTTP 头不能授予这些资源。本轮没有向普通组件开放网络，也没有增加特权配置开关。
+普通已安装 Lib 使用标准 WASI HTTP outgoing，以当前 Endpoint 发送远端 DHTTP 请求；本端目标通过原生 Router 分发，HTTP 继承真实 caller、CLI 后台使用实际 LocalAuthority。每次都经 daccess 授权，WASM 不能注入 Visitor 或身份事实。本端转交只替换认证 extensions，保留 Router 自己产生的路径参数。没有 Workspace 名称判断、系统 Linker或新增 HTTP WIT。
 
-Granted 只接受 HTTPS DHTTP authority；`~` 指本端，远端名称沿用 DHTTP 规范化和证书验证。本端在进程内交给调用方提供的原生 Router，HTTP 执行传递真实 HandshakeSummary，匿名仍是匿名。后台分发使用实际 LocalAuthority 让原生 daccess 派生 owner Visitor；没有伪造 caller。实际握手优先于 LocalAuthority，外带 Visitor 被移除。
+出站接受 HTTPS DHTTP authority，`~` 表示本端。保持正常证书验证、逐跳头清理、流式请求响应；正文各限1 MiB，总传输最多15秒，并遵循更短 WASI 期限。请求 trailers 拒绝。业务准入、申请状态、重试和队列全部在 Lib 中。
 
-远端使用当前 Endpoint 和联系人数据，经 DHTTP 发送。请求/响应使用标准流式 Body，上传和响应可同时进行；请求扩展和逐跳头清除，带请求 trailers 时拒绝。请求/响应正文各限 1 MiB，单次传输最多15秒，并遵循更短的 WASI 连接、首字节和字节间隔期限。业务路径、联系人申请回执、chat 准入和队列状态不在 hook 中处理。
+宿主每3秒驱动当前用户 Lib 中具有标准 wasi:cli/run 导出的组件。每次独立 Store、私有 filesystem、既有 fuel/limiter 与 TaskTracker；15秒超时取消并回收。一个运行批次未结束时不积累定时批次；HTTP 执行仍没有额外并发名额。没有 Server 业务 worker 字段。
 
-后台入口使用同一 component 的标准 `wasi:cli/run` 导出。每次有独立 Store、私有 `/db`、现有 fuel/limiter 和 TaskTracker；15秒超时会取消并回收该次任务。业务重试和 lease 由未来 Lib 管理，周期调度待默认 bundle 接入。
+原生资源 API 增强：联系人列表直接返回 id/incoming；详情和自身状态返回 id；PUT /std/contact/{name} 为 owner 专用本机资源写入。GET /std/acl/reviews 支持 pending/expired 与 requested_at；DELETE /std/acl/review/{id} 仅删除已过期 pending 记录。数据库 schema、授权模型和公共 ContactRecord/ReviewRecord 不变。
 
-原生 daccess API 变化：
+普通入口为 `/api/<name>/` 和 `/app/<name>/`，前端 hash 导航、后端字面量路径/query。通用已加载目录位于 `/std/pishoo/loaded-libs`、`/std/pishoo/loaded-apps`。
 
-| API | 变化 | 身份要求 |
-| --- | --- | --- |
-| GET /std/contacts | items 返回稳定 id 与 incoming；incoming 表示当前名称和 subject 曾有入站申请 | 现有 daccess 授权 |
-| GET /std/contact/{name} | 返回 id；公共 ContactRecord/schema 不变 | 现有 daccess 授权 |
-| GET /std/contact/self | 不带 application_id 的资源响应增加 id | 真实 visitor 与资源 subject 匹配 |
-| PUT /std/contact/{name} | 创建/更新本机联系人资源 | 同名且同 subject 的本端 owner；仍经过外层 daccess |
+默认制品从发行 share/pishoo/default-artifacts 交付，首次初始化通过普通安装器保存到用户目录。配置文件存在后不重装、不自动升级；卸载和依赖保护同其他 App/Lib。来源不授予额外权限。构建与安装详见 [Workspace 后端](../workspace-lib/README.md)。
 
-PUT 输入示例：
+安装登记存入身份的 config.db：libs 与 apps 分开，各自 name 唯一；app_dependencies 保存完整后端 ID 和精确版本。签名制品保留在原有 publisher/name 目录。启动只加载数据库登记项，核对制品身份、版本、依赖；不扫描或自动导入其他文件。旧安装使用正常安装命令显式登记。
 
-```json
-{
-  "subject_id": "目标的 owner hash 文本",
-  "class": "",
-  "description": "Bob",
-  "status": "active",
-  "requested_access": {},
-  "offers": {}
-}
-```
+卸载 App 只移除前端制品、App 登记和该 App 的依赖关联，保留后端制品、Lib 登记和数据；被其他 App 依赖的 Lib 不能卸载，显式卸载 Lib 也保留数据。文件与数据库在已有身份锁下提交；进程意外中断导致两者不一致时明确报错，通过重新安装修复，不以文件反写数据库。
 
-status 只允许 pending/active，默认 pending；expired_after 可选，默认新资源7天，重试保留已有期限。新建返回201，已有成功写入返回204；同一资源重试不刷新时间。变化的 pending、blocked、expired 资源返回409；状态/别名修改和删除仍走现有 PATCH/DELETE。id/incoming/granted_access/created_at/updated_at 不可写。资源创建和激活复用已有原生方法；激活失败时保留 pending，允许相同请求重试。PUT 不发网络、不轮询、不按 chat 能力授权；ACL 单独走原有 API。
+App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version，最多100；Lib省略时为[]）。config.db 的 app_dependencies 与 lib_dependencies 分别保存关联。宿主拒绝循环和不匹配版本，启动核对签名制品与登记；依赖被使用时不能卸载或修改其内容/版本。正常移除父制品只删除其关联，保留依赖制品和数据。商店安装递归补齐并按依赖顺序提交，一次最多解析100个Lib，父安装失败不撤销已成功安装的有效依赖。
 
-已撤除 `/std/contact/{name}/application` 原生编排和 `/std/pishoo/identity` 原型。远端申请仍用原生 POST /std/contact、GET /std/contact/self，由 WASM 编排；没有新增 HTTP WIT 或身份请求头。
+Lib 间调用通过标准 WASI HTTP 向 https://~/api/<name>/... 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
+
+前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。

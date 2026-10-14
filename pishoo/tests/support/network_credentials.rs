@@ -18,6 +18,10 @@ fn openssl(root: &Path, args: &[&str]) {
 
 // Generate fresh certificates and signed OCSP responses. Production verification stays enabled.
 pub fn generate(root: &Path, names: &[(&str, &str)]) {
+    generate_with_owner(root, names, None);
+}
+
+pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&str, &str)>) {
     fs::create_dir_all(root).unwrap();
     openssl(
         root,
@@ -78,7 +82,10 @@ pub fn generate(root: &Path, names: &[(&str, &str)]) {
                 &subject,
             ],
         );
-        let owner_hash = format!("{:x}", Sha256::digest(hostname.as_bytes()));
+        let owner_hash = owner
+            .filter(|(name, _)| *name == hostname)
+            .map(|(_, hash)| hash.to_owned())
+            .unwrap_or_else(|| format!("{:x}", Sha256::digest(hostname.as_bytes())));
         let ski = format!("{}:0:{owner_hash}", index + 1)
             .bytes()
             .map(|byte| format!("{byte:02x}"))

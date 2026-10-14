@@ -59,9 +59,16 @@ fn release(owner: char, version: &str) -> (Vec<u8>, Value) {
         .iter()
         .map(|c| STANDARD.encode(c.as_ref()))
         .collect::<Vec<_>>();
-    let metadata = serde_json::json!({"id":"alice.dhttp.net/note","publisher":publisher,"name":"note","version":version,
+    let mut metadata = serde_json::json!({"id":"alice.dhttp.net/note","publisher":publisher,"name":"note","version":version,
         "publisher_owner_hash":owner.to_string().repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "openapi":document,"signer_certificates":certificates});
+    let package = read_package(&bytes).unwrap();
+    let fields = package_metadata(&package).unwrap();
+    for (key, value) in fields.as_object().unwrap() {
+        metadata[key] = value.clone();
+    }
+    metadata["openapi"] =
+        serde_json::from_slice(&package_file(&package, "/metadata/openapi.json").unwrap()).unwrap();
     (bytes, metadata)
 }
 
@@ -102,7 +109,7 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
 }
 
 #[test]
-fn complete_ids_keep_legacy_resources_separate_and_refuse_publisher_takeover() {
+fn complete_ids_conflict_with_legacy_names_and_refuse_publisher_takeover() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join("lib")).unwrap();
@@ -111,6 +118,8 @@ fn complete_ids_keep_legacy_resources_separate_and_refuse_publisher_takeover() {
     let (bytes, _) = release('a', "1.2.3");
     install_lib(&profile, "note", &bytes, &runtime).unwrap();
     let id = "alice.dhttp.net/note";
+    assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
+    super::super::remove_lib(&profile, "note").unwrap();
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     assert_eq!(
         super::super::installed_libs(&profile, None)
@@ -118,12 +127,12 @@ fn complete_ids_keep_legacy_resources_separate_and_refuse_publisher_takeover() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
     let mut sandbox = super::super::Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.contains_key("note") && sandbox.libs.contains_key(id));
-    assert!(profile.join("db/note").is_dir());
+    assert!(!sandbox.libs.contains_key("note") && sandbox.libs.contains_key(id));
+    assert!(!profile.join("db/note").exists());
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     let (rotated, _) = release('a', "1.2.4");
     install_lib(&profile, id, &rotated, &runtime).unwrap();
@@ -136,13 +145,111 @@ fn complete_ids_keep_legacy_resources_separate_and_refuse_publisher_takeover() {
     assert!(install_lib(&profile, "bob.dhttp.net/note", &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     super::super::remove_lib(&profile, id).unwrap();
-    assert!(profile.join("lib/note/lib.webc").is_file());
+    assert!(!profile.join("lib/note/lib.webc").exists());
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
     std::fs::remove_dir(profile.join("lib/alice.dhttp.net")).unwrap();
     std::os::unix::fs::symlink(&outside, profile.join("lib/alice.dhttp.net")).unwrap();
     assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
-    assert!(super::super::remove_lib(&profile, id).is_err());
+    super::super::remove_lib(&profile, id).unwrap();
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
+
+#[test]
+fn frontend_release_proof_binds_kind_and_exact_backend_dependencies() {
+    use super::super::tests::{package_fixture, publisher};
+    let authority = publisher("alice.dhttp.net", 'a');
+    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Frontend","version":"1.0.0","description":"Separate frontend","license":{"name":"MIT"}},"x-pishoo":{"kind":"app","publisher":"alice.dhttp.net","name":"note","entry":"/","host":{},"dependencies":[{"publisher":"alice.dhttp.net","name":"note","version":"1.2.3"}]},"paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"headPage","summary":"Page header","x-pishoo":{"static-file":"/public/index.html"}}}}});
+    let public = webc::v3::write::Directory::new(
+        std::collections::BTreeMap::from([(
+            "index.html".parse().unwrap(),
+            b"page".to_vec().into(),
+        )]),
+        webc::v3::Timestamps::default(),
+    );
+    let bytes = package_fixture(&document, &[], public, &authority);
+    let mut metadata = serde_json::json!({"kind":"app","id":"alice.dhttp.net/note","publisher":"alice.dhttp.net","name":"note","version":"1.0.0","publisher_owner_hash":"a".repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":authority.certificates().iter().map(|c| STANDARD.encode(c.as_ref())).collect::<Vec<_>>()});
+    metadata.as_object_mut().unwrap().remove("openapi");
+    let fields = package_metadata(&read_package(&bytes).unwrap()).unwrap();
+    for (key, value) in fields.as_object().unwrap() {
+        metadata[key] = value.clone();
+    }
+    verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").unwrap();
+    let mut wrong = metadata.clone();
+    wrong["kind"] = serde_json::json!("lib");
+    assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
+    wrong = metadata;
+    wrong["dependencies"][0]["version"] = serde_json::json!("2.0.0");
+    assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
+}
+
+#[test]
+fn dependency_tree_orders_transitive_libs_and_rejects_cycles() {
+    use super::super::tests::{package_fixture, publisher};
+    let authority = publisher("alice.dhttp.net", 'a');
+    let package = |name: &str, names: &[&str]| {
+        let dependencies=names.iter().map(|name|serde_json::json!({"publisher":"alice.dhttp.net","name":name,"version":"1.0.0"})).collect::<Vec<_>>();
+        let document = serde_json::json!({"openapi":"3.1.0","info":{"title":name,"description":"Dependency graph fixture","version":"1.0.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":name,"host":{},"dependencies":dependencies},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
+        let bytes = package_fixture(
+            &document,
+            include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+            webc::v3::write::Directory::default(),
+            &authority,
+        );
+        (
+            "lib".into(),
+            format!("alice.dhttp.net/{name}"),
+            bytes,
+            false,
+        )
+    };
+    let ordered = order_releases(vec![
+        package("parent", &["first", "second"]),
+        package("second", &["shared"]),
+        package("first", &["shared"]),
+        package("shared", &[]),
+    ])
+    .unwrap();
+    let ids = ordered
+        .iter()
+        .map(|(_, id, _, _)| id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.first(), Some(&"alice.dhttp.net/shared"));
+    assert_eq!(ids.last(), Some(&"alice.dhttp.net/parent"));
+    assert_eq!(ids.len(), 4);
+    assert!(
+        order_releases(vec![
+            package("first", &["second"]),
+            package("second", &["first"])
+        ])
+        .is_err()
+    );
+    assert!(order_releases(vec![package("parent", &["missing"])]).is_err());
+    let (kind, id, bytes, reused) = package("parent", &["first", "second"]);
+    let container = read_package(&bytes).unwrap();
+    let document: Value = serde_json::from_slice(
+        &super::super::package_file(&container, "/metadata/openapi.json").unwrap(),
+    )
+    .unwrap();
+    let signature = container
+        .get_volume("pishoo-signature")
+        .unwrap()
+        .read_file("/signature.json")
+        .unwrap()
+        .0;
+    let envelope: Value = serde_json::from_slice(&signature).unwrap();
+    let mut metadata = serde_json::json!({"kind":kind,"id":id,"publisher":"alice.dhttp.net","name":"parent","version":"1.0.0","publisher_owner_hash":"a".repeat(64),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len(),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":envelope["certificates"]});
+    let fields = package_metadata(&container).unwrap();
+    for (key, value) in fields.as_object().unwrap() {
+        metadata[key] = value.clone();
+    }
+    assert!(!reused);
+    verify_release(&bytes, &metadata, "alice.dhttp.net", "parent", "1.0.0").unwrap();
+    let mut altered = metadata;
+    altered["dependencies"] = serde_json::json!([]);
+    assert!(verify_release(&bytes, &altered, "alice.dhttp.net", "parent", "1.0.0").is_err());
+}
+
+#[path = "store_network.rs"]
+mod network;

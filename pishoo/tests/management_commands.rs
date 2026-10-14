@@ -30,24 +30,102 @@ fn initialize(home: &Path, name: &str) {
     db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
 }
 fn component() -> Vec<u8> {
-    let mut bytes = include_bytes!("fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
-    let doc = br#"{"openapi":"3.1.0","info":{"title":"Note","version":"1"},"paths":{"/upload":{"post":{}}}}"#;
-    let mut section = vec![14];
-    section.extend_from_slice(b"pishoo:openapi");
-    section.extend_from_slice(doc);
-    let mut n = section.len();
-    bytes.push(0);
-    loop {
-        let b = (n & 127) as u8;
-        n >>= 7;
-        bytes.push(b | if n > 0 { 128 } else { 0 });
-        if n == 0 {
-            break;
-        }
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
+    use std::{collections::BTreeMap, sync::Arc};
+    use webc::v3::{
+        SignatureAlgorithm, Timestamps,
+        write::{Directory, FileEntry, Writer},
+    };
+    let name = "alice.dhttp.net";
+    let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    let ski = format!("1:0:{}", "a".repeat(64));
+    let mut der = vec![4, ski.len() as u8];
+    der.extend_from_slice(ski.as_bytes());
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            &[2, 5, 29, 14],
+            der,
+        ));
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let authority = dhttp::LocalAuthority::new(
+        &qtls::default_provider(),
+        Arc::from(name),
+        vec![cert.der().clone()],
+        qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+        vec![1],
+    )
+    .unwrap();
+    let bytes = include_bytes!("fixtures/wasi-http-read-request-then-respond.wasm");
+    let mut doc = serde_json::json!({"openapi":"3.1.0","info":{"title":"Note","description":"CLI fixture","version":"1.0.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":name,"name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
+    doc["x-pishoo"] = serde_json::json!({});
+    let manifest:webc::metadata::Manifest=serde_json::from_value(serde_json::json!({"package":{
+        "wapm":{"name":"alice.dhttp.net/note","version":"1.0.0","description":"CLI fixture","license":"MIT"},
+        "pishoo":{"kind":"lib","title":"Note","dependencies":[],"host":{},"changelog":"CLI test; data unchanged"},
+        "fs":[{"volume_name":"metadata","mount_path":"/metadata"}]},"atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(bytes)))}}})).unwrap();
+    let atoms = || {
+        BTreeMap::from([(
+            "backend".parse().unwrap(),
+            FileEntry::borrowed(bytes, Timestamps::default()),
+        )])
+    };
+    let metadata = || {
+        Directory::new(
+            BTreeMap::from([(
+                "openapi.json".parse().unwrap(),
+                serde_json::to_vec(&doc).unwrap().into(),
+            )]),
+            Timestamps::default(),
+        )
+    };
+    let unsigned = Writer::default()
+        .write_manifest(&manifest)
+        .unwrap()
+        .write_atoms(atoms())
+        .unwrap()
+        .with_volume("metadata", metadata())
+        .unwrap()
+        .finish(SignatureAlgorithm::None)
+        .unwrap();
+    let reader = webc::v3::read::OwnedReader::parse(unsigned.clone()).unwrap();
+    let index = reader.index();
+    let mut hash = Sha256::new();
+    hash.update(b"\0webc003");
+    for entry in std::iter::once(&index.manifest)
+        .chain(std::iter::once(&index.atoms))
+        .chain(index.volumes.values())
+    {
+        hash.update(&unsigned[entry.span.start..entry.span.end()]);
     }
-    bytes.extend(section);
-    bytes
+    let mut input = b"pishoo-webc-signature-v1\0".to_vec();
+    input.extend_from_slice(&hash.finalize());
+    let envelope = serde_json::json!({"version":1,"certificates":[STANDARD.encode(cert.der())],"signature":STANDARD.encode(authority.sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256,&input).unwrap())});
+    Writer::default()
+        .write_raw_manifest(
+            unsigned[index.manifest.span.start + 41..index.manifest.span.end()].to_vec(),
+        )
+        .write_atoms(atoms())
+        .unwrap()
+        .with_volume("metadata", metadata())
+        .unwrap()
+        .with_volume(
+            "pishoo-signature",
+            Directory::new(
+                BTreeMap::from([(
+                    "signature.json".parse().unwrap(),
+                    serde_json::to_vec(&envelope).unwrap().into(),
+                )]),
+                Timestamps::default(),
+            ),
+        )
+        .unwrap()
+        .finish(SignatureAlgorithm::None)
+        .unwrap()
+        .to_vec()
 }
+
 #[test]
 fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     let root = tempfile::tempdir().unwrap();
@@ -80,11 +158,11 @@ fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     std::fs::write(&path, b"[]").unwrap();
     success(home, &["proxy", "replace", path.to_str().unwrap()]);
     success(home, &["proxy", "clear"]);
-    let input = home.join("note.wasm");
+    let input = home.join("note.webc");
     std::fs::write(&input, component()).unwrap();
     let output = success(home, &["lib", "check", input.to_str().unwrap()]);
     let checked: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(checked.get("id").is_none());
+    assert_eq!(checked["id"], "alice.dhttp.net/note");
     success(
         home,
         &[
@@ -104,7 +182,7 @@ fn local_commands_use_default_or_explicit_identity_without_starting_a_server() {
     assert!(!String::from_utf8_lossy(&loaded.stderr).contains("Catalog:    installed (disk)"));
     let info: Value =
         serde_json::from_slice(&success(home, &["lib", "info", "note"]).stdout).unwrap();
-    assert_eq!(info["endpoints"][0]["path"], "/std/api/note/upload");
+    assert_eq!(info["endpoints"][0]["path"], "/api/note/upload");
     let libs: Value = serde_json::from_slice(&success(home, &["lib"]).stdout).unwrap();
     assert_eq!(libs[0]["id"], "note");
     std::fs::create_dir(home.join("alice.smith/db/note")).unwrap();

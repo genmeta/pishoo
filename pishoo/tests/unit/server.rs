@@ -92,6 +92,36 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
             http::StatusCode::NOT_FOUND,
             "Not Found",
         ),
+        (
+            "/",
+            "/api/echo/not-declared",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            "/",
+            "/api/echo/upload",
+            http::StatusCode::METHOD_NOT_ALLOWED,
+            "Method Not Allowed",
+        ),
+        (
+            "/",
+            "/api/echo-other/upload",
+            http::StatusCode::OK,
+            "upstream /api/echo-other/upload",
+        ),
+        (
+            "/",
+            "/app/unloaded/",
+            http::StatusCode::OK,
+            "upstream /app/unloaded/",
+        ),
+        (
+            "/",
+            "/std/api/echo/upload",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
         ("/", "/std", http::StatusCode::NOT_FOUND, "Not Found"),
         (
             "/",
@@ -101,9 +131,9 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         ),
         (
             "/",
-            "/std/api/unloaded/run",
-            http::StatusCode::NOT_FOUND,
-            "Not Found",
+            "/api/unloaded/run",
+            http::StatusCode::OK,
+            "upstream /api/unloaded/run",
         ),
         (
             "/",
@@ -259,12 +289,15 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
-    std::fs::write(
-        profile.join("lib/echo/lib.webc"),
-        crate::sandbox::tests::package_component(&component("1")),
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    crate::setup::load_server_config(&profile).unwrap();
+    crate::sandbox::install_lib(
+        &profile,
+        "echo",
+        &crate::sandbox::tests::package_component(&component("1")),
+        &runtime,
     )
     .unwrap();
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
     let endpoint = crate::test_identity::endpoint(profile.name());
     let certificates = endpoint.local_authority().unwrap();
     let pem = certificates
@@ -289,21 +322,6 @@ async fn server(root: &std::path::Path) -> Server {
         .await
         .unwrap(),
     );
-    let subject = access_control::SubjectId::new(b"owner").unwrap();
-    let workspace = Arc::new(Workspace::new(
-        profile.name().to_owned(),
-        endpoint.name().to_owned(),
-        subject.clone(),
-        WorkspaceStore::open(&profile).await.unwrap(),
-        access.clone(),
-    ));
-    let chat = Arc::new(Chat::new(
-        endpoint.name().to_owned(),
-        subject,
-        ChatStore::open(&profile).await.unwrap(),
-        access.clone(),
-    ));
-    workspace.configure_chat(chat.clone()).await;
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
     let server = Server {
@@ -311,8 +329,6 @@ async fn server(root: &std::path::Path) -> Server {
         endpoint,
         config,
         access,
-        workspace,
-        chat,
         router: Arc::new(RwLock::new(Router::new())),
         sandbox: Arc::new(RwLock::new(sandbox)),
         publisher: None,
@@ -619,4 +635,87 @@ async fn unloaded_empty_configuration_waits_for_credential_validation_before_ini
     );
     assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
     assert!(!profile.access_db_path().exists());
+}
+
+#[test]
+#[ignore = "run alone: selects process-wide default artifact directory"]
+fn default_artifacts_install_as_user_resources_and_are_not_reinstalled_after_removal() {
+    use crate::sandbox::tests::{package_fixture, publisher};
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("defaults");
+    std::fs::create_dir(&source).unwrap();
+    let previous = std::env::var_os("PISHOO_DEFAULT_ARTIFACTS");
+    unsafe {
+        std::env::set_var("PISHOO_DEFAULT_ARTIFACTS", &source);
+    }
+    let _environment = scopeguard::guard(previous, |value| unsafe {
+        match value {
+            Some(value) => std::env::set_var("PISHOO_DEFAULT_ARTIFACTS", value),
+            None => std::env::remove_var("PISHOO_DEFAULT_ARTIFACTS"),
+        }
+    });
+    let authority = publisher("alice.dhttp.net", 'a');
+    let mut backend = json!({"openapi":"3.1.0","info":{"title":"Defaults","version":"1.0.0","description":"Ordinary defaults","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"default","host":{}},"paths":{"/run":{"post":{"operationId":"run","summary":"Run"}}}});
+    let mut chat = backend.clone();
+    chat["x-pishoo"]["name"] = json!("chat");
+    let chat_bytes = package_fixture(
+        &chat,
+        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &authority,
+    );
+    std::fs::write(source.join("zzz-chat.webc"), &chat_bytes).unwrap();
+    backend["x-pishoo"]["dependencies"] =
+        json!([{"publisher":"alice.dhttp.net","name":"chat","version":"1.0.0"}]);
+    let bytes = package_fixture(
+        &backend,
+        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
+        webc::v3::write::Directory::default(),
+        &authority,
+    );
+    std::fs::write(source.join("backend.webc"), &bytes).unwrap();
+    let frontend = json!({"openapi":"3.1.0","info":{"title":"Defaults","version":"1.0.0","description":"Ordinary defaults","license":{"name":"MIT"}},"x-pishoo":{"kind":"app","publisher":"alice.dhttp.net","name":"default","host":{},"entry":"/","dependencies":[{"publisher":"alice.dhttp.net","name":"default","version":"1.0.0"}]},"paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"head","summary":"Headers","x-pishoo":{"static-file":"/public/index.html"}}}}});
+    let public = webc::v3::write::Directory::new(
+        std::collections::BTreeMap::from([(
+            "index.html".parse().unwrap(),
+            b"ordinary frontend".to_vec().into(),
+        )]),
+        webc::v3::Timestamps::default(),
+    );
+    let app = package_fixture(&frontend, &[], public, &authority);
+    std::fs::write(source.join("frontend.webc"), &app).unwrap();
+
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir(profile.path()).unwrap();
+    initialize_directories(&profile).unwrap();
+    let runtime = WasmRuntime::new().unwrap();
+    install_default_artifacts(&profile, &runtime).unwrap();
+    assert!(profile.config_db_path().is_file());
+    assert_eq!(
+        std::fs::read(profile.join("lib/alice.dhttp.net/default/lib.webc")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(profile.join("app/alice.dhttp.net/default/app.webc")).unwrap(),
+        app
+    );
+    crate::sandbox::remove_app(&profile, "alice.dhttp.net/default").unwrap();
+    crate::sandbox::remove_lib(&profile, "alice.dhttp.net/default").unwrap();
+    install_default_artifacts(&profile, &runtime).unwrap();
+    assert!(!profile.join("lib/alice.dhttp.net/default").exists());
+    assert!(!profile.join("app/alice.dhttp.net/default").exists());
+    assert!(profile.join("lib/alice.dhttp.net/chat/lib.webc").is_file());
+    let failed = IdentityProfile::try_from(root.path().join("failed")).unwrap();
+    std::fs::create_dir(failed.path()).unwrap();
+    initialize_directories(&failed).unwrap();
+    std::fs::write(source.join("frontend.webc"), b"invalid package").unwrap();
+    assert!(install_default_artifacts(&failed, &runtime).is_err());
+    assert!(!failed.config_db_path().exists());
+    assert!(
+        std::fs::read_dir(failed.join("lib"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }

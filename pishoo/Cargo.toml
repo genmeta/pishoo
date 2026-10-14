@@ -34,6 +34,7 @@ sha2 = "0.10"
 scopeguard = "1"
 tower = { version = "0.5", features = ["util"] }
 cap-std = "4"
+getrandom = "0.4"
 rustix = { version = "1", features = ["fs"] }
 toml = "0.9"
 form_urlencoded = "1"
@@ -58,14 +59,11 @@ wasmtime = "47.0.4"
 wasmtime-wasi = { version = "47.0.4", features = ["p2"] }
 wasmtime-wasi-http = { version = "47.0.4", default-features = false, features = ["p2"] }
 oas3 = { version = "0.22.0", default-features = false }
-getrandom = "0.4"
-imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
-include_dir = "0.7"
-snafu = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+imagesize = { version = "0.14", default-features = false, features = ["jpeg", "png", "webp"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 qbase = { version = "0.7.0" }
 hyper = { version = "1", features = ["server", "http1"] }

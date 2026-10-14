@@ -24,7 +24,7 @@ use wasmtime_wasi_http::{
 };
 
 use super::{
-    Invocation, Lib, Outgoing, StoreData, WasmRuntime,
+    Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
     host::{identity, identity_v2},
     package_file, read_package, validate_openapi,
 };
@@ -107,11 +107,8 @@ impl Lib {
         let package = read_package(bytes)?;
         let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
         if let Some((publisher, name)) = id.split_once('/') {
-            let manifest = serde_json::to_value(&openapi)
-                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-            if manifest["x-pishoo"]["publisher"] != publisher
-                || manifest["x-pishoo"]["name"] != name
-            {
+            let manifest = super::package_metadata(&package)?;
+            if manifest["publisher"] != publisher || manifest["name"] != name {
                 return Err(Error::InvalidComponent(
                     "Lib ID and manifest identity disagree".into(),
                 ));
@@ -131,7 +128,9 @@ impl Lib {
                 }
             }
         }
-        let component = runtime.compile(&package.get_atom("backend").unwrap())?;
+        let component = runtime.compile(&package.get_atom("backend").ok_or_else(|| {
+            Error::InvalidComponent("expected a backend lib, received a frontend app".into())
+        })?)?;
         match std::fs::symlink_metadata(data_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => {
@@ -236,7 +235,11 @@ impl Invocation {
                 move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
                     let handshake = handshake.clone();
                     async move {
-                        request.extensions_mut().clear();
+                        // WASI strips guest extensions before Router matching.
+                        // Keep Axum's trusted route parameters while replacing
+                        // only authentication facts for this invocation.
+                        request.extensions_mut().remove::<access_control::Visitor>();
+                        request.extensions_mut().remove::<dhttp::LocalAuthority>();
                         request.extensions_mut().insert(handshake);
                         next.run(request).await
                     }
@@ -356,7 +359,8 @@ impl Invocation {
                 move |mut request: Request<axum::body::Body>, next: axum::middleware::Next| {
                     let authority = authority.clone();
                     async move {
-                        request.extensions_mut().clear();
+                        request.extensions_mut().remove::<access_control::Visitor>();
+                        request.extensions_mut().remove::<dhttp::HandshakeSummary>();
                         request.extensions_mut().insert(authority);
                         next.run(request).await
                     }
@@ -432,4 +436,46 @@ fn check_endpoint(actual: &dhttp::Endpoint, granted: &dhttp::Endpoint) -> Result
         return Err(Error::IdentityMismatch);
     }
     Ok(())
+}
+
+impl Sandbox {
+    pub(crate) async fn run(
+        sandbox: Arc<std::sync::RwLock<Self>>,
+        endpoint: dhttp::Endpoint,
+        access: Arc<access_control::AccessService>,
+        api: axum::Router,
+    ) {
+        let (mut libs, tasks) = {
+            let sandbox = sandbox.read().unwrap();
+            if sandbox.tasks.is_closed() {
+                return;
+            }
+            let libs = sandbox
+                .libs
+                .iter()
+                .filter(|(_, lib)| {
+                    lib.component
+                        .component_type()
+                        .exports(&lib.runtime.engine)
+                        .any(|(name, _)| name.starts_with("wasi:cli/run@0.2."))
+                })
+                .map(|(id, lib)| (id.clone(), lib.clone()))
+                .collect::<Vec<_>>();
+            (libs, sandbox.tasks.clone())
+        };
+        libs.sort_by(|left, right| left.0.cmp(&right.0));
+        futures::future::join_all(libs.into_iter().map(|(id, lib)| {
+            let endpoint = endpoint.clone();
+            let access = access.clone();
+            let api = api.clone();
+            let tasks = tasks.clone();
+            async move {
+                if tasks.is_closed() { return; }
+                let outgoing = Outgoing::Granted { endpoint: endpoint.clone(), access, api };
+                if let Err(error) = Invocation::run(lib, endpoint.clone(), tasks, outgoing).await {
+                    tracing::warn!(identity=endpoint.name(),lib=%id,%error,"background WASI run failed");
+                }
+            }
+        })).await;
+    }
 }

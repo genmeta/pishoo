@@ -26,7 +26,7 @@ architecture = "target"
 dockerfile = "xtask/release/deb/Dockerfile"
 
 [package.pishoo.deb.requires.pishoo-common.version]
-">=" = { value = "0.5.1-1" }
+">=" = { from = "self" }
 "<=" = { from = "self" }
 
 
@@ -36,7 +36,7 @@ architecture = "target"
 dockerfile = "xtask/release/rpm/Dockerfile"
 
 [package.pishoo.rpm.requires.pishoo-common.version]
-">=" = { value = "0.5.1-1" }
+">=" = { from = "self" }
 "<=" = { from = "self" }
 
 
