@@ -1,0 +1,104 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Profile",
+    "description": "身份展示资料与头像",
+    "version": "0.1.0",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "x-pishoo": {},
+  "paths": {
+    "/profile": {
+      "get": {
+        "operationId": "getProfile",
+        "summary": "profile",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchProfile",
+        "summary": "settings profile",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profile/avatar": {
+      "get": {
+        "operationId": "getProfileAvatar",
+        "summary": "profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putSettingsProfileAvatar",
+        "summary": "settings profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSettingsProfileAvatar",
+        "summary": "settings profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profile/context": {
+      "get": {
+        "operationId": "getIntroduction",
+        "summary": "公开名片及真实访客身份",
+        "responses": {
+          "200": {
+            "description": "公开资料、访客名称和主人校验；private, no-store"
+          },
+          "403": {
+            "description": "普通 daccess ACL 拒绝访问"
+          }
+        }
+      },
+      "head": {
+        "operationId": "headIntroduction",
+        "summary": "公开名片及真实访客身份",
+        "responses": {
+          "200": {
+            "description": "公开资料、访客名称和主人校验；private, no-store"
+          },
+          "403": {
+            "description": "普通 daccess ACL 拒绝访问"
+          }
+        }
+      }
+    }
+  }
+}

@@ -105,8 +105,14 @@ pub async fn run() -> Result<()> {
                             let sandbox = server.sandbox.clone();
                             let endpoint = server.endpoint.clone();
                             let access = server.access.clone();
+                            let profile = server.profile.clone();
                             let api = native_router(server).layer(axum::middleware::from_fn_with_state(access.clone(),authorize));
-                            runs.push(async move { Sandbox::run(sandbox,endpoint,access,api).await });
+                            runs.push(async move {
+                                if let Err(error) = crate::contact::contact_jobs(&profile, &endpoint, &access).await {
+                                    tracing::warn!(identity = endpoint.name(), %error, "Contact delivery failed");
+                                }
+                                Sandbox::run(sandbox,endpoint,access,api).await
+                            });
                         }
                     }
                     _ = runs.next(), if !runs.is_empty() => {},
@@ -792,10 +798,48 @@ async fn load_access(
 
 fn native_router(server: &Server) -> Router {
     let endpoint = server.endpoint.clone();
-    let sandbox = server.sandbox.clone();
     let local_router = Arc::downgrade(&server.router);
+    let capability_profile = server.profile.clone();
     Router::new()
+        .route("/std/acl/capabilities", axum::routing::get(move || {
+            let profile = capability_profile.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+                    let path = profile.config_db_path();
+                    if !path.symlink_metadata()?.is_file() {
+                        return Err(Error::InvalidConfig("config.db must be a regular file".into()));
+                    }
+                    let mut conn = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                    conn.busy_timeout(std::time::Duration::from_secs(3))?;
+                    let tx = conn.transaction()?;
+                    let ready: bool = tx.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('lib_capabilities','lib_capability_operations')",[],|r|r.get(0))?;
+                    if !ready { return Err(Error::InvalidConfig("capability registration missing; install/reinstall Libs using normal installation".into())); }
+                    let mut values = Vec::new();
+                    for row in tx.prepare("SELECT c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY c.lib_id||'#'||c.capability_id")?
+                        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))? {
+                        let (lib,id,title,version)=row?;
+                        let endpoints = tx.prepare("SELECT method,path FROM lib_capability_operations WHERE lib_id=?1 AND capability_id=?2 ORDER BY method,path")?
+                            .query_map(rusqlite::params![lib,id],|r|Ok(serde_json::json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?})))?
+                            .collect::<std::result::Result<Vec<_>,_>>()?;
+                        values.push(serde_json::json!({"id":format!("{lib}#{id}"),"title":title,"version":version,"visibility":"contact","approval_mode":"capability","selectable":true,"endpoints":endpoints}));
+                    }
+                    Ok(values.into())
+                }).await;
+                let mut response = match result {
+                    Ok(Ok(value)) => axum::Json(value).into_response(),
+                    Ok(Err(error)) => (error.status(),error.to_string()).into_response(),
+                    Err(error) => (http::StatusCode::INTERNAL_SERVER_ERROR,error.to_string()).into_response(),
+                };
+                response.headers_mut().insert(http::header::CACHE_CONTROL,http::HeaderValue::from_static("no-store"));
+                response
+            }
+        }))
         .merge(access_router(server.access.clone()))
+        .merge(crate::contact::contact_router(
+            server.profile.clone(),
+            server.endpoint.clone(),
+            server.access.clone(),
+        ))
         .merge(config_router(
             server.profile.clone(),
             server.endpoint.clone(),
@@ -809,20 +853,9 @@ fn native_router(server: &Server) -> Router {
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |mut request: Request<AxumBody>| {
             let endpoint = endpoint.clone();
-            let sandbox = sandbox.clone();
             let local_router = local_router.clone();
             async move {
-                let Some(tail) = request.uri().path().strip_prefix("/api/") else {
-                    return http::StatusCode::NOT_FOUND.into_response();
-                };
-                let name = tail.split('/').next().unwrap();
-                if !sandbox
-                    .read()
-                    .unwrap()
-                    .libs
-                    .keys()
-                    .any(|id| id.rsplit('/').next() == Some(name))
-                {
+                if !request.uri().path().starts_with("/std/") {
                     return http::StatusCode::NOT_FOUND.into_response();
                 }
                 if request
@@ -1018,8 +1051,6 @@ fn install_default_artifacts(profile: &IdentityProfile, runtime: &WasmRuntime) -
 
 fn current_router(server: &Server) -> Router {
     let proxies = server.config.proxy_locations.clone();
-    let dispatch_proxies = proxies.clone();
-    let dispatch_sandbox = server.sandbox.clone();
     let native = native_router(server);
     let outgoing = native.clone().layer(axum::middleware::from_fn_with_state(
         server.access.clone(),
@@ -1035,39 +1066,6 @@ fn current_router(server: &Server) -> Router {
         .fallback(any(move |request: Request<AxumBody>| {
             proxy_pass(proxies.clone(), request)
         }))
-        .layer(axum::middleware::from_fn(
-            move |request: Request<AxumBody>, next: axum::middleware::Next| {
-                let proxies = dispatch_proxies.clone();
-                let sandbox = dispatch_sandbox.clone();
-                async move {
-                    // Installed names own their entire mount. Other /api and /app
-                    // paths retain ordinary proxy behavior, including HA endpoints.
-                    let passthrough = {
-                        let sandbox = sandbox.read().unwrap();
-                        if let Some(tail) = request.uri().path().strip_prefix("/api/") {
-                            let name = tail.split('/').next().unwrap();
-                            !sandbox
-                                .libs
-                                .keys()
-                                .any(|id| id.rsplit('/').next() == Some(name))
-                        } else if let Some(tail) = request.uri().path().strip_prefix("/app/") {
-                            let name = tail.split('/').next().unwrap();
-                            !sandbox
-                                .apps
-                                .keys()
-                                .any(|id| id.rsplit('/').next() == Some(name))
-                        } else {
-                            false
-                        }
-                    };
-                    if passthrough {
-                        proxy_pass(proxies, request).await
-                    } else {
-                        next.run(request).await
-                    }
-                }
-            },
-        ))
         .layer(axum::middleware::from_fn_with_state(
             server.access.clone(),
             authorize,

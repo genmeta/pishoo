@@ -160,7 +160,7 @@ Queries are written to stdout; context and status messages to stderr."
             dhttp::DhttpNetwork::init().await?;
             crate::dns::maintain_mdns(&mdns, &[], &[]).await?;
             let uri: Uri = format!(
-                "https://{}/std/pishoo/loaded-{}",
+                "https://{}/std/sys/package/loaded-{}",
                 profile.name(),
                 if command == "app" { "apps" } else { "libs" }
             )
@@ -538,7 +538,7 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
         if let Some(paths) = &openapi.paths {
             for (path, item) in paths {
                 for (method, op) in item.methods() {
-                    endpoints.push(json!({"method":method.as_str(),"path":id.map_or_else(|| path.clone(), |id| format!("/api/{}{path}",id.rsplit('/').next().unwrap())),"description":op.summary.as_deref().or(op.description.as_deref())}));
+                    endpoints.push(json!({"method":method.as_str(),"path":format!("/std{path}"),"description":op.summary.as_deref().or(op.description.as_deref())}));
                 }
             }
         }

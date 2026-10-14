@@ -213,39 +213,12 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
     })
 }
 
-// Only registered application mounts are reserved, never the whole /api or /app.
-fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
-    for (table, mount) in [("libs", "api"), ("apps", "app")] {
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-            [table],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            continue;
-        }
-        let mut stmt = conn.prepare(&format!("SELECT id,name FROM {table}"))?;
-        for row in stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (id, name) = row?;
-            let prefix = format!("/{mount}/{name}");
-            if let Some(proxy) = proxies.iter().find(|proxy| {
-                let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
-                path == prefix
-                    || path
-                        .strip_prefix(&prefix)
-                        .is_some_and(|tail| tail.starts_with('/'))
-            }) {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "proxy {} conflicts with installed {table} {id} at {prefix}",
-                        proxy.location
-                    ),
-                )));
-            }
-        }
+// /std is reserved independently of installed packages. Old /api and /app remain proxyable.
+fn check_proxy_mounts(_conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
+    if proxies.iter().any(|proxy| {
+        crate::routes::reserved(proxy.location.strip_prefix("= ").unwrap_or(&proxy.location))
+    }) {
+        return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
     }
     Ok(())
 }

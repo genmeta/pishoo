@@ -20,3 +20,20 @@ CREATE TABLE IF NOT EXISTS lib_dependencies (
     version TEXT NOT NULL,
     PRIMARY KEY(lib_id, dependency_id)
 );
+
+CREATE TABLE IF NOT EXISTS lib_capabilities (
+    lib_id TEXT NOT NULL REFERENCES libs(id) ON DELETE CASCADE,
+    capability_id TEXT NOT NULL CHECK (length(capability_id) > 0),
+    title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+    PRIMARY KEY (lib_id, capability_id)
+);
+CREATE TABLE IF NOT EXISTS lib_capability_operations (
+    lib_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    method TEXT NOT NULL CHECK (length(method) > 0 AND method = upper(method)),
+    path TEXT NOT NULL CHECK (substr(path, 1, 5) = '/std/'),
+    PRIMARY KEY (lib_id, capability_id, method, path),
+    UNIQUE (method, path),
+    FOREIGN KEY (lib_id, capability_id)
+        REFERENCES lib_capabilities(lib_id, capability_id) ON DELETE CASCADE
+);

@@ -1,5 +1,6 @@
 //! Identity-bound HTTP services, components and management routes.
 mod cli;
+mod contact;
 mod dns;
 mod error;
 mod routes;

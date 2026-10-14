@@ -1,0 +1,108 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "1v1聊天",
+    "version": "0.1.0",
+    "description": "消息、会话、投递和对端权限观察；本地授权由原生 daccess 管理",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "paths": {
+    "/message/context": {
+      "get": {
+        "operationId": "getChatContext",
+        "summary": "chat context",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/message/capability": {
+      "get": {
+        "operationId": "getChatCapability",
+        "summary": "chat capability",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/message/messages": {
+      "get": {
+        "operationId": "getChatMessages",
+        "summary": "chat messages",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "post": {
+        "operationId": "postChatMessages",
+        "summary": "chat messages",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/message/messages/retry": {
+      "post": {
+        "operationId": "postChatMessagesRetry",
+        "summary": "chat messages retry",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/message": {
+      "post": {
+        "operationId": "receiveMessage",
+        "summary": "接收联系人消息",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        },
+        "x-pishoo": {
+          "access-group": "message"
+        }
+      }
+    }
+  },
+  "x-pishoo": {
+    "access-groups": {
+      "message": {
+        "title": "1v1聊天",
+        "operations": [
+          "receiveMessage"
+        ]
+      }
+    }
+  }
+}

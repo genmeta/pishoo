@@ -80,7 +80,26 @@ pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         .ok_or_else(|| invalid("missing OpenAPI paths"))?;
     let mut ids = HashSet::new();
     for (path, item) in paths {
-        if !valid_path(path) || path.contains(['{', '}']) || reserved(path) {
+        if !valid_path(path)
+            || path.contains(['{', '}'])
+            || reserved(path)
+            || [
+                "/acl",
+                "/contact",
+                "/contacts",
+                "/sys",
+                "/pishoo",
+                "/file",
+                "/dhttp",
+            ]
+            .iter()
+            .any(|prefix| {
+                path == prefix
+                    || path
+                        .strip_prefix(prefix)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            })
+        {
             return Err(invalid("unsupported or reserved API path"));
         }
         if item.reference.is_some() {
