@@ -2,16 +2,18 @@
 
 配置接口由现有 dhttp Endpoint 的 H3 监听提供，参考 minidocs 的系统 API 命名与版本协商，以及当前 daccess 管理 API。每个身份操作自己的 `db/config.db`，继续使用 schema v1。
 
+配置路径统一使用 `/std/sys/settings` 和 `/std/sys/proxies`，旧 `/std/pishoo` 配置路径不提供别名；已有路径权限规则不自动迁移。
+
 ## 资源和方法
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/std/pishoo/settings` | GET | 读取数据库中的 enabled/listen | 设置对象 |
-| `/std/pishoo/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
-| `/std/pishoo/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
-| `/std/pishoo/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
-| `/std/pishoo/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
-| `/std/pishoo/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
+| `/std/sys/settings` | GET | 读取数据库中的 enabled/listen | 设置对象 |
+| `/std/sys/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
+| `/std/sys/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
+| `/std/sys/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
+| `/std/sys/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
+| `/std/sys/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
 
 设置对象示例：
 
@@ -57,17 +59,17 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
-cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/settings
-cargo run --locked -p pishoo --example pishoo-client -- patch /std/pishoo/settings '{"listen":1}'
-cargo run --locked -p pishoo --example pishoo-client -- put /std/pishoo/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
-cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
+cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/settings
+cargo run --locked -p pishoo --example pishoo-client -- patch /std/sys/settings '{"listen":1}'
+cargo run --locked -p pishoo --example pishoo-client -- put /std/sys/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
+cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 ```
 
 接口随身份监听提供。禁用 Server 或 listen=0 后该身份的 HTTP 管理入口不可达，使用本机 `pishoo enable --id NAME` 或 `pishoo listen --id NAME internal` 恢复相应能力。
 
 ## 启动初始化与数据库兼容
 
-初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`lib`、`logs`、`repo`、`templates` 和 `assets/profile` 目录；不生成证书、私钥或 `server.conf`；启动时本地 OCSP 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`libs/std`、`apps/std`、`logs`、`repo` 和 `templates` 目录；不生成证书、私钥或 `server.conf`；启动时本地 `ssl/stapling.ocsp` 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
 新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。Linux systemd 服务默认以 root 运行并加载多用户身份；管理员可通过服务覆盖文件修改 User；非 root 运行只加载当前账户的 `.dhttp`。服务用户修改后重启，SIGTERM 退出。Homebrew 按当前用户启动服务。
 
@@ -75,12 +77,11 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 | --- | --- | --- |
 | config.db | schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
 | access.db | 由 daccess 建库，并写入 POST /std/contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
-| workspace.db | schema8；默认资料一行；联系人投递、收藏和能力决定为空 | 只接受当前版本及必要表结构；资料和队列保留 |
-| chat.db | schema4；会话、消息、投递作业和授权观察为空 | 只接受当前版本及必要表结构；历史数据保留 |
+| contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 
-所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；聊天按既有能力审批控制。已删除或更改的默认规则在重启后保持原样。
+所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息依赖联系人状态和原生 ACL 授权。已删除或更改的默认规则在重启后保持原样。
 
-仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Workspace/Chat 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取不重新创建被删除的配置库。
+仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Contact 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取不重新创建被删除的配置库。
 
 新的 access 数据库先在身份 db 目录下的临时目录中通过现有 daccess API 创建和写入默认规则，使用 SQLite 备份接口生成独立完整快照，校验并同步后发布到正式路径。正式文件缺失时以不覆盖已有文件的方式发布；已有空文件通过 SQLite 备份事务恢复，以保持 journal/WAL 一致。中断留下的未发布临时目录不会被当作正式库；当前调用正常退出时由 tempfile 清理自己的目录。
 
@@ -95,3 +96,5 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/pishoo/proxies
 不增加 schema v2。GET 只读兼容缺少 enabled 列的有效 v1：旧 listen=0 返回 enabled=false/listen=3，旧 1/2/3 返回 enabled=true并保留范围；旧0未保存之前的范围，因此启用默认 both。首次正常加载或配置写入在 SQLite 即时事务中完整验证并补 enabled 列，保留代理、旧 exec 列及其他数据。无效版本、损坏配置或写入失败不提交补列。已有 enabled 列严格校验为整数0/1；enabled=true/listen=0仍可运行出站 worker，enabled=false则不加载 Server。
 
 旧版 gmutils 的 ensite/dissite 仍只写 listen，不能操作新增的完整 Server 开关；本版使用 Pishoo 的 enable/disable CLI 或 settings API。gmutils 适配需要使用同一 enabled 语义。
+
+Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化；Workspace 仅为前端 App。旧 workspace.db、chat.db 保留，不再由原生启动初始化。

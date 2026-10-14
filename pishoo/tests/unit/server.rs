@@ -286,7 +286,7 @@ async fn server(root: &std::path::Path) -> Server {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
-    std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
+    std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
@@ -477,7 +477,7 @@ async fn close_clears_router_and_execution_resources() {
 async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
     let root = tempfile::tempdir().unwrap();
     let server = server(root.path()).await;
-    let path = server.profile.join("lib");
+    let path = server.profile.join("libs");
     std::fs::rename(&path, server.profile.join("real-lib")).unwrap();
     std::os::unix::fs::symlink(server.profile.join("real-lib"), &path).unwrap();
     assert!(
@@ -506,8 +506,8 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("disabled")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
-    std::fs::create_dir_all(profile.join("lib/broken")).unwrap();
-    std::fs::write(profile.join("lib/broken/lib.webc"), b"broken").unwrap();
+    std::fs::create_dir_all(profile.join("libs/broken")).unwrap();
+    std::fs::write(profile.join("libs/broken/.webc-proof"), b"broken").unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(2, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
     assert!(
@@ -543,7 +543,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     crate::setup::config_database(
         &profile,
         &http::Method::PATCH,
-        &"/std/pishoo/proxies".parse().unwrap(),
+        &"/std/sys/proxies".parse().unwrap(),
         Some(serde_json::json!({"location":"/live", "proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
@@ -636,89 +636,6 @@ async fn unloaded_empty_configuration_waits_for_credential_validation_before_ini
     );
     assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
     assert!(!profile.access_db_path().exists());
-}
-
-#[test]
-#[ignore = "run alone: selects process-wide default artifact directory"]
-fn default_artifacts_install_as_user_resources_and_are_not_reinstalled_after_removal() {
-    use crate::sandbox::tests::{package_fixture, publisher};
-    use serde_json::json;
-    let root = tempfile::tempdir().unwrap();
-    let source = root.path().join("defaults");
-    std::fs::create_dir(&source).unwrap();
-    let previous = std::env::var_os("PISHOO_DEFAULT_ARTIFACTS");
-    unsafe {
-        std::env::set_var("PISHOO_DEFAULT_ARTIFACTS", &source);
-    }
-    let _environment = scopeguard::guard(previous, |value| unsafe {
-        match value {
-            Some(value) => std::env::set_var("PISHOO_DEFAULT_ARTIFACTS", value),
-            None => std::env::remove_var("PISHOO_DEFAULT_ARTIFACTS"),
-        }
-    });
-    let authority = publisher("alice.dhttp.net", 'a');
-    let mut backend = json!({"openapi":"3.1.0","info":{"title":"Defaults","version":"1.0.0","description":"Ordinary defaults","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"default","host":{}},"paths":{"/run":{"post":{"operationId":"run","summary":"Run"}}}});
-    let mut chat = backend.clone();
-    chat["x-pishoo"]["name"] = json!("chat");
-    let chat_bytes = package_fixture(
-        &chat,
-        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
-        webc::v3::write::Directory::default(),
-        &authority,
-    );
-    std::fs::write(source.join("zzz-chat.webc"), &chat_bytes).unwrap();
-    backend["x-pishoo"]["dependencies"] =
-        json!([{"publisher":"alice.dhttp.net","name":"chat","version":"1.0.0"}]);
-    let bytes = package_fixture(
-        &backend,
-        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
-        webc::v3::write::Directory::default(),
-        &authority,
-    );
-    std::fs::write(source.join("backend.webc"), &bytes).unwrap();
-    let frontend = json!({"openapi":"3.1.0","info":{"title":"Defaults","version":"1.0.0","description":"Ordinary defaults","license":{"name":"MIT"}},"x-pishoo":{"kind":"app","publisher":"alice.dhttp.net","name":"default","host":{},"entry":"/","dependencies":[{"publisher":"alice.dhttp.net","name":"default","version":"1.0.0"}]},"paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"head","summary":"Headers","x-pishoo":{"static-file":"/public/index.html"}}}}});
-    let public = webc::v3::write::Directory::new(
-        std::collections::BTreeMap::from([(
-            "index.html".parse().unwrap(),
-            b"ordinary frontend".to_vec().into(),
-        )]),
-        webc::v3::Timestamps::default(),
-    );
-    let app = package_fixture(&frontend, &[], public, &authority);
-    std::fs::write(source.join("frontend.webc"), &app).unwrap();
-
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir(profile.path()).unwrap();
-    initialize_directories(&profile).unwrap();
-    let runtime = WasmRuntime::new().unwrap();
-    install_default_artifacts(&profile, &runtime).unwrap();
-    assert!(profile.config_db_path().is_file());
-    assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/default/lib.webc")).unwrap(),
-        bytes
-    );
-    assert_eq!(
-        std::fs::read(profile.join("app/alice.dhttp.net/default/app.webc")).unwrap(),
-        app
-    );
-    crate::sandbox::remove_app(&profile, "alice.dhttp.net/default").unwrap();
-    crate::sandbox::remove_lib(&profile, "alice.dhttp.net/default").unwrap();
-    install_default_artifacts(&profile, &runtime).unwrap();
-    assert!(!profile.join("lib/alice.dhttp.net/default").exists());
-    assert!(!profile.join("app/alice.dhttp.net/default").exists());
-    assert!(profile.join("lib/alice.dhttp.net/chat/lib.webc").is_file());
-    let failed = IdentityProfile::try_from(root.path().join("failed")).unwrap();
-    std::fs::create_dir(failed.path()).unwrap();
-    initialize_directories(&failed).unwrap();
-    std::fs::write(source.join("frontend.webc"), b"invalid package").unwrap();
-    assert!(install_default_artifacts(&failed, &runtime).is_err());
-    assert!(!failed.config_db_path().exists());
-    assert!(
-        std::fs::read_dir(failed.join("lib"))
-            .unwrap()
-            .next()
-            .is_none()
-    );
 }
 
 #[tokio::test]

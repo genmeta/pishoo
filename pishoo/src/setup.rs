@@ -328,8 +328,8 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
         }
     };
     Router::new()
-        .route("/std/pishoo/settings", any(handler.clone()))
-        .route("/std/pishoo/proxies", any(handler))
+        .route("/std/sys/settings", any(handler.clone()))
+        .route("/std/sys/proxies", any(handler))
 }
 
 async fn config_request(
@@ -361,7 +361,7 @@ async fn config_request(
         }
     }
 
-    let settings = request.uri().path() == "/std/pishoo/settings";
+    let settings = request.uri().path() == "/std/sys/settings";
     let method = request.method().clone();
     let uri = request.uri().clone();
     let allowed = if settings {
@@ -431,8 +431,8 @@ pub(crate) fn config_database(
     uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    let settings = uri.path() == "/std/pishoo/settings";
-    if !settings && uri.path() != "/std/pishoo/proxies" {
+    let settings = uri.path() == "/std/sys/settings";
+    if !settings && uri.path() != "/std/sys/proxies" {
         return Err(Error::RouteNotFound);
     }
     let location = match uri.query() {

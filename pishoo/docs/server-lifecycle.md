@@ -26,7 +26,7 @@ pishoo listen --id alice.smith internal
 pishoo proxy --id alice.smith /api 127.0.0.1:8080
 ```
 
-同名身份及 owner 的现有 `PATCH /std/pishoo/settings` 接收 `{"enabled":false}` 或 `{"enabled":true}`，并可同时提交 listen；省略字段保持原值。GET/PATCH 返回 enabled/listen。代理接口和权限保持不变。CLI/API 成功表示保存的期望配置，不代表运行时已应用；生效和失败记录在服务日志中。进程停止时本机命令仍能保存配置，启动后应用。禁用或 listen=0 后该身份的 HTTP 管理入口不可达，需要本机命令恢复。
+同名身份及 owner 的现有 `PATCH /std/sys/settings` 接收 `{"enabled":false}` 或 `{"enabled":true}`，并可同时提交 listen；省略字段保持原值。GET/PATCH 返回 enabled/listen。代理接口和权限保持不变。CLI/API 成功表示保存的期望配置，不代表运行时已应用；生效和失败记录在服务日志中。进程停止时本机命令仍能保存配置，启动后应用。禁用或 listen=0 后该身份的 HTTP 管理入口不可达，需要本机命令恢复。
 
 ## 串行资源更新
 

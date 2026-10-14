@@ -268,6 +268,187 @@ fn frontend_document(version: &str) -> Value {
         "/hello":{"post":{"operationId":"hello","summary":"Backend"}}
     }})
 }
+
+#[test]
+fn expanded_lib_preserves_signed_bytes_and_rejects_modified_files() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = WasmRuntime::new().unwrap();
+    let mut document = frontend_document("1.0.0");
+    document["x-pishoo"]["kind"] = json!("lib");
+    document["x-pishoo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("entry");
+    document["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
+    let bytes = package_fixture(
+        &document,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        Directory::default(),
+        &publisher("alice.dhttp.net", 'a'),
+    );
+    let id = "alice.dhttp.net/hello";
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    let directory = profile.join("libs/hello");
+    assert!(!profile.join("libs/alice.dhttp.net").exists());
+    assert!(!directory.join("lib.webc").exists());
+    assert!(directory.join(".webc-proof").metadata().unwrap().len() < bytes.len() as u64);
+    let lib_root = files::lib_root(&profile).unwrap();
+    assert!(files::disk_bytes(&lib_root, id).unwrap() == bytes);
+    for name in [
+        "hello.wasm",
+        "openapi.json",
+        "signature.json",
+        "manifest.json",
+        ".webc-proof",
+    ] {
+        let path = directory.join(name);
+        let original = std::fs::read(&path).unwrap();
+        let mut altered = original.clone();
+        altered[0] ^= 1;
+        std::fs::write(&path, &altered).unwrap();
+        assert!(
+            installed_libs(&profile, Some(id)).is_err(),
+            "modified {name} was accepted"
+        );
+        std::fs::write(&path, &original).unwrap();
+        assert!(files::disk_bytes(&lib_root, id).unwrap() == bytes);
+    }
+    #[cfg(unix)]
+    {
+        let path = directory.join("hello.wasm");
+        let outside = root.path().join("outside.wasm");
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&outside, &original).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(installed_libs(&profile, Some(id)).is_err());
+        assert!(std::fs::read(&outside).unwrap() == original);
+    }
+}
+
+#[test]
+fn expanded_app_uses_verified_public_files_and_rejects_directory_symlinks() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let id = "alice.dhttp.net/hello";
+    install_app(&profile, id, &frontend_package("1.0.0", "verified page")).unwrap();
+    let directory = profile.join("apps/hello");
+    assert!(!directory.join("app.webc").exists());
+    let index = directory.join("public/index.html");
+    assert_eq!(std::fs::read(&index).unwrap(), b"verified page");
+    std::fs::write(&index, b"modified page").unwrap();
+    assert!(installed_apps(&profile, Some(id)).is_err());
+    std::fs::write(&index, b"verified page").unwrap();
+    assert!(installed_apps(&profile, Some(id)).is_ok());
+    #[cfg(unix)]
+    {
+        let outside = root.path().join("outside-assets");
+        let assets = directory.join("public/assets");
+        std::fs::rename(&assets, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &assets).unwrap();
+        assert!(installed_apps(&profile, Some(id)).is_err());
+        assert!(outside.join("app.js").is_file());
+    }
+}
+
+#[test]
+fn signed_std_publisher_selects_standard_directories_for_libs_and_apps() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let authority = publisher("std.dhttp.net", 'a');
+    let mut lib = frontend_document("1.0.0");
+    lib["x-pishoo"]["publisher"] = json!("std.dhttp.net");
+    lib["x-pishoo"]["kind"] = json!("lib");
+    lib["x-pishoo"].as_object_mut().unwrap().remove("entry");
+    lib["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
+    let bytes = package_fixture(
+        &lib,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        Directory::default(),
+        &authority,
+    );
+    let id = "std.dhttp.net/hello";
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    let mut app = frontend_document("1.0.0");
+    app["x-pishoo"]["publisher"] = json!("std.dhttp.net");
+    let frontend = package_fixture(&app, &[], frontend_files("standard page"), &authority);
+    install_app(&profile, id, &frontend).unwrap();
+    assert!(profile.join("libs/std/hello/hello.wasm").is_file());
+    assert!(profile.join("apps/std/hello/public/index.html").is_file());
+    assert!(!profile.join("libs/hello").exists());
+    assert!(!profile.join("apps/hello").exists());
+    let mut sandbox = Sandbox::new(runtime.clone());
+    sandbox.load_libs(&profile).unwrap();
+    assert!(sandbox.libs.contains_key(id));
+    assert!(sandbox.apps.contains_key(id));
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    assert!(profile.join("libs/std/hello/hello.wasm").is_file());
+    assert!(!profile.join("libs/hello").exists());
+    remove_app(&profile, id).unwrap();
+    remove_lib(&profile, id).unwrap();
+    assert!(!profile.join("apps/std/hello").exists());
+    assert!(!profile.join("libs/std/hello").exists());
+
+    // Familiar standard names and a forged install ID do not classify other signers.
+    let ordinary = publisher("alice.dhttp.net", 'a');
+    lib["x-pishoo"]["publisher"] = json!("alice.dhttp.net");
+    lib["x-pishoo"]["name"] = json!("message");
+    let bytes = package_fixture(
+        &lib,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        Directory::default(),
+        &ordinary,
+    );
+    assert!(install_lib(&profile, "std.dhttp.net/message", &bytes, &runtime).is_err());
+    install_lib(&profile, "alice.dhttp.net/message", &bytes, &runtime).unwrap();
+    assert!(profile.join("libs/message/message.wasm").is_file());
+    assert!(!profile.join("libs/std/message").exists());
+}
+
+#[test]
+fn registered_legacy_webc_is_preserved_and_expands_on_explicit_reinstall() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let authority = publisher("std.dhttp.net", 'a');
+    let mut document = frontend_document("1.0.0");
+    document["x-pishoo"]["publisher"] = json!("std.dhttp.net");
+    document["x-pishoo"]["kind"] = json!("lib");
+    document["x-pishoo"]
+        .as_object_mut()
+        .unwrap()
+        .remove("entry");
+    document["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
+    let bytes = package_fixture(
+        &document,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        Directory::default(),
+        &authority,
+    );
+    let id = "std.dhttp.net/hello";
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    let legacy = profile.join("lib/std.dhttp.net/hello/lib.webc");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, &bytes).unwrap();
+    std::fs::remove_dir_all(profile.join("libs/std/hello")).unwrap();
+    let mut sandbox = Sandbox::new(runtime.clone());
+    sandbox.load_libs(&profile).unwrap();
+    assert!(sandbox.libs.contains_key(id));
+    assert!(!profile.join("libs/std/hello").exists());
+    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    assert!(profile.join("libs/std/hello/hello.wasm").is_file());
+    assert!(std::fs::read(&legacy).unwrap() == bytes);
+}
 fn frontend_files(text: &'static str) -> Directory<'static> {
     Directory::new(
         BTreeMap::from([
@@ -396,7 +577,7 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("app")).unwrap();
+    std::fs::create_dir_all(profile.join("apps")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let id = "alice.dhttp.net/hello";
@@ -405,10 +586,22 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     sandbox.load_libs(&profile).unwrap();
     let old = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
     install_app(&profile, id, &frontend_package("2.0.0", "new page")).unwrap();
-    let before = std::fs::read(profile.join("app").join(id).join("app.webc")).unwrap();
+    let before = std::fs::read(
+        profile
+            .join("apps")
+            .join(id.rsplit('/').next().unwrap())
+            .join(".webc-proof"),
+    )
+    .unwrap();
     assert!(install_app(&profile, id, b"broken").is_err());
     assert_eq!(
-        std::fs::read(profile.join("app").join(id).join("app.webc")).unwrap(),
+        std::fs::read(
+            profile
+                .join("apps")
+                .join(id.rsplit('/').next().unwrap())
+                .join(".webc-proof")
+        )
+        .unwrap(),
         before
     );
     sandbox.load_libs(&profile).unwrap();
@@ -503,7 +696,7 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let authority = publisher("alice.dhttp.net", 'a');
@@ -542,7 +735,7 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
             .iter()
             .all(|e| e["path"].as_str().unwrap().starts_with("/app/"))
     );
-    assert!(profile.join("app/alice.dhttp.net/hello/app.webc").is_file());
+    assert!(profile.join("apps/hello/.webc-proof").is_file());
     assert!(remove_lib(&profile, "alice.dhttp.net/hello").is_err());
     backend["info"]["version"] = json!("2.0.0");
     let changed = package_fixture(
@@ -604,10 +797,10 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let old = std::fs::read(profile.join("app/alice.dhttp.net/hello/app.webc")).unwrap();
+    let old = std::fs::read(profile.join("apps/hello/.webc-proof")).unwrap();
     assert!(install_app(&profile, "alice.dhttp.net/hello", b"broken").is_err());
     assert_eq!(
-        std::fs::read(profile.join("app/alice.dhttp.net/hello/app.webc")).unwrap(),
+        std::fs::read(profile.join("apps/hello/.webc-proof")).unwrap(),
         old
     );
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
@@ -646,7 +839,7 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
         std::fs::read(profile.join("db/alice.dhttp.net/hello/saved.db")).unwrap(),
         b"preserve backend data"
     );
-    assert!(profile.join("lib/alice.dhttp.net/hello/lib.webc").is_file());
+    assert!(profile.join("libs/hello/.webc-proof").is_file());
     sandbox.load_libs(&profile).unwrap();
     assert!(sandbox.apps.is_empty());
     assert_eq!(sandbox.libs.len(), 1);
@@ -661,7 +854,7 @@ async fn independent_app_install_mount_update_remove_and_dependency_protection()
 fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
     let directory = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = WasmRuntime::new().unwrap();
     let fixture = |name: &str, kind: &str, version: &str| {
@@ -729,7 +922,7 @@ fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
         .is_err()
     );
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/hello/lib.webc")).unwrap(),
+        files::disk_bytes(&files::lib_root(&profile).unwrap(), "alice.dhttp.net/hello").unwrap(),
         lib
     );
     assert_eq!(
@@ -752,7 +945,7 @@ fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
     );
     db.execute_batch("ROLLBACK;").unwrap();
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/hello/lib.webc")).unwrap(),
+        files::disk_bytes(&files::lib_root(&profile).unwrap(), "alice.dhttp.net/hello").unwrap(),
         lib
     );
     assert_eq!(
@@ -776,8 +969,12 @@ fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
     db.execute_batch("CREATE TRIGGER reject_remove BEFORE DELETE ON apps BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
     assert!(remove_app(&profile, "bob.dhttp.net/hello").is_err());
     assert_eq!(
-        std::fs::read(profile.join("app/bob.dhttp.net/hello/app.webc")).unwrap(),
-        app
+        serde_json::to_value(
+            installed_apps(&profile, Some("bob.dhttp.net/hello")).unwrap()["bob.dhttp.net/hello"]
+                .manifest()
+        )
+        .unwrap(),
+        serde_json::to_value(read_package(&app).unwrap().manifest()).unwrap()
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM apps", [], |r| r.get::<_, i64>(0))
@@ -813,7 +1010,7 @@ fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
 fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let authority = publisher("alice.dhttp.net", 'a');
@@ -890,7 +1087,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     )
     .unwrap();
     remove_lib(&profile, "alice.dhttp.net/parent").unwrap();
-    assert!(profile.join("lib/alice.dhttp.net/first/lib.webc").is_file());
+    assert!(profile.join("libs/first/.webc-proof").is_file());
     assert_eq!(
         std::fs::read(profile.join("db/alice.dhttp.net/first/keep.db")).unwrap(),
         b"keep"
@@ -933,7 +1130,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     install_lib(&profile, "alice.dhttp.net/self", &before, &runtime).unwrap();
     assert!(install_lib(&profile, "alice.dhttp.net/self", &self_dependency, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("lib/alice.dhttp.net/self/lib.webc")).unwrap(),
+        files::disk_bytes(&files::lib_root(&profile).unwrap(), "alice.dhttp.net/self").unwrap(),
         before
     );
     let mut duplicate = dependencies.clone();
@@ -949,7 +1146,7 @@ fn old_business_prefixes_remain_proxyable() {
     let directory = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let uri = "/std/pishoo/proxies".parse().unwrap();
+    let uri = "/std/sys/proxies".parse().unwrap();
     crate::setup::config_database(
         &profile,
         &http::Method::PUT,
@@ -979,7 +1176,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let authority = publisher("alice.dhttp.net", 'a');
@@ -1027,7 +1224,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         )
         .is_err()
     );
-    assert!(!profile.join("lib/alice.dhttp.net/other/lib.webc").exists());
+    assert!(!profile.join("libs/other/.webc-proof").exists());
     // Native services cannot become WASM capabilities.
     for path in [
         "/acl/capabilities",
@@ -1050,7 +1247,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         .is_err()
     );
     assert_eq!(
-        std::fs::read(profile.join("lib").join(id).join("lib.webc")).unwrap(),
+        files::disk_bytes(&files::lib_root(&profile).unwrap(), id).unwrap(),
         bytes
     );
     assert_eq!(

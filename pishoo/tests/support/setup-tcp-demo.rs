@@ -39,7 +39,7 @@ async fn setup_tcp_demo() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::Permissions::from_mode(0o400),
         )?;
     }
-    std::fs::write(root.join("ssl/ocsp.der"), [1_u8])?;
+    std::fs::write(root.join("ssl/stapling.ocsp"), [1_u8])?;
 
     let db = rusqlite::Connection::open(root.join("db/config.db"))?;
     db.execute_batch(

@@ -201,7 +201,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         .unwrap();
     let _listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(runtime)));
@@ -255,7 +255,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     super::super::super::remove_app(&profile, "alice.dhttp.net/workspace").unwrap();
     assert!(super::super::super::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
     super::super::super::remove_lib(&profile, "alice.dhttp.net/workspace").unwrap();
-    assert!(profile.join("lib/alice.dhttp.net/chat/lib.webc").is_file());
+    assert!(profile.join("libs/chat/.webc-proof").is_file());
     sandbox.write().unwrap().load_libs(&profile).unwrap();
     assert_eq!(sandbox.read().unwrap().libs.len(), 1);
 }

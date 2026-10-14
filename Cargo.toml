@@ -5,3 +5,4 @@ exclude = ["xtask"]
 
 [patch.crates-io]
 daccess = { path = "../daccess" }
+dhttp-home = { path = "../dhttp/home" }

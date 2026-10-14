@@ -37,11 +37,5 @@ cargo "${args[@]}"
 release_dir="$product_source/target/$target/release"
 cp "$release_dir/pishoo" "$out/staging/pishoo"
 cp "$release_dir/pishoo-pack" "$out/staging/pishoo-pack"
-defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
-mkdir -p "$out/staging/default-artifacts"
-for artifact in message-lib.webc profile-lib.webc workspace-app.webc; do
-    [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
-    cp "$defaults/$artifact" "$out/staging/default-artifacts/$artifact"
-done
 tar -C "$out/staging" -czf "$out/pishoo_$version-$target.tar.gz" .
 rm -rf "$out/staging"

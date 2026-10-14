@@ -30,7 +30,7 @@ fn component(id: &str, version: &str) -> Vec<u8> {
 
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = WasmRuntime::new().unwrap();
     for id in ["alpha", "beta"] {
@@ -74,7 +74,7 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
     let original = sandbox.libs["alpha"].clone();
-    std::fs::write(profile.join("lib/alpha/lib.webc"), b"invalid wasm").unwrap();
+    std::fs::write(profile.join("libs/alpha/.webc-proof"), b"invalid wasm").unwrap();
     assert!(matches!(
         sandbox.load_libs(&profile),
         Err(Error::InvalidComponent(_))
@@ -88,7 +88,7 @@ fn missing_registered_files_reject_reload_and_keep_loaded_libs() {
     let profile = profile(directory.path());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
-    std::fs::remove_dir_all(profile.join("lib")).unwrap();
+    std::fs::remove_dir_all(profile.join("libs")).unwrap();
     assert!(sandbox.load_libs(&profile).is_err());
     assert_eq!(sandbox.libs.len(), 2);
 }
@@ -99,15 +99,23 @@ fn database_registration_controls_loading_and_file_versions_must_match() {
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let mut sandbox = Sandbox::new(runtime);
-    std::fs::create_dir_all(profile.join("lib/extra")).unwrap();
-    std::fs::write(profile.join("lib/extra/lib.webc"), component("extra", "1")).unwrap();
+    std::fs::create_dir_all(profile.join("libs/extra")).unwrap();
+    std::fs::write(
+        profile.join("libs/extra/.webc-proof"),
+        component("extra", "1"),
+    )
+    .unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute("DELETE FROM libs WHERE id='beta'", []).unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
-    assert!(profile.join("lib/beta/lib.webc").is_file());
-    std::fs::write(profile.join("lib/alpha/lib.webc"), component("alpha", "2")).unwrap();
+    assert!(profile.join("libs/beta/.webc-proof").is_file());
+    std::fs::write(
+        profile.join("libs/alpha/.webc-proof"),
+        component("alpha", "2"),
+    )
+    .unwrap();
     assert!(sandbox.load_libs(&profile).is_err());
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
     assert_eq!(

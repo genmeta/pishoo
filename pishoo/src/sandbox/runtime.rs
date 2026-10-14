@@ -14,6 +14,7 @@ use wasmtime_wasi::{
     WasiCtx, WasiCtxView, WasiView,
     cli::{WasiCli, WasiCliView},
     filesystem::WasiFilesystemView,
+    random::WasiRandomView,
 };
 use wasmtime_wasi_http::{
     WasiHttpCtx,
@@ -42,6 +43,13 @@ impl WasmRuntime {
         let engine = Engine::new(&config).map_err(Error::Guest)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi_http::p2::add_to_linker_async(&mut linker).map_err(Error::Guest)?;
+        // Rust's HashMap seed imports are outside the HTTP proxy world.
+        // Use the invocation's existing WasiCtx random resources.
+        wasmtime_wasi::p2::bindings::random::insecure_seed::add_to_linker::<
+            StoreData,
+            wasmtime_wasi::random::WasiRandom,
+        >(&mut linker, StoreData::random)
+        .map_err(Error::Guest)?;
         // The HTTP proxy world omits filesystem interfaces, but Libs have a
         // private WASM /db grant. Register only those missing interfaces.
         wasmtime_wasi::p2::bindings::filesystem::types::add_to_linker::<

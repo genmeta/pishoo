@@ -129,7 +129,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         )
         .unwrap();
         std::fs::create_dir_all(profile.join("db")).unwrap();
-        std::fs::create_dir_all(profile.join("lib")).unwrap();
+        std::fs::create_dir_all(profile.join("libs")).unwrap();
         crate::setup::load_server_config(&profile).unwrap();
         install_lib(&profile, chat_id, &chat_package, &runtime).unwrap();
         install_lib(&profile, &id, &package, &runtime).unwrap();

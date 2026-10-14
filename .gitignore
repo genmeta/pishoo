@@ -7,7 +7,13 @@ std/apps/workspace/node_modules/
 std/apps/workspace/dist/
 std/apps/workspace/playwright-report/
 std/apps/workspace/test-results/
+std/apps/calendar/node_modules/
+std/apps/calendar/dist/
+std/apps/calendar/package-dist/
+std/libs/calendar/dist/
 /output/playwright/
+/.playwright-cli/
+/*.har
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
@@ -34,6 +40,8 @@ tarpaulin-report.html
 
 # Local profile keys and certificates
 /keychain/
+/std.dhttp.net.crt.pem
+/std.dhttp.net.key.pem
 
 # Agent instructions
 AGENTS.md
@@ -69,6 +77,7 @@ pishoo.pid
 /pishoo/DACCESS.md
 /pishoo/docs/management-design.md
 /pishoo/docs/testing-snapshot.md
+/pishoo/docs/genmeta-pack-implementation.md
 /pishoo/docs/transport-*.md
 /pishoo/docs/transport-*.json
 /pishoo/docs/workspace/*IMPLEMENTATION_PLAN.md

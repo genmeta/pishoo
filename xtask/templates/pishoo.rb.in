@@ -9,7 +9,6 @@ class {{homebrew.class}} < Formula
   def install
     bin.install "pishoo"
     bin.install "pishoo-pack"
-    (share/"pishoo/default-artifacts").install Dir["default-artifacts/*.webc"]
   end
 
   def caveats
@@ -18,6 +17,10 @@ class {{homebrew.class}} < Formula
       Identity directories and current databases are initialized at first startup.
       Existing data is preserved; unsupported legacy databases stop startup with a diagnostic.
       To run as the current user, use: brew services start pishoo
+      To install Workspace after configuring an identity and starting Pishoo:
+        brew install gmutils
+        genmeta install std.dhttp.net/workspace --id YOUR_IDENTITY
+      Run genmeta as the account that owns the identity. App dependencies install automatically.
     EOS
   end
 

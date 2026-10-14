@@ -175,7 +175,7 @@ pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&
                 "-cert",
                 &cert,
                 "-respout",
-                &format!("{directory}/ocsp.der"),
+                &format!("{directory}/stapling.ocsp"),
                 "-ndays",
                 "1",
             ],
@@ -185,7 +185,7 @@ pub fn generate_with_owner(root: &Path, names: &[(&str, &str)], owner: Option<(&
             &[
                 "ocsp",
                 "-respin",
-                &format!("{directory}/ocsp.der"),
+                &format!("{directory}/stapling.ocsp"),
                 "-issuer",
                 "ca.crt",
                 "-cert",

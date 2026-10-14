@@ -173,13 +173,17 @@ async fn main() -> Result<()> {
         dirs::home_dir().ok_or("cannot locate user home directory")?,
     );
     let profile = home.identity_profile(publisher)?;
-    let endpoint = dhttp::Endpoint::load_from(profile.path())
+    let certificates = profile
+        .load_certs()
         .await
         .map_err(|e| format!("missing or invalid local credentials for {publisher}: {e}"))?;
-    if endpoint.name() != publisher {
-        return Err("package publisher differs from signing identity".into());
-    }
-    let authority = endpoint.local_authority()?;
+    let private_key = profile
+        .load_key()
+        .await
+        .map_err(|e| format!("missing or invalid local credentials for {publisher}: {e}"))?;
+    let signing_key = qtls::default_provider()
+        .key_provider
+        .load_private_key(private_key)?;
     let mut manifest: webc::metadata::Manifest = serde_json::from_value(json!({
         "package":{"wapm":wapm,"pishoo":annotation,"fs":[{"volume_name":volume_name,"mount_path":mount}]},
         "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
@@ -215,17 +219,13 @@ async fn main() -> Result<()> {
         qtls::SignatureScheme::ECDSA_NISTP384_SHA384,
         qtls::SignatureScheme::ED25519,
     ] {
-        match authority.sign(scheme, &input) {
-            Ok(bytes) => {
-                signature = Some(bytes);
-                break;
-            }
-            Err(qtls::SignError::UnsupportedScheme { .. }) => {}
-            Err(error) => return Err(error.into()),
+        if let Some(signer) = signing_key.choose_scheme(&[scheme]) {
+            signature = Some(signer.sign(&input)?);
+            break;
         }
     }
     let envelope = json!({"version":1,
-        "certificates":authority.certificates().iter().map(|c|STANDARD.encode(c.as_ref())).collect::<Vec<_>>(),
+        "certificates":certificates.iter().map(|c|STANDARD.encode(c.as_ref())).collect::<Vec<_>>(),
         "signature":STANDARD.encode(signature.ok_or("unsupported signing key")?)});
     let mut writer = Writer::default()
         .write_raw_manifest(

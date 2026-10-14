@@ -44,9 +44,9 @@ async fn transport_public_peer() {
         .try_init();
     let profile = profile(&home, &role);
     std::fs::create_dir_all(profile.join("file")).unwrap();
-    std::fs::create_dir_all(profile.join("lib/echo")).unwrap();
+    std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
     std::fs::write(
-        profile.join("lib/echo/lib.wasm"),
+        profile.join("libs/echo/lib.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();
@@ -874,9 +874,9 @@ async fn transport_cross_process_acceptance() {
     );
     let receiver = profile(root.path(), "receiver");
     std::fs::create_dir_all(receiver.join("file")).unwrap();
-    std::fs::create_dir_all(receiver.join("lib/echo")).unwrap();
+    std::fs::create_dir_all(receiver.join("libs/echo")).unwrap();
     std::fs::write(
-        receiver.join("lib/echo/lib.wasm"),
+        receiver.join("libs/echo/lib.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();
@@ -1047,9 +1047,9 @@ async fn transport_large_duplex_concurrency_acceptance() {
 
     let receiver_profile = profile(root.path(), "receiver");
     std::fs::create_dir_all(receiver_profile.join("file")).unwrap();
-    std::fs::create_dir_all(receiver_profile.join("lib/echo")).unwrap();
+    std::fs::create_dir_all(receiver_profile.join("libs/echo")).unwrap();
     std::fs::write(
-        receiver_profile.join("lib/echo/lib.wasm"),
+        receiver_profile.join("libs/echo/lib.wasm"),
         include_bytes!("../../../assets/tcp-demo-echo.wasm"),
     )
     .unwrap();

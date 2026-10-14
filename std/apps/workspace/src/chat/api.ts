@@ -1,5 +1,6 @@
 import type { ChatCapabilityState, ChatMessage, ChatMessagePage } from '../api/types'
 import { api, ApiError, backendPath, query, request } from '../api/client'
+import { contactStatus } from '../lib/format'
 
 
 
@@ -33,6 +34,19 @@ export const chatApi = {
     for (const endpoint of descriptor.endpoints) {
       try { await api.setRule({ api: endpoint.path, method: endpoint.method, effect: 'allow', grantee: name }); results.push(`${endpoint.method} ${endpoint.path}: allowed`) }
       catch (error) { throw new Error(`${results.join('; ')}; ${endpoint.method} ${endpoint.path}: ${String(error)}`) }
+    }
+    // daccess reports completion to the applicant only after accepting the contact.
+    if (['pending', 'transfered'].includes(contactStatus(contact.status))) {
+      try {
+        await api.patchContact(name, { status: 'active' })
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 409) throw error
+        // Crossed requests can be reconciled while ACL writes are in flight.
+        const current = await api.contact(name)
+        if (Reflect.get(current, 'id') !== Reflect.get(contact, 'id')
+          || current.subject_id !== contact.subject_id
+          || contactStatus(current.status) !== 'active') throw error
+      }
     }
   },
 
