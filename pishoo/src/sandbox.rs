@@ -122,16 +122,37 @@ impl Sandbox {
         rustix::fs::flock(&parent, rustix::fs::FlockOperation::LockShared)
             .map_err(std::io::Error::from)?;
         let mut candidates = HashMap::new();
-        let registered = installed_libs(profile, None)?;
+        // Startup selects registered IDs, then reads each executable once.
+        // Package integrity, dependencies and route conflicts were checked when
+        // installation committed these rows and files together.
+        let database = profile.config_db_path();
+        if !database.symlink_metadata()?.file_type().is_file() {
+            return Err(Error::InvalidConfig(
+                "config.db must be a regular file".into(),
+            ));
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        conn.busy_timeout(Duration::from_secs(3))?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='libs')",
+            [],
+            |row| row.get(0),
+        )?;
+        let registered = if exists {
+            conn.prepare("SELECT id FROM libs ORDER BY id")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         match lib_root(profile) {
             Ok(root) => {
                 rustix::fs::flock(&root, rustix::fs::FlockOperation::LockShared)
                     .map_err(std::io::Error::from)?;
-                for record in registered.as_array().unwrap() {
-                    if let Some(error) = record["error"].as_str() {
-                        return Err(Error::InvalidComponent(error.to_owned()));
-                    }
-                    let id = record["id"].as_str().unwrap().to_owned();
+                for id in &registered {
                     let bytes = disk_bytes(&root, &id)?;
                     let lib = Lib::load(
                         self.runtime.clone(),
@@ -139,36 +160,14 @@ impl Sandbox {
                         &bytes,
                         &profile.join("db").join(&id),
                     )?;
-                    if record["version"] != lib.openapi.info.version {
-                        return Err(Error::InvalidComponent(format!(
-                            "registered version changed while loading {id}; retry startup"
-                        )));
-                    }
-                    candidates.insert(id, Arc::new(lib));
+                    candidates.insert(id.clone(), Arc::new(lib));
                 }
             }
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && registered.is_empty() => {}
             Err(error) => return Err(error),
         }
         let apps = installed_apps(profile, None)?;
-        for package in apps.values() {
-            let document = package_metadata(package)?;
-            for dependency in document["dependencies"].as_array().unwrap() {
-                let id = format!(
-                    "{}/{}",
-                    dependency["publisher"].as_str().unwrap(),
-                    dependency["name"].as_str().unwrap()
-                );
-                if candidates
-                    .get(&id)
-                    .is_none_or(|lib| dependency["version"] != lib.openapi.info.version)
-                {
-                    return Err(Error::InvalidComponent(format!(
-                        "app dependency {id} is missing or has a different version"
-                    )));
-                }
-            }
-        }
         self.libs = candidates;
         self.apps = apps;
         Ok(())
@@ -419,12 +418,22 @@ fn reject_api(error: Error) -> axum::response::Response {
 }
 
 fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Value {
-    // Callers only pass containers authenticated by read_package.
-    let mut value = package_metadata(package).expect("validated package metadata");
+    // Installed packages are trusted after installation. Catalog reads parse
+    // display metadata without repeating package or OpenAPI policy validation.
+    let mut value = match package_metadata(package) {
+        Ok(value) => value,
+        Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
+    };
     let mut endpoints = Vec::new();
     if value["kind"] == "lib" {
-        let openapi =
-            validate_openapi(&package_file(package, "/metadata/openapi.json").unwrap()).unwrap();
+        let openapi: oas3::OpenApiV3Spec = match package_file(package, "/metadata/openapi.json")
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| Error::InvalidComponent(error.to_string()))
+            }) {
+            Ok(openapi) => openapi,
+            Err(error) => return serde_json::json!({"id":id,"error":error.to_string()}),
+        };
         if let Some(paths) = &openapi.paths {
             for (path, item) in paths {
                 for (method, operation) in item.methods() {
@@ -456,6 +465,89 @@ pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::Ope
         runtime.compile(&backend)?;
     }
     Ok(openapi)
+}
+
+// HTTP catalog reads installation facts, with display details from the already
+// loaded package at that version. It never opens payloads or waits for their
+// file locks. Offline changes remain visible through their database records.
+fn installed_catalog(
+    profile: &IdentityProfile,
+    sandbox: &Sandbox,
+    app: bool,
+    name: Option<&str>,
+) -> Result<serde_json::Value> {
+    let path = profile.config_db_path();
+    if !path.symlink_metadata()?.file_type().is_file() {
+        return Err(Error::InvalidConfig(
+            "config.db must be a regular file".into(),
+        ));
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(3))?;
+    let table = if app { "apps" } else { "libs" };
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )?;
+    let mut items = Vec::new();
+    if exists {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id,name,version FROM {table} WHERE ?1 IS NULL OR name=?1 ORDER BY id"
+        ))?;
+        for row in stmt.query_map([name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, name, version) = row?;
+            let package = if app {
+                sandbox.apps.get(&id)
+            } else {
+                sandbox.libs.get(&id).map(|lib| &lib.package)
+            };
+            let mut value = package
+                .map(|package| lib_metadata(package, Some(&id)))
+                .filter(|value| value["version"] == version)
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "id":id, "title":name, "version":version,
+                        "kind":if app {"app"} else {"lib"},
+                        "description":null, "endpoints":[],
+                    })
+                });
+            let (edges, source, target) = if app {
+                ("app_dependencies", "app_id", "lib_id")
+            } else {
+                ("lib_dependencies", "lib_id", "dependency_id")
+            };
+            let dependencies = conn
+                .prepare(&format!(
+                    "SELECT {target},version FROM {edges} WHERE {source}=?1 ORDER BY {target}"
+                ))?
+                .query_map([&id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .map(|row| {
+                    let (id, version) = row?;
+                    let (publisher, name) = id.split_once('/').ok_or_else(|| {
+                        Error::InvalidConfig("invalid registered dependency ID".into())
+                    })?;
+                    Ok(serde_json::json!({"publisher":publisher,"name":name,"version":version}))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            value["dependencies"] = dependencies.into();
+            items.push(value);
+        }
+    }
+    if name.is_some() {
+        items.pop().ok_or(Error::RouteNotFound)
+    } else {
+        Ok(items.into())
+    }
 }
 
 pub(crate) fn lib_management_router(
@@ -684,6 +776,13 @@ async fn lib_management_request(
         };
         return Ok(axum::Json(value).into_response());
     }
+    if method == Method::GET {
+        let value = tokio::task::spawn_blocking(move || {
+            installed_catalog(&profile, &sandbox.read().unwrap(), app, id.as_deref())
+        })
+        .await??;
+        return Ok(axum::Json(value).into_response());
+    }
     let runtime = sandbox.read().unwrap().runtime.clone();
     let value = tokio::task::spawn_blocking(move || {
         // The URL selects a local short name. Package identity remains the
@@ -796,24 +895,13 @@ async fn lib_management_request(
                 sandbox.apps.remove(id);
                 return Ok(serde_json::Value::Null);
             }
-            let apps = installed_apps(&profile, id.as_deref())?;
-            let mut values = apps
-                .iter()
-                .map(|(id, package)| Ok(lib_metadata(package, Some(id))))
-                .collect::<Result<Vec<_>>>()?;
-            values.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-            return if id.is_some() {
-                values.pop().ok_or(Error::RouteNotFound)
-            } else {
-                Ok(values.into())
-            };
+            unreachable!("App reads returned through the lightweight catalog");
         }
         if checking {
             check_lib(&bytes, &runtime)?;
             return Ok(lib_metadata(&read_package(&bytes)?, None));
         }
         match method {
-            Method::GET => installed_libs(&profile, id.as_deref()),
             Method::PUT => {
                 let id = id.as_deref().unwrap();
                 // Prepare the full executable/resource snapshot before commit.

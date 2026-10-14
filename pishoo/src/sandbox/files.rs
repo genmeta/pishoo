@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 
 use dhttp_home::identity::IdentityProfile;
 
-use super::{WasmRuntime, check_lib, lib_metadata, package_metadata, read_package};
+use super::{WasmRuntime, lib_metadata, package_metadata, read_package};
 use crate::{Error, Result};
 
 fn child_dir(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File> {
@@ -219,8 +219,8 @@ pub(super) fn disk_ids(root: &std::fs::File) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-// Installation facts belong to config.db. Signed files are verified against
-// these rows, never discovered as an implicit installation during startup.
+// Installation facts belong to config.db; startup never discovers files as an
+// implicit installation. Read-only queries do not audit the database graph.
 fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusqlite::Connection> {
     let path = profile.config_db_path();
     if !path.symlink_metadata()?.file_type().is_file() {
@@ -246,14 +246,6 @@ fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusq
             tx.execute_batch(include_str!("install.sql"))?;
             tx.commit()?;
         }
-    }
-    let broken: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-        [],
-        |row| row.get(0),
-    )?;
-    if broken && !create {
-        return Err(Error::InvalidConfig("installed package/dependency/capability registration has broken references; reinstall the affected package or explicitly repair registration".into()));
     }
     Ok(conn)
 }
@@ -350,34 +342,6 @@ fn capability_rows(
     }
     rows.sort();
     Ok(rows)
-}
-
-fn check_capabilities(
-    conn: &rusqlite::Connection,
-    id: &str,
-    package: &webc::Container,
-) -> Result<()> {
-    let ready: bool = conn.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('lib_capabilities','lib_capability_operations')", [], |r| r.get(0))?;
-    if !ready {
-        return Err(Error::InvalidConfig(format!(
-            "capability registration is missing; reinstall {id} using normal installation"
-        )));
-    }
-    let mut actual = Vec::new();
-    for row in conn.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_id=?1 ORDER BY capability_id")?
-        .query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))? {
-        let (capability, title) = row?;
-        let endpoints = conn.prepare("SELECT method,path FROM lib_capability_operations WHERE lib_id=?1 AND capability_id=?2 ORDER BY method,path")?
-            .query_map(rusqlite::params![id,capability], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-            .collect::<std::result::Result<Vec<_>,_>>()?;
-        actual.push((capability,title,endpoints));
-    }
-    if actual != capability_rows(package)? {
-        return Err(Error::InvalidConfig(format!(
-            "capability registration differs from signed package; reinstall {id} using normal installation"
-        )));
-    }
-    Ok(())
 }
 
 fn package_routes(
@@ -640,50 +604,6 @@ fn check_dependency_cycle(conn: &rusqlite::Connection, id: &str, dependency: &st
     Ok(())
 }
 
-fn check_registration_dependencies(
-    conn: &rusqlite::Connection,
-    id: &str,
-    kind: &str,
-    api: &serde_json::Value,
-) -> Result<()> {
-    let mut expected = declared_dependencies(api);
-    expected.sort();
-    let (edges, source, target) = if kind == "app" {
-        ("app_dependencies", "app_id", "lib_id")
-    } else {
-        ("lib_dependencies", "lib_id", "dependency_id")
-    };
-    let actual = conn
-        .prepare(&format!(
-            "SELECT {target},version FROM {edges} WHERE {source}=?1 ORDER BY {target}"
-        ))?
-        .query_map([id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if actual != expected {
-        return Err(Error::InvalidComponent(format!(
-            "registered dependencies differ from file for {id}"
-        )));
-    }
-    for (dependency, version) in expected {
-        let matches: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM libs WHERE id=?1 AND version=?2)",
-            rusqlite::params![dependency, version],
-            |row| row.get(0),
-        )?;
-        if !matches {
-            return Err(Error::InvalidComponent(format!(
-                "registered dependency {dependency}@{version} is missing or incompatible"
-            )));
-        }
-        if kind == "lib" {
-            check_dependency_cycle(conn, id, &dependency)?;
-        }
-    }
-    Ok(())
-}
-
 fn expanded_error() -> Error {
     Error::InvalidComponent("invalid or modified expanded package".into())
 }
@@ -917,23 +837,9 @@ fn expanded_bytes(dir: &std::fs::File) -> Result<Vec<u8>> {
         return Err(expanded_error());
     }
     bytes.extend_from_slice(&proof[cursor..]);
-    // Verify both the original publisher signature and canonical file placement.
-    // A modified proof cannot redirect a signed payload to a different pathname.
-    if expanded_layout(&bytes)? != files {
-        return Err(expanded_error());
-    }
-    let package = read_package(&bytes)?;
-    let mut manifest = Vec::new();
-    expanded_file(dir, "manifest.json")?
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_end(&mut manifest)?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&manifest).map_err(|_| expanded_error())?;
-    if manifest.len() > 16 * 1024 * 1024
-        || value != serde_json::to_value(package.manifest()).map_err(|_| expanded_error())?
-    {
-        return Err(expanded_error());
-    }
+    // Installation authenticated the package and wrote this layout. Reading it
+    // only reconstructs the container; it does not rehash or reverify payloads.
+    // Bounds and no-follow traversal above are necessary to read files safely.
     Ok(bytes)
 }
 
@@ -1024,20 +930,16 @@ pub(crate) fn installed_libs(
     let mut values = Vec::new();
     for (registered, version) in registered_packages(&conn, "lib", id)? {
         let value = match disk_bytes(&root, &registered).and_then(|bytes| {
-            let package = read_package(&bytes)?;
-            let metadata = package_metadata(&package)?;
-            check_resource_identity(&metadata, &registered)?;
-            if metadata["version"].as_str().unwrap() != version {
-                return Err(Error::InvalidComponent(format!(
-                    "registered version differs from file for {registered}"
-                )));
-            }
-            check_registration_dependencies(&conn, &registered, "lib", &metadata)?;
-            check_capabilities(&conn, &registered, &package)?;
-            check_routes(profile, &conn, &registered, "lib", &package)?;
+            let package = webc::Container::from_bytes_and_version(bytes.into(), webc::Version::V3)
+                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+            package_metadata(&package)?;
             Ok(package)
         }) {
-            Ok(package) => lib_metadata(&package, Some(&registered)),
+            Ok(package) => {
+                let mut value = lib_metadata(&package, Some(&registered));
+                value["version"] = version.into();
+                value
+            }
             Err(error) if id.is_some() => return Err(error),
             Err(error) => serde_json::json!({"id":registered,"error":error.to_string()}),
         };
@@ -1208,7 +1110,11 @@ fn install_artifact(
         ));
     }
     if let Some(runtime) = runtime {
-        check_lib(bytes, runtime)?;
+        runtime.compile(
+            &package
+                .get_atom("backend")
+                .ok_or_else(|| Error::InvalidComponent("expected a backend lib".into()))?,
+        )?;
     }
     check_resource_identity(&metadata, id)?;
     if kind == "lib" {
@@ -1389,7 +1295,7 @@ fn remove_artifact(profile: &IdentityProfile, id: &str, kind: &str) -> Result<()
     }
 }
 
-/// Read validated immutable frontend resources using the same no-follow traversal.
+/// Read installed frontend resources without repeating installation validation.
 pub(crate) fn installed_apps(
     profile: &IdentityProfile,
     id: Option<&str>,
@@ -1413,20 +1319,13 @@ pub(crate) fn installed_apps(
     let conn = installation_database(profile, false)?;
     let ids = registered_packages(&conn, "app", id)?;
     let mut apps = std::collections::HashMap::new();
-    for (id, version) in ids {
-        let package = read_package(&artifact_bytes(&root, &id, "app")?)?;
-        let api = package_metadata(&package)?;
-        check_resource_identity(&api, &id)?;
-        if api["kind"] != "app" {
-            return Err(Error::InvalidComponent("expected a frontend app".into()));
-        }
-        if api["version"].as_str().unwrap() != version {
-            return Err(Error::InvalidComponent(format!(
-                "registered version differs from file for {id}"
-            )));
-        }
-        check_registration_dependencies(&conn, &id, "app", &api)?;
-        check_routes(profile, &conn, &id, "app", &package)?;
+    for (id, _) in ids {
+        let package = webc::Container::from_bytes_and_version(
+            artifact_bytes(&root, &id, "app")?.into(),
+            webc::Version::V3,
+        )
+        .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        package_metadata(&package)?;
         apps.insert(id, package);
     }
     Ok(apps)

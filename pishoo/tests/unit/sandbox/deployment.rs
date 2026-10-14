@@ -68,6 +68,34 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
 }
 
 #[test]
+fn startup_trusts_installed_packages_while_explicit_validation_rejects_bad_signatures() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = profile(directory.path());
+    let signature = profile.join("libs/alpha/signature.json");
+    let mut bytes = std::fs::read(&signature).unwrap();
+    // Keep the stored layout intact, but make the signature envelope invalid.
+    bytes[0] ^= 1;
+    std::fs::write(signature, bytes).unwrap();
+    let root = lib_root(&profile).unwrap();
+    let bytes = disk_bytes(&root, "alpha").unwrap();
+    assert!(read_package(&bytes).is_err());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    assert!(install_lib(&profile, "alpha", &bytes, &runtime).is_err());
+    let mut sandbox = Sandbox::new(runtime);
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.libs.len(), 2);
+    assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
+    assert!(
+        installed_libs(&profile, None)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item.get("error").is_none())
+    );
+}
+
+#[test]
 fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
@@ -94,7 +122,7 @@ fn missing_registered_files_reject_reload_and_keep_loaded_libs() {
 }
 
 #[test]
-fn database_registration_controls_loading_and_file_versions_must_match() {
+fn database_registration_controls_loading_without_revalidating_versions() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
@@ -111,17 +139,14 @@ fn database_registration_controls_loading_and_file_versions_must_match() {
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
     assert!(profile.join("libs/beta/.webc-proof").is_file());
-    std::fs::write(
-        profile.join("libs/alpha/.webc-proof"),
-        component("alpha", "2"),
-    )
-    .unwrap();
-    assert!(sandbox.load_libs(&profile).is_err());
+    db.execute("UPDATE libs SET version='2.0.0' WHERE id='alpha'", [])
+        .unwrap();
+    sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
     assert_eq!(
         db.query_row("SELECT version FROM libs WHERE id='alpha'", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
-        "1.0.0"
+        "2.0.0"
     );
 }

@@ -27,7 +27,7 @@ use wasmtime_wasi_http::{
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
     host::{identity, identity_v2},
-    package_file, read_package, validate_openapi,
+    package_file,
 };
 use crate::{Body, Error, Result};
 
@@ -112,15 +112,12 @@ impl Lib {
         data_dir: &Path,
     ) -> Result<Self> {
         super::valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
-        let package = read_package(bytes)?;
-        let openapi = validate_openapi(&package_file(&package, "/metadata/openapi.json")?)?;
-        if let Some((publisher, name)) = id.split_once('/') {
-            let manifest = super::package_metadata(&package)?;
-            if manifest["publisher"] != publisher || manifest["name"] != name {
-                return Err(Error::InvalidComponent(
-                    "Lib ID and manifest identity disagree".into(),
-                ));
-            }
+        let package =
+            webc::Container::from_bytes_and_version(bytes.to_vec().into(), webc::Version::V3)
+                .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        let openapi = serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
+            .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+        if id.contains('/') {
             // Both identity levels must be real directories. In particular,
             // canonicalizing only the leaf would follow a publisher symlink.
             for directory in [data_dir.parent().unwrap(), data_dir] {

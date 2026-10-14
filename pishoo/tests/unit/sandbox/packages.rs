@@ -301,7 +301,6 @@ fn expanded_lib_preserves_signed_bytes_and_rejects_modified_files() {
         "hello.wasm",
         "openapi.json",
         "signature.json",
-        "manifest.json",
         ".webc-proof",
     ] {
         let path = directory.join(name);
@@ -310,8 +309,10 @@ fn expanded_lib_preserves_signed_bytes_and_rejects_modified_files() {
         altered[0] ^= 1;
         std::fs::write(&path, &altered).unwrap();
         assert!(
-            installed_libs(&profile, Some(id)).is_err(),
-            "modified {name} was accepted"
+            files::disk_bytes(&lib_root, id)
+                .and_then(|bytes| read_package(&bytes))
+                .is_err(),
+            "installation validation accepted modified {name}"
         );
         std::fs::write(&path, &original).unwrap();
         assert!(files::disk_bytes(&lib_root, id).unwrap() == bytes);
@@ -330,7 +331,7 @@ fn expanded_lib_preserves_signed_bytes_and_rejects_modified_files() {
 }
 
 #[test]
-fn expanded_app_uses_verified_public_files_and_rejects_directory_symlinks() {
+fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_symlinks() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join("libs")).unwrap();
@@ -342,7 +343,11 @@ fn expanded_app_uses_verified_public_files_and_rejects_directory_symlinks() {
     let index = directory.join("public/index.html");
     assert_eq!(std::fs::read(&index).unwrap(), b"verified page");
     std::fs::write(&index, b"modified page").unwrap();
-    assert!(installed_apps(&profile, Some(id)).is_err());
+    let apps = installed_apps(&profile, Some(id)).unwrap();
+    assert_eq!(
+        package_file(&apps[id], "/public/index.html").unwrap(),
+        &b"modified page"[..]
+    );
     std::fs::write(&index, b"verified page").unwrap();
     assert!(installed_apps(&profile, Some(id)).is_ok());
     #[cfg(unix)]
@@ -354,6 +359,65 @@ fn expanded_app_uses_verified_public_files_and_rejects_directory_symlinks() {
         assert!(installed_apps(&profile, Some(id)).is_err());
         assert!(outside.join("app.js").is_file());
     }
+}
+
+#[test]
+fn http_installed_catalog_uses_registration_and_loaded_metadata_without_opening_payloads() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.path()).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let id = "alice.dhttp.net/hello";
+    install_app(&profile, id, &frontend_package("1.0.0", "installed")).unwrap();
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    sandbox.apps = installed_apps(&profile, None).unwrap();
+    // The HTTP catalog must not inspect any saved payload, even when none of
+    // those files are readable. Installation facts still come from config.db.
+    std::fs::remove_dir_all(profile.join("apps")).unwrap();
+    let value = installed_catalog(&profile, &sandbox, true, Some("hello")).unwrap();
+    assert_eq!(value["id"], id);
+    assert_eq!(value["version"], "1.0.0");
+    assert_eq!(
+        value["title"],
+        lib_metadata(&sandbox.apps[id], Some(id))["title"]
+    );
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute(
+        "INSERT INTO libs VALUES('alice.dhttp.net/backend','backend','2.0.0')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO app_dependencies VALUES(?1,'alice.dhttp.net/backend','2.0.0')",
+        [id],
+    )
+    .unwrap();
+    db.execute("UPDATE apps SET version='2.0.0' WHERE id=?1", [id])
+        .unwrap();
+    let value = installed_catalog(&profile, &sandbox, true, Some("hello")).unwrap();
+    assert_eq!(value["version"], "2.0.0");
+    assert_eq!(value["title"], "hello");
+    assert_eq!(value["description"], Value::Null);
+    assert_eq!(
+        value["dependencies"],
+        json!([{"publisher":"alice.dhttp.net","name":"backend","version":"2.0.0"}])
+    );
+    let value = installed_catalog(&profile, &sandbox, false, None).unwrap();
+    assert_eq!(value[0]["id"], "alice.dhttp.net/backend");
+    assert_eq!(value[0]["version"], "2.0.0");
+    assert!(matches!(
+        installed_catalog(&profile, &sandbox, false, Some("missing")),
+        Err(Error::RouteNotFound)
+    ));
+    db.execute("DELETE FROM apps WHERE id=?1", [id]).unwrap();
+    assert!(
+        installed_catalog(&profile, &sandbox, true, None)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(sandbox.apps.contains_key(id));
 }
 
 #[test]
@@ -1079,7 +1143,8 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         [],
     )
     .unwrap();
-    assert!(sandbox.load_libs(&profile).is_err());
+    // Startup trusts installation; it does not audit out-of-band DB edits.
+    sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 3);
     db.execute(
         "UPDATE lib_dependencies SET version='1.0.0' WHERE dependency_id='alice.dhttp.net/first'",
@@ -1112,10 +1177,10 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         &runtime,
     )
     .unwrap();
-    // Simulate a corrupt registry graph; startup must reject it rather than
-    // relying on a filesystem scan or selecting a partial graph.
+    // Startup does not repeat dependency-cycle validation after installation.
     db.execute("INSERT INTO lib_dependencies VALUES('alice.dhttp.net/second','alice.dhttp.net/first','1.0.0')",[]).unwrap();
-    assert!(sandbox.load_libs(&profile).is_err());
+    // Startup trusts installation; it does not audit out-of-band DB edits.
+    sandbox.load_libs(&profile).unwrap();
     db.execute(
         "DELETE FROM lib_dependencies WHERE lib_id='alice.dhttp.net/second'",
         [],
@@ -1261,7 +1326,8 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     sandbox.load_libs(&profile).unwrap();
     db.execute("UPDATE lib_capabilities SET title='tampered'", [])
         .unwrap();
-    assert!(sandbox.load_libs(&profile).is_err());
+    // Startup trusts installation; it does not audit out-of-band DB edits.
+    sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     // Static and business paths coexist by method; a competing GET is rejected.
@@ -1359,14 +1425,15 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         .await
         .unwrap();
     install_lib(&profile, id, &bytes, &runtime).unwrap();
-    // Startup also detects orphan capabilities after out-of-band DB edits.
+    // Startup does not repeat a database-wide foreign-key audit.
     db.pragma_update(None, "foreign_keys", false).unwrap();
     db.execute(
         "INSERT INTO lib_capabilities VALUES('missing','test','Broken')",
         [],
     )
     .unwrap();
-    assert!(sandbox.load_libs(&profile).is_err());
+    // Startup trusts installation; it does not audit out-of-band DB edits.
+    sandbox.load_libs(&profile).unwrap();
     db.execute("DELETE FROM lib_capabilities WHERE lib_id='missing'", [])
         .unwrap();
 }
