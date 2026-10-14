@@ -1,3 +1,4 @@
+import { backendPath } from '../api/client'
 import type { ChatCapabilityState, Contact } from '../api/types'
 import type { MessageKey, Translator } from '../i18n'
 import { contactStatus } from './format'
@@ -22,8 +23,8 @@ export function chatCapabilityLabel(contact: Contact, t: Translator, capability?
     if (capability.can_send) return t('contacts.chatRequested')
     return t('contacts.chatUnavailable')
   }
-  if (Object.hasOwn(contact.granted_access, '/std/message')) return t('contacts.chatEnabled')
-  if (Object.hasOwn(contact.requested_access, '/std/message')) return t('contacts.chatRequested')
+  if (Object.hasOwn(contact.granted_access, backendPath('/message'))) return t('contacts.chatEnabled')
+  if (Object.hasOwn(contact.requested_access, backendPath('/message'))) return t('contacts.chatRequested')
   return t('contacts.chatNotRequested')
 }
 
@@ -34,13 +35,13 @@ export function chatDirectionState(
 ): ChatDirectionState {
   const status = contactStatus(contact.status)
   if (status === 'blocked' || status === 'expired') return 'unavailable'
-  const requested = Object.hasOwn(contact.requested_access, '/std/message')
+  const requested = Object.hasOwn(contact.requested_access, backendPath('/message'))
   if (direction === 'incoming') {
     if (capability) {
       if (capability.can_receive === true) return 'enabled'
       return ['pending', 'transfered'].includes(status) && requested ? 'waiting' : 'unavailable'
     }
-    if (Object.hasOwn(contact.granted_access, '/std/message')) return 'enabled'
+    if (Object.hasOwn(contact.granted_access, backendPath('/message'))) return 'enabled'
     return requested ? 'waiting' : 'unavailable'
   }
   if (capability) {

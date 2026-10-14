@@ -96,7 +96,7 @@ async fn transport_public_peer() {
     let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
         .await
         .unwrap();
-    for path in ["/std/file", "/std/api/echo", "/transport"] {
+    for path in ["/std/file", "/api/echo", "/transport"] {
         server
             .access
             .set_policy(
@@ -216,7 +216,7 @@ async fn transport_public_peer() {
             }
         }
         for (kind, uri) in [
-            ("wasm", "https://receiver.dhttp.net/std/api/echo/echo"),
+            ("wasm", "https://receiver.dhttp.net/api/echo/echo"),
             ("proxy", "https://receiver.dhttp.net/transport/echo"),
         ] {
             let started = Instant::now();
@@ -657,7 +657,7 @@ async fn transport_cross_process_acceptance() {
             let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
                 .await
                 .unwrap();
-            for path in ["/std/file", "/std/api/echo"] {
+            for path in ["/std/file", "/api/echo"] {
                 server
                     .access
                     .set_policy(
@@ -786,7 +786,7 @@ async fn transport_cross_process_acceptance() {
                 let values = try_join_all((0..8).map(|index| {
                     echo(
                         &client,
-                        "https://receiver.dhttp.net/std/api/echo/echo",
+                        "https://receiver.dhttp.net/api/echo/echo",
                         MIB,
                         index + if identity == "alice" { 600 } else { 700 },
                         Duration::ZERO,
@@ -811,7 +811,7 @@ async fn transport_cross_process_acceptance() {
                 &format!("process_{identity}_duplex_no_idle"),
                 bounded(duplex(
                     &client,
-                    "https://receiver.dhttp.net/std/api/echo/echo",
+                    "https://receiver.dhttp.net/api/echo/echo",
                     Duration::ZERO,
                 ))
                 .await,
@@ -823,7 +823,7 @@ async fn transport_cross_process_acceptance() {
                 &format!("process_{identity}_slow_reader_1ms"),
                 bounded(echo(
                     &client,
-                    "https://receiver.dhttp.net/std/api/echo/echo",
+                    "https://receiver.dhttp.net/api/echo/echo",
                     2 * MIB,
                     800,
                     Duration::ZERO,
@@ -1134,7 +1134,7 @@ async fn transport_large_duplex_concurrency_acceptance() {
     let bob = dhttp::Endpoint::load("bob").await.unwrap();
     let mut listeners = Vec::new();
     for server in [&receiver, &alice] {
-        for path in ["/std/file", "/std/api/echo", "/transport"] {
+        for path in ["/std/file", "/api/echo", "/transport"] {
             server
                 .access
                 .set_policy(
@@ -1170,7 +1170,7 @@ async fn transport_large_duplex_concurrency_acceptance() {
     let mut results = Vec::new();
     println!("TRANSPORT_SETUP ready");
     let client = &alice.endpoint;
-    let wasm_uri = "https://receiver.dhttp.net/std/api/echo/echo";
+    let wasm_uri = "https://receiver.dhttp.net/api/echo/echo";
     let proxy_uri = "https://receiver.dhttp.net/transport/echo";
     let small = &files[7];
     let small_uri = format!("https://receiver.dhttp.net/std/file/{}", small.0);

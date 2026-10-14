@@ -84,6 +84,9 @@ URL:            https://www.dhttp.net
 Vendor:         Genmeta Tech Limited
 Source0:        mime.types
 Source1:        pishoo.service
+Source2:        workspace-lib.webc
+Source3:        workspace-app.webc
+Source4:        chat-lib.webc
 BuildArch:      noarch
 AutoReqProv:    no
 Requires(pre):  shadow-utils
@@ -103,11 +106,17 @@ Common configuration files and the systemd unit for the pishoo proxy engine.
 rm -rf %{buildroot}
 install -D -m 0644 %{SOURCE0} %{buildroot}/etc/dhttp/mime.types
 install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/pishoo.service
+install -D -m 0644 %{SOURCE2} %{buildroot}/usr/share/pishoo/default-artifacts/workspace-lib.webc
+install -D -m 0644 %{SOURCE4} %{buildroot}/usr/share/pishoo/default-artifacts/chat-lib.webc
+install -D -m 0644 %{SOURCE3} %{buildroot}/usr/share/pishoo/default-artifacts/workspace-app.webc
 
 %files
 %dir /etc/dhttp
 /etc/dhttp/mime.types
 %{_unitdir}/pishoo.service
+/usr/share/pishoo/default-artifacts/workspace-lib.webc
+/usr/share/pishoo/default-artifacts/workspace-app.webc
+/usr/share/pishoo/default-artifacts/chat-lib.webc
 
 %pre
 if getent group dhttp >/dev/null; then
@@ -195,6 +204,11 @@ run_common() {
     write_common_spec "$spec"
     install -D -m 0644 xtask/deb/common/etc/dhttp/mime.types "$topdir/SOURCES/mime.types"
     install -D -m 0644 xtask/deb/pishoo-common.pishoo.service "$topdir/SOURCES/pishoo.service"
+    defaults=${PISHOO_DEFAULT_ARTIFACTS_INPUT:-"$XTASK_RELEASE_REPO_ROOT/target/workspace-dist/default-artifacts"}
+    for artifact in chat-lib.webc workspace-lib.webc workspace-app.webc; do
+        [ -f "$defaults/$artifact" ] || { echo "missing signed default artifact: $defaults/$artifact" >&2; exit 1; }
+        install -m 0644 "$defaults/$artifact" "$topdir/SOURCES/$artifact"
+    done
     rpmbuild -bb \
         --define "_topdir $topdir" \
         --define "_binary_payload w19.xzdio" \

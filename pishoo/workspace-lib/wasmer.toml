@@ -1,0 +1,22 @@
+[package]
+name = "dev.dhttp.net/workspace"
+version = "0.2.0"
+description = "用户工作台、资料与联系人申请后端"
+license = "Apache-2.0"
+
+[package.pishoo]
+kind = "lib"
+title = "Workspace"
+changelog = "拆分为独立后端；原合包数据不自动迁移。"
+dependencies = [{ publisher = "dev.dhttp.net", name = "chat", version = "0.2.0"}]
+
+[package.pishoo.host]
+private-storage = "资料、收藏与联系人申请投递队列"
+request-identity = "核对真实调用身份和主人身份"
+
+[[module]]
+name = "backend"
+source = "lib.wasm"
+
+[fs]
+"/metadata" = "metadata"

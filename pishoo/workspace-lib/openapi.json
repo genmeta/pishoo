@@ -1,0 +1,336 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Workspace",
+    "description": "用户工作台、资料与联系人申请后端",
+    "version": "0.2.0",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "x-pishoo": {},
+  "paths": {
+    "/context": {
+      "get": {
+        "operationId": "getContext",
+        "summary": "context",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "summary": "capabilities",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/approvals": {
+      "get": {
+        "operationId": "getApprovals",
+        "summary": "approvals",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteApprovals",
+        "summary": "approvals",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contact-directory": {
+      "get": {
+        "operationId": "getContact-Directory",
+        "summary": "contact-directory",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/capability-requests": {
+      "get": {
+        "operationId": "getCapability-Requests",
+        "summary": "capability-requests",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/settings/profile": {
+      "get": {
+        "operationId": "getSettingsProfile",
+        "summary": "settings profile",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchSettingsProfile",
+        "summary": "settings profile",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/settings/profile/avatar": {
+      "get": {
+        "operationId": "getSettingsProfileAvatar",
+        "summary": "settings profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putSettingsProfileAvatar",
+        "summary": "settings profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSettingsProfileAvatar",
+        "summary": "settings profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profile": {
+      "get": {
+        "operationId": "getProfile",
+        "summary": "profile",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profile/avatar": {
+      "get": {
+        "operationId": "getProfileAvatar",
+        "summary": "profile avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profiles": {
+      "get": {
+        "operationId": "getProfiles",
+        "summary": "profiles",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/profiles/avatar": {
+      "get": {
+        "operationId": "getProfilesAvatar",
+        "summary": "profiles avatar",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contact-requests": {
+      "get": {
+        "operationId": "getContact-Requests",
+        "summary": "contact-requests",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "post": {
+        "operationId": "postContact-Requests",
+        "summary": "contact-requests",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteContact-Requests",
+        "summary": "contact-requests",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contact-requests/refresh": {
+      "post": {
+        "operationId": "postContact-RequestsRefresh",
+        "summary": "contact-requests refresh",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/saved": {
+      "put": {
+        "operationId": "putContactsSaved",
+        "summary": "contacts saved",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteContactsSaved",
+        "summary": "contacts saved",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/grant": {
+      "post": {
+        "operationId": "postContactsCapabilitiesGrant",
+        "summary": "contacts capabilities grant",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/revoke": {
+      "post": {
+        "operationId": "postContactsCapabilitiesRevoke",
+        "summary": "contacts capabilities revoke",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    },
+    "/contacts/capabilities/deny": {
+      "post": {
+        "operationId": "postContactsCapabilitiesDeny",
+        "summary": "contacts capabilities deny",
+        "responses": {
+          "200": {
+            "description": "成功"
+          },
+          "403": {
+            "description": "身份或权限不符"
+          }
+        }
+      }
+    }
+  }
+}

@@ -40,8 +40,8 @@ export default function HomePage(props: {
           }>
             <p>{t('home.pendingReviews', { count: props.pendingCount })}</p>
           </Show>
-          <a class="button button-primary overview-action" href="/std/workspace/approvals"
-            onClick={(event) => props.follow(event, '/std/workspace/approvals')}>
+          <a class="button button-primary overview-action" href="#/approvals"
+            onClick={(event) => props.follow(event, '#/approvals')}>
             {t('home.goReviews')}
           </a>
         </section>

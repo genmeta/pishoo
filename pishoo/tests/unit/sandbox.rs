@@ -33,9 +33,15 @@ fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::Router {
     Sandbox::api_router(
         Arc::new(RwLock::new(Sandbox {
             libs: sandbox.libs.clone(),
+            apps: sandbox.apps.clone(),
             runtime: sandbox.runtime.clone(),
             tasks: sandbox.tasks.clone(),
         })),
-        endpoint,
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        axum::Router::new(),
     )
 }

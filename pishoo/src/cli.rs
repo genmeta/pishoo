@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use crate::{
     Error, Result,
-    sandbox::{WasmRuntime, check_lib, install_lib, installed_libs, remove_lib},
+    sandbox::{
+        WasmRuntime, check_lib, install_app, install_lib, installed_apps, installed_libs,
+        package_metadata, read_package, remove_app, remove_lib,
+    },
     setup::config_database,
 };
 
@@ -36,6 +39,13 @@ Components:
   lib install ID FILE.webc     Install or update a Lib
   lib remove|rm ID             Remove a Lib; preserve its data
   lib check FILE.webc          Validate a WEBC package without selecting an identity
+  app [list|ls]                List installed frontend Apps
+  app --loaded                 Query frontend Apps loaded by the running host
+  app info PUBLISHER/NAME      Inspect an installed frontend App
+  app install PUBLISHER/NAME FILE.webc
+                              Install or update a frontend; install Lib dependencies first
+  app remove|rm PUBLISHER/NAME Remove a frontend App; preserve its Libs
+  app check FILE.webc          Validate a signed frontend without selecting an identity
 
 Service:
   start                        Start the installed Pishoo service
@@ -95,15 +105,23 @@ Queries are written to stdout; context and status messages to stderr."
         }
         return tokio::task::spawn_blocking(move || service_command(&command)).await?;
     }
-    if command == "lib" && args.first().is_some_and(|s| s == "check") {
+    if matches!(command.as_str(), "lib" | "app") && args.first().is_some_and(|s| s == "check") {
         if name.is_some() || args.len() != 2 {
             return Err(usage("lib check FILE.webc does not accept --id"));
         }
         let path = std::path::PathBuf::from(&args[1]);
+        let frontend = command == "app";
         let value = tokio::task::spawn_blocking(move || {
             let bytes = read_input(&path, 64 * 1024 * 1024)?;
-            let api = check_lib(&bytes, &WasmRuntime::new()?)?;
-            Ok::<_, Error>(lib_metadata(&api, None))
+            let package = read_package(&bytes)?;
+            let metadata = package_metadata(&package)?;
+            if (metadata["kind"] == "app") != frontend {
+                return Err(usage("package kind differs from check command"));
+            }
+            if !frontend {
+                check_lib(&bytes, &WasmRuntime::new()?)?;
+            }
+            Ok::<_, Error>(lib_metadata(&package, None))
         })
         .await??;
         return print_json(&value);
@@ -122,7 +140,7 @@ Queries are written to stdout; context and status messages to stderr."
             }
         }
         "proxy" => {}
-        "lib" => {
+        "lib" | "app" => {
             lib_operation(args)?;
         }
         _ => return Err(usage("invalid command; use --help")),
@@ -135,15 +153,19 @@ Queries are written to stdout; context and status messages to stderr."
         profile.name(),
         profile.path().display()
     );
-    if command == "lib" && args.first().is_some_and(|s| s == "--loaded") {
+    if matches!(command.as_str(), "lib" | "app") && args.first().is_some_and(|s| s == "--loaded") {
         let endpoint = dhttp::Endpoint::load(profile.name()).await?;
         let mdns = crate::dns::install()?;
         let result = async {
             dhttp::DhttpNetwork::init().await?;
             crate::dns::maintain_mdns(&mdns, &[], &[]).await?;
-            let uri: Uri = format!("https://{}/std/workspace-api/libs", profile.name())
-                .parse()
-                .map_err(|_| usage("invalid identity URI"))?;
+            let uri: Uri = format!(
+                "https://{}/std/pishoo/loaded-{}",
+                profile.name(),
+                if command == "app" { "apps" } else { "libs" }
+            )
+            .parse()
+            .map_err(|_| usage("invalid identity URI"))?;
             let response =
                 tokio::time::timeout(std::time::Duration::from_secs(30), endpoint.get(uri))
                     .await
@@ -218,20 +240,39 @@ Queries are written to stdout; context and status messages to stderr."
                 let value = config_database(&profile, &method, &uri, payload)?;
                 Ok((if value.is_null() { None } else { Some(value) }, saving))
             }
-            "lib" => {
+            "lib" | "app" => {
+                let frontend = command == "app";
                 let operation = args.first().and_then(|s| s.to_str()).unwrap_or("list");
                 let value = match operation {
                     "list" | "ls" => {
-                        eprintln!("Catalog:    installed (disk)");
-                        installed_libs(&profile, None)?
+                        eprintln!("Catalog:    installed (database)");
+                        if frontend {
+                            app_query(&profile, None)?
+                        } else {
+                            installed_libs(&profile, None)?
+                        }
                     }
-                    "info" => installed_libs(&profile, Some(text(&args[1])?))?,
+                    "info" => {
+                        if frontend {
+                            app_query(&profile, Some(text(&args[1])?))?
+                        } else {
+                            installed_libs(&profile, Some(text(&args[1])?))?
+                        }
+                    }
                     "install" => {
                         let bytes = read_input(std::path::Path::new(&args[2]), 64 * 1024 * 1024)?;
-                        install_lib(&profile, text(&args[1])?, &bytes, &WasmRuntime::new()?)?
+                        if frontend {
+                            install_app(&profile, text(&args[1])?, &bytes)?
+                        } else {
+                            install_lib(&profile, text(&args[1])?, &bytes, &WasmRuntime::new()?)?
+                        }
                     }
                     "remove" | "rm" => {
-                        remove_lib(&profile, text(&args[1])?)?;
+                        if frontend {
+                            remove_app(&profile, text(&args[1])?)?;
+                        } else {
+                            remove_lib(&profile, text(&args[1])?)?;
+                        }
                         Value::Null
                     }
                     _ => return Err(usage("invalid lib operation")),
@@ -459,45 +500,49 @@ fn service_command(operation: &str) -> Result<()> {
     )))
 }
 
-fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::Value {
+fn app_query(profile: &dhttp_home::identity::IdentityProfile, id: Option<&str>) -> Result<Value> {
+    let apps = installed_apps(profile, id)?;
+    let mut items = Vec::new();
+    for (id, package) in apps {
+        items.push(lib_metadata(&package, Some(&id)));
+    }
+    items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    if id.is_some() {
+        items.pop().ok_or(Error::RouteNotFound)
+    } else {
+        Ok(items.into())
+    }
+}
+
+fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Value {
+    let mut value = package_metadata(package).expect("validated package metadata");
     let mut endpoints = Vec::new();
-    if let Some(paths) = &openapi.paths {
-        for (path, item) in paths {
-            for (method, operation) in item.methods() {
-                let description = operation
-                    .summary
-                    .as_deref()
-                    .filter(|text| !text.trim().is_empty())
-                    .or_else(|| {
-                        operation
-                            .description
-                            .as_deref()
-                            .filter(|text| !text.trim().is_empty())
-                    })
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        operation
-                            .responses
-                            .as_ref()?
-                            .iter()
-                            .find_map(|(status, response)| {
-                                if status != "2XX"
-                                    && !status
-                                        .parse::<u16>()
-                                        .is_ok_and(|code| (200..300).contains(&code))
-                                {
-                                    return None;
-                                }
-                                response
-                                    .resolve(openapi)
-                                    .ok()?
-                                    .description
-                                    .filter(|text| !text.trim().is_empty())
-                            })
-                    });
-                endpoints.push(serde_json::json!({"method":method.as_str(), "path":id.map_or_else(|| path.clone(), |id| format!("/std/api/{id}{path}")), "description":description}));
+    if value["kind"] == "lib" {
+        let mappings = package.manifest().filesystem().unwrap().unwrap();
+        let mapping = &mappings[0];
+        let file = format!(
+            "{}/openapi.json",
+            mapping
+                .host_path
+                .as_deref()
+                .unwrap_or("/")
+                .trim_end_matches('/')
+        );
+        let raw = package
+            .get_volume(&mapping.volume_name)
+            .unwrap()
+            .read_file(file.as_str())
+            .unwrap()
+            .0;
+        let openapi = crate::sandbox::validate_openapi(&raw).unwrap();
+        if let Some(paths) = &openapi.paths {
+            for (path, item) in paths {
+                for (method, op) in item.methods() {
+                    endpoints.push(json!({"method":method.as_str(),"path":id.map_or_else(|| path.clone(), |id| format!("/api/{}{path}",id.rsplit('/').next().unwrap())),"description":op.summary.as_deref().or(op.description.as_deref())}));
+                }
             }
         }
+        value["openapi"] = serde_json::to_value(openapi).unwrap();
     }
     endpoints.sort_by(|a, b| {
         a["path"]
@@ -505,7 +550,7 @@ fn lib_metadata(openapi: &oas3::OpenApiV3Spec, id: Option<&str>) -> serde_json::
             .cmp(&b["path"].as_str())
             .then_with(|| a["method"].as_str().cmp(&b["method"].as_str()))
     });
-    let mut value = serde_json::json!({"title":openapi.info.title, "version":openapi.info.version, "description":openapi.info.description, "endpoints":endpoints});
+    value["endpoints"] = endpoints.into();
     if let Some(id) = id {
         value["id"] = id.into();
     }

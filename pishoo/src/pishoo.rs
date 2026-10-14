@@ -1,5 +1,4 @@
 //! Identity-bound HTTP services, components and management routes.
-mod chat;
 mod cli;
 mod dns;
 mod error;
@@ -7,7 +6,6 @@ mod routes;
 mod sandbox;
 mod server;
 mod setup;
-mod workspace;
 
 #[cfg(test)]
 #[path = "../tests/support/test_identity.rs"]

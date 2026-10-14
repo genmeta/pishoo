@@ -30,13 +30,11 @@ fn component(version: &str) -> Vec<u8> {
 
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = WasmRuntime::new().unwrap();
     for id in ["alpha", "beta"] {
-        std::fs::create_dir_all(profile.join("lib").join(id)).unwrap();
-        std::fs::write(
-            profile.join("lib").join(id).join("lib.webc"),
-            component("1"),
-        )
-        .unwrap();
+        install_lib(&profile, id, &component("1"), &runtime).unwrap();
     }
     profile
 }
@@ -51,8 +49,8 @@ fn successful_load_replaces_libs_and_removes_missing_versions() {
     let alpha = sandbox.libs["alpha"].clone();
     let task = sandbox.tasks.token();
 
-    std::fs::remove_dir_all(profile.join("lib/beta")).unwrap();
-    std::fs::write(profile.join("lib/alpha/lib.webc"), component("2")).unwrap();
+    remove_lib(&profile, "beta").unwrap();
+    install_lib(&profile, "alpha", &component("2"), &runtime).unwrap();
     sandbox.load_libs(&profile).unwrap();
     let replacement = sandbox.libs["alpha"].clone();
     assert!(!Arc::ptr_eq(&alpha, &replacement));
@@ -85,12 +83,37 @@ fn invalid_candidate_rejects_reload_and_retains_the_published_version() {
 }
 
 #[test]
-fn removing_lib_root_removes_all_loaded_libs() {
+fn missing_registered_files_reject_reload_and_keep_loaded_libs() {
     let directory = tempfile::tempdir().unwrap();
     let profile = profile(directory.path());
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     sandbox.load_libs(&profile).unwrap();
     std::fs::remove_dir_all(profile.join("lib")).unwrap();
+    assert!(sandbox.load_libs(&profile).is_err());
+    assert_eq!(sandbox.libs.len(), 2);
+}
+
+#[test]
+fn database_registration_controls_loading_and_file_versions_must_match() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = profile(directory.path());
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let mut sandbox = Sandbox::new(runtime);
+    std::fs::create_dir_all(profile.join("lib/extra")).unwrap();
+    std::fs::write(profile.join("lib/extra/lib.webc"), component("1")).unwrap();
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute("DELETE FROM libs WHERE id='beta'", []).unwrap();
     sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.is_empty());
+    assert_eq!(sandbox.libs.len(), 1);
+    assert!(sandbox.libs.contains_key("alpha"));
+    assert!(profile.join("lib/beta/lib.webc").is_file());
+    std::fs::write(profile.join("lib/alpha/lib.webc"), component("2")).unwrap();
+    assert!(sandbox.load_libs(&profile).is_err());
+    assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
+    assert_eq!(
+        db.query_row("SELECT version FROM libs WHERE id='alpha'", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "1.0.0"
+    );
 }

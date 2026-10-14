@@ -13,10 +13,10 @@ type NavItem = {
 }
 
 const PRIMARY_NAV: NavItem[] = [
-  { page: 'contacts', href: '/std/workspace/contacts', label: 'nav.contacts', mobileLabel: 'nav.mobileContacts' },
-  { page: 'apps', href: '/std/workspace/apps', label: 'nav.apps', mobileLabel: 'nav.mobileApps' },
-  { page: 'approvals', href: '/std/workspace/approvals', label: 'nav.reviews', mobileLabel: 'nav.mobileReviews' },
-  { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.settings', mobileLabel: 'nav.mobileSettings' },
+  { page: 'contacts', href: '#/contacts', label: 'nav.contacts', mobileLabel: 'nav.mobileContacts' },
+  { page: 'apps', href: '#/apps', label: 'nav.apps', mobileLabel: 'nav.mobileApps' },
+  { page: 'approvals', href: '#/approvals', label: 'nav.reviews', mobileLabel: 'nav.mobileReviews' },
+  { page: 'profile', href: '#/settings/profile', label: 'nav.settings', mobileLabel: 'nav.mobileSettings' },
 ]
 
 export interface SidebarProps {
@@ -45,11 +45,11 @@ export default function Sidebar(props: SidebarProps) {
 
   return (
     <aside class="sidebar">
-      <a class="brand" href="/std/workspace/" onClick={(event) => props.follow(event, '/std/workspace/')}>
+      <a class="brand" href="#/" onClick={(event) => props.follow(event, '#/')}>
         <span class="brand-mark" aria-hidden="true">P</span>
         <span><strong>pishoo</strong><small>{t('brand.subtitle')}</small></span>
       </a>
-      <a class="profile-summary" href="/std/workspace/" onClick={(event) => props.follow(event, '/std/workspace/')}>
+      <a class="profile-summary" href="#/" onClick={(event) => props.follow(event, '#/')}>
         <Avatar name={props.profileName} src={props.profileAvatar} />
         <span>
           <strong>{props.profileName}</strong>

@@ -5,14 +5,14 @@ async function mockSettings(page: Page): Promise<void> {
   let displayName: string | null = 'Initial name'
   let avatarUrl: string | null = null
 
-  await page.route('**/std/workspace-api/context', (route) => route.fulfill({ json: {
+  await page.route('**/api/workspace/context', (route) => route.fulfill({ json: {
     profile: 'owner.local', owner_name: 'owner.local',
     badges: { pending_reviews: 0, incoming_contacts: null },
   } }))
   await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,
   } }))
-  await page.route('**/std/workspace-api/settings/profile', (route) => {
+  await page.route('**/api/workspace/settings/profile', (route) => {
     if (route.request().method() === 'PATCH') {
       const body = route.request().postDataJSON() as { display_name: string }
       displayName = body.display_name.trim() || null
@@ -21,7 +21,7 @@ async function mockSettings(page: Page): Promise<void> {
       identity_name: 'owner.local', display_name: displayName, avatar_url: avatarUrl, updated_at: 1700000000,
     } })
   })
-  await page.route('**/std/workspace-api/capabilities', (route) => route.fulfill({ json: [
+  await page.route('**/api/workspace/capabilities', (route) => route.fulfill({ json: [
     {
       id: 'public_profile', version: '1', visibility: 'public', approval_mode: 'none',
       selectable: false, endpoints: [{ method: 'GET', path: '/std/profile' }],
@@ -31,14 +31,14 @@ async function mockSettings(page: Page): Promise<void> {
       selectable: true, endpoints: [{ method: 'POST', path: '/std/message' }],
     },
   ] }))
-  await page.route(/\/std\/workspace-api\/settings\/profile\/avatar(?:\?.*)?$/, (route) => {
+  await page.route(/\/std\/api\/dev.dhttp.net\/workspace\/settings\/profile\/avatar(?:\?.*)?$/, (route) => {
     if (route.request().method() === 'GET') {
       return route.fulfill({
         contentType: 'image/png',
         body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
       })
     }
-    avatarUrl = route.request().method() === 'DELETE' ? null : '/std/workspace-api/settings/profile/avatar'
+    avatarUrl = route.request().method() === 'DELETE' ? null : '/api/workspace/settings/profile/avatar'
     return route.fulfill({ json: {
       identity_name: 'owner.local', display_name: displayName, avatar_url: avatarUrl, updated_at: 1700000001,
     } })
@@ -48,7 +48,7 @@ async function mockSettings(page: Page): Promise<void> {
 test.beforeEach(async ({ page }) => mockSettings(page))
 
 test('public display name updates the profile header', async ({ page }) => {
-  await page.goto('./settings/profile')
+  await page.goto('./#/settings/profile')
   await expect(page.getByRole('heading', { name: 'My profile' })).toBeVisible()
   await expect(page.getByRole('region', { name: 'My profile' }).getByText('owner.local', { exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Display name' })).toHaveValue('Initial name')
@@ -62,7 +62,7 @@ test('public display name updates the profile header', async ({ page }) => {
 })
 
 test('public avatar can be uploaded, previewed and removed', async ({ page }) => {
-  await page.goto('./settings/profile')
+  await page.goto('./#/settings/profile')
   await page.getByLabel('Public avatar').setInputFiles({
     name: 'avatar.png',
     mimeType: 'image/png',
@@ -76,14 +76,14 @@ test('public avatar can be uploaded, previewed and removed', async ({ page }) =>
 })
 
 test('capability catalog shows public and contact capability scopes', async ({ page }) => {
-  await page.goto('./settings/capabilities')
+  await page.goto('./#/settings/capabilities')
   await expect(page.getByRole('heading', { name: 'Capabilities' })).toBeVisible()
   await expect(page.getByRole('article').filter({ hasText: 'One-to-one chat' })).toContainText('Capability grant required')
   await expect(page.getByRole('article').filter({ hasText: 'Public profile' })).toContainText('Public')
 })
 
 test('settings labels and errors are available in Chinese', async ({ page }) => {
-  await page.goto('./settings/profile')
+  await page.goto('./#/settings/profile')
   await page.getByRole('button', { name: 'Chinese' }).click()
   await expect(page.getByRole('heading', { name: '我的信息' })).toBeVisible()
   await page.getByRole('textbox', { name: '显示名称' }).fill('😀'.repeat(81))

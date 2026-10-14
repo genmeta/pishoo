@@ -78,7 +78,7 @@ export default function PoliciesPage(props: {
   const apiPaths = () => [...new Set([
     ...Object.keys(byApi.error ? {} : byApi() ?? {}),
     ...(libs.error ? [] : libs() ?? []).flatMap((lib) => [
-      `/std/api/${lib.id}`,
+      `/api/${lib.id.split('/').at(-1)}`,
       ...lib.endpoints.map((endpoint) => endpoint.path.split('{')[0].replace(/\/+$/, '') || '/'),
     ]),
   ])].sort()
@@ -298,7 +298,7 @@ export default function PoliciesPage(props: {
           <label class="field field-wide">
             <span>{t('policies.apiPath')}</span>
             <input value={apiPath()} onInput={(event) => setApiPath(event.currentTarget.value)}
-              placeholder="/std/api/note" list="api-path-options" aria-describedby="api-path-hint" pattern="/.*" required disabled={submitting() || editingRule() !== null} />
+              placeholder="/api/note" list="api-path-options" aria-describedby="api-path-hint" pattern="/.*" required disabled={submitting() || editingRule() !== null} />
             <datalist id="api-path-options">
               <For each={apiPaths()}>{(path) => <option value={path} />}</For>
             </datalist>

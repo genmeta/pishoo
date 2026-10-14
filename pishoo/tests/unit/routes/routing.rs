@@ -267,23 +267,6 @@ async fn static_handles_streaming_head_and_directory_confinement() {
     }
 }
 
-#[tokio::test]
-async fn workspace_deep_link_and_asset_are_distinct() {
-    for (path, expected) in [
-        ("/std/workspace/reviews", StatusCode::OK),
-        ("/std/workspace/missing.js", StatusCode::NOT_FOUND),
-    ] {
-        let response = workspace(
-            Request::builder()
-                .uri(path)
-                .body(AxumBody::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(response.status(), expected);
-    }
-}
-
 #[test]
 fn forwarding_keeps_repeated_values_and_removes_connection_tokens() {
     let mut headers = http::HeaderMap::new();

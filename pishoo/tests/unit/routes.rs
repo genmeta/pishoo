@@ -6,7 +6,7 @@ use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 
 use super::{
-    access::{authorize, workspace},
+    access::authorize,
     proxy::{clean_hop_headers, proxy_uri},
     static_file, *,
 };

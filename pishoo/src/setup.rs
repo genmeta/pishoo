@@ -58,6 +58,7 @@ fn read_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
     let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let tx = conn.transaction()?;
     let config = read_config(&tx)?;
+    check_proxy_mounts(&tx, &config.proxy_locations)?;
     tx.commit()?;
     Ok(config)
 }
@@ -100,7 +101,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
         [], |row| row.get::<_, bool>(0),
     )?;
-    let current = !empty && has_enabled_column(&conn)?;
+    let current = !empty && has_enabled_column(&conn)? && conn.query_row(
+        "SELECT count(*) = 4 FROM sqlite_master WHERE type='table' AND name IN ('libs','apps','app_dependencies','lib_dependencies')",
+        [], |row| row.get::<_, bool>(0),
+    )?;
     drop(conn);
     if current {
         return Ok(());
@@ -124,6 +128,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         )?;
     }
     upgrade_settings(&tx)?;
+    tx.execute_batch(include_str!("sandbox/install.sql"))?;
     tx.commit()?;
     Ok(())
 }
@@ -200,11 +205,49 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let proxy_locations = parse_proxies(values)?;
     Ok(ServerConfig {
         enabled,
         listen,
-        proxy_locations: parse_proxies(values)?,
+        proxy_locations,
     })
+}
+
+// Only registered application mounts are reserved, never the whole /api or /app.
+fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
+    for (table, mount) in [("libs", "api"), ("apps", "app")] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        let mut stmt = conn.prepare(&format!("SELECT id,name FROM {table}"))?;
+        for row in stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (id, name) = row?;
+            let prefix = format!("/{mount}/{name}");
+            if let Some(proxy) = proxies.iter().find(|proxy| {
+                let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
+                path == prefix
+                    || path
+                        .strip_prefix(&prefix)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            }) {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "proxy {} conflicts with installed {table} {id} at {prefix}",
+                        proxy.location
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn has_enabled_column(conn: &Connection) -> Result<bool> {
@@ -289,7 +332,12 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
             let mut response = config_request(profile, endpoint, request)
                 .await
                 .unwrap_or_else(|error| {
-                    let status = error.status();
+                    let status = match &error {
+                        Error::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput => {
+                            StatusCode::CONFLICT
+                        }
+                        _ => error.status(),
+                    };
                     if status.is_server_error() {
                         tracing::error!(%error, "configuration API failed");
                         (status, "configuration storage failed").into_response()
@@ -502,6 +550,7 @@ pub(crate) fn config_database(
             }
         }
         let config = read_config(&tx)?;
+        check_proxy_mounts(&tx, &config.proxy_locations)?;
         tx.commit()?;
         config
     };

@@ -10,25 +10,25 @@ export interface WorkspaceRoute {
 }
 
 export function routeFromPath(pathname: string): WorkspaceRoute {
-  const path = pathname.replace(/\/$/, '') || '/'
+  const path = pathname.replace(/^#/, '').replace(/\/$/, '') || '/'
   switch (path) {
-    case '/std/workspace': return { page: 'home' }
-    case '/std/workspace/contacts': return { page: 'contacts' }
-    case '/std/workspace/contacts/new': return { page: 'contact-new' }
-    case '/std/workspace/contacts/requests': return { page: 'contact-requests' }
-    case '/std/workspace/apps': return { page: 'apps' }
-    case '/std/workspace/approvals': return { page: 'approvals' }
-    case '/std/workspace/settings/approvals': return { page: 'approvals' }
-    case '/std/workspace/settings/profile': return { page: 'profile' }
-    case '/std/workspace/settings/access': return { page: 'access' }
-    case '/std/workspace/settings/capabilities': return { page: 'capabilities' }
+    case '/': return { page: 'home' }
+    case '/contacts': return { page: 'contacts' }
+    case '/contacts/new': return { page: 'contact-new' }
+    case '/contacts/requests': return { page: 'contact-requests' }
+    case '/apps': return { page: 'apps' }
+    case '/approvals': return { page: 'approvals' }
+    case '/settings/approvals': return { page: 'approvals' }
+    case '/settings/profile': return { page: 'profile' }
+    case '/settings/access': return { page: 'access' }
+    case '/settings/capabilities': return { page: 'capabilities' }
   }
 
   // Resource validation belongs to the detail page; malformed IDs never become API requests.
-  if (path.startsWith('/std/workspace/apps/')) return { page: 'app-detail' }
+  if (path.startsWith('/apps/')) return { page: 'app-detail' }
 
-  const chatMatch = /^\/std\/workspace\/contacts\/([^/]+)\/chat$/.exec(path)
-  const match = chatMatch ?? /^\/std\/workspace\/contacts\/(?:requests\/)?([^/]+)$/.exec(path)
+  const chatMatch = /^\/contacts\/([^/]+)\/chat$/.exec(path)
+  const match = chatMatch ?? /^\/contacts\/(?:requests\/)?([^/]+)$/.exec(path)
   if (match) {
     try {
       const contactName = decodeURIComponent(match[1])
@@ -43,9 +43,13 @@ export function routeFromPath(pathname: string): WorkspaceRoute {
 }
 
 export function contactPath(name: string): string {
-  return `/std/workspace/contacts/${encodeURIComponent(name)}`
+  return `#/contacts/${encodeURIComponent(name)}`
 }
 
 export function contactChatPath(name: string): string {
   return `${contactPath(name)}/chat`
+}
+
+export function workspacePath(path: string): string {
+  return path.startsWith('#') ? path : '#' + (path || '/')
 }

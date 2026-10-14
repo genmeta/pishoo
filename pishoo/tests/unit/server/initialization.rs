@@ -1,6 +1,5 @@
 use access_control::{AuthResult, Effect, Grantee, Headers, Method as AccessMethod, SubjectId};
 use http::Method;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
 use super::*;
 
@@ -33,7 +32,7 @@ async fn authorization(
 }
 
 #[tokio::test]
-async fn fresh_identity_initializes_four_databases_without_example_data() {
+async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path(), "alice");
     let config = load_server_config(&profile).unwrap();
@@ -52,20 +51,10 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await
         .unwrap();
-    let workspace = WorkspaceStore::open(&profile).await.unwrap();
-    let chat = ChatStore::open(&profile).await.unwrap();
-    for file in ["config.db", "access.db", "workspace.db", "chat.db"] {
+    for file in ["config.db", "access.db"] {
         assert!(profile.db_dir().join(file).is_file());
     }
-    for directory in [
-        "db",
-        "file",
-        "lib",
-        "logs",
-        "repo",
-        "templates",
-        "assets/profile",
-    ] {
+    for directory in ["db", "file", "lib", "logs", "repo", "templates"] {
         assert!(profile.join(directory).is_dir());
     }
     assert!(!profile.join("server.conf").exists());
@@ -104,27 +93,12 @@ async fn fresh_identity_initializes_four_databases_without_example_data() {
             0
         );
     }
-    for (store, sql) in [
-        (
-            workspace.db(),
-            "SELECT count(*) AS total FROM outbound_contact_requests",
-        ),
-        (chat.db(), "SELECT count(*) AS total FROM chat_messages"),
-    ] {
-        let row = store
-            .query_one_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                sql.to_owned(),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.try_get::<i64>("", "total").unwrap(), 0);
-    }
+    assert!(!profile.db_dir().join("workspace.db").exists());
+    assert!(!profile.db_dir().join("chat.db").exists());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for file in ["config.db", "access.db", "workspace.db", "chat.db"] {
+        for file in ["config.db", "access.db"] {
             assert_eq!(
                 profile
                     .db_dir()
@@ -431,83 +405,6 @@ fn unknown_config_is_preserved_and_empty_config_recovers() {
     }
 }
 
-#[tokio::test]
-async fn workspace_and_chat_reject_unknown_partial_and_future_databases_without_writing() {
-    let root = tempfile::tempdir().unwrap();
-    for module in ["workspace", "chat"] {
-        for (name, sql) in [
-            (
-                "unknown",
-                "CREATE TABLE important(value); INSERT INTO important VALUES('keep');",
-            ),
-            (
-                "partial",
-                "CREATE TABLE module_versions(module_name TEXT PRIMARY KEY,version INTEGER);",
-            ),
-            (
-                "future",
-                "CREATE TABLE module_versions(module_name TEXT PRIMARY KEY,version INTEGER); INSERT INTO module_versions VALUES('workspace',99); INSERT INTO module_versions VALUES('chat',99);",
-            ),
-        ] {
-            let profile = profile(root.path(), &format!("{module}-{name}"));
-            let path = profile.db_dir().join(format!("{module}.db"));
-            rusqlite::Connection::open(&path)
-                .unwrap()
-                .execute_batch(sql)
-                .unwrap();
-            let before = std::fs::read(&path).unwrap();
-            let failed = if module == "workspace" {
-                WorkspaceStore::open(&profile).await.is_err()
-            } else {
-                ChatStore::open(&profile).await.is_err()
-            };
-            assert!(failed, "{module} {name}");
-            assert_eq!(std::fs::read(&path).unwrap(), before, "{module} {name}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn stores_reopen_without_resetting_profile_or_message_data() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path(), "alice");
-    let workspace = WorkspaceStore::open(&profile).await.unwrap();
-    workspace
-        .db()
-        .execute_unprepared(
-            "UPDATE profile_preferences SET display_name='Alice',updated_at=10 WHERE id=1",
-        )
-        .await
-        .unwrap();
-    let chat = ChatStore::open(&profile).await.unwrap();
-    chat.db()
-        .execute_unprepared("INSERT INTO chat_conversations VALUES('bob.dhttp.net',10)")
-        .await
-        .unwrap();
-    let reopened_workspace = WorkspaceStore::open(&profile).await.unwrap();
-    let reopened_chat = ChatStore::open(&profile).await.unwrap();
-    let row = reopened_workspace
-        .db()
-        .query_one_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            "SELECT display_name FROM profile_preferences WHERE id=1".to_owned(),
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.try_get::<String>("", "display_name").unwrap(), "Alice");
-    let row = reopened_chat
-        .db()
-        .query_one_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            "SELECT count(*) AS total FROM chat_conversations".to_owned(),
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.try_get::<i64>("", "total").unwrap(), 1);
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn initialization_rejects_symlinked_directories_and_databases() {
@@ -520,13 +417,11 @@ async fn initialization_rejects_symlinked_directories_and_databases() {
     symlink(&external, identity.db_dir()).unwrap();
     assert!(initialize_directories(&identity).is_err());
     assert!(load_server_config(&identity).is_err());
-    assert!(WorkspaceStore::open(&identity).await.is_err());
-    assert!(ChatStore::open(&identity).await.is_err());
     assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
     let profile = profile(root.path(), "alice");
     let original = external.join("data");
     std::fs::write(&original, b"untouched").unwrap();
-    for file in ["config.db", "access.db", "workspace.db", "chat.db"] {
+    for file in ["config.db", "access.db"] {
         symlink(&original, profile.db_dir().join(file)).unwrap();
     }
     assert!(load_server_config(&profile).is_err());
@@ -535,7 +430,5 @@ async fn initialization_rejects_symlinked_directories_and_databases() {
             .await
             .is_err()
     );
-    assert!(WorkspaceStore::open(&profile).await.is_err());
-    assert!(ChatStore::open(&profile).await.is_err());
     assert_eq!(std::fs::read(&original).unwrap(), b"untouched");
 }

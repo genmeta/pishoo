@@ -26,9 +26,9 @@ type ToastState = { message: string; tone: 'success' | 'error' } | null
 type NavItem = { page: WorkspacePage; href: string; label: MessageKey }
 
 const SETTINGS_NAV: NavItem[] = [
-  { page: 'profile', href: '/std/workspace/settings/profile', label: 'nav.profile' },
-  { page: 'access', href: '/std/workspace/settings/access', label: 'nav.policies' },
-  { page: 'capabilities', href: '/std/workspace/settings/capabilities', label: 'nav.capabilities' },
+  { page: 'profile', href: '#/settings/profile', label: 'nav.profile' },
+  { page: 'access', href: '#/settings/access', label: 'nav.policies' },
+  { page: 'capabilities', href: '#/settings/capabilities', label: 'nav.capabilities' },
 ]
 
 const PAGE_TITLES: Record<WorkspacePage, MessageKey> = {
@@ -51,7 +51,7 @@ export default function App() {
   const [context, contextActions] = createResource(api.context)
   const loadProfile = abortable((_source: boolean, signal: AbortSignal) => api.profileSettings(signal))
   const [profile, profileActions] = createResource(() => true, loadProfile)
-  const currentPath = () => `${window.location.pathname}${window.location.search}`
+  const currentPath = () => window.location.hash || '#/'
   const [pathname, setPathname] = createSignal(currentPath())
   const route = () => routeFromPath(pathname().split('?')[0])
   const [toast, setToast] = createSignal<ToastState>(null)
@@ -83,10 +83,12 @@ export default function App() {
   }
   onMount(() => {
     window.addEventListener('popstate', onPopState)
+    window.addEventListener('hashchange', onPopState)
     document.addEventListener('visibilitychange', onVisibilityChange)
   })
   onCleanup(() => {
     window.removeEventListener('popstate', onPopState)
+    window.removeEventListener('hashchange', onPopState)
     document.removeEventListener('visibilitychange', onVisibilityChange)
     window.clearTimeout(toastTimer)
   })
@@ -108,7 +110,7 @@ export default function App() {
 
   return (
     <div class="app-shell" classList={{ 'app-shell-chat': route().page === 'chat' }}>
-      <a class="skip-link" href="#main-content">{t('nav.skipContent')}</a>
+      <a class="skip-link" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus() }}>{t('nav.skipContent')}</a>
       <Sidebar activePage={primaryPage(route().page)} profileName={profileLabel()}
         profileIdentity={displayIdentityName(ownerName())} profileAvatar={profileAvatar()}
         pendingCount={pendingCount()} follow={follow} />
@@ -130,7 +132,7 @@ export default function App() {
           <Match when={route().page === 'contacts'}>
             <ContactsPage notify={notify} contactName={route().contactName} navigate={navigate}
               returnTo={new URLSearchParams(pathname().split('?')[1] ?? '').get('from') === 'approvals'
-                ? '/std/workspace/approvals' : undefined}
+                ? '#/approvals' : undefined}
               onResolved={() => void contextActions.refetch()} />
           </Match>
           <Match when={route().page === 'contact-requests'}>
@@ -153,7 +155,7 @@ export default function App() {
           <Match when={route().page === 'contact-new'}><AddContactPage notify={notify} navigate={navigate} /></Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>
-            <a href="/std/workspace/" onClick={(event) => follow(event, '/std/workspace/')}>{t('page.backHome')}</a>
+            <a href="#/" onClick={(event) => follow(event, '#/')}>{t('page.backHome')}</a>
           </Match>
         </Switch>
       </main>

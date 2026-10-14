@@ -26,7 +26,7 @@ journal/
 
 页面、脚本和样式由 Pishoo 从 WEBC 文件卷读取，不执行 WASM。后端只处理业务 API；component 不嵌入页面、OpenAPI 或发布者签名。包包含一个 `backend` atom、`public`/`metadata` 文件卷和未映射的 `pishoo-signature` 签名卷。整个版本统一签名。
 
-HTML 使用 `./assets/...`，API 和照片使用相对 URL，不写宿主挂载前缀。入口为 `https://<安装者身份>/std/api/alice.smith.dhttp.net/journal/`。OpenAPI 对三个静态文件逐个声明 GET/HEAD，与读取 API 一起归入阅读组；评论组包含留言/回复操作。组和清单不会自动授予访问权。
+HTML 使用 `./assets/...`，API 和照片使用相对 URL，不写宿主挂载前缀。入口为 `https://<安装者身份>/api/journal/`。OpenAPI 对三个静态文件逐个声明 GET/HEAD，与读取 API 一起归入阅读组；评论组包含留言/回复操作。组和清单不会自动授予访问权。
 
 ## 构建与打包
 
@@ -103,7 +103,7 @@ DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
 ```sh
 DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
   journal_browser_preview -- --ignored --nocapture
-# http://127.0.0.1:18747/std/api/journal/
+# http://127.0.0.1:18747/api/journal/
 ```
 
 此 HTTP 适配仅用于界面检查，不作为生产身份认证入口。照片测试样本来自 dyns 0.7.2 的 `assets/ddns-logo.jpg`。
