@@ -1,13 +1,12 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from 'solid-js'
 
-import { api, backendPath } from '../api/client'
-import type { Contact, DirectoryEntry } from '../api/types'
+import { ApiError, api, backendPath, request } from '../api/client'
+import type { CapabilityDescriptor, Contact, DirectoryEntry } from '../api/types'
 import { chatApi } from '../chat/api'
 import { Avatar, Dialog, EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
 import type { ContactFollowupReason } from '../i18n'
 import { contactClassLabel, contactFollowupLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
-import { chatCapabilityLabel, chatDirectionLabel, chatDirectionState } from '../lib/chatCapability'
 import { contactDisplayName, contactStatus, displayIdentityName, errorMessage } from '../lib/format'
 import { contactChatPath, contactPath } from '../lib/routes'
 
@@ -80,6 +79,38 @@ export default function ContactsPage(props: {
   )
   const [detail, detailActions] = createResource(selectedName, loadContact)
   const [chatCapability, chatCapabilityActions] = createResource(selectedName, loadChatCapability)
+  const [remoteCapabilities, remoteCapabilityActions] = createResource(selectedName, abortable(async (name: string, signal: AbortSignal) => {
+    const catalog = await request<CapabilityDescriptor[]>(`/std/dhttp/${encodeURIComponent(name)}/std/acl/capabilities`, { signal })
+    if (!Array.isArray(catalog) || catalog.some(capability => !capability
+      || typeof capability.id !== 'string' || typeof capability.title !== 'string'
+      || typeof capability.selectable !== 'boolean' || !Array.isArray(capability.endpoints)
+      || capability.endpoints.some(endpoint => !endpoint || typeof endpoint.method !== 'string' || typeof endpoint.path !== 'string'))) {
+      throw new ApiError(502, t('contacts.capabilityCatalogInvalid'))
+    }
+    return catalog.filter(capability => capability.selectable && capability.endpoints.length > 0)
+  }))
+  const [requestedCapabilities, setRequestedCapabilities] = createSignal<string[]>([])
+  createEffect(on(selectedName, () => setRequestedCapabilities([])))
+  const requestCapabilities = async () => {
+    const name = selectedName()
+    if (!name || submitting() || remoteCapabilities.loading || remoteCapabilities.error
+      || !detail() || ['blocked', 'expired'].includes(contactStatus(detail()!.status))) return
+    const selected = [...new Set(remoteCapabilities()?.filter(capability => requestedCapabilities().includes(capability.id)).map(capability => capability.id))]
+    if (!selected.length) return
+    setSubmitting(true)
+    try {
+      await api.sendContactRequest({ target_name: name, description: '', requested_capabilities: selected, offered_capabilities: [] })
+      props.notify(t('outbound.sent'))
+      setRequestedCapabilities([])
+      props.navigate('#/contacts/requests')
+    } catch (error) {
+      props.notify(error instanceof ApiError && error.status === 409
+        && error.message.includes('already pending') ? t('outbound.duplicate')
+        : errorMessage(error, t('common.unexpectedError')), 'error')
+    } finally {
+      setSubmitting(false)
+    }
+  }
   const directoryEntries = createMemo(() => new Map<string, DirectoryEntry>(
     contacts()?.directory.map((entry) => [entry.name, entry]) ?? [],
   ))
@@ -481,8 +512,6 @@ export default function ContactsPage(props: {
             <Show when={detail()} keyed>
               {(contact) => {
                 const actions = () => statusActions(contact)
-                const incomingChat = () => chatDirectionState('incoming', contact, chatCapability())
-                const outgoingChat = () => chatDirectionState('outgoing', contact, chatCapability())
                 return (
                   <div class="drawer-content">
                     <div class="contact-heading">
@@ -521,22 +550,45 @@ export default function ContactsPage(props: {
                       </button>
                     </form>
 
-                    <section class="detail-section capability-status-section">
-                      <h3>{t('contacts.capabilities')}</h3>
-                      <div class="contact-capability-card">
-                        <strong>{t('contacts.chatCapability')}</strong>
-                        <span class="status">{chatCapabilityLabel(contact, t, chatCapability())}</span>
+                    <section class="detail-section capability-status-section" aria-label={t('contacts.requestableCapabilities')}>
+                      <div class="capability-card-header">
+                        <h3>{t('contacts.requestableCapabilities')}</h3>
+                        <button class="button button-secondary" type="button" disabled={remoteCapabilities.loading || submitting()}
+                          onClick={() => { setRequestedCapabilities([]); void remoteCapabilityActions.refetch() }}>{t('common.refresh')}</button>
                       </div>
-                      <div class="capability-direction-grid">
-                        <div class="capability-direction-row">
-                          <strong>{t('contacts.chatDirectionIncoming')}</strong>
-                          <span class="status">{chatDirectionLabel(incomingChat(), t)}</span>
-                        </div>
-                        <div class="capability-direction-row">
-                          <strong>{t('contacts.chatDirectionOutgoing')}</strong>
-                          <span class="status">{chatDirectionLabel(outgoingChat(), t)}</span>
-                        </div>
-                      </div>
+                      <Show when={remoteCapabilities.loading}><LoadingState label={t('capabilities.loading')} /></Show>
+                      <Show when={remoteCapabilities.error}>
+                        <ErrorState message={errorMessage(remoteCapabilities.error, t('common.unexpectedError'))}
+                          onRetry={() => void remoteCapabilityActions.refetch()} />
+                      </Show>
+                      <Show when={!remoteCapabilities.loading && !remoteCapabilities.error && remoteCapabilities()}>
+                        <Show when={remoteCapabilities()!.length} fallback={<p class="muted">{t('outbound.noCapabilities')}</p>}>
+                          <form onSubmit={(event) => { event.preventDefault(); void requestCapabilities() }}>
+                            <div class="capability-option-list">
+                              <For each={remoteCapabilities()}>{(capability) =>
+                                <label class="capability-option remote-capability-option">
+                                  <input type="checkbox" checked={requestedCapabilities().includes(capability.id)}
+                                    disabled={submitting() || ['blocked', 'expired'].includes(actions().status)}
+                                    aria-label={capability.title}
+                                    onChange={(event) => setRequestedCapabilities(current => event.currentTarget.checked
+                                      ? [...new Set([...current, capability.id])] : current.filter(id => id !== capability.id))} />
+                                  <span>
+                                    <strong>{capability.title}</strong>
+                                    <small>{capability.id}</small>
+                                    <For each={capability.endpoints}>{(endpoint) => <code>{endpoint.method} {endpoint.path}</code>}</For>
+                                  </span>
+                                </label>
+                              }</For>
+                            </div>
+                            <div class="settings-actions">
+                              <button class="button button-primary" type="submit" disabled={submitting() || !requestedCapabilities().length
+                                || ['blocked', 'expired'].includes(actions().status)}>
+                                {submitting() ? t('outbound.sending') : t('contacts.requestCapabilities')}
+                              </button>
+                            </div>
+                          </form>
+                        </Show>
+                      </Show>
                     </section>
 
                     <div class="drawer-actions">
