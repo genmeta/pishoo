@@ -59,7 +59,8 @@ test('public introduction opens the visitor workspace in a new tab and submits t
   })
   const adminRequests: string[] = []
   page.on('request', (request) => {
-    if (request.url().includes('/api/workspace/')) adminRequests.push(request.url())
+    const path = new URL(request.url()).pathname
+    if (path.startsWith('/api/workspace/') && !['/api/workspace/intro/context', '/api/workspace/profile/avatar'].includes(path)) adminRequests.push(request.url())
   })
 
   await page.goto('/app/workspace/#/intro')
@@ -222,4 +223,18 @@ test('prefilled targets reject self requests and show duplicate feedback', async
   await page.getByRole('button', { name: 'Send request' }).click()
   await expect(page.getByRole('alert')).toHaveText('A pending request to this name already exists.')
   expect(submissions).toBe(1)
+})
+
+test('hash navigation switches between the public card and owner shell', async ({ page }) => {
+  await mockIntroduction(page, { viewer_name: 'bob.dhttp.net', is_owner: true })
+  await mockWorkspace(page)
+  await page.goto('/app/workspace/#/intro')
+  await expect(page.getByRole('heading', { name: 'Alice Chen' })).toBeVisible()
+  await expect(page.locator('.app-shell')).toHaveCount(0)
+  await page.getByRole('link', { name: 'Edit my profile' }).click()
+  await expect(page.getByRole('region', { name: 'Share my introduction' })).toBeVisible()
+  await expect(page.locator('.public-introduction')).toHaveCount(0)
+  await page.goBack()
+  await expect(page.getByRole('heading', { name: 'Alice Chen' })).toBeVisible()
+  await expect(page.locator('.app-shell')).toHaveCount(0)
 })

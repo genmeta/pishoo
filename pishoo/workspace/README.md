@@ -26,7 +26,7 @@ WASI_SDK_PATH=/path/to/wasi-sdk sh package.sh --publisher YOUR_NAME.dhttp.net
 
 “添加好友”在新标签页打开 `https://<访客身份>/app/workspace/#/contacts/new?target=<完整目标名称>`，保留原名片页；匿名访客先输入自己的身份，这只决定跳转地址，申请仍需在其工作台认证并确认。刷新保留预填目标，禁止自请求和不合法名称。
 
-公开访问由主人显式配置普通 daccess ACL：向 `/std/acl/allow/*?` PATCH `{ "api": "/app/workspace/", "method": "GET", "effect": "allow" }`，并允许 GET `/api/workspace/intro/context`、`/api/workspace/profile/avatar`；HEAD 按需要单独授权。这里 `/app/workspace/` 覆盖前端静态文件，工作台业务 API 仍需主人身份。安装/升级不自动增加这些权限，不注册 `/std/intro` 或 SPA 路径回退。
+公开访问由主人显式配置普通 daccess ACL：向 `/std/acl/allow/%2A%3F` PATCH `{ "api": "/app/workspace/", "method": "GET", "effect": "allow" }`，并允许 GET `/api/workspace/intro/context`、`/api/workspace/profile/avatar`；HEAD 按需要单独授权。这里 `/app/workspace/` 覆盖前端静态文件，工作台业务 API 仍需主人身份。安装/升级不自动增加这些权限，不注册 `/std/intro` 或 SPA 路径回退。
 
 `e2e/introduction.spec.ts` 全量 mock 后端，覆盖名片、访客跳转、预填申请、匿名校验、主人编辑、错误重试、复制回退与各屏幕尺寸。
 

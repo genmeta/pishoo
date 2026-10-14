@@ -25,9 +25,9 @@ render(
       window.removeEventListener('popstate', update)
     })
     return (
-    <I18nProvider>
-      <Show when={hash().split('?')[0].replace(/\/$/, '') === '#/intro'} fallback={<App />}><PublicIntroductionPage /></Show>
-    </I18nProvider>
+      <I18nProvider>
+        <Show when={hash().split('?')[0].replace(/\/$/, '') === '#/intro'} fallback={<App />}><PublicIntroductionPage /></Show>
+      </I18nProvider>
     )
   },
   root,

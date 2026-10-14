@@ -428,15 +428,20 @@ fn dispatch(
     match (path, method) {
         ("/intro/context", Method::Get | Method::Head) => {
             let profile = profile(&db, local)?;
-            let mut reply = json_reply(200, json!({
-                "identity_name": local.0,
-                "display_name": profile["display_name"],
-                "avatar_url": profile["avatar_url"],
-                "updated_at": profile["updated_at"],
-                "viewer_name": caller.map(|identity| &identity.0),
-                "is_owner": caller == Some(local),
-            }))?;
-            reply.3.push(("cache-control".into(), b"private, no-store".to_vec()));
+            let mut reply = json_reply(
+                200,
+                json!({
+                    "identity_name": local.0,
+                    "display_name": profile["display_name"],
+                    "avatar_url": profile["avatar_url"],
+                    "updated_at": profile["updated_at"],
+                    "viewer_name": caller.map(|identity| &identity.0),
+                    "is_owner": caller == Some(local),
+                }),
+            )?;
+            reply
+                .3
+                .push(("cache-control".into(), b"private, no-store".to_vec()));
             if matches!(request.method(), Method::Head) {
                 reply.2.clear();
             }

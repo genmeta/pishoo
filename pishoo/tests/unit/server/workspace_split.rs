@@ -227,6 +227,85 @@ async fn workspace_user_lib_real_quic_workflow_persistence_and_uninstall() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(profile["display_name"], "Alice Workspace");
+    // Public introduction remains governed by ordinary daccess ACLs.
+    let introduction_path = format!("{prefix}/intro/context");
+    assert_eq!(
+        call(
+            &bob,
+            http::Method::GET,
+            alice.name(),
+            &introduction_path,
+            Value::Null
+        )
+        .await
+        .0,
+        403
+    );
+    for method in [http::Method::GET, http::Method::HEAD] {
+        listeners[0]
+            .1
+            .set_policy(
+                access_control::Method::Specified(method),
+                &introduction_path,
+                access_control::Effect::Allow,
+                access_control::Grantee::All,
+            )
+            .await
+            .unwrap();
+    }
+    for (endpoint, is_owner) in [(&alice, true), (&bob, false)] {
+        let (status, introduction) = call(
+            endpoint,
+            http::Method::GET,
+            alice.name(),
+            &introduction_path,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, 200, "{introduction}");
+        assert_eq!(introduction["identity_name"], alice.name());
+        assert_eq!(introduction["viewer_name"], endpoint.name());
+        assert_eq!(introduction["is_owner"], is_owner);
+        assert_eq!(introduction["display_name"], "Alice Workspace");
+        assert_eq!(introduction["avatar_url"], Value::Null);
+        assert_eq!(introduction.as_object().unwrap().len(), 6);
+        assert!(introduction.get("badges").is_none());
+        assert!(introduction.get("subject_id").is_none());
+    }
+    // Actual anonymous QUIC request: forwarded identity headers are not trusted.
+    for method in [http::Method::GET, http::Method::HEAD] {
+        let request = http::Request::builder()
+            .method(method.clone())
+            .uri(format!("https://{}{introduction_path}", alice.name()))
+            .header("x-forwarded-user", alice.name())
+            .body(http_body_util::Empty::<Bytes>::new())
+            .unwrap();
+        let response = dhttp::Request::new(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        if method == http::Method::HEAD {
+            assert!(bytes.is_empty());
+        } else {
+            let introduction: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(introduction["viewer_name"], Value::Null);
+            assert_eq!(introduction["is_owner"], false);
+            assert_eq!(introduction["identity_name"], alice.name());
+        }
+    }
+    // Granting the public operation exposes no neighboring management API.
+    assert_eq!(
+        call(
+            &bob,
+            http::Method::GET,
+            alice.name(),
+            &format!("{prefix}/settings/profile"),
+            Value::Null
+        )
+        .await
+        .0,
+        403
+    );
     let image = include_bytes!("../../../../assets/pishoo/pishoo-icon.jpg");
     let request = http::Request::builder()
         .method("PUT")
