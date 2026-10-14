@@ -2,31 +2,31 @@
 
 记下生活里的小事，留住值得回看的瞬间。用文字和照片写手记，按月份翻阅往日记录，与朋友留言交流。简洁的阅读与写作界面，适合在手机和电脑上随时记录。
 
-首个发布版本为 **0.1.0**，应用名称为「手记」，发布 ID 为 `alice.smith.dhttp.net/journal`。
+当前发布版本为 **0.1.0**，应用名称为「手记」，App 和 Lib 均使用完整 ID `alice.smith.dhttp.net/journal`，包类型分别为 `app` 和 `lib`。
 
 ## 项目组织
 
-按 [Pishoo WASM 开发指南](../../docs/developing-wasm.md) 分离前端与后端：
+按 [App/Lib 软件包规范](../../docs/package-spec.md) 分别交付：
 
 ```text
 journal/
 ├─ Cargo.toml / Cargo.lock
-├─ src/journal.rs            WASI HTTP 后端：记录、照片、留言和 SQLite
-├─ public/
-│  ├─ index.html             手记页面
-│  └─ assets/
-│     ├─ app.js              浏览器交互
-│     └─ app.css             桌面/手机布局和明暗模式
-├─ openapi.json              唯一维护的 HTTP 与权限清单
-├─ wasmer.toml               backend atom 与 public/metadata 文件映射
-├─ lib.wasm                  自动生成的后端 component
-├─ metadata/openapi.json     自动生成的清单副本
-└─ dist/journal-0.1.0.webc    签名发布包
+├─ src/journal.rs                   WASI HTTP 后端：记录、照片、留言和 SQLite
+├─ public/index.html                手记页面
+├─ public/assets/app.js / app.css   浏览器交互、桌面/手机布局和明暗模式
+├─ openapi.json                     Lib 业务 API 与能力组
+├─ wasmer.toml                      Lib 包清单：一个 backend，仅映射 metadata
+├─ app.toml                         App 包清单：零 atom，仅映射 public
+├─ lib.wasm                         自动生成的后端 component
+├─ metadata/openapi.json            自动生成的 API 清单副本
+└─ dist/
+   ├─ journal-0.1.0-lib.webc         独立签名后端包
+   └─ journal-0.1.0-app.webc         独立签名前端包，精确依赖同 ID 的 Lib 0.1.0
 ```
 
-页面、脚本和样式由 Pishoo 从 WEBC 文件卷读取，不执行 WASM。后端只处理业务 API；component 不嵌入页面、OpenAPI 或发布者签名。包包含一个 `backend` atom、`public`/`metadata` 文件卷和未映射的 `pishoo-signature` 签名卷。整个版本统一签名。
+包身份、类型、展示信息、依赖、更新说明和宿主能力用途来自各自的签名 WEBC manifest；OpenAPI 只包含业务 API、请求/响应 schema 和访问声明。App 不包含 WASM 或 OpenAPI；Lib 不包含前端资源。component 不嵌入 OpenAPI 或签名。
 
-HTML 使用 `./assets/...`，API 和照片使用相对 URL，不写宿主挂载前缀。入口为 `https://<安装者身份>/api/journal/`。OpenAPI 对三个静态文件逐个声明 GET/HEAD，与读取 API 一起归入阅读组；评论组包含留言/回复操作。组和清单不会自动授予访问权。
+入口为 `https://<安装者身份>/std/journal/`。HTML 使用 `./assets/...`，API 和照片使用相对 URL，解析到 `/std/journal/context`、`/std/journal/entries` 等路径。Lib 声明 `/journal/...`，宿主仅添加 `/std`；静态文件与业务操作共存。旧 `/api/journal/` 不提供别名。
 
 ## 构建与打包
 
@@ -40,24 +40,40 @@ WASI_SDK_PATH=/path/to/wasi-sdk sh pishoo/examples/journal/build.sh
 wasm-tools component wit pishoo/examples/journal/lib.wasm
 ```
 
-构建、签名并检查完整发布包：
+构建、签名并检查两个发布包：
 
 ```sh
 WASI_SDK_PATH=/path/to/wasi-sdk sh pishoo/examples/journal/build.sh \
   --publisher alice.smith.dhttp.net
-cargo run --locked -p pishoo --example check-lib -- \
-  pishoo/examples/journal/dist/journal-0.1.0.webc
+pishoo lib check pishoo/examples/journal/dist/journal-0.1.0-lib.webc
+pishoo app check pishoo/examples/journal/dist/journal-0.1.0-app.webc
 ```
 
-构建脚本核对 Cargo、wasmer.toml 和 OpenAPI 中的名称与版本。打包调用仓库的 `package-webc` 工具，通过发布者实际 DHTTP 身份加载凭据，在本机签名并复用宿主校验；不会把私钥或数据库写入发布包。可设置 `PISHOO_PACKAGE_WEBC=/path/to/package-webc` 使用已编译工具；独立 SDK 发行包使用这个入口。签名证书必须与上传工作台实际加载的发布者证书一致。
+构建脚本核对 Cargo、两个包清单、OpenAPI 的名称/版本和精确依赖，再通过 `pishoo-pack` 使用发布者本机 DHTTP 凭据分别签名并复用宿主校验。可设置 `PISHOO_PACKAGE_WEBC=/绝对路径/pishoo-pack` 使用已编译工具；独立 SDK 发行包需要这个入口。签名证书必须与上传工作台实际加载的发布者证书一致。脚本拒绝覆盖已有同版本产物，发布内容变化必须递增版本并更新精确依赖。
 
-也可以执行 `wasmer package build . --check` 和 `wasmer package build . --out dist/journal-unsigned.webc` 检查标准包结构。其输出未签名，不能直接上传商店或安装。
+也可用支持 `genmeta pack` 的 gmutils 分别打包：
 
-在 `alice.smith.dhttp.net` 工作台的「应用商店 → 上传应用」中选择 `journal-0.1.0.webc`，检查后发布。发布内容改变时递增版本；同版本不同内容不能覆盖。通过工作台安装成功后即可打开；离线 CLI 安装在下次启动加载。
+```sh
+genmeta pack pishoo/examples/journal/wasmer.toml --id alice.smith.dhttp.net \
+  -o pishoo/examples/journal/dist/journal-0.1.0-lib.webc
+genmeta pack pishoo/examples/journal/app.toml --id alice.smith.dhttp.net \
+  -o pishoo/examples/journal/dist/journal-0.1.0-app.webc
+```
+
+在 `alice.smith.dhttp.net` 工作台的商店上传页，**先发布 Lib，再发布 App**。商店会核对 App 依赖的 Lib 0.1.0 已发布，不能只上传前端。通过商店安装 App 时递归安装精确后端依赖；本地文件安装需先安装 Lib。在线安装后立即可用，离线 CLI 安装在下次启动加载。上传/安装均沿用现有原生 API，不添加自动授权。
 
 ## 身份与访问
 
-页面、脚本、样式、照片和 API 都经过宿主 daccess。请为需要访问的具名身份授权页面与两个 assets 的 GET/HEAD、context、记录、照片和留言读取，以及所需评论方法。`public` 是资源目录名，不表示匿名公开。
+页面、脚本、样式、照片和 API 都经过宿主 daccess。`public` 是资源目录名，不表示匿名公开。
+
+Lib 显式声明以下业务能力组，安装时由宿主登记到 `config.db`，原生 `GET /std/acl/capabilities` 提供只读目录：
+
+| 完整能力 ID | 标题 | 业务操作 |
+| --- | --- | --- |
+| `alice.smith.dhttp.net/journal#read` | 阅读 | GET context、entries、entry、photo、comments |
+| `alice.smith.dhttp.net/journal#comment` | 评论 | POST comments（留言及回复） |
+
+以上路径均位于 `/std/journal/`。评论组不隐含阅读组；希望访客阅读并留言时，应同时授予两组相应操作。主人新建、修改、删除手记以及删除留言不属于访客能力组，继续校验真实主人身份。App 静态资源不登记为 Lib 能力，请另外配置 `/std/journal/` 和两个 assets 的 GET/HEAD 访问规则。能力声明和安装不会自动授权，也不会改写旧路径 ACL。
 
 业务 API 通过 `pishoo:identity/request-identity@0.1.0` 读取已验证握手身份，拒绝匿名访问。发布、编辑、删除手记和删除留言还要求主人身份；主人检查同时核对名称与 owner_hash。留言署名来自可信身份，JSON 中伪造作者字段会被拒绝。留言验证标识表示发布时的认证，不表示历史证书现在仍有效。第一版没有逐篇访问范围开关，留言由主人管理。
 
@@ -67,17 +83,16 @@ cargo run --locked -p pishoo --example check-lib -- \
 
 ## 接口与数据
 
-| 方法 | 内部路径 | 用途 |
+| 方法 | Lib 内部路径（宿主添加 `/std`） | 用途 |
 | --- | --- | --- |
-| GET/HEAD | `/`、`/assets/app.js`、`/assets/app.css` | 宿主读取页面与资源 |
-| GET | `/context` | 当前可信身份与主人判断 |
-| GET | `/entries?offset=0` | 每页 20 篇，倒序翻阅 |
-| POST | `/entries` | 主人新建手记 |
-| GET/PUT/DELETE | `/entry?id=…` | 读取、主人编辑/删除 |
-| GET | `/photo?id=…` | 记录照片 |
-| GET | `/comments?entry_id=…` | 留言与一层回复 |
-| POST | `/comments` | 具名身份留言或回复 |
-| DELETE | `/comment?id=…` | 主人删除留言 |
+| GET | `/journal/context` | 当前可信身份与主人判断 |
+| GET | `/journal/entries?offset=0` | 每页 20 篇，倒序翻阅 |
+| POST | `/journal/entries` | 主人新建手记 |
+| GET/PUT/DELETE | `/journal/entry?id=…` | 读取、主人编辑/删除 |
+| GET | `/journal/photo?id=…` | 记录照片 |
+| GET | `/journal/comments?entry_id=…` | 留言与一层回复 |
+| POST | `/journal/comments` | 具名身份留言或回复 |
+| DELETE | `/journal/comment?id=…` | 主人删除留言 |
 
 每条新内容使用提交前生成的 16 随机字节十六进制 ID。重复创建返回 409，不覆盖既有记录；编辑/删除要求强 ETag 与 If-Match，缺少版本返回 428，旧版本返回 412。写入失败保留草稿，不把网络中断解释成未提交。
 
@@ -91,6 +106,8 @@ cargo run --locked -p pishoo --example check-lib -- \
 
 真实组件测试使用 qtls 的证书/OCSP 验证握手，覆盖匿名与伪造身份、主人校验、跨站写入、记录/留言/照片、并发更新、持久化和数据库隔离。静态验收通过真实 WEBC 宿主与 daccess，检查 HTML/JS/CSS 的访问控制、GET/HEAD 和无 WASM 执行。
 
+发布回归 `journal_release_registers_capabilities_and_pins_backend` 验证 App/Lib 独立内容、精确依赖、安装后的两组能力及六个业务操作、静态路由和卸载保护。
+
 TLS roots 是进程全局资源，每个忽略测试应单独执行：
 
 ```sh
@@ -103,7 +120,7 @@ DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
 ```sh
 DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
   journal_browser_preview -- --ignored --nocapture
-# http://127.0.0.1:18747/api/journal/
+# http://127.0.0.1:18747/std/journal/
 ```
 
 此 HTTP 适配仅用于界面检查，不作为生产身份认证入口。照片测试样本来自 dyns 0.7.2 的 `assets/ddns-logo.jpg`。

@@ -40,6 +40,18 @@ impl WasmRuntime {
             .wasm_component_model(true)
             .consume_fuel(true)
             .wasm_threads(false);
+        // Installation checks and Lib::load compile the same backend. Reuse
+        // Wasmtime's version/configuration/content-keyed machine code across
+        // those calls, identities, and process restarts. Package validation is
+        // performed by installation; loading only prepares executable resources.
+        match wasmtime::Cache::from_file(None) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "WASM compilation cache unavailable; compiling without cache");
+            }
+        }
         let engine = Engine::new(&config).map_err(Error::Guest)?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi_http::p2::add_to_linker_async(&mut linker).map_err(Error::Guest)?;

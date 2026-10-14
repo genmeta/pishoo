@@ -401,13 +401,22 @@ fn verify_release(
         .unwrap();
     let envelope: Value =
         serde_json::from_slice(&data).map_err(|_| invalid("invalid signature envelope"))?;
+    // App manifests omit host, while the store's common response shape uses
+    // an empty object. Only that empty projection is equivalent to absence.
+    let host_matches = if document["kind"] == "app" {
+        metadata.get("host").is_none_or(|host| {
+            host.is_null() || host.as_object().is_some_and(|host| host.is_empty())
+        })
+    } else {
+        metadata.get("host").filter(|host| !host.is_null()) == document.get("host")
+    };
     if document["publisher"] != publisher
         || document["name"] != name
         || document["version"] != version
         || ["kind", "dependencies", "title", "description", "changelog"]
             .iter()
             .any(|key| metadata[*key] != document[*key])
-        || metadata.get("host").filter(|v| !v.is_null()) != document.get("host")
+        || !host_matches
         || metadata
             .get("entry")
             .is_some_and(|entry| Some(entry) != document.get("entry"))
