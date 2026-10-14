@@ -1069,6 +1069,11 @@ textarea {
 .capability-option input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--primary); }
 .capability-option strong { display: block; margin-bottom: 3px; }
 
+.remote-capability-option > span { min-width: 0; }
+.remote-capability-option small,
+.remote-capability-option code { display: block; overflow-wrap: anywhere; }
+.remote-capability-option small { color: var(--text-muted); margin-bottom: 6px; }
+
 .contact-capability-card,
 .capability-direction-row {
   display: flex;
