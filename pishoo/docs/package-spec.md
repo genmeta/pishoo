@@ -168,6 +168,6 @@ WEBC 是发布、下载及安装格式，安装后展开保存，不再保存完
 
 ## 标准服务与能力登记
 
-`/std` 是协议命名空间，ACL、Contact、Package 和现有宿主基础设施原生实现，不作为 WASM 能力。Lib 声明 `/message`、`/profile`、`/workspace/context` 等业务路径，宿主仅加 `/std`；guest 收到去掉该前缀的业务路径与原 query。App 挂载 `/std/<name>/`，同名 App/Lib 可共存，按实际文件 GET/HEAD 和声明操作分派。不同 Lib 不共享路径，原生路径和静态操作冲突拒绝安装、更新或加载；不存在路径404，未声明方法405。
+`/std` 是协议命名空间，ACL、Contact、Package 和现有宿主基础设施原生实现，不作为 WASM 能力。Lib 声明 `/message`、`/profile`、`/workspace/context` 等业务路径，宿主仅加 `/std`；guest 收到去掉该前缀的业务路径与原 query。App 挂载 `/std/<name>/`，同名 App/Lib 可共存，按实际文件 GET/HEAD 和声明操作分派。不同 Lib 不共享路径，原生路径和静态操作冲突拒绝安装、更新；不存在路径404，未声明方法405。
 
-访问组来自验签 OpenAPI 的 access-groups/access-group，与包版本一起登记 config.db 的 lib_capabilities/lib_capability_operations；无组写零行。GET `/std/acl/capabilities` 返回 `<完整Lib ID>#<组>`、title、所属包版本和实际端点，经 daccess 授权，不能代表联系人的授权或激活状态。普通安装事务更新能力并恢复失败发布；启动只核验登记，不扫描或隐式导入旧安装。卸载级联删除能力并保留数据和 ACL，换提供者前须明确处理旧路径规则。详见 [std 服务与业务能力边界](std-capabilities-design.md)。
+访问组来自验签 OpenAPI 的 access-groups/access-group，与包版本一起登记 config.db 的 lib_capabilities/lib_capability_operations；无组写零行。GET `/std/acl/capabilities` 返回 `<完整Lib ID>#<组>`、title、所属包版本和实际端点，经 daccess 授权，不能代表联系人的授权或激活状态。普通安装事务更新能力并恢复失败发布；启动按登记装配已安装资源，不重复安装校验，也不扫描或隐式导入旧安装。卸载级联删除能力并保留数据和 ACL，换提供者前须明确处理旧路径规则。路径及服务归属见 [HTTP 路径](system-paths.md)。
