@@ -847,6 +847,9 @@ async fn load_access(
         (http::Method::GET, "/std/acl/capabilities"),
         (http::Method::GET, "/std/profile"),
         (http::Method::HEAD, "/std/profile/context"),
+        // The public #/intro page and its assets are served by Workspace.
+        (http::Method::GET, "/std/workspace"),
+        (http::Method::HEAD, "/std/workspace"),
     ] {
         access
             .set_policy(

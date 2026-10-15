@@ -472,9 +472,29 @@ fn check_existing_rules(
             if previous.get(&path).is_some_and(|m| m.contains(&method)) {
                 continue;
             }
+            // These exact public discovery grants are installed before the
+            // standard packages. Custom rules and other publishers still need
+            // explicit review; no write operation inherits this exception.
+            let public_default = match (id, kind, method.as_str(), path.trim_end_matches('/')) {
+                (
+                    "std.dhttp.net/profile",
+                    "lib",
+                    "GET",
+                    "/std/profile" | "/std/profile/avatar" | "/std/profile/context",
+                ) => "/std/profile",
+                ("std.dhttp.net/profile", "lib", "HEAD", "/std/profile/context") => {
+                    "/std/profile/context"
+                }
+                ("std.dhttp.net/workspace", "app", "GET" | "HEAD", route)
+                    if route == "/std/workspace" || route.starts_with("/std/workspace/") =>
+                {
+                    "/std/workspace"
+                }
+                _ => "",
+            };
             let exists: bool = access.query_row(
-                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*'))",
-                rusqlite::params![path.trim_end_matches('/'), method],
+                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*') AND NOT (api=?3 AND method=?2 AND effect='allow' AND grantee_type=4 AND grantee='*?'))",
+                rusqlite::params![path.trim_end_matches('/'), method, public_default],
                 |r| r.get(0),
             )?;
             if exists {

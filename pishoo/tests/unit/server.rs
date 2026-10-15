@@ -917,3 +917,179 @@ fn account_database_uses_actual_homes_across_distributions() {
             .map(std::path::PathBuf::from)
     );
 }
+
+#[tokio::test]
+async fn workspace_static_defaults_allow_anonymous_reads_without_management_access() {
+    use std::collections::BTreeMap;
+
+    use http::{Method, StatusCode};
+    use serde_json::json;
+    use webc::v3::{
+        Timestamps,
+        write::{DirEntry, Directory},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut server = server(root.path()).await;
+    server.access = load_access(
+        &server.profile,
+        &access_control::SubjectId::new(b"owner").unwrap(),
+    )
+    .await
+    .unwrap();
+    let document = json!({
+        "info":{"title":"Workspace","version":"1.0.0","description":"Public introduction","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"app","publisher":"std.dhttp.net","name":"workspace","entry":"/","dependencies":[]}
+    });
+    let public = Directory::new(
+        BTreeMap::from([
+            (
+                "index.html".parse().unwrap(),
+                b"public introduction".to_vec().into(),
+            ),
+            (
+                "assets".parse().unwrap(),
+                DirEntry::Dir(Directory::new(
+                    BTreeMap::from([("app.js".parse().unwrap(), b"export {}".to_vec().into())]),
+                    Timestamps::default(),
+                )),
+            ),
+        ]),
+        Timestamps::default(),
+    );
+    let package = crate::sandbox::tests::package_fixture(
+        &document,
+        &[],
+        public,
+        &crate::sandbox::tests::publisher("std.dhttp.net", 'a'),
+    );
+    let mut other_document = document.clone();
+    other_document["x-pishoo"]["publisher"] = json!("other.dhttp.net");
+    let other_package = crate::sandbox::tests::package_fixture(
+        &other_document,
+        &[],
+        Directory::new(
+            BTreeMap::from([("index.html".parse().unwrap(), b"other".to_vec().into())]),
+            Timestamps::default(),
+        ),
+        &crate::sandbox::tests::publisher("other.dhttp.net", 'b'),
+    );
+    assert!(
+        crate::sandbox::install_app(&server.profile, "other.dhttp.net/workspace", &other_package)
+            .unwrap_err()
+            .to_string()
+            .contains("existing ACL")
+    );
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/std/workspace",
+            access_control::Effect::Deny,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    assert!(
+        crate::sandbox::install_app(&server.profile, "std.dhttp.net/workspace", &package)
+            .unwrap_err()
+            .to_string()
+            .contains("existing ACL")
+    );
+    // daccess replaces conflicting All/Named rules rather than layering them.
+    // Restore the public default after testing an explicit administrator override.
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/std/workspace",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    crate::sandbox::install_app(&server.profile, "std.dhttp.net/workspace", &package).unwrap();
+    let profile_document = json!({
+        "openapi":"3.1.0",
+        "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[],"host":{}},
+        "paths":{
+            "/profile":{"get":{"operationId":"profile","summary":"Profile"},"patch":{"operationId":"edit","summary":"Edit"}},
+            "/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}},
+            "/profile/context":{"get":{"operationId":"context","summary":"Context"},"head":{"operationId":"contextHead","summary":"Context headers"}}
+        }
+    });
+    let profile_package = crate::sandbox::tests::package_fixture(
+        &profile_document,
+        include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
+        Directory::default(),
+        &crate::sandbox::tests::publisher("std.dhttp.net", 'a'),
+    );
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
+    crate::sandbox::install_lib(
+        &server.profile,
+        "std.dhttp.net/profile",
+        &profile_package,
+        &runtime,
+    )
+    .unwrap();
+    server.sandbox.write().unwrap().apps =
+        crate::sandbox::installed_apps(&server.profile, None).unwrap();
+    *server.router.write().unwrap() = current_router(&server);
+    let request = |method: Method, path: &str| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(AxumBody::empty())
+            .unwrap();
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(server.endpoint.local_authority().unwrap()),
+            remote: None,
+        });
+        request
+    };
+    for method in [Method::GET, Method::HEAD] {
+        for (path, expected) in [
+            ("/std/workspace/", b"public introduction".as_slice()),
+            ("/std/workspace/assets/app.js", b"export {}".as_slice()),
+        ] {
+            let response = server
+                .router
+                .read()
+                .unwrap()
+                .clone()
+                .oneshot(request(method.clone(), path))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                body.as_ref(),
+                if method == Method::HEAD {
+                    b""
+                } else {
+                    expected
+                }
+            );
+        }
+    }
+    for (method, path) in [
+        (Method::POST, "/std/workspace/"),
+        (Method::GET, "/std/workspace-other/"),
+        (Method::GET, "/std/contacts"),
+        (Method::GET, "/std/acl/access"),
+        (Method::GET, "/std/sys/settings"),
+    ] {
+        let response = server
+            .router
+            .read()
+            .unwrap()
+            .clone()
+            .oneshot(request(method, path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+}
