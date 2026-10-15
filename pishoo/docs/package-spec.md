@@ -1,6 +1,6 @@
 # Pishoo App / Lib 软件包规范
 
-日期：2026-10-14。状态：本仓宿主、打包器与 Workspace/Message 已按本规范实现；独立商店服务适配及线上部署须另行完成。本文是包元数据、依赖、文件布局和安装行为的当前规范；替代此前把这些信息放入 OpenAPI、为静态文件生成 OpenAPI 操作及迁移旧测试包的约定。WEBC 容器版本仍为 v3，包级签名算法不变，正式构建入口为 `genmeta package build [PATH] [-o FILE.webc] [--id PUBLISHER]`，执行本地 `[build]` 配置后签名；已有产物可直接使用 `pishoo-pack`（需要安装 Pishoo 的 `pishoo-pack`）；独立工具同样支持此参数。原 `cargo run --example package-webc -- WASMER.toml OUTPUT.webc --publisher NAME` 调用继续兼容。
+日期：2026-10-14。状态：本仓宿主、打包器与 Workspace/Message 已按本规范实现；独立商店服务适配及线上部署须另行完成。本文是包元数据、依赖、文件布局和安装行为的当前规范；替代此前把这些信息放入 OpenAPI、为静态文件生成 OpenAPI 操作及迁移旧测试包的约定。WEBC 容器版本仍为 v3，包级签名算法不变，正式构建入口为 `genmeta package build [PATH] [-o FILE.webc] [--id PUBLISHER]`，执行本地 `[build]` 配置后签名；已有产物使用 `genmeta package build --no-build`。打包实现归 gmutils，宿主发行包不再附带打包命令；宿主兼容性与包签名校验调用运行中的 Pishoo 校验 API。
 
 ## 1. 职责和包类型
 

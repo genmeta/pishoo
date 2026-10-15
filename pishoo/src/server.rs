@@ -84,6 +84,8 @@ pub async fn run() -> Result<()> {
         tokio::pin!(interrupt);
         #[cfg(unix)]
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        #[cfg(unix)]
+        let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         let mut removed_bounds = Vec::new();
         loop {
             let endpoints = servers.values()
@@ -128,6 +130,15 @@ pub async fn run() -> Result<()> {
                         }
                     }
                     _ = runs.next(), if !runs.is_empty() => {},
+                    _ = async {
+                        #[cfg(unix)]
+                        { reload.recv().await; }
+                        #[cfg(not(unix))]
+                        { std::future::pending::<()>().await; }
+                    } => {
+                        // Apply through the same serial reconciliation after active DNS/OCSP work.
+                        config_ticks.reset_immediately();
+                    }
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
                         let result = async {
                             let user_homes = multiuser.then(account_homes).transpose()?;
@@ -202,28 +213,31 @@ async fn load_profile(
     runtime: Arc<WasmRuntime>,
 ) -> Result<Option<Server>> {
     let name = profile.name().to_owned();
+    // Credentials alone do not opt a browser/client identity into hosting.
+    // Startup and runtime discovery share this check before any identity loading.
+    if !profile.config_db_path().try_exists()? {
+        return Ok(None);
+    }
     // An explicitly disabled identity needs no credentials, WASM or background workers.
-    if profile.config_db_path().try_exists()? {
-        match crate::setup::config_database(
-            &profile,
-            &http::Method::GET,
-            &http::Uri::from_static("/std/sys/settings"),
-            None,
-        ) {
-            Ok(settings) if settings["enabled"] == false => return Ok(None),
-            Ok(_) => {}
-            Err(error) => {
-                // Preserve startup recovery of a genuinely empty database, but do not
-                // initialize it before validating this identity's credentials.
-                let empty = profile.config_db_path().symlink_metadata()?.file_type().is_file()
-                    && rusqlite::Connection::open_with_flags(profile.config_db_path(),
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                        .ok().is_some_and(|conn| conn.query_row(
-                            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
-                            [], |row| row.get::<_, bool>(0)).unwrap_or(false));
-                if !empty {
-                    return Err(error);
-                }
+    match crate::setup::config_database(
+        &profile,
+        &http::Method::GET,
+        &http::Uri::from_static("/std/sys/settings"),
+        None,
+    ) {
+        Ok(settings) if settings["enabled"] == false => return Ok(None),
+        Ok(_) => {}
+        Err(error) => {
+            // Preserve startup recovery of a genuinely empty database, but do not
+            // initialize it before validating this identity's credentials.
+            let empty = profile.config_db_path().symlink_metadata()?.file_type().is_file()
+                && rusqlite::Connection::open_with_flags(profile.config_db_path(),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .ok().is_some_and(|conn| conn.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
+                        [], |row| row.get::<_, bool>(0)).unwrap_or(false));
+            if !empty {
+                return Err(error);
             }
         }
     }

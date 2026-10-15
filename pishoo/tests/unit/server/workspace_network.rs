@@ -625,6 +625,17 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         error.to_string().contains("outside its validity period"),
         "{error}"
     );
+    // Browser credentials alone must not enroll an identity in Pishoo, at startup
+    // or on subsequent discovery scans. Use valid credentials to catch initialization.
+    let browser = IdentityProfile::try_from(root.path().join("valid")).unwrap();
+    assert!(!browser.config_db_path().exists());
+    assert!(load_profile(browser.clone(), runtime.clone()).await.unwrap().is_none());
+    let mut servers = BTreeMap::new();
+    assert!(!reconcile_profiles(&DhttpHome::new(root.path().to_path_buf()), None, &mut servers, runtime.clone())
+        .await.unwrap());
+    assert!(servers.is_empty());
+    assert!(!browser.db_dir().exists());
+    assert!(!browser.join("file").exists());
     // Startup skips invalid identities and still loads later valid profiles.
     for name in ["missing", "malformed", "expired", "bad-key"] {
         let identity = IdentityProfile::try_from(root.path().join(name)).unwrap();
@@ -685,6 +696,11 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         Err(Error::InvalidConfig(_))
     ));
     let lib = profile(root.path(), "bad-lib");
+    load_server_config(&lib).unwrap();
+    rusqlite::Connection::open(lib.config_db_path())
+        .unwrap()
+        .execute("INSERT INTO libs(id,name,version) VALUES('broken','broken','1.0.0')", [])
+        .unwrap();
     std::fs::create_dir_all(lib.join("libs/broken")).unwrap();
     std::fs::write(lib.join("libs/broken/.webc-proof"), b"not WASM").unwrap();
     assert!(matches!(
@@ -1162,6 +1178,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         writer.write_all(serde_json::to_string(&serde_json::json!({"location":"/live", "proxy_pass":format!("http://{upstream_address}")})).unwrap().as_bytes()).await.unwrap();
         writer.shutdown().await.unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::OK);
+        crate::run_command(vec!["reload".into(), "--pid".into(), std::process::id().to_string().into()]).await.unwrap();
         wait_live_body(&receiver, "/live", b"live /live").await;
         // Scope changes unregister and re-register this same Server without worker reload.
         crate::setup::config_database(

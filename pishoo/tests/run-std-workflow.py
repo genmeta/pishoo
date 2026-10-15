@@ -38,7 +38,6 @@ def main():
         if args.bun:
             (tools / 'bun').symlink_to(args.bun.resolve())
         for name, path in [('genmeta', args.genmeta.resolve()),
-                           ('pishoo-pack', repo / 'target/debug/pishoo-pack'),
                            ('pishoo', repo / 'target/debug/pishoo')]:
             if name == 'genmeta':
                 shutil.copy2(path, tools / name)

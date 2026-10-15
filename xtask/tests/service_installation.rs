@@ -172,7 +172,7 @@ while [ "$#" -gt 0 ]; do
 done
 release="$(dirname "$(dirname "$manifest")")/target/$target/release"
 mkdir -p "$release"
-for binary in pishoo pishoo-pack; do
+for binary in pishoo; do
     printf '#!/bin/sh\nexit 0\n' > "$release/$binary"
     chmod +x "$release/$binary"
 done
@@ -202,7 +202,7 @@ done
         .map(str::to_owned)
         .collect();
     files.sort();
-    assert_eq!(files, ["./pishoo", "./pishoo-pack"]);
+    assert_eq!(files, ["./pishoo"]);
     let formula =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/pishoo.rb.in"))
             .unwrap();

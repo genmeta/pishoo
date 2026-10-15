@@ -132,7 +132,7 @@ for each identity; it preserves the normal ACL and dependency rules.
 
 ### Current development configuration
 
-Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's `~/.dhttp`. Each Server reads its own `<identity-home>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, enabled)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. The running process discovers identities and applies enabled/listen/proxy configuration changes automatically. Disabling a Server preserves its listening scope and data; use `pishoo enable --id NAME` or `pishoo disable --id NAME`. See [Server lifecycle](pishoo/docs/server-lifecycle.md). Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's `~/.dhttp`. Identities without `db/config.db` are skipped at startup and during discovery; credentials alone do not enable hosting. Each Server reads its own `<identity-home>/<identity>/db/config.db`; there is no instance configuration file or database. Schema v1 has one `settings(listen, enabled)` row and a `proxy_locations(location, proxy_pass)` table. Proxy targets are local HTTP/TCP services, for example `127.0.0.1:8080` or `http://127.0.0.1:8080/api/`. Pishoo installs System DNS, anonymous H3 DDNS and mDNS resolvers at startup. `listen=0/1/2/3` publishes nowhere/on the LAN/via H3/in both scopes; outbound resolution also works with listening disabled. The running process discovers identities and applies enabled/listen/proxy configuration changes automatically. Disabling a Server preserves its listening scope and data; use `genmeta identity ensite --id NAME` or `genmeta identity dissite --id NAME`. See [Server lifecycle](pishoo/docs/server-lifecycle.md). Address changes drive publication. Successful publication renews every 20 seconds; failures retry after 5 seconds. Empty addresses and shutdown stop renewal, and records expire naturally. Pishoo does not actively withdraw records or derive its renewal interval from a server lease header. See the [configuration API](pishoo/docs/config-api.md) for storage, upgrade and initialization rules.
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
@@ -202,16 +202,16 @@ and describes the implemented WEBC v3 host installation and package signature pr
 For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [Journal example](pishoo/examples/journal/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with Journal. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
 
 1. Build a standard WASI HTTP backend component, keep the browser frontend in `public/`, and declare the API in `openapi.json`.
-2. Use `package-webc` as documented in the guide to check package identity/version, validate the manifest, mapped resources and backend and sign the complete release.
+2. Use `genmeta package build` as documented in the guide to check package identity/version, validate the manifest, mapped resources and backend and sign the complete release.
 3. Check and install the resulting package:
 
 ```sh
-pishoo lib check hello-0.1.0.webc
-pishoo lib --id installer.dhttp.net install alice.smith.dhttp.net/hello hello-0.1.0.webc
-pishoo restart
+genmeta package check hello-0.1.0.webc --type lib --id installer.dhttp.net
+genmeta package install alice.smith.dhttp.net/hello --file hello-0.1.0.webc --type lib --id installer.dhttp.net
+pishoo reload
 ```
 
-WEBC packages are expanded after installation into `libs/<name>/` or `apps/<name>/`; packages signed by `std.dhttp.net` live under `libs/std/` or `apps/std/`. The expanded WASM/resources, manifest, signature and `.webc-proof` retain the original publisher signature without storing another complete archive. OCSP is cached at `ssl/stapling.ocsp`. The host serves declared frontend files and invokes only the backend atom for API operations, with daccess authorization on both. Online installation/update/removal takes effect immediately and preserves data and access rules; offline CLI changes load at the next startup. Old single-WASM releases require rebuilding as WEBC and are not automatically migrated.
+WEBC packages are expanded after installation into `libs/<name>/` or `apps/<name>/`; packages signed by `std.dhttp.net` live under `libs/std/` or `apps/std/`. The expanded WASM/resources, manifest, signature and `.webc-proof` retain the original publisher signature without storing another complete archive. OCSP is cached at `ssl/stapling.ocsp`. The host serves declared frontend files and invokes only the backend atom for API operations, with daccess authorization on both. Installation/update/removal through gmutils uses the host APIs, takes effect immediately and preserves data and access rules. Old single-WASM releases require rebuilding as WEBC and are not automatically migrated.
 
 Lib compilation uses Wasmtime's persistent machine-code cache. Installation validation, runtime loading, and later service starts reuse compiled code when the WASM content, compiler version, and engine settings match. Each load still verifies the package and checks host imports. Wasmtime uses its platform cache directory and optional standard `wasmtime/config.toml` configuration; no cache setup is required. Cache initialization failures log a warning and fall back to ordinary compilation. A newly built WASM still needs its first compilation. Development builds optimize Cranelift and its register allocator to reduce this first-compilation cost while retaining Pishoo debug information and the normal WASM execution optimization level. Building these dependencies initially takes longer; release builds already optimize them.
 
@@ -227,18 +227,20 @@ For directive reference and additional reverse-proxy examples, see the official 
 
 ### Management commands
 
-Local commands use the current account’s `~/.dhttp` and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Settings changes apply automatically; offline package changes load on the next service start.
+Use gmutils for identity settings and host APIs. Pishoo itself only runs the host
+and accepts `reload`, `--help`, and `--version`.
 
 ```sh
-pishoo listen -i alice.smith internal
-pishoo proxy -i alice.smith /test 127.0.0.1:8080
-pishoo proxy -i alice.smith rm /test
-pishoo lib check ./note.wasm
-pishoo lib -i alice.smith install note ./note.wasm
-pishoo lib -i alice.smith
-pishoo restart
-pishoo lib -i alice.smith --loaded
-pishoo lib -i alice.smith rm note
+genmeta identity ensite --id alice.smith
+genmeta identity listen --id alice.smith internal
+pishoo reload
+genmeta server proxy --id alice.smith /test 127.0.0.1:8080
+genmeta package check ./note.webc --type lib --id alice.smith
+genmeta package install note --file ./note.webc --type lib --id alice.smith
+genmeta package list --loaded --id alice.smith
 ```
 
-`start`, `stop`, `restart`, and `status` manage the entire installed systemd/Homebrew service, with its existing user and home. No automatic sudo or service installation is performed. No arguments runs all identities in the foreground. Lib removal preserves `db/<id>` and ACL rules. See the [management guide](pishoo/docs/management.md) for commands, `/std/pishoo` HTTP APIs, atomic file publication, and error behavior. Old `/sys` management paths have no compatibility aliases.
+Identity settings update the local database. Proxy and package commands use the
+running host's existing authenticated APIs. Manage process start/stop/restart/status
+with systemctl or brew services. For a foreground process, use `pishoo reload --pid PID`.
+See the [management guide](pishoo/docs/management.md) for the complete mapping.

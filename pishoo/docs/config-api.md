@@ -65,17 +65,17 @@ cargo run --locked -p pishoo --example pishoo-client -- put /std/sys/proxies '[{
 cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 ```
 
-接口随身份监听提供。禁用 Server 或 listen=0 后该身份的 HTTP 管理入口不可达，使用本机 `pishoo enable --id NAME` 或 `pishoo listen --id NAME internal` 恢复相应能力。
+接口随身份监听提供。禁用 Server 或 listen=0 后该身份的 HTTP 管理入口不可达，使用本机 `genmeta identity ensite --id NAME` 或 `genmeta identity listen --id NAME internal` 恢复相应能力。
 
 ## 启动初始化与数据库兼容
 
-初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`libs/std`、`apps/std`、`logs`、`repo` 和 `templates` 目录；不生成证书、私钥或 `server.conf`；启动时本地 `ssl/stapling.ocsp` 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+启动和运行时新身份发现先检查 `db/config.db`；缺失时跳过该身份，不创建配置、加载凭据或发布地址。配置由 gmutils 在用户选择启用服务后创建。其余初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`libs/std`、`apps/std`、`logs`、`repo` 和 `templates` 目录；不生成证书、私钥或 `server.conf`；启动时本地 `ssl/stapling.ocsp` 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
 新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。Linux systemd 服务默认以 root 运行并加载多用户身份；管理员可通过服务覆盖文件修改 User；非 root 运行只加载当前账户的 `.dhttp`。服务用户修改后重启，SIGTERM 退出。Homebrew 按当前用户启动服务。
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
-| config.db | schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
+| config.db | 缺失时不自动创建；已有空库恢复为 schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
 | access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/capabilities、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 

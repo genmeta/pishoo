@@ -90,11 +90,3 @@ path = "tools/check-lib.rs"
 [[example]]
 name = "pishoo-client"
 path = "examples/client.rs"
-
-[[example]]
-name = "package-webc"
-path = "tools/package-webc.rs"
-
-[[bin]]
-name = "pishoo-pack"
-path = "tools/package-webc.rs"
