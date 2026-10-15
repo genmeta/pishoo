@@ -139,13 +139,10 @@ write_binary_spec() {
     local install_lines=''
     local file_lines=''
     source_lines+='Source0:        pishoo
-Source1:        pishoo-pack
 '
     install_lines+='install -D -m 0755 %{SOURCE0} %{buildroot}/usr/bin/pishoo
-install -D -m 0755 %{SOURCE1} %{buildroot}/usr/bin/pishoo-pack
 '
     file_lines+='/usr/bin/pishoo
-/usr/bin/pishoo-pack
 '
     cat > "$1" <<EOF_SPEC
 Name:           pishoo
@@ -249,7 +246,6 @@ run_binary() {
     local spec="$topdir/SPECS/pishoo.spec"
     write_binary_spec "$spec"
     install -D -m 0755 "$release_dir/pishoo" "$topdir/SOURCES/pishoo"
-    install -D -m 0755 "$release_dir/pishoo-pack" "$topdir/SOURCES/pishoo-pack"
 
     rpmbuild -bb \
         --target="$arch" \

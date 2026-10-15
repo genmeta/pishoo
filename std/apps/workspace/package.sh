@@ -9,13 +9,8 @@ sh "$repo/std/libs/profile/build.sh" --publisher "$publisher"
 sh "$project/build.sh" --publisher "$publisher"
 output=${PISHOO_WORKSPACE_DIST:-"$repo/target/workspace-dist"}
 mkdir -p "$output"
-if [ -n "${PISHOO_PACKAGE_WEBC:-}" ]; then tool=$PISHOO_PACKAGE_WEBC
-else
-  cd "${TMPDIR:-/tmp}"
-  cargo build --locked --manifest-path "$repo/Cargo.toml" -p pishoo --example package-webc
-  tool="$repo/target/debug/examples/package-webc"
-fi
-"$tool" "$repo/std/libs/message/dist/wasmer.toml" "$output/message-lib.webc" --publisher "$publisher"
-"$tool" "$repo/std/libs/profile/dist/wasmer.toml" "$output/profile-lib.webc" --publisher "$publisher"
-"$tool" "$project/package-dist/wasmer.toml" "$output/workspace-app.webc" --publisher "$publisher"
+tool=${GENMETA:-genmeta}
+"$tool" package build --no-build "$repo/std/libs/message/dist/wasmer.toml" -o "$output/message-lib.webc" --id "$publisher"
+"$tool" package build --no-build "$repo/std/libs/profile/dist/wasmer.toml" -o "$output/profile-lib.webc" --id "$publisher"
+"$tool" package build --no-build "$project/package-dist/wasmer.toml" -o "$output/workspace-app.webc" --id "$publisher"
 echo "Three ordinary artifacts: $output"

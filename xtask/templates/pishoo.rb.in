@@ -8,7 +8,6 @@ class {{homebrew.class}} < Formula
 
   def install
     bin.install "pishoo"
-    bin.install "pishoo-pack"
   end
 
   def caveats
@@ -34,6 +33,5 @@ class {{homebrew.class}} < Formula
 
   test do
     assert_predicate bin/"pishoo", :executable?
-    assert_match "pishoo-pack", shell_output("#{bin}/pishoo-pack --help")
   end
 end

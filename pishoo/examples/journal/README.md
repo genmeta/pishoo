@@ -45,18 +45,18 @@ wasm-tools component wit pishoo/examples/journal/lib.wasm
 ```sh
 WASI_SDK_PATH=/path/to/wasi-sdk sh pishoo/examples/journal/build.sh \
   --publisher alice.smith.dhttp.net
-pishoo lib check pishoo/examples/journal/dist/journal-0.1.0-lib.webc
-pishoo app check pishoo/examples/journal/dist/journal-0.1.0-app.webc
+genmeta package check pishoo/examples/journal/dist/journal-0.1.0-lib.webc --type lib --id NAME
+genmeta package check pishoo/examples/journal/dist/journal-0.1.0-app.webc --type app --id NAME
 ```
 
-构建脚本核对 Cargo、两个包清单、OpenAPI 的名称/版本和精确依赖，再通过 `pishoo-pack` 使用发布者本机 DHTTP 凭据分别签名并复用宿主校验。可设置 `PISHOO_PACKAGE_WEBC=/绝对路径/pishoo-pack` 使用已编译工具；独立 SDK 发行包需要这个入口。签名证书必须与上传工作台实际加载的发布者证书一致。脚本拒绝覆盖已有同版本产物，发布内容变化必须递增版本并更新精确依赖。
+构建脚本核对 Cargo、两个包清单、OpenAPI 的名称/版本和精确依赖，再通过 `genmeta package build --no-build` 使用发布者本机 DHTTP 凭据分别签名并复用宿主校验。可设置 `GENMETA=/绝对路径/genmeta` 使用已编译工具；独立 SDK 发行包需要这个入口。签名证书必须与上传工作台实际加载的发布者证书一致。脚本拒绝覆盖已有同版本产物，发布内容变化必须递增版本并更新精确依赖。
 
-也可用支持 `pishoo-pack` 的 gmutils 分别打包：
+也可用支持 `genmeta package build --no-build` 的 gmutils 分别打包：
 
 ```sh
-pishoo-pack pishoo/examples/journal/wasmer.toml --id alice.smith.dhttp.net \
+genmeta package build --no-build pishoo/examples/journal/wasmer.toml --id alice.smith.dhttp.net \
   -o pishoo/examples/journal/dist/journal-0.1.0-lib.webc
-pishoo-pack pishoo/examples/journal/app.toml --id alice.smith.dhttp.net \
+genmeta package build --no-build pishoo/examples/journal/app.toml --id alice.smith.dhttp.net \
   -o pishoo/examples/journal/dist/journal-0.1.0-app.webc
 ```
 

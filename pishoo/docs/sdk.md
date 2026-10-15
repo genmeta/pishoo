@@ -72,7 +72,7 @@ rustup target add wasm32-wasip2
 
 Follow the minimal HTTP example in the [WASM developer guide](developing-wasm.md)
 to create a backend, independent OpenAPI and public frontend. Sign a WEBC release
-with `package-webc`, then install it through the Workspace or CLI. Online
+with `genmeta package build`, then install it through the Workspace or CLI. Online
 installation activates the app immediately; offline CLI changes load on startup.
 The Pishoo daccess rules authorize each method/path; the manifest and SDK do not
 grant access. Identity comes from the verified handshake, never HTTP headers.
@@ -82,16 +82,16 @@ grant access. Identity comes from the verified handshake, never HTTP headers.
 Journal uses SQLite and additionally requires the official WASI SDK:
 
 ```sh
-WASI_SDK_PATH=/path/to/wasi-sdk PISHOO_PACKAGE_WEBC=/path/to/pishoo-pack \
+WASI_SDK_PATH=/path/to/wasi-sdk GENMETA=/path/to/genmeta \
   sh examples/journal/build.sh --publisher alice.smith.dhttp.net
-pishoo lib check examples/journal/dist/journal-0.1.0-lib.webc
-pishoo app check examples/journal/dist/journal-0.1.0-app.webc
+genmeta package check examples/journal/dist/journal-0.1.0-lib.webc --type lib --id NAME
+genmeta package check examples/journal/dist/journal-0.1.0-app.webc --type app --id NAME
 ```
 
 Journal ships two independently signed WEBC releases: a Lib with one WASI HTTP
 backend and metadata OpenAPI, and a pure frontend App containing HTML/JS/CSS.
 The App depends on the exact Journal Lib version. The build script checks Cargo,
-`wasmer.toml`, `app.toml`, OpenAPI and dependencies, then uses `pishoo-pack` with
+`wasmer.toml`, `app.toml`, OpenAPI and dependencies, then uses `genmeta package build --no-build` with
 the publisher’s local DHTTP credentials. Run without `--publisher` to build the
 backend and metadata only. Publish the Lib first, then the App. The entry is
 `/std/journal/`; read/comment capability groups belong to the Lib, while static
@@ -110,7 +110,7 @@ wasip2 = "=1.0.4"
 
 SDK 0.1.0 is not yet published to crates.io. Resolve the path relative to your own
 `Cargo.toml`. A Lib built for `wasm32-wasip2` is already a component. Use
-`wasm-tools validate` to check it and `pishoo-pack` to produce the signed WEBC;
+`wasm-tools validate` to check it and `genmeta package build --no-build` to produce the signed WEBC;
 OpenAPI stays in the Lib's metadata volume. The included `package-lib.py` is a
 legacy binding example and does not produce current installable releases.
 No custom HTTP or identity wrapper is required.
