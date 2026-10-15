@@ -122,6 +122,14 @@ jobs:
           path: pishoo
           persist-credentials: false
 
+      - name: Checkout release verification tool
+        uses: actions/checkout@v6
+        with:
+          repository: genmeta/genmeta-xtask-release
+          ref: v0.2.0-beta.11
+          path: release-tool
+          persist-credentials: false
+
       - name: Install Rust
         run: |
           rustup toolchain install nightly --profile minimal
@@ -180,6 +188,11 @@ jobs:
           printf '%s' "$XTASK_RELEASE_APT_SIGNING_KEY" > "$key_file"
           fingerprint="$(gpg --batch --import-options show-only --with-colons --import "$key_file" \
             | awk -F: '$1 == "fpr" { print toupper($10); exit }')"
+          verify_home="$(mktemp -d)"
+          gpg --batch --homedir "$verify_home" --import "$key_file"
+          gpg --batch --homedir "$verify_home" --export "$fingerprint" > "$RUNNER_TEMP/apt-publication-keyring.gpg"
+          gpgconf --homedir "$verify_home" --kill all
+          rm -rf "$verify_home"
           rm -f "$key_file"
           if [ -z "$fingerprint" ]; then
             echo "failed to derive APT signing key fingerprint" >&2
@@ -202,6 +215,7 @@ jobs:
             deb "${deb_args[@]}"
 
       - name: Publish or dry-run S3 for deb artifacts
+        id: apt_publish
         env:
           XTASK_RELEASE_S3_ACCESS_KEY_ID: ${{ secrets.XTASK_RELEASE_S3_ACCESS_KEY_ID }}
           XTASK_RELEASE_S3_SECRET_ACCESS_KEY: ${{ secrets.XTASK_RELEASE_S3_SECRET_ACCESS_KEY }}
@@ -221,6 +235,20 @@ jobs:
           fi
           echo "S3 publish mode: $mode"
           "${publish_cmd[@]}" --publish-report target/publish-reports/deb.toml deb
+          cargo xtask show s3-destination deb --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Verify signed APT publication through ordinary public URLs
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        env:
+          APT_PREFIX: ${{ steps.apt_publish.outputs.prefix }}
+          APT_SUITE: ${{ steps.apt_publish.outputs.suite }}
+        run: |
+          python3 ../release-tool/scripts/verify-publication.py \
+            --base-url https://download.dhttp.net/ \
+            --prefix "$APT_PREFIX" --suite "$APT_SUITE" \
+            --keyring "$RUNNER_TEMP/apt-publication-keyring.gpg" \
+            --report target/publish-reports/deb.toml \
+            --timeout 180
 
       - name: Upload deb packages to GitHub Release
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
