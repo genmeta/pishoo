@@ -39,6 +39,9 @@
 
 ### Fixed
 
+- Submit offered contact capabilities through the native API, pin the verified
+  peer before applying the owner's selected grants, and queue the friend request.
+  Keep browser submission to one request so a first-time contact can offer access.
 - Accept the store's empty App host metadata projection while rejecting forged
   capabilities and preserving signed Lib metadata checks.
 

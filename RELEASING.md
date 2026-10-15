@@ -18,18 +18,14 @@ the TLS backend remains qrustls 0.23.45. No sibling path or Git patches are ship
 
 ## Validation and lockfiles
 
-This is preparation for a new preview release. The three upstream versions were
-not available on crates.io when this preparation started on 2026-10-14.
-The tracked lockfiles retain the last resolvable registry versions for those
-dependencies; they are a baseline, not a final release lockfile. Do not tag yet.
-Local checks with the exact upstream PR sources establish integration only.
+The required dhttp 0.7.1, dhttp-home 0.6.1 and daccess 0.1.1 releases are
+available on crates.io. The committed Cargo.lock now resolves those registry
+versions with checksums and no local overrides. Registry checks run from a
+checkout outside ancestor Cargo path patches.
 
-After upstream publication, use a checkout outside directories containing
-ancestor Cargo patches. Run `cargo update -p dhttp -p dhttp-home -p daccess`,
-review and commit the registry lockfile, then run the normal locked Rust CI,
-documentation, MSRV and packaging dry runs. Confirm the resolved versions are at
-least dhttp 0.7.1, dhttp-home 0.6.1 and daccess 0.1.1. Merge and tag only the
-commit that passes those checks. Local PR-source lockfiles are never committed.
+Run locked Rust CI, documentation, MSRV and crate/DEB/RPM/Homebrew dry runs
+before tagging. Merge using rebase and tag only the checked commit.
+Local integration lockfiles must never replace the registry release lockfile.
 
 ## Publication
 
@@ -39,8 +35,8 @@ publication and production deployment remain separate from this preparation PR.
 
 The legacy gateway stub is not published. pishoo-common tracks 0.9.0-preview.2
 (0.9.0~preview.2-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0-preview.2 from wit/
-on the same release tag. Existing SDK publication uses Trusted Publishing for
-genmeta/pishoo and publish-sdk.yml; first publication requires CARGO_REGISTRY_TOKEN.
+on the same release tag. SDK publication uses the repository token when configured, otherwise Trusted
+Publishing for genmeta/pishoo and publish-sdk.yml; first publication requires a token.
 
 ## Tag-triggered artifacts
 
@@ -90,9 +86,10 @@ Required registry checks and publication ordering above still apply.
 - Workspace production build and 23 frontend tests passed.
 - Nightly formatting and diff checks passed.
 
-Native checks use fixed PR sources dhttp
-`469e4fa7be32e649427cd8340d64fbee5d9e4bdd` and daccess
-`bc1672451510f448259478b460245b42237e0da1`; temporary overrides and their
-lockfiles are not committed. The three required upstream versions were checked
-again and remain unavailable on crates.io. Final registry lockfile refresh,
-locked CI and publication dry runs remain required before tagging.
+The preparation checks above used fixed upstream PR sources. Final checks use
+published crates through the refreshed registry lockfile. Their CI results must
+pass before merging and tagging.
+
+Publication uses the repository CARGO_REGISTRY_TOKEN when configured. Without
+that secret, existing crates use Trusted Publishing; first publication requires
+an API token.
