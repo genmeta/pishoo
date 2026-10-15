@@ -76,7 +76,7 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
 | config.db | schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
-| access.db | 由 daccess 建库，并写入 POST /std/contact、Allow、Named（**）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
+| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile、Allow、Named（**），以及 GET /std/acl/capabilities、Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 
 所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息依赖联系人状态和原生 ACL 授权。已删除或更改的默认规则在重启后保持原样。
@@ -98,3 +98,37 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 旧版 gmutils 的 ensite/dissite 仍只写 listen，不能操作新增的完整 Server 开关；本版使用 Pishoo 的 enable/disable CLI 或 settings API。gmutils 适配需要使用同一 enabled 语义。
 
 Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化；Workspace 仅为前端 App。旧 workspace.db、chat.db 保留，不再由原生启动初始化。
+
+### 加好友前的默认访问
+
+新身份通过现有 daccess 初始化以下默认规则。规则可由管理员修改或移除，
+重启不覆盖已有权限选择；安装业务包本身不新增授权。
+
+| 请求 | 默认访问 | 用途 |
+| --- | --- | --- |
+| GET /std/acl/capabilities | 所有访问者（含匿名） | 发现可申请的业务能力 |
+| GET /std/profile | 已认证具名身份（**） | 读取对方公开资料 |
+| GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，要求具名身份 | 显示头像；未设置头像可返回 404 |
+| GET /std/profile/context | 继承 GET /std/profile 前缀规则，要求具名身份 | 资料上下文与真实访客身份 |
+| POST /std/contact | 已认证具名身份（**） | 提交联系人申请，匿名拒绝 |
+| GET /std/contact/self | 处理器按已验证 Visitor 和申请编号校验 | 仅查询自己的申请/授权状态，不增加公开 ACL |
+
+加好友页面先并行读取目标 profile 与 capabilities，再按 avatar_url 读取头像。
+申请发送到本机 POST /std/contact/local/requests，由 Pishoo 使用自己的身份投递到
+对方 POST /std/contact。批准后申请方轮询 GET /std/contact/self。
+
+`/std/dhttp/*` 是本机所有者代理；`/std/contact/local/*`、联系人列表/审批和 ACL
+管理接口保持管理权限。Profile 的 PATCH、头像 PUT/DELETE 不开放。
+`POST /std/message` 仍需双方明确授权，联系人获批不等于聊天能力获批。
+这里没有开放匿名资料访问，也没有默认开放整个 Workspace App。
+
+已有身份保留原配置，需要采用这些默认值时，在目标身份上显式执行：
+
+```sh
+genmeta access --id NAME /std/acl/capabilities allow '*?' --method GET
+genmeta access --id NAME /std/profile allow '**' --method GET
+genmeta access --id NAME /std/contact allow '**' --method POST
+```
+
+这些管理 API 修改立即生效，无需重启。新的代码默认值在更新后的 Pishoo
+初始化新身份时生效；仅重新编译不会改变正在运行的旧进程。

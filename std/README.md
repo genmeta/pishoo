@@ -12,10 +12,10 @@
 
 它们使用普通 App/Lib 的打包、安装、卸载及授权机制。原生 ACL、Contact、Package 和其他宿主基础设施仍由 Pishoo 实现；`std` 源码目录本身不授予特权。Journal 示例保留在 `pishoo/examples/journal`。
 
-业务制品独立发布到商店，不随 Pishoo 宿主安装包交付，也不在首次启动自动安装。安装 Pishoo 与提供 `genmeta install` 的新版 gmutils，配置身份并启动 Pishoo 后，由身份所属账户执行：
+业务制品独立发布到商店，不随 Pishoo 宿主安装包交付，也不在首次启动自动安装。安装 Pishoo 与提供 `genmeta package install` 的新版 gmutils，配置身份并启动 Pishoo 后，由身份所属账户执行：
 
 ```sh
-genmeta install std.dhttp.net/workspace --id YOUR_IDENTITY
+genmeta package install std.dhttp.net/workspace --id YOUR_IDENTITY
 ```
 
 宿主会下载、验签并递归安装 App 所声明的精确 Profile、Message 依赖；所需版本须已发布到商店。两个宿主软件包安装顺序不限，Pishoo 不依赖 gmutils 启动。

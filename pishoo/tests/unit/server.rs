@@ -643,7 +643,14 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     use http::{Method, StatusCode};
     use serde_json::json;
     let root = tempfile::tempdir().unwrap();
-    let server = server(root.path()).await;
+    let mut server = server(root.path()).await;
+    server.access = load_access(
+        &server.profile,
+        &access_control::SubjectId::new(b"owner").unwrap(),
+    )
+    .await
+    .unwrap();
+    *server.router.write().unwrap() = current_router(&server);
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"},"access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}}},
         "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
@@ -683,6 +690,28 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
             .await
             .unwrap()
             .status(),
+        StatusCode::OK
+    );
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/std/acl/capabilities",
+            access_control::Effect::Deny,
+            access_control::Grantee::All,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .router
+            .read()
+            .unwrap()
+            .clone()
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
         StatusCode::FORBIDDEN
     );
     server
@@ -691,7 +720,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
             access_control::Method::Specified(Method::GET),
             "/std/acl/capabilities",
             access_control::Effect::Allow,
-            access_control::Grantee::Anony,
+            access_control::Grantee::All,
         )
         .await
         .unwrap();

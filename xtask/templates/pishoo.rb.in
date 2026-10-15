@@ -19,7 +19,7 @@ class {{homebrew.class}} < Formula
       To run as the current user, use: brew services start pishoo
       To install Workspace after configuring an identity and starting Pishoo:
         brew install gmutils
-        genmeta install std.dhttp.net/workspace --id YOUR_IDENTITY
+        genmeta package install std.dhttp.net/workspace --id YOUR_IDENTITY
       Run genmeta as the account that owns the identity. App dependencies install automatically.
     EOS
   end

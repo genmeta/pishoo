@@ -654,6 +654,12 @@ async fn lib_management_request(
         valid_id(id)?;
     }
     let method = request.method().clone();
+    let expected_id = request.headers().get("expected-package-id").cloned();
+    if expected_id.is_some() && (method != Method::DELETE || id.is_none()) {
+        return Err(Error::BadRequest(
+            "Expected-Package-Id is supported only for package removal".into(),
+        ));
+    }
     let allow = if checking || store_install {
         "POST"
     } else if id.is_none() {
@@ -781,7 +787,17 @@ async fn lib_management_request(
             installed_catalog(&profile, &sandbox.read().unwrap(), app, id.as_deref())
         })
         .await??;
-        return Ok(axum::Json(value).into_response());
+        let package_id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(http::HeaderValue::from_str)
+            .transpose()
+            .map_err(|_| Error::InvalidConfig("invalid installed package ID".into()))?;
+        let mut response = axum::Json(value).into_response();
+        if let Some(id) = package_id {
+            response.headers_mut().insert("package-id", id);
+        }
+        return Ok(response);
     }
     let runtime = sandbox.read().unwrap().runtime.clone();
     let value = tokio::task::spawn_blocking(move || {
@@ -828,6 +844,14 @@ async fn lib_management_request(
             } else {
                 None
             };
+            if let Some(expected) = &expected_id
+                && registered.as_deref().map(str::as_bytes) != Some(expected.as_bytes())
+            {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "installed package identity changed; query the catalog before removing",
+                )));
+            }
             let Some(registered) = registered else {
                 return if method == Method::DELETE {
                     if sandbox.read().unwrap().tasks.is_closed() {

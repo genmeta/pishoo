@@ -1,11 +1,13 @@
-# genmeta install 实现设计与 Agent 任务书
+> 2026-10-15：统一命令与构建流程见 [genmeta package](genmeta-package.md)。下文的打包细节由 pishoo-pack 承担；genmeta package build 先执行本地构建配置。
+
+# genmeta package install 实现设计与 Agent 任务书
 
 日期：2026-10-14。状态：待实现。配套任务：[pack](genmeta-pack-design.md)、[upload](genmeta-upload-design.md)。本任务实现从商店安装的CLI，以及用户要求的源码仓库链接展示。
 
 ## 1. 目标和已确认边界
 
 ```sh
-genmeta install workspace
+genmeta package install workspace
 ```
 
 默认从固定商店解析App，选择最新已发布版本，为当前默认身份安装；pishoo负责可信下载、验签、递归精确Lib依赖、登记和即时加载。
@@ -22,13 +24,13 @@ genmeta install workspace
 ## 2. 命令契约
 
 ```sh
-genmeta install TARGET [-i NAME | --id NAME] [--version MAJOR.MINOR.PATCH] [--kind app|lib]
+genmeta package install TARGET [-i NAME | --id NAME] [--version MAJOR.MINOR.PATCH] [--type app|lib]
 
-genmeta install workspace
-genmeta install dev.dhttp.net/workspace
-genmeta install workspace --version 0.2.0
-genmeta install workspace --id alice.smith
-genmeta install dev.dhttp.net/chat --kind lib
+genmeta package install workspace
+genmeta package install dev.dhttp.net/workspace
+genmeta package install workspace --version 0.2.0
+genmeta package install workspace --id alice.smith
+genmeta package install dev.dhttp.net/chat --type lib
 ```
 
 | 输入 | 规则 |

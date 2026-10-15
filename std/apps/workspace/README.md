@@ -4,7 +4,7 @@
 
 `wasmer.toml` 的 `package.pishoo.dependencies` 精确声明同一发布者的 `profile@0.1.0` 和 `message@0.1.0`。Profile 后端负责资料与头像，原生 Contact 负责收藏与申请投递，Message 后端负责聊天；原生联系人、ACL、配置和制品管理仍调用 `/std` API。应用商店安装 App 会自动补装缺失后端，复用相同版本并拒绝冲突；本地文件安装要求后端已经安装。
 
-Workspace 不随宿主发行包交付或首次启动自动安装。配置身份、启动 Pishoo 并安装提供 `genmeta install` 的新版 gmutils 后，由身份所属账户运行 `genmeta install std.dhttp.net/workspace --id YOUR_IDENTITY`。该命令调用在线安装 API，要求 App 和精确依赖已发布到商店。
+Workspace 不随宿主发行包交付或首次启动自动安装。配置身份、启动 Pishoo 并安装提供 `genmeta package install` 的新版 gmutils 后，由身份所属账户运行 `genmeta package install std.dhttp.net/workspace --id YOUR_IDENTITY`。该命令调用在线安装 API，要求 App 和精确依赖已发布到商店。
 
 构建使用支持现有 bun.lock 的 Bun（本次验证为 1.4.3）：
 

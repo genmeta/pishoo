@@ -1,4 +1,4 @@
-//! Build a signed Pishoo WEBC v3 from local, already-built artifacts.
+//! Build/sign local Pishoo packages; bare invocation signs existing artifacts.
 use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Write},
@@ -35,6 +35,12 @@ async fn main() -> Result<()> {
         .version(env!("CARGO_PKG_VERSION"))
         .about("Package local build artifacts as a signed Pishoo App or Lib")
         .arg(
+            Arg::new("build")
+                .long("build")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run the manifest's local [build] command before signing its output"),
+        )
+        .arg(
             Arg::new("path")
                 .help("Local project directory or TOML manifest")
                 .default_value(".")
@@ -62,11 +68,76 @@ async fn main() -> Result<()> {
     reject_url(input.as_os_str())?;
     let input = std::fs::canonicalize(input)
         .map_err(|e| format!("missing local project or manifest {}: {e}", input.display()))?;
-    let manifest_path = if input.is_dir() {
+    let mut manifest_path = if input.is_dir() {
         input.join("wasmer.toml")
     } else {
         input
     };
+    if options.get_flag("build") {
+        let config: toml::Value = toml::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+        let build = config.get("build").and_then(toml::Value::as_table)
+            .ok_or("source build requires [build] command=[\"program\", \"arg\", ...] in the local manifest")?;
+        if build
+            .keys()
+            .any(|key| !matches!(key.as_str(), "command" | "manifest"))
+        {
+            return Err("build supports only command and optional output manifest".into());
+        }
+        let command = build
+            .get("command")
+            .and_then(toml::Value::as_array)
+            .filter(|args| !args.is_empty())
+            .ok_or("build.command must be a nonempty argument array")?;
+        let command = command
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .ok_or("build.command arguments must be strings")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if command[0].is_empty() {
+            return Err("build.command program must not be empty".into());
+        }
+        let project = manifest_path
+            .parent()
+            .ok_or("manifest has no parent directory")?
+            .to_path_buf();
+        let output_manifest = match build.get("manifest") {
+            Some(path) => {
+                let path = Path::new(
+                    path.as_str()
+                        .ok_or("build.manifest must be a local relative path")?,
+                );
+                if path.as_os_str().is_empty()
+                    || path.is_absolute()
+                    || path
+                        .components()
+                        .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+                {
+                    return Err("build.manifest must stay within the project directory".into());
+                }
+                project.join(path)
+            }
+            None => manifest_path.clone(),
+        };
+        eprintln!("Building {}", manifest_path.display());
+        let status = tokio::process::Command::new(command[0])
+            .args(&command[1..])
+            .current_dir(&project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(std::io::stderr()))
+            .stderr(Stdio::inherit())
+            .status()
+            .await?;
+        if !status.success() {
+            return Err(format!("source build failed ({status}); no package was signed").into());
+        }
+        manifest_path = std::fs::canonicalize(output_manifest)
+            .map_err(|e| format!("build did not produce its package manifest: {e}"))?;
+        if !manifest_path.starts_with(&project) {
+            return Err("built manifest must stay within the project directory".into());
+        }
+    }
     let project = manifest_path
         .parent()
         .ok_or("manifest has no parent directory")?;
@@ -74,7 +145,7 @@ async fn main() -> Result<()> {
     if config.as_table().is_none_or(|table| {
         table
             .keys()
-            .any(|key| !matches!(key.as_str(), "package" | "module" | "fs"))
+            .any(|key| !matches!(key.as_str(), "package" | "module" | "fs" | "build"))
     }) {
         return Err(
             "unsupported package input: commands, bindings and module dependencies are forbidden"
