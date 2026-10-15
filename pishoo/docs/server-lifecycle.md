@@ -33,7 +33,7 @@ genmeta server proxy --id alice.smith /api 127.0.0.1:8080
 run 用现有 Server 集合、共享 WasmRuntime 和一个局部一秒 Interval 对照 dhttp-home 发现结果与 SQLite 配置。没有变化时不重建 Router、不重新编译、不触发 DNS 发布。扫描等待当前 DNS 发布批及 OCSP 刷新完成；加载、编译和最长15秒的单身份关闭也可能增加延迟，不保证一秒完成。
 
 - 启用或新发现：已保存的 disabled 配置在凭据/WASM/worker 加载前跳过。启用后串行校验凭据、加载数据库及 Lib、构造 Router，监听成功后加入集合并进入 DNS 维护。缺少 `db/config.db` 的身份在凭据、OCSP、数据库和服务加载前跳过，不创建配置、不监听或发布地址。gmutils apply 仅在用户选择启用服务时创建配置；也可显式运行 `genmeta identity ensite --id NAME` 创建并启用。
-- 禁用或移除：从集合移出，先撤销监听和 publisher，再清空 Router、关闭 Sandbox/Workspace/Chat 并等待回收；保留身份与磁盘数据。mDNS 下轮维护清除本机记录，DDNS 停止续期并自然过期。已进入的 HTTP/Lib 请求遵循既有资源生命周期，关闭超时明确记录。
+- 禁用或移除：从集合移出，先撤销监听和 publisher，再清空 Router、关闭 Sandbox/Workspace/Chat 并等待回收；保留身份与磁盘数据。等待应用任务回收之前，立即从所有网卡/IP 对应的 mDNS 实例删除该身份的本机应答记录；关闭内网监听、切换为仅外网监听、监听恢复失败和进程退出同样清理。其他身份和共享 mDNS 查询资源保持。DDNS 只停止发布及续期，不发送公网撤回请求，已有远端记录自然过期。已进入的 HTTP/Lib 请求遵循既有资源生命周期，关闭超时明确记录。
 - 代理变更：校验完整配置后替换 Router，复用 Endpoint、Sandbox、AccessService、Workspace 和 Chat。每个请求短暂克隆 Router 后释放锁，在途请求继续使用已取得的资源。
 - listen 变更：先验证发布凭据和准备 publisher，然后释放旧监听并登记新范围；失败恢复原配置和原监听。恢复也失败则关闭该身份，下轮重新加载。全局 Network 及其他身份不受影响。
 

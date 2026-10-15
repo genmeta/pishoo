@@ -631,7 +631,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     assert!(!browser.config_db_path().exists());
     assert!(load_profile(browser.clone(), runtime.clone()).await.unwrap().is_none());
     let mut servers = BTreeMap::new();
-    assert!(!reconcile_profiles(&DhttpHome::new(root.path().to_path_buf()), None, &mut servers, runtime.clone())
+    assert!(!reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &DhttpHome::new(root.path().to_path_buf()), None, &mut servers, runtime.clone())
         .await.unwrap());
     assert!(servers.is_empty());
     assert!(!browser.db_dir().exists());
