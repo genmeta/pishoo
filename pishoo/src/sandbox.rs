@@ -73,6 +73,10 @@ pub(crate) struct Invocation {
 }
 
 pub(crate) enum Outgoing {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "frozen outgoing policy used by isolation tests")
+    )]
     Denied,
     Granted {
         endpoint: dhttp::Endpoint,
@@ -100,6 +104,10 @@ impl Sandbox {
     }
 
     /// A timeout leaves unfinished executions owning their Store.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "frozen shutdown operation used by resource tests")
+    )]
     pub(crate) async fn wait(&self) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(15), self.tasks.wait())
             .await
