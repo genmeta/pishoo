@@ -1,6 +1,6 @@
 # Pishoo 标准应用与业务库
 
-标准发行的 App/Lib 源码集中在此目录，独立于 `pishoo/src` 宿主实现。当前 Workspace App、Profile Lib、Message Lib 及 Calendar App/Lib 均为初始版本 `0.1.0`。
+标准发行的 App/Lib 源码集中在此目录，独立于 `pishoo/src` 宿主实现。当前 Workspace App 为 `0.1.3`；Profile Lib、Message Lib 及 Calendar App/Lib 保持 `0.1.0`。
 
 | 目录 | 职责 |
 | --- | --- |
