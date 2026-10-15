@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.0-preview.3] - 2026-10-15
+
+### Changed
+
+- Require an existing config.db before loading an identity, so browser-only
+  credentials do not silently enable hosting.
+- Move management and package-building commands to gmutils. Keep the host APIs,
+  foreground runtime, help/version and explicit SIGHUP configuration reload.
+- Stop shipping pishoo-pack in host DEB/RPM/Homebrew packages.
+
+### Fixed
+
+- Remove a stopped identity from every local mDNS responder before waiting for
+  guest tasks. Cover disabling, removal, internal-listener shutdown and process
+  exit while retaining other identities and shared query resources.
+- Stop public address renewal without sending a withdrawal request.
+
+Pishoo and pishoo-common advance to 0.9.0-preview.3. The unchanged SDK remains
+0.1.0-preview.2; business App/Lib versions are published independently.
+
+
 ## [0.9.0-preview.2] - 2026-10-15
 
 ### Added

@@ -1,6 +1,7 @@
 //! The host runs services; management commands belong to gmutils.
-use crate::{Error, Result};
 use std::ffi::OsString;
+
+use crate::{Error, Result};
 
 pub async fn run_command(args: Vec<OsString>) -> Result<()> {
     if args.first().is_some_and(|arg| arg == "reload") {
