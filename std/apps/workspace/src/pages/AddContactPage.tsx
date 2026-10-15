@@ -222,6 +222,9 @@ export default function AddContactPage(props: {
               <Show when={!capabilities.error && capabilities()} fallback={
                 <Show when={!capabilities.loading}><p class="muted">{t('outbound.noCapabilities')}</p></Show>
               }>
+                <Show when={requestableCapabilities().length === 0}>
+                  <p class="muted">{t('outbound.noCapabilities')}</p>
+                </Show>
                 <div class="capability-option-list">
                   <For each={requestableCapabilities()}>{(capability) =>
                     <CapabilityOption capability={capability} checked={offeredCapabilities().includes(capability.id)}
@@ -249,13 +252,19 @@ function CapabilityOption(props: {
   onToggle: () => void
 }) {
   const { t } = useI18n()
-  const name = () => props.capability.title
+  const name = () => props.capability.id === 'std.dhttp.net/message#message'
+    ? t('capabilities.chat.name') : props.capability.title
   return (
     <label class="capability-option">
       <input type="checkbox" checked={props.checked} onChange={props.onToggle}
         aria-label={`${name()} — ${props.direction === 'requested' ? t('outbound.requestedCapabilities') : t('outbound.offeredCapabilities')}`} />
       <span>
         <strong>{name()}</strong>
+        <Show when={props.capability.id === 'std.dhttp.net/message#message'}>
+          <small>{t(props.direction === 'requested'
+            ? 'outbound.capability.chat.requestSummary'
+            : 'outbound.capability.chat.offerSummary')}</small>
+        </Show>
       </span>
     </label>
   )
