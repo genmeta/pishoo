@@ -16,3 +16,8 @@ dependencies = [
 
 [fs]
 "/public" = "."
+
+# Local source-build recipe; not part of the signed package metadata.
+[build]
+command = ["sh", "build.sh"]
+manifest = "package-dist/wasmer.toml"

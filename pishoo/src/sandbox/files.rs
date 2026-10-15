@@ -1230,11 +1230,20 @@ fn remove_artifact(profile: &IdentityProfile, id: &str, kind: &str) -> Result<()
         Err(e) => return Err(e),
     }
     if kind == "lib" {
-        let dependents: i64 = database.query_row("SELECT (SELECT count(*) FROM app_dependencies WHERE lib_id=?1)+(SELECT count(*) FROM lib_dependencies WHERE dependency_id=?1)",[id],|row|row.get(0))?;
-        if dependents > 0 {
+        let dependents = database
+            .prepare(
+                "SELECT 'app ' || app_id FROM app_dependencies WHERE lib_id=?1 \
+                 UNION SELECT 'lib ' || lib_id FROM lib_dependencies WHERE dependency_id=?1 ORDER BY 1",
+            )?
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if !dependents.is_empty() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "lib is required by an installed App/Lib",
+                format!(
+                    "lib is required by an installed App/Lib: {}; remove these packages first",
+                    dependents.join(", "),
+                ),
             )));
         }
     }

@@ -149,8 +149,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             "{}.webc",
             project.file_name().unwrap().to_str().unwrap()
         ));
-        let result = std::process::Command::new(&genmeta)
-            .arg("pack")
+        let result = std::process::Command::new(Path::new(&genmeta).with_file_name("pishoo-pack"))
             .arg(&project)
             .args(["--id", "std.dhttp.net", "--output"])
             .arg(&output)
@@ -160,7 +159,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             .unwrap();
         assert!(
             result.status.success(),
-            "genmeta pack {}: {}",
+            "pishoo-pack {}: {}",
             project.display(),
             String::from_utf8_lossy(&result.stderr)
         );
@@ -273,14 +272,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             200,
         )
         .await;
-        // These are explicit owner choices made through the same APIs as Workspace.
-        for path in [
-            "/std/acl/capabilities",
-            "/std/profile",
-            "/std/profile/context",
-        ] {
-            rule(&server, "**", "GET", path, "allow").await;
-        }
+        // Contact discovery uses the host defaults, without test-only grants.
         servers.push(server);
     }
     let _listeners = scopeguard::guard(listeners, |tasks| {

@@ -137,32 +137,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
             .await
             .unwrap();
         let access = server.access.clone();
-        access
-            .set_policy(
-                access_control::Method::Specified(http::Method::POST),
-                "/std/contact",
-                access_control::Effect::Allow,
-                access_control::Grantee::Named,
-            )
-            .await
-            .unwrap();
-        // Explicit test policies; installation does not grant these paths.
-        for path in [
-            "/std/acl/capabilities",
-            "/std/profile",
-            "/std/profile/avatar",
-            "/std/profile/context",
-        ] {
-            access
-                .set_policy(
-                    access_control::Method::Specified(http::Method::GET),
-                    path,
-                    access_control::Effect::Allow,
-                    access_control::Grantee::Named,
-                )
-                .await
-                .unwrap();
-        }
+        // Contact submission and profile discovery use the host defaults.
         let sandbox = server.sandbox.clone();
         let native = native_router(&server).layer(axum::middleware::from_fn_with_state(
             access.clone(),

@@ -1,14 +1,16 @@
-# genmeta pack 实施与交接
+> 2026-10-15：统一命令与构建流程见 [genmeta package](genmeta-package.md)。下文的打包细节由 pishoo-pack 承担；genmeta package build 先执行本地构建配置。
+
+# pishoo-pack 实施与交接
 
 日期：2026-10-14。已实现源码与本地验收；尚未构建或发布新的 DEB/RPM/Homebrew 发行包。
 
 ## 使用
 
 ```sh
-genmeta pack
-genmeta pack ./workspace-app
-genmeta pack ./std/libs/profile/wasmer.toml -o ./dist/profile-lib.webc
-genmeta pack ./workspace-app --id dev.dhttp.net
+pishoo-pack
+pishoo-pack ./workspace-app
+pishoo-pack ./std/libs/profile/wasmer.toml -o ./dist/profile-lib.webc
+pishoo-pack ./workspace-app --id dev.dhttp.net
 ```
 
 需要安装新版 Pishoo 的两个正式二进制 `pishoo`、`pishoo-pack`。launcher 优先查找同目录的打包器，再通过 PATH 查找。独立工具接受同样参数；旧 `cargo run --example package-webc -- WASMER.toml OUTPUT.webc --publisher NAME` 参数继续兼容。新增二进制后，Cargo 的默认运行目标仍是 `pishoo`。
@@ -27,7 +29,7 @@ Cargo 在 `/private/tmp` 执行，以避开工作区父目录的开发 path patc
 
 - Pishoo `cargo check --locked --offline --bins --example package-webc`。
 - Pishoo `cargo test --locked --offline --test pack_commands`：17 项通过。涵盖真实 App/兼容 Lib、宿主验签、签名篡改、repository、缺失/错误产物、版本不一致、非法路径/文件大小、符号链接、映射自包含、旧目标保留、并发创建目标、FIFO 不阻塞、帮助/版本及旧 example 参数。
-- 设置 `GENMETA_PACK_TEST_BIN` 为已构建的 genmeta 后，同一组 17 项再次通过；临时复制 genmeta/pishoo-pack/pishoo 三个二进制、清空 PATH，在临时项目中完成真实 genmeta pack。
+- 设置 `GENMETA_PACK_TEST_BIN` 为已构建的 genmeta 后，同一组 17 项再次通过；临时复制 genmeta/pishoo-pack/pishoo 三个二进制、清空 PATH，在临时项目中完成真实 pishoo-pack。
 - gmutils `--test pack_launcher`：3 项通过，验证同目录优先、PATH 回退、独立参数、stdout JSON、缺少或失败工具。
 - gmutils launcher 单元集成：32 项通过，1 项 upload 网络集成按其测试声明忽略；无失败。首次发现的 upload 容器解析和 install 身份测试失败已由并行工作修复，最终结果通过。
 - Pishoo xtask `--test release_contract`：7 项通过。
@@ -45,7 +47,7 @@ pack 独占负责的 Pishoo Cargo、打包器、repository package_metadata 方�
 
 ## std 安装、好友与消息流程测试
 
-`pishoo/tests/run-std-workflow.py` 枚举 `std/libs` 与 `std/apps` 的真实源码，构建后调用 gmutils 新版 `genmeta pack`，然后运行独立的 HTTP/3 集成测试。标准发布者签名使用本轮用户提供的仓库根 `std.dhttp.net.crt.pem` / `std.dhttp.net.key.pem`；只在临时 HOME 中复制凭据并设置私钥权限，不修改用户身份目录。
+`pishoo/tests/run-std-workflow.py` 枚举 `std/libs` 与 `std/apps` 的真实源码，构建后调用 Pishoo 的 `pishoo-pack`，然后运行独立的 HTTP/3 集成测试。标准发布者签名使用本轮用户提供的仓库根 `std.dhttp.net.crt.pem` / `std.dhttp.net.key.pem`；只在临时 HOME 中复制凭据并设置私钥权限，不修改用户身份目录。
 
 ```sh
 WASI_SDK_PATH=/path/to/wasi-sdk python3 pishoo/tests/run-std-workflow.py \

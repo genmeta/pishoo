@@ -640,7 +640,13 @@ fn installed_tool_and_validator_need_no_source_checkout_or_cargo() {
         let installed = bin.join(format!("genmeta{}", std::env::consts::EXE_SUFFIX));
         std::fs::copy(launcher, &installed).unwrap();
         let mut command = Command::new(installed);
-        command.arg("pack");
+        let manifest = app.join("wasmer.toml");
+        let mut input = std::fs::read_to_string(&manifest).unwrap();
+        input
+            .push_str("\n[build]\ncommand=['/bin/sh', '-c', 'printf built > public/index.html']\n");
+        std::fs::write(manifest, input).unwrap();
+        std::fs::remove_file(app.join("public/index.html")).unwrap();
+        command.args(["package", "build"]);
         command
     } else {
         Command::new(packer)
@@ -704,4 +710,89 @@ fn host_rejects_invalid_repository_even_in_independently_built_packages() {
             .unwrap();
         fails(&output, "repository");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn source_build_runs_before_signing_and_does_not_sign_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home/.dhttp");
+    identity(&home);
+    let app = dir.path().join("source with spaces");
+    project(&app, "app", "");
+    let manifest = app.join("wasmer.toml");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{original}\n[build]\ncommand=['sh','build script.sh']\n"),
+    )
+    .unwrap();
+    std::fs::remove_file(app.join("public/index.html")).unwrap();
+    std::fs::write(
+        app.join("build script.sh"),
+        "echo build-log\nprintf '<h1>Built from source</h1>' > public/index.html\n",
+    )
+    .unwrap();
+    let output = pack(&home, &app, &["--build".as_ref()]);
+    let result = success(&output);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("build-log"));
+    let file = Path::new(result["file"].as_str().unwrap());
+    let package = webc::Container::from_bytes_and_version(
+        std::fs::read(file).unwrap().into(),
+        webc::Version::V3,
+    )
+    .unwrap();
+    assert_eq!(
+        package
+            .get_volume("public")
+            .unwrap()
+            .read_file("/index.html")
+            .unwrap()
+            .0
+            .as_ref(),
+        b"<h1>Built from source</h1>"
+    );
+    assert!(
+        serde_json::to_value(package.manifest()).unwrap()["package"]
+            .get("build")
+            .is_none()
+    );
+    std::fs::remove_file(file).unwrap();
+    std::fs::write(app.join("build script.sh"), "exit 17\n").unwrap();
+    fails(
+        &pack(&home, &app, &["--build".as_ref()]),
+        "source build failed",
+    );
+    assert!(!file.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn source_build_uses_explicit_output_manifest_and_requires_a_recipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home/.dhttp");
+    identity(&home);
+    let source = dir.path().join("source");
+    let built = source.join("generated");
+    project(&built, "app", "");
+    std::fs::write(
+        source.join("wasmer.toml"),
+        "[build]\ncommand=['sh','-c','echo built >&2']\nmanifest='generated/wasmer.toml'\n",
+    )
+    .unwrap();
+    let result = success(&pack(&home, &source, &["--build".as_ref()]));
+    assert_eq!(result["id"], "alice.dhttp.net/hello");
+    fails(
+        &pack(&home, &built, &["--build".as_ref()]),
+        "source build requires [build]",
+    );
+    std::fs::write(
+        source.join("wasmer.toml"),
+        "[build]\ncommand=['sh','-c','exit 0']\nmanifest='../outside.toml'\n",
+    )
+    .unwrap();
+    fails(
+        &pack(&home, &source, &["--build".as_ref()]),
+        "build.manifest must stay within",
+    );
 }

@@ -1,10 +1,12 @@
-# genmeta pack 实现设计与 Agent 任务书
+> 2026-10-15：统一命令与构建流程见 [genmeta package](genmeta-package.md)。下文的打包细节由 pishoo-pack 承担；genmeta package build 先执行本地构建配置。
+
+# pishoo-pack 实现设计与 Agent 任务书
 
 日期：2026-10-14。状态：待实现。本文件与 [upload](genmeta-upload-design.md)、[install](genmeta-install-design.md) 一起描述用户确认的三个工具；不表示代码或商店已经上线，也不修改冻结接口清单。
 
 ## 1. 目标和已确认边界
 
-`genmeta pack` 将本地构建产物打包成一个已经签名、验证通过的 WEBC v3 App 或 Lib，供 `genmeta upload` 发布。App/Lib 类型、身份、版本及依赖来自 `wasmer.toml`，遵循 [App/Lib 软件包规范](package-spec.md)。
+`pishoo-pack` 将本地构建产物打包成一个已经签名、验证通过的 WEBC v3 App 或 Lib，供 `genmeta package publish` 发布。App/Lib 类型、身份、版本及依赖来自 `wasmer.toml`，遵循 [App/Lib 软件包规范](package-spec.md)。
 
 - 只接收本地目录或本地清单文件。
 - 不获取 GitHub 仓库、远程 TOML、URL 文件或远程构建产物。
@@ -18,11 +20,11 @@
 ## 2. 命令契约
 
 ```sh
-genmeta pack [PATH] [-o FILE.webc] [--id PUBLISHER]
+pishoo-pack [PATH] [-o FILE.webc] [--id PUBLISHER]
 
-genmeta pack
-genmeta pack ./workspace-app
-genmeta pack ./std/libs/profile/wasmer.toml -o ./dist/profile-lib.webc
+pishoo-pack
+pishoo-pack ./workspace-app
+pishoo-pack ./std/libs/profile/wasmer.toml -o ./dist/profile-lib.webc
 ```
 
 | 参数 | 行为 |
@@ -103,7 +105,7 @@ stdout 在成功时输出一份 JSON：`id, kind, version, file, size, package_s
 
 ## 7. 实现位置与并行文件归属
 
-推荐把现有 `pishoo/tools/package-webc.rs` 提升为随 Pishoo 安装的正式二进制 `pishoo-pack`，保留既有 example 调用兼容。它是独立命令入口，不新增 Pishoo 库公开函数。`genmeta pack` 使用普通 `pack.rs`，通过参数数组启动该工具，不拼接 shell 命令。优先查找与 genmeta 同目录的工具，再按 PATH 查找；缺失时明确提示需要安装包含此工具的 Pishoo。是否存在工具不能用失败后在线下载来补救。
+推荐把现有 `pishoo/tools/package-webc.rs` 提升为随 Pishoo 安装的正式二进制 `pishoo-pack`，保留既有 example 调用兼容。它是独立命令入口，不新增 Pishoo 库公开函数。`genmeta package build` 使用普通 `pack.rs`，通过参数数组和 `--build` 启动该工具，不拼接 shell 命令。优先查找与 genmeta 同目录的工具，再按 PATH 查找；缺失时明确提示需要安装包含此工具的 Pishoo。是否存在工具不能用失败后在线下载来补救。
 
 pack agent 唯一负责以下共享文件：gmutils 的 `genmeta/src/main.rs`、`genmeta/Cargo.toml`、根 `Cargo.toml`、`Cargo.lock` 及共享 genmeta 命令文档；Pishoo 的 `pishoo/Cargo.toml`、打包工具、发行打包文件、package_metadata 和 package-spec。修改 xtask 的方法体/脚本即可完成时，不新增其冻结字段。
 
@@ -138,7 +140,7 @@ pub(super) async fn run(target: String, id: Option<String>, version: Option<Stri
 - manifest 中 repository 保留；缺省可用；错误协议/类型被拒绝。
 - App 含 backend、Lib 缺 metadata、版本不一致、非法文件/超限、publisher 不匹配均失败且不留下成功输出。
 - 输出映射自包含、目标已存在及并发创建目标均失败并保留原文件；验证失败不能覆盖输出。
-- 安装发行包后，`genmeta pack` 不依赖源码 checkout 或 `cargo run --example`；验证发行脚本确实携带工具。
+- 安装发行包后，`pishoo-pack` 不依赖源码 checkout 或 `cargo run --example`；验证发行脚本确实携带工具。
 - 不访问真实用户私钥、上传线上包或部署商店；测试用隔离身份。适当运行 Rust check/test、格式检查及发行契约检查。
 
 交付包含实现、命令帮助/用户示例、测试结果、发行工具接入证据、给其他两个 agent 的共享入口完成状态。任何超出上述具体变体/接缝/可选展示字段的冻结成员或 SQL 修改，先列出成员级差异并取得用户授权。

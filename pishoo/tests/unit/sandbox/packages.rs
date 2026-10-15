@@ -1125,7 +1125,8 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         .unwrap(),
         2
     );
-    assert!(remove_lib(&profile, "alice.dhttp.net/first").is_err());
+    let blocked = remove_lib(&profile, "alice.dhttp.net/first").unwrap_err();
+    assert!(blocked.to_string().contains("lib alice.dhttp.net/parent"));
     assert!(
         install_lib(
             &profile,

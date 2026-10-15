@@ -97,7 +97,7 @@ genmeta identity apply
 
 ### Install Workspace from the store
 
-Install a gmutils version that provides `genmeta install`, configure your identity,
+Install a gmutils version that provides `genmeta package install`, configure your identity,
 then check or start the Pishoo service:
 
 ```sh
@@ -116,7 +116,7 @@ Once Pishoo has loaded the identity and is reachable, run the following **as the
 account that owns the identity**, replacing `alice.smith` with its name:
 
 ```sh
-genmeta install std.dhttp.net/workspace --id alice.smith
+genmeta package install std.dhttp.net/workspace --id alice.smith
 ```
 
 The command calls the running identity's Pishoo installation API. Pishoo downloads
@@ -138,7 +138,7 @@ Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, 
 
 Database configuration is available over H3 through `GET/PATCH /std/sys/settings` and `GET/PUT/PATCH/DELETE /std/sys/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
 
-First startup with valid identity credentials creates `db/`, `file/`, `libs/std/`, `apps/std/`, `logs/`, `repo/`, and `templates/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact`; Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
+First startup with valid identity credentials creates `db/`, `file/`, `libs/std/`, `apps/std/`, `logs/`, `repo/`, and `templates/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact` and all visitors to `GET /std/acl/capabilities` for capability discovery. Authenticated named identities can read `GET /std/profile` and its avatar/context subpaths before becoming contacts; anonymous profile access remains denied. Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
