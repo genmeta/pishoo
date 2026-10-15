@@ -548,12 +548,12 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     )
     .unwrap();
     assert!(
-        reconcile_profiles(&home, None, &mut servers, runtime.clone())
+        reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime.clone())
             .await
             .unwrap()
     );
     assert!(
-        !reconcile_profiles(&home, None, &mut servers, runtime.clone())
+        !reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime.clone())
             .await
             .unwrap()
     );
@@ -571,13 +571,13 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     ));
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute("UPDATE settings SET listen=99", []).unwrap();
-    reconcile_profiles(&home, None, &mut servers, runtime.clone())
+    reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert_eq!(servers[&name].config.listen, 0);
     db.execute("UPDATE settings SET listen=0", []).unwrap();
     std::fs::remove_file(profile.config_db_path()).unwrap();
-    reconcile_profiles(&home, None, &mut servers, runtime.clone())
+    reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert!(servers.contains_key(&name));
@@ -585,12 +585,12 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     drop(db);
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(0, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
-    reconcile_profiles(&home, None, &mut servers, runtime.clone())
+    reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime.clone())
         .await
         .unwrap();
     assert!(servers.is_empty());
     // Subsequent scans keep a disabled profile unloaded, even with unusable credentials.
-    reconcile_profiles(&home, None, &mut servers, runtime)
+    reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &home, None, &mut servers, runtime)
         .await
         .unwrap();
     assert!(servers.is_empty());
@@ -605,13 +605,13 @@ async fn discovery_failure_retains_servers_and_deleted_identity_is_removed() {
     let mut servers = BTreeMap::from([(server.name().to_owned(), server)]);
     let missing_home = DhttpHome::new(root.path().join("missing"));
     assert!(
-        reconcile_profiles(&missing_home, None, &mut servers, runtime.clone())
+        reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"), &missing_home, None, &mut servers, runtime.clone())
             .await
             .is_err()
     );
     assert_eq!(servers.len(), 1);
     std::fs::rename(root.path().join("alice"), root.path().join(".removed")).unwrap();
-    reconcile_profiles(
+    reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
         &DhttpHome::new(root.path().to_path_buf()),
         None,
         &mut servers,
@@ -884,7 +884,7 @@ async fn multiuser_discovery_conflict_preserves_running_server() {
     let users = root.path().join("home");
     std::fs::create_dir_all(users.join("other/.dhttp/alice/ssl")).unwrap();
     assert!(
-        reconcile_profiles(
+        reconcile_profiles(&ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
             &DhttpHome::new(root.path().to_path_buf()),
             Some(&[users.join("other")]),
             &mut servers,
@@ -1092,4 +1092,84 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+#[ignore = "run alone; requires local multicast on loopback and an IPv4 network interface"]
+async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
+    use ddns::mdns::{MdnsBinding, MdnsResolverSet};
+    use dhttp::resolve::Resolve;
+    use futures::StreamExt;
+
+    dhttp::DhttpNetwork::init().await.unwrap();
+    let mdns = MdnsResolverSet::new(format!("pishoo-retire-{}.local", std::process::id()));
+    let device = if cfg!(target_os = "linux") { "lo" } else { "lo0" };
+    mdns.upsert(MdnsBinding::new(device, "127.0.0.1".parse().unwrap()))
+        .await.unwrap();
+    for (bound, device) in qprotocol::AddressBook::global().inner_bindings() {
+        if bound.is_ipv4() && !bound.ip().is_loopback() {
+            mdns.upsert(MdnsBinding::new(device.name(), bound.ip())).await.unwrap();
+        }
+    }
+    let instances = mdns.snapshot();
+    assert!(instances.len() >= 2, "test requires at least two mDNS instances");
+    let kept = crate::test_identity::endpoint("kept.dhttp.net");
+    let address: dhttp::resolve::EndpointAddr = "192.168.80.7:4433".parse::<std::net::SocketAddr>().unwrap().into();
+
+    for operation in ["disable", "remove", "off", "external"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut server = server(root.path()).await;
+        server.config.listen = 1;
+        let runtime = server.sandbox.read().unwrap().runtime.clone();
+        let name = server.name().to_owned();
+        for instance in &instances {
+            instance.publish_endpoints(&server.endpoint.local_authority().unwrap(), &name, [address]).unwrap();
+            instance.publish_endpoints(&kept.local_authority().unwrap(), kept.name(), [address]).unwrap();
+            assert!(instance.lookup(&name, "", None).await.unwrap().next().await.is_some());
+        }
+        // A blocked guest must not keep stale addresses advertised while close waits.
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        if matches!(operation, "disable" | "remove") {
+            server.sandbox.read().unwrap().tasks.spawn(async { let _ = pending.await; });
+        }
+        match operation {
+            "remove" => std::fs::rename(server.profile.path(), root.path().join(".removed")).unwrap(),
+            operation => {
+                let sql = match operation {
+                    "disable" => "UPDATE settings SET enabled=0, listen=1",
+                    "off" => "UPDATE settings SET listen=0",
+                    "external" => "UPDATE settings SET listen=2",
+                    _ => unreachable!(),
+                };
+                rusqlite::Connection::open(server.profile.config_db_path()).unwrap().execute_batch(sql).unwrap();
+            }
+        }
+        let home = DhttpHome::new(root.path().to_path_buf());
+        let mut servers = BTreeMap::from([(name.clone(), server)]);
+        let mut reconcile = Box::pin(reconcile_profiles(&mdns, &home, None, &mut servers, runtime));
+        if matches!(operation, "disable" | "remove") {
+            tokio::select! {
+                result = &mut reconcile => panic!("cleanup must wait for the guest: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            }
+        } else {
+            assert!(reconcile.as_mut().await.unwrap());
+        }
+        for instance in &instances {
+            assert!(instance.lookup(&name, "", None).await.is_err(), "{operation}: stale record on {}", instance.bound_device());
+            assert!(instance.lookup(kept.name(), "", None).await.unwrap().next().await.is_some(), "unrelated identity must remain published");
+        }
+        if matches!(operation, "disable" | "remove") {
+            release.send(()).unwrap();
+            assert!(reconcile.as_mut().await.unwrap());
+        }
+        drop(reconcile);
+        assert_eq!(mdns.snapshot().len(), instances.len(), "shared mDNS query resources must remain");
+        for server in servers.values_mut() {
+            if operation == "external" { assert!(server.publisher.is_some()); }
+            server.close().await.unwrap();
+        }
+    }
+    mdns.shutdown().await.unwrap();
 }
