@@ -76,7 +76,7 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
 | config.db | schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
-| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile、Allow、Named（**），以及 GET /std/acl/capabilities、Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
+| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/capabilities、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 
 所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息依赖联系人状态和原生 ACL 授权。已删除或更改的默认规则在重启后保持原样。
@@ -106,10 +106,12 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 
 | 请求 | 默认访问 | 用途 |
 | --- | --- | --- |
+| GET/HEAD /std/workspace | 所有访问者（含匿名）；前缀覆盖静态资源 | 保留 Workspace 的公开名片页面 `#/intro` |
 | GET /std/acl/capabilities | 所有访问者（含匿名） | 发现可申请的业务能力 |
-| GET /std/profile | 已认证具名身份（**） | 读取对方公开资料 |
-| GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，要求具名身份 | 显示头像；未设置头像可返回 404 |
-| GET /std/profile/context | 继承 GET /std/profile 前缀规则，要求具名身份 | 资料上下文与真实访客身份 |
+| GET /std/profile | 所有访问者（含匿名） | 读取对方公开资料 |
+| GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，允许匿名 | 显示头像；未设置头像可返回 404 |
+| GET /std/profile/context | 继承 GET /std/profile 前缀规则，允许匿名 | 资料上下文与真实访客身份 |
+| HEAD /std/profile/context | 所有访问者（含匿名） | 公开名片上下文响应头 |
 | POST /std/contact | 已认证具名身份（**） | 提交联系人申请，匿名拒绝 |
 | GET /std/contact/self | 处理器按已验证 Visitor 和申请编号校验 | 仅查询自己的申请/授权状态，不增加公开 ACL |
 
@@ -120,15 +122,23 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 `/std/dhttp/*` 是本机所有者代理；`/std/contact/local/*`、联系人列表/审批和 ACL
 管理接口保持管理权限。Profile 的 PATCH、头像 PUT/DELETE 不开放。
 `POST /std/message` 仍需双方明确授权，联系人获批不等于聊天能力获批。
-这里没有开放匿名资料访问，也没有默认开放整个 Workspace App。
+公开名片前端继续由 Workspace App 提供，Profile Lib 提供资料数据。`#/intro` 是浏览器片段，不会发送到服务器，因此 GET/HEAD 规则覆盖 Workspace 静态页面和资源，不能只按片段授权。加载静态界面不授予后台管理权限；其他方法和相邻前缀仍受限。
 
 已有身份保留原配置，需要采用这些默认值时，在目标身份上显式执行：
 
 ```sh
 genmeta access --id NAME /std/acl/capabilities allow '*?' --method GET
-genmeta access --id NAME /std/profile allow '**' --method GET
+genmeta access --id NAME /std/profile allow '*?' --method GET
+genmeta access --id NAME /std/profile/context allow '*?' --method HEAD
 genmeta access --id NAME /std/contact allow '**' --method POST
+genmeta access --id NAME /std/workspace allow '*?' --method GET
+genmeta access --id NAME /std/workspace allow '*?' --method HEAD
 ```
 
 这些管理 API 修改立即生效，无需重启。新的代码默认值在更新后的 Pishoo
 初始化新身份时生效；仅重新编译不会改变正在运行的旧进程。
+
+
+标准 `std.dhttp.net/workspace` App 与 `std.dhttp.net/profile` Lib 首次安装时，
+允许复用上述精确的只读 Allow/All 默认规则，以免默认公开权限反过来阻止安装。
+这不豁免其他发布者、自定义规则、通配方法或写操作的旧权限冲突检查。
