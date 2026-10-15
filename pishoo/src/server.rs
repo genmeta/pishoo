@@ -142,7 +142,7 @@ pub async fn run() -> Result<()> {
                     _ = config_ticks.tick(), if jobs.is_empty() && ocsp_updates.is_empty() => {
                         let result = async {
                             let user_homes = multiuser.then(account_homes).transpose()?;
-                            reconcile_profiles(&home, user_homes.as_deref(), &mut servers, runtime.clone()).await
+                            reconcile_profiles(&mdns, &home, user_homes.as_deref(), &mut servers, runtime.clone()).await
                         }.await;
                         match result {
                             Ok(true) => break,
@@ -188,6 +188,10 @@ pub async fn run() -> Result<()> {
             }
         }
     }.await;
+    // Remove all local mDNS response records before waiting for outstanding work.
+    for server in servers.values() {
+        remove_mdns_name(&mdns, server.name());
+    }
     // No new batches after the run body exits, including failure during startup.
     while jobs.next().await.is_some() {}
     let mut shutdown = Ok(());
@@ -331,8 +335,17 @@ fn discover_profiles(
     Ok(profiles.into_values().collect())
 }
 
+// mDNS responders are process-owned; retire this name on every interface before
+// waiting for application cleanup. Shared responders and other names remain live.
+fn remove_mdns_name(mdns: &ddns::mdns::MdnsResolverSet, name: &str) {
+    for instance in mdns.snapshot() {
+        instance.remove_name(name);
+    }
+}
+
 // Reconcile each identity serially; a failed discovery never removes active resources.
 async fn reconcile_profiles(
+    mdns: &ddns::mdns::MdnsResolverSet,
     home: &DhttpHome,
     user_homes: Option<&[std::path::PathBuf]>,
     servers: &mut BTreeMap<String, Server>,
@@ -352,6 +365,7 @@ async fn reconcile_profiles(
     for name in removed {
         let mut server = servers.remove(&name).unwrap();
         changed = true;
+        remove_mdns_name(mdns, &name);
         if let Err(error) = server.close().await {
             tracing::warn!(identity = %name, %error, "Server removal cleanup failed");
         }
@@ -373,12 +387,16 @@ async fn reconcile_profiles(
                 if !config.enabled {
                     let mut server = servers.remove(&name).unwrap();
                     changed = true;
+                    remove_mdns_name(mdns, &name);
                     server.close().await?;
                     tracing::info!(identity = %name, "Server disabled");
                 } else {
                     let server = servers.get_mut(&name).unwrap();
                     if !same_config(&server.config, &config) {
                         let result = apply_config(server, config).await;
+                        if server.config.listen & 1 == 0 || server.listener.is_none() {
+                            remove_mdns_name(mdns, &name);
+                        }
                         // If re-registration and rollback both fail, release the resources
                         // and retry loading this identity on the next scan.
                         if server.config.listen != 0 && server.listener.is_none() {
