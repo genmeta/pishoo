@@ -1,6 +1,62 @@
 use super::*;
 
 #[tokio::test]
+async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_operations() {
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let owner = owner(&endpoint).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db("sqlite::memory:", endpoint.name(), owner.subject_id())
+            .await
+            .unwrap(),
+    );
+    let target = "bob.dhttp.net";
+    let subject = "b".repeat(64);
+    let selected = vec![
+        json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"POST","path":"/std/message"}]}),
+    ];
+    assert!(contact(&access, &endpoint, target).await.is_err());
+    grant_offered(&access, &endpoint, target, &subject, &selected)
+        .await
+        .unwrap();
+    let pending = contact(&access, &endpoint, target).await.unwrap();
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["subject_id"], subject);
+    let rules = local_api(&access, &endpoint, Method::GET, "/std/acl/allow", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rules[target],
+        json!({"/std/message":{"allow":["POST"],"review":[],"deny":[]}})
+    );
+
+    assert_eq!(
+        grant_offered(&access, &endpoint, target, &"c".repeat(64), &selected)
+            .await
+            .unwrap_err()
+            .0,
+        409
+    );
+    for status in ["active", "blocked"] {
+        local_api(
+            &access,
+            &endpoint,
+            Method::PATCH,
+            "/std/contact/bob.dhttp.net",
+            Some(&json!({"status":status})),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        grant_offered(&access, &endpoint, target, &subject, &selected)
+            .await
+            .unwrap_err()
+            .0,
+        409
+    );
+}
+
+#[tokio::test]
 async fn local_contact_routes_require_the_real_owner_before_opening_storage() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();

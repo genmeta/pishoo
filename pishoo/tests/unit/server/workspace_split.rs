@@ -236,9 +236,30 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .0,
         403
     );
-    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net",requests,json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["dev.dhttp.net/message#message"],"offered_capabilities":[]})).await;
+    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net",requests,json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["dev.dhttp.net/message#message"],"offered_capabilities":["dev.dhttp.net/message#message"]})).await;
     assert_eq!(status, 201, "{queued}");
     assert_eq!(queued["status"], "queued");
+    let (_, local) = call(
+        &alice,
+        http::Method::GET,
+        "alice.dhttp.net",
+        "/std/contact/bob.dhttp.net",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(local["status"], "pending");
+    let (_, rules) = call(
+        &alice,
+        http::Method::GET,
+        "alice.dhttp.net",
+        "/std/acl/allow",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        rules["bob.dhttp.net"]["/std/message"]["allow"],
+        json!(["POST"])
+    );
     crate::contact::contact_jobs(profile, &alice, access)
         .await
         .unwrap();
@@ -251,6 +272,28 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     )
     .await;
     assert_eq!(pending["status"], "pending", "{pending}");
+    let (_, incoming) = call(
+        &bob,
+        http::Method::GET,
+        "bob.dhttp.net",
+        "/std/contact/alice.dhttp.net",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(incoming["offers"]["/std/message"]["allow"], json!(["POST"]));
+    // A later revocation stays authoritative through acceptance and polling.
+    assert_eq!(
+        call(
+            &alice,
+            http::Method::DELETE,
+            "alice.dhttp.net",
+            "/std/acl/allow/bob.dhttp.net",
+            json!({"api":"/std/message","method":"POST"})
+        )
+        .await
+        .0,
+        204
+    );
     assert_eq!(
         call(
             &bob,

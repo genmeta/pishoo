@@ -448,6 +448,52 @@ async fn selected(
     Ok(result)
 }
 
+// Called only by the owner's submission, before enqueueing. Delivery and
+// acceptance never replay grants or restore permissions the owner revoked.
+async fn grant_offered(
+    access: &Arc<AccessService>,
+    endpoint: &dhttp::Endpoint,
+    target: &str,
+    subject: &str,
+    capabilities: &[Value],
+) -> Result<(), Failure> {
+    let existing = match contact(access, endpoint, target).await {
+        Ok(contact) => contact,
+        Err((404, _)) => {
+            local_api(
+                access,
+                endpoint,
+                Method::PUT,
+                &format!("/std/contact/{}", encoded(target)),
+                Some(&json!({"subject_id":subject,"class":"Human","description":"","status":"pending","offers":offered(capabilities)})),
+            )
+            .await?;
+            contact(access, endpoint, target).await?
+        }
+        Err(error) => return Err(error),
+    };
+    if existing["subject_id"] != subject
+        || !matches!(existing["status"].as_str(), Some("pending" | "active"))
+    {
+        return Err(fail(409, "local contact blocks offered capabilities"));
+    }
+    for capability in capabilities {
+        for operation in capability["endpoints"].as_array().unwrap() {
+            local_api(
+                access,
+                endpoint,
+                Method::PATCH,
+                &format!("/std/acl/allow/{}", encoded(target)),
+                Some(
+                    &json!({"api":operation["path"],"method":operation["method"],"effect":"allow"}),
+                ),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn contact_router(
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
@@ -576,13 +622,32 @@ async fn dispatch(
             return Err(fail(400, "invalid description"));
         }
         selected(&profile, &endpoint, &doc["requested_capabilities"], &target).await?;
-        selected(
+        let offered_capabilities = selected(
             &profile,
             &endpoint,
             &doc["offered_capabilities"],
             endpoint.name(),
         )
         .await?;
+        if !offered_capabilities.is_empty() {
+            let existing = match contact(&access, &endpoint, &target).await {
+                Ok(contact) => Some(contact),
+                Err((404, _)) => None,
+                Err(error) => return Err(error),
+            };
+            let (_, _, subject) = remote(
+                &endpoint,
+                &target,
+                Method::GET,
+                "/std/acl/capabilities",
+                None,
+                existing
+                    .as_ref()
+                    .and_then(|contact| contact["subject_id"].as_str()),
+            )
+            .await?;
+            grant_offered(&access, &endpoint, &target, &subject, &offered_capabilities).await?;
+        }
         let mut doc = doc;
         doc["target_name"] = target.into();
         doc
