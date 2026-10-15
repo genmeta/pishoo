@@ -36,6 +36,5 @@ fi
 cargo "${args[@]}"
 release_dir="$product_source/target/$target/release"
 cp "$release_dir/pishoo" "$out/staging/pishoo"
-cp "$release_dir/pishoo-pack" "$out/staging/pishoo-pack"
 tar -C "$out/staging" -czf "$out/pishoo_$version-$target.tar.gz" .
 rm -rf "$out/staging"

@@ -37,15 +37,15 @@ when omitted, the original manifest is used. It must remain within the project.
 The recipe is local build input and is not copied into signed metadata.
 
 `build` runs the recipe on every invocation and stops if it fails. It then signs
-and checks the generated package through the installed `pishoo-pack --build`.
+and checks the generated package through the publisher identity’s running Pishoo validation API.
 Build output goes to stderr; stdout contains the final package JSON. Existing
 output files are not overwritten. `--id` checks the built package publisher;
 it does not rewrite it or its dependencies. Standard projects use their existing
 `build.sh`; WASI SDK, Rust/WASM tools, and Bun requirements remain unchanged.
 For these scripts `PISHOO_WORKSPACE_PUBLISHER` selects the build publisher.
 
-For already-built input, use `pishoo-pack PATH -o FILE.webc` directly. It does not
-run the recipe without `--build`. `publish` accepts a signed WEBC file and uses the
+For already-built input, use `genmeta package build --no-build PATH -o FILE.webc` directly. It does not
+run the recipe with `--no-build`. `publish` accepts a signed WEBC file and uses the
 existing pinned store publishing protocol; building never publishes automatically.
 
 ## Installation, update and removal

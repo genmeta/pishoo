@@ -216,7 +216,7 @@ Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求�
 ## 本仓打包入口
 
 ```sh
-cargo run --locked -p pishoo --example package-webc -- WASMER.toml OUTPUT.webc --publisher NAME
+genmeta package build --no-build WASMER.toml --output OUTPUT.webc --id NAME
 ```
 
 `wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向不嵌入 OpenAPI/签名的 Component。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、包级签名、调用宿主检查后原子写入输出，不生成 App OpenAPI 或改写源清单。

@@ -57,17 +57,7 @@ if [ "$#" -eq 0 ]; then
   echo "Built Journal backend and metadata. Use --publisher NAME to sign independent Lib and App releases."
   exit 0
 fi
-if [ -n "${PISHOO_PACKAGE_WEBC:-}" ]; then
-  tool=$PISHOO_PACKAGE_WEBC
-else
-  repo_dir=$(CDPATH= cd -- "$journal_dir/../../.." && pwd)
-  if [ ! -f "$repo_dir/pishoo/tools/package-webc.rs" ]; then
-    echo "Set PISHOO_PACKAGE_WEBC to the pishoo-pack executable to sign this standalone project." >&2
-    exit 1
-  fi
-  cargo build --locked --manifest-path "$repo_dir/Cargo.toml" -p pishoo --bin pishoo-pack
-  tool="$repo_dir/target/debug/pishoo-pack"
-fi
-"$tool" "$journal_dir/wasmer.toml" -o "$journal_dir/dist/journal-$journal_version-lib.webc" --id "$2"
-"$tool" "$journal_dir/app.toml" -o "$journal_dir/dist/journal-$journal_version-app.webc" --id "$2"
+tool=${GENMETA:-genmeta}
+"$tool" package build --no-build "$journal_dir/wasmer.toml" -o "$journal_dir/dist/journal-$journal_version-lib.webc" --id "$2"
+"$tool" package build --no-build "$journal_dir/app.toml" -o "$journal_dir/dist/journal-$journal_version-app.webc" --id "$2"
 echo "Publish journal-$journal_version-lib.webc first, then journal-$journal_version-app.webc."
