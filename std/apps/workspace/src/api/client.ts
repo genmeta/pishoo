@@ -143,20 +143,6 @@ export const api = {
     if ([...value.description].length > 80 || /\p{Cc}/u.test(value.description)) {
       throw new ApiError(400, 'Invalid description')
     }
-    if (value.offered_capabilities.length) {
-      const catalog = await api.capabilities()
-      const offered = value.offered_capabilities.map(id => catalog.find(capability => capability.id === id && capability.selectable))
-      if (offered.some(capability => !capability) || new Set(value.offered_capabilities).size !== offered.length) {
-        throw new ApiError(400, 'Invalid offered capability')
-      }
-      // The owner's submitted selections authorize these native ACL writes now.
-      // The delivery queue and the peer's later acceptance are not permission sources.
-      for (const capability of offered) {
-        for (const endpoint of capability!.endpoints) {
-          await api.setRule({ api: endpoint.path, method: endpoint.method, effect: 'allow', grantee: target })
-        }
-      }
-    }
     return request<OutboundContactRequest>('/std/contact/local/requests', {
       method: 'POST', body: JSON.stringify({ ...value, target_name: target }),
     })
