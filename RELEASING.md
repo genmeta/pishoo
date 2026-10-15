@@ -35,8 +35,8 @@ publication and production deployment remain separate from this preparation PR.
 
 The legacy gateway stub is not published. pishoo-common tracks 0.9.0-preview.2
 (0.9.0~preview.2-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0-preview.2 from wit/
-on the same release tag. SDK publication uses the repository token when configured, otherwise Trusted
-Publishing for genmeta/pishoo and publish-sdk.yml; first publication requires a token.
+on the same release tag. Existing SDK versions use Trusted Publishing for genmeta/pishoo and
+publish-sdk.yml; first publication requires CARGO_REGISTRY_TOKEN.
 
 ## Tag-triggered artifacts
 
@@ -90,6 +90,5 @@ The preparation checks above used fixed upstream PR sources. Final checks use
 published crates through the refreshed registry lockfile. Their CI results must
 pass before merging and tagging.
 
-Publication uses the repository CARGO_REGISTRY_TOKEN when configured. Without
-that secret, existing crates use Trusted Publishing; first publication requires
-an API token.
+Existing crates use Trusted Publishing. CARGO_REGISTRY_TOKEN is reserved for
+first publication of a missing crate.
