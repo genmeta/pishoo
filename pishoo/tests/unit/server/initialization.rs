@@ -90,16 +90,22 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             authorization(&access, Method::GET, "/std/acl/capabilities", visitor).await,
             AuthResult::Allowed
         ));
-        for path in [
-            "/std/profile",
-            "/std/profile/avatar",
-            "/std/profile/context",
+        for (method, path) in [
+            (Method::GET, "/std/profile"),
+            (Method::GET, "/std/profile/avatar"),
+            (Method::GET, "/std/profile/context"),
+            (Method::HEAD, "/std/profile/context"),
+            (Method::GET, "/std/workspace"),
+            (Method::GET, "/std/workspace/"),
+            (Method::GET, "/std/workspace/assets/app.js"),
+            (Method::HEAD, "/std/workspace/assets/app.css"),
         ] {
-            let decision = authorization(&access, Method::GET, path, visitor).await;
-            assert_eq!(
-                matches!(decision, AuthResult::Allowed),
-                visitor.is_some(),
-                "profile discovery requires an authenticated identity: {path}"
+            assert!(
+                matches!(
+                    authorization(&access, method, path, visitor).await,
+                    AuthResult::Allowed
+                ),
+                "public discovery must not require a contact or login: {path}"
             );
         }
         for (method, path) in [
@@ -114,6 +120,8 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             (Method::PATCH, "/std/contact/bob.dhttp.net"),
             (Method::GET, "/std/contact/local/requests"),
             (Method::POST, "/std/message"),
+            (Method::POST, "/std/workspace/"),
+            (Method::GET, "/std/workspace-other/"),
         ] {
             assert!(
                 matches!(
@@ -191,14 +199,17 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         )
         .await
         .unwrap();
-    access
-        .remove_policy(
-            AccessMethod::Specified(Method::GET),
-            "/std/profile",
-            Grantee::Named,
-        )
-        .await
-        .unwrap();
+    for (method, path) in [
+        (Method::GET, "/std/profile"),
+        (Method::HEAD, "/std/profile/context"),
+        (Method::GET, "/std/workspace"),
+        (Method::HEAD, "/std/workspace"),
+    ] {
+        access
+            .remove_policy(AccessMethod::Specified(method), path, Grantee::All)
+            .await
+            .unwrap();
+    }
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     db.execute_batch("UPDATE settings SET listen=1; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
     let config = load_server_config(&profile).unwrap();
