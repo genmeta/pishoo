@@ -1,3 +1,5 @@
+新版统一命令、源码构建与安全卸载见 [genmeta package](genmeta-package.md)。
+
 # Pishoo 管理命令与 API
 
 资源命令操作指定身份的配置与组件文件；服务命令管理整个 Pishoo 进程。
@@ -103,10 +105,10 @@ GET/DELETE 不接受非空 Body，未知 query 参数返回400；管理接口仍
 `Content-Type: application/json`，最多4 KiB，接收期限15秒。商店仍使用完整 publisher/name 和精确版本。
 宿主核验固定商店身份、发布者签名、包摘要及依赖，安装不自动设置访问规则；原始文件 PUT 不产生商店来源证明。
 
-宿主安装包不携带业务 App/Lib，首次启动仅初始化原生服务及数据库。Pishoo 和提供 `genmeta install` 的新版 gmutils 可以按任意顺序安装；身份配置完成、运行中的 Pishoo 已加载该身份并可达后，由身份所属账户执行：
+宿主安装包不携带业务 App/Lib，首次启动仅初始化原生服务及数据库。Pishoo 和提供 `genmeta package install` 的新版 gmutils 可以按任意顺序安装；身份配置完成、运行中的 Pishoo 已加载该身份并可达后，由身份所属账户执行：
 
 ```sh
-genmeta install std.dhttp.net/workspace --id NAME
+genmeta package install std.dhttp.net/workspace --id NAME
 ```
 
 命令调用上述商店安装 API，在线安装 Workspace 和其精确 Profile、Message 依赖，所需版本须已发布。Pishoo 不强依赖或自动调用 gmutils；系统包安装脚本不选择用户身份、不调用在线业务安装。

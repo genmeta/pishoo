@@ -303,6 +303,7 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
         .oneshot(request(Method::GET, path, AxumBody::empty()))
         .await
         .unwrap();
+    assert_eq!(response.headers()["package-id"], "alice.dhttp.net/note");
     let value: Value = serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), 65536)
             .await
@@ -310,6 +311,22 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
     )
     .unwrap();
     assert_eq!(value["id"], "alice.dhttp.net/note");
+    let mut wrong_identity = request(Method::DELETE, path, AxumBody::empty());
+    wrong_identity
+        .headers_mut()
+        .insert("expected-package-id", "bob.dhttp.net/note".parse().unwrap());
+    assert_eq!(
+        app.clone().oneshot(wrong_identity).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(Method::GET, path, AxumBody::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
     assert_eq!(value["endpoints"][0]["path"], "/std/upload");
     assert!(profile.join("db/alice.dhttp.net/note").is_dir());
     assert!(!profile.join("db/note").exists());
@@ -371,12 +388,13 @@ async fn short_name_routes_preserve_complete_ids_and_store_install_owner_checks(
     }
     // Removal resolves registration even when the installed file is corrupt.
     std::fs::write(profile.join("libs/note/.webc-proof"), b"broken").unwrap();
+    let mut removal = request(Method::DELETE, path, AxumBody::empty());
+    removal.headers_mut().insert(
+        "expected-package-id",
+        "alice.dhttp.net/note".parse().unwrap(),
+    );
     assert_eq!(
-        app.clone()
-            .oneshot(request(Method::DELETE, path, AxumBody::empty()))
-            .await
-            .unwrap()
-            .status(),
+        app.clone().oneshot(removal).await.unwrap().status(),
         StatusCode::NO_CONTENT
     );
     assert_eq!(

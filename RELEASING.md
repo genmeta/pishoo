@@ -60,9 +60,9 @@ with the host package.
 
 Publish the signed business Libs and App independently to the store, with the
 exact dependencies declared by the App available before users install it.
-After installing Pishoo and a gmutils version with `genmeta install`, configuring
+After installing Pishoo and a gmutils version with `genmeta package install`, configuring
 an identity and starting its Pishoo service, that identity's account runs
-`genmeta install std.dhttp.net/workspace --id NAME`. Installation calls the running
+`genmeta package install std.dhttp.net/workspace --id NAME`. Installation calls the running
 Pishoo API and recursively installs exact Lib dependencies. Host package install
 order does not matter, and Pishoo has no gmutils package dependency. Store
 publication and this user-triggered install remain separate from the host release.

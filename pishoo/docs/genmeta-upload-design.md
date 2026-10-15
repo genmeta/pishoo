@@ -1,10 +1,12 @@
-# genmeta upload 实现设计与 Agent 任务书
+> 2026-10-15：统一命令与构建流程见 [genmeta package](genmeta-package.md)。下文的打包细节由 pishoo-pack 承担；genmeta package build 先执行本地构建配置。
+
+# genmeta package publish 实现设计与 Agent 任务书
 
 日期：2026-10-14。状态：待实现。配套任务：[pack](genmeta-pack-design.md)、[install](genmeta-install-design.md)。本文件描述单包发布 CLI，不表示当前独立商店已适配新格式或已部署。
 
 ## 1. 目标和边界
 
-`genmeta upload` 将一个本地签名 WEBC App 或 Lib 发布到固定商店。名称、类型、版本、依赖、源码仓库链接来自已签 manifest；不要求用户重复输入，不允许上传参数改写。
+`genmeta package publish` 将一个本地签名 WEBC App 或 Lib 发布到固定商店。名称、类型、版本、依赖、源码仓库链接来自已签 manifest；不要求用户重复输入，不允许上传参数改写。
 
 - 一次一个本地普通文件，不接受目录、GitHub URL、远程包或通配批量发布。
 - 不打包、不修改签名文件、不自动重签、不自动发布依赖、不安装。
@@ -16,10 +18,10 @@
 ## 2. 命令契约
 
 ```sh
-genmeta upload FILE.webc [-i PUBLISHER | --id PUBLISHER]
+genmeta package publish FILE.webc [-i PUBLISHER | --id PUBLISHER]
 
-genmeta upload ./dist/chat-0.2.0-lib.webc
-genmeta upload ./dist/workspace-0.2.0-app.webc --id dev.dhttp.net
+genmeta package publish ./dist/chat-0.2.0-lib.webc
+genmeta package publish ./dist/workspace-0.2.0-app.webc --id dev.dhttp.net
 ```
 
 FILE 必填；没有 kind/name/version/store/source/force 选项。帮助与版本行为沿用 genmeta。`--id` 是实际签名发布身份的核对项，不是商店名称，也不是最终安装用户身份。
@@ -80,9 +82,9 @@ URL 完全由已验证字段和固定集合构造；使用 `http::Uri`、`Header
 Workspace 按以下顺序发布：
 
 ```sh
-genmeta upload ./dist/chat-lib.webc
-genmeta upload ./dist/profile-lib.webc
-genmeta upload ./dist/workspace-app.webc
+genmeta package publish ./dist/chat-lib.webc
+genmeta package publish ./dist/profile-lib.webc
+genmeta package publish ./dist/workspace-app.webc
 ```
 
 每次只发布一个包。上游失败时已成功发布的依赖保留；没有跨包事务或级联回滚。App 和 Lib 可以同 publisher/name/version，各自位于独立集合。相同名字的 App 不能满足 Lib 依赖。

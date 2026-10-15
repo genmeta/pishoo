@@ -20,3 +20,8 @@ source = "lib.wasm"
 
 [fs]
 "/metadata" = "metadata"
+
+# Local source-build recipe; not part of the signed package metadata.
+[build]
+command = ["sh", "build.sh"]
+manifest = "dist/wasmer.toml"

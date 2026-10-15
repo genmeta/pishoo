@@ -51,12 +51,12 @@ pishoo app check pishoo/examples/journal/dist/journal-0.1.0-app.webc
 
 构建脚本核对 Cargo、两个包清单、OpenAPI 的名称/版本和精确依赖，再通过 `pishoo-pack` 使用发布者本机 DHTTP 凭据分别签名并复用宿主校验。可设置 `PISHOO_PACKAGE_WEBC=/绝对路径/pishoo-pack` 使用已编译工具；独立 SDK 发行包需要这个入口。签名证书必须与上传工作台实际加载的发布者证书一致。脚本拒绝覆盖已有同版本产物，发布内容变化必须递增版本并更新精确依赖。
 
-也可用支持 `genmeta pack` 的 gmutils 分别打包：
+也可用支持 `pishoo-pack` 的 gmutils 分别打包：
 
 ```sh
-genmeta pack pishoo/examples/journal/wasmer.toml --id alice.smith.dhttp.net \
+pishoo-pack pishoo/examples/journal/wasmer.toml --id alice.smith.dhttp.net \
   -o pishoo/examples/journal/dist/journal-0.1.0-lib.webc
-genmeta pack pishoo/examples/journal/app.toml --id alice.smith.dhttp.net \
+pishoo-pack pishoo/examples/journal/app.toml --id alice.smith.dhttp.net \
   -o pishoo/examples/journal/dist/journal-0.1.0-app.webc
 ```
 

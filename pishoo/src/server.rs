@@ -841,6 +841,22 @@ async fn load_access(
             access_control::Grantee::Named,
         )
         .await?;
+    // Discovery is public before a contact relationship exists. The profile
+    // GET prefix covers the public profile, avatar and introduction context.
+    for (method, path) in [
+        (http::Method::GET, "/std/acl/capabilities"),
+        (http::Method::GET, "/std/profile"),
+        (http::Method::HEAD, "/std/profile/context"),
+    ] {
+        access
+            .set_policy(
+                access_control::Method::Specified(method),
+                path,
+                access_control::Effect::Allow,
+                access_control::Grantee::All,
+            )
+            .await?;
+    }
     let ready = tempfile::NamedTempFile::new_in(staging.path())?;
     snapshot_access(working.path(), ready.path())?;
     if access_version(ready.path())? != Some(1) {
