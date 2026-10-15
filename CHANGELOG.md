@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.9.0-preview.2] - 2026-10-15
+
+### Added
+
+- Build signed packages from local recipes and guard package removal with its
+  complete installed identity; report the App/Lib packages blocking removal.
+- Allow anonymous read-only Workspace/Profile/capability discovery for new
+  identities, with narrowly scoped standard-package install exemptions. Existing
+  identities retain their access policies.
+- Refine Workspace capability cards and align their heights.
+- Deliver `pishoo-pack` with the native host for signed WEBC App/Lib packaging.
+- Install, update and remove packages online with exact recursive Lib dependencies,
+  persistent registration, signed expanded files and preserved private data.
+- Add separate Workspace and Calendar Apps and Profile, Message and Calendar Libs
+  under `std/`; publish and install these business packages independently.
+- Expose the installed Lib access groups through native `GET /std/acl/capabilities`.
+- Export the identity 0.2.0 guest API through pishoo-sdk 0.1.0-preview.2.
+
+### Changed
+
+- Native services and business APIs share `/std` by actual path and method;
+  management uses `/std/sys/settings`, `/std/sys/proxies` and `/std/sys/package`.
+- Apply enabled/listen/proxy settings and discover identities at runtime.
+  Linux root services discover the global and system accounts' identity homes.
+- Keep host DEB/RPM/Homebrew packages independent of business WEBCs and gmutils;
+  first startup initializes only native configuration and authorization.
+- Load and query installed packages from their registration and existing resources,
+  avoiding repeated installation validation on reads and startup.
+- Split the Journal example into independently packaged App/Lib artifacts and
+  request contact capabilities from the actual installed catalog.
+- Expand verified packages into `apps/<name>` / `libs/<name>` and `std` subdirectories
+  for the signed standard publisher; preserve registered legacy package reads.
+- Use daccess and contact state for Message authorization; remove private approval
+  tables and routes. Existing business data is retained without automatic migration.
+- Reuse Wasmtime's persistent compilation cache and optimize compiler dependencies
+  in development builds, with ordinary compilation as the cache-failure fallback.
+
+### Fixed
+
+- Accept the store's empty App host metadata projection while rejecting forged
+  capabilities and preserving signed Lib metadata checks.
+
+### Dependencies
+
+- Require dhttp 0.7.1, dhttp-home 0.6.1 and daccess 0.1.1 from crates.io;
+  read OCSP caches consistently from `ssl/stapling.ocsp`.
+- Remove sibling Cargo patches. Final registry lockfile refresh and release checks
+  await these upstream publications.
+
+### Release versions
+
+| Package | Previous published version | Prepared version |
+| --- | --- | --- |
+| `pishoo` | 0.9.0-preview.1 | 0.9.0-preview.2 |
+| `pishoo-common` | 0.9.0-preview.1 | 0.9.0-preview.2 |
+| `pishoo-sdk` | 0.1.0-preview.1 | 0.1.0-preview.2 |
+
 ## [0.9.0-preview.1] - 2026-10-12
 
 ### Changed

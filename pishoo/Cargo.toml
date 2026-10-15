@@ -2,7 +2,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://www.dhttp.net"
-version = "0.9.0-preview.1"
+version = "0.9.0-preview.2"
 edition = "2024"
 license = "Apache-2.0"
 autobins = false
@@ -17,11 +17,11 @@ url = "2"
 dirs = "6"
 ddns = { version = "0.8.0", package = "dyns", features = ["h3", "mdns"] }
 qprotocol = { version = "0.7.0" }
-dhttp = { version = "0.7.0" }
+dhttp = { version = "0.7.1" }
 h3x = { version = "0.7.0" }
-dhttp-home = { version = "0.6.0" }
+dhttp-home = { version = "0.6.1" }
 qtls = { version = "0.1.0" }
-access_control = { package = "daccess", version = "0.1.0" }
+access_control = { package = "daccess", version = "0.1.1" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }

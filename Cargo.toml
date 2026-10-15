@@ -3,10 +3,6 @@ resolver = "2"
 members = ["gateway", "pishoo"]
 exclude = ["xtask"]
 
-[patch.crates-io]
-daccess = { path = "../daccess" }
-dhttp-home = { path = "../dhttp/home" }
-
 # Lib installation compiles WASM inside the host. Optimize the compiler hot
 # paths even in development builds, while keeping Pishoo itself debuggable.
 [profile.dev.package.cranelift-codegen]

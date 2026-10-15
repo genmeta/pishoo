@@ -36,15 +36,15 @@ python3 pishoo/tools/package-sdk.py
 python3 pishoo/tools/package-sdk.py --offline
 ```
 
-The script produces `target/sdk-dist/pishoo-sdk-0.1.0-preview.1.crate` and
-`target/sdk-dist/pishoo-sdk-0.1.0-preview.1.tar.gz`; the version comes from the SDK manifest.
+The script produces `target/sdk-dist/pishoo-sdk-0.1.0-preview.2.crate` and
+`target/sdk-dist/pishoo-sdk-0.1.0-preview.2.tar.gz`; the version comes from the SDK manifest.
 Use `--output-dir PATH` to select another destination. Cargo verifies the `.crate`
 in isolation. The script does not publish to crates.io or install any Libs.
 
 The developer archive contains:
 
 ```text
-pishoo-sdk-0.1.0-preview.1/
+pishoo-sdk-0.1.0-preview.2/
   sdk/                  Rust crate, WIT, Cargo.lock, documentation and license
   examples/journal/     Journal backend, public frontend, wasmer.toml and SQLite
   tools/package-lib.py  Attach an OpenAPI manifest to a component
@@ -65,8 +65,8 @@ Use a host implementing the identity interface imported by your component.
 Unpack the developer archive and install the component target:
 
 ```sh
-tar -xzf pishoo-sdk-0.1.0-preview.1.tar.gz
-cd pishoo-sdk-0.1.0-preview.1
+tar -xzf pishoo-sdk-0.1.0-preview.2.tar.gz
+cd pishoo-sdk-0.1.0-preview.2
 rustup target add wasm32-wasip2
 ```
 
@@ -104,7 +104,7 @@ filename. Keep the SDK dependency:
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0-preview.1", path = "../../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.2", path = "../../sdk" }
 wasip2 = "=1.0.4"
 ```
 

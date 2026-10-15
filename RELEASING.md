@@ -1,46 +1,50 @@
-# Release preparation for v0.9.0-preview.1
+# Release preparation for v0.9.0-preview.2
 
 | Package | Previous published version | Prepared version |
 | --- | --- | --- |
-| `pishoo` | 0.8.2 | 0.9.0-preview.1 |
-| `pishoo-common` | 0.8.2 | 0.9.0-preview.1 |
-| `pishoo-sdk` | first release | 0.1.0-preview.1 |
+| `pishoo` | 0.9.0-preview.1 | 0.9.0-preview.2 |
+| `pishoo-common` | 0.9.0-preview.1 | 0.9.0-preview.2 |
+| `pishoo-sdk` | 0.1.0-preview.1 | 0.1.0-preview.2 |
 
 ## Dependency order
 
-dquic → h3x → dhttp → ddns → daccess
-
-Manifest versions use Cargo's compatible-version requirements, without `=`.
-They allow patch updates within the selected 0.x series. External Genmeta
-dependencies come from crates.io; no sibling checkout or Git patch is required.
-The dquic TLS backend is the published qrustls 0.23.45 package, used as `rustls`
-where the application exchanges TLS types with qtls.
+Release prerequisites are [dhttp PR #34](https://github.com/genmeta/dhttp/pull/34)
+(dhttp-home 0.6.1, then dhttp 0.7.1) and
+[daccess PR #3](https://github.com/genmeta/daccess/pull/3) (daccess 0.1.1).
+Both releases must be available on crates.io before final registry checks.
+The manifests require these versions with Cargo's compatible-version requirements.
+Existing dyns 0.8.0, h3x 0.7.0 and QUIC versions remain in their current series;
+the TLS backend remains qrustls 0.23.45. No sibling path or Git patches are shipped.
 
 ## Validation and lockfiles
 
-This PR is release preparation. Unpublished upstream versions can make CI fail;
-such failures do not confirm compilation, tests or package verification.
-For tracked lockfiles, run `cargo generate-lockfile` after upstream publication,
-review and commit the resulting registry lockfile before tagging.
-Run Cargo from a checkout outside directories containing ancestor path patches.
-Never commit a lockfile generated with local transport path overrides as the
-registry release lockfile. Re-run the normal CI checks and publish dry run after
-upstream publication and lockfile refresh; merge and tag only that checked commit.
+This is preparation for a new preview release. The three upstream versions were
+not available on crates.io when this preparation started on 2026-10-14.
+The tracked lockfiles retain the last resolvable registry versions for those
+dependencies; they are a baseline, not a final release lockfile. Do not tag yet.
+Local checks with the exact upstream PR sources establish integration only.
+
+After upstream publication, use a checkout outside directories containing
+ancestor Cargo patches. Run `cargo update -p dhttp -p dhttp-home -p daccess`,
+review and commit the registry lockfile, then run the normal locked Rust CI,
+documentation, MSRV and packaging dry runs. Confirm the resolved versions are at
+least dhttp 0.7.1, dhttp-home 0.6.1 and daccess 0.1.1. Merge and tag only the
+commit that passes those checks. Local PR-source lockfiles are never committed.
 
 ## Publication
 
-Planned tag: `v0.9.0-preview.1`. Release through the repository's GitHub Actions workflow.
+Planned tag: `v0.9.0-preview.2`. Release through the repository's GitHub Actions workflow.
 Use an annotated tag with the changelog entry as its release notes. Actual
 publication and production deployment remain separate from this preparation PR.
 
-The legacy gateway stub is not published. pishoo-common tracks 0.9.0-preview.1
-(0.9.0~preview.1-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0-preview.1 from wit/
-on the same release tag; configure CARGO_REGISTRY_TOKEN for its first upload,
-then configure Trusted Publishing for genmeta/pishoo and publish-sdk.yml.
+The legacy gateway stub is not published. pishoo-common tracks 0.9.0-preview.2
+(0.9.0~preview.2-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0-preview.2 from wit/
+on the same release tag. Existing SDK publication uses Trusted Publishing for
+genmeta/pishoo and publish-sdk.yml; first publication requires CARGO_REGISTRY_TOKEN.
 
 ## Tag-triggered artifacts
 
-Pushing `v0.9.0-preview.1` to this repository triggers release.yml for DEB, RPM and Homebrew.
+Pushing `v0.9.0-preview.2` to this repository triggers release.yml for DEB, RPM and Homebrew.
 The tag must match the main package version. Packaging creates a draft GitHub
 Release, uploads artifacts, and publishes that Release after all package jobs
 succeed. Release builds keep `--locked`; refresh the registry lockfile after
@@ -69,3 +73,26 @@ publication and this user-triggered install remain separate from the host releas
 
 Pishoo, pishoo-common and pishoo-sdk are preview prereleases. DEB/RPM and
 Homebrew publication selects the preview channel from each package version.
+
+## History and validation
+
+The 14 development commits after snapshot `66a339a` are rebased onto main
+(`7c91d2b`), which already contains the earlier development history as the
+preview.1 squash. Documentation cleanup, formatting and release preparation add
+three commits, for 17 commits above main. The release commit updates versions and
+dependencies; temporary task plans and implementation reports are excluded.
+Required registry checks and publication ordering above still apply.
+
+## Preparation checks (2026-10-15)
+
+- Workspace tests: 159 passed, 29 opt-in/recorded-environment tests excluded.
+- Release-contract and service-installation tests: 14 passed.
+- Workspace production build and 23 frontend tests passed.
+- Nightly formatting and diff checks passed.
+
+Native checks use fixed PR sources dhttp
+`469e4fa7be32e649427cd8340d64fbee5d9e4bdd` and daccess
+`bc1672451510f448259478b460245b42237e0da1`; temporary overrides and their
+lockfiles are not committed. The three required upstream versions were checked
+again and remain unavailable on crates.io. Final registry lockfile refresh,
+locked CI and publication dry runs remain required before tagging.
