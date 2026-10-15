@@ -12,6 +12,9 @@
 
 ### Fixed
 
+- Append request records to per-identity access.log independently of RUST_LOG;
+  report HTTP 5xx and log-write failures through the global error.log.
+
 - Remove a stopped identity from every local mDNS responder before waiting for
   guest tasks. Cover disabling, removal, internal-listener shutdown and process
   exit while retaining other identities and shared query resources.

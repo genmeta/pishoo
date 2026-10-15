@@ -1067,6 +1067,62 @@ fn current_router(server: &Server) -> Router {
         ))
 }
 
+fn open_access_log(profile: &IdentityProfile) -> Result<std::fs::File> {
+    let path = profile.join("logs/access.log");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(&path).map_err(|error| {
+        std::io::Error::new(error.kind(), format!("{}: {error}", path.display())).into()
+    })
+}
+
+async fn serve_request(
+    router: Arc<RwLock<Router>>,
+    request: Request<Body>,
+    name: &str,
+    access_log: &std::sync::Mutex<std::fs::File>,
+) -> http::Response<AxumBody> {
+    use std::io::Write;
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let version = request.version();
+    let peer = request
+        .extensions()
+        .get::<dhttp::HandshakeSummary>()
+        .and_then(|handshake| handshake.remote.as_ref())
+        .map(|authority| authority.name().to_owned());
+    let app = router.read().unwrap().clone();
+    let response = app
+        .oneshot(request.map(axum::body::Body::new))
+        .await
+        .expect("Router is infallible");
+    let status = response.status().as_u16();
+    if response.status().is_server_error() {
+        tracing::error!(identity = name, peer = peer.as_deref().unwrap_or("anonymous"),
+            %method, ?path, status, "request failed");
+    }
+    let line = format!(
+        "{} request server={name} peer={} version={version:?} method={method} path={path:?} status={status}\n",
+        chrono::Utc::now().to_rfc3339(),
+        peer.as_deref().unwrap_or("anonymous"),
+    );
+    // The listener owns the file; one lock keeps concurrent request lines intact.
+    let result = access_log
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .write_all(line.as_bytes());
+    if let Err(error) = result {
+        tracing::error!(identity = name, %error, "cannot write access.log");
+    }
+    response
+}
+
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
         let certs = profile
@@ -1137,44 +1193,12 @@ impl Server {
             2 => dhttp::Scope::External.into(),
             _ => dhttp::Scope::Internal | dhttp::Scope::External,
         };
+        let access_log = Arc::new(std::sync::Mutex::new(open_access_log(&self.profile)?));
         let name = endpoint.name().to_owned();
         let service = tower::service_fn(move |request: http::Request<Body>| {
-            let (router, name) = (router.clone(), name.clone());
+            let (router, name, access_log) = (router.clone(), name.clone(), access_log.clone());
             async move {
-                let method = request.method().clone();
-                let path = request.uri().path().to_owned();
-                let version = request.version();
-                let peer = request
-                    .extensions()
-                    .get::<dhttp::HandshakeSummary>()
-                    .and_then(|handshake| handshake.remote.as_ref())
-                    .map(|authority| authority.name().to_owned());
-                let result: Result<http::Response<AxumBody>> = async {
-                    let app = router.read().unwrap().clone();
-                    let response = app
-                        .oneshot(request.map(axum::body::Body::new))
-                        .await
-                        .expect("Router is infallible");
-                    Ok(response)
-                }
-                .await;
-                let response = result.unwrap_or_else(|error| {
-                    let status = error.status();
-                    if status.is_server_error() {
-                        tracing::error!(identity = %name, %error, "request failed");
-                    }
-                    (
-                        status,
-                        status.canonical_reason().unwrap_or("request failed"),
-                    )
-                        .into_response()
-                });
-                eprintln!(
-                    "{} request server={name} peer={} version={version:?} method={method} path={path:?} status={}",
-                    chrono::Utc::now().to_rfc3339(),
-                    peer.as_deref().unwrap_or("anonymous"),
-                    response.status().as_u16(),
-                );
+                let response = serve_request(router, request, &name, &access_log).await;
                 Ok::<_, std::convert::Infallible>(response)
             }
         });
@@ -1206,3 +1230,7 @@ mod network_tests;
 #[cfg(test)]
 #[path = "../tests/unit/server/initialization.rs"]
 mod initialization_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/server/logging.rs"]
+mod logging_tests;

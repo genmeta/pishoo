@@ -73,3 +73,7 @@ fn logging(
         .with_writer(writer)
         .finish())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/logging.rs"]
+mod tests;
