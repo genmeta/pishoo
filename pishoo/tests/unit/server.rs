@@ -286,6 +286,7 @@ async fn server(root: &std::path::Path) -> Server {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
     std::fs::create_dir_all(profile.db_dir()).unwrap();
     std::fs::create_dir_all(profile.join("ssl")).unwrap();
+    std::fs::create_dir_all(profile.join("logs")).unwrap();
     std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
