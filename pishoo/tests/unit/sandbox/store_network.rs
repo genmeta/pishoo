@@ -45,7 +45,8 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         }
     });
     // Exercise the actual packaging CLI with temporary signer credentials.
-    let tool = std::env::var_os("GENMETA_PACK_TEST_BIN").expect("set GENMETA_PACK_TEST_BIN to the current gmutils executable");
+    let tool = std::env::var_os("GENMETA_PACK_TEST_BIN")
+        .expect("set GENMETA_PACK_TEST_BIN to the current gmutils executable");
     for kind in ["app", "lib"] {
         let input = root.path().join(format!("tool-{kind}"));
         std::fs::create_dir_all(input.join(if kind == "app" { "public" } else { "metadata" }))
@@ -78,7 +79,9 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
                 std::fs::read_to_string(root.path().join("ca.crt")).unwrap(),
             )
             .output()
-            .expect("build gmutils and provide a publisher validation API before this acceptance test");
+            .expect(
+                "build gmutils and provide a publisher validation API before this acceptance test",
+            );
         assert!(
             result.status.success(),
             "packaging {kind}: {}",
