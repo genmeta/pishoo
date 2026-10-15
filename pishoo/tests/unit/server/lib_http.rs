@@ -1,8 +1,10 @@
 //! Real local Lib calls preserve foreground identity and authenticate CLI HTTP.
-use super::*;
+use std::path::Path;
+
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::path::Path;
+
+use super::*;
 
 async fn call(endpoint: &dhttp::Endpoint, path: &str) -> (u16, Value) {
     let response = tokio::time::timeout(

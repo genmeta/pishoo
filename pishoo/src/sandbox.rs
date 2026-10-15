@@ -31,8 +31,7 @@ pub(crate) use files::{
 };
 pub use manifest::{validate_lib, validate_openapi};
 use package::package_file;
-pub(crate) use package::package_metadata;
-pub(crate) use package::read_package;
+pub(crate) use package::{package_metadata, read_package};
 pub(crate) use store::{install_store_app, install_store_lib};
 
 pub(crate) struct Sandbox {

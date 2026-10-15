@@ -1,8 +1,9 @@
 //! Bootstrap a frontend through the real CLI before any Workspace is installed.
+use std::{collections::BTreeMap, process::Command, sync::Arc};
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, process::Command, sync::Arc};
 use webc::v3::{
     SignatureAlgorithm, Timestamps,
     write::{Directory, Writer},

@@ -1,10 +1,12 @@
 //! Real pinned-store installation of a frontend with a shared transitive backend.
-use super::*;
-use crate::sandbox::tests::{package_fixture, publisher};
+use std::collections::BTreeMap;
+
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
 use futures::{FutureExt, StreamExt};
-use std::collections::BTreeMap;
 use tower::ServiceExt;
+
+use super::*;
+use crate::sandbox::tests::{package_fixture, publisher};
 
 #[allow(dead_code)]
 #[path = "../../support/network_credentials.rs"]

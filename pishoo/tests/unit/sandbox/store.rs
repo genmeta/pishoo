@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use super::super::WasmRuntime;
-use super::*;
+use super::{super::WasmRuntime, *};
 
 fn section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {
     fn leb(mut value: usize, bytes: &mut Vec<u8>) {
