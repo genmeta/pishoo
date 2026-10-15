@@ -1014,19 +1014,20 @@ textarea {
 
 .capability-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  align-items: stretch;
+  gap: 14px;
 }
 
 .capability-card {
   display: grid;
+  grid-template-rows: auto minmax(1.25rem, 1fr) auto auto;
   gap: 12px;
   min-width: 0;
-  padding: 20px;
+  padding: 16px;
   border: 1px solid var(--border-strong);
   border-radius: 0;
   background: var(--surface);
-  box-shadow: 3px 3px 0 var(--border-strong);
 }
 
 .capability-card-header {
@@ -1036,7 +1037,32 @@ textarea {
   gap: 12px;
 }
 
-.capability-card h2 { margin: 4px 0 0; font-size: 20px; }
+.capability-card h2 { margin: 5px 0 0; font-size: 16px; overflow-wrap: anywhere; }
+.capability-card-header > div { min-width: 0; }
+.capability-kicker {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.capability-card .status-badge {
+  flex-shrink: 0;
+  max-width: 45%;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.capability-summary { grid-row: 2; margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.capability-card-footer { grid-row: 3; display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--text-muted); font-size: 12px; }
+.capability-endpoints { grid-row: 4; border-top: 1px solid var(--border); padding-top: 4px; font-size: 12px; }
+.capability-endpoints summary { display: list-item; padding: 10px 0; cursor: pointer; }
+.capability-endpoints summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.capability-endpoints ul { display: grid; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.capability-endpoints li { display: flex; align-items: baseline; gap: 8px; }
+.capability-endpoints .method { flex-shrink: 0; font-size: 10px; }
+.capability-endpoints code { min-width: 0; overflow-wrap: anywhere; }
 
 .wasm-api-link { color: var(--text); text-underline-offset: 3px; }
 .wasm-api-description { margin-left: 8px; overflow-wrap: anywhere; }
@@ -1068,6 +1094,56 @@ textarea {
 
 .capability-option input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--primary); }
 .capability-option strong { display: block; margin-bottom: 3px; }
+
+.capability-selection {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.capability-selection legend {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.capability-selection .capability-option-list {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.capability-selection .capability-option {
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.capability-selection .capability-option:hover {
+  background: var(--surface-subtle);
+}
+
+.capability-selection .capability-option:has(input:checked) {
+  background: var(--primary-soft);
+}
+
+.capability-selection .capability-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.capability-selection .capability-option input { margin: 0; }
+.capability-selection .capability-option strong { margin: 0; font-size: 14px; }
+.capability-selection .capability-option > span { min-width: 0; overflow-wrap: anywhere; }
+.capability-selection .capability-option small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 
 .remote-capability-option > span { min-width: 0; }
 .remote-capability-option small,
