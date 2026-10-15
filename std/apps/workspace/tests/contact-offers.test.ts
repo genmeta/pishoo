@@ -1,80 +1,61 @@
 import { afterEach, expect, test } from 'bun:test'
-import { api } from '../src/api/client'
+import { api, ApiError } from '../src/api/client'
 
 const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
 
-function backend(options: { failGrant?: boolean; failSubmit?: boolean } = {}) {
-  const calls: Array<{ path: string; method: string; body: any }> = []
-  const grants: any[] = []
-  const catalog = [
-    { id: 'alice.dhttp.net/message#message', selectable: true, endpoints: [{ method: 'POST', path: '/std/message' }] },
-    { id: 'alice.dhttp.net/note#read', selectable: true, endpoints: [{ method: 'GET', path: '/std/note' }, { method: 'GET', path: '/std/note/items' }] },
-  ]
+function backend(rejection?: { status: number; message: string }) {
+  const calls: Array<{ path: string; method: string; body: unknown }> = []
   globalThis.fetch = (async (input, init) => {
     const path = new URL(String(input), 'http://localhost').pathname
     const method = init?.method ?? 'GET'
     const body = init?.body ? JSON.parse(String(init.body)) : null
     calls.push({ path, method, body })
-    if (path === '/std/acl/capabilities') return Response.json(catalog)
-    if (path === '/std/acl/allow/iphone.alice.dhttp.net' && method === 'PATCH') {
-      if (options.failGrant) return new Response('Grant failed', { status: 500 })
-      grants.push(body)
-      return new Response(null, { status: 204 })
+    if (path !== '/std/contact/local/requests' || method !== 'POST') {
+      throw new Error(`Unexpected request: ${method} ${path}`)
     }
-    if (path === '/std/contact/local/requests' && method === 'POST') {
-      if (options.failSubmit) return new Response('Submission failed', { status: 500 })
-      return Response.json({ id: 1, status: 'queued', ...body }, { status: 201 })
-    }
-    throw new Error(`Unexpected request: ${method} ${path}`)
+    if (rejection) return new Response(rejection.message, { status: rejection.status })
+    return Response.json({ id: 1, status: 'queued', ...body }, { status: 201 })
   }) as typeof fetch
-  return { calls, grants, catalog }
+  return calls
 }
 
-test('submitting selected offers grants the peer before sending the friend request', async () => {
-  const { calls, grants, catalog } = backend()
+test('selected requested and offered capabilities reach the native submission together', async () => {
+  const calls = backend()
   const value = {
     target_name: 'iphone.alice.dhttp.net', description: 'Hello',
-    requested_capabilities: ['iphone.alice.dhttp.net/message#message'], offered_capabilities: [catalog[0].id],
+    requested_capabilities: ['dev.dhttp.net/message#message'],
+    offered_capabilities: ['dev.dhttp.net/note#read'],
   }
   expect((await api.sendContactRequest(value)).status).toBe('queued')
-  expect(grants).toEqual([{ api: '/std/message', method: 'POST', effect: 'allow' }])
-  expect(calls.map(call => [call.method, call.path])).toEqual([
-    ['GET', '/std/acl/capabilities'], ['PATCH', '/std/acl/allow/iphone.alice.dhttp.net'], ['POST', '/std/contact/local/requests'],
-  ])
-  expect(calls.at(-1)?.body).toEqual(value)
+  expect(calls).toEqual([{ path: '/std/contact/local/requests', method: 'POST', body: value }])
 })
 
-test('only the explicitly offered operations are granted', async () => {
-  const { grants, catalog } = backend()
-  await api.sendContactRequest({ target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [catalog[0].id], offered_capabilities: [catalog[1].id] })
-  expect(grants).toEqual([
-    { api: '/std/note', method: 'GET', effect: 'allow' }, { api: '/std/note/items', method: 'GET', effect: 'allow' },
-  ])
+test('an empty offer remains empty in the native submission', async () => {
+  const calls = backend()
+  await api.sendContactRequest({
+    target_name: 'iphone.alice.dhttp.net', description: '',
+    requested_capabilities: ['dev.dhttp.net/message#message'], offered_capabilities: [],
+  })
+  expect(calls).toHaveLength(1)
+  expect(calls[0].body).toMatchObject({ offered_capabilities: [] })
 })
 
-test('an unselected offer grants nothing', async () => {
-  const { calls, grants } = backend()
-  await api.sendContactRequest({ target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [], offered_capabilities: [] })
-  expect(grants).toEqual([])
-  expect(calls.map(call => call.path)).toEqual(['/std/contact/local/requests'])
-})
-
-test('unknown offers are rejected before any ACL or request writes', async () => {
-  const { calls, grants, catalog } = backend()
-  await expect(api.sendContactRequest({ target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [], offered_capabilities: [catalog[0].id, 'missing'] })).rejects.toThrow()
-  expect(grants).toEqual([])
-  expect(calls.every(call => call.method === 'GET')).toBe(true)
-})
-
-test('a failed grant does not submit an offer that is not actually authorized', async () => {
-  const { calls, catalog } = backend({ failGrant: true })
-  await expect(api.sendContactRequest({ target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [], offered_capabilities: [catalog[0].id] })).rejects.toThrow('Grant failed')
-  expect(calls.some(call => call.path === '/std/contact/local/requests')).toBe(false)
-})
-
-test('a failed submission is reported after the explicit permission grant', async () => {
-  const { grants, catalog } = backend({ failSubmit: true })
-  await expect(api.sendContactRequest({ target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [], offered_capabilities: [catalog[0].id] })).rejects.toThrow('Submission failed')
-  expect(grants).toEqual([{ api: '/std/message', method: 'POST', effect: 'allow' }])
-})
+for (const rejection of [
+  { status: 409, message: 'selected capability unavailable' },
+  { status: 409, message: 'local contact blocks offered capabilities' },
+  { status: 500, message: 'Grant failed' },
+  { status: 500, message: 'Submission failed' },
+]) {
+  test(`native rejection is reported without separate ACL writes: ${rejection.message}`, async () => {
+    const calls = backend(rejection)
+    const operation = api.sendContactRequest({
+      target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [],
+      offered_capabilities: ['dev.dhttp.net/message#message'],
+    })
+    await expect(operation).rejects.toBeInstanceOf(ApiError)
+    await expect(operation).rejects.toMatchObject(rejection)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].path).toBe('/std/contact/local/requests')
+  })
+}
