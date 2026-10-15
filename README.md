@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0--preview.1-1f6feb?style=flat-square" alt="Version 0.9.0-preview.1">
+  <img src="https://img.shields.io/badge/version-0.9.0--preview.2-1f6feb?style=flat-square" alt="Version 0.9.0-preview.2">
   <img src="https://img.shields.io/badge/Rust-2024-dea584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4c956c?style=flat-square" alt="Apache-2.0 license"></a>
 </p>
@@ -31,7 +31,7 @@ and WASM components. See the [configuration API](pishoo/docs/config-api.md),
 
 ### Local development build
 
-The 0.9.0-preview.1 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
+The 0.9.0-preview.2 release preparation uses compatible crates.io versions of DHTTP, DQUIC, DDNS, H3X and daccess. Publication order and lockfile preparation are listed in [RELEASING.md](RELEASING.md); no sibling checkouts are required. Use Rust 1.97.1, Bun 1.4.2 and Node.js 23.11.0 (the tested tool versions) on PATH, plus a native C/C++ build toolchain, then run:
 
 ```sh
 git clone --branch feat/release-pishoo-0.9.0 https://github.com/genmeta/pishoo.git
@@ -41,7 +41,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](std/apps/workspace/README.md) for independent publication to the store. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override this snapshot; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build all three with [the Workspace scripts](std/apps/workspace/README.md) for independent publication to the store. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -136,7 +136,7 @@ Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including WASM execution at `/std/api/<LibId>`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths. See [system paths and migration](pishoo/docs/system-paths.md).
 
-Database configuration is available over H3 through `GET/PATCH /std/sys/settings` and `GET/PUT/PATCH/DELETE /std/sys/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; proxy and listen changes require restart. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
+Database configuration is available over H3 through `GET/PATCH /std/sys/settings` and `GET/PUT/PATCH/DELETE /std/sys/proxies`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; the running process applies proxy and listen changes automatically. See [Configuration API](pishoo/docs/config-api.md) for payloads and native H3 client examples.
 
 First startup with valid identity credentials creates `db/`, `file/`, `libs/std/`, `apps/std/`, `logs/`, `repo/`, and `templates/` under each identity. New configuration uses `listen=3` (public and LAN scopes) and no proxies. New access databases allow authenticated named identities to `POST /std/contact` and all visitors to `GET /std/acl/capabilities` for capability discovery. All visitors can also read `GET /std/profile` and its avatar/context subpaths, and `HEAD /std/profile/context`, before becoming contacts. The Workspace App keeps the public `#/intro` page; its `/std/workspace` static pages and assets allow GET/HEAD for all visitors, while management APIs remain protected. Chat capabilities still require approval. Existing configuration, profile data, queues, and user access rules are preserved, including deleted defaults. Initialization is performed by the application, not package installation scripts. See [Initialization and database compatibility](pishoo/docs/config-api.md#启动初始化与数据库兼容).
 
@@ -202,7 +202,7 @@ and describes the implemented WEBC v3 host installation and package signature pr
 For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [Journal example](pishoo/examples/journal/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with Journal. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
 
 1. Build a standard WASI HTTP backend component, keep the browser frontend in `public/`, and declare the API in `openapi.json`.
-2. Use `package-webc` as documented in the guide to check package identity/version, generate static GET/HEAD operations and sign the complete release.
+2. Use `package-webc` as documented in the guide to check package identity/version, validate the manifest, mapped resources and backend and sign the complete release.
 3. Check and install the resulting package:
 
 ```sh
@@ -227,7 +227,7 @@ For directive reference and additional reverse-proxy examples, see the official 
 
 ### Management commands
 
-Local commands use the current account’s `~/.dhttp` and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Resource changes require a service restart.
+Local commands use the current account’s `~/.dhttp` and the initialized identity's files. Select with `--id NAME` or `-i NAME` before or after the resource; without it, `settings.toml` must define `[default].name`. Queries write stdout, identity/save notices write stderr. Settings changes apply automatically; offline package changes load on the next service start.
 
 ```sh
 pishoo listen -i alice.smith internal

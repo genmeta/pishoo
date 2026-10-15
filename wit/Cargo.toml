@@ -1,6 +1,6 @@
 [package]
 name = "pishoo-sdk"
-version = "0.1.0-preview.1"
+version = "0.1.0-preview.2"
 edition = "2024"
 description = "Guest bindings for Pishoo WASM identity interfaces"
 license = "Apache-2.0"

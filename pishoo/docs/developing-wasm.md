@@ -182,7 +182,7 @@ kind 选择 app/lib；省略时仍按 lib 处理。两种包都递归解析精�
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0-preview.1", path = "../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.2", path = "../sdk" }
 ```
 
 上面的 path 假设开发 SDK 的 `sdk/` 与项目目录相邻。SDK 当前从源码或开发者发行包获取，尚未发布到 crates.io；绑定说明见 [SDK 文档](sdk.md)。
