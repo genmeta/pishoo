@@ -1151,9 +1151,9 @@ dependencies = [
 
 [[package]]
 name = "daccess"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cc5cc4eca528434b04a1a70cbf44f750b38de953654fe9d0fc105b1b42a28df"
+checksum = "20cabdd2286923b303d1279cd17f4226b2d6ed702f971af69d07d3f1428d98d6"
 dependencies = [
  "axum",
  "chrono",
@@ -1434,9 +1434,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c931444003e6a593bbe49d94c71294f95b4ac8fff33362b66039d71e9a36d75a"
+checksum = "0b420c048ac0cc485029cc39684616e2ed6e56a0b1072219797d050189732fd9"
 dependencies = [
  "bytes",
  "dhttp-home",
@@ -1466,9 +1466,9 @@ dependencies = [
 
 [[package]]
 name = "dhttp-home"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06d27baa49bd85f6c358ac84032d3461e05dc7a8a465e2b7f95757f5542b7732"
+checksum = "3827ef3f9414f2956aa9a742b403ecbb688f1f8aa7938ee02b0a5ae6a1934e39"
 dependencies = [
  "dirs",
  "futures",
