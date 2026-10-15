@@ -1,14 +1,18 @@
 //! Real user Lib acceptance, using private WASI SQLite and native resource APIs.
-use super::*;
-use crate::sandbox::tests::{package_fixture, publisher};
-use crate::sandbox::{install_lib, remove_lib};
+use std::path::Path;
+
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
 use futures::{FutureExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tower::ServiceExt;
+
+use super::*;
+use crate::sandbox::{
+    install_lib, remove_lib,
+    tests::{package_fixture, publisher},
+};
 
 #[derive(Debug)]
 struct Peer(EndpointAddr);

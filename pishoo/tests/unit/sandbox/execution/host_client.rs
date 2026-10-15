@@ -1,6 +1,7 @@
 //! Real component coverage for tuple identity, standard HTTP, and CLI run.
-use super::*;
 use serde_json::{Value, json};
+
+use super::*;
 
 #[path = "../../../support/network_credentials.rs"]
 mod credentials;

@@ -31,9 +31,10 @@ fn initialize(home: &Path, name: &str) {
     db.execute_batch("CREATE TABLE settings(listen INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT PRIMARY KEY, proxy_pass TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
 }
 fn component() -> Vec<u8> {
+    use std::{collections::BTreeMap, sync::Arc};
+
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
-    use std::{collections::BTreeMap, sync::Arc};
     use webc::v3::{
         SignatureAlgorithm, Timestamps,
         write::{Directory, FileEntry, Writer},
