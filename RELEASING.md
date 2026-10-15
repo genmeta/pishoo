@@ -35,8 +35,9 @@ publication and production deployment remain separate from this preparation PR.
 
 The legacy gateway stub is not published. pishoo-common tracks 0.9.0-preview.2
 (0.9.0~preview.2-1 for DEB/RPM). publish-sdk.yml publishes pishoo-sdk 0.1.0-preview.2 from wit/
-on the same release tag. Existing SDK versions use Trusted Publishing for genmeta/pishoo and
-publish-sdk.yml; first publication requires CARGO_REGISTRY_TOKEN.
+on the same release tag. SDK publication uses CARGO_REGISTRY_TOKEN when configured; unlike gmutils,
+genmeta/pishoo has no Trusted Publishing configuration. Without a repository
+token, existing crates can use OIDC only after configuring a trusted publisher.
 
 ## Tag-triggered artifacts
 
@@ -90,5 +91,10 @@ The preparation checks above used fixed upstream PR sources. Final checks use
 published crates through the refreshed registry lockfile. Their CI results must
 pass before merging and tagging.
 
-Existing crates use Trusted Publishing. CARGO_REGISTRY_TOKEN is reserved for
-first publication of a missing crate.
+The SDK workflow prefers the repository CARGO_REGISTRY_TOKEN when configured.
+It falls back to OIDC only when no token is configured and the crate already exists.
+
+To retry SDK publication without moving the release tag, dispatch
+`publish-sdk.yml` from main with `release_tag=v0.9.0-preview.2`. It validates and
+checks out the exact annotated tag. Empty input, PRs and main pushes remain
+publication dry runs.
