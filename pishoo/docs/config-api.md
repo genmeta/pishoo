@@ -2,26 +2,26 @@
 
 配置接口由现有 dhttp Endpoint 的 H3 监听提供，参考 minidocs 的系统 API 命名与版本协商，以及当前 daccess 管理 API。每个身份操作自己的 `db/config.db`，继续使用 schema v1。
 
-配置路径统一使用 `/std/sys/settings` 和 `/std/sys/proxies`，旧 `/std/pishoo` 配置路径不提供别名；已有路径权限规则不自动迁移。
+配置路径统一使用 `/std/sys/listen` 和 `/std/sys/forward`，旧 `/std/pishoo` 配置路径不提供别名；已有路径权限规则不自动迁移。
 
 ## 资源和方法
 
 | 路径 | 方法 | 行为 | 成功响应 |
 | --- | --- | --- | --- |
-| `/std/sys/settings` | GET | 读取数据库中的 enabled/listen | 设置对象 |
-| `/std/sys/settings` | PATCH | 更新指定设置，至少提供一个字段 | 保存后的设置对象 |
-| `/std/sys/proxies` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
-| `/std/sys/proxies` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
-| `/std/sys/proxies` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
-| `/std/sys/proxies?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
+| `/std/sys/listen` | GET | 读取数据库中的 listen 模式 | 设置对象 |
+| `/std/sys/listen` | PATCH | 设置 listen 模式，必须提供 listen 字段 | 保存后的设置对象 |
+| `/std/sys/forward` | GET | 无 query 读取全部；`?location=...` 精确读取一条 | 数组或单条对象 |
+| `/std/sys/forward` | PUT | 原子替换完整代理规则列表，空数组清除全部规则 | 保存后的规则数组 |
+| `/std/sys/forward` | PATCH | 添加或覆盖单个 location，其他规则不变 | 保存后的规则对象 |
+| `/std/sys/forward?location=...` | DELETE | 删除单条，缺失亦成功；无 location 拒绝 | 204，无 Body |
 
 设置对象示例：
 
 ```json
-{"enabled": true, "listen": 3}
+{"listen": "all"}
 ```
 
-`enabled` 仅接受 JSON 布尔值，控制是否加载整个 Server；disable 保留 listen 和代理配置。`listen` 仅接受整数 0、1、2、3，依次表示关闭、内网、外网、两者。宿主命令 exec 已移除；新库的 settings 含 enabled 和 listen，已有库的旧 exec 列保留但不读取或更新，PATCH 提交 exec 字段返回400。PATCH 省略的字段保持原值；并发更新通过 SQLite 即时事务串行执行，避免丢失其他字段的更新。
+`listen` 仅接受字符串 `loopback`、`internal`、`external`、`all`、`off`，分别表示仅回环、仅内网、仅外网、全部范围、完整停用身份 Server。`all` 包含回环、内网和外网；`off` 释放监听、发布器和运行资源。请求对象必须恰好包含一个 `listen` 字段，数字、`both`、`enable`、`enabled` 和其他字段均返回 400。新库 settings 仅有 TEXT listen 一列，没有独立启用开关或隐藏的旧范围。写入通过 SQLite 即时事务串行执行。
 
 代理规则数组示例：
 
@@ -53,19 +53,19 @@ PATCH 代理接收单个规则对象；PUT 代理接收数组。location query �
 
 ## 生效规则与 H3 调用
 
-成功写入表示期望配置已保存，GET 展示数据库配置。运行进程每秒扫描并串行应用 enabled、listen 和代理配置，新身份目录也自动发现；不提供 SIGHUP 重载。扫描等待当前 DNS/OCSP 批结束，身份加载、编译及关闭也可能增加生效延迟；接口不承诺一秒内完成。生效和失败在服务日志中记录。详见 [运行时生命周期](server-lifecycle.md)。
+成功写入表示期望配置已保存，GET 展示数据库配置。运行进程每秒扫描并串行应用 listen 和代理配置，新身份目录也自动发现；`pishoo reload` 可发送 SIGHUP 提前触发同一轮扫描。扫描等待当前 DNS/OCSP 批结束，身份加载、编译及关闭也可能增加生效延迟；接口不承诺一秒内完成。生效和失败在服务日志中记录。详见 [运行时生命周期](server-lifecycle.md)。
 
 使用原生 H3 示例客户端，在客户端身份所属账户下运行，并以目标身份的同名凭据连接：
 
 ```sh
 export PISHOO_CLIENT_IDENTITY=alice.dhttp.net
-cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/settings
-cargo run --locked -p pishoo --example pishoo-client -- patch /std/sys/settings '{"listen":1}'
-cargo run --locked -p pishoo --example pishoo-client -- put /std/sys/proxies '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
-cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
+cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/listen
+cargo run --locked -p pishoo --example pishoo-client -- patch /std/sys/listen '{"listen":"internal"}'
+cargo run --locked -p pishoo --example pishoo-client -- put /std/sys/forward '[{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]'
+cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/forward
 ```
 
-接口随身份监听提供。禁用 Server 或 listen=0 后该身份的 HTTP 管理入口不可达，使用本机 `genmeta identity ensite --id NAME` 或 `genmeta identity listen --id NAME internal` 恢复相应能力。
+接口随身份监听提供。listen=off 后该身份的 HTTP 管理入口不可达，使用本机 `genmeta listen --id NAME all` 或 `genmeta listen --id NAME internal` 恢复相应能力。
 
 ## 启动初始化与数据库兼容
 
@@ -77,7 +77,7 @@ root 服务创建上述身份子目录、安装或更新 App/Lib 时，目录与
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
-| config.db | 缺失时不自动创建；已有空库恢复为 schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
+| config.db | 缺失时不自动创建；已有空库恢复为 schema v1；settings 一行 listen=all（回环、内网和外网均监听）；代理为空 | 校验版本、配置和值；有效旧 v1 事务转换为字符串 listen，代理及其他表保留 |
 | access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/promissions、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 
@@ -93,56 +93,8 @@ root 服务创建上述身份子目录、安装或更新 App/Lib 时，目录与
 
 磁盘 Lib 管理与离线命令见[管理命令与 API](management.md)。本机资源命令不启动 Server，也不自动重启。
 
-### enabled 的 v1 兼容
+### listen 的 v1 兼容
 
-不增加 schema v2。GET 只读兼容缺少 enabled 列的有效 v1：旧 listen=0 返回 enabled=false/listen=3，旧 1/2/3 返回 enabled=true并保留范围；旧0未保存之前的范围，因此启用默认 both。首次正常加载或配置写入在 SQLite 即时事务中完整验证并补 enabled 列，保留代理、旧 exec 列及其他数据。无效版本、损坏配置或写入失败不提交补列。已有 enabled 列严格校验为整数0/1；enabled=true/listen=0仍可运行出站 worker，enabled=false则不加载 Server。
+schema 保持 v1。GET 只读兼容旧数字 listen：0/1/2/3 分别转换为 off/internal/external/all；旧 enabled=0 一律转换为 off，enabled 非整数0/1则拒绝。正常启动或首次配置写入在事务内完整校验后，将旧 settings 表转换为仅含 TEXT listen 的单列表，删除 enabled 和已废弃的 exec 列，代理、制品及其他表保持。无效配置或写入失败不提交转换。数字只用于读取旧数据库，不是新 API 或命令行输入。
 
-旧版 gmutils 的 ensite/dissite 仍只写 listen，不能操作新增的完整 Server 开关；本版使用 Pishoo 的 enable/disable CLI 或 settings API。gmutils 适配需要使用同一 enabled 语义。
-
-Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化；Workspace 仅为前端 App。旧 workspace.db、chat.db 保留，不再由原生启动初始化。
-
-### 加好友前的默认访问
-
-新身份通过现有 daccess 初始化以下默认规则。规则可由管理员修改或移除，
-重启不覆盖已有权限选择；安装业务包本身不新增授权。
-
-| 请求 | 默认访问 | 用途 |
-| --- | --- | --- |
-| GET/HEAD /std/workspace | 所有访问者（含匿名）；前缀覆盖静态资源 | 保留 Workspace 的公开名片页面 `#/intro` |
-| GET /std/acl/promissions | 所有访问者（含匿名） | 发现可申请的业务能力 |
-| GET /std/profile | 所有访问者（含匿名） | 读取对方公开资料 |
-| GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，允许匿名 | 显示头像；未设置头像可返回 404 |
-| GET /std/profile/context | 继承 GET /std/profile 前缀规则，允许匿名 | 资料上下文与真实访客身份 |
-| HEAD /std/profile/context | 所有访问者（含匿名） | 公开名片上下文响应头 |
-| POST /std/contact | 已认证具名身份（**） | 提交联系人申请，匿名拒绝 |
-| GET /std/contact/self | 处理器按已验证 Visitor 和申请编号校验 | 仅查询自己的申请/授权状态，不增加公开 ACL |
-
-加好友页面先并行读取目标 profile 与 capabilities，再按 avatar_url 读取头像。
-申请发送到本机 POST /std/contact/local/requests，由 Pishoo 使用自己的身份投递到
-对方 POST /std/contact。批准后申请方轮询 GET /std/contact/self。
-
-`/std/dhttp/*` 是本机所有者代理；`/std/contact/local/*`、联系人列表/审批和 ACL
-管理接口保持管理权限。Profile 的 PATCH、头像 PUT/DELETE 不开放。
-`POST /std/message` 仍需双方明确授权，联系人获批不等于聊天能力获批。
-公开名片前端继续由 Workspace App 提供，Profile Lib 提供资料数据。`#/intro` 是浏览器片段，不会发送到服务器，因此 GET/HEAD 规则覆盖 Workspace 静态页面和资源，不能只按片段授权。加载静态界面不授予后台管理权限；其他方法和相邻前缀仍受限。
-
-已有身份保留原配置，需要采用这些默认值时，在目标身份上显式执行：
-
-```sh
-genmeta access --id NAME /std/acl/promissions allow '*?' --method GET
-genmeta access --id NAME /std/profile allow '*?' --method GET
-genmeta access --id NAME /std/profile/context allow '*?' --method HEAD
-genmeta access --id NAME /std/contact allow '**' --method POST
-genmeta access --id NAME /std/workspace allow '*?' --method GET
-genmeta access --id NAME /std/workspace allow '*?' --method HEAD
-```
-
-这些管理 API 修改立即生效，无需重启。新的代码默认值在更新后的 Pishoo
-初始化新身份时生效；仅重新编译不会改变正在运行的旧进程。
-
-
-标准 `std.dhttp.net/workspace` App 与 `std.dhttp.net/profile` Lib 首次安装时，
-允许复用上述精确的只读 Allow/All 默认规则，以免默认公开权限反过来阻止安装。
-这不豁免其他发布者、自定义规则、通配方法或写操作的旧权限冲突检查。
-
-2026-10-20：个人身份以所属账户 home 的 UID/GID 修复 .dhttp、身份和各子目录归属；不再创建 apps/std。宿主创建的数据库、访问日志、OCSP 与制品临时内容在发布时归身份账户。数据库字段和包管理路径见 [本轮契约](../../design/package-management-2026-10-20.md)。
+`genmeta listen --id NAME loopback|internal|external|all|off` 直接操作本机配置，停用后也可恢复；省略模式只读，指定模式时创建缺失配置，`--global` 选择系统 home。off 停用不保存旧范围。已有路径的 ACL 规则不会自动改写，应显式改用新的 listen/forward 路径。

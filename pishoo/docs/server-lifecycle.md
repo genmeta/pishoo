@@ -1,6 +1,6 @@
 # Server 运行时生命周期
 
-2026-10-15：本机身份配置由 gmutils 修改；`pishoo reload`（前台使用 `--pid PID`）发送 SIGHUP，立即调度串行配置重载。每秒自动发现继续保留。重载应用身份增删、enabled/listen 和代理，不重新编译 Lib 或轮换证书。
+2026-10-15：本机身份配置由 gmutils 修改；`pishoo reload`（前台使用 `--pid PID`）发送 SIGHUP，立即调度串行配置重载。每秒自动发现继续保留。重载应用身份增删、listen 和代理，不重新编译 Lib 或轮换证书。
 
 ## 身份目录发现
 
@@ -17,22 +17,20 @@ Linux root 进程日志默认写入 `/etc/dhttp/logs/error.log`。
 
 ## 配置与操作
 
-`settings.enabled` 保存是否启动 Server，`listen` 保存范围0/1/2/3；两者独立。`ServerConfig.enabled: bool` 是持久配置的内存值。Server 直接持有实际登记资源 `listener: Option<dhttp::ListenFuture>`；丢弃该 future 撤销名称/Service 登记，不关闭共享连接池、socket 或已有请求。未监听、加载和关闭阶段没有 listener。没有额外 active、failed、registered 标志、状态容器、通知信号或后台编译协调器。
-
+`settings.listen` 和 `ServerConfig.listen: String` 只保存 `loopback/internal/external/all/off`。off 完整停用身份，其余值直接指定监听范围；all 包含回环、内网和外网。没有独立 enabled 或隐藏的旧范围。Server 直接持有 `listener: Option<dhttp::ListenFuture>`；丢弃 future 撤销名称/Service 登记，共享连接池和在途请求继续按现有生命周期释放。
 ```sh
-genmeta identity ensite --id alice.smith
-genmeta identity dissite --id alice.smith
-genmeta identity listen --id alice.smith internal
-genmeta server proxy --id alice.smith /api 127.0.0.1:8080
+genmeta listen --id alice.smith all
+genmeta listen --id alice.smith off
+genmeta listen --id alice.smith internal
+genmeta forward --id alice.smith /api 127.0.0.1:8080
 ```
 
-同名身份及 owner 的现有 `PATCH /std/sys/settings` 接收 `{"enabled":false}` 或 `{"enabled":true}`，并可同时提交 listen；省略字段保持原值。GET/PATCH 返回 enabled/listen。代理接口和权限保持不变。CLI/API 成功表示保存的期望配置，不代表运行时已应用；生效和失败记录在服务日志中。进程停止时本机命令仍能保存配置，启动后应用。禁用或 listen=0 后该身份的 HTTP 管理入口不可达，需要本机命令恢复。
-
+同名身份及 owner 的 `PATCH /std/sys/listen` 接收 `{"listen":"MODE"}`；GET/PATCH 只返回 listen。转发接口为 `/std/sys/forward`，规则字段与授权保持。CLI/API 成功表示期望配置已保存，生效和失败记录在日志中。off 后 HTTP 入口不可达，使用本机 `genmeta listen --id NAME internal` 恢复。省略模式只查询；带模式时创建缺失配置，`--global` 选择系统 home。
 ## 串行资源更新
 
 run 用现有 Server 集合、共享 WasmRuntime 和一个局部一秒 Interval 对照 dhttp-home 发现结果与 SQLite 配置。没有变化时不重建 Router、不重新编译、不触发 DNS 发布。扫描等待当前 DNS 发布批及 OCSP 刷新完成；加载、编译和最长15秒的单身份关闭也可能增加延迟，不保证一秒完成。
 
-- 启用或新发现：已保存的 disabled 配置在凭据/WASM/worker 加载前跳过。启用后串行校验凭据、加载数据库及 Lib、构造 Router，监听成功后加入集合并进入 DNS 维护。缺少 `db/config.db` 的身份在凭据、OCSP、数据库和服务加载前跳过，不创建配置、不监听或发布地址。gmutils apply 仅在用户选择启用服务时创建配置；也可显式运行 `genmeta identity ensite --id NAME` 创建并启用。
+- 启用或新发现：已保存的 off 配置在凭据/WASM/worker 加载前跳过。启用后串行校验凭据、加载数据库及 Lib、构造 Router，监听成功后加入集合并进入 DNS 维护。缺少 `db/config.db` 的身份在凭据、OCSP、数据库和服务加载前跳过，不创建配置、不监听或发布地址。gmutils apply 仅在用户选择启用服务时创建配置；也可显式运行 `genmeta listen --id NAME all` 创建并启用。
 - 禁用或移除：从集合移出，先撤销监听和 publisher，再清空 Router、关闭 Sandbox/Workspace/Chat 并等待回收；保留身份与磁盘数据。等待应用任务回收之前，立即从所有网卡/IP 对应的 mDNS 实例删除该身份的本机应答记录；关闭内网监听、切换为仅外网监听、监听恢复失败和进程退出同样清理。其他身份和共享 mDNS 查询资源保持。DDNS 只停止发布及续期，不发送公网撤回请求，已有远端记录自然过期。已进入的 HTTP/Lib 请求遵循既有资源生命周期，关闭超时明确记录。
 - 代理变更：校验完整配置后替换 Router，复用 Endpoint、Sandbox、AccessService、Workspace 和 Chat。每个请求短暂克隆 Router 后释放锁，在途请求继续使用已取得的资源。
 - listen 变更：先验证发布凭据和准备 publisher，然后释放旧监听并登记新范围；失败恢复原配置和原监听。恢复也失败则关闭该身份，下轮重新加载。全局 Network 及其他身份不受影响。
@@ -43,10 +41,10 @@ run 用现有 Server 集合、共享 WasmRuntime 和一个局部一秒 Interval 
 
 ## SQLite v1 兼容
 
-新库 settings 只增加 enabled 整数列，严格限定0/1，schema仍为v1。旧v1缺列时，GET只读映射旧0为 enabled=false/listen=3，旧1/2/3为 enabled=true及原范围。旧0没有保存之前的范围，重新启用默认 both。正常加载或配置写事务完整校验后原子补列；原代理、旧exec列和其他数据保留，无效配置/版本不修补。enabled存在后，listen=0只停入站监听，enabled=false完全停用 Server。
+新库 settings 仅保存 TEXT listen，schema 仍为 v1。GET 只读兼容旧0/1/2/3为 off/internal/external/all；旧 enabled=0 或 listen=0 均为 off。正常启动和首次配置写入在完整验证后的事务中替换旧 settings，删除 enabled 和废弃 exec 列，代理及其他表保留。无效数据库不修补。
 
-新版 gmutils 的 ensite/dissite 操作 enabled，禁用保留监听范围；listen 直接修改本机数据库。旧 v1 缺 enabled 时继续兼容 listen。
+仅 internal/all 发布 mDNS，external/all 发布公网 DNS，loopback 不发布网络地址。停用不保存先前范围，本机 listen 命令显式选择新范围后恢复。
 
 ## 验证
 
-工作区回归通过；真实主循环 HTTP/3 验收通过，覆盖代理在线替换、listen 关闭/恢复、完整禁用/启用、新身份发现、单身份失败隔离、身份移除及 SIGTERM 释放监听。库测试覆盖 enabled 类型校验、部分更新、重复启停保留范围/代理/exec、旧v1只读兼容与事务补列、无效配置不补列、禁用身份跳过凭据/Lib/worker、代理扫描复用Sandbox、失效配置库不重建、发现失败保留资源及删除身份回收。真实网络验收单独运行 `server::network_tests::live_run_discovers_enables_disables_and_updates_proxies_without_restart`，使用独立测试CA/OCSP、原生QUIC/H3和本机HTTP上游，驱动实际run循环及SIGTERM。
+配置回归覆盖五种模式、旧数字/开关迁移、旧路径404、非法输入拒绝、转发原子写入和授权。运行循环回归覆盖 off 移除 Server、配置失败保留旧资源、恢复监听和 mDNS 清理。真实网络验收单独运行 `server::network_tests::live_run_discovers_enables_disables_and_updates_proxies_without_restart`。

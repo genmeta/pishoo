@@ -51,7 +51,7 @@ pub async fn run() -> Result<()> {
                 servers.insert(server.name().to_owned(), server);
             }
         }
-        for server in servers.values_mut().filter(|s| s.config.listen != 0) {
+        for server in servers.values_mut().filter(|s| s.config.listen != "off") {
             server.listener = Some(server.listen().await?);
             tracing::trace!(endpoint = server.name(), listen = server.config.listen, "Pishoo listener ready");
         }
@@ -74,7 +74,7 @@ pub async fn run() -> Result<()> {
         let mut removed_bounds = Vec::new();
         loop {
             let endpoints = servers.values()
-                .filter(|s| s.config.listen & 1 != 0)
+                .filter(|s| matches!(s.config.listen.as_str(), "internal" | "all"))
                 .map(|s| s.endpoint.clone()).collect::<Vec<_>>();
             let mut next_due = match dns::maintain_mdns(&mdns, &endpoints, &removed_bounds).await {
                 Ok(()) => None,
@@ -208,10 +208,10 @@ pub(super) async fn load_profile(
     match crate::setup::config_database(
         &profile,
         &http::Method::GET,
-        &http::Uri::from_static("/std/sys/settings"),
+        &http::Uri::from_static("/std/sys/listen"),
         None,
     ) {
-        Ok(settings) if settings["enabled"] == false => return Ok(None),
+        Ok(settings) if settings["listen"] == "off" => return Ok(None),
         Ok(_) => {}
         Err(error) => {
             // Preserve startup recovery of a genuinely empty database, but do not
@@ -228,7 +228,7 @@ pub(super) async fn load_profile(
         }
     }
     match Server::load(profile, runtime).await {
-        Ok(mut server) if !server.config.enabled => {
+        Ok(mut server) if server.config.listen == "off" => {
             server.close().await?;
             Ok(None)
         }
@@ -362,7 +362,7 @@ pub(super) async fn reconcile_profiles(
                     let mut conn = servers[&name].config_db.lock().unwrap();
                     read_server_config(&mut conn)?
                 };
-                if !config.enabled {
+                if config.listen == "off" {
                     let mut server = servers.remove(&name).unwrap();
                     changed = true;
                     remove_mdns_name(mdns, &name);
@@ -372,12 +372,14 @@ pub(super) async fn reconcile_profiles(
                     let server = servers.get_mut(&name).unwrap();
                     if !same_config(&server.config, &config) {
                         let result = apply_config(server, config).await;
-                        if server.config.listen & 1 == 0 || server.listener.is_none() {
+                        if !matches!(server.config.listen.as_str(), "internal" | "all")
+                            || server.listener.is_none()
+                        {
                             remove_mdns_name(mdns, &name);
                         }
                         // If re-registration and rollback both fail, release the resources
                         // and retry loading this identity on the next scan.
-                        if server.config.listen != 0 && server.listener.is_none() {
+                        if server.config.listen != "off" && server.listener.is_none() {
                             let mut server = servers.remove(&name).unwrap();
                             changed = true;
                             if let Err(error) = server.close().await {
@@ -390,7 +392,7 @@ pub(super) async fn reconcile_profiles(
                     }
                 }
             } else if let Some(mut server) = load_profile(profile, runtime.clone()).await? {
-                if server.config.listen != 0 {
+                if server.config.listen != "off" {
                     match server.listen().await {
                         Ok(listener) => server.listener = Some(listener),
                         Err(error) => {
@@ -414,8 +416,7 @@ pub(super) async fn reconcile_profiles(
 }
 
 fn same_config(a: &ServerConfig, b: &ServerConfig) -> bool {
-    a.enabled == b.enabled
-        && a.listen == b.listen
+    a.listen == b.listen
         && a.proxy_locations.len() == b.proxy_locations.len()
         && a.proxy_locations
             .iter()
@@ -430,10 +431,10 @@ fn same_config(a: &ServerConfig, b: &ServerConfig) -> bool {
 
 async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
     let scope_changed = server.config.listen != config.listen;
-    let publisher = if scope_changed && config.listen != 0 {
+    let publisher = if scope_changed && config.listen != "off" {
         dns::authority(&server.endpoint)
             .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
-        if config.listen & 2 != 0 {
+        if matches!(config.listen.as_str(), "external" | "all") {
             Some(dns::publisher(&server.endpoint)?)
         } else {
             None
@@ -447,12 +448,12 @@ async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
     if scope_changed {
         // Dropping the resource unregisters this name without closing shared connections.
         server.listener.take();
-        if server.config.listen != 0 {
+        if server.config.listen != "off" {
             match server.listen().await {
                 Ok(listener) => server.listener = Some(listener),
                 Err(error) => {
                     server.config = previous;
-                    if server.config.listen != 0 {
+                    if server.config.listen != "off" {
                         match server.listen().await {
                             Ok(listener) => server.listener = Some(listener),
                             Err(rollback) => tracing::error!(identity = server.name(), %rollback,
@@ -470,7 +471,7 @@ async fn apply_config(server: &mut Server, config: ServerConfig) -> Result<()> {
 }
 
 pub(super) async fn apply_ocsp(server: &mut Server, endpoint: dhttp::Endpoint) -> Result<()> {
-    let publisher = if server.config.listen & 2 != 0 {
+    let publisher = if matches!(server.config.listen.as_str(), "external" | "all") {
         Some(dns::publisher(&endpoint)?)
     } else {
         None
