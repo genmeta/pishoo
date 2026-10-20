@@ -21,7 +21,7 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 标准发布者 Lib 入口为 `/std` + 声明路径，其他 Lib 为 `/<name>` + 声明路径；App 为 `/<name>/`，前端页面路径导航、后端字面量路径/query。已安装清单从数据库读取，位于 `/std/sys/lib/list`、`/std/sys/app/list`；不提供 loaded/check/openapi 辅助管理接口。
 
-宿主发行包不携带业务 App/Lib，首次初始化不安装或下载默认制品。Pishoo 和提供 `genmeta install` 的新版 gmutils 安装顺序不限；配置好身份、启动该身份的 Pishoo 服务后，由身份所属账户执行 `genmeta install workspace --id NAME`。宿主从商店下载、验签并递归安装精确后端依赖，在线即时生效；所需版本须已发布。卸载和依赖保护同其他 App/Lib，安装不授予额外权限。构建与独立发布制品详见 [Workspace 前端](../../std/apps/workspace/README.md)。
+宿主发行包不携带业务 App/Lib，首次初始化不安装或下载默认制品。Pishoo 和提供 `genmeta install` 的新版 gmutils 安装顺序不限；配置好身份、启动该身份的 Pishoo 服务后，由身份所属账户执行 `genmeta install workspace --id NAME`。宿主从商店下载、验签并递归安装精确后端依赖，在线即时生效；所需版本须已发布。卸载和依赖保护同其他 App/Lib，安装不授予额外权限。构建与独立发布制品详见 [Workspace 前端](../../../workspace/README.md)。
 
 安装登记存入身份的 config.db：libs 与 apps 分开，各自 name 唯一；app_dependencies 保存完整后端 ID 和精确版本。签名制品保留在原有 publisher/name 目录。启动只加载数据库登记项，核对制品身份、版本、依赖；不扫描或自动导入其他文件。旧安装使用正常安装命令显式登记。
 

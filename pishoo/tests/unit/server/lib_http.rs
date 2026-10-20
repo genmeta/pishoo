@@ -57,10 +57,16 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     });
     dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
     let project = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut profile_doc: Value = serde_json::from_slice(
-        &std::fs::read(project.join("../std/libs/profile/openapi.json")).unwrap(),
-    )
-    .unwrap();
+    let profile_repo = std::path::PathBuf::from(
+        std::env::var_os("PISHOO_PROFILE_REPO")
+            .expect("set PISHOO_PROFILE_REPO to the independent Profile checkout"),
+    );
+    let message_repo = std::path::PathBuf::from(
+        std::env::var_os("PISHOO_MESSAGE_REPO")
+            .expect("set PISHOO_MESSAGE_REPO to the independent Message checkout"),
+    );
+    let mut profile_doc: Value =
+        serde_json::from_slice(&std::fs::read(profile_repo.join("openapi.json")).unwrap()).unwrap();
     let publisher = "alice.dhttp.net";
     profile_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"profile",
         "host":{"request-identity":"Profile caller","private-storage":"Profile data"},
@@ -70,7 +76,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     let authority = crate::package::tests::publisher(publisher, 'a');
     let profile_package = crate::package::tests::package_fixture(
         &profile_doc,
-        &std::fs::read(project.join("../std/libs/profile/dist/lib.wasm")).unwrap(),
+        &std::fs::read(profile_repo.join("dist/lib.wasm")).unwrap(),
         webc::v3::write::Directory::default(),
         &authority,
     );
@@ -88,15 +94,12 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
         webc::v3::write::Directory::default(),
         &authority,
     );
-    let mut chat_doc: Value = serde_json::from_slice(
-        &std::fs::read(project.join("../std/libs/message/openapi.json")).unwrap(),
-    )
-    .unwrap();
+    let mut chat_doc: Value =
+        serde_json::from_slice(&std::fs::read(message_repo.join("openapi.json")).unwrap()).unwrap();
     chat_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"message","host":{"request-identity":"Chat caller","private-storage":"Chat data"},"dependencies":[],"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
     let chat = crate::package::tests::package_fixture(
         &chat_doc,
-        &std::fs::read(project.join("../std/libs/message/dist/lib.wasm"))
-            .expect("build message-lib first"),
+        &std::fs::read(message_repo.join("dist/lib.wasm")).expect("build message-lib first"),
         webc::v3::write::Directory::default(),
         &authority,
     );

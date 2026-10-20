@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the Rust SDK and standalone Lib examples without publishing them."""
+"""Package the Rust SDK and developer tools without publishing them."""
 
 import argparse
 import os
@@ -50,33 +50,11 @@ def main() -> int:
                 command.append("--offline")
             subprocess.run(command, check=True)
 
-            for example in ["journal"]:
-                source = repo / "pishoo/examples" / example
-                destination = bundle / "examples" / example
-                destination.mkdir(parents=True)
-                for filename in ["Cargo.toml", "Cargo.lock", "README.md", "build.sh", "openapi.json", ".gitignore"]:
-                    shutil.copy2(source / filename, destination / filename)
-                shutil.copytree(source / "src", destination / "src")
-                if example == "journal":
-                    shutil.copytree(source / "public", destination / "public")
-                    shutil.copy2(source / "wasmer.toml", destination / "wasmer.toml")
-                    shutil.copy2(source / "app.toml", destination / "app.toml")
-                cargo_manifest = destination / "Cargo.toml"
-                text = cargo_manifest.read_text()
-                original = 'path = "../../../wit"'
-                if text.count(original) != 1:
-                    raise ValueError(f"{example}: expected exactly one repository SDK dependency")
-                cargo_manifest.write_text(text.replace(original, 'path = "../../sdk"'))
-                if example == "journal":
-                    readme = destination / "README.md"
-                    readme.write_text(readme.read_text().replace(
-                        "[SDK 文档](../../docs/sdk.md)", "[SDK 文档](../../README.md)",
-                    ))
-
             tools = bundle / "tools"
             tools.mkdir()
             shutil.copy2(repo / "pishoo/tools/package-lib.py", tools / "package-lib.py")
             shutil.copy2(repo / "pishoo/docs/sdk.md", bundle / "README.md")
+            shutil.copy2(repo / "pishoo/docs/business-repositories.md", bundle / "business-repositories.md")
             shutil.copy2(repo / "pishoo/docs/host-capabilities.md", bundle / "host-capabilities.md")
             guide = repo / "pishoo/docs/developing-wasm.md"
             (bundle / "developing-wasm.md").write_text(
