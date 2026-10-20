@@ -20,7 +20,7 @@ async function setup(page: import('@playwright/test').Page, kind: 'app' | 'lib',
   const collection = kind === 'app' ? 'apps' : 'libs'
   await page.route('**/std/profile', route => route.fulfill({ json: { identity_name: publisher, display_name: null, avatar_url: null, updated_at: 0 } }))
   await page.route('**/std/acl/reviews?*', route => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 1 } }))
-  await page.route('**/std/acl/capabilities', route => route.fulfill({ json: [] }))
+  await page.route('**/std/acl/promissions', route => route.fulfill({ json: {} }))
   await page.route('**/std/acl/allow', route => route.fulfill({ json: {} }))
   await page.route('**/std/acl/access', route => route.fulfill({ json: {} }))
   await page.route('**/std/contacts?*', route => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 100 } }))

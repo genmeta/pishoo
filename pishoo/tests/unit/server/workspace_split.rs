@@ -239,7 +239,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .0,
         403
     );
-    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net",requests,json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["dev.dhttp.net/message#message"],"offered_capabilities":["dev.dhttp.net/message#message"]})).await;
+    let (status,queued)=call(&alice,http::Method::POST,"alice.dhttp.net",requests,json!({"target_name":"bob.dhttp.net","description":"Friend","requested_capabilities":["message"],"offered_capabilities":["message"]})).await;
     assert_eq!(status, 201, "{queued}");
     assert_eq!(queued["status"], "queued");
     let (_, local) = call(

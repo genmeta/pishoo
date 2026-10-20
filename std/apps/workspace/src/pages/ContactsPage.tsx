@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from 'solid-js'
 
-import { ApiError, api, backendPath, request } from '../api/client'
-import type { CapabilityDescriptor, Contact, DirectoryEntry } from '../api/types'
+import { ApiError, api, backendPath } from '../api/client'
+import type { Contact, DirectoryEntry } from '../api/types'
 import { chatApi } from '../chat/api'
 import { Avatar, Dialog, EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
 import type { ContactFollowupReason } from '../i18n'
@@ -80,13 +80,7 @@ export default function ContactsPage(props: {
   const [detail, detailActions] = createResource(selectedName, loadContact)
   const [chatCapability, chatCapabilityActions] = createResource(selectedName, loadChatCapability)
   const [remoteCapabilities, remoteCapabilityActions] = createResource(selectedName, abortable(async (name: string, signal: AbortSignal) => {
-    const catalog = await request<CapabilityDescriptor[]>(`/std/dhttp/${encodeURIComponent(name)}/std/acl/capabilities`, { signal })
-    if (!Array.isArray(catalog) || catalog.some(capability => !capability
-      || typeof capability.id !== 'string' || typeof capability.title !== 'string'
-      || typeof capability.selectable !== 'boolean' || !Array.isArray(capability.endpoints)
-      || capability.endpoints.some(endpoint => !endpoint || typeof endpoint.method !== 'string' || typeof endpoint.path !== 'string'))) {
-      throw new ApiError(502, t('contacts.capabilityCatalogInvalid'))
-    }
+    const catalog = await api.capabilities(signal, name)
     return catalog.filter(capability => capability.selectable && capability.endpoints.length > 0)
   }))
   const [requestedCapabilities, setRequestedCapabilities] = createSignal<string[]>([])

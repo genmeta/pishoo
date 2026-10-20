@@ -49,17 +49,15 @@ function CapabilityCard(props: { capability: CapabilityDescriptor }) {
     <article class="capability-card">
       <header class="capability-card-header">
         <div>
-          <small class="capability-kicker">{capability().id.split('#')[0]}</small>
-          <h2>{capability().id === 'std.dhttp.net/message#message'
+          <h2>{capability().endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')
             ? t('capabilities.chat.name') : capability().title}</h2>
         </div>
         <span class="status-badge">{t(capability().approval_mode === 'none' ? 'capabilities.noApproval' : 'capabilities.approvalRequired')}</span>
       </header>
-      <Show when={capability().id === 'std.dhttp.net/message#message'}>
+      <Show when={capability().endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')}>
         <p class="capability-summary">{t('capabilities.chat.summary')}</p>
       </Show>
       <footer class="capability-card-footer">
-        <span>{t('capabilities.version', { version: capability().version })}</span>
         <Show when={capability().selectable}><span>{t('capabilities.requestable')}</span></Show>
       </footer>
       <Show when={capability().endpoints.length > 0}>

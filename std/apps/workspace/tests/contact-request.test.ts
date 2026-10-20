@@ -7,7 +7,7 @@ test('offering capabilities submits one native request without granting an unkno
   const calls: string[] = []
   const input = {
     target_name: 'sky.lee~', description: 'Hello',
-    requested_capabilities: [], offered_capabilities: ['dev.dhttp.net/message#message'],
+    requested_capabilities: [], offered_capabilities: ['message'],
   }
   globalThis.fetch = (async (url, init) => {
     calls.push(String(url))
@@ -36,7 +36,7 @@ test('a rejected native submission reports the error without additional ACL writ
   try {
     let failure: unknown
     try {
-      await api.sendContactRequest({ target_name: 'sky.lee~', description: '', requested_capabilities: [], offered_capabilities: ['dev.dhttp.net/message#message'] })
+      await api.sendContactRequest({ target_name: 'sky.lee~', description: '', requested_capabilities: [], offered_capabilities: ['message'] })
     } catch (error) {
       failure = error
     }
