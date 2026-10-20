@@ -1,4 +1,13 @@
-use super::*;
+use std::sync::Mutex;
+
+use rusqlite::Connection;
+use tower::ServiceExt;
+
+use super::{
+    access::local_api,
+    capabilities::{catalog, requested},
+    *,
+};
 
 #[tokio::test]
 async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_operations() {
@@ -169,7 +178,7 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     ));
     // No database exists at the profile path. Both rounds must use this connection.
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("../../src/contact.sql"))
+    db.execute_batch(include_str!("../../src/contact/contact.sql"))
         .unwrap();
     let db = Arc::new(Mutex::new(db));
     for expected in 1..=2 {
