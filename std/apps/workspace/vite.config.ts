@@ -16,7 +16,6 @@ export default defineConfig({
       '/std/dhttp': backend,
       '/std/acl': backend,
       '/std/contact': backend,
-      '/std/contacts': backend,
     },
   },
 })

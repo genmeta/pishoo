@@ -1,7 +1,6 @@
 import { Show, createResource } from 'solid-js'
 
 import { api } from '../api/client'
-import { chatApi } from '../chat/api'
 import { contactClassLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { chatCapabilityLabel, chatDirectionLabel, chatDirectionState } from '../lib/chatCapability'
@@ -14,11 +13,9 @@ export default function ContactDetailsDrawer(props: {
 }) {
   const { date, t } = useI18n()
   const loadContact = abortable((name: string, signal: AbortSignal) => api.contact(name, signal))
-  const loadProfile = abortable((name: string, signal: AbortSignal) => api.publicProfile(name, signal))
-  const loadCapability = abortable((name: string, signal: AbortSignal) => chatApi.capability(name, signal))
+  const loadProfile = abortable((name: string, signal: AbortSignal) => api.contactProfile(name, signal))
   const [contact] = createResource(() => props.contactName, loadContact)
   const [profile] = createResource(() => contact()?.name ?? null, loadProfile)
-  const [capability] = createResource(() => contact()?.name ?? null, loadCapability)
   const resolvedProfile = () => profile.error ? undefined : profile()
   const identityName = () => displayIdentityName(contact()?.name ?? props.contactName ?? '')
   const displayName = () => contactDisplayName(
@@ -59,7 +56,7 @@ export default function ContactDetailsDrawer(props: {
                   <div><dt>{t('contacts.class')}</dt><dd>{contactClassLabel(t, item.class)}</dd></div>
                   <div><dt>{t('contacts.updated')}</dt><dd>{date(item.updated_at)}</dd></div>
                   <div><dt>{t('contacts.created')}</dt><dd>{date(item.created_at)}</dd></div>
-                  <div><dt>{t('contacts.expires')}</dt><dd>{date(item.expired_after)}</dd></div>
+                  <div><dt>{t('contacts.expires')}</dt><dd>{date(item.valid_before)}</dd></div>
                   <div class="wide"><dt>{t('contacts.subjectId')}</dt><dd><code>{item.subject_id}</code></dd></div>
                 </dl>
 
@@ -67,16 +64,16 @@ export default function ContactDetailsDrawer(props: {
                   <h3>{t('contacts.capabilities')}</h3>
                   <div class="contact-capability-card">
                     <strong>{t('contacts.chatCapability')}</strong>
-                    <span class="status">{chatCapabilityLabel(item, t, capability())}</span>
+                    <span class="status">{chatCapabilityLabel(item, t)}</span>
                   </div>
                   <div class="capability-direction-grid">
                     <div class="capability-direction-row">
                       <strong>{t('contacts.chatDirectionIncoming')}</strong>
-                      <span class="status">{chatDirectionLabel(chatDirectionState('incoming', item, capability()), t)}</span>
+                      <span class="status">{chatDirectionLabel(chatDirectionState('incoming', item), t)}</span>
                     </div>
                     <div class="capability-direction-row">
                       <strong>{t('contacts.chatDirectionOutgoing')}</strong>
-                      <span class="status">{chatDirectionLabel(chatDirectionState('outgoing', item, capability()), t)}</span>
+                      <span class="status">{chatDirectionLabel(chatDirectionState('outgoing', item), t)}</span>
                     </div>
                   </div>
                 </section>

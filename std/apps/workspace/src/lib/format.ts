@@ -1,4 +1,4 @@
-import type { ContactStatus, PublicProfile } from '../api/types'
+import type { Contact, ContactStatus, PublicProfile } from '../api/types'
 
 const DHTTP_NAME_SUFFIX = '.dhttp.net'
 
@@ -40,7 +40,7 @@ export function normalizeIdentityName(value: string): string | null {
 }
 
 export function contactDisplayName(name: string, alias?: string | null, remoteName?: string | null): string {
-  return alias || remoteName || displayIdentityName(name)
+  return alias?.trim() || remoteName?.trim() || displayIdentityName(name)
 }
 
 export function profileAvatarUrl(profile: PublicProfile | null | undefined): string | null {
@@ -53,4 +53,11 @@ export function profileAvatarUrl(profile: PublicProfile | null | undefined): str
 
 export function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
+}
+
+const contactCollator = new Intl.Collator('en', { sensitivity: 'base', numeric: true })
+
+export function compareContacts(a: Contact & { display_name?: string | null }, b: Contact & { display_name?: string | null }): number {
+  return contactCollator.compare(contactDisplayName(a.name, a.alias, a.display_name), contactDisplayName(b.name, b.alias, b.display_name))
+    || a.name.localeCompare(b.name, 'en')
 }

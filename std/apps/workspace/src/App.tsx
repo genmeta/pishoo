@@ -129,11 +129,15 @@ export default function App() {
               pendingCount={pendingCount()} pendingLoading={context.loading}
               pendingError={context.error} follow={follow} />
           </Match>
-          <Match when={route().page === 'contacts'}>
-            <ContactsPage notify={notify} contactName={route().contactName} navigate={navigate}
-              returnTo={new URLSearchParams(pathname().split('?')[1] ?? '').get('from') === 'approvals'
-                ? '#/approvals' : undefined}
-              onResolved={() => void contextActions.refetch()} />
+          <Match when={route().page === 'contacts' || route().page === 'contact-new'}>
+            <AddContactPage open={route().page === 'contact-new'} notify={notify} navigate={navigate} ownerName={ownerName()}
+              initialTarget={new URLSearchParams(pathname().split('?')[1] ?? '').get('target') ?? undefined}>
+              <ContactsPage notify={notify} contactName={route().contactName} navigate={navigate}
+                pausePolling={route().page === 'contact-new'}
+                returnTo={new URLSearchParams(pathname().split('?')[1] ?? '').get('from') === 'approvals'
+                  ? '#/approvals' : undefined}
+                onResolved={() => void contextActions.refetch()} />
+            </AddContactPage>
           </Match>
           <Match when={route().page === 'contact-requests'}>
             <OutboundRequestsPage notify={notify} />
@@ -152,10 +156,6 @@ export default function App() {
               onSaved={(value: ProfileSettings) => profileActions.mutate(value)} notify={notify} />
           </Match>
           <Match when={route().page === 'apps' || route().page === 'app-detail'}><AppsPage /></Match>
-          <Match when={route().page === 'contact-new'}>
-            <AddContactPage notify={notify} navigate={navigate} ownerName={ownerName()}
-              initialTarget={new URLSearchParams(pathname().split('?')[1] ?? '').get('target') ?? undefined} />
-          </Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>
             <a href="#/" onClick={(event) => follow(event, '#/')}>{t('page.backHome')}</a>

@@ -136,17 +136,18 @@ export interface CapabilityDescriptor {
   endpoints: Array<{ method: string; path: string }>
 }
 
-export type ChatMessageState = 'queued' | 'sending' | 'sent' | 'received' | 'failed' | 'blocked'
+export type ChatMessageState = 'reviewing' | 'queued' | 'sending' | 'sent' | 'received' | 'failed' | 'blocked'
 
 export interface ChatMessage {
-  id: string
+  index: number
   client_message_id: string
   remote_message_id: string | null
   direction: 'incoming' | 'outgoing'
   state: ChatMessageState
-  sender: string
-  recipient: string
-  text: string
+  from: string
+  to: string
+  content: string
+  media_type: string
   created_at: number
   updated_at: number
   error_message: string | null
@@ -157,45 +158,35 @@ export interface ChatMessagePage {
   next_cursor: string | null
 }
 
-export interface ChatCapabilityState {
-  capability: 'message'
-  status: 'available' | 'waiting' | 'blocked'
-  contact_status: ContactStatus
-  can_send: boolean
-  can_receive: boolean
-  remote_grant: boolean | null
-  endpoints: Array<{ method: string; path: string }>
-}
-
-export interface DirectoryEntry {
-  name: string
-  saved: boolean
+export interface DirectoryEntry extends Contact {
+  display_name: string | null
+  avatar_url: string | null
+  profile_updated_at: number
   chat_available: boolean
-  remote_chat_granted: boolean | null
 }
 
-export interface CapabilityApproval {
-  kind: 'capability'
+export interface ContactApproval {
+  kind: 'contact'
   request_id: number
   contact_name: string
-  capability_id: string
-  capability_version: string
+  subject_id: string
   requested_at: number
   expired_after: number
 }
 
 export interface AccessApproval {
   kind: 'access'
+  review_kind: 'live' | 'persistent'
   id: number
   visitor: string
   method: string
   api: string
   reason: string
   requested_at: number
-  expired_after: number
+  expired_after: number | null
 }
 
-export type Approval = CapabilityApproval | AccessApproval
+export type Approval = ContactApproval | AccessApproval
 
 export interface OutboundContactRequest {
   id: number
@@ -204,9 +195,9 @@ export interface OutboundContactRequest {
   requested_capabilities: string[]
   offered_capabilities: string[]
   status: 'queued' | 'pending' | 'active' | 'denied' | 'expired' | 'failed' | 'revoked'
-  expired_after: number
+  valid_before: number
   delivery_deadline: number
-  remote_expired_after: number | null
+  remote_valid_before: number | null
   last_checked_at: number | null
   error_message: string | null
   created_at: number
@@ -214,6 +205,8 @@ export interface OutboundContactRequest {
 }
 
 export interface OutboundContactInput {
+  expires_after?: number
+  valid_before?: number
   target_name: string
   description: string
   requested_capabilities: string[]
@@ -230,6 +223,8 @@ export type RequestedAccess = Record<string, string[]>
 export type GrantedAccess = Record<string, GrantedMethods>
 
 export interface Contact {
+  id?: number
+  incoming?: boolean
   name: string
   /** Readable UTF-8 or `hex:` followed by the original bytes for binary subject IDs. */
   subject_id: string
@@ -239,7 +234,7 @@ export interface Contact {
   status: ContactStatus | number
   created_at: number
   updated_at: number
-  expired_after: number
+  valid_before: number
   requested_access: RequestedAccess
   granted_access: GrantedAccess
   offers: GrantedAccess

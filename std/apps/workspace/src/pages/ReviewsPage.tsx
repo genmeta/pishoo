@@ -1,8 +1,7 @@
-import { For, Show, createResource, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { ApiError, api } from '../api/client'
-import type { AccessApproval, Approval, CapabilityApproval } from '../api/types'
-import { chatApi } from '../chat/api'
+import type { AccessApproval, Approval, ContactApproval } from '../api/types'
 import ContactDetailsDrawer from '../components/ContactDetailsDrawer'
 import { Dialog, EmptyState, ErrorState, LoadingState, Pagination } from '../components/Ui'
 import { useI18n } from '../i18n'
@@ -16,10 +15,8 @@ interface Decision {
 
 type ApprovalTab = 'pending' | 'expired'
 
-function defaultExpiry(): string {
-  const date = new Date(Date.now() + 60 * 60 * 1000)
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-  return local.toISOString().slice(0, 16)
+function approvalKey(item: Approval): string {
+  return item.kind === 'contact' ? `contact:${item.request_id}:${item.subject_id}` : `access:${item.review_kind}:${item.id}`
 }
 
 export default function ReviewsPage(props: {
@@ -33,14 +30,20 @@ export default function ReviewsPage(props: {
   const [decision, setDecision] = createSignal<Decision | null>(null)
   const [deleteCandidate, setDeleteCandidate] = createSignal<Approval | null>(null)
   const [deleting, setDeleting] = createSignal(false)
-  const [expiry, setExpiry] = createSignal(defaultExpiry())
   const [submitting, setSubmitting] = createSignal(false)
-  const [capabilityWorking, setCapabilityWorking] = createSignal<number | null>(null)
+  const [contactWorking, setContactWorking] = createSignal<number | null>(null)
   const [selectedContactName, setSelectedContactName] = createSignal<string | null>(null)
-  const load = abortable(([status, currentPage]: readonly [ApprovalTab, number, number], signal: AbortSignal) =>
-    api.approvals(status, currentPage, signal))
+  const fetchApprovals = async ([status, currentPage]: readonly [ApprovalTab, number, number], signal: AbortSignal) => {
+    const result = await api.approvals(status, currentPage, signal)
+    signal.throwIfAborted()
+    return result
+  }
+  const load = abortable(fetchApprovals)
+  const loadBackground = abortable(fetchApprovals)
+  const source = createMemo(() => [tab(), page(), revision()] as const)
   const [catalog] = createResource(() => revision(), () => api.capabilities())
-  const [approvals] = createResource(() => [tab(), page(), revision()] as const, load)
+  const [approvals, approvalActions] = createResource(source, load)
+  let backgroundLoading = false
 
   const refresh = () => {
     setRevision((value) => value + 1)
@@ -50,32 +53,66 @@ export default function ReviewsPage(props: {
     setPage(1)
     setTab(value)
   }
-  const onVisibilityChange = () => {
-    if (!document.hidden) refresh()
+  const refreshInBackground = async () => {
+    if (document.hidden || submitting() || deleting() || contactWorking() !== null
+      || approvals.loading || approvals.error || backgroundLoading) return
+    const currentSource = source()
+    backgroundLoading = true
+    try {
+      const result = await loadBackground(currentSource)
+      if (source() !== currentSource) return
+      approvalActions.mutate(previous => {
+        const existing = new Map<string, Approval>(previous?.items.map(item => [approvalKey(item), item]))
+        return {
+          ...result,
+          items: result.items.map(item => {
+            const current = existing.get(approvalKey(item))
+            if (current && Object.keys(current).length === Object.keys(item).length
+              && Object.entries(item).every(([key, value]) => Reflect.get(current, key) === value)) {
+              return current
+            }
+            return item
+          }),
+        }
+      })
+      props.onRefresh?.()
+    } catch {
+      // Keep the last successful snapshot; the next poll retries.
+    } finally {
+      backgroundLoading = false
+    }
   }
-  onMount(() => document.addEventListener('visibilitychange', onVisibilityChange))
+  const onVisibilityChange = () => {
+    void refreshInBackground()
+  }
+  onMount(() => {
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    const timer = window.setInterval(() => void refreshInBackground(), 3000)
+    onCleanup(() => window.clearInterval(timer))
+  })
   onCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange))
 
-  const decideCapability = async (request: CapabilityApproval, action: 'grant' | 'deny') => {
-    if (capabilityWorking() !== null) return
-    setCapabilityWorking(request.request_id)
+  const decideContact = async (request: ContactApproval, action: 'accept' | 'deny') => {
+    if (contactWorking() !== null) return
+    setContactWorking(request.request_id)
     try {
-      if (action === 'grant') {
-        await chatApi.grantCapability(request.contact_name, request.capability_id, {
-          requestId: request.request_id,
-          version: request.capability_version,
-        })
-        props.notify(t('reviews.capabilityGranted'))
+      const current = await api.contact(request.contact_name)
+      if (Reflect.get(current, 'id') !== request.request_id || current.subject_id !== request.subject_id) {
+        throw new ApiError(409, 'Contact request changed')
+      }
+      if (action === 'accept') {
+        await api.patchContact(request.contact_name, { status: 'active' })
+        props.notify(t('contacts.accepted'))
       } else {
-        await chatApi.denyCapability(request.contact_name, request.capability_id, request.request_id, request.capability_version)
-        props.notify(t('reviews.capabilityDenied'))
+        await api.deleteContact(request.contact_name)
+        props.notify(t('reviews.contactDeclined'))
       }
       setPage(1)
       refresh()
     } catch (error) {
       props.notify(errorMessage(error, t('common.unexpectedError')), 'error')
     } finally {
-      setCapabilityWorking(null)
+      setContactWorking(null)
     }
   }
 
@@ -90,7 +127,7 @@ export default function ReviewsPage(props: {
     if (!current) return
     setSubmitting(true)
     try {
-      await api.decideReview(current.review.id, current.action, new Date(expiry()).toISOString())
+      await api.decideReview(current.review.id, current.action, current.review.review_kind)
       props.notify(current.action === 'allow' ? t('reviews.allowed') : t('reviews.denied'))
       setDecision(null)
       setPage(1)
@@ -124,16 +161,15 @@ export default function ReviewsPage(props: {
     }
   }
   const openDecision = (review: AccessApproval, action: Decision['action']) => {
-    setExpiry(defaultExpiry())
     setDecision({ review, action })
   }
   const applicant = (item: Approval) =>
-    displayIdentityName(item.kind === 'capability' ? item.contact_name : item.visitor)
-  const capabilityTitle = (item: Approval) =>
-    catalog()?.find((capability) => item.kind === 'capability'
-      ? capability.id === item.capability_id
-      : capability.endpoints.some((endpoint) => endpoint.method === item.method && endpoint.path === item.api))?.title
-      ?? t('reviews.unlistedCapability')
+    displayIdentityName(item.kind === 'contact' ? item.contact_name : item.visitor)
+  const capabilityTitle = (item: Approval) => {
+    if (item.kind === 'contact') return t('reviews.contactRequest')
+    return catalog()?.find(capability => capability.endpoints.some(endpoint => endpoint.method === item.method && endpoint.path === item.api))?.title
+      ?? `${item.method} ${item.api}`
+  }
 
   return (
     <>
@@ -190,10 +226,10 @@ export default function ReviewsPage(props: {
                   {(item) => (
                     <tr>
                       <td class="approval-type-cell" data-label={t('reviews.type')}>
-                        <span class="method">{t(item.kind === 'capability' ? 'reviews.capabilityTab' : 'reviews.accessTab')}</span>
+                        <span class="method">{t(item.kind === 'contact' ? 'reviews.contactRequest' : 'reviews.accessTab')}</span>
                       </td>
                       <td class="approval-requester-cell" data-label={t('reviews.requester')}>
-                        {item.kind === 'capability'
+                        {item.kind === 'contact'
                           ? <button class="contact-link" type="button" title={t('contacts.openDetails')}
                               onClick={() => setSelectedContactName(item.contact_name)}>
                               <strong>{applicant(item)}</strong>
@@ -204,9 +240,9 @@ export default function ReviewsPage(props: {
                         <strong>{capabilityTitle(item)}</strong>
                       </td>
                       <td class="approval-time-cell" data-label={t('reviews.requestedAt')}>{date(item.requested_at)}</td>
-                      <td class="approval-expiry-cell" data-label={t('reviews.expiry')}>{date(item.expired_after)}</td>
+                      <td class="approval-expiry-cell" data-label={t('reviews.expiry')}>{item.kind === 'access' && item.review_kind === 'live' ? t('reviews.live') : date(item.expired_after)}</td>
                       <td class="approval-actions-cell" data-label={t('common.actions')}
-                        aria-busy={tab() === 'pending' && item.kind === 'capability' && capabilityWorking() === item.request_id || tab() === 'expired' && deleting()}>
+                        aria-busy={tab() === 'pending' && item.kind === 'contact' && contactWorking() === item.request_id || tab() === 'expired' && deleting()}>
                         <Show when={tab() === 'pending'} fallback={
                           <div class="row-actions">
                             <button class="button button-danger-quiet button-small" type="button"
@@ -215,22 +251,22 @@ export default function ReviewsPage(props: {
                             </button>
                           </div>
                         }>
-                          {item.kind === 'capability'
+                          {item.kind === 'contact'
                             ? <div class="row-actions">
                                 <button class="button button-success button-small" type="button"
-                                  disabled={capabilityWorking() !== null}
-                                  onClick={() => void decideCapability(item, 'grant')}>
-                                  {t('capabilities.allowCapability')}
+                                  disabled={contactWorking() !== null}
+                                  onClick={() => void decideContact(item, 'accept')}>
+                                  {t('contacts.accept')}
                                 </button>
                                 <button class="button button-danger-quiet button-small" type="button"
-                                  disabled={capabilityWorking() !== null}
-                                  onClick={() => void decideCapability(item, 'deny')}>
+                                  disabled={contactWorking() !== null}
+                                  onClick={() => void decideContact(item, 'deny')}>
                                   {t('reviews.deny')}
                                 </button>
                               </div>
                             : <div class="row-actions">
                                 <button class="button button-success button-small" type="button"
-                                  onClick={() => openDecision(item, 'allow')}>{t('reviews.allowOnce')}</button>
+                                  onClick={() => openDecision(item, 'allow')}>{t('reviews.allow')}</button>
                                 <button class="button button-danger-quiet button-small" type="button"
                                   onClick={() => openDecision(item, 'deny')}>{t('reviews.deny')}</button>
                               </div>}
@@ -272,16 +308,7 @@ export default function ReviewsPage(props: {
           <strong>{decision() ? capabilityTitle(decision()!.review) : ''}</strong>
           <span>{displayIdentityName(decision()?.review.visitor ?? '')}</span>
         </div>
-        <label class="field">
-          <span>{t('reviews.decisionExpires')}</span>
-          <input
-            type="datetime-local"
-            min={new Date().toISOString().slice(0, 16)}
-            value={expiry()}
-            onInput={(event) => setExpiry(event.currentTarget.value)}
-            required
-          />
-        </label>
+        <p>{t('reviews.decisionPersists')}</p>
         <div class="dialog-actions">
           <button class="button button-secondary" type="button" onClick={() => setDecision(null)} disabled={submitting()}>
             {t('common.cancel')}
@@ -290,7 +317,7 @@ export default function ReviewsPage(props: {
             class={`button ${decision()?.action === 'allow' ? 'button-success' : 'button-danger'}`}
             type="button"
             onClick={decide}
-            disabled={submitting() || !expiry()}
+            disabled={submitting()}
           >
             {submitLabel()}
           </button>

@@ -11,7 +11,7 @@ function backend(rejection?: { status: number; message: string }) {
     const method = init?.method ?? 'GET'
     const body = init?.body ? JSON.parse(String(init.body)) : null
     calls.push({ path, method, body })
-    if (path !== '/std/contact/local/requests' || method !== 'POST') {
+    if (path !== '/std/contact' || method !== 'POST') {
       throw new Error(`Unexpected request: ${method} ${path}`)
     }
     if (rejection) return new Response(rejection.message, { status: rejection.status })
@@ -28,7 +28,7 @@ test('selected requested and offered capabilities reach the native submission to
     offered_capabilities: ['dev.dhttp.net/note#read'],
   }
   expect((await api.sendContactRequest(value)).status).toBe('queued')
-  expect(calls).toEqual([{ path: '/std/contact/local/requests', method: 'POST', body: value }])
+  expect(calls).toEqual([{ path: '/std/contact', method: 'POST', body: value }])
 })
 
 test('an empty offer remains empty in the native submission', async () => {
@@ -56,6 +56,6 @@ for (const rejection of [
     await expect(operation).rejects.toBeInstanceOf(ApiError)
     await expect(operation).rejects.toMatchObject(rejection)
     expect(calls).toHaveLength(1)
-    expect(calls[0].path).toBe('/std/contact/local/requests')
+    expect(calls[0].path).toBe('/std/contact')
   })
 }

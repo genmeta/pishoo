@@ -4,10 +4,9 @@ import { api } from '../api/client'
 import type { ChatMessage } from '../api/types'
 import { chatApi } from '../chat/api'
 import { Avatar, EmptyState, ErrorState, LoadingState, StatusBadge } from '../components/Ui'
-import { contactFollowupLabel, statusLabel, useI18n } from '../i18n'
+import { statusLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { contactDisplayName, contactStatus, displayIdentityName, errorMessage, profileAvatarUrl } from '../lib/format'
-import { contactPath } from '../lib/routes'
 
 function deliveryReason(message: ChatMessage): string | null {
   return message.state === 'failed' || message.state === 'blocked'
@@ -36,7 +35,7 @@ function DeliveryStatus(props: { message: ChatMessage }) {
         <Show when={props.message.state === 'failed' || props.message.state === 'blocked'}>
           <path d="M5 5 15 15M15 5 5 15" />
         </Show>
-        <Show when={props.message.state === 'queued' || props.message.state === 'sending'}>
+        <Show when={['queued', 'sending', 'reviewing'].includes(props.message.state)}>
           <circle cx="10" cy="10" r="7" />
           <path d="M10 6v4l3 2" />
         </Show>
@@ -54,16 +53,15 @@ export default function ChatPage(props: {
   const [draft, setDraft] = createSignal('')
   const [submitting, setSubmitting] = createSignal(false)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  let pendingSend: { content: string; clientMessageId: string } | null = null
   let feed: HTMLDivElement | undefined
 
   const loadContact = abortable((name: string, signal: AbortSignal) => api.contact(name, signal))
   const [contact, contactActions] = createResource(() => props.contactName, loadContact)
-  const loadProfile = abortable((name: string, signal: AbortSignal) => api.publicProfile(name, signal))
+  const loadProfile = abortable((name: string, signal: AbortSignal) => api.contactProfile(name, signal))
   const [profile] = createResource(() => contact()?.name ?? null, loadProfile)
-  const loadCapability = abortable((name: string, signal: AbortSignal) => chatApi.capability(name, signal))
-  const [capability, capabilityActions] = createResource(() => contact()?.name ?? null, loadCapability)
-  const canChat = () => !capability.error && capability()?.status === 'available'
-  const canSend = () => !capability.error && capability()?.can_send === true
+  const canChat = () => !!contact() && contactStatus(contact()!.status) !== 'blocked'
+  const canSend = canChat
   let loadedName: string | undefined
   let loadedMessages: ChatMessage[] = []
   const loadMessages = abortable(async (name: string, signal: AbortSignal) => {
@@ -72,7 +70,7 @@ export default function ChatPage(props: {
     // message so retries and permission changes also update older messages.
     const unresolved = previous.findIndex((message) => !['sent', 'received'].includes(message.state))
     const items = unresolved === -1 ? [...previous] : previous.slice(0, unresolved)
-    let cursor: string | null = items.at(-1)?.id ?? null
+    let cursor: string | null = items.at(-1)?.index.toString() ?? null
     do {
       const page = await chatApi.messages(name, cursor, 100, signal)
       items.push(...page.items)
@@ -93,7 +91,6 @@ export default function ChatPage(props: {
   onMount(() => {
     const refresh = () => {
       if (document.hidden) return
-      if (contact() && !capability.loading) void capabilityActions.refetch()
       if (canChat() && !messages.loading) void messageActions.refetch()
     }
     const timer = window.setInterval(refresh, 3000)
@@ -109,7 +106,7 @@ export default function ChatPage(props: {
   const identityName = () => displayIdentityName(props.contactName)
   const avatarUrl = () => profileAvatarUrl(resolvedProfile())
 
-  const back = () => props.navigate(contactPath(props.contactName))
+  const back = () => props.navigate('#/contacts')
 
   const send = async (event: SubmitEvent) => {
     event.preventDefault()
@@ -117,8 +114,13 @@ export default function ChatPage(props: {
     if (!text || submitting() || !canChat() || !canSend()) return
     setSubmitting(true)
     setActionError(null)
+    const clientMessageId = pendingSend?.content === text
+      ? pendingSend.clientMessageId
+      : crypto.randomUUID()
+    pendingSend = { content: text, clientMessageId }
     try {
-      await chatApi.sendMessage(props.contactName, text)
+      await chatApi.sendMessage(props.contactName, text, clientMessageId)
+      pendingSend = null
       setDraft('')
       await messageActions.refetch()
       props.notify(t('chat.queued'))
@@ -153,21 +155,9 @@ export default function ChatPage(props: {
       <Show when={contact.loading && !contact()}>
         <LoadingState label={t('chat.loadingContact')} />
       </Show>
-      <Show when={contact() && capability.error}>
-        <ErrorState
-          message={errorMessage(capability.error, t('chat.capabilityLoadFailed'))}
-          onRetry={() => void capabilityActions.refetch()}
-        />
-      </Show>
-      <Show when={contact() && capability.loading && !capability()}>
-        <LoadingState label={t('chat.loadingCapability')} />
-      </Show>
-      <Show when={contact() && !capability.loading && !capability.error && !canChat()}>
+      <Show when={contact() && !canChat()}>
         <section class="chat-state-panel" role="status">
-          <StatusBadge value={contactStatus(contact()!.status)} />
-          <h2>{t('chat.unavailableTitle')}</h2>
-          <p>{t(capability()?.status === 'blocked' ? 'chat.blockedDetail' : 'chat.waitingDetail')}</p>
-          <button class="text-link" type="button" onClick={back}>{t('chat.backToContact')}</button>
+          <h2>{t('chat.unavailableTitle')}</h2><p>{t('chat.blockedDetail')}</p>
         </section>
       </Show>
 
@@ -197,7 +187,7 @@ export default function ChatPage(props: {
                       <DeliveryStatus message={message} />
                     </Show>
                     <div class="chat-message-bubble">
-                      <p>{message.text}</p>
+                      <p>{message.content}</p>
                     </div>
                   </article>
                 )}
@@ -209,10 +199,6 @@ export default function ChatPage(props: {
             <p class="field-error chat-action-error" role="alert">{actionError()}</p>
           </Show>
           <form class="chat-composer" onSubmit={send}>
-            <Show when={canSend() && capability()?.remote_grant !== true}>
-              <p class="muted">{contactFollowupLabel(t, capability()?.remote_grant === false
-                ? 'remote-not-granted' : 'remote-unknown')}</p>
-            </Show>
             <Show when={!canSend()}><p class="muted">{t('chat.sendUnavailable')}</p></Show>
             <label class="field">
               <span>{t('chat.messageLabel')}</span>

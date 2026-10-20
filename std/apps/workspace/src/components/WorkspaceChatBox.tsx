@@ -5,9 +5,10 @@ import type { Contact } from '../api/types'
 import { contactClassLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { contactDisplayName, contactStatus, displayIdentityName, initials } from '../lib/format'
+import { useContactDirectoryProfiles } from '../lib/useContactDirectoryProfiles'
 
-function contactLabel(contact: Contact): string {
-  return contactDisplayName(contact.name, contact.alias?.trim())
+function contactLabel(contact: Contact & { display_name?: string | null }): string {
+  return contactDisplayName(contact.name, contact.alias?.trim(), contact.display_name)
 }
 
 export default function WorkspaceChatBox() {
@@ -19,9 +20,10 @@ export default function WorkspaceChatBox() {
   let textarea: HTMLTextAreaElement | undefined
 
   const loadContacts = abortable((_source: boolean, signal: AbortSignal) =>
-    api.allContacts('name', 'asc', signal),
+    api.contactDirectory(signal),
   )
   const [contacts] = createResource(() => true, loadContacts)
+  const directory = useContactDirectoryProfiles(contacts)
 
   const mention = createMemo(() => {
     if (mentionDismissed()) return null
@@ -36,7 +38,7 @@ export default function WorkspaceChatBox() {
     }
   })
 
-  const availableContacts = createMemo(() => (contacts() ?? [])
+  const availableContacts = createMemo(() => directory()
     .filter((contact) => contactStatus(contact.status) === 'active'))
 
   const suggestions = createMemo(() => {

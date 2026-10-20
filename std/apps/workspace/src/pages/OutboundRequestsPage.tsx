@@ -74,7 +74,7 @@ export default function OutboundRequestsPage(props: {
               <tr><td><strong>{displayIdentityName(item.target_name)}</strong><Show when={item.description}><small class="muted outbound-description">{item.description}</small></Show></td>
                 <td><StatusBadge value={item.status} /><Show when={item.error_message}><small class="field-error outbound-description">{item.error_message}</small></Show></td>
                 <td><Show when={item.status === 'queued' || item.status === 'pending' || item.status === 'expired'} fallback={t('common.none')}>
-                  <small>{item.status === 'queued' ? t('outbound.deliveryDeadline') : t('contacts.expires')}</small><br />{date(item.expired_after)}
+                  <small>{item.status === 'queued' ? t('outbound.deliveryDeadline') : t('contacts.expires')}</small><br />{date(item.valid_before)}
                 </Show></td><td>{item.last_checked_at ? date(item.last_checked_at) : t('common.none')}</td>
                 <td><div class="row-actions">
                   <button class="button button-secondary button-small" type="button" disabled={working() !== null || !['queued', 'pending', 'active'].includes(item.status)}

@@ -1,43 +1,34 @@
-import { For, Show, createEffect, createResource, createSignal, on, onCleanup } from 'solid-js'
+import { Show, createEffect, createResource, createSignal, on, onCleanup } from 'solid-js'
+import type { JSX } from 'solid-js'
 
-import { ApiError, api, request } from '../api/client'
-import type { CapabilityDescriptor } from '../api/types'
-import { Avatar, Dialog, ErrorState, LoadingState } from '../components/Ui'
+import { ApiError, api } from '../api/client'
+import { Avatar, Dialog, LoadingState } from '../components/Ui'
 import { useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { displayIdentityName, errorMessage, normalizeIdentityName, profileAvatarUrl } from '../lib/format'
-import ContactsPage from './ContactsPage'
 
 export default function AddContactPage(props: {
+  open: boolean
+  children: JSX.Element
   notify: (message: string, tone?: 'success' | 'error') => void
   navigate: (path: string) => void
   ownerName: string
   initialTarget?: string
 }) {
   const { t } = useI18n()
-  const load = abortable((_source: boolean, signal: AbortSignal) => api.capabilities(signal))
-  const [capabilities, capabilityActions] = createResource(() => true, load)
   const [target, setTarget] = createSignal('')
   const [lookupName, setLookupName] = createSignal<string | null>(null)
   const [recipient, recipientActions] = createResource(() => {
     const name = lookupName()
-    return name && name !== normalizeIdentityName(props.ownerName) ? name : false
+    return props.open && name && name !== normalizeIdentityName(props.ownerName) ? name : false
   }, abortable(async (name: string, signal: AbortSignal) => {
-    const [catalog, profile] = await Promise.all([
-      request<CapabilityDescriptor[]>(`/std/dhttp/${encodeURIComponent(name)}/std/acl/capabilities`, { signal }),
-      api.publicProfile(name, signal),
-    ])
-    if (!Array.isArray(catalog)) throw new ApiError(502, 'Remote capability catalog unknown or awaiting access approval')
-    if ((profile.display_name !== null && typeof profile.display_name !== 'string') || !Number.isFinite(profile.updated_at)) {
-      throw new ApiError(502, 'Remote profile unknown or awaiting access approval')
-    }
-    return { name, catalog, profile }
+    const profile = await api.publicProfile(name, signal).catch(() => ({ display_name: null, avatar_url: null, updated_at: 0 }))
+    signal.throwIfAborted()
+    return { name, profile }
   }))
-  const recipientReady = () => !recipient.loading && !recipient.error && !!lookupName()
+  const recipientReady = () => props.open && !recipient.loading && !recipient.error && !!lookupName()
     && lookupName() !== normalizeIdentityName(props.ownerName) && recipient()?.name === lookupName()
   const [description, setDescription] = createSignal('')
-  const [requestedCapabilities, setRequestedCapabilities] = createSignal<string[]>([])
-  const [offeredCapabilities, setOfferedCapabilities] = createSignal<string[]>([])
   const [targetError, setTargetError] = createSignal<string | null>(null)
   const [descriptionError, setDescriptionError] = createSignal<string | null>(null)
   const [submitError, setSubmitError] = createSignal<string | null>(null)
@@ -45,12 +36,10 @@ export default function AddContactPage(props: {
   let targetInput: HTMLInputElement | undefined
   let descriptionInput: HTMLTextAreaElement | undefined
 
-  createEffect(on(() => props.initialTarget, (value) => {
-    const name = normalizeIdentityName(value ?? '')
+  createEffect(on(() => [props.open, props.initialTarget] as const, ([open, value]) => {
+    const name = normalizeIdentityName(open ? value ?? '' : '')
     setTarget(displayIdentityName(name ?? value ?? ''))
     setLookupName(name)
-    setRequestedCapabilities([])
-    setOfferedCapabilities([])
     setDescription('')
     setDescriptionError(null)
     setTargetError(null)
@@ -66,7 +55,7 @@ export default function AddContactPage(props: {
   })
 
   createEffect(() => {
-    if (recipientReady() || recipient.loading) return
+    if (!props.open || recipientReady() || recipient.loading) return
     const frame = window.requestAnimationFrame(() => targetInput?.focus())
     onCleanup(() => window.cancelAnimationFrame(frame))
   })
@@ -93,7 +82,7 @@ export default function AddContactPage(props: {
   }
 
   const send = async () => {
-    if (sending() || !recipientReady() || capabilities.loading || capabilities.error) return
+    if (sending() || !recipientReady()) return
     const targetName = lookupName()
     const descriptionIsValid = validDescription()
     setDescriptionError(descriptionIsValid ? null : t('outbound.invalidDescription'))
@@ -107,8 +96,8 @@ export default function AddContactPage(props: {
       await api.sendContactRequest({
         target_name: targetName,
         description: description().trim(),
-        requested_capabilities: requestedCapabilities(),
-        offered_capabilities: offeredCapabilities(),
+        requested_capabilities: [],
+        offered_capabilities: [],
       })
       props.notify(t('outbound.sent'))
       props.navigate('#/contacts/requests')
@@ -124,22 +113,12 @@ export default function AddContactPage(props: {
     }
   }
 
-  const toggleCapability = (id: string, direction: 'requested' | 'offered') => {
-    const setter = direction === 'requested' ? setRequestedCapabilities : setOfferedCapabilities
-    setter((current) => current.includes(id)
-      ? current.filter((value) => value !== id)
-      : [...current, id])
-  }
-
   const recipientLabel = () => recipient.error ? '' : recipient()?.profile.display_name || displayIdentityName(lookupName() ?? '')
-  const requestableCapabilities = () => capabilities()?.filter((capability) => capability.selectable) ?? []
 
   return (
     <>
-      <Show when={!recipientReady()}>
-        <ContactsPage notify={props.notify} navigate={props.navigate} />
-      </Show>
-      <Dialog open={!recipientReady()} title={t('outbound.searchTitle')}
+      <div hidden={recipientReady()}>{props.children}</div>
+      <Dialog open={props.open && !recipientReady()} title={t('outbound.searchTitle')}
         onClose={() => props.navigate('#/contacts')}>
         <form class="contact-search-form" onSubmit={(event) => { event.preventDefault(); search() }}>
           <label class="field">
@@ -197,75 +176,13 @@ export default function AddContactPage(props: {
                 onBlur={() => setDescriptionError(validDescription() ? null : t('outbound.invalidDescription'))} />
               <Show when={descriptionError()}><span class="field-error" role="alert">{descriptionError()}</span></Show>
             </label>
-            <fieldset class="capability-selection">
-              <legend>{t('outbound.requestedCapabilities')}</legend>
-              <Show when={recipient()?.catalog.filter((capability) => capability.selectable).length === 0}>
-                <p class="muted">{t('outbound.noCapabilities')}</p>
-              </Show>
-              <div class="capability-option-list">
-                <For each={recipient()?.catalog.filter((capability) => capability.selectable) ?? []}>{(capability) =>
-                  <CapabilityOption capability={capability} checked={requestedCapabilities().includes(capability.id)}
-                    direction="requested"
-                    onToggle={() => toggleCapability(capability.id, 'requested')} />
-                }</For>
-              </div>
-            </fieldset>
-            <fieldset class="capability-selection">
-              <legend>{t('outbound.offeredCapabilities')}</legend>
-              <Show when={capabilities.loading && !capabilities()}>
-                <LoadingState label={t('capabilities.loading')} />
-              </Show>
-              <Show when={capabilities.error}>
-                <ErrorState message={errorMessage(capabilities.error, t('common.unexpectedError'))}
-                  onRetry={() => void capabilityActions.refetch()} />
-              </Show>
-              <Show when={!capabilities.error && capabilities()} fallback={
-                <Show when={!capabilities.loading}><p class="muted">{t('outbound.noCapabilities')}</p></Show>
-              }>
-                <Show when={requestableCapabilities().length === 0}>
-                  <p class="muted">{t('outbound.noCapabilities')}</p>
-                </Show>
-                <div class="capability-option-list">
-                  <For each={requestableCapabilities()}>{(capability) =>
-                    <CapabilityOption capability={capability} checked={offeredCapabilities().includes(capability.id)}
-                      direction="offered"
-                      onToggle={() => toggleCapability(capability.id, 'offered')} />
-                  }</For>
-                </div>
-              </Show>
-            </fieldset>
             <Show when={submitError()}><p class="field-error" role="alert">{submitError()}</p></Show>
-            <div class="settings-actions"><button class="button button-primary" type="submit" disabled={sending() || capabilities.loading || !!capabilities.error}>
+            <div class="settings-actions"><button class="button button-primary" type="submit" disabled={sending()}>
               {sending() ? t('outbound.sending') : t('outbound.send')}
             </button></div>
           </form>
         </section>
       </Show>
     </>
-  )
-}
-
-function CapabilityOption(props: {
-  capability: CapabilityDescriptor
-  checked: boolean
-  direction: 'requested' | 'offered'
-  onToggle: () => void
-}) {
-  const { t } = useI18n()
-  const name = () => props.capability.id === 'std.dhttp.net/message#message'
-    ? t('capabilities.chat.name') : props.capability.title
-  return (
-    <label class="capability-option">
-      <input type="checkbox" checked={props.checked} onChange={props.onToggle}
-        aria-label={`${name()} — ${props.direction === 'requested' ? t('outbound.requestedCapabilities') : t('outbound.offeredCapabilities')}`} />
-      <span>
-        <strong>{name()}</strong>
-        <Show when={props.capability.id === 'std.dhttp.net/message#message'}>
-          <small>{t(props.direction === 'requested'
-            ? 'outbound.capability.chat.requestSummary'
-            : 'outbound.capability.chat.offerSummary')}</small>
-        </Show>
-      </span>
-    </label>
   )
 }

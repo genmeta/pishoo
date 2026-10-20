@@ -4,8 +4,7 @@ import type {
   ApiSummary,
   Approval,
   AccessApproval,
-  CapabilityApproval,
-  ChatCapabilityState,
+  ContactApproval,
   CapabilityDescriptor,
   Contact,
   DirectoryEntry,
@@ -22,6 +21,11 @@ import type {
   RulesByGrantee,
 } from './types'
 
+interface ApiReview extends Omit<AccessApproval, 'kind' | 'review_kind' | 'expired_after'> {
+  kind: 'live' | 'persistent'
+  expired_after: string | number | null
+}
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -32,15 +36,33 @@ export class ApiError extends Error {
   }
 }
 
+export class ReviewRequiredError extends ApiError {
+  readonly reviewId?: number
+  readonly statusUrl?: string
+
+  constructor(reviewId?: number, statusUrl?: string) {
+    super(400, 'need_review')
+    this.name = 'ReviewRequiredError'
+    this.reviewId = reviewId
+    this.statusUrl = statusUrl
+  }
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   if (init?.body && !headers.has('content-type')) {
     headers.set('content-type', 'application/json')
   }
 
+  if (!headers.has('if-reviewed')) headers.set('if-reviewed', 'break')
   const response = await fetch(path, { ...init, headers })
   if (!response.ok) {
     const message = (await response.text()).trim()
+    let body: { error?: string; review_id?: number; status_url?: string } | undefined
+    try { body = JSON.parse(message) } catch { /* Non-JSON errors keep their response text. */ }
+    if (response.status === 400 && body?.error === 'need_review') {
+      throw new ReviewRequiredError(body.review_id, body.status_url)
+    }
     throw new ApiError(response.status, message || `Request failed (${response.status})`)
   }
   if (response.status === 204) {
@@ -57,41 +79,29 @@ export function query(values: Record<string, string | number>): string {
 
 export function backendPath(path: string): string {
   if (path === '/message') return '/std/message'
-  if (path.startsWith('/chat/')) return `/std/message/${path.slice(6)}`
+  if (path.startsWith('/message/')) return `/std/message/${path.slice(9)}`
   return `/std${path}`
 }
-function capabilityRequests(contacts: Contact[], catalog: CapabilityDescriptor[], rules: RulesByGrantee, expired: boolean): CapabilityApproval[] {
+function contactRequests(contacts: Contact[], expired: boolean): ContactApproval[] {
   const time = Date.now() / 1000
-  return contacts.flatMap(contact => {
-    const status = contactStatus(contact.status)
-    if ((contact.expired_after <= time) !== expired || !['pending', 'transfered', 'active', 'expired'].includes(status)) return []
-    const requestId = Number(Reflect.get(contact, 'id'))
-    if (!Number.isSafeInteger(requestId) || requestId <= 0) throw new ApiError(502, 'Invalid contact request ID')
-    return catalog.filter(capability => {
-      const requested = capability.endpoints.some(endpoint => contact.requested_access[endpoint.path]?.includes(endpoint.method))
-      const decided = capability.endpoints.every(endpoint => {
-        // Capability decisions are written to native ACL rules, not contact.grants.
-        const methods = rules[contact.name]?.[endpoint.path]
-        return methods?.allow.includes(endpoint.method) || methods?.deny.includes(endpoint.method)
-      })
-      const awaitingAcceptance = ['pending', 'transfered'].includes(status)
-        && capability.endpoints.some(endpoint => rules[contact.name]?.[endpoint.path]?.allow.includes(endpoint.method))
-      return requested && (!decided || awaitingAcceptance)
-    }).map(capability => ({ kind: 'capability' as const, request_id: requestId,
-      contact_name: contact.name, capability_id: capability.id, capability_version: capability.version,
-      requested_at: contact.created_at, expired_after: contact.expired_after }))
-  })
+  return contacts.filter(contact => contact.incoming === true
+    && ['pending', 'transfered', 'expired'].includes(contactStatus(contact.status))
+    && (contact.valid_before <= time) === expired).map(contact => ({
+      kind: 'contact', request_id: Number(Reflect.get(contact, 'id')),
+      contact_name: contact.name, subject_id: contact.subject_id,
+      requested_at: contact.created_at, expired_after: contact.valid_before,
+    }))
 }
 
 export const api = {
   context: async (): Promise<RuntimeContext> => {
-    const [profile, reviews, contacts, catalog, rules] = await Promise.all([
+    const [profile, reviews, contacts] = await Promise.all([
       request<ProfileSettings>('/std/profile'),
       request<Page<AccessApproval[]>>('/std/acl/reviews?page=1&page_size=1'),
-      api.allContacts('name', 'asc'), api.capabilities(), api.rulesByGrantee(),
+      api.allContacts('name', 'asc'),
     ])
     return { profile: profile.identity_name, owner_name: profile.identity_name,
-      badges: { pending_reviews: reviews.total, incoming_contacts: capabilityRequests(contacts, catalog, rules, false).length } }
+      badges: { pending_reviews: reviews.total, incoming_contacts: contactRequests(contacts, false).length } }
   },
 
   introduction: (signal?: AbortSignal) => request<Introduction>('/std/profile/context', { signal }),
@@ -105,37 +115,35 @@ export const api = {
   },
 
   approvals: async (status: 'pending' | 'expired', page: number, signal?: AbortSignal): Promise<Page<Approval[]>> => {
-    const [contacts, catalog, rules] = await Promise.all([
-      api.allContacts('name', 'asc', signal), api.capabilities(signal), api.rulesByGrantee(signal),
-    ])
-    const items: Approval[] = capabilityRequests(contacts, catalog, rules, status === 'expired')
+    const contacts = await api.allContacts('name', 'asc', signal)
+    const items: Approval[] = contactRequests(contacts, status === 'expired')
     let sourcePage = 1
     while (true) {
-      const result = await request<Page<AccessApproval[]>>(`/std/acl/reviews?${query({ status, page: sourcePage, page_size: 100 })}`, { signal })
+      const result = await request<Page<ApiReview[]>>(`/std/acl/reviews?${query({ status, page: sourcePage, page_size: 100 })}`, { signal })
       items.push(...result.items.map(review => {
-        const expires: unknown = Reflect.get(review, 'expired_after')
-        const requested: unknown = Reflect.get(review, 'requested_at')
+        const expires = review.expired_after
+        const requested = review.requested_at
         const seconds = (value: unknown) => typeof value === 'string' ? Date.parse(value) / 1000 : Number(value)
-        const expiredAfter = seconds(expires), requestedAt = seconds(requested)
-        if (!Number.isFinite(expiredAfter) || !Number.isFinite(requestedAt)) throw new ApiError(502, 'Invalid approval timestamp')
-        return { ...review, kind: 'access' as const, expired_after: expiredAfter, requested_at: requestedAt }
+        const expiredAfter = expires === null ? null : seconds(expires), requestedAt = seconds(requested)
+        if ((expiredAfter !== null && !Number.isFinite(expiredAfter)) || !Number.isFinite(requestedAt)) throw new ApiError(502, 'Invalid approval timestamp')
+        return { ...review, kind: 'access' as const, review_kind: review.kind, expired_after: expiredAfter, requested_at: requestedAt }
       }))
       if (sourcePage * 100 >= result.total || !result.items.length) break
       sourcePage++
     }
-    items.sort((a, b) => status === 'expired' ? b.expired_after - a.expired_after : b.requested_at - a.requested_at)
+    items.sort((a, b) => status === 'expired' ? (b.expired_after ?? 0) - (a.expired_after ?? 0) : b.requested_at - a.requested_at)
     return { items: items.slice((page - 1) * 20, page * 20), total: items.length, page, page_size: 20 }
   },
 
-  deleteExpiredApproval: (approval: Approval) => approval.kind === 'capability'
-    ? request<void>(`/std/contact/${encodeURIComponent(approval.contact_name)}`, { method: 'DELETE' })
+  deleteExpiredApproval: (approval: Approval) => approval.kind === 'contact'
+    ? request<void>(`/std/contact?${query({ name: approval.contact_name })}`, { method: 'DELETE' })
     : request<void>(`/std/acl/review/${approval.id}`, { method: 'DELETE' }),
 
   outboundRequests: (page: number, signal?: AbortSignal) =>
-    request<Page<OutboundContactRequest[]>>(`/std/contact/local/requests?${query({ page, page_size: 20 })}`, { signal }),
+    request<Page<OutboundContactRequest[]>>(`/std/contact/requests?${query({ page, page_size: 20 })}`, { signal }),
 
   outboundRequest: (id: number, signal?: AbortSignal) =>
-    request<OutboundContactRequest>(`/std/contact/local/requests?${query({ id })}`, { signal }),
+    request<OutboundContactRequest>(`/std/contact/requests?${query({ id })}`, { signal }),
 
   sendContactRequest: async (value: OutboundContactInput) => {
     const target = normalizeIdentityName(value.target_name)
@@ -143,16 +151,16 @@ export const api = {
     if ([...value.description].length > 80 || /\p{Cc}/u.test(value.description)) {
       throw new ApiError(400, 'Invalid description')
     }
-    return request<OutboundContactRequest>('/std/contact/local/requests', {
+    return request<OutboundContactRequest>('/std/contact', {
       method: 'POST', body: JSON.stringify({ ...value, target_name: target }),
     })
   },
 
   refreshOutboundRequest: (id: number) =>
-    request<OutboundContactRequest>(`/std/contact/local/requests/refresh?${query({ id })}`, { method: 'POST' }),
+    request<OutboundContactRequest>(`/std/contact/requests/refresh?${query({ id })}`, { method: 'POST' }),
 
   deleteOutboundRequest: (id: number) =>
-    request<void>(`/std/contact/local/requests?${query({ id })}`, { method: 'DELETE' }),
+    request<void>(`/std/contact/requests?${query({ id })}`, { method: 'DELETE' }),
 
   profileSettings: (signal?: AbortSignal) =>
     request<ProfileSettings>('/std/profile', { signal }),
@@ -185,20 +193,20 @@ export const api = {
   decideReview: (
     reviewId: number,
     action: 'allow' | 'deny',
-    expiredAfter: string,
+    kind: 'live' | 'persistent' = 'persistent',
   ) =>
     request<void>('/std/acl/review', {
       method: 'PATCH',
       body: JSON.stringify({
         id: reviewId,
+        kind,
         action,
-        expired_after: expiredAfter,
       }),
     }),
 
   contacts: (page: number, sort: string, order: string, signal?: AbortSignal, pageSize = 20) =>
     request<Page<Contact[]>>(
-      `/std/contacts?${query({ page, page_size: pageSize, sort, order })}`,
+      `/std/contact/list?${query({ page, page_size: pageSize, sort, order })}`,
       { signal },
     ),
 
@@ -213,41 +221,53 @@ export const api = {
     }
   },
 
-  contactDirectory: async (signal?: AbortSignal): Promise<DirectoryEntry[]> => {
-    const [contacts, saved] = await Promise.all([api.allContacts('name', 'asc', signal), request<string[]>('/std/contact/local/saved', { signal })])
-    const entries = await Promise.all(contacts.map(async contact => {
-      let capability: Pick<ChatCapabilityState, 'can_send' | 'can_receive' | 'remote_grant'>
-      try {
-        capability = await request<ChatCapabilityState>(`/std/message/capability?${query({ name: contact.name })}`, { signal })
-      } catch (error) {
-        if (signal?.aborted) throw error
-        capability = { can_send: false, can_receive: contact.granted_access['/std/message']?.allow.includes('POST') ?? false, remote_grant: null }
-      }
-      return { name: contact.name, saved: saved.includes(contact.name), chat_available: capability.can_send || capability.can_receive, remote_chat_granted: capability.remote_grant }
-    }))
-    return entries.filter(entry => entry.saved || entry.chat_available)
+  contactProfile: async (name: string, signal?: AbortSignal): Promise<PublicProfile> => {
+    const profile = await api.publicProfile(name, signal)
+    return { ...profile, avatar_url: profile.avatar_url ? `/std/contact/${encodeURIComponent(name)}/profile/avatar` : null }
   },
 
-  saveContactIdentity: (name: string) =>
-    request<void>(`/std/contact/local/saved?${query({ name })}`, { method: 'PUT' }),
+  contactDirectory: async (signal?: AbortSignal): Promise<DirectoryEntry[]> => {
+    const contacts = (await api.allContacts('name', 'asc', signal))
+      .filter(contact => contactStatus(contact.status) !== 'blocked')
+    return contacts.map(contact => ({
+      ...contact,
+      display_name: null,
+      avatar_url: null,
+      profile_updated_at: 0,
+      chat_available: true,
+    }))
+  },
 
-  unsaveContactIdentity: (name: string) =>
-    request<void>(`/std/contact/local/saved?${query({ name })}`, { method: 'DELETE' }),
+  enrichContactDirectory: async (
+    contacts: DirectoryEntry[],
+    onProfile: (name: string, profile: PublicProfile) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    let index = 0
+    await Promise.all(Array.from({ length: Math.min(6, contacts.length) }, async () => {
+      while (index < contacts.length) {
+        const contact = contacts[index++]
+        const profile = await api.contactProfile(contact.name, signal).catch(() => null)
+        signal?.throwIfAborted()
+        if (profile) onProfile(contact.name, profile)
+      }
+    }))
+  },
 
   contact: (name: string, signal?: AbortSignal) =>
-    request<Contact>(`/std/contact/${encodeURIComponent(name)}`, { signal }),
+    request<Contact>(`/std/contact?${query({ name })}`, { signal }),
 
-  patchContact: (name: string, body: { status?: string; alias?: string }) =>
-    request<void>(`/std/contact/${encodeURIComponent(name)}`, {
+  patchContact: (name: string, body: { status?: string; alias?: string; expires_after?: number; valid_before?: number }) =>
+    request<void>(`/std/contact?${query({ name })}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
   deleteContact: (name: string) =>
-    request<void>(`/std/contact/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    request<void>(`/std/contact?${query({ name })}`, { method: 'DELETE' }),
 
   deleteContacts: (names: string[]) =>
-    request<void>('/std/contacts', {
+    request<void>('/std/contact', {
       method: 'DELETE',
       body: JSON.stringify({ names }),
     }),

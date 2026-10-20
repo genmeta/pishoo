@@ -1,41 +1,28 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
-import { ApiError, api, backendPath, request } from '../api/client'
-import type { CapabilityDescriptor, Contact, DirectoryEntry } from '../api/types'
+import { api } from '../api/client'
+import type { Contact, DirectoryEntry } from '../api/types'
 import { chatApi } from '../chat/api'
 import { Avatar, Dialog, EmptyState, ErrorState, LoadingState, Pagination, StatusBadge } from '../components/Ui'
-import type { ContactFollowupReason } from '../i18n'
-import { contactClassLabel, contactFollowupLabel, useI18n } from '../i18n'
+import { contactClassLabel, useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
-import { contactDisplayName, contactStatus, displayIdentityName, errorMessage } from '../lib/format'
+import { contactDisplayName, contactStatus, profileAvatarUrl, displayIdentityName, errorMessage } from '../lib/format'
 import { contactChatPath, contactPath } from '../lib/routes'
+import { useContactDirectoryProfiles } from '../lib/useContactDirectoryProfiles'
 
 type ConfirmDelete = { names: string[] } | null
-type ContactCategory = 'attention' | 'saved' | 'blocked'
-const CONTACT_CATEGORIES: ContactCategory[] = ['attention', 'saved', 'blocked']
-const CATEGORY_LABEL_KEYS = {
-  attention: 'contacts.category.attention',
-  saved: 'contacts.category.saved',
-  blocked: 'contacts.category.blocked',
-} as const
-
-function ContactIdentity(props: { contact: Contact; large?: boolean; detail?: boolean }) {
-  const loadProfile = abortable((name: string, signal: AbortSignal) => api.publicProfile(name, signal))
-  const source = () => ['active', 'blocked'].includes(contactStatus(props.contact.status))
-    ? props.contact.name
-    : null
-  const [profile] = createResource(source, loadProfile)
-  const resolvedProfile = () => profile.error ? undefined : profile()
+function ContactIdentity(props: { contact: Contact; large?: boolean; detail?: boolean; entry?: DirectoryEntry }) {
+  const resolvedProfile = () => {
+    if (props.entry) return { display_name: props.entry.display_name, avatar_url: props.entry.avatar_url, updated_at: props.entry.profile_updated_at }
+  }
   const identityName = () => displayIdentityName(props.contact.name)
   const label = () => contactDisplayName(props.contact.name, props.contact.alias, resolvedProfile()?.display_name)
   return (
     <>
-      <Avatar name={label()} src={resolvedProfile()?.avatar_url} large={props.large} />
+      <Avatar name={label()} src={profileAvatarUrl(resolvedProfile())} large={props.large} />
       <span classList={{ 'contact-identity-detail': props.detail }}>
         <strong>{label()}</strong>
-        <Show when={identityName() !== label()}>
-          <small>{identityName()}</small>
-        </Show>
+        <Show when={identityName() !== label()}><small>{identityName()}</small></Show>
       </span>
     </>
   )
@@ -46,124 +33,44 @@ export default function ContactsPage(props: {
   contactName?: string
   navigate: (path: string) => void
   returnTo?: string
+  pausePolling?: boolean
   onResolved?: () => void
 }) {
   const { date, t } = useI18n()
   const [page, setPage] = createSignal(1)
-  const [category, setCategory] = createSignal<ContactCategory | null>(null)
-  const [sort, setSort] = createSignal('updated_at')
-  const [order, setOrder] = createSignal('desc')
+  const [search, setSearch] = createSignal('')
   const [revision, setRevision] = createSignal(0)
   const selectedName = () => props.contactName ?? null
   const openContact = (name: string) => props.navigate(contactPath(name))
   const openChat = (name: string) => props.navigate(contactChatPath(name))
   const closeContact = () => props.navigate(props.returnTo ?? '#/contacts')
-  const [selected, setSelected] = createSignal<Set<string>>(new Set())
   const [confirmDelete, setConfirmDelete] = createSignal<ConfirmDelete>(null)
   const [alias, setAlias] = createSignal('')
   const [submitting, setSubmitting] = createSignal(false)
-  const loadContacts = abortable(
-    async ([currentSort, currentOrder]: readonly [string, string, number], signal: AbortSignal) => {
-      const [items, directory] = await Promise.all([
-        api.allContacts(currentSort, currentOrder, signal),
-        api.contactDirectory(signal),
-      ])
-      return { items, directory }
-    },
-  )
+  const loadContacts = abortable((_revision: number, signal: AbortSignal) => api.contactDirectory(signal))
   const loadContact = abortable((name: string, signal: AbortSignal) => api.contact(name, signal))
-  const loadChatCapability = abortable((name: string, signal: AbortSignal) => chatApi.capability(name, signal))
-  const [contacts] = createResource(
-    () => [sort(), order(), revision()] as const,
-    loadContacts,
-  )
+  const [contacts] = createResource(revision, loadContacts)
   const [detail, detailActions] = createResource(selectedName, loadContact)
-  const [chatCapability, chatCapabilityActions] = createResource(selectedName, loadChatCapability)
-  const [remoteCapabilities, remoteCapabilityActions] = createResource(selectedName, abortable(async (name: string, signal: AbortSignal) => {
-    const catalog = await request<CapabilityDescriptor[]>(`/std/dhttp/${encodeURIComponent(name)}/std/acl/capabilities`, { signal })
-    if (!Array.isArray(catalog) || catalog.some(capability => !capability
-      || typeof capability.id !== 'string' || typeof capability.title !== 'string'
-      || typeof capability.selectable !== 'boolean' || !Array.isArray(capability.endpoints)
-      || capability.endpoints.some(endpoint => !endpoint || typeof endpoint.method !== 'string' || typeof endpoint.path !== 'string'))) {
-      throw new ApiError(502, t('contacts.capabilityCatalogInvalid'))
-    }
-    return catalog.filter(capability => capability.selectable && capability.endpoints.length > 0)
-  }))
-  const [requestedCapabilities, setRequestedCapabilities] = createSignal<string[]>([])
-  createEffect(on(selectedName, () => setRequestedCapabilities([])))
-  const requestCapabilities = async () => {
-    const name = selectedName()
-    if (!name || submitting() || remoteCapabilities.loading || remoteCapabilities.error
-      || !detail() || ['blocked', 'expired'].includes(contactStatus(detail()!.status))) return
-    const selected = [...new Set(remoteCapabilities()?.filter(capability => requestedCapabilities().includes(capability.id)).map(capability => capability.id))]
-    if (!selected.length) return
-    setSubmitting(true)
-    try {
-      await api.sendContactRequest({ target_name: name, description: '', requested_capabilities: selected, offered_capabilities: [] })
-      props.notify(t('outbound.sent'))
-      setRequestedCapabilities([])
-      props.navigate('#/contacts/requests')
-    } catch (error) {
-      props.notify(error instanceof ApiError && error.status === 409
-        && error.message.includes('already pending') ? t('outbound.duplicate')
-        : errorMessage(error, t('common.unexpectedError')), 'error')
-    } finally {
-      setSubmitting(false)
-    }
-  }
+  const directory = useContactDirectoryProfiles(contacts)
   const directoryEntries = createMemo(() => new Map<string, DirectoryEntry>(
-    contacts()?.directory.map((entry) => [entry.name, entry]) ?? [],
-  ))
-  const directory = createMemo(() => new Map<string, boolean>(
-    contacts()?.directory.map((entry) => [entry.name, entry.saved]) ?? [],
+    directory().map(entry => [entry.name, entry]),
   ))
   const chatAvailable = createMemo(() => new Set(
-    contacts()?.directory.filter((entry) => entry.chat_available).map((entry) => entry.name) ?? [],
+    directory().filter(entry => entry.chat_available).map(entry => entry.name),
   ))
-  const followupReason = (contact: Contact): ContactFollowupReason | null => {
-    if (contactStatus(contact.status) !== 'active') return null
-    const entry = directoryEntries().get(contact.name)
-    if (!entry) return 'unlisted'
-    if (!Object.prototype.hasOwnProperty.call(contact.requested_access, backendPath('/message'))
-      || entry.remote_chat_granted === true) return null
-    return entry.remote_chat_granted === false ? 'remote-not-granted' : 'remote-unknown'
-  }
-  const directoryContacts = () => contacts()?.items.filter((contact) =>
-    directory().has(contact.name) || contactStatus(contact.status) === 'active') ?? []
-  const inCategory = (contact: Contact, current: ContactCategory | null) => {
-    if (current === 'attention') return followupReason(contact) !== null
-    if (current === 'saved') return directory().get(contact.name) === true
-    if (current === 'blocked') return contactStatus(contact.status) === 'blocked'
-    return contactStatus(contact.status) === 'active'
-      && chatAvailable().has(contact.name)
-      && directory().get(contact.name) !== true
-      && followupReason(contact) === null
-  }
-  const categoryCount = (current: ContactCategory) => directoryContacts()
-    .filter((contact) => inCategory(contact, current)).length
-  const filtered = () => directoryContacts().filter((contact) => inCategory(contact, category()))
-  const followupLabel = (contact: Contact) => {
-    const reason = followupReason(contact)
-    return reason ? contactFollowupLabel(t, reason) : null
-  }
-  const followupDetail = (contact: Contact) => {
-    const reason = followupReason(contact)
-    return reason ? contactFollowupLabel(t, reason, 'detail') : undefined
-  }
+  const filtered = () => directory().filter(contact => {
+    const text = `${contactDisplayName(contact.name, contact.alias, contact.display_name)} ${contact.name}`
+    return text.toLocaleLowerCase().includes(search().trim().toLocaleLowerCase())
+  })
   const visible = () => filtered().slice((page() - 1) * 20, page() * 20)
 
   const refresh = () => setRevision((value) => value + 1)
   onMount(() => {
     const timer = window.setInterval(() => {
-      if (document.hidden || submitting()) return
-      // Approval is reconciled asynchronously by both profiles. Keep the list
-      // and open detail current until the reverse permission is confirmed.
+      if (document.hidden || submitting() || props.pausePolling) return
+      if (selectedName()) return
       if (!contacts.loading && !contacts.error
-        && directoryContacts().some((contact) => followupReason(contact) !== null)) refresh()
-      if (selectedName() && !chatCapability.loading && !chatCapability.error
-        && chatCapability()?.contact_status === 'active' && chatCapability()?.remote_grant !== true) {
-        void chatCapabilityActions.refetch()
-      }
+        && contacts()?.some(contact => contactStatus(contact.status) === 'pending')) refresh()
     }, 3000)
     onCleanup(() => window.clearInterval(timer))
   })
@@ -172,32 +79,9 @@ export default function ContactsPage(props: {
     const lastPage = Math.max(1, Math.ceil(filtered().length / 20))
     if (page() > lastPage) setPage(lastPage)
   })
-  const changeCategory = (next: ContactCategory) => {
-    setCategory((current) => current === next ? null : next)
-    setPage(1)
-    setSelected(new Set<string>())
-  }
   createEffect(() => {
     setAlias(detail()?.alias ?? '')
   })
-  const toggle = (name: string) => {
-    const next = new Set(selected())
-    if (next.has(name)) next.delete(name)
-    else next.add(name)
-    setSelected(next)
-  }
-
-  const toggleAll = () => {
-    const names = visible().map((contact) => contact.name)
-    const allSelected = names.length > 0 && names.every((name) => selected().has(name))
-    const next = new Set(selected())
-    for (const name of names) {
-      if (allSelected) next.delete(name)
-      else next.add(name)
-    }
-    setSelected(next)
-  }
-
   const mutateContact = async (body: { status?: string; alias?: string }, success: string) => {
     const name = selectedName()
     if (!name) return
@@ -208,7 +92,6 @@ export default function ContactsPage(props: {
       refresh()
       props.onResolved?.()
       await detailActions.refetch()
-      await chatCapabilityActions.refetch()
     } catch (error) {
       props.notify(errorMessage(error, t('common.unexpectedError')), 'error')
     } finally {
@@ -229,7 +112,6 @@ export default function ContactsPage(props: {
       refresh()
       props.onResolved?.()
       await detailActions.refetch()
-      await chatCapabilityActions.refetch()
     }).catch((error) => {
       props.notify(errorMessage(error, t('common.unexpectedError')), 'error')
     }).finally(() => setSubmitting(false))
@@ -248,26 +130,9 @@ export default function ContactsPage(props: {
       refresh()
       props.onResolved?.()
       await detailActions.refetch()
-      await chatCapabilityActions.refetch()
     }).catch((error) => {
       props.notify(errorMessage(error, t('common.unexpectedError')), 'error')
     }).finally(() => setSubmitting(false))
-  }
-
-  const setIdentitySaved = async (name: string, saved: boolean) => {
-    if (submitting()) return
-    setSubmitting(true)
-    try {
-      if (saved) await api.unsaveContactIdentity(name)
-      else await api.saveContactIdentity(name)
-      props.notify(t(saved ? 'contacts.identityUnsaved' : 'contacts.identitySaved'))
-      refresh()
-      props.onResolved?.()
-    } catch (error) {
-      props.notify(errorMessage(error, t('common.unexpectedError')), 'error')
-    } finally {
-      setSubmitting(false)
-    }
   }
 
   const removeContacts = async () => {
@@ -282,11 +147,6 @@ export default function ContactsPage(props: {
           ? t('contacts.deletedOne')
           : t('contacts.deletedMany', { count: names.length }),
       )
-      setSelected((current) => {
-        const next = new Set(current)
-        names.forEach((name) => next.delete(name))
-        return next
-      })
       if (selectedName() && names.includes(selectedName()!)) closeContact()
       setConfirmDelete(null)
       refresh()
@@ -301,10 +161,10 @@ export default function ContactsPage(props: {
   const statusActions = (contact: Contact) => {
     const status = contactStatus(contact.status)
     return {
+      canAccept: ['pending', 'transfered'].includes(status),
       canGrantChat: ['pending', 'transfered', 'active'].includes(status)
-        && Object.prototype.hasOwnProperty.call(contact.requested_access, backendPath('/message'))
-        && chatCapability()?.can_receive !== true,
-      canRevokeChat: status === 'active' && chatCapability()?.can_receive === true,
+        && !detail()?.granted_access['/std/message']?.allow.includes('POST'),
+      canRevokeChat: status === 'active' && detail()?.granted_access['/std/message']?.allow.includes('POST') === true,
       canBlock: ['active', 'transfered'].includes(status),
       canRestore: status === 'blocked',
       status,
@@ -326,67 +186,14 @@ export default function ContactsPage(props: {
         </div>
       </header>
 
-      <div class="section-nav" role="group" aria-label={t('contacts.category.label')}>
-        <For each={CONTACT_CATEGORIES}>{(item) =>
-          <button type="button"
-            classList={{ active: category() === item }} aria-pressed={category() === item}
-            aria-label={`${t(CATEGORY_LABEL_KEYS[item])} ${categoryCount(item)}`}
-            onClick={() => changeCategory(item)}>
-            {t(CATEGORY_LABEL_KEYS[item])}
-            <span class="contact-category-count">{categoryCount(item)}</span>
-          </button>
-        }</For>
-      </div>
-
       <div class="toolbar toolbar-wrap">
-        <Show
-          when={selected().size}
-          fallback={<span class="toolbar-meta">{t('contacts.count', { count: filtered().length })}</span>}
-        >
-          <div class="bulk-actions">
-            <strong>{t('contacts.selected', { count: selected().size })}</strong>
-            <button
-              class="button button-danger-quiet button-small"
-              type="button"
-              onClick={() => setConfirmDelete({ names: [...selected()] })}
-            >
-              {t('common.delete')}
-            </button>
-          </div>
-        </Show>
-        <div class="filter-group">
-          <label>
-            <span class="sr-only">{t('contacts.sortBy')}</span>
-            <select
-              class="view-select"
-              value={sort()}
-              onChange={(event) => {
-                setSort(event.currentTarget.value)
-                setPage(1)
-              }}
-            >
-              <option value="updated_at">{t('contacts.updated')}</option>
-              <option value="created_at">{t('contacts.created')}</option>
-              <option value="name">{t('contacts.name')}</option>
-              <option value="alias">{t('contacts.alias')}</option>
-              <option value="class">{t('contacts.class')}</option>
-            </select>
-          </label>
-          <label>
-            <span class="sr-only">{t('contacts.sortDirection')}</span>
-            <select
-              class="view-select"
-              value={order()}
-              onChange={(event) => {
-                setOrder(event.currentTarget.value)
-                setPage(1)
-              }}
-            >
-              <option value="desc">{t('contacts.descending')}</option>
-              <option value="asc">{t('contacts.ascending')}</option>
-            </select>
-          </label>
-        </div>
+        <span class="toolbar-meta">{t('contacts.count', { count: filtered().length })}</span>
+        <label class="contact-search">
+          <span class="sr-only">{t('contacts.search')}</span>
+          <input type="search" placeholder={t('contacts.search')} value={search()} onInput={event => {
+            setSearch(event.currentTarget.value); setPage(1)
+          }} />
+        </label>
       </div>
 
       <section class="data-panel" aria-label={t('contacts.section')}>
@@ -397,98 +204,40 @@ export default function ContactsPage(props: {
           <LoadingState label={t('contacts.loading')} />
         </Show>
         <Show when={!contacts.error && contacts() && filtered().length === 0}>
-          <EmptyState title={t(category() === null ? 'contacts.empty' : 'contacts.emptyCategory')} />
+          <EmptyState title={t('contacts.empty')} />
         </Show>
         <Show when={!contacts.error && filtered().length}>
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th class="checkbox-cell">
-                    <input
-                      type="checkbox"
-                      aria-label={t('contacts.selectAll')}
-                      checked={visible().length > 0 && visible().every((contact) => selected().has(contact.name))}
-                      onChange={toggleAll}
-                    />
-                  </th>
-                  <th>{t('contacts.contact')}</th>
-                  <th>{t('contacts.status')}</th>
-                  <th>{t('contacts.class')}</th>
-                  <th><span class="sr-only">{t('common.actions')}</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                <For each={visible()}>
-                  {(contact) => (
-                    <tr classList={{ selected: selectedName() === contact.name }}>
-                      <td class="checkbox-cell">
-                        <input
-                          type="checkbox"
-                          aria-label={t('contacts.select', { name: displayIdentityName(contact.name) })}
-                          checked={selected().has(contact.name)}
-                          onChange={() => toggle(contact.name)}
-                        />
-                      </td>
-                      <td>
-                        <button class="contact-link" type="button" onClick={() => openContact(contact.name)}>
-                          <ContactIdentity contact={contact} />
-                        </button>
-                      </td>
-                      <td>
-                        <div class="contact-row-status">
-                          <Show when={contactStatus(contact.status) !== 'active'
-                            || inCategory(contact, null)}>
-                            <StatusBadge value={contactStatus(contact.status)} />
-                          </Show>
-                          <Show when={followupLabel(contact)}>
-                            <span class="contact-status-note" title={followupDetail(contact)}>
-                              {followupLabel(contact)}
-                            </span>
-                          </Show>
-                          <Show when={directory().get(contact.name)}>
-                            <span class="contact-saved-note">{t('contacts.savedMarker')}</span>
-                          </Show>
-                        </div>
-                      </td>
-                      <td>{contactClassLabel(t, contact.class)}</td>
-                      <td>
-                        <div class="row-actions contact-row-actions">
-                          <Show when={followupReason(contact) === 'unlisted'}>
-                            <button class="button button-secondary button-small" type="button" disabled={submitting()}
-                              onClick={() => void setIdentitySaved(contact.name, false)}>
-                              {t('contacts.saveIdentity')}
-                            </button>
-                          </Show>
-                          <Show when={chatAvailable().has(contact.name)}>
-                            <button class="button button-secondary button-small" type="button"
-                              aria-label={t('contacts.chatWith', { name: displayIdentityName(contact.name) })}
-                              onClick={() => openChat(contact.name)}>
-                              {t('contacts.openChat')}
-                            </button>
-                          </Show>
-                          <button
-                            class="icon-button"
-                            type="button"
-                            aria-label={t('contacts.openContact', { name: displayIdentityName(contact.name) })}
-                            title={t('contacts.openDetails')}
-                            onClick={() => openContact(contact.name)}
-                          >
-                            ›
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
+          <div class="contact-card-grid" role="list">
+            <For each={visible()}>{contact => (
+              <article class="contact-card" role="listitem" classList={{ selected: selectedName() === contact.name }}>
+                <div class="contact-card-heading">
+                  <button class="contact-link" type="button" onClick={() => openContact(contact.name)}>
+                    <ContactIdentity contact={contact} entry={directoryEntries().get(contact.name)} large />
+                  </button>
+                </div>
+                <div class="contact-row-status">
+                  <StatusBadge value={contactStatus(contact.status)} />
+                  <span class="muted">{contactClassLabel(t, contact.class)}</span>
+
+                </div>
+                <div class="contact-card-actions">
+                  <Show when={chatAvailable().has(contact.name)}>
+                    <button class="button button-secondary" type="button"
+                      aria-label={t('contacts.chatWith', { name: displayIdentityName(contact.name) })}
+                      onClick={() => openChat(contact.name)}>{t('contacts.openChat')}</button>
+                  </Show>
+                  <button class="button button-secondary" type="button"
+                    aria-label={t('contacts.openContact', { name: displayIdentityName(contact.name) })}
+                    onClick={() => openContact(contact.name)}>{t('contacts.openDetails')}</button>
+                </div>
+              </article>
+            )}</For>
           </div>
           <Pagination
             page={page()}
             pageSize={20}
             total={filtered().length}
-            onPage={(next) => { setPage(next); setSelected(new Set<string>()) }}
+            onPage={setPage}
           />
         </Show>
       </section>
@@ -515,11 +264,8 @@ export default function ContactsPage(props: {
                 return (
                   <div class="drawer-content">
                     <div class="contact-heading">
-                      <ContactIdentity contact={contact} large detail />
+                      <ContactIdentity contact={contact} entry={directoryEntries().get(contact.name)} large detail />
                       <StatusBadge value={actions().status} />
-                      <Show when={directory().get(contact.name)}>
-                        <span class="method">{t('contacts.savedIdentity')}</span>
-                      </Show>
                     </div>
 
                     <dl class="metadata-grid">
@@ -530,7 +276,7 @@ export default function ContactsPage(props: {
                       <div><dt>{t('contacts.class')}</dt><dd>{contactClassLabel(t, contact.class)}</dd></div>
                       <div><dt>{t('contacts.updated')}</dt><dd>{date(contact.updated_at)}</dd></div>
                       <div><dt>{t('contacts.created')}</dt><dd>{date(contact.created_at)}</dd></div>
-                      <div><dt>{t('contacts.expires')}</dt><dd>{date(contact.expired_after)}</dd></div>
+                      <div><dt>{t('contacts.expires')}</dt><dd>{date(contact.valid_before)}</dd></div>
                       <div class="wide"><dt>{t('contacts.subjectId')}</dt><dd><code>{contact.subject_id}</code></dd></div>
                     </dl>
 
@@ -550,56 +296,11 @@ export default function ContactsPage(props: {
                       </button>
                     </form>
 
-                    <section class="detail-section capability-status-section" aria-label={t('contacts.requestableCapabilities')}>
-                      <div class="capability-card-header">
-                        <h3>{t('contacts.requestableCapabilities')}</h3>
-                        <button class="button button-secondary" type="button" disabled={remoteCapabilities.loading || submitting()}
-                          onClick={() => { setRequestedCapabilities([]); void remoteCapabilityActions.refetch() }}>{t('common.refresh')}</button>
-                      </div>
-                      <Show when={remoteCapabilities.loading}><LoadingState label={t('capabilities.loading')} /></Show>
-                      <Show when={remoteCapabilities.error}>
-                        <ErrorState message={errorMessage(remoteCapabilities.error, t('common.unexpectedError'))}
-                          onRetry={() => void remoteCapabilityActions.refetch()} />
-                      </Show>
-                      <Show when={!remoteCapabilities.loading && !remoteCapabilities.error && remoteCapabilities()}>
-                        <Show when={remoteCapabilities()!.length} fallback={<p class="muted">{t('outbound.noCapabilities')}</p>}>
-                          <form onSubmit={(event) => { event.preventDefault(); void requestCapabilities() }}>
-                            <div class="capability-option-list">
-                              <For each={remoteCapabilities()}>{(capability) =>
-                                <label class="capability-option remote-capability-option">
-                                  <input type="checkbox" checked={requestedCapabilities().includes(capability.id)}
-                                    disabled={submitting() || ['blocked', 'expired'].includes(actions().status)}
-                                    aria-label={capability.title}
-                                    onChange={(event) => setRequestedCapabilities(current => event.currentTarget.checked
-                                      ? [...new Set([...current, capability.id])] : current.filter(id => id !== capability.id))} />
-                                  <span>
-                                    <strong>{capability.title}</strong>
-                                    <small>{capability.id}</small>
-                                    <For each={capability.endpoints}>{(endpoint) => <code>{endpoint.method} {endpoint.path}</code>}</For>
-                                  </span>
-                                </label>
-                              }</For>
-                            </div>
-                            <div class="settings-actions">
-                              <button class="button button-primary" type="submit" disabled={submitting() || !requestedCapabilities().length
-                                || ['blocked', 'expired'].includes(actions().status)}>
-                                {submitting() ? t('outbound.sending') : t('contacts.requestCapabilities')}
-                              </button>
-                            </div>
-                          </form>
-                        </Show>
-                      </Show>
-                    </section>
-
                     <div class="drawer-actions">
-                      <button
-                        class="button button-secondary"
-                        type="button"
-                        disabled={submitting()}
-                        onClick={() => void setIdentitySaved(contact.name, directory().get(contact.name) === true)}
-                      >
-                        {t(directory().get(contact.name) ? 'contacts.unsaveIdentity' : 'contacts.saveIdentity')}
-                      </button>
+                      <Show when={actions().canAccept}>
+                        <button class="button button-secondary" type="button" disabled={submitting()}
+                          onClick={() => void mutateContact({ status: 'active' }, t('contacts.accepted'))}>{t('contacts.accept')}</button>
+                      </Show>
                       <Show when={actions().canGrantChat}>
                         <button
                           class="button button-primary"

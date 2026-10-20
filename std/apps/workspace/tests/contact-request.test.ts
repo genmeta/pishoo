@@ -11,7 +11,7 @@ test('offering capabilities submits one native request without granting an unkno
   }
   globalThis.fetch = (async (url, init) => {
     calls.push(String(url))
-    if (url !== '/std/contact/local/requests') {
+    if (url !== '/std/contact') {
       return new Response('contact does not exist', { status: 400 })
     }
     expect(init?.method).toBe('POST')
@@ -20,7 +20,7 @@ test('offering capabilities submits one native request without granting an unkno
   }) as typeof fetch
   try {
     expect(await api.sendContactRequest(input)).toMatchObject({ id: 1, status: 'queued' })
-    expect(calls).toEqual(['/std/contact/local/requests'])
+    expect(calls).toEqual(['/std/contact'])
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -42,7 +42,7 @@ test('a rejected native submission reports the error without additional ACL writ
     }
     expect(failure).toBeInstanceOf(ApiError)
     expect((failure as ApiError).status).toBe(409)
-    expect(calls).toEqual(['/std/contact/local/requests'])
+    expect(calls).toEqual(['/std/contact'])
   } finally {
     globalThis.fetch = originalFetch
   }

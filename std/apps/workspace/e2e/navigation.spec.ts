@@ -27,11 +27,6 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/workspace/contact-directory', (route) => route.fulfill({ json: [{
     name: 'alice.example', saved: false, chat_available: true, remote_chat_granted: true,
   }] }))
-  await page.route('**/api/chat/chat/capability?name=alice.example', (route) => route.fulfill({ json: {
-    capability: 'chat', status: 'available', contact_status: 'active',
-    can_send: true, can_receive: false, remote_grant: true,
-    endpoints: [{ method: 'POST', path: '/std/message' }],
-  } }))
   await page.route('**/std/contacts?*', (route) => route.fulfill({ json: {
     items: [{
       name: 'alice.example', subject_id: 'subject-alice', alias: null, class: 'Human',
@@ -111,11 +106,6 @@ test('identity labels omit the domain suffix while routes and rule data retain i
   await page.route('**/api/workspace/contact-directory', (route) => route.fulfill({ json: [{
     name, saved: false, chat_available: true, remote_chat_granted: true,
   }] }))
-  await page.route('**/api/chat/chat/capability?name=friend.dhttp.net', (route) => route.fulfill({ json: {
-    capability: 'chat', status: 'available', contact_status: 'active',
-    can_send: true, can_receive: false, remote_grant: true,
-    endpoints: [{ method: 'POST', path: '/std/message' }],
-  } }))
   await page.route('**/std/acl/reviews?*', (route) => route.fulfill({ json: {
     items: [{ id: 1, visitor: name, method: 'GET', api: '/files', reason: 'Need access', expired_after: '2033-01-01T00:00:00Z' }],
     total: 1, page: 1, page_size: 20,
