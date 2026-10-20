@@ -26,6 +26,8 @@ genmeta package install std.dhttp.net/workspace --id YOUR_IDENTITY
 WASI_SDK_PATH=/path/to/wasi-sdk sh std/apps/workspace/package.sh --publisher YOUR_NAME.dhttp.net
 ```
 
+从源码构建并启动 Pishoo、安装 Workspace 及其依赖，可运行 `WASI_SDK_PATH=/path/to/wasi-sdk python3 std/apps/workspace/dev.py --id YOUR_IDENTITY`。此开发命令每次都会卸载并重装这三个包，清除它们的业务数据、对应 ACL 和审批记录。前置条件、清理范围和发布者选项见 [Workspace 开发说明](apps/workspace/README.md)。
+
 输出为 `target/workspace-dist/{message-lib,profile-lib,workspace-app}.webc`，供独立上传商店。仅构建前端可在 `std/apps/workspace` 中运行 `bun run build`。
 
 Calendar 独立发布前后端，App 精确依赖同发布者的 Calendar Lib `0.1.0`：

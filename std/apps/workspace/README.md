@@ -10,6 +10,24 @@ Workspace 不随宿主发行包交付或首次启动自动安装。配置身份�
 
 不编译宿主即可运行 `python3 pishoo/tests/check-contact-migration.py` 检查 SQLite 迁移。脚本读取 Cargo 已缓存的锁定版 daccess；缓存缺失时先运行 `cargo fetch --locked`，也可设置 `DACCESS_PATH=/path/to/daccess` 指定待检查源码。
 
+从当前源码本地启动完整 Workspace，在仓库根目录运行：
+
+```sh
+WASI_SDK_PATH=/path/to/wasi-sdk python3 std/apps/workspace/dev.py --id YOUR_IDENTITY
+```
+
+需要 Python 3、Rust（含 wasm32-wasip2 target）、Bun、wasm-tools、WASI SDK 和支持 `package build/install/list/remove` 的新版 genmeta。`--id` 使用本机已经配置、已启用的身份；缺少 config.db 时先用 `genmeta identity ensite --id YOUR_IDENTITY` 启用。先停止已有 Pishoo 服务，脚本会增量构建并启动当前分支宿主，等待管理入口就绪，再构建并签名三个包。
+
+**每次运行都重建这三个包的开发数据。** 构建签名成功后，脚本按 Workspace → Profile → Message 的顺序卸载旧包，停止宿主，删除目标身份 `db/<publisher>/{message,profile}` 后端业务目录，并清除 `/std/message`、`/std/profile`、`/std/workspace` 及其子路径的 ACL 和审批记录，然后重启宿主，依次安装 Message、Profile、Workspace。聊天记录、个人资料和头像会重置。Workspace 为静态 App，没有宿主业务目录。身份凭据、联系人记录、原生配置及其他应用数据保留；其他 App/Lib 若依赖这两个后端，会在卸载前报错。宿主沿用当前账户的身份扫描和数据库迁移逻辑。
+
+Rust 版本和 WASI target 由仓库根目录的 `rust-toolchain.toml` 声明；Lib 构建脚本在各自项目目录运行 Cargo，沿用该工具链。
+
+Lib 构建会清除继承的全局 `RUSTFLAGS`、`CARGO_ENCODED_RUSTFLAGS`，避免宿主链接参数传入 WASM 链接器。WASM 专用 Rust 参数可通过 `CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS` 设置。
+
+默认使用目标身份签名；通过 `--publisher NAME` 可选择另一个已启用且有本机凭据的发布者。已有同名包时应沿用其发布者；发布者不一致时在卸载前报错。用 `--genmeta /path/to/genmeta` 可指定新版工具。每次运行的制品和宿主日志保存在 Cargo target 目录下的 `workspace-dev/run-*`。
+
+成功后在 AnySee 等支持 DHTTP 的浏览器中，以目标身份访问 `https://YOUR_IDENTITY/std/workspace/`。终端保持运行，Ctrl+C 只停止本次启动的宿主；再次运行脚本会重新清理开发数据。脚本失败也会清理本次宿主进程，安装仍遵循逐包提交语义，已成功安装的依赖保留。
+
 构建使用支持现有 bun.lock 的 Bun（本次验证为 1.4.3）：
 
 ```sh
@@ -22,7 +40,7 @@ sh build.sh --publisher YOUR_NAME.dhttp.net
 WASI_SDK_PATH=/path/to/wasi-sdk sh package.sh --publisher YOUR_NAME.dhttp.net
 ```
 
-输出为 `target/workspace-dist/{message-lib,profile-lib,workspace-app}.webc`，不上传商店或修改用户数据。设置 `PISHOO_PACKAGE_WEBC` 可以选择已构建打包器。构建输入生成在 `package-dist/`，不进入 public 文件树；源文件不会被发布者参数改写。
+输出为 `target/workspace-dist/{message-lib,profile-lib,workspace-app}.webc`，不上传商店或修改用户数据。设置 `GENMETA` 可以选择新版 genmeta 打包工具。构建输入生成在 `package-dist/`，不进入 public 文件树；源文件不会被发布者参数改写。
 
 应用列表和安装预览从宿主/商店返回的验签 manifest 展示身份、版本、入口、依赖、能力用途和更新说明。仅 Lib 展示真实业务 OpenAPI；App 展示精确后端依赖。
 
