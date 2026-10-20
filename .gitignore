@@ -87,3 +87,7 @@ pishoo.pid
 /pishoo/docs/workspace/source/
 
 std/apps/workspace/package-dist/
+
+# Local demo tooling and archives
+/anysee-demo/
+/anysee-demo.zip
