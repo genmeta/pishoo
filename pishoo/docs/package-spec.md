@@ -108,6 +108,8 @@ App 从实际 `/public` 文件树派生静态路由：`index.html` 对应 `/`，
 
 本机管理 API 仅使用短名：`GET/PUT/DELETE /std/sys/package/libs/<name>` 和 `/std/sys/package/apps/<name>`。GET/DELETE 从同类安装登记解析完整 ID，PUT 从已验签包取得 publisher/name 并核对短名与 URL；不接受带发布者的旧管理路径。响应仍返回完整包 ID，更新继续核对发布者 owner_hash。商店路径和精确依赖继续使用完整包身份。
 
+本机文件安装 PUT 与 `POST /std/sys/package/lib-check`、`POST /std/sys/package/app-check` 接受 `Content-Type: application/webc` 或 `application/octet-stream`，兼容 genmeta preview.3 的二进制上传；两者都必须提交完整签名 WEBC，使用相同的大小限制、格式与签名校验。`store-install` 仍只接受 `application/json`。
+
 WEBC 是发布、下载及安装格式，安装后展开保存，不再保存完整 WEBC 文件。普通制品位于 `apps/<name>/`、`libs/<name>/`，已验签发布者为 `std.dhttp.net` 的制品位于 `apps/std/<name>/`、`libs/std/<name>/`；不创建发布者目录。`std` 为制品目录保留名，App、Lib 各自按短名唯一，同类跨发布者同名不能共存；两类名称空间独立。
 
 ```text

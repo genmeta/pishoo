@@ -675,6 +675,57 @@ async fn lib_routes_enforce_owner_protocol_limits_and_disk_semantics() {
 }
 
 #[tokio::test]
+async fn package_checks_and_installs_accept_webc_and_cli_binary_content_types() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let app = lib_management_router(
+        profile.clone(),
+        endpoint(),
+        Arc::new(RwLock::new(Sandbox::new(Arc::new(
+            WasmRuntime::new().unwrap(),
+        )))),
+    );
+    let lib = component("1.0.0");
+    let frontend = package_fixture(
+        &serde_json::json!({
+            "info": {
+                "title": "Frontend", "version": "1.0.0",
+                "description": "Frontend", "license": {"name": "MIT"}
+            },
+            "x-pishoo": {"kind": "app", "publisher": "alice.dhttp.net", "name": "note"}
+        }),
+        &[],
+        webc::v3::write::Directory::new(
+            std::collections::BTreeMap::from([(
+                "index.html".parse().unwrap(),
+                b"frontend".to_vec().into(),
+            )]),
+            webc::v3::Timestamps::default(),
+        ),
+        &publisher("alice.dhttp.net", 'a'),
+    );
+    for content_type in [
+        "application/webc",
+        "application/octet-stream",
+        "Application/Octet-Stream; charset=binary",
+    ] {
+        for (method, path, bytes) in [
+            (Method::POST, "/std/sys/package/lib-check", &lib),
+            (Method::POST, "/std/sys/package/app-check", &frontend),
+            (Method::PUT, "/std/sys/package/libs/note", &lib),
+            (Method::PUT, "/std/sys/package/apps/note", &frontend),
+        ] {
+            let mut input = request(method, path, AxumBody::from(bytes.clone()));
+            input
+                .headers_mut()
+                .insert("content-type", content_type.parse().unwrap());
+            let response = app.clone().oneshot(input).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}: {content_type}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn legacy_wasm_cannot_be_uploaded_as_a_webc_release() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
@@ -689,6 +740,7 @@ async fn legacy_wasm_cannot_be_uploaded_as_a_webc_release() {
     for (content_type, expected) in [
         ("application/wasm", StatusCode::UNSUPPORTED_MEDIA_TYPE),
         ("application/webc", StatusCode::BAD_REQUEST),
+        ("application/octet-stream", StatusCode::BAD_REQUEST),
     ] {
         let mut input = request(
             Method::PUT,

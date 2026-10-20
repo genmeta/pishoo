@@ -691,11 +691,14 @@ async fn lib_management_request(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
             .is_some_and(|v| {
-                v.trim().eq_ignore_ascii_case(if store_install {
-                    "application/json"
+                let media_type = v.trim();
+                if store_install {
+                    media_type.eq_ignore_ascii_case("application/json")
                 } else {
-                    "application/webc"
-                })
+                    // genmeta preview.3 uploads WEBC as generic binary data.
+                    media_type.eq_ignore_ascii_case("application/webc")
+                        || media_type.eq_ignore_ascii_case("application/octet-stream")
+                }
             })
     {
         return Ok(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
