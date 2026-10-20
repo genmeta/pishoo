@@ -54,12 +54,22 @@ pub(super) fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
     } else {
         ("lib_id", "id")
     };
+    let standard = if author {
+        "l.author='std.dhttp.net'"
+    } else {
+        "substr(l.id,1,14)='std.dhttp.net/'"
+    };
+    let package = if author {
+        "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"
+    } else {
+        "l.id"
+    };
     let mut permissions = std::collections::BTreeMap::<
         String,
         std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     >::new();
     let mut stmt = db.prepare(&format!(
-        "SELECT c.title,o.path,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
     )).map_err(storage)?;
     for row in stmt
         .query_map([], |row| {
@@ -113,17 +123,43 @@ pub(super) async fn selected(
         let id = id
             .as_str()
             .ok_or_else(|| fail(400, "invalid permission name"))?;
-        if result.iter().any(|value: &Value| value["id"] == id) {
+        // Existing queued requests may still contain an unqualified title.
+        // Resolve it only when exactly one installed package owns that title.
+        let (id, paths) = if let Some(entry) = catalog.get_key_value(id) {
+            entry
+        } else {
+            let mut matches = catalog
+                .iter()
+                .filter(|(name, _)| name.split_once(" · ").is_some_and(|(_, title)| title == id));
+            let entry = matches
+                .next()
+                .ok_or_else(|| fail(409, "selected capability unavailable"))?;
+            if matches.next().is_some() {
+                return Err(fail(
+                    409,
+                    "selected capability is ambiguous; refresh the catalog",
+                ));
+            }
+            entry
+        };
+        if result
+            .iter()
+            .any(|value: &Value| value["id"] == id.as_str())
+        {
             return Err(fail(400, "duplicate capability"));
         }
-        let paths = catalog
-            .get(id)
-            .ok_or_else(|| fail(409, "selected capability unavailable"))?
+        let paths = paths
             .as_object()
             .ok_or_else(|| fail(502, "invalid permission paths"))?;
         let mut endpoints = Vec::new();
         for (path, methods) in paths {
-            if !path.starts_with("/std/") || path.parse::<http::Uri>().is_err() {
+            if !path.starts_with('/')
+                || path.len() == 1
+                || path.starts_with("//")
+                || path.contains(['?', '#', '%', '\\'])
+                || path.split('/').any(|part| matches!(part, "." | ".."))
+                || path.parse::<http::Uri>().is_err()
+            {
                 return Err(fail(502, "invalid permission path"));
             }
             for method in methods

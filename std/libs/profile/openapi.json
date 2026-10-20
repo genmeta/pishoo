@@ -8,7 +8,6 @@
       "name": "Apache-2.0"
     }
   },
-  "x-pishoo": {},
   "paths": {
     "/profile": {
       "get": {

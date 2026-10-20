@@ -264,6 +264,19 @@ fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusq
         }
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute_batch(include_str!("packages.sql"))?;
+        // Older registrations required every operation to start with /std/.
+        // Change only this leaf table's path constraint; keep its columns/keys.
+        let operations_sql: String = tx.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='lib_capability_operations'",
+            [],
+            |row| row.get(0),
+        )?;
+        if operations_sql.contains("'/std/'") {
+            tx.execute_batch("ALTER TABLE lib_capability_operations RENAME TO pishoo_legacy_lib_capability_operations")?;
+            tx.execute_batch(include_str!("packages.sql"))?;
+            tx.execute_batch("INSERT INTO lib_capability_operations SELECT * FROM pishoo_legacy_lib_capability_operations; DROP TABLE pishoo_legacy_lib_capability_operations")?;
+        }
+        tx.execute_batch("UPDATE lib_capability_operations SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM libs WHERE author IS NULL OR author<>'std.dhttp.net')")?;
         for table in ["libs", "apps"] {
             let columns = tx
                 .prepare(&format!("PRAGMA table_info({table})"))?
@@ -524,7 +537,7 @@ fn capability_rows(
                     "get", "head", "post", "put", "patch", "delete", "options", "trace",
                 ] {
                     if item[method]["x-pishoo"]["access-group"] == *id {
-                        endpoints.push((method.to_ascii_uppercase(), format!("/std{path}")));
+                        endpoints.push((method.to_ascii_uppercase(), path.clone()));
                     }
                 }
             }
@@ -547,11 +560,19 @@ fn package_routes(
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     let mut routes = std::collections::BTreeMap::new();
     if kind == "lib" {
+        let prefix = if id
+            .split_once('/')
+            .is_some_and(|(publisher, _)| publisher == "std.dhttp.net")
+        {
+            "/std".to_owned()
+        } else {
+            format!("/{}", id.rsplit('/').next().unwrap())
+        };
         let api =
             super::validate_openapi(&super::package_file(package, "/metadata/openapi.json")?)?;
         for (path, item) in api.paths.as_ref().unwrap() {
             routes.insert(
-                format!("/std{path}"),
+                format!("{prefix}{path}"),
                 item.methods()
                     .into_iter()
                     .map(|(m, _)| m.as_str().to_owned())
@@ -597,7 +618,7 @@ fn check_routes(
     kind: &str,
     package: &webc::Container,
 ) -> Result<()> {
-    if kind == "app" {
+    if kind == "app" || !id.starts_with("std.dhttp.net/") {
         let mount = format!("/{}", id.rsplit('/').next().unwrap());
         let locations = conn
             .prepare("SELECT location FROM proxy_locations")?
@@ -615,7 +636,7 @@ fn check_routes(
             {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("App {mount} conflicts with configured proxy {location}"),
+                    format!("{kind} {mount} conflicts with configured proxy {location}"),
                 )));
             }
         }
@@ -795,12 +816,18 @@ fn save_registration(
 
     if kind == "lib" {
         conn.execute("DELETE FROM lib_capabilities WHERE lib_name=?1", [name])?;
+        let prefix = if author == Some("std.dhttp.net") {
+            "/std".to_owned()
+        } else {
+            format!("/{name}")
+        };
         for (capability, title, endpoints) in capability_rows(package)? {
             conn.execute(
                 "INSERT INTO lib_capabilities(lib_name,capability_id,title) VALUES(?1,?2,?3)",
                 rusqlite::params![name, capability, title],
             )?;
             for (method, path) in endpoints {
+                let path = format!("{prefix}{path}");
                 conn.execute("INSERT INTO lib_capability_operations(lib_name,capability_id,method,path) VALUES(?1,?2,?3,?4)",rusqlite::params![name,capability,method,path])?;
             }
         }

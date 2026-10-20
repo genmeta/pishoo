@@ -8,7 +8,7 @@ license = "Apache-2.0"
 kind = "app"
 title = "手记"
 entry = "/"
-changelog = "首次发布手记 App，精确依赖手记 Lib 0.1.0；支持图文记录、月份归档、留言回复及明暗模式，入口 /std/journal/。数据库由 Lib 保存。"
+changelog = "首次发布手记 App，精确依赖手记 Lib 0.1.0；支持图文记录、月份归档、留言回复及明暗模式，入口 /journal/。数据库由 Lib 保存。"
 dependencies = [{ publisher = "alice.smith.dhttp.net", name = "journal", version = "0.1.0" }]
 
 [fs]

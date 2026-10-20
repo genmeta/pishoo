@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS lib_capability_operations (
     lib_name TEXT NOT NULL,
     capability_id TEXT NOT NULL,
     method TEXT NOT NULL CHECK (length(method) > 0 AND method = upper(method)),
-    path TEXT NOT NULL CHECK (substr(path, 1, 5) = '/std/'),
+    path TEXT NOT NULL CHECK (substr(path, 1, 1) = '/' AND length(path) > 1),
     PRIMARY KEY (lib_name, capability_id, method, path),
     UNIQUE (method, path),
     FOREIGN KEY (lib_name, capability_id)

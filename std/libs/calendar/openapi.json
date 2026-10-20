@@ -8,33 +8,11 @@
       "name": "Apache-2.0"
     }
   },
-  "x-pishoo": {
-    "access-groups": {
-      "read": {
-        "title": "Read calendar",
-        "operations": [
-          "listCalendarEvents",
-          "getCalendarEvent"
-        ]
-      },
-      "write": {
-        "title": "Manage calendar",
-        "operations": [
-          "createCalendarEvent",
-          "updateCalendarEvent",
-          "deleteCalendarEvent"
-        ]
-      }
-    }
-  },
   "paths": {
     "/calendar/events": {
       "get": {
         "operationId": "listCalendarEvents",
         "summary": "List events intersecting a time range",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "responses": {
           "200": {
             "description": "Success",
@@ -129,14 +107,12 @@
               "minimum": 0
             }
           }
-        ]
+        ],
+        "x-access-group": "read"
       },
       "post": {
         "operationId": "createCalendarEvent",
         "summary": "Create an event",
-        "x-pishoo": {
-          "access-group": "write"
-        },
         "responses": {
           "201": {
             "description": "Success",
@@ -218,16 +194,14 @@
               }
             }
           }
-        }
+        },
+        "x-access-group": "write"
       }
     },
     "/calendar/event": {
       "get": {
         "operationId": "getCalendarEvent",
         "summary": "Get an event",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "responses": {
           "200": {
             "description": "Success",
@@ -310,14 +284,12 @@
               "pattern": "^[a-f0-9]{32}$"
             }
           }
-        ]
+        ],
+        "x-access-group": "read"
       },
       "put": {
         "operationId": "updateCalendarEvent",
         "summary": "Replace an event with version checking",
-        "x-pishoo": {
-          "access-group": "write"
-        },
         "responses": {
           "200": {
             "description": "Success",
@@ -430,14 +402,12 @@
               }
             }
           }
-        }
+        },
+        "x-access-group": "write"
       },
       "delete": {
         "operationId": "deleteCalendarEvent",
         "summary": "Delete an event with version checking",
-        "x-pishoo": {
-          "access-group": "write"
-        },
         "responses": {
           "204": {
             "description": "Success"
@@ -533,7 +503,8 @@
               "minimum": 0
             }
           }
-        ]
+        ],
+        "x-access-group": "write"
       }
     }
   },
@@ -749,6 +720,23 @@
           }
         }
       }
+    }
+  },
+  "x-access-groups": {
+    "read": {
+      "title": "Read",
+      "operations": [
+        "listCalendarEvents",
+        "getCalendarEvent"
+      ]
+    },
+    "write": {
+      "title": "Manage",
+      "operations": [
+        "createCalendarEvent",
+        "updateCalendarEvent",
+        "deleteCalendarEvent"
+      ]
     }
   }
 }

@@ -63,6 +63,12 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
     }
     let mut endpoints = Vec::new();
     if value["kind"] == "lib" {
+        let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
+        let prefix = if identity.starts_with("std.dhttp.net/") {
+            "/std".to_owned()
+        } else {
+            format!("/{}", identity.rsplit('/').next().unwrap())
+        };
         let openapi: oas3::OpenApiV3Spec = match package_file(package, "/metadata/openapi.json")
             .and_then(|bytes| {
                 serde_json::from_slice(&bytes)
@@ -74,7 +80,7 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
         if let Some(paths) = &openapi.paths {
             for (path, item) in paths {
                 for (method, operation) in item.methods() {
-                    let path = format!("/std{path}");
+                    let path = format!("{prefix}{path}");
                     endpoints.push(serde_json::json!({"method":method.as_str(),"path":path,
                         "description":operation.summary.as_deref().or(operation.description.as_deref())}));
                 }
@@ -418,9 +424,48 @@ async fn lib_management_request(
         return Ok(axum::Json(value).into_response());
     }
     if method == Method::GET {
-        let value =
+        let detail = !app && id.is_some();
+        let mut value =
             tokio::task::spawn_blocking(move || installed_catalog(&profile, app, id.as_deref()))
                 .await??;
+        if detail {
+            let loaded = sandbox
+                .read()
+                .unwrap()
+                .libs
+                .get(value["id"].as_str().unwrap())
+                .cloned();
+            if let Some(lib) = loaded
+                && value["version"].as_str() == Some(lib.openapi.info.version.as_str())
+            {
+                let id = value["id"].as_str().unwrap();
+                let prefix = if id.starts_with("std.dhttp.net/") {
+                    "/std".to_owned()
+                } else {
+                    format!("/{}", id.rsplit('/').next().unwrap())
+                };
+                let mut endpoints = Vec::new();
+                if let Some(paths) = &lib.openapi.paths {
+                    for (path, item) in paths {
+                        for (method, operation) in item.methods() {
+                            endpoints.push(serde_json::json!({
+                                "method": method.as_str(), "path": format!("{prefix}{path}"),
+                                "description": operation.summary.as_deref().or(operation.description.as_deref()),
+                            }));
+                        }
+                    }
+                }
+                endpoints.sort_by(|a, b| {
+                    a["path"]
+                        .as_str()
+                        .cmp(&b["path"].as_str())
+                        .then_with(|| a["method"].as_str().cmp(&b["method"].as_str()))
+                });
+                value["openapi"] = serde_json::to_value(&lib.openapi)
+                    .map_err(|error| Error::InvalidComponent(error.to_string()))?;
+                value["endpoints"] = endpoints.into();
+            }
+        }
         let package_id = value
             .get("id")
             .and_then(serde_json::Value::as_str)

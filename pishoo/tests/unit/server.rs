@@ -60,6 +60,24 @@ async fn system_static_files_are_separate_from_ordinary_proxy_paths() {
         ("/", "/std/file/local.txt", http::StatusCode::OK, "static"),
         (
             "/",
+            "/echo/upload",
+            http::StatusCode::METHOD_NOT_ALLOWED,
+            "Method Not Allowed",
+        ),
+        (
+            "/",
+            "/echo/missing",
+            http::StatusCode::NOT_FOUND,
+            "Not Found",
+        ),
+        (
+            "/",
+            "/echoish/upload",
+            http::StatusCode::OK,
+            "upstream /echoish/upload",
+        ),
+        (
+            "/",
             "/file/local.txt",
             http::StatusCode::OK,
             "upstream /file/local.txt",
@@ -806,7 +824,10 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .await
         .unwrap();
     let values: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(values, json!({"1v1聊天":{"/std/message":["POST"]}}));
+    assert_eq!(
+        values,
+        json!({"alice.dhttp.net/message · 1v1聊天":{"/message/message":["POST"]}})
+    );
     // Builtin ACL, Contact and Package do not become WASM capabilities.
     assert_eq!(values.as_object().unwrap().len(), 1);
     crate::package::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
@@ -1302,7 +1323,7 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
 }
 
 #[tokio::test]
-async fn permission_catalog_merges_group_titles_and_preserves_legacy_registration() {
+async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registration() {
     for legacy in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
@@ -1322,6 +1343,15 @@ async fn permission_catalog_merges_group_titles_and_preserves_legacy_registratio
                 INSERT INTO lib_capabilities VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
                 INSERT INTO lib_capability_operations VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'details', 'GET', '/std/message/history');").unwrap();
         }
+        if legacy {
+            db.execute_batch("INSERT INTO libs VALUES ('other.dhttp.net/archive', 'archive', '1.0.0');
+                INSERT INTO lib_capabilities VALUES ('other.dhttp.net/archive', 'read', 'read message');
+                INSERT INTO lib_capability_operations VALUES ('other.dhttp.net/archive', 'read', '/archive/entries', 'GET');").unwrap();
+        } else {
+            db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
+                INSERT INTO lib_capabilities VALUES ('archive', 'read', 'read message');
+                INSERT INTO lib_capability_operations VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
+        }
         let router = capabilities_router(profile.clone());
         let response = router
             .clone()
@@ -1337,7 +1367,7 @@ async fn permission_catalog_merges_group_titles_and_preserves_legacy_registratio
         let bytes = axum::body::to_bytes(response.into_body(), 65536)
             .await
             .unwrap();
-        let expected = serde_json::json!({"read message":{"/std/message":["GET","HEAD"],"/std/message/history":["GET"]},"empty":{}});
+        let expected = serde_json::json!({"dev.dhttp.net/message · read message":{"/message/message":["GET","HEAD"],"/message/message/history":["GET"]},"dev.dhttp.net/message · empty":{},"other.dhttp.net/archive · read message":{"/archive/entries":["GET"]}});
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
             expected

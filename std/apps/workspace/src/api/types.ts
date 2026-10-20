@@ -78,6 +78,10 @@ export interface StoreLib {
 
 export interface StoreSummary extends StoreLib {
   repository?: string
+  license?: string
+  likes_count?: number
+  favorites_count?: number
+  downloads_count?: number
   title: string
   description: string | null
   changelog: string | null

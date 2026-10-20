@@ -9,7 +9,7 @@
     }
   },
   "paths": {
-    "/journal/context": {
+    "/context": {
       "get": {
         "responses": {
           "200": {
@@ -55,12 +55,10 @@
         },
         "operationId": "readContext",
         "summary": "读取当前可信身份和主人判断",
-        "x-pishoo": {
-          "access-group": "read"
-        }
+        "x-access-group": "read"
       }
     },
-    "/journal/entries": {
+    "/entries": {
       "get": {
         "responses": {
           "200": {
@@ -140,9 +138,6 @@
         },
         "operationId": "listEntries",
         "summary": "分页读取记录列表",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "parameters": [
           {
             "name": "offset",
@@ -156,7 +151,8 @@
               "maximum": 100000
             }
           }
-        ]
+        ],
+        "x-access-group": "read"
       },
       "post": {
         "responses": {
@@ -277,7 +273,7 @@
         }
       }
     },
-    "/journal/entry": {
+    "/entry": {
       "get": {
         "responses": {
           "200": {
@@ -351,9 +347,6 @@
         },
         "operationId": "readEntry",
         "summary": "读取单篇记录",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "parameters": [
           {
             "name": "id",
@@ -365,7 +358,8 @@
               "pattern": "^[0-9a-f]{32}$"
             }
           }
-        ]
+        ],
+        "x-access-group": "read"
       },
       "put": {
         "responses": {
@@ -639,7 +633,7 @@
         ]
       }
     },
-    "/journal/comments": {
+    "/comments": {
       "get": {
         "responses": {
           "200": {
@@ -717,9 +711,6 @@
         },
         "operationId": "listComments",
         "summary": "读取记录留言和回复",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "parameters": [
           {
             "name": "entry_id",
@@ -731,7 +722,8 @@
               "pattern": "^[0-9a-f]{32}$"
             }
           }
-        ]
+        ],
+        "x-access-group": "read"
       },
       "post": {
         "responses": {
@@ -844,9 +836,6 @@
         },
         "operationId": "addComment",
         "summary": "具名访客留言或回复",
-        "x-pishoo": {
-          "access-group": "comment"
-        },
         "parameters": [
           {
             "name": "x-journal-write",
@@ -870,10 +859,11 @@
               }
             }
           }
-        }
+        },
+        "x-access-group": "comment"
       }
     },
-    "/journal/comment": {
+    "/comment": {
       "delete": {
         "responses": {
           "204": {
@@ -958,7 +948,7 @@
         ]
       }
     },
-    "/journal/photo": {
+    "/photo": {
       "get": {
         "responses": {
           "200": {
@@ -1025,9 +1015,6 @@
         },
         "operationId": "readPhoto",
         "summary": "读取记录照片",
-        "x-pishoo": {
-          "access-group": "read"
-        },
         "parameters": [
           {
             "name": "id",
@@ -1039,27 +1026,8 @@
               "pattern": "^[0-9a-f]{32}$"
             }
           }
-        ]
-      }
-    }
-  },
-  "x-pishoo": {
-    "access-groups": {
-      "read": {
-        "title": "阅读",
-        "operations": [
-          "readContext",
-          "listEntries",
-          "readEntry",
-          "listComments",
-          "readPhoto"
-        ]
-      },
-      "comment": {
-        "title": "评论",
-        "operations": [
-          "addComment"
-        ]
+        ],
+        "x-access-group": "read"
       }
     }
   },
@@ -1346,6 +1314,24 @@
           }
         }
       }
+    }
+  },
+  "x-access-groups": {
+    "read": {
+      "title": "Read",
+      "operations": [
+        "readContext",
+        "listEntries",
+        "readEntry",
+        "listComments",
+        "readPhoto"
+      ]
+    },
+    "comment": {
+      "title": "Comment",
+      "operations": [
+        "addComment"
+      ]
     }
   }
 }

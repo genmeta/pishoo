@@ -191,6 +191,8 @@ impl Sandbox {
         access: Arc<access_control::AccessService>,
         native_api: axum::Router,
     ) -> axum::Router {
+        use tower::ServiceExt;
+
         let frontend_sandbox = sandbox.clone();
         let api = axum::routing::any(move |request: http::Request<axum::body::Body>| {
             let (endpoint, sandbox, access, native_api) = (
@@ -201,29 +203,27 @@ impl Sandbox {
             );
             async move {
                 let result: Result<axum::response::Response> = async {
-                    let path = request
-                        .uri()
-                        .path()
-                        .strip_prefix("/std")
-                        .ok_or(Error::RouteNotFound)?
-                        .to_owned();
                     // One exact snapshot, then release the shared collection lock.
-                    let (lib, tasks) = {
+                    let (lib, path, tasks) = {
                         let sandbox = sandbox.read().unwrap();
-                        let lib = sandbox
+                        let (lib, path) = sandbox
                             .libs
-                            .values()
-                            .find(|lib| {
+                            .iter()
+                            .find_map(|(id, lib)| {
+                                let prefix = if id.starts_with("std.dhttp.net/") {
+                                    "/std".to_owned()
+                                } else {
+                                    format!("/{}", id.rsplit('/').next().unwrap())
+                                };
+                                let path = request.uri().path().strip_prefix(&prefix)?;
                                 lib.openapi
                                     .paths
                                     .as_ref()
-                                    .is_some_and(|paths| paths.contains_key(&path))
+                                    .is_some_and(|paths| paths.contains_key(path))
+                                    .then(|| (lib.clone(), path.to_owned()))
                             })
-                            .cloned();
-                        (lib, sandbox.tasks.clone())
-                    };
-                    let Some(lib) = lib else {
-                        return Err(Error::RouteNotFound);
+                            .ok_or(Error::RouteNotFound)?;
+                        (lib, path, sandbox.tasks.clone())
                     };
                     let item = &lib.openapi.paths.as_ref().unwrap()[&path];
                     if !item
@@ -269,9 +269,50 @@ impl Sandbox {
                 result.unwrap_or_else(reject_api)
             }
         });
+        let lib_api = api.clone();
         let frontend = axum::routing::any(move |request: http::Request<axum::body::Body>| {
             let sandbox = frontend_sandbox.clone();
+            let api = lib_api.clone();
             async move {
+                // App and Lib operations may share a short-name mount. Dispatch
+                // declared Lib methods first; App GET/HEAD retains its fallback.
+                let route_lib = {
+                    let sandbox = sandbox.read().unwrap();
+                    let name = request
+                        .uri()
+                        .path()
+                        .trim_start_matches('/')
+                        .split('/')
+                        .next()
+                        .unwrap_or("");
+                    let app = sandbox
+                        .apps
+                        .keys()
+                        .any(|id| id.rsplit('/').next() == Some(name));
+                    sandbox.libs.iter().any(|(id, lib)| {
+                        if id.starts_with("std.dhttp.net/") || id.rsplit('/').next() != Some(name) {
+                            return false;
+                        }
+                        let path = request
+                            .uri()
+                            .path()
+                            .strip_prefix(&format!("/{name}"))
+                            .unwrap();
+                        !app || lib
+                            .openapi
+                            .paths
+                            .as_ref()
+                            .and_then(|paths| paths.get(path))
+                            .is_some_and(|item| {
+                                item.methods()
+                                    .into_iter()
+                                    .any(|(method, _)| method == *request.method())
+                            })
+                    })
+                };
+                if route_lib {
+                    return api.oneshot(request).await.expect("route is infallible");
+                }
                 let result: Result<axum::response::Response> = (|| {
                     use axum::response::IntoResponse;
                     use http::{Method, StatusCode, header};

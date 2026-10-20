@@ -26,7 +26,20 @@ journal/
 
 包身份、类型、展示信息、依赖、更新说明和宿主能力用途来自各自的签名 WEBC manifest；OpenAPI 只包含业务 API、请求/响应 schema 和访问声明。App 不包含 WASM 或 OpenAPI；Lib 不包含前端资源。component 不嵌入 OpenAPI 或签名。
 
-入口为 `https://<安装者身份>/std/journal/`。HTML 使用 `./assets/...`，API 和照片使用相对 URL，解析到 `/std/journal/context`、`/std/journal/entries` 等路径。Lib 声明 `/journal/...`，宿主仅添加 `/std`；静态文件与业务操作共存。旧 `/api/journal/` 不提供别名。
+入口为 `https://<安装者身份>/journal/`。HTML 使用 `./assets/...`，API 和照片使用 `context`、`entries`、`photo` 等相对 URL，解析到 `/journal/context`、`/journal/entries` 等路径。示例发布者不是 `std.dhttp.net`，Lib 声明 `/context`、`/entries` 等不带包名的路径，宿主添加包名前缀 `/journal`；静态文件与业务操作按实际路径/方法共存。旧 `/api/journal/` 不提供别名。
+
+## 能力接口分组
+
+本示例的未签名 `openapi.json` 已按[能力接口分组目标规范](../../docs/package-spec.md#能力接口分组)改用文档级 `x-access-groups` 和操作级 `x-access-group`，不再使用 `x-pishoo` 嵌套。**当前解析器尚未同步；本次用于规范审阅，不表示新格式已经通过安装或发布校验。** 已有签名制品不变，后续发布须按新版本重新构建和签名。
+
+| 组名 | 英文标题 | 操作 | 展示示例 |
+| --- | --- | --- | --- |
+| `read` | `Read` | `readContext`、`listEntries`、`readEntry`、`listComments`、`readPhoto` | `journal · Read` |
+| `comment` | `Comment` | `addComment` | `journal · Comment` |
+
+读取组覆盖上下文、手记、留言和照片；评论组仅包含新增留言。创建、编辑、删除等其他操作不因这两个分组而获得权限。App 通过 manifest 精确依赖 Lib，不单独声明后端能力组。
+
+展示时从完整包身份 `alice.smith.dhttp.net/journal` 派生上述标签，仅显示包短名和能力标题，不显示作者；OpenAPI 标题不重复包名，包身份和验签仍使用完整名称。
 
 ## 构建与打包
 
@@ -68,10 +81,10 @@ Lib 显式声明以下业务能力组，安装时由宿主登记到 `config.db`�
 
 | 权限组名称 | 业务操作 |
 | --- | --- |
-| 阅读 | GET context、entries、entry、photo、comments |
-| 评论 | POST comments（留言及回复） |
+| Read | GET context、entries、entry、photo、comments |
+| Comment | POST comments（留言及回复） |
 
-以上路径均位于 `/std/journal/`。评论组不隐含阅读组；希望访客阅读并留言时，应同时授予两组相应操作。主人新建、修改、删除手记以及删除留言不属于访客能力组，继续校验真实主人身份。App 静态资源不登记为 Lib 能力，请另外配置 `/std/journal/` 和两个 assets 的 GET/HEAD 访问规则。能力声明和安装不会自动授权，也不会改写旧路径 ACL。
+以上业务路径均位于 `/journal/`。评论组不隐含阅读组；希望访客阅读并留言时，应同时授予两组相应操作。主人新建、修改、删除手记以及删除留言不属于访客能力组，继续校验真实主人身份。App 静态资源不登记为 Lib 能力，请另外配置 `/journal/` 和两个 assets 的 GET/HEAD 访问规则。能力声明和安装不会自动授权，也不会改写旧路径 ACL。
 
 业务 API 通过 `pishoo:identity/request-identity@0.1.0` 读取已验证握手身份，拒绝匿名访问。发布、编辑、删除手记和删除留言还要求主人身份；主人检查同时核对名称与 owner_hash。留言署名来自可信身份，JSON 中伪造作者字段会被拒绝。留言验证标识表示发布时的认证，不表示历史证书现在仍有效。第一版没有逐篇访问范围开关，留言由主人管理。
 
@@ -81,16 +94,16 @@ Lib 显式声明以下业务能力组，安装时由宿主登记到 `config.db`�
 
 ## 接口与数据
 
-| 方法 | Lib 内部路径（宿主添加 `/std`） | 用途 |
+| 方法 | Lib 内部路径（宿主添加 `/journal`） | 用途 |
 | --- | --- | --- |
-| GET | `/journal/context` | 当前可信身份与主人判断 |
-| GET | `/journal/entries?offset=0` | 每页 20 篇，倒序翻阅 |
-| POST | `/journal/entries` | 主人新建手记 |
-| GET/PUT/DELETE | `/journal/entry?id=…` | 读取、主人编辑/删除 |
-| GET | `/journal/photo?id=…` | 记录照片 |
-| GET | `/journal/comments?entry_id=…` | 留言与一层回复 |
-| POST | `/journal/comments` | 具名身份留言或回复 |
-| DELETE | `/journal/comment?id=…` | 主人删除留言 |
+| GET | `/context` | 当前可信身份与主人判断 |
+| GET | `/entries?offset=0` | 每页 20 篇，倒序翻阅 |
+| POST | `/entries` | 主人新建手记 |
+| GET/PUT/DELETE | `/entry?id=…` | 读取、主人编辑/删除 |
+| GET | `/photo?id=…` | 记录照片 |
+| GET | `/comments?entry_id=…` | 留言与一层回复 |
+| POST | `/comments` | 具名身份留言或回复 |
+| DELETE | `/comment?id=…` | 主人删除留言 |
 
 每条新内容使用提交前生成的 16 随机字节十六进制 ID。重复创建返回 409，不覆盖既有记录；编辑/删除要求强 ETag 与 If-Match，缺少版本返回 428，旧版本返回 412。写入失败保留草稿，不把网络中断解释成未提交。
 
@@ -118,7 +131,7 @@ DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
 ```sh
 DHTTP_TEST_OPENSSL=/path/to/openssl-3 cargo test --locked -p pishoo --lib \
   journal_browser_preview -- --ignored --nocapture
-# http://127.0.0.1:18747/std/journal/
+# http://127.0.0.1:18747/journal/
 ```
 
 此 HTTP 适配仅用于界面检查，不作为生产身份认证入口。照片测试样本来自 dyns 0.7.2 的 `assets/ddns-logo.jpg`。

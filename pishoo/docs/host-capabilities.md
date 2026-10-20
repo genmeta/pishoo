@@ -19,7 +19,7 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 原生资源 API 增强：联系人列表直接返回 id/incoming；详情和自身状态返回 id；PUT /std/contact/{name} 为 owner 专用本机资源写入。GET /std/acl/reviews 支持 pending/expired 与 requested_at；DELETE /std/acl/review/{id} 仅删除已过期 pending 记录。数据库 schema、授权模型和公共 ContactRecord/ReviewRecord 不变。
 
-普通入口为 `/std/<业务路径>` 和 `/<name>/`，前端页面路径导航、后端字面量路径/query。已安装清单从数据库读取，位于 `/std/sys/lib/list`、`/std/sys/app/list`；不提供 loaded/check/openapi 辅助管理接口。
+标准发布者 Lib 入口为 `/std` + 声明路径，其他 Lib 为 `/<name>` + 声明路径；App 为 `/<name>/`，前端页面路径导航、后端字面量路径/query。已安装清单从数据库读取，位于 `/std/sys/lib/list`、`/std/sys/app/list`；不提供 loaded/check/openapi 辅助管理接口。
 
 宿主发行包不携带业务 App/Lib，首次初始化不安装或下载默认制品。Pishoo 和提供 `genmeta install` 的新版 gmutils 安装顺序不限；配置好身份、启动该身份的 Pishoo 服务后，由身份所属账户执行 `genmeta install workspace --id NAME`。宿主从商店下载、验签并递归安装精确后端依赖，在线即时生效；所需版本须已发布。卸载和依赖保护同其他 App/Lib，安装不授予额外权限。构建与独立发布制品详见 [Workspace 前端](../../std/apps/workspace/README.md)。
 
@@ -29,6 +29,6 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version，最多100；Lib省略时为[]）。config.db 的 app_dependencies 与 lib_dependencies 分别保存关联。宿主拒绝循环和不匹配版本，启动核对签名制品与登记；依赖被使用时不能卸载或修改其内容/版本。正常移除父制品只删除其关联，保留依赖制品和数据。商店安装递归补齐并按依赖顺序提交，一次最多解析100个Lib，父安装失败不撤销已成功安装的有效依赖。
 
-Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
+Lib 间调用通过标准 WASI HTTP 向映射后的本机 URL 发请求：标准 Lib 为 `https://~/std<声明路径>`，其他 Lib 为 `https://~/<name><声明路径>`。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
 
 前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。

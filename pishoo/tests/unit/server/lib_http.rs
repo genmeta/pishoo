@@ -113,9 +113,19 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/call",
+            "/http-probe/call",
             access_control::Effect::Allow,
             access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    server
+        .access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/profile/profile/context",
+            access_control::Effect::Allow,
+            access_control::Grantee::All,
         )
         .await
         .unwrap();
@@ -134,12 +144,12 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     let listener = scopeguard::guard(tokio::spawn(listener), |task| task.abort());
     let alice = server.endpoint.clone();
     let bob = dhttp::Endpoint::load("bob").await.unwrap();
-    let (status, owner) = call(&alice, "/std/call").await;
+    let (status, owner) = call(&alice, "/http-probe/call").await;
     assert_eq!(status, 200);
     assert_eq!(owner["status"], 200);
     assert_eq!(owner["caller"][0], "alice.dhttp.net");
     assert_eq!(owner["response"]["identity_name"], "alice.dhttp.net");
-    let (status, visitor) = call(&bob, "/std/call").await;
+    let (status, visitor) = call(&bob, "/http-probe/call").await;
     assert_eq!(status, 200);
     assert_eq!(visitor["caller"][0], "bob.dhttp.net");
     assert_eq!(

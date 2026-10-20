@@ -22,16 +22,11 @@ fn component(document: &str) -> Vec<u8> {
     wasm
 }
 #[test]
-fn manifest_rejects_templates_path_references_and_reserved_routes() {
+fn manifest_rejects_templates_and_path_references() {
     let document = r#"{"openapi":"3.1.0","info":{"title":"test","version":"1"},"paths":{"/echo":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
     let valid = component(document);
     assert!(validate_lib(&valid).is_ok());
     for broken in [
-        document.replace("/echo", "/std/workspace"),
-        document.replace("/echo", "/std/file/a"),
-        document.replace("/echo", "/file/a"),
-        document.replace("/echo", "/contact"),
-        document.replace("/echo", "/acl"),
         document.replace("/echo", "/{id}"),
         document.replace(
             "\"get\":",
@@ -40,7 +35,15 @@ fn manifest_rejects_templates_path_references_and_reserved_routes() {
     ] {
         assert!(validate_lib(&component(&broken)).is_err());
     }
-    for path in ["/workspace", "/api", "/std-extra"] {
+    for path in [
+        "/workspace",
+        "/api",
+        "/std-extra",
+        "/std/xxxx",
+        "/contact",
+        "/file/a",
+        "/acl",
+    ] {
         assert!(
             validate_lib(&component(&document.replace("/echo", path))).is_ok(),
             "{path}"
@@ -71,11 +74,7 @@ fn independent_openapi_uses_the_same_rules_as_component_documents() {
         serde_json::to_value(crate::validate_openapi(document.as_bytes()).unwrap()).unwrap(),
         serde_json::to_value(validate_lib(&component(document)).unwrap()).unwrap()
     );
-    for broken in [
-        document.replace("/echo", "/std/workspace"),
-        document.replace("3.1.0", "3.0.0"),
-        "invalid JSON".into(),
-    ] {
+    for broken in [document.replace("3.1.0", "3.0.0"), "invalid JSON".into()] {
         assert!(crate::validate_openapi(broken.as_bytes()).is_err());
         assert!(validate_lib(&component(&broken)).is_err());
     }
