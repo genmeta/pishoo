@@ -29,7 +29,7 @@ impl wasip2::exports::http::incoming_handler::Guest for Handler {
         let local = request_identity::local_name();
         let target = request.path_with_query().unwrap_or_else(|| "/".into());
         let path = target.split('?').next().unwrap_or("/");
-        if path == "/journal/photo" && matches!(request.method(), Method::Get) {
+        if path == "/photo" && matches!(request.method(), Method::Get) {
             let result = (|| {
                 let id = parameter(&target, "id")?
                     .filter(|id| valid_id(id))
@@ -120,7 +120,7 @@ fn dispatch(
 ) -> Result<Reply, Failure> {
     let path = target.split('?').next().unwrap_or("/");
     let method = request.method();
-    if path == "/journal/context" && matches!(method, Method::Get) {
+    if path == "/context" && matches!(method, Method::Get) {
         return Ok((
             200,
             json!({"owner_name":local,"caller_name":caller,"is_owner":owner}),
@@ -149,13 +149,13 @@ fn dispatch(
         {
             return Err((403, "cross_origin_denied"));
         }
-        if !(path == "/journal/comments" && matches!(method, Method::Post)) && !owner {
+        if !(path == "/comments" && matches!(method, Method::Post)) && !owner {
             return Err((403, "owner_required"));
         }
     }
     let mut db = database()?;
     match (path, method) {
-        ("/journal/entries", Method::Get) => {
+        ("/entries", Method::Get) => {
             let offset = parameter(target, "offset")?
                 .unwrap_or_else(|| "0".into())
                 .parse::<i64>()
@@ -176,7 +176,7 @@ fn dispatch(
                 None,
             ))
         }
-        ("/journal/entries", Method::Post) => {
+        ("/entries", Method::Post) => {
             let doc = input(request, &["id", "title", "body", "photo"])?;
             let id = document_id(&doc, "id")?;
             let (title, body) = content(&doc)?;
@@ -193,7 +193,7 @@ fn dispatch(
             tx.commit().map_err(|_| (500, "commit_uncertain"))?;
             Ok((201, entry, Some("\"1\"".into())))
         }
-        ("/journal/entry", method @ (Method::Get | Method::Put | Method::Delete)) => {
+        ("/entry", method @ (Method::Get | Method::Put | Method::Delete)) => {
             let id = parameter(target, "id")?
                 .filter(|id| valid_id(id))
                 .ok_or((400, "invalid_input"))?;
@@ -244,7 +244,7 @@ fn dispatch(
             tx.commit().map_err(|_| (500, "commit_uncertain"))?;
             Ok(result)
         }
-        ("/journal/comments", Method::Get) => {
+        ("/comments", Method::Get) => {
             let id = parameter(target, "entry_id")?
                 .filter(|id| valid_id(id))
                 .ok_or((400, "invalid_input"))?;
@@ -259,7 +259,7 @@ fn dispatch(
             }
             Ok((200, json!({"comments":comments}), None))
         }
-        ("/journal/comments", Method::Post) => {
+        ("/comments", Method::Post) => {
             let doc = input(request, &["id", "entry_id", "parent_id", "body"])?;
             let id = document_id(&doc, "id")?;
             let entry_id = document_id(&doc, "entry_id")?;
@@ -312,7 +312,7 @@ fn dispatch(
                 None,
             ))
         }
-        ("/journal/comment", Method::Delete) => {
+        ("/comment", Method::Delete) => {
             let id = parameter(target, "id")?
                 .filter(|id| valid_id(id))
                 .ok_or((400, "invalid_input"))?;
@@ -326,11 +326,9 @@ fn dispatch(
             tx.commit().map_err(|_| (500, "commit_uncertain"))?;
             Ok((204, Value::Null, None))
         }
-        (
-            "/journal/context" | "/journal/entries" | "/journal/entry" | "/journal/comments"
-            | "/journal/comment" | "/journal/photo",
-            _,
-        ) => Err((405, "method_not_allowed")),
+        ("/context" | "/entries" | "/entry" | "/comments" | "/comment" | "/photo", _) => {
+            Err((405, "method_not_allowed"))
+        }
         _ => Err((404, "not_found")),
     }
 }

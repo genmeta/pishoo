@@ -34,9 +34,13 @@ pub(crate) fn capabilities_router(profile: IdentityProfile) -> Router {
                         [], |row| row.get(0),
                     )?;
                     let (key, lib_key) = if author { ("lib_name", "name") } else { ("lib_id", "id") };
+                    let standard = if author { "l.author='std.dhttp.net'" } else { "substr(l.id,1,14)='std.dhttp.net/'" };
+                    let package = if author {
+                        "CASE WHEN coalesce(l.author,'')<>'' THEN l.author||'/'||l.name ELSE l.name END"
+                    } else { "l.id" };
                     let mut permissions = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
                     let mut statement = tx.prepare(&format!(
-                        "SELECT c.title,o.path,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+                        "SELECT ({package})||' · '||c.title,CASE WHEN coalesce({standard},0)=0 AND substr(o.path,1,5)='/std/' THEN '/'||l.name||substr(o.path,5) ELSE o.path END,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
                     ))?;
                     for row in statement.query_map([], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,

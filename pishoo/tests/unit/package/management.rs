@@ -40,7 +40,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let parent_mode = std::fs::metadata(profile.join("libs")).unwrap().mode() & 0o777;
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
-    assert_eq!(saved["endpoints"][0]["path"], "/std/upload");
+    assert_eq!(saved["endpoints"][0]["path"], "/note/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
     assert_eq!(
         saved["openapi"],
@@ -153,6 +153,13 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     std::fs::rename(
         profile.join("libs/broken/.webc-proof-link"),
         profile.join("libs/broken/.webc-proof"),
+    )
+    .unwrap();
+    // The active WASM target must reject symlinks independently of unused
+    // legacy sidecars or other Libs' now-isolated routes.
+    std::os::unix::fs::symlink(
+        outside.join(".webc-proof"),
+        profile.join("libs/broken.wasm"),
     )
     .unwrap();
     assert!(install_lib(&profile, "broken", &component("1"), &runtime).is_err());
@@ -320,8 +327,48 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     .unwrap();
     assert_eq!(value["id"], "alice.dhttp.net/note");
     assert_eq!(value["version"], "1.2.3");
-    assert_eq!(value["endpoints"], serde_json::json!([]));
+    assert_eq!(
+        value["endpoints"],
+        serde_json::json!([
+            {"method":"POST","path":"/note/upload","description":"Upload"}
+        ])
+    );
+    assert_eq!(value["openapi"]["info"]["version"], "1.2.3");
+    assert!(value["openapi"]["paths"].get("/upload").is_some());
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, "/std/sys/lib/list", AxumBody::empty()))
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list[0]["endpoints"], serde_json::json!([]));
+    assert!(list[0].get("openapi").is_none());
+    let database = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    database
+        .execute("UPDATE libs SET version='2.0.0' WHERE name='note'", [])
+        .unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(Method::GET, path, AxumBody::empty()))
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["version"], "2.0.0");
     assert!(value.get("openapi").is_none());
+    assert_eq!(value["endpoints"], serde_json::json!([]));
+    database
+        .execute("UPDATE libs SET version='1.2.3' WHERE name='note'", [])
+        .unwrap();
     for old in [
         "/std/sys/package/libs",
         "/std/sys/package/libs/note",

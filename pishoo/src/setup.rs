@@ -296,6 +296,35 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
             }
         }
     }
+    let has_libs: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='libs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_libs {
+        let has_author: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut names = conn.prepare(if has_author {
+            "SELECT name FROM libs WHERE author IS NULL OR author<>'std.dhttp.net' ORDER BY name"
+        } else {
+            "SELECT name FROM libs WHERE substr(id,1,14)<>'std.dhttp.net/' ORDER BY name"
+        })?;
+        for name in names.query_map([], |row| row.get::<_, String>(0))? {
+            let mount = format!("/{}", name?);
+            if let Some(proxy) = proxies.iter().find(|proxy| {
+                let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
+                path == mount || path.starts_with(&format!("{mount}/"))
+            }) {
+                return Err(Error::InvalidConfig(format!(
+                    "proxy {} conflicts with installed Lib {mount}",
+                    proxy.location
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

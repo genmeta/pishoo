@@ -106,13 +106,18 @@ export const api = {
         throw new ApiError(502, 'Invalid permission group')
       }
       const endpoints = Object.entries(paths).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([path, methods]) => {
-        if (!path.startsWith('/std/') || !Array.isArray(methods)
+        if (!/^\/[a-z][a-z0-9-]{0,62}\//.test(path) || /[?#%\\\s]/.test(path)
+          || path.split('/').some(part => part === '.' || part === '..') || !Array.isArray(methods)
           || methods.some(method => typeof method !== 'string' || !/^[!#$%&'*+.^_`|~0-9A-Z-]+$/.test(method))) {
           throw new ApiError(502, 'Invalid permission operations')
         }
         return [...new Set<string>(methods)].sort().map(method => ({ method, path }))
       })
-      return { id: title, title, endpoints,
+      // Keep the full catalog name for requests; show only the package name and group title.
+      const separator = title.indexOf(' · ')
+      const label = separator < 0 ? title
+        : `${title.slice(0, separator).split('/').at(-1)}${title.slice(separator)}`
+      return { id: title, title: label, endpoints,
         // Compare actual operations before applying an approval; the wire format has no Lib version.
         version: JSON.stringify(endpoints), visibility: 'contact', approval_mode: 'capability', selectable: endpoints.length > 0 }
     })

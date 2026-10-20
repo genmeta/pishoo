@@ -312,17 +312,17 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     )
     .await;
     assert_eq!(denied.0, StatusCode::FORBIDDEN);
-    let catalog = expect(
-        alice,
-        Method::GET,
-        "/std/acl/promissions",
-        Value::Null,
-        200,
-    )
-    .await;
-    assert_eq!(catalog["message"], json!({"/std/message":["POST"]}));
+    let catalog = expect(alice, Method::GET, "/std/acl/promissions", Value::Null, 200).await;
+    assert_eq!(
+        catalog["std.dhttp.net/message · message"],
+        json!({"/std/message":["POST"]})
+    );
     assert!(catalog.as_object().unwrap().values().all(|paths| {
-        !paths.as_object().unwrap().keys().any(|path| path.starts_with("/std/acl"))
+        !paths
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|path| path.starts_with("/std/acl"))
     }));
 
     // Each permutation starts with no friendship and denied messaging. Each action occurs via HTTP.

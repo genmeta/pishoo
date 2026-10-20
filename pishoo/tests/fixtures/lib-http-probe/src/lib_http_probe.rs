@@ -7,7 +7,7 @@ fn fetch()->Result<serde_json::Value,()> {
     req.set_method(&Method::Get).map_err(|_|())?;
     req.set_scheme(Some(&Scheme::Https)).map_err(|_|())?;
     req.set_authority(Some("~")).map_err(|_|())?;
-    req.set_path_with_query(Some("/std/profile/context")).map_err(|_|())?;
+    req.set_path_with_query(Some("/profile/profile/context")).map_err(|_|())?;
     let body=req.body().map_err(|_|())?;
     OutgoingBody::finish(body,None).map_err(|_|())?;
     let future=outgoing_handler::handle(req,None).map_err(|_|())?;

@@ -35,8 +35,8 @@ if app['package']['pishoo']['kind'] != 'app' or app['package']['pishoo']['entry'
     sys.exit('Journal App must have kind=app and entry=/')
 if app['package']['pishoo']['dependencies'] != [{'publisher': publisher, 'name': name, 'version': version}]:
     sys.exit('App must depend on the exact Journal Lib release')
-if set(document['x-pishoo']) != {'access-groups'} or any(not path.startswith('/journal/') for path in document['paths']):
-    sys.exit('OpenAPI must contain only Journal business paths and access groups')
+if set(document['x-pishoo']) != {'access-groups'} or set(document['paths']) != {'/context', '/entries', '/entry', '/comments', '/comment', '/photo'}:
+    sys.exit('OpenAPI must contain only unprefixed Journal business paths and access groups')
 if sys.argv[2]:
     for kind in ('lib', 'app'):
         output = root / 'dist' / f'journal-{version}-{kind}.webc'

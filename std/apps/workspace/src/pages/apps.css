@@ -98,6 +98,76 @@
 .app-card .app-actions {
   margin-top: auto;
 }
+.app-store-card > .app-card-title {
+  width: 100%;
+  flex-wrap: wrap;
+}
+.app-store-card .app-card-title h2 {
+  flex: 1 1 120px;
+}
+.app-version {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.app-store-meta,
+.app-store-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.app-store-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.app-store-card .app-engagement {
+  margin-top: auto;
+}
+.app-engagement {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.app-store-stats {
+  gap: 8px;
+}
+.app-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.app-reaction svg {
+  flex-shrink: 0;
+}
+.app-reaction[aria-pressed="true"] {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.app-download-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 0;
+}
+.app-download-count strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.app-stats-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.app-stats-error button {
+  background: transparent;
+  border: 0;
+  padding: 0 8px;
+}
 .app-more {
   position: relative;
 }

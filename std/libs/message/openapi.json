@@ -89,20 +89,16 @@
             "description": "身份或权限不符"
           }
         },
-        "x-pishoo": {
-          "access-group": "message"
-        }
+        "x-access-group": "message"
       }
     }
   },
-  "x-pishoo": {
-    "access-groups": {
-      "message": {
-        "title": "message",
-        "operations": [
-          "receiveMessage"
-        ]
-      }
+  "x-access-groups": {
+    "message": {
+      "title": "Receive",
+      "operations": [
+        "receiveMessage"
+      ]
     }
   }
 }

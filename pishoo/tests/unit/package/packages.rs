@@ -1743,6 +1743,260 @@ fn old_business_prefixes_remain_proxyable() {
 }
 
 #[tokio::test]
+async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing_acl() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch("DROP TABLE lib_capability_operations")
+        .unwrap();
+    db.execute_batch(&include_str!("../../../src/package/packages.sql").replace(
+        "substr(path, 1, 1) = '/' AND length(path) > 1",
+        "substr(path, 1, 5) = '/std/'",
+    ))
+    .unwrap();
+    db.execute_batch("INSERT INTO libs(name,author,version) VALUES('journal','alice.dhttp.net','1.0.0'),('message','std.dhttp.net','1.0.0');
+        INSERT INTO lib_capabilities VALUES('journal','write','Journal'),('message','write','Message');
+        INSERT INTO lib_capability_operations VALUES('journal','write','POST','/std/entries'),('message','write','POST','/std/message');").unwrap();
+    let acl = rusqlite::Connection::open(profile.access_db_path()).unwrap();
+    acl.execute_batch("CREATE TABLE preserved_rules(api TEXT); INSERT INTO preserved_rules VALUES('/std/entries')").unwrap();
+    for migrated in [false, true] {
+        if migrated {
+            // A normal management write upgrades the constraint and path facts.
+            remove_lib(&profile, "missing").unwrap();
+        }
+        let response = crate::routes::capabilities_router(profile.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/std/acl/promissions")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            value,
+            json!({"alice.dhttp.net/journal · Journal":{"/journal/entries":["POST"]},"std.dhttp.net/message · Message":{"/std/message":["POST"]}})
+        );
+        let stored: String = db
+            .query_row(
+                "SELECT path FROM lib_capability_operations WHERE lib_name='journal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            if migrated {
+                "/journal/entries"
+            } else {
+                "/std/entries"
+            }
+        );
+        assert_eq!(
+            acl.query_row("SELECT api FROM preserved_rules", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "/std/entries"
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    // New prefixes can be stored and the uniqueness constraint still applies.
+    db.execute(
+        "INSERT INTO lib_capability_operations VALUES('journal','write','GET','/journal/std/xxxx')",
+        [],
+    )
+    .unwrap();
+    assert!(db.execute("INSERT INTO lib_capability_operations VALUES('message','write','GET','/journal/std/xxxx')", []).is_err());
+    remove_lib(&profile, "missing").unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() {
+    use http::{Method, StatusCode};
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let mut doc = json!({"openapi":"3.1.0","info":{"title":"Journal","version":"1.0.0","description":"test","license":{"name":"MIT"}},
+        "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"journal","dependencies":[],"host":{"request-identity":"identity"},
+            "access-groups":{"journal":{"title":"Journal","operations":["write"]}}},
+        "paths":{"/std/xxxx":{"post":{"operationId":"write","summary":"write","x-pishoo":{"access-group":"journal"}}},"/contact":{"get":{"operationId":"contact","summary":"local operation"}}}});
+    let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
+    let authority = publisher("alice.dhttp.net", 'a');
+    let bytes = package_fixture(&doc, backend, Directory::default(), &authority);
+    assert!(read_package(&bytes).is_ok());
+    // Even the standard publisher cannot occupy a native reserved path.
+    doc["x-pishoo"]["publisher"] = json!("std.dhttp.net");
+    assert!(
+        read_package(&package_fixture(
+            &doc,
+            backend,
+            Directory::default(),
+            &publisher("std.dhttp.net", 's')
+        ))
+        .is_err()
+    );
+    // A permitted standard path still needs the actual standard publisher signature.
+    doc["paths"] = json!({"/journal":doc["paths"]["/std/xxxx"].clone()});
+    assert!(
+        read_package(&package_fixture(
+            &doc,
+            backend,
+            Directory::default(),
+            &authority
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("signer certificate and publisher disagree")
+    );
+    let uri = "/std/sys/forward".parse().unwrap();
+    let id = "alice.dhttp.net/journal";
+    for location in ["/journal", "/journal/", "= /journal/std/xxxx"] {
+        crate::setup::config_database(
+            &profile,
+            &Method::PUT,
+            &uri,
+            Some(json!([{"location":location,"proxy_pass":"127.0.0.1:8080"}])),
+        )
+        .unwrap();
+        assert!(
+            install_lib(&profile, id, &bytes, &runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("proxy")
+        );
+    }
+    crate::setup::config_database(
+        &profile,
+        &Method::PUT,
+        &uri,
+        Some(json!([
+            {"location":"/","proxy_pass":"127.0.0.1:8080"},
+            {"location":"/journalish","proxy_pass":"127.0.0.1:8080"}
+        ])),
+    )
+    .unwrap();
+    let installed = install_lib(&profile, id, &bytes, &runtime).unwrap();
+    assert!(
+        installed["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|endpoint| endpoint["path"] == "/journal/std/xxxx")
+    );
+    for location in ["/journal", "/journal/", "= /journal/std/xxxx"] {
+        assert!(
+            crate::setup::config_database(
+                &profile,
+                &Method::PATCH,
+                &uri,
+                Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"}))
+            )
+            .is_err()
+        );
+    }
+    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT path FROM lib_capability_operations", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        "/journal/std/xxxx"
+    );
+    let directory = crate::routes::capabilities_router(profile.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/std/acl/promissions")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let value: Value =
+        serde_json::from_slice(&directory.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        value,
+        json!({"alice.dhttp.net/journal · Journal":{"/journal/std/xxxx":["POST"]}})
+    );
+    let mut sandbox = Sandbox::new(runtime.clone());
+    sandbox.load_libs(&profile).unwrap();
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    for (path, expected) in [
+        ("/journal/std/xxxx", StatusCode::INTERNAL_SERVER_ERROR),
+        ("/std/xxxx", StatusCode::NOT_FOUND),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    let mut frontend = frontend_document("1.0.0");
+    frontend["x-pishoo"]["name"] = json!("journal");
+    frontend["x-pishoo"]["dependencies"] = json!([]);
+    install_app(
+        &profile,
+        id,
+        &package_fixture(&frontend, &[], frontend_files("Journal page"), &authority),
+    )
+    .unwrap();
+    sandbox.load_libs(&profile).unwrap();
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    // The same URL may serve an App GET and a declared Lib POST.
+    let page = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/journal/std/xxxx")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(
+        page.into_body().collect().await.unwrap().to_bytes(),
+        "Journal page"
+    );
+    let post = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/journal/std/xxxx")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    db.execute(
+        "INSERT INTO proxy_locations VALUES('/journal/blocked','127.0.0.1:8080')",
+        [],
+    )
+    .unwrap();
+    assert!(crate::setup::load_server_config(&profile).is_err());
+}
+
+#[tokio::test]
 async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     use http::{Method, StatusCode};
     use tower::ServiceExt;
@@ -1751,10 +2005,10 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     std::fs::create_dir_all(profile.join("libs")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let authority = publisher("alice.dhttp.net", 'a');
+    let authority = publisher("std.dhttp.net", 'a');
     let make_lib = |name: &str, version: &str, path: &str, method: &str, title: &str| {
         let doc = json!({"openapi":"3.1.0","info":{"title":name,"version":version,"description":"test","license":{"name":"MIT"}},
-            "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":name,"dependencies":[],"host":{"request-identity":"identity"},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":name,"dependencies":[],"host":{"request-identity":"identity"},
                 "access-groups":{"message":{"title":title,"operations":["receive"]}}},
             "paths":{path:{method:{"operationId":"receive","summary":"test","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
         package_fixture(
@@ -1764,7 +2018,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
             &authority,
         )
     };
-    let id = "alice.dhttp.net/message";
+    let id = "std.dhttp.net/message";
     let bytes = make_lib("message", "1.0.0", "/message", "post", "1v1聊天");
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
@@ -1790,7 +2044,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     assert!(
         install_lib(
             &profile,
-            "alice.dhttp.net/other",
+            "std.dhttp.net/other",
             &make_lib("other", "1.0.0", "/message", "get", "Other"),
             &runtime
         )
@@ -1841,6 +2095,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     install_lib(&profile, id, &bytes, &runtime).unwrap();
     // Static App mounts and Lib business routes have independent roots.
     let mut doc = frontend_document("1.0.0");
+    doc["x-pishoo"]["publisher"] = json!("std.dhttp.net");
     doc["x-pishoo"]["kind"] = json!("app");
     doc["x-pishoo"]["name"] = json!("message");
     doc["x-pishoo"]["dependencies"] = json!([]);
@@ -1902,7 +2157,7 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     );
     let access = access_control::AccessService::load_from_db(
         &format!("sqlite://{}?mode=rwc", profile.access_db_path().display()),
-        "alice.dhttp.net",
+        "std.dhttp.net",
         &access_control::SubjectId::new(b"owner").unwrap(),
     )
     .await

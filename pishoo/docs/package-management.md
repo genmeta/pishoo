@@ -135,9 +135,10 @@ Accept-Versions: v1
 
 - `/list` 为数组，按派生完整名称排序；无登记时为 `[]`。详情为单个对象，缺失返回 404。
 - `id` 与 `publisher` 是兼容接口字段，分别由 author/name 与 author 推导，数据库没有 id 列。历史无作者短别名没有 publisher。
-- `name/kind/version/title/description/dependencies/endpoints` 始终存在；title 缺失回退短名，description 可以是 null，endpoints 当前固定为空数组，不表示 Lib 没有业务 API。
+- `name/kind/version/title/description/dependencies/endpoints` 始终存在；title 缺失回退短名，description 可以是 null，清单及 App 的 endpoints 为空数组，不表示 Lib 没有业务 API。
 - license、repository 非 NULL 时才返回。App 增加固定 `entry: "/"`。
-- 不返回 changelog、host、OpenAPI 或运行健康信息；数据库不保存包校验和或作者密钥指纹。
+- Lib 详情在完整包 ID、登记版本与已加载 Lib 匹配时，额外返回 `openapi` 和按实际挂载前缀映射的 `endpoints`，供 Workspace 展示完整 API。未加载或版本不匹配时不附加 OpenAPI，保留登记元数据与空 endpoints。此读取不执行 guest、不重新读磁盘制品或验签。
+- 不返回 changelog、host 或运行健康信息；App 不返回 OpenAPI，也不声明业务能力。数据库不保存包校验和或作者密钥指纹。
 - 详情成功额外返回 `Package-Id: alice.dhttp.net/calendar`。
 
 安装成功的 200 来自已验证的本次输入，可以额外含有 changelog、host、OpenAPI 和 endpoints；商店复用结果也可能返回精简登记对象。当前成功写入响应并非统一的、固定丰富度的资源表示，客户端不得要求 GET 一定带回上述安装预览信息。
@@ -211,7 +212,7 @@ Expected-Package-Id: alice.dhttp.net/calendar
 | `app_dependencies` | PK (`app_name`,`lib_name`)，另有非空 `version` | `app_name -> apps(name)` 删除级联；`lib_name -> libs(name)` 删除限制。 |
 | `lib_dependencies` | PK (`lib_name`,`dependency_name`)，另有非空 `version` | 来源 `lib_name -> libs(name)` 删除级联；目标 `dependency_name -> libs(name)` 删除限制。 |
 | `lib_capabilities` | PK (`lib_name`,`capability_id`)，非空 `title` | `lib_name -> libs(name)` 删除级联；`capability_id` 非空字符串；`trim(title)` 非空。 |
-| `lib_capability_operations` | PK (`lib_name`,`capability_id`,`method`,`path`)；UNIQUE (`method`,`path`) | (`lib_name`,`capability_id`) 指向能力表并删除级联；方法须非空且为大写，路径须以 `/std/` 开头。 |
+| `lib_capability_operations` | PK (`lib_name`,`capability_id`,`method`,`path`)；UNIQUE (`method`,`path`) | (`lib_name`,`capability_id`) 指向能力表并删除级联；方法须非空且为大写，路径须为非根绝对路径，保存按已验签发布者映射后的实际路径。 |
 
 依赖只指向 Lib；安装 App 不会令 App 成为另一制品的依赖。关系键保存同类唯一短名，查询时连接 `libs/apps` 还原作者与完整标识。依赖要求精确到作者、名称、版本，例如 alice.dhttp.net/calendar@1.2.3，不能以 bob.dhttp.net/calendar@1.2.3 替代；作者不必重复保存在关系行中。`version` 并非外键的一部分，SQLite 不会自动检查它与被依赖 Lib 的登记版本一致。
 
@@ -221,7 +222,7 @@ Expected-Package-Id: alice.dhttp.net/calendar
 
 卸载 App 只删除其登记、静态制品和自身依赖出边，保留依赖 Lib。卸载一个仍有 App/Lib 入边的 Lib 会被拒绝并列出依赖者。卸载父 Lib 删除其出边和自身能力登记，不自动卸载因此不再被引用的依赖；业务数据库与既有 ACL 均保留。
 
-能力表只登记源 OpenAPI 的业务 `access-groups` 及其操作。它不是全部 HTTP 路由、宿主 imports、ACL/Contact/包管理服务的统一登记表。SQL 的全局方法/路径唯一约束只覆盖已登记的能力操作；不同 Lib 不得拆分同一路径的方法等更强规则，由安装时 `check_routes` 检查。
+能力表只登记源 OpenAPI 的业务能力组及其操作；2026-10-20 目标字段改为文档级 `x-access-groups`，操作级 `x-access-group` 和 `x-initial-access`，详见[能力接口分组](package-spec.md#能力接口分组)。当前解析器仍读取旧 `x-pishoo` 嵌套，本次规范修订不代表运行时已切换。它不是全部 HTTP 路由、宿主 imports、ACL/Contact/包管理服务的统一登记表。SQL 的全局方法/路径唯一约束只覆盖已登记的能力操作；不同 Lib 不得拆分同一路径的方法等更强规则，由安装时 `check_routes` 检查。
 
 来源：`packages.sql`；`files.rs::capability_rows/save_registration/check_dependency_cycle/remove_artifact/check_routes`；原生能力查询见 `server.rs::native_router` 和 `contact.rs` 中的能力目录查询。
 
@@ -277,7 +278,7 @@ Expected-Package-Id: alice.dhttp.net/calendar
 
 标准目录由已验证发布者身份分类，熟悉的模块名不会令普通作者自动进入 `libs/std`。该目录没有额外运行特权。App 不区分 `apps/std`；新安装不会写 `manifest.json`、`signature.json`、OpenAPI 旁置文件或恢复原包的 proof。 此图只展示包相关资源；ssl、file、logs、repo、templates 和原生 contact.db 仍按原生基础设施布局保留，不属于业务包卸载范围。
 
-App 使用 `/<name>/` 及其子路径；Lib 使用 OpenAPI 声明的 `/std` 业务路径。磁盘中的 `std` 分类不决定 App URL，也不会令 Lib 使用 `/<author>/<name>` 路由。配置、文件、DHTTP 等原生基础设施路径仍由各自服务定义。
+App 使用 `/<name>/` 及其子路径；标准发布者 `std.dhttp.net` 的 Lib 使用 `/std` + OpenAPI 声明路径，其他 Lib 使用 `/<name>` + 声明路径（普通 journal 声明 `/std/xxxx` 对外为 `/journal/std/xxxx`）。磁盘中的 `std` 分类不决定 App URL，也不会令 Lib 使用 `/<author>/<name>` 路由。配置、文件、DHTTP 等原生基础设施路径仍由各自服务定义。
 
 App 安装检查已存代理，配置写入也检查已装 App，均在各自现有的即时事务内完成。App 的根和子路径不得被显式代理占用；祖先、邻接名称及未安装名称仍可代理。它不是全局保留 `/app` 或全部任意应用名。
 
@@ -299,7 +300,7 @@ App 快照遍历拒绝符号链接、特殊文件和跨设备目录/文件；当
 
 商店流程校验本次下载的原始发布包；复用已加载依赖只核对数据库作者、短名、精确版本及当前版本，没有本地载荷、摘要或作者密钥指纹比对。无签名快照不会送入源包验签入口。见 `store.rs::can_reuse_lib/install_store_artifact`。
 
-已安装 GET 清单/详情从 SQLite 只读事务读取登记和依赖，不要求载荷存在、正在加载或可编译。它不调用 guest，也不打开 WASM 或静态资源。数据库目录快照与当前运行集合因此可能暂时不同，不应将 GET 结果解释为运行健康检查。
+已安装 GET 清单/详情从 SQLite 只读事务读取登记和依赖，不要求载荷存在、正在加载或可编译。Lib 详情仅在完整 ID 和版本匹配时补充已加载 Lib 的 OpenAPI 与实际 API 路径；清单及 App 详情不读取运行集合。查询不调用 guest，也不重新打开 WASM 或静态资源。数据库目录快照与当前运行集合可能暂时不同，不应将 GET 结果解释为运行健康检查。
 
 来源：`files.rs::runtime_wasm/installed_bytes/runtime_snapshot/snapshot_directory/registered_metadata/installed_libs/installed_apps`；`sandbox.rs::Sandbox::load_libs`；`package.rs::installed_catalog`；`runtime.rs::Lib::load`；`format.rs::read_package/package_metadata`。
 
@@ -438,7 +439,7 @@ CREATE TABLE IF NOT EXISTS lib_capability_operations (
     lib_name TEXT NOT NULL,
     capability_id TEXT NOT NULL,
     method TEXT NOT NULL CHECK (length(method) > 0 AND method = upper(method)),
-    path TEXT NOT NULL CHECK (substr(path, 1, 5) = '/std/'),
+    path TEXT NOT NULL CHECK (substr(path, 1, 1) = '/' AND length(path) > 1),
     PRIMARY KEY (lib_name, capability_id, method, path),
     UNIQUE (method, path),
     FOREIGN KEY (lib_name, capability_id)

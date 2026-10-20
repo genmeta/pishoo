@@ -251,7 +251,7 @@ async fn journal_call(
 ) -> (u16, http::HeaderMap, Bytes) {
     let mut builder = Request::builder()
         .method(method)
-        .uri(format!("https://alice.dhttp.net/journal{path}"));
+        .uri(format!("https://alice.dhttp.net{path}"));
     if !document.is_null() {
         builder = builder.header("content-type", "application/json");
     }
@@ -349,6 +349,23 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
     assert_eq!(
         serde_json::from_slice::<Value>(&context).unwrap(),
         json!({"owner_name":"alice.dhttp.net","caller_name":"bob.dhttp.net","is_owner":false})
+    );
+    assert_eq!(
+        journal_call(
+            &lib,
+            &tasks,
+            &local,
+            Some(&owner),
+            "GET",
+            "/journal/context",
+            Value::Null,
+            None,
+            &[]
+        )
+        .await
+        .0,
+        404,
+        "the guest must not retain the package-name prefix"
     );
     // The backend owns APIs only; the root page is served from the WEBC volume.
     assert_eq!(
@@ -1048,7 +1065,7 @@ async fn journal_browser_preview() {
         .await
         .unwrap();
     eprintln!(
-        "Journal real WASM browser fixture: http://127.0.0.1:18747/std/journal/ (test owner, temporary data)"
+        "Journal real WASM browser fixture: http://127.0.0.1:18747/journal/ (test owner, temporary data)"
     );
     use tower::ServiceExt;
     let serving = async {
@@ -1107,7 +1124,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
         ("/assets/app.js", "assets/app.js", "text/javascript"),
         ("/assets/app.css", "assets/app.css", "text/css"),
     ] {
-        let path = format!("/std/{}{suffix}", id.rsplit('/').next().unwrap());
+        let path = format!("/{}{suffix}", id.rsplit('/').next().unwrap());
         for grantee in [Grantee::Anony, Grantee::Named] {
             access
                 .set_policy(
@@ -1235,16 +1252,12 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     assert_eq!(
         operations,
         vec![
-            (
-                "comment".into(),
-                "POST".into(),
-                "/std/journal/comments".into()
-            ),
-            ("read".into(), "GET".into(), "/std/journal/comments".into()),
-            ("read".into(), "GET".into(), "/std/journal/context".into()),
-            ("read".into(), "GET".into(), "/std/journal/entries".into()),
-            ("read".into(), "GET".into(), "/std/journal/entry".into()),
-            ("read".into(), "GET".into(), "/std/journal/photo".into()),
+            ("comment".into(), "POST".into(), "/journal/comments".into()),
+            ("read".into(), "GET".into(), "/journal/comments".into()),
+            ("read".into(), "GET".into(), "/journal/context".into()),
+            ("read".into(), "GET".into(), "/journal/entries".into()),
+            ("read".into(), "GET".into(), "/journal/entry".into()),
+            ("read".into(), "GET".into(), "/journal/photo".into()),
         ]
     );
     assert_eq!(
@@ -1262,9 +1275,9 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     assert_eq!(sandbox.apps.len(), 1);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
     for path in [
-        "/std/journal/",
-        "/std/journal/assets/app.js",
-        "/std/journal/assets/app.css",
+        "/journal/",
+        "/journal/assets/app.js",
+        "/journal/assets/app.css",
     ] {
         let response = router
             .clone()
@@ -1279,8 +1292,10 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
         assert_eq!(response.status(), 200);
     }
     for (method, path, status) in [
-        ("GET", "/std/journal/missing", 404),
-        ("POST", "/std/journal/assets/app.js", 405),
+        ("GET", "/journal/missing.js", 404),
+        ("POST", "/journal/assets/app.js", 405),
+        ("GET", "/journal/context", 500),
+        ("POST", "/journal/entries", 500),
     ] {
         let response = router
             .clone()

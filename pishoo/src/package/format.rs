@@ -199,7 +199,30 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
     validate_content(&container, &metadata)?;
     if metadata["kind"] == "lib" {
         let raw = package_file(&container, "/metadata/openapi.json")?;
-        super::validate_openapi(&raw)?;
+        let api = super::validate_openapi(&raw)?;
+        if metadata["publisher"] == "std.dhttp.net"
+            && api.paths.as_ref().unwrap().keys().any(|path| {
+                crate::routes::reserved(path)
+                    || [
+                        "/acl",
+                        "/contact",
+                        "/contacts",
+                        "/sys",
+                        "/pishoo",
+                        "/file",
+                        "/dhttp",
+                    ]
+                    .iter()
+                    .any(|prefix| {
+                        path == prefix
+                            || path
+                                .strip_prefix(prefix)
+                                .is_some_and(|tail| tail.starts_with('/'))
+                    })
+            })
+        {
+            return Err(invalid("standard Lib conflicts with a reserved API path"));
+        }
         let document: Value =
             serde_json::from_slice(&raw).map_err(|_| invalid("invalid OpenAPI JSON"))?;
         if document["info"]["version"] != metadata["version"] {

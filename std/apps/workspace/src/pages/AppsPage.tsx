@@ -10,7 +10,7 @@ import {
 } from 'solid-js'
 
 import { api, request } from '../api/client'
-import type { LibSummary, StoreLib, StoreCatalog, StoreDetail, StoreVersions, StoreUpdate } from '../api/types'
+import type { LibSummary, StoreLib, StoreSummary, StoreCatalog, StoreDetail, StoreVersions, StoreUpdate } from '../api/types'
 import {
   Dialog,
   EmptyState,
@@ -48,13 +48,22 @@ async function storeRead<T>(path: string, signal?: AbortSignal) {
   })
 }
 
+function validStoreFacts(release: StoreSummary) {
+  return typeof release.title === 'string' && !!release.title
+    && Number.isSafeInteger(release.published_at) && release.published_at >= 0 && release.published_at <= 8_640_000_000_000
+    && Number.isSafeInteger(release.size) && release.size >= 0
+    && (release.license === undefined || typeof release.license === 'string')
+    && [release.likes_count, release.favorites_count, release.downloads_count].every(count =>
+      count === undefined || Number.isSafeInteger(count) && count >= 0)
+}
+
 async function readStoreDetail(id: string, version: string, signal?: AbortSignal, kind: 'app' | 'lib' = 'lib') {
   if (!validId(id) || !id.includes('/') || version && !validVersion(version))
     throw new Error('Invalid store release identity')
   const result = await storeRead<StoreDetail>(`/${kind === 'app' ? 'apps' : 'libs'}/${id}${version ? `/versions/${version}` : ''}`, signal)
   if (result.id !== id || result.publisher + '/' + result.name !== id
     || !validVersion(result.version) || version && result.version !== version
-    || result.kind !== kind || !result.title || !result.description || !result.changelog
+    || result.kind !== kind || !validStoreFacts(result) || !result.description || !result.changelog
     || !Array.isArray(result.dependencies)
     || (kind === 'lib' && (!result.openapi?.info || result.openapi.info.version !== result.version))
     || (kind === 'app' && result.openapi !== undefined)
@@ -71,24 +80,92 @@ function newerVersion(next: string, previous: string) {
   return false
 }
 
+function StoreEngagement(props: { release: StoreSummary }) {
+  const { t, locale } = useI18n()
+  const path = () => `/${props.release.kind === 'app' ? 'apps' : 'libs'}/${props.release.id}`
+  const parse = (value: unknown) => {
+    const stats = value as { likes_count: number; favorites_count: number; downloads_count: number; liked?: boolean; favorited?: boolean }
+    if (!stats || ![stats.likes_count, stats.favorites_count, stats.downloads_count].every(count => Number.isSafeInteger(count) && count >= 0)
+      || stats.liked !== undefined && typeof stats.liked !== 'boolean'
+      || stats.favorited !== undefined && typeof stats.favorited !== 'boolean')
+      throw new Error(t('apps.statsInvalid'))
+    return stats
+  }
+  const [stats, { mutate, refetch }] = createResource(path, abortable(async (path: string, signal) =>
+    parse(await storeRead<unknown>(`${path}/stats`, signal)),
+  ))
+  const values = () => stats.error ? undefined : stats()
+  const [pending, setPending] = createSignal<'idle' | 'like' | 'favorite'>('idle')
+  const [failure, setFailure] = createSignal('')
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  const toggle = async (action: 'like' | 'favorite') => {
+    const current = values()
+    if (!current || stats.error || stats.loading || pending() !== 'idle') return
+    const active = action === 'like' ? current.liked : current.favorited
+    if (active === undefined) return
+    setPending(action); setFailure('')
+    try {
+      const result = parse(await request<unknown>(`${storeBase}${path()}/${action}`, {
+        method: active ? 'DELETE' : 'PUT',
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]),
+      }))
+      if (result.liked === undefined || result.favorited === undefined) throw new Error(t('apps.statsInvalid'))
+      mutate(result)
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setFailure(errorMessage(error, t('apps.statsError')))
+        void refetch()
+      }
+    } finally { setPending('idle') }
+  }
+  const count = (value: number | undefined) => value === undefined ? '—' : new Intl.NumberFormat(locale()).format(value)
+  return <div class="app-engagement" aria-busy={stats.loading || pending() !== 'idle'}>
+    <div class="app-store-stats">
+      <For each={['like', 'favorite'] as const}>{action => {
+        const active = () => action === 'like' ? values()?.liked : values()?.favorited
+        const total = () => action === 'like' ? values()?.likes_count ?? props.release.likes_count : values()?.favorites_count ?? props.release.favorites_count
+        return <button class="button button-secondary app-reaction" type="button" aria-pressed={active() ?? false}
+          disabled={stats.loading || !!stats.error || pending() !== 'idle' || active() === undefined}
+          onClick={() => void toggle(action)}>
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill={active() ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+            <path d={action === 'like' ? 'M7 10H3v11h4V10Zm0 0 5-8c3 0 3 3 1 7h6a2 2 0 0 1 2 2l-2 8a3 3 0 0 1-3 2H7' : 'M6 3h12v19l-6-4-6 4V3Z'} />
+          </svg>
+          {t(action === 'like' ? active() ? 'apps.liked' : 'apps.like' : active() ? 'apps.favorited' : 'apps.favorite')}
+          {' '}<span>{count(total())}</span>
+        </button>
+      }}</For>
+      <span class="app-download-count">{t('apps.downloads')} <strong>{count(values()?.downloads_count ?? props.release.downloads_count)}</strong></span>
+    </div>
+    <Show when={failure() || stats.error}><div class="app-stats-error" role="alert">
+      <span>{failure() || t('apps.statsError')}</span>
+      <button class="text-link" type="button" disabled={stats.loading || pending() !== 'idle'} onClick={() => { setFailure(''); void refetch() }}>{t('common.retry')}</button>
+    </div></Show>
+    <Show when={!stats.loading && values() && (values()?.liked === undefined || values()?.favorited === undefined)}><p class="app-meta">{t('apps.statsIdentity')}</p></Show>
+  </div>
+}
+
 function storeManifest(release: StoreDetail | undefined): LibSummary | undefined {
   if (!release) return undefined
+  const prefix = release.publisher === 'std.dhttp.net' ? '/std' : `/${release.name}`
   const endpoints: LibSummary['endpoints'] = []
   for (const [path, item] of Object.entries(release.openapi?.paths ?? {})) {
     for (const [method, op] of Object.entries(item)) {
       if (['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'].includes(method) && op)
-        endpoints.push({ method: method.toUpperCase(), path: `/std${path}`, description: op.summary ?? op.description ?? null })
+        endpoints.push({ method: method.toUpperCase(), path: `${prefix}${path}`, description: op.summary ?? op.description ?? null })
     }
   }
   return { kind: release.kind, dependencies: release.dependencies, id: release.id, title: release.title, version: release.version,
-    description: release.description, repository: release.repository, changelog: release.changelog ?? undefined, host: release.host ?? undefined,
+    description: release.description, license: release.license, repository: release.repository, changelog: release.changelog ?? undefined, host: release.host ?? undefined,
     entry: release.kind === 'app' ? '/' : undefined, endpoints, openapi: release.openapi }
 }
 
 function operations(lib: LibSummary | undefined) {
+  const [publisher, name] = lib?.id.includes('/') ? lib.id.split('/') : [undefined, lib?.id]
+  const prefix = publisher === 'std.dhttp.net' ? '/std' : `/${name}`
   return (lib?.endpoints ?? [])
     .map((endpoint) => {
-      const path = endpoint.path.replace(/^\/std(?=\/|$)/, '')
+      const path = endpoint.path.startsWith(`${prefix}/`) ? endpoint.path.slice(prefix.length) : endpoint.path
       const method = endpoint.method.toLowerCase() as keyof NonNullable<
         NonNullable<LibSummary['openapi']>['paths']
       >[string]
@@ -134,7 +211,7 @@ function entry(lib: LibSummary | undefined) {
 }
 
 export default function AppsPage() {
-  const { t } = useI18n()
+  const { t, date } = useI18n()
   const locationUrl = () => {
     const value = new URL(window.location.href)
     value.pathname = value.pathname.replace(/^\/workspace(?=\/|$)/, '') || '/'
@@ -149,6 +226,7 @@ export default function AppsPage() {
   const section = () => {
     const value = params().get('section') ?? ''
     if (value === 'trust' && identity()?.source !== 'store') return 'about'
+    if (value === 'access' && kind() === 'app') return 'about'
     return ['changes', 'interfaces', 'access', 'trust'].includes(value) ? value : 'about'
   }
   const [installed, installedActions] = createResource(kind, abortable((kind: 'app' | 'lib', signal) =>
@@ -203,7 +281,7 @@ export default function AppsPage() {
       const result = await storeRead<StoreCatalog>(`/${collection}?${query}`, signal)
       const items = collection === 'apps' ? result.apps : result.libs
       if (!Array.isArray(items) || !Number.isSafeInteger(result.total) || result.total < 0 || items.some(item =>
-        item.kind !== (collection === 'apps' ? 'app' : 'lib') || item.id !== `${item.publisher}/${item.name}` || !validId(item.id) || !validVersion(item.version)))
+        item.kind !== (collection === 'apps' ? 'app' : 'lib') || item.id !== `${item.publisher}/${item.name}` || !validId(item.id) || !validVersion(item.version) || !validStoreFacts(item)))
         throw new Error('Invalid store catalogue response')
       return { ...result, libs: items }
     }),
@@ -216,7 +294,35 @@ export default function AppsPage() {
     }),
   )
   const selectedStore = () => storeDetail.error ? undefined : storeDetail()
-  const current = () => identity()?.source === 'store' ? storeManifest(selectedStore()) : saved(identity()?.id ?? '')
+  const [localDetail, localDetailActions] = createResource(
+    () => identity()?.source === 'local' && kind() === 'lib' && saved(identity()!.id)
+      ? `${identity()!.id}|${saved(identity()!.id)!.version}` : false,
+    abortable(async (source: string, signal) => {
+      const [id, version] = source.split('|')
+      const result = await request<LibSummary>(`/std/sys/lib?name=${encodeURIComponent(id.split('/').at(-1)!)}`, { signal })
+      if (result.id !== id || result.version !== version || result.kind !== 'lib') throw new Error(t('apps.invalidId'))
+      return result
+    }),
+  )
+  const [capabilities, capabilityActions] = createResource(
+    () => identity()?.source === 'local' && kind() === 'lib' && section() === 'access' ? identity()!.id : false,
+    abortable(async (id: string, signal) => (await api.capabilities(signal)).filter(capability => capability.id.startsWith(`${id} · `))),
+  )
+  const current = () => identity()?.source === 'store' ? storeManifest(selectedStore())
+    : kind() === 'lib' && !localDetail.error && localDetail.latest?.id === identity()?.id
+      && localDetail.latest?.version === saved(identity()?.id ?? '')?.version ? localDetail.latest : saved(identity()?.id ?? '')
+  const detailCapabilities = () => {
+    if (identity()?.source === 'local') return capabilities.error ? [] : capabilities() ?? []
+    const item = current()
+    const groups = Object.entries(item?.openapi ?? {}).find(([key]) => key === 'x-access-groups')?.[1]
+      ?? item?.openapi?.['x-pishoo']?.['access-groups']
+    if (!groups || typeof groups !== 'object' || Array.isArray(groups)) return []
+    return Object.values(groups).flatMap(group => {
+      if (!group || typeof group !== 'object' || typeof group.title !== 'string' || !Array.isArray(group.operations)) return []
+      return [{ title: `${item!.id.split('/').at(-1)} · ${group.title}`,
+        endpoints: operations(item).filter(endpoint => group.operations.includes(endpoint.operation?.operationId)) }]
+    })
+  }
   const publisher = (item: LibSummary | undefined) => item?.id.includes('/') ? item.id.split('/')[0].replace(/\.dhttp\.net$/, '') : t('apps.local')
   const filtered = () => installedItems().filter(item => `${item.id} ${item.title}`.toLowerCase().includes((params().get('q') ?? '').toLowerCase()))
     .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
@@ -345,12 +451,10 @@ export default function AppsPage() {
   </Show>
   const interfaces = (item: LibSummary | undefined) => <>
     {dependencies(item)}
-    <Show when={identity()?.source === 'store' && item?.kind !== 'app'}><ul class="app-operations">
+    <Show when={item?.kind !== 'app'}><ul class="app-operations">
       <For each={operations(item).filter(op => !pageResource(op))}>{op => <li><code>{op.method} {op.path}</code><p>{op.description}</p></li>}</For>
     </ul></Show>
-    <Show when={identity()?.source === 'local' && item?.kind !== 'app'}>
-      <a class="text-link" href={workspacePath('/settings/capabilities')}>{t('nav.capabilities')}</a>
-    </Show>
+    <Show when={identity()?.source === 'local' && item?.kind !== 'app' && !localDetail.loading && !localDetail.error && !item?.openapi}><p class="muted">{t('apps.notProvided')}</p></Show>
   </>
   const actions = (item: LibSummary, details = false) => <div class="button-group app-actions">
     <Show when={entry(item)} keyed>{href => <a class="button button-primary" href={href} target="_blank" rel="noopener noreferrer">{t('apps.open')} ↗</a>}</Show>
@@ -381,7 +485,7 @@ export default function AppsPage() {
         <Show when={tab() === 'store'}><input name="publisher" aria-label={t('apps.publisher')} placeholder={t('apps.publisher')} value={params().get('publisher') ?? ''} /></Show>
         <button class="button button-secondary" type="submit">{t('apps.search')}</button>
         <button class="button button-secondary" type="button" disabled={installed.loading || !!installed.error || updates.loading} onClick={checkUpdates}>{t('apps.check')}</button>
-        <button class="button button-secondary" type="button" disabled={installed.loading} onClick={() => void installedActions.refetch()}>{t('common.refresh')}</button>
+        <button class="button button-secondary" type="button" disabled={tab() === 'store' ? catalog.loading : installed.loading} onClick={() => { if (tab() === 'store') void catalogActions.refetch(); else void installedActions.refetch() }}>{t('common.refresh')}</button>
       </form>
       <Show when={tab() === 'mine'}>
         <Show when={installed.loading && !installedItems().length}><LoadingState label={t('apps.loading')} /></Show>
@@ -403,9 +507,11 @@ export default function AppsPage() {
       <Show when={tab() === 'store'}>
         <Show when={catalog.loading}><LoadingState /></Show><Show when={catalog.error}><ErrorState message={errorMessage(catalog.error, t('common.unexpectedError'))} onRetry={() => void catalogActions.refetch()} /></Show>
         <Show when={!catalog.loading && !catalog.error && catalog()?.total === 0}><EmptyState title={t('apps.storeEmpty')} /></Show>
-        <section class="app-grid"><For each={catalog()?.libs}>{release => <article class="app-card">
-          <a class="app-card-title" href={storeHref(release.id, release.version)} onClick={event => follow(event, storeHref(release.id, release.version))}><h2>{release.title}</h2></a>
-          <p class="app-meta">{release.publisher.replace(/\.dhttp\.net$/, '')}</p><p class="app-description">{release.description}</p><p class="app-meta">v{release.version}</p>
+        <section class="app-grid app-store-grid" aria-label={t('apps.store')}><For each={catalog()?.libs}>{release => <article class="app-card app-store-card">
+          <a class="app-card-title" href={storeHref(release.id, release.version)} onClick={event => follow(event, storeHref(release.id, release.version))}><span class="app-icon" aria-hidden="true">{release.title.slice(0, 1).toUpperCase()}</span><h2>{release.title}</h2><span class="app-version">v{release.version}</span></a>
+          <code class="app-meta">{release.id}</code><p class="app-description">{release.description}</p>
+          <div class="app-store-meta"><Show when={release.license}><span>{release.license}</span></Show><time dateTime={new Date(release.published_at * 1000).toISOString()}>{date(release.published_at)}</time><span>{t(release.status === 'published' ? 'apps.published' : 'apps.yanked')}</span></div>
+          <StoreEngagement release={release} />
           <button class="button button-primary" disabled={writing() !== 'idle' || release.status !== 'published' || !!installed.error} onClick={() => void prepareStoreInstall(release)}>{t('apps.installVersion', { version: release.version })}</button>
         </article>}</For></section>
         <Pagination page={requestedPage()} pageSize={20} total={catalog()?.total ?? 0} onPage={next => changeQuery('page', String(next))} />
@@ -418,14 +524,30 @@ export default function AppsPage() {
         <Show when={current()} fallback={<Show when={!installed.loading && !storeDetail.loading && !storeDetail.error && !installed.error}><EmptyState title={t('apps.missing')} /></Show>} keyed>{item => <>
           <header class="app-detail-header"><div class="app-identity"><span class="app-icon">{item.title.slice(0, 1)}</span><div><h1>{item.title}</h1><p class="app-meta">{publisher(item)} · v{item.version}</p></div></div>
             <Show when={selectedStore()} fallback={actions(item)} keyed>{release => storeActions(release)}</Show></header>
-          <nav class="section-nav app-tabs" aria-label={t('apps.details')}><For each={(['about', 'changes', 'interfaces', 'access', 'trust'] as const).filter(name => name !== 'trust' || identity()?.source === 'store')}>{name => <button aria-current={section() === name ? 'page' : undefined} onClick={() => changeQuery('section', name)}>{t(name === 'interfaces' && kind() === 'app' ? 'apps.dependencies' : `apps.${name}`)}</button>}</For></nav>
-          <Show when={section() === 'about'}><div class="app-about"><section class="app-panel"><h2>{t('apps.about')}</h2><p class="app-prose">{item.description ?? t('apps.notProvided')}</p></section>
+          <Show when={selectedStore()} keyed>{release => <StoreEngagement release={release} />}</Show>
+          <nav class="section-nav app-tabs" aria-label={t('apps.details')}><For each={(['about', 'changes', 'interfaces', 'access', 'trust'] as const).filter(name => (name !== 'trust' || identity()?.source === 'store') && (name !== 'access' || kind() === 'lib'))}>{name => <button aria-current={section() === name ? 'page' : undefined} onClick={() => changeQuery('section', name)}>{t(name === 'interfaces' && kind() === 'app' ? 'apps.dependencies' : `apps.${name}`)}</button>}</For></nav>
+          <Show when={section() === 'about'}><div class="app-about"><section class="app-panel"><h2>{t('apps.about')}</h2><p class="app-prose">{item.description ?? t('apps.notProvided')}</p>
+            <Show when={selectedStore()}><h2>{t('apps.changes')}</h2><p class="app-prose">{item.changelog ?? t('apps.notProvided')}</p><h2>{t('apps.dependencies')}</h2>{dependencies(item)}</Show></section>
             <aside class="app-panel app-facts"><h2>{t('apps.fullId')}</h2><code>{item.id}</code><dl>
               <dt>{t('apps.declared')}</dt><dd>{publisher(item)}</dd><dt>{t('apps.savedVersion')}</dt><dd>{saved(item.id)?.version ?? '—'}</dd>
+              <Show when={selectedStore()} keyed>{release => <><dt>{t('apps.releaseVersion')}</dt><dd>{release.version}</dd><dt>{t('apps.publishedAt')}</dt><dd><time dateTime={new Date(release.published_at * 1000).toISOString()}>{date(release.published_at)}</time></dd><dt>{t('apps.packageSize')}</dt><dd>{(release.size / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} KiB</dd></>}</Show>
               <Show when={repositoryUrl(item.repository)} keyed>{href => <><dt>{t('apps.repository')}</dt><dd><a class="text-link" href={href} target="_blank" rel="noopener noreferrer">{href}</a></dd></>}</Show>
               <dt>{t('apps.license')}</dt><dd>{item.license ?? t('apps.notProvided')}</dd></dl></aside></div></Show>
-          <Show when={section() === 'interfaces'}><section class="app-panel"><h2>{t(kind() === 'app' ? 'apps.dependencies' : 'apps.interfaces')}</h2>{interfaces(item)}</section></Show>
-          <Show when={section() === 'access'}><section class="app-panel"><a class="text-link" href={workspacePath('/settings/capabilities')}>{t('nav.capabilities')}</a> · <a class="text-link" href={workspacePath('/settings/access')}>{t('nav.policies')}</a></section></Show>
+          <Show when={section() === 'interfaces'}><section class="app-panel"><h2>{t(kind() === 'app' ? 'apps.dependencies' : 'apps.interfaces')}</h2>
+            <Show when={identity()?.source === 'local' && kind() === 'lib' && localDetail.loading}><LoadingState /></Show>
+            <Show when={localDetail.error && identity()?.source === 'local' && kind() === 'lib'}><ErrorState message={errorMessage(localDetail.error, t('common.unexpectedError'))} onRetry={() => void localDetailActions.refetch()} /></Show>
+            {interfaces(item)}</section></Show>
+          <Show when={section() === 'access' && kind() === 'lib'}><section class="app-panel"><h2>{t('nav.capabilities')}</h2>
+            <Show when={identity()?.source === 'local' && capabilities.loading}><LoadingState /></Show>
+            <Show when={identity()?.source === 'local' && capabilities.error}><ErrorState message={errorMessage(capabilities.error, t('common.unexpectedError'))} onRetry={() => void capabilityActions.refetch()} /></Show>
+            <Show when={identity()?.source === 'store' || !capabilities.loading && !capabilities.error}>
+              <Show when={detailCapabilities().length} fallback={<p class="muted">{t('apps.noGroups')}</p>}>
+                <For each={detailCapabilities()}>{capability => <section class="app-panel"><h3>{capability.title}</h3>
+                  <ul class="app-operations"><For each={capability.endpoints}>{endpoint => <li><code>{endpoint.method} {endpoint.path}</code></li>}</For></ul>
+                </section>}</For>
+              </Show>
+            </Show>
+            <a class="text-link" href={workspacePath('/settings/capabilities')}>{t('nav.capabilities')}</a> · <a class="text-link" href={workspacePath('/settings/access')}>{t('nav.policies')}</a></section></Show>
           <Show when={section() === 'trust'}><section class="app-panel"><h2>{t('apps.trust')}</h2><Show when={selectedStore()} keyed>{release => <>
             <dl class="app-facts"><dt>{t('apps.publisherOwner')}</dt><dd><code>{release.publisher_owner_hash}</code></dd><dt>{t('apps.packageDigest')}</dt><dd><code>{release.package_sha256}</code></dd><dt>{t('apps.packageSize')}</dt><dd>{release.size.toLocaleString()} B</dd></dl>
             <dl><For each={Object.entries(release.host ?? {})}>{([name, purpose]) => <><dt>{name}</dt><dd>{purpose}</dd></>}</For></dl>

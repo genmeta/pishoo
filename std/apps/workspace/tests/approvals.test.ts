@@ -191,3 +191,32 @@ test('changed permission operations reject an approval before any ACL writes', a
   await expect(chatApi.grantCapability(contact.name, initial.id, { requestId: contact.id, version: initial.version }))
     .rejects.toThrow('Capability or contact request changed')
 })
+
+
+test('capability labels omit authors and retain full request identities', async () => {
+  const catalog = {
+    'alice.smith.dhttp.net/journal · Read journal': { '/journal/entries': ['GET'] },
+    'bob.dhttp.net/archive · Read journal': { '/archive/entries': ['GET'] },
+    'std.dhttp.net/message · Receive messages': { '/std/message': ['POST'] },
+    'custom.example/tasks · Manage tasks': { '/tasks/items': ['GET'] },
+  }
+  const calls: Array<{ url: string; body?: unknown }> = []
+  globalThis.fetch = (async (input, init) => {
+    calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined })
+    return Response.json(String(input).includes('/std/contact/local/requests') ? { id: 1, status: 'queued' } : catalog)
+  }) as typeof fetch
+  const local = await api.capabilities()
+  const remote = await api.capabilities(undefined, 'friend.dhttp.net')
+  expect(remote).toEqual(local)
+  expect(local.map(group => group.title)).toEqual([
+    'journal · Read journal', 'archive · Read journal',
+    'tasks · Manage tasks', 'message · Receive messages',
+  ])
+  expect(local.map(group => group.id)).toEqual(Object.keys(catalog).sort())
+  await api.sendContactRequest({ target_name: 'friend.dhttp.net', description: '',
+    requested_capabilities: [remote[0]!.id], offered_capabilities: [local[1]!.id] })
+  expect(calls.at(-1)?.body).toMatchObject({
+    requested_capabilities: ['alice.smith.dhttp.net/journal · Read journal'],
+    offered_capabilities: ['bob.dhttp.net/archive · Read journal'],
+  })
+})

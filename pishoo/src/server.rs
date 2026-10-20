@@ -53,6 +53,7 @@ fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
 }
 
 fn native_router(server: &Server) -> Router {
+    let sandbox = server.sandbox.clone();
     let endpoint = server.endpoint.clone();
     let local_router = Arc::downgrade(&server.router);
     capabilities_router(server.profile.clone())
@@ -76,8 +77,17 @@ fn native_router(server: &Server) -> Router {
         .fallback(any(move |mut request: Request<AxumBody>| {
             let endpoint = endpoint.clone();
             let local_router = local_router.clone();
+            let sandbox = sandbox.clone();
             async move {
-                if !request.uri().path().starts_with("/std/") {
+                let path = request.uri().path();
+                if !path.starts_with("/std/")
+                    && !sandbox.read().unwrap().libs.keys().any(|id| {
+                        !id.starts_with("std.dhttp.net/")
+                            && path
+                                .strip_prefix(&format!("/{}", id.rsplit('/').next().unwrap()))
+                                .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
+                    })
+                {
                     return http::StatusCode::NOT_FOUND.into_response();
                 }
                 if request
@@ -138,12 +148,16 @@ fn current_router(server: &Server) -> Router {
                 .split('/')
                 .next()
                 .unwrap_or("");
-            let installed = sandbox
-                .read()
-                .unwrap()
-                .apps
-                .keys()
-                .any(|id| id.rsplit('/').next() == Some(name));
+            let installed = {
+                let sandbox = sandbox.read().unwrap();
+                sandbox
+                    .apps
+                    .keys()
+                    .any(|id| id.rsplit('/').next() == Some(name))
+                    || sandbox.libs.keys().any(|id| {
+                        !id.starts_with("std.dhttp.net/") && id.rsplit('/').next() == Some(name)
+                    })
+            };
             async move {
                 if installed {
                     api.oneshot(request).await.expect("Router is infallible")

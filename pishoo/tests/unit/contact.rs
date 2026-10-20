@@ -246,7 +246,7 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
         INSERT INTO lib_capability_operations VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'history', 'GET', '/std/message/history');").unwrap();
     assert_eq!(
         catalog(&profile).unwrap(),
-        json!({"read message":{"/std/message":["GET","HEAD"],"/std/message/history":["GET"]}})
+        json!({"dev.dhttp.net/message · read message":{"/message/message":["GET","HEAD"],"/message/message/history":["GET"]}})
     );
     let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
     let operations = selected(
@@ -259,7 +259,7 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
     .unwrap();
     assert_eq!(
         requested(&operations),
-        json!({"/std/message":["GET","HEAD"],"/std/message/history":["GET"]})
+        json!({"/message/message":["GET","HEAD"],"/message/message/history":["GET"]})
     );
     assert_eq!(
         selected(
@@ -284,5 +284,64 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
         .unwrap_err()
         .0,
         409
+    );
+
+    let canonical = "dev.dhttp.net/message · read message";
+    assert_eq!(
+        selected(&profile, &endpoint, &json!([canonical]), endpoint.name())
+            .await
+            .unwrap(),
+        operations
+    );
+    assert_eq!(
+        selected(
+            &profile,
+            &endpoint,
+            &json!([canonical, "read message"]),
+            endpoint.name()
+        )
+        .await
+        .unwrap_err()
+        .0,
+        400
+    );
+    db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
+        INSERT INTO lib_capabilities VALUES ('archive', 'read', 'read message');
+        INSERT INTO lib_capability_operations VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
+    assert_eq!(
+        selected(
+            &profile,
+            &endpoint,
+            &json!(["read message"]),
+            endpoint.name()
+        )
+        .await
+        .unwrap_err()
+        .0,
+        409,
+        "legacy titles must not silently select multiple packages"
+    );
+    assert_eq!(
+        selected(&profile, &endpoint, &json!([canonical]), endpoint.name())
+            .await
+            .unwrap(),
+        operations
+    );
+    use tower::ServiceExt;
+    let response = crate::routes::capabilities_router(profile.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/std/acl/promissions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        catalog(&profile).unwrap()
     );
 }

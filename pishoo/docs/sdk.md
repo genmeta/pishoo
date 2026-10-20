@@ -92,7 +92,8 @@ The App depends on the exact Journal Lib version. The build script checks Cargo,
 `wasmer.toml`, `app.toml`, OpenAPI and dependencies, then uses `genmeta build --no-build` with
 the publisher’s local DHTTP credentials. Run without `--publisher` to build the
 backend and metadata only. Publish the Lib first, then the App. The entry is
-`/std/journal/`; read/comment capability groups belong to the Lib, while static
+`/journal/`; its nonstandard Lib declares `/context`, `/entries` and other package-relative paths,
+exposed as `/journal/context`, `/journal/entries`, and so on. Read/comment capability groups belong to the Lib, while static
 files remain separately subject to daccess. See `examples/journal/README.md`.
 
 Use the developer guide or `examples/journal` as the starting point for a new Lib.
