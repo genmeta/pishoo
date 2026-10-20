@@ -3,14 +3,6 @@
 debug/
 target/
 xtask/target/
-std/apps/workspace/node_modules/
-std/apps/workspace/dist/
-std/apps/workspace/playwright-report/
-std/apps/workspace/test-results/
-std/apps/calendar/node_modules/
-std/apps/calendar/dist/
-std/apps/calendar/package-dist/
-std/libs/calendar/dist/
 /output/playwright/
 /.playwright-cli/
 /*.har
@@ -67,7 +59,6 @@ TODO
 pishoo.pid
 
 # Local VM acceptance captures and runtime diagnostics
-/pishoo/docs/workspace/vm-evidence/
 
 # Local implementation notes and agent working documents
 /CONTEXT.md
@@ -80,10 +71,3 @@ pishoo.pid
 /pishoo/docs/genmeta-pack-implementation.md
 /pishoo/docs/transport-*.md
 /pishoo/docs/transport-*.json
-/pishoo/docs/workspace/*IMPLEMENTATION_PLAN.md
-/pishoo/docs/workspace/CHAT_ASYNC_DELIVERY_DESIGN.md
-/pishoo/docs/workspace/BRANCH_MIGRATION_*.md
-/pishoo/docs/workspace/VM_*.md
-/pishoo/docs/workspace/source/
-
-std/apps/workspace/package-dist/

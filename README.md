@@ -41,7 +41,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. The [standard Apps and Libs](std/README.md) live separately from the host source: Workspace is an ordinary user App with separate Profile and Message WASM Libs, exact backend dependencies, normal install/uninstall behavior and private data. Build the three independently with [the Workspace scripts](std/apps/workspace/README.md); publishing new embedded-OpenAPI Libs still requires a compatible store, as noted below. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. Business products live in five independent repositories: Workspace, Profile, Message, Calendar and Journal; see [repository boundaries](pishoo/docs/business-repositories.md). Calendar and Journal each keep their App and Lib together, publishing separate artifacts. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Release versions and pending registry lockfile preparation are listed in [RELEASING.md](RELEASING.md). Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -200,7 +200,7 @@ The [package management review](pishoo/docs/package-management.md) is the curren
 
 The [Pishoo WASM developer guide](pishoo/docs/developing-wasm.md) covers writing a WASI HTTP backend. Package metadata and runtime dependencies belong to the WEBC manifest; Lib OpenAPI describes business APIs and is embedded in the installed component. App packages contain frontend resources and no backend OpenAPI.
 
-For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the [Journal example](pishoo/examples/journal/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with Journal. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
+For Rust components using Pishoo identity functions, use the [developer SDK](pishoo/docs/sdk.md) and the independent [Journal repository](../journal/README.md). Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone developer archive with SDK, tools and documentation. The SDK directly exports the existing WIT bindings and is not yet published to crates.io.
 
 1. Build the WASI HTTP backend and separate browser frontend, with the required package metadata and exact Lib dependencies.
 2. Use `genmeta build` to create a signed WEBC release locally. This does not certify compatibility with a running host or the unchanged store.
