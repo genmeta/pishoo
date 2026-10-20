@@ -221,4 +221,4 @@ genmeta build --no-build WASMER.toml --output OUTPUT.webc --id NAME
 
 `wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向 Component；OpenAPI 可作为唯一顶层 pishoo:openapi 嵌入，不嵌入另一份签名。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、本地包级签名后原子写入输出，实际安装/更新执行完整宿主校验，不生成 App OpenAPI 或改写源清单。
 
-Workspace 的构建与三包依赖顺序见 [Profile 后端](../../std/libs/profile/README.md)。
+Workspace 的独立后端构建与依赖顺序见 [Profile 后端](../../../profile/README.md)。

@@ -183,7 +183,10 @@ async fn request_identity_is_derived_from_handshake_and_owner_requires_name_and_
 }
 
 fn journal_package(kind: &str) -> Vec<u8> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal");
+    let root = std::path::PathBuf::from(
+        std::env::var_os("PISHOO_JOURNAL_REPO")
+            .expect("set PISHOO_JOURNAL_REPO to the independent Journal checkout"),
+    );
     let manifest: toml::Value = toml::from_str(
         &std::fs::read_to_string(root.join(if kind == "app" {
             "app.toml"
@@ -304,7 +307,7 @@ async fn journal_call(
 }
 
 #[tokio::test]
-#[ignore = "build examples/journal/build.sh before running the real Journal guest"]
+#[ignore = "set PISHOO_JOURNAL_REPO and build its build.sh before running the real Journal guest"]
 async fn journal_component_identity_crud_comments_photos_and_persistence() {
     let data = tempfile::tempdir().unwrap();
     let lib = journal_lib(data.path());
@@ -810,7 +813,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
 }
 
 #[tokio::test]
-#[ignore = "build examples/journal/build.sh before running the real Journal guest"]
+#[ignore = "set PISHOO_JOURNAL_REPO and build its build.sh before running the real Journal guest"]
 async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
     let data = tempfile::tempdir().unwrap();
     let lib = journal_lib(data.path());
@@ -972,7 +975,7 @@ async fn journal_component_origin_shorthand_preserves_cross_site_rejection() {
 }
 
 #[tokio::test]
-#[ignore = "build examples/journal/build.sh before running the real Journal guest"]
+#[ignore = "set PISHOO_JOURNAL_REPO and build its build.sh before running the real Journal guest"]
 async fn journal_component_concurrent_updates_only_accept_one_version() {
     let data = tempfile::tempdir().unwrap();
     let lib = journal_lib(data.path());
@@ -1118,7 +1121,11 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
     let app = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net")).layer(
         axum::middleware::from_fn_with_state(access.clone(), crate::routes::authorize),
     );
-    let public = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/journal/public");
+    let public = std::path::PathBuf::from(
+        std::env::var_os("PISHOO_JOURNAL_REPO")
+            .expect("set PISHOO_JOURNAL_REPO to the independent Journal checkout"),
+    )
+    .join("public");
     for (suffix, file, media) in [
         ("/", "index.html", "text/html"),
         ("/assets/app.js", "assets/app.js", "text/javascript"),
@@ -1208,7 +1215,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
 }
 
 #[tokio::test]
-#[ignore = "build examples/journal/build.sh before testing the release packages"]
+#[ignore = "set PISHOO_JOURNAL_REPO and build its build.sh before testing the release packages"]
 async fn journal_release_registers_capabilities_and_pins_backend() {
     use tower::ServiceExt;
 

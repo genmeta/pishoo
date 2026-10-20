@@ -1,5 +1,5 @@
 //! Real user Lib acceptance, using private WASI SQLite and native resource APIs.
-use std::path::Path;
+use std::path::PathBuf;
 
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
 use futures::{FutureExt, StreamExt};
@@ -97,14 +97,20 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     dhttp::resolve::Resolver::add(Arc::new(Peer(address)));
     let alice = dhttp::Endpoint::load("alice").await.unwrap();
     let bob = dhttp::Endpoint::load("bob").await.unwrap();
-    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../std/libs/profile");
+    let project = PathBuf::from(
+        std::env::var_os("PISHOO_PROFILE_REPO")
+            .expect("set PISHOO_PROFILE_REPO to the independent Profile checkout"),
+    );
     let bytes = std::fs::read(project.join("dist/lib.wasm")).expect("build profile-lib first");
     let document: Value =
         serde_json::from_slice(&std::fs::read(project.join("openapi.json")).unwrap()).unwrap();
     let id = "dev.dhttp.net/profile".to_owned();
     let prefix = "/std/profile";
     let chat_id = "dev.dhttp.net/message";
-    let chat_project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../std/libs/message");
+    let chat_project = PathBuf::from(
+        std::env::var_os("PISHOO_MESSAGE_REPO")
+            .expect("set PISHOO_MESSAGE_REPO to the independent Message checkout"),
+    );
     let chat_bytes =
         std::fs::read(chat_project.join("dist/lib.wasm")).expect("build message-lib first");
     let mut chat_document: Value =

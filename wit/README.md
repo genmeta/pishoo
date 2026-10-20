@@ -19,12 +19,11 @@ Both name and hash must match. Anonymous HTTP requests and background runs retur
 empty hash. Outgoing calls do not change these invocation facts.
 
 The SDK is currently distributed as source and a Cargo `.crate` archive; it has
-not been published to crates.io. In an extracted developer bundle, a Lib under
-`examples/<name>` uses:
+not been published to crates.io. For a Lib beside an extracted SDK crate, use:
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0-preview.2", path = "../../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.2", path = "../sdk" }
 wasip2 = "=1.0.4"
 ```
 
@@ -53,7 +52,7 @@ by Pishoo. They cannot run as a native client or authenticate a caller themselve
 Ordinary installed Libs use standard WASI HTTP through their Endpoint and native API resources; daccess still authorizes each
 complete HTTP method/path. Use a Pishoo host with the request-identity interface.
 
-The developer bundle contains a minimal `examples/identity` component, the full
-`examples/journal` component and `tools/package-lib.py`. Both examples include
-locked dependencies, OpenAPI manifests and build scripts. Installing/updating a
-Lib requires restarting Pishoo; neither example changes access rules.
+The developer bundle contains the SDK, WIT, documentation and `tools/package-lib.py`.
+Business App/Lib sources are maintained in independent product repositories and are
+not bundled with the SDK. Online package installation applies runtime resources
+immediately and does not change access rules.

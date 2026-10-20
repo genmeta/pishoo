@@ -46,7 +46,6 @@ The developer archive contains:
 ```text
 pishoo-sdk-0.1.0-preview.2/
   sdk/                  Rust crate, WIT, Cargo.lock, documentation and license
-  examples/journal/     Journal backend, public frontend, wasmer.toml and SQLite
   tools/package-lib.py  Attach an OpenAPI manifest to a component
   developing-wasm.md    WASI HTTP and the selected WEBC distribution design
   host-capabilities.md  Verified identity and host-granted execution
@@ -54,11 +53,10 @@ pishoo-sdk-0.1.0-preview.2/
   LICENSE
 ```
 
-Generated targets, local credentials and prebuilt Libs are not included. Journal
-depends on `../../sdk` inside the archive; the repository version uses
-`../../../wit`. WIT remains a single source under the repository SDK crate's
+Generated targets, local credentials, business App/Lib sources and prebuilt Libs are not included. WIT remains a single source under the repository SDK crate's
 `wit/pishoo-identity` and `wit/pishoo-identity-v2` directories, shared with the host.
 Use a host implementing the identity interface imported by your component.
+Business products, including Journal, are maintained in [independent repositories](business-repositories.md).
 
 ## Start a new Lib
 
@@ -77,39 +75,20 @@ installation activates the app immediately; offline CLI changes load on startup.
 The Pishoo daccess rules authorize each method/path; the manifest and SDK do not
 grant access. Identity comes from the verified handshake, never HTTP headers.
 
-## Build Journal or your own Lib
+## Use the SDK in an independent Lib
 
-Journal uses SQLite and additionally requires the official WASI SDK:
-
-```sh
-WASI_SDK_PATH=/path/to/wasi-sdk GENMETA=/path/to/genmeta \
-  sh examples/journal/build.sh --publisher alice.smith.dhttp.net
-```
-
-Journal ships two independently signed WEBC releases: a Lib with one WASI HTTP
-backend and metadata OpenAPI, and a pure frontend App containing HTML/JS/CSS.
-The App depends on the exact Journal Lib version. The build script checks Cargo,
-`wasmer.toml`, `app.toml`, OpenAPI and dependencies, then uses `genmeta build --no-build` with
-the publisher’s local DHTTP credentials. Run without `--publisher` to build the
-backend and metadata only. Publish the Lib first, then the App. The entry is
-`/journal/`; its nonstandard Lib declares `/context`, `/entries` and other package-relative paths,
-exposed as `/journal/context`, `/journal/entries`, and so on. Read/comment capability groups belong to the Lib, while static
-files remain separately subject to daccess. See `examples/journal/README.md`.
-
-Use the developer guide or `examples/journal` as the starting point for a new Lib.
-Preserve the standard WASI HTTP handler export, update the Cargo name, both
-package manifests and OpenAPI paths, and update the build script's WASM output
-filename. Keep the SDK dependency:
+Journal and Calendar keep their App and Lib in their own product repositories.
+See [repository boundaries](business-repositories.md) for locations and acceptance-test inputs.
+The SDK is not yet published to crates.io. With sibling Pishoo and Lib checkouts:
 
 ```toml
 [dependencies]
-pishoo-sdk = { version = "=0.1.0-preview.2", path = "../../sdk" }
+pishoo-sdk = { version = "=0.1.0-preview.2", path = "../pishoo/wit" }
 wasip2 = "=1.0.4"
 ```
 
-SDK 0.1.0 is not yet published to crates.io. Resolve the path relative to your own
-`Cargo.toml`. A Lib built for `wasm32-wasip2` is already a component. Use
-`wasm-tools validate` to check it and `genmeta build --no-build` to produce the signed WEBC;
-OpenAPI stays in the Lib's metadata volume. The included `package-lib.py` is a
-legacy binding example and does not produce current installable releases.
-No custom HTTP or identity wrapper is required.
+For an extracted developer archive, point the dependency at its `sdk/` directory.
+A Lib built for `wasm32-wasip2` is already a component. Validate it using
+`wasm-tools validate`, then use `genmeta build --no-build` to sign the WEBC package.
+The included `tools/package-lib.py` attaches the OpenAPI document to the component;
+signatures belong to the outer WEBC package. SDK packaging does not build or bundle business products.
