@@ -301,8 +301,7 @@ async fn trailing_slash_redirect_precedes_the_root_proxy() {
         crate::test_identity::endpoint("owner"),
         access,
         &ServerConfig {
-            enabled: true,
-            listen: 0,
+            listen: "off".into(),
             proxy_locations: ["/", "/docs/"]
                 .into_iter()
                 .map(|location| ProxyLocation {
@@ -354,8 +353,7 @@ async fn file_route_is_separate_from_proxy_fallback() {
         endpoint.clone(),
         access.clone(),
         &ServerConfig {
-            enabled: true,
-            listen: 0,
+            listen: "off".into(),
             proxy_locations: Vec::new(),
         },
         &profile,
@@ -381,8 +379,7 @@ async fn file_route_is_separate_from_proxy_fallback() {
         endpoint,
         access,
         &ServerConfig {
-            enabled: true,
-            listen: 0,
+            listen: "off".into(),
             proxy_locations: vec![ProxyLocation {
                 location: "/".into(),
                 proxy_pass: "http://127.0.0.1:8080/"
@@ -428,8 +425,7 @@ async fn proxy_prefix_matches_path_segments_only() {
         crate::test_identity::endpoint("owner"),
         access,
         &ServerConfig {
-            enabled: true,
-            listen: 0,
+            listen: "off".into(),
             proxy_locations: vec![ProxyLocation {
                 location: "/docs/".into(),
                 proxy_pass: "http://127.0.0.1:8080/"
@@ -526,8 +522,7 @@ async fn unowned_api_paths_use_configured_proxy_and_never_static_files() {
             endpoint.clone(),
             access.clone(),
             &ServerConfig {
-                enabled: true,
-                listen: 0,
+                listen: "off".into(),
                 proxy_locations,
             },
             &profile,

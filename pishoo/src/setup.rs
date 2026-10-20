@@ -17,8 +17,7 @@ use crate::{Error, Result, routes::reserved};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServerConfig {
-    pub(crate) enabled: bool,
-    pub(crate) listen: u8,
+    pub(crate) listen: String,
     pub(crate) proxy_locations: Vec<ProxyLocation>,
 }
 #[derive(Debug)]
@@ -117,7 +116,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%') AND (SELECT user_version FROM pragma_user_version) = 0",
         [], |row| row.get::<_, bool>(0),
     )?;
-    let current = !empty && has_enabled_column(&conn)? && conn.query_row(
+    let current = !empty && !has_enabled_column(&conn)? && conn.query_row(
+        "SELECT type = 'TEXT' FROM pragma_table_info('settings') WHERE name = 'listen'",
+        [], |row| row.get::<_, bool>(0),
+    )? && conn.query_row(
         "SELECT count(*) = 4 FROM sqlite_master WHERE type='table' AND name IN ('libs','apps','app_dependencies','lib_dependencies')",
         [], |row| row.get::<_, bool>(0),
     )?;
@@ -135,10 +137,9 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     if empty {
         tx.execute_batch(
             "CREATE TABLE settings (
-                listen INTEGER NOT NULL CHECK(typeof(listen) = 'integer' AND listen BETWEEN 0 AND 3),
-                enabled INTEGER NOT NULL CHECK(typeof(enabled) = 'integer' AND enabled IN (0, 1))
+                listen TEXT NOT NULL CHECK(listen IN ('loopback','internal','external','all','off'))
              );
-             INSERT INTO settings(listen, enabled) VALUES(3, 1);
+             INSERT INTO settings(listen) VALUES('all');
              CREATE TABLE proxy_locations(location TEXT NOT NULL PRIMARY KEY, proxy_pass TEXT NOT NULL);
              PRAGMA user_version=1;",
         )?;
@@ -224,33 +225,29 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
             "settings must contain exactly one row".into(),
         ));
     };
-    let listen = match row.get_ref(0)? {
-        ValueRef::Integer(v @ 0..=3) => v as u8,
-        _ => {
-            return Err(Error::InvalidConfig(
-                "listen must be an integer in 0..=3".into(),
-            ));
+    // Integers and enabled are accepted only while reading legacy v1 databases.
+    let mut listen = match row.get_ref(0)? {
+        ValueRef::Text(value) => std::str::from_utf8(value)
+            .ok()
+            .filter(|value| valid_listen(value))
+            .map(str::to_owned)
+            .ok_or_else(|| Error::InvalidConfig("invalid listen mode".into()))?,
+        ValueRef::Integer(value @ 0..=3) => {
+            ["off", "internal", "external", "all"][value as usize].to_owned()
         }
+        _ => return Err(Error::InvalidConfig("invalid listen mode".into())),
     };
-    let enabled = if has_enabled {
+    if has_enabled {
         match row.get_ref(1)? {
-            ValueRef::Integer(0) => false,
-            ValueRef::Integer(1) => true,
+            ValueRef::Integer(0) => listen = "off".into(),
+            ValueRef::Integer(1) => {}
             _ => {
                 return Err(Error::InvalidConfig(
                     "enabled must be an integer 0 or 1".into(),
                 ));
             }
         }
-    } else {
-        listen != 0
-    };
-    // Legacy off meant disabled, and retained no previous listening scope.
-    let listen = if !has_enabled && listen == 0 {
-        3
-    } else {
-        listen
-    };
+    }
     if rows.next()?.is_some() {
         return Err(Error::InvalidConfig(
             "settings must contain exactly one row".into(),
@@ -267,7 +264,6 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let proxy_locations = parse_proxies(values)?;
     Ok(ServerConfig {
-        enabled,
         listen,
         proxy_locations,
     })
@@ -315,14 +311,29 @@ fn has_enabled_column(conn: &Connection) -> Result<bool> {
 // Called only inside an IMMEDIATE transaction. Validate before modifying legacy v1.
 fn upgrade_settings(conn: &Connection) -> Result<()> {
     let config = read_config(conn)?;
-    if !has_enabled_column(conn)? {
-        conn.execute_batch("ALTER TABLE settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(typeof(enabled) = 'integer' AND enabled IN (0, 1));")?;
-        conn.execute(
-            "UPDATE settings SET enabled=?1, listen=?2",
-            rusqlite::params![config.enabled, config.listen],
+    check_proxy_mounts(conn, &config.proxy_locations)?;
+    let current: bool = conn.query_row(
+        "SELECT type = 'TEXT' FROM pragma_table_info('settings') WHERE name = 'listen'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !current || has_enabled_column(conn)? {
+        conn.execute_batch(
+            "CREATE TABLE settings_listen (
+            listen TEXT NOT NULL CHECK(listen IN ('loopback','internal','external','all','off'))
+        );",
         )?;
+        conn.execute(
+            "INSERT INTO settings_listen(listen) VALUES(?1)",
+            [&config.listen],
+        )?;
+        conn.execute_batch("DROP TABLE settings; ALTER TABLE settings_listen RENAME TO settings;")?;
     }
     Ok(())
+}
+
+fn valid_listen(value: &str) -> bool {
+    matches!(value, "loopback" | "internal" | "external" | "all" | "off")
 }
 
 fn parse_proxies(values: Vec<(String, String)>) -> Result<Vec<ProxyLocation>> {
@@ -408,8 +419,8 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
         }
     };
     Router::new()
-        .route("/std/sys/settings", any(handler.clone()))
-        .route("/std/sys/proxies", any(handler))
+        .route("/std/sys/listen", any(handler.clone()))
+        .route("/std/sys/forward", any(handler))
 }
 
 async fn config_request(
@@ -441,17 +452,17 @@ async fn config_request(
         }
     }
 
-    let settings = request.uri().path() == "/std/sys/settings";
+    let listening = request.uri().path() == "/std/sys/listen";
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let allowed = if settings {
+    let allowed = if listening {
         "GET, PATCH"
     } else {
         "GET, PUT, PATCH, DELETE"
     };
     if !(method == Method::GET
         || method == Method::PATCH
-        || !settings && (method == Method::PUT || method == Method::DELETE))
+        || !listening && (method == Method::PUT || method == Method::DELETE))
     {
         return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allowed)]).into_response());
     }
@@ -511,13 +522,13 @@ pub(crate) fn config_database(
     uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    let settings = uri.path() == "/std/sys/settings";
-    if !settings && uri.path() != "/std/sys/proxies" {
+    let listening = uri.path() == "/std/sys/listen";
+    if !listening && uri.path() != "/std/sys/forward" {
         return Err(Error::RouteNotFound);
     }
     let location = match uri.query() {
         None => None,
-        Some(query) if !settings && (*method == Method::GET || *method == Method::DELETE) => {
+        Some(query) if !listening && (*method == Method::GET || *method == Method::DELETE) => {
             let params = form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
             if params.len() != 1 || params[0].0 != "location" {
                 return Err(Error::BadRequest(
@@ -543,18 +554,18 @@ pub(crate) fn config_database(
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         read_server_config(&mut conn)?
     } else {
-        let proxies = match (settings, method) {
+        let proxies = match (listening, method) {
             (true, &Method::PATCH) => {
-                validate_settings_patch(
+                validate_listen_patch(
                     payload
                         .as_ref()
-                        .ok_or_else(|| Error::BadRequest("missing settings".into()))?,
+                        .ok_or_else(|| Error::BadRequest("missing listen".into()))?,
                 )?;
                 None
             }
             (false, &Method::PUT) => {
                 Some(parse_proxy_json(payload.as_ref().ok_or_else(|| {
-                    Error::BadRequest("missing proxies".into())
+                    Error::BadRequest("missing forward rules".into())
                 })?)?)
             }
             (false, &Method::PATCH) => Some(parse_proxy_json(&Value::Array(vec![
@@ -568,20 +579,12 @@ pub(crate) fn config_database(
         let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         upgrade_settings(&tx)?;
-        if settings {
+        if listening {
             let payload = payload.as_ref().unwrap();
-            if let Some(listen) = payload.get("listen") {
-                tx.execute(
-                    "UPDATE settings SET listen=?1",
-                    [listen.as_u64().unwrap() as u8],
-                )?;
-            }
-            if let Some(enabled) = payload.get("enabled") {
-                tx.execute(
-                    "UPDATE settings SET enabled=?1",
-                    [enabled.as_bool().unwrap()],
-                )?;
-            }
+            tx.execute(
+                "UPDATE settings SET listen=?1",
+                [payload["listen"].as_str().unwrap()],
+            )?;
         } else if *method == Method::DELETE {
             tx.execute(
                 "DELETE FROM proxy_locations WHERE location=?1",
@@ -612,8 +615,8 @@ pub(crate) fn config_database(
     if *method == Method::DELETE {
         return Ok(Value::Null);
     }
-    if settings {
-        return Ok(json!({"enabled": config.enabled, "listen": config.listen}));
+    if listening {
+        return Ok(json!({"listen": config.listen}));
     }
     let values = config
         .proxy_locations
@@ -635,19 +638,20 @@ pub(crate) fn config_database(
     Ok(Value::Array(values))
 }
 
-fn validate_settings_patch(payload: &Value) -> Result<()> {
+fn validate_listen_patch(payload: &Value) -> Result<()> {
     let object = payload
         .as_object()
-        .filter(|object| !object.is_empty())
-        .ok_or_else(|| Error::BadRequest("settings PATCH requires a nonempty object".into()))?;
+        .filter(|object| object.len() == 1)
+        .ok_or_else(|| {
+            Error::BadRequest("listen PATCH requires exactly one listen field".into())
+        })?;
     for (key, value) in object {
         let valid = match key.as_str() {
-            "listen" => value.as_u64().is_some_and(|value| value <= 3),
-            "enabled" => value.is_boolean(),
+            "listen" => value.as_str().is_some_and(valid_listen),
             _ => false,
         };
         if !valid {
-            return Err(Error::BadRequest(format!("invalid settings field: {key}")));
+            return Err(Error::BadRequest(format!("invalid listen field: {key}")));
         }
     }
     Ok(())
@@ -656,7 +660,7 @@ fn validate_settings_patch(payload: &Value) -> Result<()> {
 fn parse_proxy_json(payload: &Value) -> Result<Vec<ProxyLocation>> {
     let values = payload
         .as_array()
-        .ok_or_else(|| Error::BadRequest("proxies PUT requires an array".into()))?
+        .ok_or_else(|| Error::BadRequest("forward PUT requires an array".into()))?
         .iter()
         .map(|value| {
             let object = value

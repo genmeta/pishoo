@@ -1342,96 +1342,50 @@ status 为 pending、allowed、denied、expired。不存在或身份不匹配返
 
 可选请求头 `Accept-Versions` 接受包含 v1 的逗号列表和多个同名头；省略使用 v1，当前无匹配版本返回 505。不支持的方法返回 405 并带 Allow；无效输入 400、身份不符 403、超大写请求 413、非 JSON 写请求 415、配置冲突 409、存储失败 500。
 
-### 4.1 `GET /std/sys/settings`
+### 4.1 `GET /std/sys/listen`
 
-读取数据库中保存的期望设置。
-
-**请求示例**
+读取数据库保存的期望监听模式。无 query 和请求体。
 
 ```http
-GET /std/sys/settings
+GET /std/sys/listen
 Host: bob.dhttp.net
 Accept: application/json
 ```
 
-**参数**
+成功返回 200，JSON 为 `{"listen":"all"}`，带 `Cache-Control: no-store` 和 `Supported-Versions: v1`。
 
-| 位置 | 参数 | 类型 | 必填 | 省略时 | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| 请求头 | Accept-Versions | string | 否 | — | 可省略；省略使用 v1，提供时须包含 v1 |
+### 4.2 `PATCH /std/sys/listen`
 
-**响应示例**
+设置监听模式，请求对象恰好包含字符串 listen：
 
 ```http
-200 OK
-Content-Type: application/json
-Cache-Control: no-store
-Supported-Versions: v1
-
-{
-  "enabled": true,
-  "listen": 3
-}
-```
-
-**说明与错误**
-
-enabled 为布尔值，控制整个身份 Server 是否加载。listen 为整数 0、1、2、3，分别表示不监听、内网、外网、两者。
-
-### 4.2 `PATCH /std/sys/settings`
-
-部分更新身份启用状态和监听范围。
-
-**请求示例**
-
-```http
-PATCH /std/sys/settings
+PATCH /std/sys/listen
 Host: bob.dhttp.net
 Content-Type: application/json
 
-{
-  "enabled": true,
-  "listen": 1
-}
+{"listen":"internal"}
 ```
 
-**参数**
+| listen | 作用 |
+| --- | --- |
+| loopback | 仅回环监听，不发布 mDNS 或公网 DNS |
+| internal | 仅内网监听，发布 mDNS |
+| external | 仅外网监听，发布公网 DNS |
+| all | 回环、内网和外网监听，发布 mDNS 和公网 DNS |
+| off | 完整停用身份 Server，释放监听、发布器和运行资源 |
 
-| 位置 | 参数 | 类型 | 必填 | 省略时 | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| 请求体 | enabled | boolean | 至少一项 | 保持原值 | 是否加载整个身份 Server；与 listen 至少提供一项 |
-| 请求体 | listen | integer | 至少一项 | 保持原值 | 0/1/2/3：不监听/内网/外网/两者 |
-| 请求头 | Accept-Versions | string | 否 | — | 可省略；省略使用 v1，提供时须包含 v1 |
-| 请求头 | Content-Type | string | 是 | — | application/json |
+成功返回 200 和保存后的 `{"listen":"internal"}`。不接受数字、both、enable、enabled 或其他字段；缺失 listen、未知值、query 均返回400。无独立启用开关或隐藏的旧监听范围。两种方法均支持可选 Accept-Versions，提供时须包含 v1。
 
-**响应示例**
+成功表示期望配置已保存，运行进程随后扫描应用。off 后该身份 HTTP 管理入口不可达，用本机 `genmeta listen --id NAME internal` 恢复。旧 settings/proxies 路径不提供别名，已有 ACL 规则不自动迁移。
 
-```http
-200 OK
-Content-Type: application/json
-Cache-Control: no-store
-Supported-Versions: v1
-
-{
-  "enabled": true,
-  "listen": 1
-}
-```
-
-**说明与错误**
-
-两个字段均可省略，但至少提供一项；不接受其他字段。成功返回 200，响应为保存后的完整设置。
-
-成功表示期望配置已保存，运行进程随后扫描应用，不承诺响应时监听已切换。禁用身份后，其 HTTP 管理入口也会不可达。
-
-### 4.3 `GET /std/sys/proxies`
+### 4.3 `GET /std/sys/forward`
 
 读取全部代理规则，或按 location 查询单条规则。
 
 **请求示例**
 
 ```http
-GET /std/sys/proxies
+GET /std/sys/forward
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -1462,7 +1416,7 @@ Supported-Versions: v1
 提供 location 时，请求与响应示例：
 
 ```http
-GET /std/sys/proxies?location=%2Fservice%2F
+GET /std/sys/forward?location=%2Fservice%2F
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -1487,14 +1441,14 @@ Supported-Versions: v1
 
 指定规则不存在返回 404。查询参数只能为恰好一次 location。
 
-### 4.4 `PUT /std/sys/proxies`
+### 4.4 `PUT /std/sys/forward`
 
 原子替换整个代理规则列表。
 
 **请求示例**
 
 ```http
-PUT /std/sys/proxies
+PUT /std/sys/forward
 Host: bob.dhttp.net
 Content-Type: application/json
 
@@ -1538,14 +1492,14 @@ Supported-Versions: v1
 
 成功返回 200，响应为保存后的完整数组，结构同请求。规则在既有 SQLite 事务中一起校验和提交。
 
-### 4.5 `PATCH /std/sys/proxies`
+### 4.5 `PATCH /std/sys/forward`
 
 按 location 新增或替换单条代理规则。
 
 **请求示例**
 
 ```http
-PATCH /std/sys/proxies
+PATCH /std/sys/forward
 Host: bob.dhttp.net
 Content-Type: application/json
 
@@ -1580,16 +1534,16 @@ Supported-Versions: v1
 
 **说明与错误**
 
-两项必填，校验规则同 `PUT /std/sys/proxies`。成功返回 200。
+两项必填，校验规则同 `PUT /std/sys/forward`。成功返回 200。
 
-### 4.6 `DELETE /std/sys/proxies`
+### 4.6 `DELETE /std/sys/forward`
 
 按 location 删除一条代理规则。
 
 **请求示例**
 
 ```http
-DELETE /std/sys/proxies?location=%2Fservice%2F
+DELETE /std/sys/forward?location=%2Fservice%2F
 Host: bob.dhttp.net
 Accept: application/json
 ```

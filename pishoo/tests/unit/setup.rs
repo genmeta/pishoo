@@ -30,16 +30,16 @@ fn persistent_config_connection_reads_external_commits_and_ends_each_transaction
     let profile = profile(root.path());
     let mut reader = open_config(&profile, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let writer = Connection::open(profile.config_db_path()).unwrap();
-    assert_eq!(read_server_config(&mut reader).unwrap().listen, 1);
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, "internal");
     assert!(reader.is_autocommit());
     writer.execute("UPDATE settings SET listen=2", []).unwrap();
-    assert_eq!(read_server_config(&mut reader).unwrap().listen, 2);
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, "external");
     assert!(reader.is_autocommit());
     writer.execute("UPDATE settings SET listen=99", []).unwrap();
     assert!(read_server_config(&mut reader).is_err());
     assert!(reader.is_autocommit());
     writer.execute("UPDATE settings SET listen=3", []).unwrap();
-    assert_eq!(read_server_config(&mut reader).unwrap().listen, 3);
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, "all");
     assert!(reader.is_autocommit());
     // Routine reads never run the legacy schema upgrade.
     assert!(!has_enabled_column(&writer).unwrap());
@@ -49,7 +49,7 @@ fn persistent_config_connection_reads_external_commits_and_ends_each_transaction
 fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    assert_eq!(load_server_config(&profile).unwrap().listen, 1);
+    assert_eq!(load_server_config(&profile).unwrap().listen, "internal");
     let db = Connection::open(profile.config_db_path()).unwrap();
     db.execute(
         "INSERT INTO proxy_locations VALUES('/plain/','http://127.0.0.1:8080')",
@@ -139,7 +139,7 @@ fn config_requires_one_row_and_local_http_upstreams() {
             .unwrap();
     }
     db.execute("DELETE FROM proxy_locations", []).unwrap();
-    db.execute("INSERT INTO settings(listen) VALUES(1)", [])
+    db.execute("INSERT INTO settings(listen) VALUES('internal')", [])
         .unwrap();
     assert!(load_server_config(&profile).is_err());
 }
@@ -199,7 +199,7 @@ fn only_std_namespace_is_reserved_for_proxy_locations() {
                 super::config_database(
                     &profile,
                     &method,
-                    &format!("/std/sys/proxies?{query}").parse().unwrap(),
+                    &format!("/std/sys/forward?{query}").parse().unwrap(),
                     None
                 )
                 .is_err(),
@@ -247,17 +247,21 @@ fn config_api_updates_resources_independently_and_preserves_upstream_paths() {
     assert_eq!(saved[1]["proxy_pass"], "http://127.0.0.1:8080/");
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"enabled":true,"listen":1})
+        json!({"listen":"internal"})
     );
     assert_eq!(
-        config_database(&profile, true, Some(json!({"listen":3}))).unwrap(),
-        json!({"enabled":true,"listen":3})
+        config_database(&profile, true, Some(json!({"listen":"all"}))).unwrap(),
+        json!({"listen":"all"})
     );
     assert_eq!(config_database(&profile, false, None).unwrap(), saved);
     assert_eq!(
-        db.query_row("SELECT exec FROM settings", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        1
+        db.query_row(
+            "SELECT count(*) FROM pragma_table_info('settings') WHERE name='exec'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
     );
     config_database(&profile, false, Some(json!([]))).unwrap();
     assert!(
@@ -283,7 +287,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         json!({"listen":-1}),
         json!({"listen":4}),
         json!({"exec":null}),
-        json!({"listen":2,"extra":true}),
+        json!({"listen":"external","extra":true}),
     ] {
         assert!(matches!(
             config_database(&profile, true, Some(payload)),
@@ -291,7 +295,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         ));
         assert_eq!(
             config_database(&profile, true, None).unwrap(),
-            json!({"enabled":true,"listen":1})
+            json!({"listen":"internal"})
         );
     }
     for payload in [
@@ -299,7 +303,7 @@ fn invalid_config_api_input_never_changes_saved_resources() {
         json!([{"location":"/a","proxy_pass":"127.0.0.1:8080","extra":1}]),
         json!([{"location":"/a","proxy_pass":null}]),
         json!([{"location":"/a","proxy_pass":"127.0.0.1:8080"},{"location":"/a","proxy_pass":"127.0.0.1:8081"}]),
-        json!([{"location":"/valid","proxy_pass":"127.0.0.1:8080"},{"location":"/std/sys/settings","proxy_pass":"127.0.0.1:8081"}]),
+        json!([{"location":"/valid","proxy_pass":"127.0.0.1:8080"},{"location":"/std/sys/listen","proxy_pass":"127.0.0.1:8081"}]),
         json!([{"location":"/std/pishoo","proxy_pass":"127.0.0.1:8080"}]),
         json!([{"location":"/bad","proxy_pass":"http://192.168.1.1:8080"}]),
         json!([{"location":"/bad","proxy_pass":"http://127.0.0.1:0"}]),
@@ -383,7 +387,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     let app = config_router(profile.clone(), api_endpoint("alice.dhttp.net"));
     let response = app
         .clone()
-        .oneshot(api_request(Method::GET, "/std/sys/settings", Body::empty()))
+        .oneshot(api_request(Method::GET, "/std/sys/listen", Body::empty()))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -396,13 +400,23 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
                 .unwrap()
         )
         .unwrap(),
-        json!({"enabled":true,"listen":1})
+        json!({"listen":"internal"})
     );
+    for path in ["/std/sys/settings", "/std/sys/proxies"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(api_request(Method::GET, path, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
     for (versions, expected) in [
         ("v2, v1", StatusCode::OK),
         ("v2", StatusCode::HTTP_VERSION_NOT_SUPPORTED),
     ] {
-        let mut request = api_request(Method::GET, "/std/sys/proxies", Body::empty());
+        let mut request = api_request(Method::GET, "/std/sys/forward", Body::empty());
         request
             .headers_mut()
             .insert("accept-versions", versions.parse().unwrap());
@@ -412,8 +426,8 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
         );
     }
     for (method, path, allow) in [
-        (Method::PUT, "/std/sys/settings", "GET, PATCH"),
-        (Method::POST, "/std/sys/proxies", "GET, PUT, PATCH, DELETE"),
+        (Method::PUT, "/std/sys/listen", "GET, PATCH"),
+        (Method::POST, "/std/sys/forward", "GET, PUT, PATCH, DELETE"),
     ] {
         let response = app
             .clone()
@@ -436,14 +450,14 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     ] {
         assert_eq!(
             app.clone()
-                .oneshot(api_request(Method::PATCH, "/std/sys/settings", body))
+                .oneshot(api_request(Method::PATCH, "/std/sys/listen", body))
                 .await
                 .unwrap()
                 .status(),
             expected
         );
     }
-    let mut request = api_request(Method::PATCH, "/std/sys/settings", Body::from("{}"));
+    let mut request = api_request(Method::PATCH, "/std/sys/listen", Body::from("{}"));
     request
         .headers_mut()
         .insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -462,7 +476,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
             SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        let mut request = api_request(Method::GET, "/std/sys/settings", Body::empty());
+        let mut request = api_request(Method::GET, "/std/sys/listen", Body::empty());
         request.extensions_mut().remove::<Visitor>();
         if let Some(visitor) = visitor {
             request.extensions_mut().insert(visitor);
@@ -474,7 +488,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
     }
     assert_eq!(
         config_database(&profile, true, None).unwrap(),
-        json!({"enabled":true,"listen":1})
+        json!({"listen":"internal"})
     );
 }
 
@@ -508,7 +522,7 @@ async fn config_routes_do_not_trust_forged_visitors_after_daccess_authorization(
         access,
         crate::routes::authorize,
     ));
-    let mut request = api_request(Method::GET, "/std/sys/settings", Body::empty());
+    let mut request = api_request(Method::GET, "/std/sys/listen", Body::empty());
     request.extensions_mut().insert(dhttp::HandshakeSummary {
         alpn: None,
         local: Some(endpoint.local_authority().unwrap().clone()),
@@ -537,9 +551,9 @@ fn config_database(
         profile,
         &method,
         &if settings {
-            http::Uri::from_static("/std/sys/settings")
+            http::Uri::from_static("/std/sys/listen")
         } else {
-            http::Uri::from_static("/std/sys/proxies")
+            http::Uri::from_static("/std/sys/forward")
         },
         payload,
     )
@@ -556,7 +570,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
                 super::config_database(
                     profile,
                     &Method::PATCH,
-                    &http::Uri::from_static("/std/sys/proxies"),
+                    &http::Uri::from_static("/std/sys/forward"),
                     Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"})),
                 )
                 .unwrap()
@@ -566,7 +580,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
     let all = super::config_database(
         &profile,
         &Method::GET,
-        &http::Uri::from_static("/std/sys/proxies"),
+        &http::Uri::from_static("/std/sys/forward"),
         None,
     )
     .unwrap();
@@ -575,7 +589,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
         super::config_database(
             &profile,
             &Method::GET,
-            &"/std/sys/proxies?location=%2Fone".parse().unwrap(),
+            &"/std/sys/forward?location=%2Fone".parse().unwrap(),
             None
         )
         .unwrap()["location"],
@@ -586,7 +600,7 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
             super::config_database(
                 &profile,
                 &Method::DELETE,
-                &"/std/sys/proxies?location=%2Fone".parse().unwrap(),
+                &"/std/sys/forward?location=%2Fone".parse().unwrap(),
                 None
             )
             .unwrap()
@@ -597,16 +611,16 @@ fn single_proxy_updates_are_transactional_and_do_not_lose_other_locations() {
         super::config_database(
             &profile,
             &Method::GET,
-            &http::Uri::from_static("/std/sys/proxies"),
+            &http::Uri::from_static("/std/sys/forward"),
             None
         )
         .unwrap()[0]["location"],
         "/two"
     );
     for uri in [
-        "/std/sys/proxies",
-        "/std/sys/proxies?extra=1",
-        "/std/sys/proxies?location=%2Ftwo&location=%2Fone",
+        "/std/sys/forward",
+        "/std/sys/forward?extra=1",
+        "/std/sys/forward?location=%2Ftwo&location=%2Fone",
     ] {
         assert!(matches!(
             super::config_database(&profile, &Method::DELETE, &uri.parse().unwrap(), None),
@@ -638,37 +652,37 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
     for (method, uri, body, status) in [
         (
             Method::GET,
-            "/std/sys/proxies",
+            "/std/sys/forward",
             "x",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::GET,
-            "/std/sys/settings?extra=x",
+            "/std/sys/listen?extra=x",
             "",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::DELETE,
-            "/std/sys/proxies",
+            "/std/sys/forward",
             "",
             StatusCode::BAD_REQUEST,
         ),
         (
             Method::DELETE,
-            "/std/sys/proxies?location=%2Fgone",
+            "/std/sys/forward?location=%2Fgone",
             "",
             StatusCode::NO_CONTENT,
         ),
         (
             Method::GET,
-            "/std/sys/proxies?location=%2Fgone",
+            "/std/sys/forward?location=%2Fgone",
             "",
             StatusCode::NOT_FOUND,
         ),
         (
             Method::PATCH,
-            "/std/sys/proxies?location=%2Ftest",
+            "/std/sys/forward?location=%2Ftest",
             "{}",
             StatusCode::BAD_REQUEST,
         ),
@@ -691,25 +705,39 @@ async fn proxy_routes_reject_bodies_queries_and_missing_delete_keys() {
 }
 
 #[test]
-fn enabled_is_independent_of_listen_and_legacy_v1_upgrades_atomically() {
+fn listen_accepts_only_named_modes_and_off_replaces_enabled() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("ALTER TABLE settings ADD COLUMN exec INTEGER DEFAULT 7; INSERT INTO proxy_locations VALUES('/keep', '127.0.0.1:8080');").unwrap();
-    for scope in [1, 2, 3] {
-        config_database(&profile, true, Some(json!({"listen":scope}))).unwrap();
-        for enabled in [false, false, true, true] {
-            assert_eq!(
-                config_database(&profile, true, Some(json!({"enabled":enabled}))).unwrap(),
-                json!({"enabled":enabled,"listen":scope})
-            );
-        }
+    config_database(
+        &profile,
+        false,
+        Some(json!([{"location":"/keep","proxy_pass":"127.0.0.1:8080"}])),
+    )
+    .unwrap();
+    for mode in ["loopback", "internal", "external", "all", "off"] {
+        assert_eq!(
+            config_database(&profile, true, Some(json!({"listen":mode}))).unwrap(),
+            json!({"listen":mode})
+        );
+        assert_eq!(load_server_config(&profile).unwrap().listen, mode);
     }
-    assert_eq!(
-        db.query_row("SELECT exec FROM settings", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        7
-    );
+    for payload in [
+        json!({"enabled":true}),
+        json!({"listen":"all","enabled":false}),
+        json!({"listen":0}),
+        json!({"listen":1}),
+        json!({"listen":"both"}),
+        json!({"listen":"ALL"}),
+    ] {
+        assert!(matches!(
+            config_database(&profile, true, Some(payload)),
+            Err(Error::BadRequest(_))
+        ));
+        assert_eq!(
+            config_database(&profile, true, None).unwrap(),
+            json!({"listen":"off"})
+        );
+    }
     assert_eq!(
         config_database(&profile, false, None)
             .unwrap()
@@ -718,55 +746,80 @@ fn enabled_is_independent_of_listen_and_legacy_v1_upgrades_atomically() {
             .len(),
         1
     );
-    assert_eq!(
-        config_database(&profile, true, Some(json!({"enabled":true,"listen":0}))).unwrap(),
-        json!({"enabled":true,"listen":0})
-    );
-    for value in [Value::Null, json!(0), json!(1), json!("true"), json!([])] {
-        assert!(matches!(
-            config_database(&profile, true, Some(json!({"enabled":value}))),
-            Err(Error::BadRequest(_))
-        ));
-    }
-    assert_eq!(
-        config_database(&profile, true, None).unwrap(),
-        json!({"enabled":true,"listen":0})
-    );
-}
-
-#[test]
-fn legacy_disabled_v1_maps_to_disabled_with_default_scope_without_a_read_mutation() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
     let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute("UPDATE settings SET listen=0", []).unwrap();
-    assert_eq!(
-        config_database(&profile, true, None).unwrap(),
-        json!({"enabled":false,"listen":3})
-    );
     assert!(!has_enabled_column(&db).unwrap());
-    assert_eq!(
-        db.query_row("SELECT listen FROM settings", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        config_database(&profile, true, Some(json!({"enabled":true}))).unwrap(),
-        json!({"enabled":true,"listen":3})
-    );
-    assert!(has_enabled_column(&db).unwrap());
-}
-
-#[test]
-fn invalid_legacy_v1_is_not_modified_by_enabled_upgrade() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = profile(root.path());
-    let db = Connection::open(profile.config_db_path()).unwrap();
-    db.execute("INSERT INTO settings(listen) VALUES(1)", [])
+    let columns: i64 = db
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('settings')",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert!(config_database(&profile, true, Some(json!({"enabled":false}))).is_err());
-    assert!(!has_enabled_column(&db).unwrap());
+    assert_eq!(columns, 1);
+}
+
+#[test]
+fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
+    for (value, enabled, expected) in [
+        (0, None, "off"),
+        (1, None, "internal"),
+        (2, Some(1), "external"),
+        (3, Some(1), "all"),
+        (2, Some(0), "off"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = profile(root.path());
+        let db = Connection::open(profile.config_db_path()).unwrap();
+        db.execute("UPDATE settings SET listen=?1", [value])
+            .unwrap();
+        if let Some(enabled) = enabled {
+            db.execute_batch("ALTER TABLE settings ADD COLUMN enabled INTEGER;")
+                .unwrap();
+            db.execute("UPDATE settings SET enabled=?1", [enabled])
+                .unwrap();
+        }
+        assert_eq!(
+            config_database(&profile, true, None).unwrap(),
+            json!({"listen":expected})
+        );
+        assert_eq!(has_enabled_column(&db).unwrap(), enabled.is_some());
+        assert_eq!(
+            db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "integer"
+        );
+        assert_eq!(load_server_config(&profile).unwrap().listen, expected);
+        assert!(!has_enabled_column(&db).unwrap());
+        assert_eq!(
+            db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "text"
+        );
+        assert_eq!(
+            config_database(&profile, true, Some(json!({"listen":"loopback"}))).unwrap(),
+            json!({"listen":"loopback"})
+        );
+    }
+}
+
+#[test]
+fn invalid_legacy_v1_is_not_modified_by_listen_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch(
+        "ALTER TABLE settings ADD COLUMN enabled INTEGER; UPDATE settings SET enabled=9",
+    )
+    .unwrap();
+    assert!(config_database(&profile, true, Some(json!({"listen":"off"}))).is_err());
+    assert!(has_enabled_column(&db).unwrap());
     assert!(load_server_config(&profile).is_err());
-    assert!(!has_enabled_column(&db).unwrap());
+    assert_eq!(
+        db.query_row("SELECT typeof(listen) FROM settings", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "integer"
+    );
 }

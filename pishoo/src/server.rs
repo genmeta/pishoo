@@ -246,10 +246,10 @@ impl Server {
                     error => Error::Dhttp(error),
                 })?;
         let config = load_server_config(&profile)?;
-        if config.listen != 0 {
+        if config.listen != "off" {
             dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;
         }
-        let publisher = if config.listen & 2 != 0 {
+        let publisher = if matches!(config.listen.as_str(), "external" | "all") {
             Some(dns::publisher(&endpoint)?)
         } else {
             None
@@ -297,13 +297,15 @@ impl Server {
         let (endpoint, router, listen) = (
             self.endpoint.clone(),
             self.router.clone(),
-            self.config.listen,
+            self.config.listen.clone(),
         );
-        let scopes = match listen {
-            0 => return Err(Error::InvalidConfig("listen is disabled".into())),
-            1 => dhttp::Scope::Internal.into(),
-            2 => dhttp::Scope::External.into(),
-            _ => dhttp::Scope::Internal | dhttp::Scope::External,
+        let scopes = match listen.as_str() {
+            "off" => return Err(Error::InvalidConfig("listen is disabled".into())),
+            "loopback" => dhttp::Scope::Loopback.into(),
+            "internal" => dhttp::Scope::Internal.into(),
+            "external" => dhttp::Scope::External.into(),
+            "all" => dhttp::Scopes::ALL,
+            _ => return Err(Error::InvalidConfig("invalid listen mode".into())),
         };
         let access_log = Arc::new(std::sync::Mutex::new(open_access_log(&self.profile)?));
         let name = endpoint.name().to_owned();

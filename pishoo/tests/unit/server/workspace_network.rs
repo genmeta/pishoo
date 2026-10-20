@@ -5,8 +5,8 @@ use bytes::Bytes;
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
 use dhttp_home::DhttpHome;
 use futures::{FutureExt, StreamExt};
-use tokio::time::Instant;
 use http::{Method, StatusCode};
+use tokio::time::Instant;
 
 use super::{
     ocsp::renew_ocsp,
@@ -489,7 +489,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let profile = profile(root.path(), "receiver");
     rusqlite::Connection::open(profile.config_db_path())
         .unwrap()
-        .execute("UPDATE settings SET listen=3", [])
+        .execute("UPDATE settings SET listen='all'", [])
         .unwrap();
     let mut server = Server::load(profile, Arc::new(WasmRuntime::new().unwrap()))
         .await
@@ -513,7 +513,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/std/sys/settings",
+        "/std/sys/listen",
         serde_json::Value::Null,
     )
     .await;
@@ -521,7 +521,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     // A disk config change must stay unapplied; no identity/Lib reload occurs.
     rusqlite::Connection::open(server.profile.config_db_path())
         .unwrap()
-        .execute("UPDATE settings SET listen=1", [])
+        .execute("UPDATE settings SET listen='internal'", [])
         .unwrap();
 
     let endpoint = renew_ocsp(&server.profile, &server.endpoint).await.unwrap();
@@ -529,13 +529,13 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     assert_eq!(server.endpoint.local_authority().unwrap().ocsp(), renewed);
     assert_eq!(std::fs::read(server.profile.ocsp_path()).unwrap(), renewed);
     assert!(Arc::ptr_eq(&router, &server.router));
-    assert_eq!(server.config.listen, 3);
+    assert_eq!(server.config.listen, "all");
     assert!(!Arc::ptr_eq(&publisher, server.publisher.as_ref().unwrap()));
     // The existing pooled connection remains usable after renewal.
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/std/sys/settings",
+        "/std/sys/listen",
         serde_json::Value::Null,
     )
     .await;
@@ -684,8 +684,8 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         .await
         .unwrap()
         .unwrap();
-    assert!(recovered.config.enabled);
-    assert_eq!(recovered.config.listen, 3);
+    assert_ne!(recovered.config.listen, "off");
+    assert_eq!(recovered.config.listen, "all");
     recovered.close().await.unwrap();
 
     // A corrected identity must not be remembered as permanently invalid.
@@ -847,7 +847,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
             owner_request(
                 &server,
                 Method::PATCH,
-                "/std/sys/proxies",
+                "/std/sys/forward",
                 serde_json::json!({"location":location,"proxy_pass":upstream})
             )
             .await
@@ -859,7 +859,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/proxies?location=%2Fone",
+            "/std/sys/forward?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -870,7 +870,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/std/sys/proxies?location=%2Fone",
+            "/std/sys/forward?location=%2Fone",
             serde_json::Value::Null
         )
         .await
@@ -881,35 +881,35 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, settings) = owner_request(
         &server,
         Method::GET,
-        "/std/sys/settings",
+        "/std/sys/listen",
         serde_json::Value::Null,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"enabled":true,"listen":0}));
+    assert_eq!(settings, serde_json::json!({"listen":"off"}));
     let (status, settings) = owner_request(
         &server,
         Method::PATCH,
-        "/std/sys/settings",
-        serde_json::json!({"listen":1}),
+        "/std/sys/listen",
+        serde_json::json!({"listen":"internal"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{settings}");
-    assert_eq!(settings, serde_json::json!({"enabled":true,"listen":1}));
+    assert_eq!(settings, serde_json::json!({"listen":"internal"}));
     assert_eq!(
         crate::setup::load_server_config(&server.profile)
             .unwrap()
             .listen,
-        1
+        "internal"
     );
     assert_eq!(
-        server.config.listen, 0,
+        server.config.listen, "off",
         "settings remain desired until the run loop applies them"
     );
     let proxies =
         serde_json::json!([{"location":"/service/","proxy_pass":"http://127.0.0.1:8080/"}]);
     let (status, saved) =
-        owner_request(&server, Method::PUT, "/std/sys/proxies", proxies.clone()).await;
+        owner_request(&server, Method::PUT, "/std/sys/forward", proxies.clone()).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved, proxies);
     assert!(
@@ -924,7 +924,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     .await
     .unwrap();
     assert_eq!(
-        server.config.listen, 1,
+        server.config.listen, "internal",
         "restart loads the saved listen setting"
     );
     assert_eq!(server.config.proxy_locations[0].location, "/service/");
@@ -958,7 +958,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_request(
         &server,
         Method::GET,
-        "/std/sys/proxies",
+        "/std/sys/forward",
         serde_json::Value::Null,
     )
     .await;
@@ -967,8 +967,8 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::PUT,
-        "/std/sys/proxies",
-        serde_json::json!([{"location":"/std/sys/settings","proxy_pass":"127.0.0.1:8080"}]),
+        "/std/sys/forward",
+        serde_json::json!([{"location":"/std/sys/listen","proxy_pass":"127.0.0.1:8080"}]),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -976,7 +976,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/proxies",
+            "/std/sys/forward",
             serde_json::Value::Null
         )
         .await
@@ -1023,7 +1023,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let alice = dhttp::Endpoint::load("alice").await.unwrap();
     let response = alice
         .get(
-            format!("https://{}/std/sys/settings", server.name())
+            format!("https://{}/std/sys/listen", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1043,7 +1043,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
 
     let response = dhttp::Anonymous
         .get(
-            format!("https://{}/std/sys/settings", server.name())
+            format!("https://{}/std/sys/listen", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1065,7 +1065,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, _) = owner_request(
         &server,
         Method::GET,
-        "/std/sys/settings",
+        "/std/sys/listen",
         serde_json::Value::Null,
     )
     .await;
@@ -1124,12 +1124,13 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         dhttp::resolve::Resolver::add(Arc::new(PeerResolver(EndpointAddr::direct(*address))));
         let receiver_profile = profile(identity_home.as_path(), "receiver");
         let db = rusqlite::Connection::open(receiver_profile.config_db_path()).unwrap();
-        db.execute("UPDATE settings SET listen=1", []).unwrap();
+        db.execute("UPDATE settings SET listen='internal'", [])
+            .unwrap();
         for name in ["late", "broken"] {
             let identity = profile(identity_home.as_path(), name);
             rusqlite::Connection::open(identity.config_db_path())
                 .unwrap()
-                .execute("UPDATE settings SET listen=1", [])
+                .execute("UPDATE settings SET listen='internal'", [])
                 .unwrap();
             std::fs::rename(
                 identity.path(),
@@ -1177,7 +1178,7 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         // HTTP writes return the desired settings; the run loop applies them asynchronously.
         let request = Request::builder()
             .method(Method::PATCH)
-            .uri("https://receiver.dhttp.net/std/sys/proxies")
+            .uri("https://receiver.dhttp.net/std/sys/forward")
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(dhttp::WndBuf::new(64 * 1024))
             .unwrap();
@@ -1198,21 +1199,22 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/sys/settings".parse().unwrap(),
-            Some(serde_json::json!({"listen":0})),
+            &"/std/sys/listen".parse().unwrap(),
+            Some(serde_json::json!({"listen":"off"})),
         )
         .unwrap();
         wait_live_rejection(&receiver, "/std/file/keep.txt").await;
         assert!(
-            db.query_row("SELECT enabled FROM settings", [], |row| row
-                .get::<_, bool>(0))
+            db.query_row("SELECT listen FROM settings", [], |row| row
+                .get::<_, String>(0))
                 .unwrap()
+                == "off"
         );
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/sys/settings".parse().unwrap(),
-            Some(serde_json::json!({"listen":1})),
+            &"/std/sys/listen".parse().unwrap(),
+            Some(serde_json::json!({"listen":"internal"})),
         )
         .unwrap();
         wait_live_body(&receiver, "/live", b"live /live").await;
@@ -1220,22 +1222,22 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/sys/settings".parse().unwrap(),
-            Some(serde_json::json!({"enabled":false})),
+            &"/std/sys/listen".parse().unwrap(),
+            Some(serde_json::json!({"listen":"off"})),
         )
         .unwrap();
         wait_live_rejection(&receiver, "/std/file/keep.txt").await;
         assert_eq!(
             db.query_row("SELECT listen FROM settings", [], |row| row
-                .get::<_, i64>(0))
+                .get::<_, String>(0))
                 .unwrap(),
-            1
+            "off"
         );
         crate::setup::config_database(
             &receiver_profile,
             &Method::PATCH,
-            &"/std/sys/settings".parse().unwrap(),
-            Some(serde_json::json!({"enabled":true})),
+            &"/std/sys/listen".parse().unwrap(),
+            Some(serde_json::json!({"listen":"internal"})),
         )
         .unwrap();
         wait_live_body(&receiver, "/std/file/keep.txt", b"kept").await;

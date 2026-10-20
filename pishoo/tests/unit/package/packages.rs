@@ -1649,7 +1649,7 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let uri = "/std/sys/proxies".parse().unwrap();
+    let uri = "/std/sys/forward".parse().unwrap();
     let app = frontend_package("1.0.0", "installed");
     let id = "alice.dhttp.net/hello";
     for location in [
@@ -1718,7 +1718,7 @@ fn old_business_prefixes_remain_proxyable() {
     let directory = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let uri = "/std/sys/proxies".parse().unwrap();
+    let uri = "/std/sys/forward".parse().unwrap();
     crate::setup::config_database(
         &profile,
         &http::Method::PUT,
