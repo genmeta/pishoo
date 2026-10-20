@@ -9,7 +9,9 @@ if [ "$#" -gt 0 ]; then
 fi
 export CC_wasm32_wasip2="$WASI_SDK_PATH/bin/clang"
 export CFLAGS_wasm32_wasip2="--target=wasm32-wasip2 -USQLITE_THREADSAFE -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_WAL -DSQLITE_TEMP_STORE=3"
-cd "${TMPDIR:-/tmp}"
+cd "$project"
+# Host linker flags (such as macOS rpaths) are not valid for WASM.
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
 cargo build --locked --offline --release --target wasm32-wasip2 --manifest-path "$project/Cargo.toml"
 mkdir -p "$project/dist/metadata"
 cp "$project/target/wasm32-wasip2/release/profile.wasm" "$project/dist/lib.wasm"
