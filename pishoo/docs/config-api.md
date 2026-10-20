@@ -78,7 +78,7 @@ root 服务创建上述身份子目录、安装或更新 App/Lib 时，目录与
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
 | config.db | 缺失时不自动创建；已有空库恢复为 schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
-| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/capabilities、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
+| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/promissions、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
 | contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
 
 所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息依赖联系人状态和原生 ACL 授权。已删除或更改的默认规则在重启后保持原样。
@@ -109,7 +109,7 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 | 请求 | 默认访问 | 用途 |
 | --- | --- | --- |
 | GET/HEAD /std/workspace | 所有访问者（含匿名）；前缀覆盖静态资源 | 保留 Workspace 的公开名片页面 `#/intro` |
-| GET /std/acl/capabilities | 所有访问者（含匿名） | 发现可申请的业务能力 |
+| GET /std/acl/promissions | 所有访问者（含匿名） | 发现可申请的业务能力 |
 | GET /std/profile | 所有访问者（含匿名） | 读取对方公开资料 |
 | GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，允许匿名 | 显示头像；未设置头像可返回 404 |
 | GET /std/profile/context | 继承 GET /std/profile 前缀规则，允许匿名 | 资料上下文与真实访客身份 |
@@ -129,7 +129,7 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 已有身份保留原配置，需要采用这些默认值时，在目标身份上显式执行：
 
 ```sh
-genmeta access --id NAME /std/acl/capabilities allow '*?' --method GET
+genmeta access --id NAME /std/acl/promissions allow '*?' --method GET
 genmeta access --id NAME /std/profile allow '*?' --method GET
 genmeta access --id NAME /std/profile/context allow '*?' --method HEAD
 genmeta access --id NAME /std/contact allow '**' --method POST

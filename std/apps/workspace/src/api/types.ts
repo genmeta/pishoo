@@ -129,6 +129,7 @@ export interface Introduction extends PublicProfile {
 export interface CapabilityDescriptor {
   id: string
   title: string
+  /** Canonical operation snapshot used to detect changes while approving. Not a Lib version. */
   version: string
   visibility: 'public' | 'contact'
   approval_mode: 'none' | 'capability'

@@ -6,7 +6,7 @@
 | --- | --- |
 | `/std/contact`、`/std/contact/*`、`/std/contacts` | 内置 daccess 联系人资源 |
 | `/std/acl/*` | 内置 daccess 授权与请求审批 |
-| `/std/acl/capabilities` | 内置 Pishoo 处理器读取已安装 Lib 的业务能力登记 |
+| `/std/acl/promissions` | 内置 Pishoo 处理器读取已安装 Lib 的业务能力登记 |
 | `/std/sys/lib?name=NAME`、`/std/sys/app?name=NAME` | GET 数据库详情；PUT 以 JSON `{publisher,version}` 从商店安装或更新；DELETE 卸载 |
 | `/std/sys/lib/list`、`/std/sys/app/list` | 仅读取数据库的已安装清单 |
 | `/std/sys/settings`、`/std/sys/proxies` | 原生配置与代理基础设施 |

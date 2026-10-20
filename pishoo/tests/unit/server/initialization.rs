@@ -1,7 +1,7 @@
 use access_control::{AuthResult, Effect, Grantee, Headers, Method as AccessMethod, SubjectId};
 use http::Method;
 
-use super::*;
+use super::{access::access_version, *};
 
 #[test]
 #[ignore = "requires root; run in an isolated filesystem"]
@@ -140,7 +140,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     ));
     for visitor in [None, Some("bob.dhttp.net")] {
         assert!(matches!(
-            authorization(&access, Method::GET, "/std/acl/capabilities", visitor).await,
+            authorization(&access, Method::GET, "/std/acl/promissions", visitor).await,
             AuthResult::Allowed
         ));
         for (method, path) in [
@@ -162,7 +162,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             );
         }
         for (method, path) in [
-            (Method::POST, "/std/acl/capabilities"),
+            (Method::POST, "/std/acl/promissions"),
             (Method::GET, "/std/acl/access"),
             (Method::GET, "/std/acl/allow"),
             (Method::GET, "/std/sys/settings"),
@@ -247,7 +247,7 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
     access
         .remove_policy(
             AccessMethod::Specified(Method::GET),
-            "/std/acl/capabilities",
+            "/std/acl/promissions",
             Grantee::All,
         )
         .await
@@ -283,7 +283,7 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         authorization(
             &reopened,
             Method::GET,
-            "/std/acl/capabilities",
+            "/std/acl/promissions",
             Some("bob.dhttp.net")
         )
         .await,

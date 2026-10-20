@@ -24,8 +24,8 @@ test('selected requested and offered capabilities reach the native submission to
   const calls = backend()
   const value = {
     target_name: 'iphone.alice.dhttp.net', description: 'Hello',
-    requested_capabilities: ['dev.dhttp.net/message#message'],
-    offered_capabilities: ['dev.dhttp.net/note#read'],
+    requested_capabilities: ['message'],
+    offered_capabilities: ['read notes'],
   }
   expect((await api.sendContactRequest(value)).status).toBe('queued')
   expect(calls).toEqual([{ path: '/std/contact/local/requests', method: 'POST', body: value }])
@@ -35,7 +35,7 @@ test('an empty offer remains empty in the native submission', async () => {
   const calls = backend()
   await api.sendContactRequest({
     target_name: 'iphone.alice.dhttp.net', description: '',
-    requested_capabilities: ['dev.dhttp.net/message#message'], offered_capabilities: [],
+    requested_capabilities: ['message'], offered_capabilities: [],
   })
   expect(calls).toHaveLength(1)
   expect(calls[0].body).toMatchObject({ offered_capabilities: [] })
@@ -51,7 +51,7 @@ for (const rejection of [
     const calls = backend(rejection)
     const operation = api.sendContactRequest({
       target_name: 'iphone.alice.dhttp.net', description: '', requested_capabilities: [],
-      offered_capabilities: ['dev.dhttp.net/message#message'],
+      offered_capabilities: ['message'],
     })
     await expect(operation).rejects.toBeInstanceOf(ApiError)
     await expect(operation).rejects.toMatchObject(rejection)

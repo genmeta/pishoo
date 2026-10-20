@@ -22,7 +22,7 @@ async function mockIntroduction(page: Page, overrides: Partial<Introduction> = {
 }
 
 async function mockWorkspace(page: Page | BrowserContext): Promise<void> {
-  await page.route('**/std/dhttp/**/std/acl/capabilities', (route) => route.fulfill({ json: [] }))
+  await page.route('**/std/dhttp/**/std/acl/promissions', (route) => route.fulfill({ json: {} }))
   await page.route('**/std/acl/reviews?*', route => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 1 } }))
   await page.route('**/std/contact/local/saved', route => route.fulfill({ json: [] }))
   await page.route('**/std/acl/allow', route => route.fulfill({ json: {} }))
@@ -30,10 +30,7 @@ async function mockWorkspace(page: Page | BrowserContext): Promise<void> {
   await page.route('**/std/profile', (route) => route.fulfill({ json: {
     identity_name: 'bob.dhttp.net', display_name: 'Bob', avatar_url: null, updated_at: 1700000000,
   } }))
-  await page.route('**/std/acl/capabilities', (route) => route.fulfill({ json: [{
-    id: 'dev.dhttp.net/message/message', title: 'One-to-one chat', version: '1', visibility: 'contact', approval_mode: 'capability',
-    selectable: true, endpoints: [{ method: 'POST', path: '/std/message' }],
-  }] }))
+  await page.route('**/std/acl/promissions', (route) => route.fulfill({ json: { 'One-to-one chat': { '/std/message': ['POST'] } } }))
   await page.route('**/std/dhttp/**/std/profile', route => route.fulfill({ json: { display_name: 'Alice Chen', avatar_url: null, updated_at: 1700000000 } }))
   await page.route('**/std/contact/local/requests?*', (route) => route.fulfill({ json: {
     items: [], total: 0, page: 1, page_size: 20,

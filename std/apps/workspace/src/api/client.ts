@@ -95,10 +95,27 @@ export const api = {
 
   introduction: (signal?: AbortSignal) => request<Introduction>('/std/profile/context', { signal }),
 
-  capabilities: async (signal?: AbortSignal) => {
-    const catalog = await request<CapabilityDescriptor[]>('/std/acl/capabilities', { signal })
-    if (!Array.isArray(catalog)) throw new ApiError(502, 'Capability catalog unknown or awaiting access approval')
-    return catalog
+  capabilities: async (signal?: AbortSignal, target?: string): Promise<CapabilityDescriptor[]> => {
+    const path = target ? `/std/dhttp/${encodeURIComponent(target)}/std/acl/promissions` : '/std/acl/promissions'
+    const catalog = await request<unknown>(path, { signal })
+    if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
+      throw new ApiError(502, 'Invalid permission catalog')
+    }
+    return Object.entries(catalog).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([title, paths]) => {
+      if (!title.trim() || !paths || typeof paths !== 'object' || Array.isArray(paths)) {
+        throw new ApiError(502, 'Invalid permission group')
+      }
+      const endpoints = Object.entries(paths).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).flatMap(([path, methods]) => {
+        if (!path.startsWith('/std/') || !Array.isArray(methods)
+          || methods.some(method => typeof method !== 'string' || !/^[!#$%&'*+.^_`|~0-9A-Z-]+$/.test(method))) {
+          throw new ApiError(502, 'Invalid permission operations')
+        }
+        return [...new Set<string>(methods)].sort().map(method => ({ method, path }))
+      })
+      return { id: title, title, endpoints,
+        // Compare actual operations before applying an approval; the wire format has no Lib version.
+        version: JSON.stringify(endpoints), visibility: 'contact', approval_mode: 'capability', selectable: endpoints.length > 0 }
+    })
   },
 
   approvals: async (status: 'pending' | 'expired', page: number, signal?: AbortSignal): Promise<Page<Approval[]>> => {

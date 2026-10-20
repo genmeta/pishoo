@@ -315,25 +315,15 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let catalog = expect(
         alice,
         Method::GET,
-        "/std/acl/capabilities",
+        "/std/acl/promissions",
         Value::Null,
         200,
     )
     .await;
-    assert!(
-        catalog
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v["id"] == "std.dhttp.net/message#message")
-    );
-    assert!(
-        catalog
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|v| !v["id"].as_str().unwrap().contains("#acl"))
-    );
+    assert_eq!(catalog["message"], json!({"/std/message":["POST"]}));
+    assert!(catalog.as_object().unwrap().values().all(|paths| {
+        !paths.as_object().unwrap().keys().any(|path| path.starts_with("/std/acl"))
+    }));
 
     // Each permutation starts with no friendship and denied messaging. Each action occurs via HTTP.
     // 0/1: accept on Alice/Bob; 2/3: persistent Message grant on Alice/Bob.
@@ -357,7 +347,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             .await;
             rule(server, "**", "POST", "/std/message", "deny").await;
         }
-        let payload = |target: &str| json!({"target_name":target,"description":format!("crossed case {case}"),"requested_capabilities":["std.dhttp.net/message#message"],"offered_capabilities":["std.dhttp.net/message#message"]});
+        let payload = |target: &str| json!({"target_name":target,"description":format!("crossed case {case}"),"requested_capabilities":["message"],"offered_capabilities":["message"]});
         let (a, b) = tokio::join!(
             expect(
                 alice,

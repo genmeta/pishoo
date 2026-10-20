@@ -1,3 +1,12 @@
+use std::collections::BTreeMap;
+
+use dhttp_home::DhttpHome;
+use tokio::time::Instant;
+
+use super::{
+    ocsp::renew_ocsp,
+    run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes, reconcile_profiles},
+};
 use super::*;
 use crate::{Error, setup::load_server_config};
 
@@ -722,7 +731,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     .unwrap();
     let request = || {
         let mut request = Request::builder()
-            .uri("/std/acl/capabilities")
+            .uri("/std/acl/promissions")
             .body(AxumBody::empty())
             .unwrap();
         request.extensions_mut().insert(dhttp::HandshakeSummary {
@@ -748,7 +757,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/acl/capabilities",
+            "/std/acl/promissions",
             access_control::Effect::Deny,
             access_control::Grantee::All,
         )
@@ -770,7 +779,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/acl/capabilities",
+            "/std/acl/promissions",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -786,16 +795,17 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
+    assert_eq!(response.headers()[http::header::CONTENT_TYPE], "application/json");
     let bytes = axum::body::to_bytes(response.into_body(), 65536)
         .await
         .unwrap();
     let values: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         values,
-        json!([{"id":"alice.dhttp.net/message#message","title":"1v1聊天","version":"1.0.0","visibility":"contact","approval_mode":"capability","selectable":true,"endpoints":[{"method":"POST","path":"/std/message"}]}])
+        json!({"1v1聊天":{"/std/message":["POST"]}})
     );
     // Builtin ACL, Contact and Package do not become WASM capabilities.
-    assert_eq!(values.as_array().unwrap().len(), 1);
+    assert_eq!(values.as_object().unwrap().len(), 1);
     crate::package::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
     let response = server
         .router
@@ -809,7 +819,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         axum::body::to_bytes(response.into_body(), 65536)
             .await
             .unwrap(),
-        "[]"
+        "{}"
     );
     let db = rusqlite::Connection::open(server.profile.config_db_path()).unwrap();
     db.execute_batch("DROP TABLE lib_capability_operations; DROP TABLE lib_capabilities;")
@@ -1286,4 +1296,58 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
         }
     }
     mdns.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn permission_catalog_merges_group_titles_and_preserves_legacy_registration() {
+    for legacy in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+        std::fs::create_dir_all(profile.db_dir()).unwrap();
+        let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+        if legacy {
+            db.execute_batch("CREATE TABLE libs (id TEXT PRIMARY KEY, name TEXT, version TEXT);
+                CREATE TABLE lib_capabilities (lib_id TEXT, capability_id TEXT, title TEXT);
+                CREATE TABLE lib_capability_operations (lib_id TEXT, capability_id TEXT, path TEXT, method TEXT);
+                INSERT INTO libs VALUES ('dev.dhttp.net/message', 'message', '1.0.0');
+                INSERT INTO lib_capabilities VALUES ('dev.dhttp.net/message', 'read', 'read message'), ('dev.dhttp.net/message', 'details', 'read message'), ('dev.dhttp.net/message', 'empty', 'empty');
+                INSERT INTO lib_capability_operations VALUES ('dev.dhttp.net/message', 'read', '/std/message', 'GET'), ('dev.dhttp.net/message', 'read', '/std/message', 'HEAD'), ('dev.dhttp.net/message', 'details', '/std/message', 'GET'), ('dev.dhttp.net/message', 'details', '/std/message/history', 'GET');").unwrap();
+        } else {
+            db.execute_batch(include_str!("../../src/package/packages.sql"))
+                .unwrap();
+            db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
+                INSERT INTO lib_capabilities VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
+                INSERT INTO lib_capability_operations VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'details', 'GET', '/std/message/history');").unwrap();
+        }
+        let router = capabilities_router(profile.clone());
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/std/acl/promissions")
+                    .body(AxumBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let expected = serde_json::json!({"read message":{"/std/message":["GET","HEAD"],"/std/message/history":["GET"]},"empty":{}});
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            expected
+        );
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/std/acl/capabilities")
+                    .body(AxumBody::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    }
 }

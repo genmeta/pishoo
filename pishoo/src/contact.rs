@@ -459,26 +459,42 @@ fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(storage)?;
-    let author: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
-        [], |row| row.get(0),
-    ).map_err(storage)?;
-    let key = if author { "lib_name" } else { "lib_id" };
-    let query = if author {
-        "SELECT CASE WHEN l.author IS NULL THEN l.name ELSE l.author||'/'||l.name END,c.lib_name,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.name=c.lib_name ORDER BY 1,3"
+    let author: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    let (key, lib_key) = if author {
+        ("lib_name", "name")
     } else {
-        "SELECT c.lib_id,c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY 1,3"
+        ("lib_id", "id")
     };
-    let mut items = Vec::new();
-    let mut stmt = db.prepare(query).map_err(storage)?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
-        r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))).map_err(storage)? {
-        let (lib, name, id, title, version) = row.map_err(storage)?;
-        let endpoints = db.prepare(&format!("SELECT method,path FROM lib_capability_operations WHERE {key}=?1 AND capability_id=?2 ORDER BY method,path")).map_err(storage)?
-            .query_map(params![name,id],|r|Ok(json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?}))).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)?;
-        items.push(json!({"id":format!("{lib}#{id}"),"title":title,"version":version,"selectable":true,"endpoints":endpoints}));
+    let mut permissions = std::collections::BTreeMap::<
+        String,
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    >::new();
+    let mut stmt = db.prepare(&format!(
+        "SELECT c.title,o.path,o.method FROM lib_capabilities c JOIN libs l ON l.{lib_key}=c.{key} LEFT JOIN lib_capability_operations o ON o.{key}=c.{key} AND o.capability_id=c.capability_id ORDER BY c.title,o.path,o.method"
+    )).map_err(storage)?;
+    for row in stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(storage)?
+    {
+        let (title, path, method) = row.map_err(storage)?;
+        let paths = permissions.entry(title).or_default();
+        if let (Some(path), Some(method)) = (path, method) {
+            paths.entry(path).or_default().insert(method);
+        }
     }
-    Ok(items.into())
+    Ok(json!(permissions))
 }
 async fn selected(
     profile: &IdentityProfile,
@@ -499,7 +515,7 @@ async fn selected(
             endpoint,
             target,
             Method::GET,
-            "/std/acl/capabilities",
+            "/std/acl/promissions",
             None,
             None,
         )
@@ -507,23 +523,42 @@ async fn selected(
         .1
     };
     let catalog = catalog
-        .as_array()
-        .ok_or_else(|| fail(502, "invalid capability catalog"))?;
+        .as_object()
+        .ok_or_else(|| fail(502, "invalid permission catalog"))?;
     let mut result = Vec::new();
     for id in ids {
         let id = id
             .as_str()
-            .ok_or_else(|| fail(400, "invalid capability ID"))?;
-        if result.iter().any(|v: &Value| v["id"] == id) {
+            .ok_or_else(|| fail(400, "invalid permission name"))?;
+        if result.iter().any(|value: &Value| value["id"] == id) {
             return Err(fail(400, "duplicate capability"));
         }
-        result.push(
-            catalog
-                .iter()
-                .find(|v| v["id"] == id && v["selectable"] == true)
-                .ok_or_else(|| fail(409, "selected capability unavailable"))?
-                .clone(),
-        );
+        let paths = catalog
+            .get(id)
+            .ok_or_else(|| fail(409, "selected capability unavailable"))?
+            .as_object()
+            .ok_or_else(|| fail(502, "invalid permission paths"))?;
+        let mut endpoints = Vec::new();
+        for (path, methods) in paths {
+            if !path.starts_with("/std/") || path.parse::<http::Uri>().is_err() {
+                return Err(fail(502, "invalid permission path"));
+            }
+            for method in methods
+                .as_array()
+                .ok_or_else(|| fail(502, "invalid permission methods"))?
+            {
+                let method = method
+                    .as_str()
+                    .ok_or_else(|| fail(502, "invalid permission method"))?;
+                if method != method.to_ascii_uppercase()
+                    || Method::from_bytes(method.as_bytes()).is_err()
+                {
+                    return Err(fail(502, "invalid permission method"));
+                }
+                endpoints.push(json!({"method":method,"path":path}));
+            }
+        }
+        result.push(json!({"id":id,"endpoints":endpoints}));
     }
     Ok(result)
 }
@@ -719,7 +754,7 @@ async fn dispatch(
                 &endpoint,
                 &target,
                 Method::GET,
-                "/std/acl/capabilities",
+                "/std/acl/promissions",
                 None,
                 existing
                     .as_ref()
