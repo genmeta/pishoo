@@ -6,6 +6,10 @@
 
 Workspace 不随宿主发行包交付或首次启动自动安装。配置身份、启动 Pishoo 并安装提供 `genmeta package install` 的新版 gmutils 后，由身份所属账户运行 `genmeta package install std.dhttp.net/workspace --id YOUR_IDENTITY`。该命令调用在线安装 API，要求 App 和精确依赖已发布到商店。
 
+宿主通过 Git 依赖使用 daccess 的 `feat/contact-acl-v2` 分支，具体提交由根目录 `Cargo.lock` 固定，无需同级仓库。
+
+不编译宿主即可运行 `python3 pishoo/tests/check-contact-migration.py` 检查 SQLite 迁移。脚本读取 Cargo 已缓存的锁定版 daccess；缓存缺失时先运行 `cargo fetch --locked`，也可设置 `DACCESS_PATH=/path/to/daccess` 指定待检查源码。
+
 构建使用支持现有 bun.lock 的 Bun（本次验证为 1.4.3）：
 
 ```sh

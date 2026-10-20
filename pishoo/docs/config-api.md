@@ -76,16 +76,16 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
 | config.db | 缺失时不自动创建；已有空库恢复为 schema v1；settings 一行 enabled=1、listen=3（启用且内外网均监听）；代理为空 | 校验版本、配置和值；有效旧v1事务补enabled列，其他设置保留 |
-| access.db | 由 daccess 建库，写入 POST /std/contact、Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/capabilities、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v1直接加载；原生v0备份后由库事务升级；不补默认授权 |
-| contact.db | 原生 Contact 首次使用时建立 schema v1，收藏和出站申请为空 | 校验现行版本及必要表，保留收藏和投递队列 |
+| access.db | 由 daccess migrations 创建并升级至 schema v2；Pishoo 首次初始化写入 POST /std/contact/application、GET /std/contact/status、GET /std/acl/status 的 Allow、Named（**），GET /std/profile 和 HEAD /std/profile/context 的 Allow、All（*?），以及 GET /std/acl/capabilities、GET/HEAD /std/workspace 的 Allow、All（*?）规则 | v0/v1 在原库事务升级结构并保留数据与 ACL；v2 直接加载；升级和重启不补默认授权 |
+| contact.db | 原生 Contact 首次使用时建立 schema v2，出站申请为空 | v1升级时保留投递队列、移除 saved 标记并增加联系人记录绑定 |
 
-所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息依赖联系人状态和原生 ACL 授权。已删除或更改的默认规则在重启后保持原样。
+所有者权限由 daccess 根据名称与证书 owner_hash 派生，不新增所有者联系人。具名好友申请默认允许提交，匿名仍拒绝；消息接收由原生 ACL 授权，联系人接受独立于接口权限。已删除或更改的默认规则在重启后保持原样。
 
 仅缺失或完全空白、无用户结构且未声明版本的 SQLite 数据库按首次初始化处理。config/Contact 的建表、初始数据和版本在同一事务提交；已有未识别结构或不支持的版本直接报错，不执行建表修补。完整性检查失败也拒绝启动。配置 API 读取不重新创建被删除的配置库。
 
 新的 access 数据库先在身份 db 目录下的临时目录中通过现有 daccess API 创建和写入默认规则，使用 SQLite 备份接口生成独立完整快照，校验并同步后发布到正式路径。正式文件缺失时以不覆盖已有文件的方式发布；已有空文件通过 SQLite 备份事务恢复，以保持 journal/WAL 一致。中断留下的未发布临时目录不会被当作正式库；当前调用正常退出时由 tempfile 清理自己的目录。
 
-原生 daccess v0 升级先在临时副本验证，再生成 db/access-v0-backup-*.db，备份包含已提交的 WAL 数据；库自身的事务在原文件上完成升级，保留用户规则。后续v1启动不重复备份。旧0.8.2的 location_rule_sets/location_rules 不是该v0格式，目前无受支持转换，明确报错并保留原文件。旧 server.conf 不读取，也不删除。
+access.db 通过 daccess migrations 在原库按版本升级结构，不转换历史 ACL 路径、不补默认规则、不自动备份替换或重置数据库。失败回滚当前迁移事务。未知格式和不支持的版本明确报错并保留原文件。旧 server.conf 不读取，也不删除。
 
 四库独立初始化，不建立跨库事务或初始化标记表；全部加载成功后才注册监听。某库失败可使本次启动结束，已完成的库在下次启动被正常复用。升级失败不自动删库、重置授权或回退版本。
 
@@ -112,15 +112,16 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 | GET /std/profile/avatar | 继承 GET /std/profile 前缀规则，允许匿名 | 显示头像；未设置头像可返回 404 |
 | GET /std/profile/context | 继承 GET /std/profile 前缀规则，允许匿名 | 资料上下文与真实访客身份 |
 | HEAD /std/profile/context | 所有访问者（含匿名） | 公开名片上下文响应头 |
-| POST /std/contact | 已认证具名身份（**） | 提交联系人申请，匿名拒绝 |
-| GET /std/contact/self | 处理器按已验证 Visitor 和申请编号校验 | 仅查询自己的申请/授权状态，不增加公开 ACL |
+| POST /std/contact/application | 已认证具名身份（**） | 远端本人提交联系人申请，匿名拒绝 |
+| GET /std/contact/status | 已认证具名身份（**） | 普通 ACL 规则，处理器继续校验申请归属 |
+| GET /std/acl/status | 已认证具名身份（**）；按路径前缀覆盖审批编号 | 普通 ACL 规则，处理器继续核对名称和 SubjectId |
 
 加好友页面先并行读取目标 profile 与 capabilities，再按 avatar_url 读取头像。
-申请发送到本机 POST /std/contact/local/requests，由 Pishoo 使用自己的身份投递到
-对方 POST /std/contact。批准后申请方轮询 GET /std/contact/self。
+申请发送到本机 POST /std/contact，由 Pishoo 使用自己的身份投递到
+对方 POST /std/contact/application。批准后申请方轮询 GET /std/contact/status。
 
-`/std/dhttp/*` 是本机所有者代理；`/std/contact/local/*`、联系人列表/审批和 ACL
-管理接口保持管理权限。Profile 的 PATCH、头像 PUT/DELETE 不开放。
+`/std/dhttp/*` 是本机所有者代理；联系人管理与投递进度、ACL
+管理接口经过统一 ACL，默认 owner 使用，可显式授权其他管理员，不额外叠加 owner 检查。Profile 的 PATCH、头像 PUT/DELETE 不开放。
 `POST /std/message` 仍需双方明确授权，联系人获批不等于聊天能力获批。
 公开名片前端继续由 Workspace App 提供，Profile Lib 提供资料数据。`#/intro` 是浏览器片段，不会发送到服务器，因此 GET/HEAD 规则覆盖 Workspace 静态页面和资源，不能只按片段授权。加载静态界面不授予后台管理权限；其他方法和相邻前缀仍受限。
 
@@ -130,7 +131,7 @@ Profile 和 Message 的数据库在各自 Lib 私有目录中按使用初始化�
 genmeta access --id NAME /std/acl/capabilities allow '*?' --method GET
 genmeta access --id NAME /std/profile allow '*?' --method GET
 genmeta access --id NAME /std/profile/context allow '*?' --method HEAD
-genmeta access --id NAME /std/contact allow '**' --method POST
+genmeta access --id NAME /std/contact/application allow '**' --method POST
 genmeta access --id NAME /std/workspace allow '*?' --method GET
 genmeta access --id NAME /std/workspace allow '*?' --method HEAD
 ```
@@ -142,3 +143,7 @@ genmeta access --id NAME /std/workspace allow '*?' --method HEAD
 标准 `std.dhttp.net/workspace` App 与 `std.dhttp.net/profile` Lib 首次安装时，
 允许复用上述精确的只读 Allow/All 默认规则，以免默认公开权限反过来阻止安装。
 这不豁免其他发布者、自定义规则、通配方法或写操作的旧权限冲突检查。
+
+联系人管理与时间字段、当前 schema v2 及回执 ACL 规则见独立 daccess 仓库的 `SPEC.md`。`GET /std/contact/{name}/profile/avatar` 为管理侧只读头像入口；无 POST 或本地覆盖。回执经过普通 ACL，可以禁止或删除其访问规则。公开 Named／All allow 与历史联系人主体无关，身份专属规则仍在 SubjectId 变更时转审批。
+
+业务审核通过 If-Reviewed: waiting/break 选择内存等待或异步待办，缺省 break。review 的异步响应为400与 error=need_review、review_id、status_url；waiting 最多300秒。PATCH /std/acl/review 携带 id、kind=live|persistent、action=allow|deny，不需要 expired_after。审批决定写入普通 ACL，批准后该用户对该方法路径持续允许，拒绝持续 deny，均可通过规则管理修改。联系人状态轮询只用于申请回执，不作为 Message 投递前置权限检查。

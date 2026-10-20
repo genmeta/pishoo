@@ -21,7 +21,7 @@ dhttp = { version = "0.7.1" }
 h3x = { version = "0.7.0" }
 dhttp-home = { version = "0.6.1" }
 qtls = { version = "0.1.0" }
-access_control = { package = "daccess", version = "0.1.1" }
+access_control = { package = "daccess", version = "0.1.1", git = "https://github.com/genmeta/daccess.git", branch = "feat/contact-acl-v2" }
 axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 sea-orm = { version = "2", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }

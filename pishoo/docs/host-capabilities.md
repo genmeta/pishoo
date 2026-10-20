@@ -13,11 +13,11 @@ tuple 是规范化名称与证书 SKI owner_hash。主人比较完整 tuple；�
 
 普通已安装 Lib 使用标准 WASI HTTP outgoing，以当前 Endpoint 发送远端 DHTTP 请求；本端目标通过原生 Router 分发，HTTP 继承真实 caller、CLI 后台使用实际 LocalAuthority。每次都经 daccess 授权，WASM 不能注入 Visitor 或身份事实。本端转交只替换认证 extensions，保留 Router 自己产生的路径参数。没有 Workspace 名称判断、系统 Linker或新增 HTTP WIT。
 
-出站接受 HTTPS DHTTP authority，`~` 表示本端。保持正常证书验证、逐跳头清理、流式请求响应；正文各限1 MiB，总传输最多15秒，并遵循更短 WASI 期限。请求 trailers 拒绝。业务准入、申请状态、重试和队列全部在 Lib 中。
+出站接受 HTTPS DHTTP authority，`~` 表示本端。保持正常证书验证、逐跳头清理、流式请求响应；正文各限1 MiB，普通出站总传输最多15秒，If-Reviewed: waiting 的出站上限为300秒；均遵循更短 WASI 连接／首字节／字节间期限。后台 CLI 每批仍限15秒，应使用 break。请求 trailers 拒绝。业务准入、申请状态、重试和队列全部在 Lib 中。
 
 宿主每3秒驱动当前用户 Lib 中具有标准 wasi:cli/run 导出的组件。每次独立 Store、私有 filesystem、既有 fuel/limiter 与 TaskTracker；15秒超时取消并回收。一个运行批次未结束时不积累定时批次；HTTP 执行仍没有额外并发名额。没有 Server 业务 worker 字段。
 
-原生资源 API 增强：联系人列表直接返回 id/incoming；详情和自身状态返回 id；PUT /std/contact/{name} 为 owner 专用本机资源写入。GET /std/acl/reviews 支持 pending/expired 与 requested_at；DELETE /std/acl/review/{id} 仅删除已过期 pending 记录。数据库 schema、授权模型和公共 ContactRecord/ReviewRecord 不变。
+原生资源 API 增强：联系人列表直接返回 id/incoming；详情和自身状态返回 id；PUT /std/contact?name=... 为统一 ACL 管理的联系人资源写入，不额外限制 owner。GET /std/acl/reviews 支持 pending/expired、live/persistent 类型与 requested_at；DELETE /std/acl/review/{id} 仅删除已过期 pending 记录。联系人 schema v2 与 API 契约见独立 daccess 仓库的 `SPEC.md`。公共 ContactRecord/ReviewRecord 保持原 Rust 字段，联系人 HTTP 到期字段统一为 valid_before。
 
 普通入口为 `/std/<业务路径>` 和 `/std/<name>/`，前端 hash 导航、后端字面量路径/query。通用已加载目录位于 `/std/sys/package/loaded-libs`、`/std/sys/package/loaded-apps`。
 
@@ -32,3 +32,5 @@ App 与 Lib 均可声明多个精确后端 dependencies（publisher/name/version
 Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求。前台保留当前请求的真实调用者，继续受原生daccess和被调用Lib自身身份检查约束；后台CLI发起真实具名HTTP请求，调用身份由握手给出，CLI自身仍无caller。未声明依赖不会赋予额外权限，dependencies用于安装和生命周期约束。
 
 前端详情展示所依赖后端及版本，静态文件GET/HEAD仅用于机器分派，不作为前端业务API展示。
+
+业务访问命中 ACL review 时，If-Reviewed: waiting 将原请求暂停最多300秒，待办仅内存保存；请求 Future 取消、超时或进程退出时移除。break（缺省）保存异步待办并返回400 need_review。管理员通过同一审批 API 保存具名用户对原方法路径的 ACL allow/deny，提交后放行／拒绝匹配的实时请求；后续请求及重启后继续按普通 ACL 判断。审批不需要决定有效期。Message 直接投递并重试实际请求，不查询远端联系人回执来判断访问权限。详见独立 daccess SPEC.md。

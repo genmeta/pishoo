@@ -1123,7 +1123,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     for (method, path) in [
         (Method::POST, "/std/workspace/"),
         (Method::GET, "/std/workspace-other/"),
-        (Method::GET, "/std/contacts"),
+        (Method::GET, "/std/contact/list"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/settings"),
     ] {

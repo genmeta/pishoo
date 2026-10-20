@@ -4,7 +4,7 @@
 
 | 路径 | 提供者与用途 |
 | --- | --- |
-| `/std/contact`、`/std/contact/*`、`/std/contacts` | 内置 daccess 联系人资源 |
+| `/std/contact`、`/std/contact/*` | 内置 daccess 联系人资源 |
 | `/std/acl/*` | 内置 daccess 授权与请求审批 |
 | `/std/acl/capabilities` | 内置 Pishoo 处理器读取已安装 Lib 的业务能力登记 |
 | `/std/sys/package/libs/<name>`、`/std/sys/package/apps/<name>` | 按同类唯一短名查看、安装、更新与卸载；发布者仍属于包身份 |

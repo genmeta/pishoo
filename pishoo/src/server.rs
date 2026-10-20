@@ -722,12 +722,9 @@ fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
             |row| row.get(0),
         )?;
         if !module {
-            let legacy: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('location_rule_sets','location_rules'))", [], |row| row.get(0))?;
-            return Err(Error::InvalidConfig(if legacy {
-                "unsupported or incomplete legacy ACL schema; original database preserved".into()
-            } else {
-                "unrecognized access database format; original database preserved".into()
-            }));
+            return Err(Error::InvalidConfig(
+                "unrecognized access database format; original database preserved".into(),
+            ));
         }
         let rows: i64 = conn.query_row("SELECT count(*) FROM module", [], |row| row.get(0))?;
         if rows != 1 {
@@ -740,12 +737,12 @@ fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
             [],
             |row| row.get(0),
         )?;
-        if !matches!(version, 0 | 1) {
+        if !matches!(version, 0 | 1 | 2) {
             return Err(Error::InvalidConfig(format!(
-                "unsupported access database version {version}; expected 0 or 1"
+                "unsupported access database version {version}; expected 0, 1 or 2"
             )));
         }
-        // Validate the library's required tables before allowing its migrations to write.
+        // Validate the source schema before allowing structural migrations.
         for sql in [
             "SELECT id,name,subject_id,alias,class,grants,offers,requests,description,status,expired_after,updated_at,created_at FROM contacts LIMIT 0",
             "SELECT id,method,api,effect,grantee_type,grantee,updated_at,created_at FROM access_rules LIMIT 0",
@@ -753,7 +750,10 @@ fn access_version(path: &std::path::Path) -> Result<Option<i64>> {
         ] {
             conn.prepare(sql)?;
         }
-        if version == 1 {
+        if version == 2 {
+            conn.prepare("SELECT name,updated_at FROM contact_deletions LIMIT 0")?;
+        }
+        if version >= 1 {
             conn.prepare("SELECT application_id,applicant_name,applicant_sid,payload_hash,status,received_at,expired_after FROM contact_applications LIMIT 0")?;
         } else {
             let applications: bool = conn.query_row(
@@ -801,51 +801,12 @@ fn snapshot_access(source: &std::path::Path, destination: &std::path::Path) -> R
     Ok(())
 }
 
-fn legacy_access(path: &std::path::Path) -> Result<bool> {
-    if !path.try_exists()? {
-        return Ok(false);
-    }
-    if !path.symlink_metadata()?.file_type().is_file() {
-        return Ok(false);
-    }
-    let conn =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let tables = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if !tables.iter().any(|name| name == "location_rule_sets")
-        || !tables.iter().any(|name| name == "location_rules")
-        || tables.iter().any(|name| {
-            !matches!(
-                name.as_str(),
-                "location_rule_sets" | "location_rules" | "migration"
-            )
-        })
-    {
-        return Ok(false);
-    }
-    // Recognize the published configuration schema, not merely similarly named tables.
-    for sql in [
-        "SELECT id,pattern,created_at,updated_at FROM location_rule_sets LIMIT 0",
-        "SELECT id,location_id,action,exprs,created_at,updated_at FROM location_rules LIMIT 0",
-    ] {
-        if conn.prepare(sql).is_err() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 async fn load_access(
     profile: &IdentityProfile,
     subject: &access_control::SubjectId,
 ) -> Result<Arc<access_control::AccessService>> {
     let path = profile.access_db_path();
-    let legacy = legacy_access(&path).map_err(|error| {
-        Error::InvalidConfig(format!("access database {}: {error}", path.display()))
-    })?;
-    let version = if legacy { None } else { access_version(&path)? };
+    let version = access_version(&path)?;
     let load = || async {
         let uri = format!("sqlite://{}?mode=rw", path.display());
         access_control::AccessService::load_from_db(&uri, profile.name(), subject)
@@ -855,7 +816,7 @@ async fn load_access(
                 Error::InvalidConfig(format!("access database {}: {error}", path.display()))
             })
     };
-    if version == Some(1) {
+    if version.is_some() {
         return load().await;
     }
     // Nothing partially initialized is ever published at the application's database path.
@@ -865,14 +826,20 @@ async fn load_access(
     let working = tempfile::NamedTempFile::new_in(staging.path())?;
     let uri = format!("sqlite://{}?mode=rw", working.path().display());
     let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject).await?;
-    access
-        .set_policy(
-            access_control::Method::Specified(http::Method::POST),
-            "/std/contact",
-            access_control::Effect::Allow,
-            access_control::Grantee::Named,
-        )
-        .await?;
+    for (method, path) in [
+        (http::Method::POST, "/std/contact/application"),
+        (http::Method::GET, "/std/contact/status"),
+        (http::Method::GET, "/std/acl/status"),
+    ] {
+        access
+            .set_policy(
+                access_control::Method::Specified(method),
+                path,
+                access_control::Effect::Allow,
+                access_control::Grantee::Named,
+            )
+            .await?;
+    }
     // Discovery is public before a contact relationship exists. The profile
     // GET prefix covers the public profile, avatar and introduction context.
     for (method, path) in [
@@ -894,41 +861,10 @@ async fn load_access(
     }
     let ready = tempfile::NamedTempFile::new_in(staging.path())?;
     snapshot_access(working.path(), ready.path())?;
-    if access_version(ready.path())? != Some(1) {
+    if access_version(ready.path())? != Some(2) {
         return Err(Error::InvalidConfig(
             "initialized access database failed version validation".into(),
         ));
-    }
-    // Old configuration is archived, never translated or imported into the new database.
-    if legacy || version == Some(0) {
-        let prefix = if legacy {
-            "access-legacy-backup-"
-        } else {
-            "access-v0-backup-"
-        };
-        let backup = tempfile::Builder::new()
-            .prefix(prefix)
-            .suffix(".db")
-            .tempfile_in(profile.db_dir())?;
-        snapshot_access(&path, backup.path())?;
-        let (_, backup_path) = backup.keep().map_err(|error| error.error)?;
-        tracing::info!(
-            database = %path.display(),
-            backup = %backup_path.display(),
-            "access database backed up"
-        );
-        // SQLite performs the replacement as a database transaction, including
-        // existing journals/WAL, rather than renaming only the main database file.
-        if legacy_access(&path)? != legacy || (!legacy && access_version(&path)? != version) {
-            return Err(Error::InvalidConfig(format!(
-                "{} changed during initialization; backup retained",
-                path.display()
-            )));
-        }
-        snapshot_access(ready.path(), &path)?;
-        #[cfg(unix)]
-        std::fs::File::open(profile.db_dir())?.sync_all()?;
-        return load().await;
     }
     // A simultaneous initializer must not overwrite a completed database or user rules.
     if access_version(&path)? != version {

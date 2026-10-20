@@ -93,7 +93,7 @@ async fn refresh(server: &Server, id: &Value) -> Value {
     expect(
         server,
         Method::POST,
-        &format!("/std/contact/local/requests/refresh?id={id}"),
+        &format!("/std/contact/requests/refresh?id={id}"),
         Value::Null,
         200,
     )
@@ -102,7 +102,7 @@ async fn refresh(server: &Server, id: &Value) -> Value {
     expect(
         server,
         Method::GET,
-        &format!("/std/contact/local/requests?id={id}"),
+        &format!("/std/contact/requests?id={id}"),
         Value::Null,
         200,
     )
@@ -342,7 +342,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             expect(
                 server,
                 Method::DELETE,
-                &format!("/std/contact/{}", peer.name()),
+                &format!("/std/contact?name={}", peer.name()),
                 Value::Null,
                 if case == 0 { 404 } else { 204 },
             )
@@ -354,14 +354,14 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             expect(
                 alice,
                 Method::POST,
-                "/std/contact/local/requests",
+                "/std/contact",
                 payload(bob.name()),
                 201
             ),
             expect(
                 bob,
                 Method::POST,
-                "/std/contact/local/requests",
+                "/std/contact",
                 payload(alice.name()),
                 201
             )
@@ -371,7 +371,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             expect(
                 alice,
                 Method::GET,
-                &format!("/std/contact/{}", bob.name()),
+                &format!("/std/contact?name={}", bob.name()),
                 Value::Null,
                 200
             )
@@ -382,7 +382,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             expect(
                 bob,
                 Method::GET,
-                &format!("/std/contact/{}", alice.name()),
+                &format!("/std/contact?name={}", alice.name()),
                 Value::Null,
                 200
             )
@@ -390,7 +390,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             "pending"
         );
         if case == 0 {
-            // Approve a message request before accepting the contact. The guest must still refuse it.
+            // Approving the actual request persists ACL independently of contact acceptance.
             rule(bob, alice.name(), "POST", "/std/message", "review").await;
             let payload =
                 json!({"client_message_id":"review-before-contact","text":"先审批后加好友"});
@@ -402,8 +402,15 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 payload.clone(),
             )
             .await;
-            assert_eq!(status, StatusCode::ACCEPTED, "{pending}");
-            expect(bob, Method::PATCH, "/std/acl/review", json!({"id":pending["review_id"],"action":"allow","expired_after":"2099-01-01T00:00:00Z"}), 204).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{pending}");
+            expect(
+                bob,
+                Method::PATCH,
+                "/std/acl/review",
+                json!({"id":pending["review_id"],"action":"allow"}),
+                204,
+            )
+            .await;
             let (status, body) = remote_json(
                 &alice.endpoint,
                 bob.name(),
@@ -412,9 +419,9 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 payload,
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "pending contact: {body}");
+            assert_eq!(status, StatusCode::CREATED, "approved request: {body}");
             rule(bob, alice.name(), "POST", "/std/message", "deny").await;
-            eprintln!("PASS review before contact acceptance: Message remains forbidden");
+            eprintln!("PASS request approval is independent of contact acceptance");
         }
         let mut granted = [false, false];
         for action in order {
@@ -424,7 +431,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 (bob, alice)
             };
             if action < 2 {
-                let path = format!("/std/contact/{}", peer.name());
+                let path = format!("/std/contact?name={}", peer.name());
                 let before = expect(server, Method::GET, &path, Value::Null, 200).await;
                 expect(
                     server,
@@ -456,13 +463,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 let contact = expect(
                     receiver,
                     Method::GET,
-                    &format!("/std/contact/{}", sender.name()),
+                    &format!("/std/contact?name={}", sender.name()),
                     Value::Null,
                     200,
                 )
                 .await;
-                let allowed = contact["status"] == "active"
-                    && granted[usize::from(receiver.name() == bob.name())];
+                let allowed = granted[usize::from(receiver.name() == bob.name())];
                 let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::POST, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"text":"乱序权限探测"})).await;
                 assert_eq!(
                     status.as_u16(),
@@ -482,7 +488,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             )
             .await;
             assert_eq!(c["can_send"], true, "case {case}: {c}");
-            assert_eq!(c["can_receive"], true, "case {case}: {c}");
+            assert!(c.get("remote_grant").is_none());
             let text = format!("第{case}轮 {} → {}，你好 👋", server.name(), peer.name());
             let sent = expect(
                 server,
@@ -528,7 +534,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             expect(
                 server,
                 Method::DELETE,
-                &format!("/std/contact/local/requests?id={}", request["id"]),
+                &format!("/std/contact/requests?id={}", request["id"]),
                 Value::Null,
                 204,
             )
@@ -539,7 +545,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         );
     }
 
-    // Review permission and friendship acceptance are independent; approving a request is not an ACL grant.
+    // Review permission and friendship acceptance are independent; approval persists an ordinary ACL grant.
     rule(bob, alice.name(), "POST", "/std/message", "review").await;
     let payload = json!({"client_message_id":"review-order","text":"请求审批重试"});
     let (status, pending) = remote_json(
@@ -550,7 +556,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         payload.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{pending}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{pending}");
     let (_, repeated) = remote_json(
         &alice.endpoint,
         bob.name(),
@@ -564,7 +570,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         bob,
         Method::PATCH,
         "/std/acl/review",
-        json!({"id":pending["review_id"],"action":"allow","expired_after":"2099-01-01T00:00:00Z"}),
+        json!({"id":pending["review_id"],"action":"allow"}),
         204,
     )
     .await;
@@ -586,17 +592,6 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{receipt}");
-    let (status, next_review) = remote_json(
-        &alice.endpoint,
-        bob.name(),
-        Method::POST,
-        "/std/message?scenario=active-review",
-        payload.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_ne!(next_review["review_id"], pending["review_id"]);
-    expect(bob, Method::PATCH, "/std/acl/review", json!({"id":next_review["review_id"],"action":"allow","expired_after":"2099-01-01T00:00:00Z"}), 204).await;
     let (status, duplicate) = remote_json(
         &alice.endpoint,
         bob.name(),
@@ -609,12 +604,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     assert_eq!(duplicate["id"], receipt["id"]);
     let rules = expect(bob, Method::GET, "/std/acl/allow", Value::Null, 200).await;
     assert!(
-        !rules[alice.name()]["/std/message"]["allow"]
+        rules[alice.name()]["/std/message"]["allow"]
             .as_array()
             .is_some_and(|m| m.contains(&json!("POST")))
     );
     eprintln!(
-        "PASS request review: deduplicated pending request, approved retry, exactly-once receive; no persistent grant"
+        "PASS request review: deduplicated pending request, approved retry, exactly-once receive; durable ACL grant"
     );
     for server in &mut servers {
         let db =
