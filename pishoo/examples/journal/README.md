@@ -64,12 +64,12 @@ genmeta build --no-build pishoo/examples/journal/app.toml --id alice.smith.dhttp
 
 页面、脚本、样式、照片和 API 都经过宿主 daccess。`public` 是资源目录名，不表示匿名公开。
 
-Lib 显式声明以下业务能力组，安装时由宿主登记到 `config.db`，原生 `GET /std/acl/capabilities` 提供只读目录：
+Lib 显式声明以下业务能力组，安装时由宿主登记到 `config.db`，原生 `GET /std/acl/promissions` 提供只读目录：
 
-| 完整能力 ID | 标题 | 业务操作 |
-| --- | --- | --- |
-| `alice.smith.dhttp.net/journal#read` | 阅读 | GET context、entries、entry、photo、comments |
-| `alice.smith.dhttp.net/journal#comment` | 评论 | POST comments（留言及回复） |
+| 权限组名称 | 业务操作 |
+| --- | --- |
+| 阅读 | GET context、entries、entry、photo、comments |
+| 评论 | POST comments（留言及回复） |
 
 以上路径均位于 `/std/journal/`。评论组不隐含阅读组；希望访客阅读并留言时，应同时授予两组相应操作。主人新建、修改、删除手记以及删除留言不属于访客能力组，继续校验真实主人身份。App 静态资源不登记为 Lib 能力，请另外配置 `/std/journal/` 和两个 assets 的 GET/HEAD 访问规则。能力声明和安装不会自动授权，也不会改写旧路径 ACL。
 

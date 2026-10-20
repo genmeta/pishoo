@@ -10,7 +10,7 @@ afterEach(() => { globalThis.fetch = originalFetch })
 function backend(options: { endpoints?: Array<{ method: string; path: string }>; grants?: RulesByGrantee; expired?: boolean; failPath?: string; status?: string | number; failAcceptance?: boolean; acceptanceRace?: 'active' | 'blocked' | 'replacement' } = {}) {
   const now = Math.floor(Date.now() / 1000)
   const endpoints = options.endpoints ?? [{ method: 'POST', path: '/std/message' }]
-  const capability = { id: 'std.dhttp.net/message/message', version: '0.3.0', endpoints }
+  const capability = { id: 'message', version: JSON.stringify([...endpoints].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.method < b.method ? -1 : a.method > b.method ? 1 : 0)), endpoints }
   const contact = {
     id: 7, name: 'alice.smith.dhttp.net', subject_id: 'a'.repeat(64), status: options.status ?? 'active', created_at: now - 60,
     expired_after: now + (options.expired ? -1 : 3600),
@@ -23,7 +23,11 @@ function backend(options: { endpoints?: Array<{ method: string; path: string }>;
     const url = new URL(String(input), 'http://localhost')
     const json = (value: unknown) => Response.json(value)
     if (url.pathname === '/std/profile') return json({ identity_name: 'bob.dhttp.net' })
-    if (url.pathname === '/std/acl/capabilities') return json([capability])
+    if (url.pathname === '/std/acl/promissions') {
+      const paths: Record<string, string[]> = {}
+      for (const endpoint of endpoints) (paths[endpoint.path] ??= []).push(endpoint.method)
+      return json({ message: paths })
+    }
     if (url.pathname === '/std/contacts') return json({ items: [contact], total: 1 })
     if (url.pathname === `/std/contact/${contact.name}`) {
       if (init?.method === 'PATCH') {
@@ -151,3 +155,39 @@ for (const acceptanceRace of ['blocked', 'replacement'] as const) {
     await expect(chatApi.grantCapability(contact.name, capability.id, { requestId: contact.id, version: capability.version })).rejects.toThrow('Contact changed')
   })
 }
+
+test('permission groups expose paths and deduplicated methods to local and remote discovery', async () => {
+  const calls: string[] = []
+  globalThis.fetch = (async (input) => {
+    calls.push(String(input))
+    return Response.json({ 'read message': { '/std/message/history': ['GET'], '/std/message': ['HEAD', 'GET', 'GET'] } })
+  }) as typeof fetch
+  const local = await api.capabilities()
+  const remote = await api.capabilities(undefined, 'alice.dhttp.net')
+  expect(calls).toEqual(['/std/acl/promissions', '/std/dhttp/alice.dhttp.net/std/acl/promissions'])
+  expect(remote).toEqual(local)
+  expect(local[0]).toMatchObject({ id: 'read message', title: 'read message', endpoints: [
+    { method: 'GET', path: '/std/message' }, { method: 'HEAD', path: '/std/message' },
+    { method: 'GET', path: '/std/message/history' },
+  ] })
+})
+
+for (const catalog of [[], null, { message: [] }, { message: { '/std/message': 'POST' } }, { message: { '/std/message': [null] } }]) {
+  test(`rejects a malformed permission catalog: ${JSON.stringify(catalog)}`, async () => {
+    globalThis.fetch = (async () => Response.json(catalog)) as typeof fetch
+    await expect(api.capabilities()).rejects.toBeInstanceOf(Error)
+  })
+}
+
+test('an empty permission catalog is an empty object', async () => {
+  globalThis.fetch = (async () => Response.json({})) as typeof fetch
+  expect(await api.capabilities()).toEqual([])
+})
+
+test('changed permission operations reject an approval before any ACL writes', async () => {
+  const { capability, contact } = backend()
+  const initial = (await api.capabilities())[0]!
+  capability.endpoints.push({ method: 'GET', path: '/std/message/history' })
+  await expect(chatApi.grantCapability(contact.name, initial.id, { requestId: contact.id, version: initial.version }))
+    .rejects.toThrow('Capability or contact request changed')
+})

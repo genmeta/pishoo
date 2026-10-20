@@ -13,6 +13,7 @@ use tokio_util::io::ReaderStream;
 use self::proxy::proxy;
 use crate::{Error, Result, setup::ProxyLocation};
 mod access;
+mod capabilities;
 mod outbound;
 
 mod proxy;
@@ -20,6 +21,7 @@ mod proxy;
 pub(crate) const DHTTP_PREFIX: &str = "/std/dhttp/";
 
 pub(crate) use access::{access_router, authorize};
+pub(crate) use capabilities::capabilities_router;
 pub(crate) use outbound::forward_dhttp;
 
 pub(crate) fn reserved(path: &str) -> bool {

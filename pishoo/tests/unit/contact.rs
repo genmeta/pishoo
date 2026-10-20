@@ -223,3 +223,57 @@ async fn background_jobs_reuse_the_supplied_connection_and_release_transactions(
     assert!(outcome.2.is_some_and(|error| !error.is_empty()));
     assert!(!profile.join("db/contact.db").exists());
 }
+
+#[tokio::test]
+async fn selected_permission_titles_resolve_to_actual_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    std::fs::create_dir_all(profile.db_dir()).unwrap();
+    let db = Connection::open(profile.config_db_path()).unwrap();
+    db.execute_batch(include_str!("../../src/package/packages.sql"))
+        .unwrap();
+    db.execute_batch("INSERT INTO libs (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
+        INSERT INTO lib_capabilities VALUES ('message', 'read', 'read message'), ('message', 'history', 'read message');
+        INSERT INTO lib_capability_operations VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'history', 'GET', '/std/message/history');").unwrap();
+    assert_eq!(
+        catalog(&profile).unwrap(),
+        json!({"read message":{"/std/message":["GET","HEAD"],"/std/message/history":["GET"]}})
+    );
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let operations = selected(
+        &profile,
+        &endpoint,
+        &json!(["read message"]),
+        endpoint.name(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        requested(&operations),
+        json!({"/std/message":["GET","HEAD"],"/std/message/history":["GET"]})
+    );
+    assert_eq!(
+        selected(
+            &profile,
+            &endpoint,
+            &json!(["read message", "read message"]),
+            endpoint.name()
+        )
+        .await
+        .unwrap_err()
+        .0,
+        400
+    );
+    assert_eq!(
+        selected(
+            &profile,
+            &endpoint,
+            &json!(["dev.dhttp.net/message#read"]),
+            endpoint.name()
+        )
+        .await
+        .unwrap_err()
+        .0,
+        409
+    );
+}

@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createResource, createSignal, on, onCleanup } from 'solid-js'
 
-import { ApiError, api, request } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { CapabilityDescriptor } from '../api/types'
 import { Avatar, Dialog, ErrorState, LoadingState } from '../components/Ui'
 import { useI18n } from '../i18n'
@@ -24,10 +24,9 @@ export default function AddContactPage(props: {
     return name && name !== normalizeIdentityName(props.ownerName) ? name : false
   }, abortable(async (name: string, signal: AbortSignal) => {
     const [catalog, profile] = await Promise.all([
-      request<CapabilityDescriptor[]>(`/std/dhttp/${encodeURIComponent(name)}/std/acl/capabilities`, { signal }),
+      api.capabilities(signal, name),
       api.publicProfile(name, signal),
     ])
-    if (!Array.isArray(catalog)) throw new ApiError(502, 'Remote capability catalog unknown or awaiting access approval')
     if ((profile.display_name !== null && typeof profile.display_name !== 'string') || !Number.isFinite(profile.updated_at)) {
       throw new ApiError(502, 'Remote profile unknown or awaiting access approval')
     }
@@ -252,7 +251,7 @@ function CapabilityOption(props: {
   onToggle: () => void
 }) {
   const { t } = useI18n()
-  const name = () => props.capability.id === 'std.dhttp.net/message#message'
+  const name = () => props.capability.endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')
     ? t('capabilities.chat.name') : props.capability.title
   return (
     <label class="capability-option">
@@ -260,7 +259,7 @@ function CapabilityOption(props: {
         aria-label={`${name()} — ${props.direction === 'requested' ? t('outbound.requestedCapabilities') : t('outbound.offeredCapabilities')}`} />
       <span>
         <strong>{name()}</strong>
-        <Show when={props.capability.id === 'std.dhttp.net/message#message'}>
+        <Show when={props.capability.endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')}>
           <small>{t(props.direction === 'requested'
             ? 'outbound.capability.chat.requestSummary'
             : 'outbound.capability.chat.offerSummary')}</small>

@@ -39,7 +39,7 @@ Pishoo and pishoo-common advance to 0.9.0-preview.3. The unchanged SDK remains
   persistent registration, signed expanded files and preserved private data.
 - Add separate Workspace and Calendar Apps and Profile, Message and Calendar Libs
   under `std/`; publish and install these business packages independently.
-- Expose the installed Lib access groups through native `GET /std/acl/capabilities`.
+- Expose the installed Lib access groups through native `GET /std/acl/promissions`.
 - Export the identity 0.2.0 guest API through pishoo-sdk 0.1.0-preview.2.
 
 ### Changed

@@ -631,7 +631,7 @@ Content-Type: application/json
       "target_name": "alice.dhttp.net",
       "description": "Bob",
       "requested_capabilities": [
-        "std.dhttp.net/message#message"
+        "message"
       ],
       "offered_capabilities": [],
       "status": "queued",
@@ -668,7 +668,7 @@ Cache-Control: no-store
   "target_name": "alice.dhttp.net",
   "description": "Bob",
   "requested_capabilities": [
-    "std.dhttp.net/message#message"
+    "message"
   ],
   "offered_capabilities": [],
   "status": "queued",
@@ -705,7 +705,7 @@ Content-Type: application/json
   "target_name": "alice.dhttp.net",
   "description": "Bob",
   "requested_capabilities": [
-    "std.dhttp.net/message#message"
+    "message"
   ],
   "offered_capabilities": []
 }
@@ -717,8 +717,8 @@ Content-Type: application/json
 | --- | --- | --- | --- | --- | --- |
 | 请求体 | target_name | string | 是 | — | 目标身份，不能是自己 |
 | 请求体 | description | string | 是 | — | 最多 80 字符，不接受控制字符 |
-| 请求体 | requested_capabilities | string[] | 是 | — | 对方目录中的完整能力 ID，不重复 |
-| 请求体 | offered_capabilities | string[] | 是 | — | 本机目录中的完整能力 ID，不重复 |
+| 请求体 | requested_capabilities | string[] | 是 | — | 对方目录中的权限组名称，不重复 |
+| 请求体 | offered_capabilities | string[] | 是 | — | 本机目录中的权限组名称，不重复 |
 | 请求头 | Content-Type | string | 否 | 不校验该头 | 请求体按 JSON 解析，示例使用 application/json |
 
 **响应示例**
@@ -732,7 +732,7 @@ Content-Type: application/json
   "target_name": "alice.dhttp.net",
   "description": "Bob",
   "requested_capabilities": [
-    "std.dhttp.net/message#message"
+    "message"
   ],
   "offered_capabilities": [],
   "status": "queued",
@@ -748,7 +748,7 @@ Content-Type: application/json
 
 **说明与错误**
 
-四个字段均必填。description 最多 80 字符，不接受控制字符；两个能力数组存放完整能力 ID，不能重复，必须存在于相应一方能力目录。不能向自己申请，请求体最大 64 KiB。
+四个字段均必填。description 最多 80 字符，不接受控制字符；两个能力数组存放权限组名称，不能重复，必须存在于相应一方能力目录。不能向自己申请，请求体最大 64 KiB。
 
 成功返回 201，响应为 `GET /std/contact/requests` 的单条记录。相同目标已有 queued/pending 申请时返回 409。若 offered_capabilities 非空，处理器还会核验远端身份并写入相应本地授权；创建操作可能发起远端请求。
 
@@ -811,7 +811,7 @@ Content-Type: application/json
   "target_name": "alice.dhttp.net",
   "description": "Bob",
   "requested_capabilities": [
-    "std.dhttp.net/message#message"
+    "message"
   ],
   "offered_capabilities": [],
   "status": "queued",
@@ -835,14 +835,14 @@ Content-Type: application/json
 
 grantee 可为具体身份、`组名@签发者`、`**`（具名）、`?`（匿名）、`*?`（全部）。修改规则须保留 ACL 管理作用域至少一位精确身份或组的 allow 管理员。
 
-### 3.1 `GET /std/acl/capabilities`
+### 3.1 `GET /std/acl/promissions`
 
 读取已登记 Lib 的业务能力目录。
 
 **请求示例**
 
 ```http
-GET /std/acl/capabilities
+GET /std/acl/promissions
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -857,27 +857,17 @@ Accept: application/json
 200 OK
 Content-Type: application/json
 
-[
-  {
-    "id": "std.dhttp.net/message#message",
-    "title": "message",
-    "version": "0.1.0",
-    "visibility": "contact",
-    "approval_mode": "capability",
-    "selectable": true,
-    "endpoints": [
-      {
-        "method": "POST",
-        "path": "/std/message"
-      }
-    ]
+{
+  "read message": {
+    "/std/message": ["GET", "HEAD"],
+    "/std/message/history": ["GET"]
   }
-]
+}
 ```
 
 **说明与错误**
 
-id 格式为完整 Lib ID 加 `#能力组`，version 为已登记 Lib 版本。响应带 no-store。新身份默认允许匿名 GET，已有身份仍以自己的 ACL 为准；目录登记或安装不自动授权。
+顶层键为已登记 Lib 的 access-group title，值为路径到大写 HTTP 方法数组的映射。同名组按路径合并，方法排序去重；空目录为 `{}`。不返回 id、版本、visibility、approval_mode、selectable 或 endpoints 元数据。联系人申请中的 requested_capabilities/offered_capabilities 使用这些权限组名称。响应带 no-store。新身份默认允许匿名 GET，已有身份仍以自己的 ACL 为准；目录登记或安装不自动授权。
 
 ### 3.2 `GET /std/acl/access`
 
