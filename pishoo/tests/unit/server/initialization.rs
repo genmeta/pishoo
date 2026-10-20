@@ -89,7 +89,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path(), "alice");
     let config = load_server_config(&profile).unwrap();
-    assert_eq!(config.listen, 3);
+    assert_eq!(config.listen, "all");
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     let columns: Vec<String> = db
         .prepare("PRAGMA table_info(settings)")
@@ -98,8 +98,8 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         .unwrap()
         .collect::<std::result::Result<_, _>>()
         .unwrap();
-    assert_eq!(columns, ["listen", "enabled"]);
-    assert!(config.enabled);
+    assert_eq!(columns, ["listen"]);
+    assert_ne!(config.listen, "off");
     assert!(config.proxy_locations.is_empty());
     for table in [
         "libs",
@@ -165,7 +165,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             (Method::POST, "/std/acl/promissions"),
             (Method::GET, "/std/acl/access"),
             (Method::GET, "/std/acl/allow"),
-            (Method::GET, "/std/sys/settings"),
+            (Method::GET, "/std/sys/listen"),
             (Method::PATCH, "/std/profile"),
             (Method::PUT, "/std/profile/avatar"),
             (Method::DELETE, "/std/profile/avatar"),
@@ -264,9 +264,9 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
             .unwrap();
     }
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("UPDATE settings SET listen=1; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
+    db.execute_batch("UPDATE settings SET listen='internal'; INSERT INTO proxy_locations VALUES('/service','127.0.0.1:8080');").unwrap();
     let config = load_server_config(&profile).unwrap();
-    assert_eq!(config.listen, 1);
+    assert_eq!(config.listen, "internal");
     assert_eq!(config.proxy_locations.len(), 1);
     let reopened = load_access(&profile, &subject).await.unwrap();
     assert!(matches!(
@@ -522,7 +522,7 @@ fn unknown_config_is_preserved_and_empty_config_recovers() {
     let root = tempfile::tempdir().unwrap();
     let empty = profile(root.path(), "empty");
     std::fs::write(empty.config_db_path(), []).unwrap();
-    assert_eq!(load_server_config(&empty).unwrap().listen, 3);
+    assert_eq!(load_server_config(&empty).unwrap().listen, "all");
     for (name, sql) in [
         (
             "unknown",
@@ -676,8 +676,8 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
     crate::setup::config_database(
         &profile,
         &Method::PATCH,
-        &http::Uri::from_static("/std/sys/settings"),
-        Some(serde_json::json!({"listen":2})),
+        &http::Uri::from_static("/std/sys/listen"),
+        Some(serde_json::json!({"listen":"external"})),
     )
     .unwrap();
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())

@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use dhttp_home::DhttpHome;
 use tokio::time::Instant;
 
+use super::*;
 use super::{
     ocsp::renew_ocsp,
     run::{discover_profiles, load_profile, ocsp_ticks, parse_account_homes, reconcile_profiles},
 };
-use super::*;
 use crate::{Error, setup::load_server_config};
 
 #[tokio::test]
@@ -298,7 +298,7 @@ async fn server(root: &std::path::Path) -> Server {
     std::fs::create_dir_all(profile.join("logs")).unwrap();
     std::fs::create_dir_all(profile.join("libs/echo")).unwrap();
     let db = rusqlite::Connection::open(profile.db_dir().join("config.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen TEXT); INSERT INTO settings(listen) VALUES('loopback'); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     crate::setup::load_server_config(&profile).unwrap();
     crate::package::install_lib(
@@ -508,7 +508,8 @@ async fn lib_root_symlink_does_not_grant_a_foreign_directory() {
 #[tokio::test]
 async fn disabled_listener_is_rejected_before_network_registration() {
     let root = tempfile::tempdir().unwrap();
-    let server = server(root.path()).await;
+    let mut server = server(root.path()).await;
+    server.config.listen = "off".into();
     assert!(matches!(
         server.listen().await,
         Err(Error::InvalidConfig(_))
@@ -539,7 +540,9 @@ async fn disabled_profile_skips_credentials_libs_and_workers() {
 #[tokio::test]
 async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server() {
     let root = tempfile::tempdir().unwrap();
-    let server = server(root.path()).await;
+    dhttp::DhttpNetwork::init().await.unwrap();
+    let mut server = server(root.path()).await;
+    server.listener = Some(server.listen().await.unwrap());
     let name = server.name().to_owned();
     let profile = server.profile.clone();
     let sandbox_lib = server
@@ -558,7 +561,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     crate::setup::config_database(
         &profile,
         &http::Method::PATCH,
-        &"/std/sys/proxies".parse().unwrap(),
+        &"/std/sys/forward".parse().unwrap(),
         Some(serde_json::json!({"location":"/live", "proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
@@ -607,7 +610,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     )
     .await
     .unwrap();
-    assert_eq!(servers[&name].config.listen, 0);
+    assert_eq!(servers[&name].config.listen, "loopback");
     // Invalid SQL contents keep the loaded configuration; a repaired row is
     // visible through the same long-lived connection on the next scan.
     db.execute("DELETE FROM settings", []).unwrap();
@@ -623,9 +626,9 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
         .unwrap()
     );
     assert!(servers.contains_key(&name));
-    assert!(servers[&name].config.enabled);
+    assert_ne!(servers[&name].config.listen, "off");
     assert!(servers[&name].config_db.lock().unwrap().is_autocommit());
-    db.execute("INSERT INTO settings(listen, enabled) VALUES(0, 0)", [])
+    db.execute("INSERT INTO settings(listen) VALUES('off')", [])
         .unwrap();
     reconcile_profiles(
         &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
@@ -795,15 +798,15 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
-    assert_eq!(response.headers()[http::header::CONTENT_TYPE], "application/json");
+    assert_eq!(
+        response.headers()[http::header::CONTENT_TYPE],
+        "application/json"
+    );
     let bytes = axum::body::to_bytes(response.into_body(), 65536)
         .await
         .unwrap();
     let values: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        values,
-        json!({"1v1聊天":{"/std/message":["POST"]}})
-    );
+    assert_eq!(values, json!({"1v1聊天":{"/std/message":["POST"]}}));
     // Builtin ACL, Contact and Package do not become WASM capabilities.
     assert_eq!(values.as_object().unwrap().len(), 1);
     crate::package::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
@@ -1143,7 +1146,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         (Method::GET, "/workspace-other/"),
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
-        (Method::GET, "/std/sys/settings"),
+        (Method::GET, "/std/sys/listen"),
     ] {
         let response = server
             .router
@@ -1196,7 +1199,7 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
     for operation in ["disable", "remove", "off", "external"] {
         let root = tempfile::tempdir().unwrap();
         let mut server = server(root.path()).await;
-        server.config.listen = 1;
+        server.config.listen = "internal".into();
         let runtime = server.sandbox.read().unwrap().runtime.clone();
         let name = server.name().to_owned();
         for instance in &instances {
@@ -1233,9 +1236,9 @@ async fn stopping_identity_removes_all_mdns_records_before_waiting_for_tasks() {
             }
             operation => {
                 let sql = match operation {
-                    "disable" => "UPDATE settings SET enabled=0, listen=1",
-                    "off" => "UPDATE settings SET listen=0",
-                    "external" => "UPDATE settings SET listen=2",
+                    "disable" => "UPDATE settings SET listen='off'",
+                    "off" => "UPDATE settings SET listen='off'",
+                    "external" => "UPDATE settings SET listen='external'",
                     _ => unreachable!(),
                 };
                 rusqlite::Connection::open(server.profile.config_db_path())
