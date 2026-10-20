@@ -6,7 +6,10 @@ use futures::{FutureExt, StreamExt};
 use tower::ServiceExt;
 
 use super::*;
-use crate::sandbox::tests::{package_fixture, publisher};
+use crate::package::tests::{package_fixture, publisher};
+use crate::package::{STORE_NAME, STORE_OWNER, package_metadata};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[allow(dead_code)]
 #[path = "../../support/network_credentials.rs"]
@@ -26,74 +29,19 @@ impl Resolve for Peer {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "run alone; owns temporary TLS/DNS/home, needs OpenSSL 3 and loopback UDP"]
+#[ignore = "run alone; owns temporary TLS/DNS, needs OpenSSL 3 and loopback UDP"]
 async fn store_app_install_downloads_shared_transitive_dependencies_and_preserves_them() {
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter("warn,pishoo=debug,dhttp=debug")
+        .with_test_writer()
+        .try_init();
     let root = tempfile::tempdir().unwrap();
     credentials::generate_with_owner(
         root.path(),
         &[("alice", "alice.dhttp.net"), ("store", "store.dhttp.net")],
         Some((STORE_NAME, STORE_OWNER)),
     );
-    let previous = std::env::var_os("DHTTP_HOME");
-    unsafe {
-        std::env::set_var("DHTTP_HOME", root.path());
-    }
-    let _environment = scopeguard::guard(previous, |value| unsafe {
-        match value {
-            Some(value) => std::env::set_var("DHTTP_HOME", value),
-            None => std::env::remove_var("DHTTP_HOME"),
-        }
-    });
-    // Exercise the actual packaging CLI with temporary signer credentials.
-    let tool = std::env::var_os("GENMETA_PACK_TEST_BIN")
-        .expect("set GENMETA_PACK_TEST_BIN to the current gmutils executable");
-    for kind in ["app", "lib"] {
-        let input = root.path().join(format!("tool-{kind}"));
-        std::fs::create_dir_all(input.join(if kind == "app" { "public" } else { "metadata" }))
-            .unwrap();
-        let mut config = format!(
-            "[package]\nname = \"alice.dhttp.net/tool-{kind}\"\nversion = \"1.0.0\"\ndescription = \"CLI packaging acceptance\"\nlicense = \"MIT\"\n[package.pishoo]\nkind = \"{kind}\"\ntitle = \"Tool acceptance\"\nchangelog = \"First release; no existing data\"\ndependencies = []\n"
-        );
-        if kind == "app" {
-            config.push_str("entry = \"/\"\n[fs]\n\"/public\" = \"public\"\n");
-            std::fs::write(input.join("public/index.html"), b"Packaged frontend").unwrap();
-        } else {
-            config.push_str("host = {}\n[[module]]\nname = \"backend\"\nsource = \"lib.wasm\"\n[fs]\n\"/metadata\" = \"metadata\"\n");
-            std::fs::write(
-                input.join("lib.wasm"),
-                include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-            )
-            .unwrap();
-            std::fs::write(input.join("metadata/openapi.json"),br#"{"openapi":"3.1.0","info":{"title":"API","version":"1.0.0"},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}}"#).unwrap();
-        }
-        std::fs::write(input.join("wasmer.toml"), config).unwrap();
-        let output = input.join(format!("{kind}.webc"));
-        let result = std::process::Command::new(&tool)
-            .args(["package", "build", "--no-build"])
-            .arg(input.join("wasmer.toml"))
-            .arg("--output")
-            .arg(&output)
-            .args(["--id", "alice.dhttp.net"])
-            .env(
-                "DHTTP_ROOT_CA_PEM",
-                std::fs::read_to_string(root.path().join("ca.crt")).unwrap(),
-            )
-            .output()
-            .expect(
-                "build gmutils and provide a publisher validation API before this acceptance test",
-            );
-        assert!(
-            result.status.success(),
-            "packaging {kind}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let package = read_package(&std::fs::read(&output).unwrap()).unwrap();
-        assert_eq!(package_metadata(&package).unwrap()["kind"], kind);
-        assert_eq!(package.atoms().len(), usize::from(kind == "lib"));
-        if kind == "app" {
-            assert!(package_file(&package, "/metadata/openapi.json").is_err());
-        }
-    }
     dhttp::DhttpNetwork::init().await.unwrap();
     qtls::RootCerts::set([qtls::CertificateDer::from(
         std::fs::read(root.path().join("ca.der")).unwrap(),
@@ -105,23 +53,46 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
         .add(socket.clone())
         .unwrap()
         .unwrap();
+    qprotocol::AddressBook::global()
+        .insert_inner(&socket, address)
+        .unwrap();
     let _socket = scopeguard::guard(socket, |socket| {
         qprotocol::Dock::global().remove(&socket);
     });
+    // QUIC does not pair an endpoint with itself. Keep a distinct loopback
+    // binding for the client, with both sockets owned by this isolated test.
+    let outgoing = Arc::new(qprotocol::UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap());
+    let outgoing_address = EndpointAddr::direct(outgoing.local_addr().unwrap());
+    qprotocol::Dock::global()
+        .add(outgoing.clone())
+        .unwrap()
+        .unwrap();
+    qprotocol::AddressBook::global()
+        .insert_inner(&outgoing, outgoing_address)
+        .unwrap();
+    let _outgoing = scopeguard::guard(outgoing, |socket| {
+        qprotocol::Dock::global().remove(&socket);
+    });
     dhttp::resolve::Resolver::add(Arc::new(Peer(address)));
-    let client = dhttp::Endpoint::load("alice").await.unwrap();
-    let store = dhttp::Endpoint::load("store").await.unwrap();
+    let client = dhttp::Endpoint::load_from(root.path().join("alice"))
+        .await
+        .unwrap();
+    let store = dhttp::Endpoint::load_from(root.path().join("store"))
+        .await
+        .unwrap();
     let signer = publisher("alice.dhttp.net", 'a');
     let mut files = BTreeMap::new();
     for (kind, name, deps) in [
         ("lib", "chat", vec![]),
         ("lib", "workspace", vec!["chat"]),
         ("app", "workspace", vec!["workspace", "chat"]),
+        ("lib", "blocked", vec![]),
     ] {
         let dependencies=deps.into_iter().map(|name|serde_json::json!({"publisher":"alice.dhttp.net","name":name,"version":"1.0.0"})).collect::<Vec<_>>();
+        let route = if name == "blocked" { "chat" } else { name };
         let document = serde_json::json!({"openapi":"3.1.0","info":{"title":name,"version":"1.0.0","description":"Installation acceptance","license":{"name":"MIT"}},
             "x-pishoo":{"kind":kind,"publisher":"alice.dhttp.net","name":name,"entry":"/","host":{},"dependencies":dependencies},
-            "paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload"}}}});
+            "paths":{(format!("/{route}/upload")):{"post":{"operationId":"upload","summary":"Upload"}}}});
         let public = if kind == "app" {
             webc::v3::write::Directory::new(
                 BTreeMap::from([("index.html".parse().unwrap(), b"Workspace".to_vec().into())]),
@@ -211,20 +182,51 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(runtime)));
-    let installed = install_store_app(
-        &profile,
-        &client,
-        "alice.dhttp.net",
-        "workspace",
-        "1.0.0",
-        &sandbox,
+    let management =
+        crate::package::lib_management_router(profile.clone(), client.clone(), sandbox.clone());
+    let authority = client.local_authority().unwrap();
+    let ski =
+        dhttp_home::certificate::extract_dhttp_subject_key_identifier(authority.certificates())
+            .unwrap();
+    let owner = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes()).unwrap();
+    let request = || {
+        let mut request = http::Request::builder()
+            .method(http::Method::PUT)
+            .uri("/std/sys/app?name=workspace")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({"publisher":"alice.dhttp.net","version":"1.0.0"}).to_string(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(access_control::Visitor::new(client.name(), owner.clone()));
+        request
+    };
+    let response = management.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let installed: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
     )
-    .await
     .unwrap();
     assert_eq!(installed["kind"], "app");
     assert!(installed.get("openapi").is_none());
     assert_eq!(sandbox.read().unwrap().libs.len(), 2);
     assert_eq!(sandbox.read().unwrap().apps.len(), 1);
+    assert!(
+        sandbox.read().unwrap().libs["alice.dhttp.net/chat"]
+            .package
+            .get_volume("pishoo-signature")
+            .is_none()
+    );
+    assert!(
+        sandbox.read().unwrap().apps["alice.dhttp.net/workspace"]
+            .get_volume("pishoo-signature")
+            .is_none()
+    );
     let conn = rusqlite::Connection::open(profile.config_db_path()).unwrap();
     let counts:(i64,i64,i64,i64)=conn.query_row("SELECT (SELECT count(*) FROM libs),(SELECT count(*) FROM apps),(SELECT count(*) FROM lib_dependencies),(SELECT count(*) FROM app_dependencies)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
     assert_eq!(counts, (2, 1, 1, 2));
@@ -237,31 +239,171 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
             .count(),
         1
     );
-    install_store_app(
-        &profile,
-        &client,
-        "alice.dhttp.net",
-        "workspace",
-        "1.0.0",
-        &sandbox,
+    let before = conn
+        .prepare("SELECT name,author,version FROM libs ORDER BY name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let edges = conn
+        .prepare(
+            "SELECT app_name,lib_name,version FROM app_dependencies ORDER BY app_name,lib_name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let response = management.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let repeated: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
     )
-    .await
     .unwrap();
+    assert_eq!(repeated["id"], installed["id"]);
+    assert_eq!(repeated["version"], installed["version"]);
+    assert_eq!(repeated["dependencies"], installed["dependencies"]);
+    let after = conn
+        .prepare("SELECT name,author,version FROM libs ORDER BY name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let repeated_edges = conn
+        .prepare(
+            "SELECT app_name,lib_name,version FROM app_dependencies ORDER BY app_name,lib_name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(edges, repeated_edges);
+    assert_eq!(sandbox.read().unwrap().libs.len(), 2);
+    assert_eq!(sandbox.read().unwrap().apps.len(), 1);
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM apps", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM lib_dependencies", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
     assert_eq!(
         requests
             .lock()
             .unwrap()
             .iter()
-            .filter(|p| p.ends_with("/chat/versions/1.0.0/lib.webc"))
+            .filter(|path| path.ends_with("/chat/versions/1.0.0/lib.webc"))
+            .count(),
+        2
+    );
+
+    // This name is unregistered, so the early author/name conflict check cannot
+    // reject it. The valid signed input must be downloaded before its route
+    // conflicts with chat. Preparing a rejected Lib must not create a flat data
+    // directory that would hide another author's existing legacy data later.
+    let legacy = profile.join("db/bob.dhttp.net/blocked");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("keep.db"), b"legacy blocked data").unwrap();
+    assert!(!profile.join("db/blocked").exists());
+    let chat = sandbox.read().unwrap().libs["alice.dhttp.net/chat"].clone();
+    let mut rejected = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri("/std/sys/lib?name=blocked")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({"publisher":"alice.dhttp.net","version":"1.0.0"}).to_string(),
+        ))
+        .unwrap();
+    rejected
+        .extensions_mut()
+        .insert(access_control::Visitor::new(client.name(), owner.clone()));
+    let response = management.clone().oneshot(rejected).await.unwrap();
+    let status = response.status();
+    let error = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        http::StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&error)
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/blocked/versions/1.0.0/lib.webc"))
             .count(),
         1,
-        "reuse the exact installed package without another artifact download"
+        "the conflict must follow a real signed store download"
     );
-    assert!(super::super::super::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
-    super::super::super::remove_app(&profile, "alice.dhttp.net/workspace").unwrap();
-    assert!(super::super::super::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
-    super::super::super::remove_lib(&profile, "alice.dhttp.net/workspace").unwrap();
-    assert!(profile.join("libs/chat/.webc-proof").is_file());
+    assert!(!profile.join("db/blocked").exists());
+    assert!(!profile.join("libs/blocked.wasm").exists());
+    assert_eq!(
+        std::fs::read(legacy.join("keep.db")).unwrap(),
+        b"legacy blocked data"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM libs WHERE name='blocked'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(sandbox.read().unwrap().libs.len(), 2);
+    assert!(Arc::ptr_eq(
+        &chat,
+        &sandbox.read().unwrap().libs["alice.dhttp.net/chat"]
+    ));
+    assert!(
+        !sandbox
+            .read()
+            .unwrap()
+            .libs
+            .contains_key("alice.dhttp.net/blocked")
+    );
+    assert!(crate::package::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
+    crate::package::remove_app(&profile, "alice.dhttp.net/workspace").unwrap();
+    assert!(crate::package::remove_lib(&profile, "alice.dhttp.net/chat").is_err());
+    crate::package::remove_lib(&profile, "alice.dhttp.net/workspace").unwrap();
+    assert!(profile.join("libs/chat.wasm").is_file());
     sandbox.write().unwrap().load_libs(&profile).unwrap();
     assert_eq!(sandbox.read().unwrap().libs.len(), 1);
 }

@@ -115,6 +115,9 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
     let container =
         webc::Container::from_bytes_and_version(bytes.to_vec().into(), webc::Version::V3)
             .map_err(|_| invalid("malformed WEBC package"))?;
+    if container.get_volume("pishoo-signature").is_none() {
+        return Err(invalid("incoming package requires a publisher signature"));
+    }
     // Use an iterative bounded walk before any recursive dependency validator.
     let mut count = 0;
     for volume in container.volumes().values() {
@@ -136,14 +139,14 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
             "package must contain one backend atom without commands, bindings or dependencies",
         ));
     }
+    // Only installed runtime snapshots may use an old short-name alias. Every
+    // incoming release still has a canonical, signed publisher/name identity.
     let metadata = package_metadata(&container)?;
-    if metadata["kind"] == "app"
-        && [
-            "acl", "contact", "contacts", "sys", "pishoo", "file", "dhttp",
-        ]
-        .contains(&metadata["name"].as_str().unwrap())
-    {
-        return Err(invalid("App name conflicts with a native std service"));
+    if metadata.get("publisher").and_then(Value::as_str).is_none() {
+        return Err(invalid("package requires publisher/name"));
+    }
+    if metadata["kind"] == "app" && metadata["name"] == "std" {
+        return Err(invalid("App name conflicts with the native std namespace"));
     }
     let mappings = manifest
         .filesystem()
@@ -185,10 +188,10 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
         for item in wasmparser::Parser::new(0).parse_all(&backend) {
             if let wasmparser::Payload::CustomSection(section) =
                 item.map_err(|_| invalid("malformed backend"))?
-                && matches!(section.name(), "pishoo:openapi" | "pishoo:signature")
+                && section.name() == "pishoo:signature"
             {
                 return Err(invalid(
-                    "backend must not embed a second OpenAPI or publisher signature",
+                    "backend must not embed a second publisher signature",
                 ));
             }
         }
@@ -264,9 +267,68 @@ fn volume_files(
     Ok(files)
 }
 
-pub(super) fn package_file(container: &webc::Container, path: &str) -> Result<bytes::Bytes> {
+pub(crate) fn package_file(container: &webc::Container, path: &str) -> Result<bytes::Bytes> {
     if !file_path(path) {
         return Err(invalid("invalid logical package path"));
+    }
+    // OpenAPI is signed as part of the backend atom. Keep the historical logical
+    // path so policy, capability and runtime consumers all read the same bytes.
+    if path == "/metadata/openapi.json"
+        && let Some(backend) = container.get_atom("backend")
+    {
+        let mut document = None;
+        let mut depth = 0;
+        for item in wasmparser::Parser::new(0).parse_all(&backend) {
+            match item.map_err(|_| invalid("malformed backend"))? {
+                wasmparser::Payload::ModuleSection { .. }
+                | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+                wasmparser::Payload::End(_) if depth > 0 => depth -= 1,
+                wasmparser::Payload::CustomSection(section)
+                    if depth > 0 && section.name() == "pishoo:openapi" =>
+                {
+                    return Err(invalid(
+                        "OpenAPI must be embedded in the top-level backend component",
+                    ));
+                }
+                wasmparser::Payload::CustomSection(section)
+                    if depth == 0 && section.name() == "pishoo:openapi" =>
+                {
+                    if document.is_some() || section.data().len() > 1024 * 1024 {
+                        return Err(invalid("duplicate or oversized embedded OpenAPI"));
+                    }
+                    document = Some(bytes::Bytes::copy_from_slice(section.data()));
+                }
+                _ => {}
+            }
+        }
+        if let Some(document) = document {
+            let mappings = container
+                .manifest()
+                .filesystem()
+                .map_err(|_| invalid("invalid mappings"))?;
+            if let Some(mapping) = mappings.as_ref().and_then(|items| {
+                items
+                    .iter()
+                    .find(|mapping| mapping.mount_path == "/metadata")
+            }) {
+                let target = format!(
+                    "{}/openapi.json",
+                    mapping
+                        .host_path
+                        .as_deref()
+                        .unwrap_or("/")
+                        .trim_end_matches('/')
+                );
+                if container
+                    .get_volume(&mapping.volume_name)
+                    .and_then(|volume| volume.read_file(target.as_str()))
+                    .is_some()
+                {
+                    return Err(invalid("OpenAPI must have a single signed source"));
+                }
+            }
+            return Ok(document);
+        }
     }
     let mappings = container
         .manifest()
@@ -404,7 +466,7 @@ fn verify_signature(bytes: &[u8], container: &webc::Container, document: &Value)
     Ok(())
 }
 
-/// Derive package metadata from the signed manifest; never fall back to OpenAPI.
+/// Derive package metadata from the manifest; never fall back to OpenAPI.
 pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     let manifest = serde_json::to_value(container.manifest())
         .map_err(|_| invalid("invalid package manifest"))?;
@@ -412,12 +474,16 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     let annotation = &manifest["package"]["pishoo"];
     let id = text(wapm, "name")?;
     super::valid_id(id).map_err(|_| invalid("invalid full package identity"))?;
-    let (publisher, name) = id
-        .split_once('/')
-        .ok_or_else(|| invalid("package requires publisher/name"))?;
-    if dhttp_home::normalize_name(publisher).as_deref() != Some(publisher) {
-        return Err(invalid("publisher must be normalized"));
-    }
+    let (publisher, name) = match id.split_once('/') {
+        Some((publisher, name)) => {
+            if dhttp_home::normalize_name(publisher).as_deref() != Some(publisher) {
+                return Err(invalid("publisher must be normalized"));
+            }
+            (Some(publisher), name)
+        }
+        None if container.get_volume("pishoo-signature").is_none() => (None, id),
+        None => return Err(invalid("package requires publisher/name")),
+    };
     let version = text(wapm, "version")?;
     if !release_version(version) {
         return Err(invalid("version must be MAJOR.MINOR.PATCH"));
@@ -459,9 +525,15 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
             return Err(invalid("invalid, duplicate or self Lib dependency"));
         }
     }
-    let mut value = serde_json::json!({"id":id,"publisher":publisher,"name":name,"version":version,
+    let mut value = serde_json::json!({"id":id,"name":name,"version":version,
         "kind":kind,"title":text(annotation,"title")?,"description":text(wapm,"description")?,
-        "license":text(wapm,"license")?,"changelog":text(annotation,"changelog")?,"dependencies":dependencies});
+        "license":text(wapm,"license")?,"dependencies":dependencies});
+    if container.get_volume("pishoo-signature").is_some() || annotation.get("changelog").is_some() {
+        value["changelog"] = text(annotation, "changelog")?.into();
+    }
+    if let Some(publisher) = publisher {
+        value["publisher"] = publisher.into();
+    }
     if let Some(repository) = wapm.get("repository") {
         let raw = repository
             .as_str()
@@ -499,6 +571,9 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     } else {
         if annotation.get("entry").is_some() {
             return Err(invalid("lib forbids entry"));
+        }
+        if container.get_volume("pishoo-signature").is_none() && annotation.get("host").is_none() {
+            return Ok(value);
         }
         let host = annotation["host"]
             .as_object()
@@ -718,4 +793,104 @@ fn validate_imports(bytes: &[u8], host: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use webc::v3::{
+        SignatureAlgorithm, Timestamps,
+        write::{Directory, FileEntry, Writer},
+    };
+
+    #[test]
+    fn signed_lib_reads_embedded_openapi_without_a_sidecar() {
+        let document = serde_json::to_vec(&json!({
+            "openapi":"3.1.0", "info":{"title":"Embedded API","version":"1.0.0"},
+            "paths":{}
+        }))
+        .unwrap();
+        let mut backend = b"\0asm\x0d\0\x01\0".to_vec();
+        let mut payload = vec![b"pishoo:openapi".len() as u8];
+        payload.extend_from_slice(b"pishoo:openapi");
+        payload.extend_from_slice(&document);
+        backend.push(0);
+        let mut length = payload.len();
+        while length >= 0x80 {
+            backend.push((length as u8 & 0x7f) | 0x80);
+            length >>= 7;
+        }
+        backend.push(length as u8);
+        backend.extend_from_slice(&payload);
+        let authority = crate::package::tests::publisher("alice.dhttp.net", 'a');
+        let manifest: webc::metadata::Manifest = serde_json::from_value(json!({
+            "package":{
+                "wapm":{"name":"alice.dhttp.net/embedded","version":"1.0.0","description":"Embedded API","license":"MIT"},
+                "pishoo":{"kind":"lib","title":"Embedded","changelog":"First release","dependencies":[],"host":{}},
+                "fs":[{"volume_name":"metadata","mount_path":"/metadata"}]
+            },
+            "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
+        })).unwrap();
+        let atoms = || {
+            BTreeMap::from([(
+                "backend".parse().unwrap(),
+                FileEntry::borrowed(&backend, Timestamps::default()),
+            )])
+        };
+        let metadata = || Directory::new(BTreeMap::new(), Timestamps::default());
+        let unsigned = Writer::default()
+            .write_manifest(&manifest)
+            .unwrap()
+            .write_atoms(atoms())
+            .unwrap()
+            .with_volume("metadata", metadata())
+            .unwrap()
+            .finish(SignatureAlgorithm::None)
+            .unwrap();
+        let mut input = b"pishoo-webc-signature-v1\0".to_vec();
+        let digest = package_payload(&unsigned);
+        for index in (0..digest.len()).step_by(2) {
+            input.push(u8::from_str_radix(&digest[index..index + 2], 16).unwrap());
+        }
+        let signature = authority
+            .sign(qtls::SignatureScheme::ECDSA_NISTP256_SHA256, &input)
+            .unwrap();
+        let envelope = json!({"version":1,
+            "certificates":authority.certificates().iter().map(|cert|STANDARD.encode(cert.as_ref())).collect::<Vec<_>>(),
+            "signature":STANDARD.encode(signature)});
+        let reader = webc::v3::read::OwnedReader::parse(unsigned.clone()).unwrap();
+        let entry = &reader.index().manifest;
+        let bytes = Writer::default()
+            .write_raw_manifest(unsigned[entry.span.start + 41..entry.span.end()].to_vec())
+            .write_atoms(atoms())
+            .unwrap()
+            .with_volume("metadata", metadata())
+            .unwrap()
+            .with_volume(
+                "pishoo-signature",
+                Directory::new(
+                    BTreeMap::from([(
+                        "signature.json".parse().unwrap(),
+                        serde_json::to_vec(&envelope).unwrap().into(),
+                    )]),
+                    Timestamps::default(),
+                ),
+            )
+            .unwrap()
+            .finish(SignatureAlgorithm::None)
+            .unwrap();
+        let package = read_package(&bytes).unwrap();
+        assert_eq!(
+            package_file(&package, "/metadata/openapi.json").unwrap(),
+            document
+        );
+        assert!(
+            package
+                .get_volume("metadata")
+                .unwrap()
+                .read_file("/openapi.json")
+                .is_none()
+        );
+    }
 }

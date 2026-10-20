@@ -69,9 +69,14 @@ async fn rule(server: &Server, peer: &str, method: &str, path: &str, effect: &st
 }
 
 async fn jobs(server: &Server) {
-    crate::contact::contact_jobs(&server.profile, &server.endpoint, &server.access)
-        .await
-        .unwrap();
+    crate::contact::contact_jobs(
+        &server.profile,
+        &server.endpoint,
+        &server.access,
+        &server.contact_db,
+    )
+    .await
+    .unwrap();
     let native = native_router(server).layer(axum::middleware::from_fn_with_state(
         server.access.clone(),
         crate::routes::authorize,
@@ -152,7 +157,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             project.file_name().unwrap().to_str().unwrap()
         ));
         let result = std::process::Command::new(&genmeta)
-            .args(["package", "build", "--no-build"])
+            .args(["build", "--no-build"])
             .arg(&project)
             .args(["--id", "std.dhttp.net", "--output"])
             .arg(&output)
@@ -162,7 +167,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             .unwrap();
         assert!(
             result.status.success(),
-            "genmeta package build {}: {}",
+            "genmeta build {}: {}",
             project.display(),
             String::from_utf8_lossy(&result.stderr)
         );
@@ -172,8 +177,8 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             metadata["kind"], metadata["id"], metadata["version"]
         );
         let bytes = std::fs::read(output).unwrap();
-        let package = crate::sandbox::read_package(&bytes).unwrap();
-        let metadata = crate::sandbox::package_metadata(&package).unwrap();
+        let package = crate::package::read_package(&bytes).unwrap();
+        let metadata = crate::package::package_metadata(&package).unwrap();
         packages.push((metadata, bytes));
     }
     packages.sort_by_key(|(metadata, _)| metadata["kind"] == "app");
@@ -226,7 +231,10 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 "libs"
             };
             let name = metadata["name"].as_str().unwrap();
-            let path = format!("/std/sys/package/{category}/{name}");
+            let path = format!(
+                "/std/sys/{}?name={name}",
+                if category == "apps" { "app" } else { "lib" }
+            );
             let (status, body) = tokio::time::timeout(
                 Duration::from_secs(90),
                 owner_bytes(&server, Method::PUT, &path, bytes, "application/webc"),
@@ -299,7 +307,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &bob.endpoint,
         alice.name(),
         Method::PUT,
-        "/std/sys/package/apps/workspace",
+        "/std/sys/app?name=workspace",
         json!({}),
     )
     .await;
@@ -617,9 +625,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         "PASS request review: deduplicated pending request, approved retry, exactly-once receive; no persistent grant"
     );
     for server in &mut servers {
-        let db =
-            rusqlite::Connection::open(server.profile.join("db/std.dhttp.net/message/message.db"))
-                .unwrap();
+        let db = rusqlite::Connection::open(server.profile.join("db/message/message.db")).unwrap();
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('capability_decisions','capability_decision_events')", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
         let messages = db
             .query_row("SELECT count(*) FROM chat_messages", [], |r| {
@@ -651,10 +657,8 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 .status,
             access_control::ContactStatus::Active as i32
         );
-        let db = rusqlite::Connection::open(
-            reloaded.profile.join("db/std.dhttp.net/message/message.db"),
-        )
-        .unwrap();
+        let db =
+            rusqlite::Connection::open(reloaded.profile.join("db/message/message.db")).unwrap();
         assert_eq!(
             db.query_row("SELECT count(*) FROM chat_messages", [], |r| r
                 .get::<_, i64>(0))

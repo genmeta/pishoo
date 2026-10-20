@@ -147,30 +147,30 @@ const response = await fetch('/std/hello', {
 })
 ```
 
-App 安装于 `/std/hello/`；它与 `/std/hello` 是独立挂载。资源目录直接生成静态 GET/HEAD 路由，不生成 OpenAPI、operationId 或 static-file 注解。不存在的资源404，不支持的方法405；SPA 使用 hash 路由，没有隐式 index.html fallback。所有资源仍经过 daccess，public 不代表匿名公开。
+App 挂载于 `/hello/`。资源目录直接提供静态 GET/HEAD，不生成 OpenAPI、operationId 或 static-file 注解；前端页面深链接回退 public/index.html，缺失静态资源404，其他方法405。所有资源仍经过 daccess，public 不代表匿名公开；确切回退判定和当前限制见[包管理审查稿](package-management.md)。
 
 ## 打包、签名和发布
 
-1. Lib 写入一个 `backend` atom，只映射 `/metadata`，包含唯一 OpenAPI；App 零 atom，只映射 `/public`。
+1. Lib 写入一个 `backend` atom，保留可为空的 `/metadata` 映射，唯一 OpenAPI 嵌入 backend 顶层 `pishoo:openapi`；App 零 atom，只映射 `/public`。
 2. 两种包都填写 manifest 的 wapm/pishoo 注解和显式 dependencies；Lib 填写 host 用途，App 填写 entry=/。
 3. 构建工具核对包身份、版本、实际内容、路径、imports/exports 和文件限额；整包签名保护 manifest、atoms 及内容卷。
 4. 先发布依赖，再上传使用方。上传地址分别为 `/store/v1/libs/<publisher>/<name>/versions/<version>` 和 `/store/v1/apps/<publisher>/<name>/versions/<version>`，Content-Type 都是 `application/webc`。
 
 同一类型、发布者、名称、版本不可覆盖。修改前端或依赖只递增 App 自身版本；修改后端递增 Lib 版本，需要使用新后端的使用方再更新自身依赖。签名算法和限额见 [商店协议](../../../store-server/docs/webc-protocol.md)。旧测试包从源码重新构建，不拆包、改签或迁移历史记录。
 
-当前打包工具尚未实现上述 manifest 输入；实现完成前不要通过手改旧签名包或伪造 App OpenAPI 生成所谓新格式。
+构建器已支持上述源格式。独立商店本轮未调整，当前内嵌 OpenAPI 的新 Lib 与其发布校验仍有兼容缺口；详见[发布包规范](package-spec.md)和包管理审查项 R02。
 
 ## 安装和卸载
 
-商店安装继续调用 `POST /std/sys/package/store-install`，例如：
+商店安装和更新统一调用 `PUT /std/sys/app?name=hello` 或 `/std/sys/lib?name=hello`，Content-Type 为 application/json，例如：
 
 ```json
-{"kind":"app","publisher":"alice.smith.dhttp.net","name":"hello","version":"1.0.0"}
+{"publisher":"alice.smith.dhttp.net","version":"1.0.0"}
 ```
 
-kind 选择 app/lib；省略时仍按 lib 处理。两种包都递归解析精确 Lib 依赖，复用匹配版本，补装缺失版本；循环、版本冲突、同类短名冲突或代理范围冲突时拒绝。缺少依赖的本地文件安装不自动联网补装。
+路径选择 app/lib，name 只放 query，请求体恰好为 publisher、version。两种包都递归解析精确 Lib 依赖，复用匹配版本，补装缺失版本；循环、版本冲突、同类短名冲突或代理范围冲突时拒绝。不支持本地文件安装，CLI --file 和 Workspace 本地安装入口已删除。
 
-安装事实以 config.db 为准，启动不扫描导入未登记文件。完整包身份用于签名、依赖、管理地址和磁盘，普通访问使用 `/std/<name>/`、`/std/<业务路径>`。在线操作即时生效，离线 CLI 修改下次加载生效；单制品原子保存，不承诺跨包事务。
+安装事实以 config.db 为准，启动不扫描导入未登记文件。完整包身份用于签名、商店依赖和运行时键，宿主管理 query 和新磁盘路径使用短名，普通访问使用 `/<name>/`、`/std/<业务路径>`。在线操作即时生效；每个制品单独提交，不承诺跨数据库与文件系统的崩溃原子性或跨包事务。安装只保留七列登记及运行内容，验签和完整性检查归本次商店输入，不保存本地校验和或作者指纹。
 
 卸载 App 保留后端；被 App/Lib 依赖的 Lib 不允许单独卸载或不兼容更新。显式卸载也保留后端数据和既有权限。不增加自动清理、级联删除或 purge；不自动授予页面/API 权限。
 
@@ -197,7 +197,7 @@ let owner = request_identity::caller_is_owner();
 
 这些值来自宿主认证信息。匿名 caller 为 None；主人判断同时核对名称和 owner_hash。使用该导入时，在 WEBC `package.pishoo.host` 中说明 request-identity 的具体用途；使用身份签名时说明 signatures 的用途。
 
-持久数据写入当前 Lib 的 `/db`，对应身份目录下 `db/<publisher>/<name>/`。使用文件系统导入时，在 WEBC `package.pishoo.host` 中说明 private-storage 的用途。业务数据不进入 public、metadata 或发布包，卸载不自动清除数据与访问规则。
+持久数据写入当前 Lib 的 `/db`，对应身份目录下 `db/<name>/`，作者不参与新路径命名。已有作者目录中的数据保持兼容读取。使用文件系统导入时，在 WEBC `package.pishoo.host` 中说明 private-storage 的用途。业务数据不进入 public、metadata 或发布包，卸载不自动清除数据与访问规则。
 
 Lib 不获得通用宿主目录或命令执行能力。已批准的标准 WASI HTTP 出站仍经过既有宿主和 daccess，不由依赖或 host 用途声明授予权限；App 的 public 文件不作为 Lib 的预打开目录。
 
@@ -216,9 +216,9 @@ Lib 间调用通过标准 WASI HTTP 向 https://~/std/<业务路径> 发请求�
 ## 本仓打包入口
 
 ```sh
-genmeta package build --no-build WASMER.toml --output OUTPUT.webc --id NAME
+genmeta build --no-build WASMER.toml --output OUTPUT.webc --id NAME
 ```
 
-`wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向不嵌入 OpenAPI/签名的 Component。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、包级签名、调用宿主检查后原子写入输出，不生成 App OpenAPI 或改写源清单。
+`wasmer.toml` 包含 `[package]` 的完整 name/version/description/license、`[package.pishoo]` 的 kind/title/dependencies/changelog 与 App entry 或 Lib host；`[fs]` 仅映射 App `/public` 或 Lib `/metadata`。Lib 的唯一 `[[module]]` 必须名为 backend，source 指向 Component；OpenAPI 可作为唯一顶层 pishoo:openapi 嵌入，不嵌入另一份签名。输入路径相对 TOML 文件解析。打包器加载发布者实际凭据、本地包级签名后原子写入输出，实际安装/更新执行完整宿主校验，不生成 App OpenAPI 或改写源清单。
 
 Workspace 的构建与三包依赖顺序见 [Profile 后端](../../std/libs/profile/README.md)。

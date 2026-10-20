@@ -7,7 +7,13 @@ use http_body_util::{BodyExt, StreamBody};
 use wasmtime::StoreLimits;
 
 use super::{host::identity, *};
-use crate::Body;
+use crate::{
+    Body,
+    package::{
+        install_lib, installed_libs, read_package, remove_lib, tests::package_component,
+        validate_lib,
+    },
+};
 
 #[path = "sandbox/api.rs"]
 mod api;
@@ -15,21 +21,14 @@ mod api;
 mod deployment;
 #[path = "sandbox/execution.rs"]
 mod execution;
-#[path = "sandbox/manifest.rs"]
-mod manifest;
 #[path = "sandbox/resources.rs"]
 mod resources;
-
-#[path = "sandbox/management.rs"]
-mod management;
-
-#[path = "sandbox/packages.rs"]
-mod packages;
-pub(crate) use packages::{package_component, package_fixture, publisher};
+#[path = "sandbox/store_network.rs"]
+mod store_network;
 
 // Independent fixture routers own a collection initialized from each test's
 // supplied resources. Live management tests share one Sandbox between routers.
-fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::Router {
+pub(crate) fn api_router(sandbox: &Sandbox, endpoint: dhttp::Endpoint) -> axum::Router {
     Sandbox::api_router(
         Arc::new(RwLock::new(Sandbox {
             libs: sandbox.libs.clone(),

@@ -136,7 +136,7 @@ export default function PublicIntroductionPage() {
                 <Show when={!isOwnProfile()} fallback={
                   <>
                     <p class="muted">{t('intro.ownProfile')}</p>
-                    <a class="button button-primary" href="/std/workspace/#/settings/profile">{t('intro.editProfile')}</a>
+                    <a class="button button-primary" href="/workspace/settings/profile">{t('intro.editProfile')}</a>
                   </>
                 }>
                   <Show when={contactUrl()} fallback={

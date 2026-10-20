@@ -27,9 +27,11 @@ use wasmtime_wasi_http::{
 use super::{
     Invocation, Lib, Outgoing, Sandbox, StoreData, WasmRuntime,
     host::{identity, identity_v2},
-    package_file,
 };
-use crate::{Body, Error, Result};
+use crate::{
+    Body, Error, Result,
+    package::{package_file, valid_id},
+};
 
 // Component compilation, per-version filesystem grants, and Store limits.
 
@@ -123,31 +125,65 @@ impl Lib {
         bytes: &[u8],
         data_dir: &Path,
     ) -> Result<Self> {
-        super::valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
+        valid_id(&id).map_err(|_| Error::InvalidComponent("invalid Lib id".into()))?;
         let package =
             webc::Container::from_bytes_and_version(bytes.to_vec().into(), webc::Version::V3)
                 .map_err(|error| Error::InvalidComponent(error.to_string()))?;
         let openapi = serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
             .map_err(|error| Error::InvalidComponent(error.to_string()))?;
-        if id.contains('/') {
-            // Both identity levels must be real directories. In particular,
-            // canonicalizing only the leaf would follow a publisher symlink.
-            for directory in [data_dir.parent().unwrap(), data_dir] {
-                match std::fs::symlink_metadata(directory) {
-                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-                    Ok(_) => {
-                        return Err(Error::InvalidComponent(
-                            "Lib data must be a real directory".into(),
-                        ));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let parent = data_dir
+            .parent()
+            .ok_or_else(|| Error::InvalidComponent("Lib data has no database directory".into()))?;
+        // New callers use db/<name>. Existing author directories remain readable
+        // so changing the layout never silently replaces a user's stored data.
+        let database_root = if id
+            .split_once('/')
+            .is_some_and(|(author, _)| parent.file_name().is_some_and(|name| name == author))
+        {
+            parent.parent().ok_or_else(|| {
+                Error::InvalidComponent("Lib data has no database directory".into())
+            })?
+        } else {
+            parent
+        };
+        let legacy_data = id
+            .split_once('/')
+            .map(|(author, name)| database_root.join(author).join(name));
+        let data_dir = if parent == database_root
+            && matches!(data_dir.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            match legacy_data.as_deref() {
+                Some(legacy) => match legacy.symlink_metadata() {
+                    Ok(_) => legacy,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => data_dir,
                     Err(error) => return Err(Error::Io(error)),
+                },
+                None => data_dir,
+            }
+        } else {
+            data_dir
+        };
+        for directory in [data_dir.parent().unwrap(), data_dir] {
+            match directory.symlink_metadata() {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(Error::InvalidComponent(
+                        "Lib data must be a real directory".into(),
+                    ));
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Error::Io(error)),
             }
         }
         let component = runtime.compile(&package.get_atom("backend").ok_or_else(|| {
             Error::InvalidComponent("expected a backend lib, received a frontend app".into())
         })?)?;
+        let owner = database_root.symlink_metadata().map_err(Error::Io)?;
+        if !owner.is_dir() {
+            return Err(Error::InvalidComponent(
+                "Lib database root must be a real directory".into(),
+            ));
+        }
         match std::fs::symlink_metadata(data_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => {
@@ -159,6 +195,31 @@ impl Lib {
                 std::fs::create_dir_all(data_dir).map_err(Error::Io)?;
             }
             Err(error) => return Err(Error::Io(error)),
+        }
+        if rustix::process::geteuid().is_root() {
+            use std::os::unix::fs::MetadataExt;
+            for directory in [data_dir.parent().unwrap(), data_dir] {
+                let file = rustix::fs::open(
+                    directory,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                let permissions = rustix::fs::fstat(&file)
+                    .map_err(std::io::Error::from)?
+                    .st_mode;
+                rustix::fs::fchown(
+                    &file,
+                    Some(rustix::fs::Uid::from_raw(owner.uid())),
+                    Some(rustix::fs::Gid::from_raw(owner.gid())),
+                )
+                .map_err(std::io::Error::from)?;
+                rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(permissions as _))
+                    .map_err(std::io::Error::from)?;
+            }
         }
         let parent = data_dir
             .parent()
@@ -300,6 +361,11 @@ impl Invocation {
         // Keep execution tracked after execute returns or is dropped.
         let (response_tx, response_rx) = oneshot::channel();
         let execution_task = tasks.spawn(async move {
+            let _ownership = scopeguard::guard(lib.filesystem.clone(), |filesystem| {
+                if let Err(error) = repair_guest_ownership(filesystem) {
+                    tracing::error!(%error, "cannot restore Lib data ownership");
+                }
+            });
             let mut store = Store::new(&lib.runtime.engine, store_data);
             store.limiter(|state| &mut state.memory);
             store.set_fuel(100_000_000).map_err(Error::Guest)?;
@@ -388,6 +454,11 @@ impl Invocation {
         *wasi.filesystem() = lib.filesystem.clone();
         let mut task = scopeguard::guard(
             tasks.spawn(async move {
+                let _ownership = scopeguard::guard(lib.filesystem.clone(), |filesystem| {
+                    if let Err(error) = repair_guest_ownership(filesystem) {
+                        tracing::error!(%error, "cannot restore Lib data ownership");
+                    }
+                });
                 let mut store = Store::new(
                     &lib.runtime.engine,
                     StoreData {
@@ -434,6 +505,76 @@ impl Invocation {
             }
         }
     }
+}
+
+// Use the actual preopened directory, including on cancellation, rather than
+// retaining a second path or identity in Lib or StoreData.
+fn repair_guest_ownership(
+    mut filesystem: wasmtime_wasi::filesystem::WasiFilesystemCtx,
+) -> Result<()> {
+    if !rustix::process::geteuid().is_root() {
+        return Ok(());
+    }
+    use wasmtime_wasi::p2::bindings::filesystem::preopens::Host;
+    let mut table = ResourceTable::new();
+    let directories = wasmtime_wasi::filesystem::WasiFilesystemCtxView {
+        ctx: &mut filesystem,
+        table: &mut table,
+    }
+    .get_directories()
+    .map_err(Error::Guest)?;
+    for (descriptor, _) in directories {
+        if let wasmtime_wasi::filesystem::Descriptor::Dir(directory) = table
+            .get(&descriptor)
+            .map_err(|error| Error::Guest(error.into()))?
+        {
+            let owner = directory.dir.try_clone()?.into_std_file().metadata()?;
+            repair_guest_directory(&directory.dir, &owner)?;
+        }
+    }
+    Ok(())
+}
+
+fn repair_guest_directory(directory: &cap_std::fs::Dir, owner: &std::fs::Metadata) -> Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    let mut directories = vec![directory.try_clone()?];
+    while let Some(directory) = directories.pop() {
+        for entry in directory.entries()? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() && !entry.file_type()?.is_file() {
+                continue;
+            }
+            let file = std::fs::File::from(
+                rustix::fs::openat(
+                    &directory,
+                    entry.file_name(),
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            let metadata = file.metadata()?;
+            if metadata.dev() != owner.dev()
+                || (!metadata.is_dir() && (!metadata.is_file() || metadata.nlink() != 1))
+            {
+                continue;
+            }
+            if metadata.uid() != owner.uid() || metadata.gid() != owner.gid() {
+                rustix::fs::fchown(
+                    &file,
+                    Some(rustix::fs::Uid::from_raw(owner.uid())),
+                    Some(rustix::fs::Gid::from_raw(owner.gid())),
+                )
+                .map_err(std::io::Error::from)?;
+                file.set_permissions(metadata.permissions())?;
+            }
+            if metadata.is_dir() {
+                directories.push(cap_std::fs::Dir::from_std_file(file));
+            }
+        }
+    }
+    Ok(())
 }
 
 // Endpoint ownership is validated before moving a granted capability into a Store.

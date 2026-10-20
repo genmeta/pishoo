@@ -1,6 +1,6 @@
 //! Native contact collections and outbound delivery; daccess owns relationships and ACL.
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -140,7 +140,7 @@ fn expire_requests(db: &Connection) -> Result<(), Failure> {
     Ok(())
 }
 
-fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
+pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = profile.join("db/contact.db");
     match path.symlink_metadata() {
@@ -154,7 +154,21 @@ fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
                 .mode(0o600)
                 .open(&path)
             {
-                Ok(_) => {}
+                Ok(file) => {
+                    if rustix::process::geteuid().is_root() {
+                        use std::os::unix::fs::MetadataExt;
+                        let owner = profile
+                            .db_dir()
+                            .metadata()
+                            .map_err(|error| fail(500, error.to_string()))?;
+                        rustix::fs::fchown(
+                            &file,
+                            Some(rustix::fs::Uid::from_raw(owner.uid())),
+                            Some(rustix::fs::Gid::from_raw(owner.gid())),
+                        )
+                        .map_err(|error| fail(500, error.to_string()))?;
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(fail(500, e.to_string())),
             }
@@ -170,7 +184,30 @@ fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
     {
         return Err(fail(500, "contact database must be a regular file"));
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+    let file = std::fs::File::from(
+        rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| fail(500, error.to_string()))?,
+    );
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file
+            .metadata()
+            .map_err(|error| fail(500, error.to_string()))?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(fail(
+                500,
+                "contact database must be a single-link regular file",
+            ));
+        }
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|e| fail(500, e.to_string()))?;
     let mut db = Connection::open(&path).map_err(storage)?;
     db.busy_timeout(Duration::from_secs(2)).map_err(storage)?;
@@ -203,6 +240,48 @@ fn database(profile: &IdentityProfile) -> Result<Connection, Failure> {
         .map_err(storage)?;
     tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at FROM outbound_contact_requests LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
+    if rustix::process::geteuid().is_root() {
+        use rustix::fs::{Mode, OFlags};
+        use std::os::unix::fs::MetadataExt;
+        let directory = std::fs::File::from(
+            rustix::fs::open(
+                profile.db_dir(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| fail(500, error.to_string()))?,
+        );
+        let owner = directory
+            .metadata()
+            .map_err(|error| fail(500, error.to_string()))?;
+        for name in ["contact.db", "contact.db-wal", "contact.db-shm"] {
+            let file = match rustix::fs::openat(
+                &directory,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(file) => std::fs::File::from(file),
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(error) => return Err(fail(500, error.to_string())),
+            };
+            let metadata = file
+                .metadata()
+                .map_err(|error| fail(500, error.to_string()))?;
+            if !metadata.is_file() || metadata.nlink() != 1 {
+                return Err(fail(
+                    500,
+                    "contact database files must be single-link regular files",
+                ));
+            }
+            rustix::fs::fchown(
+                &file,
+                Some(rustix::fs::Uid::from_raw(owner.uid())),
+                Some(rustix::fs::Gid::from_raw(owner.gid())),
+            )
+            .map_err(|error| fail(500, error.to_string()))?;
+        }
+    }
     Ok(db)
 }
 fn owner(endpoint: &dhttp::Endpoint) -> Result<access_control::Visitor, Failure> {
@@ -380,22 +459,23 @@ fn catalog(profile: &IdentityProfile) -> Result<Value, Failure> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(storage)?;
+    let author: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+        [], |row| row.get(0),
+    ).map_err(storage)?;
+    let key = if author { "lib_name" } else { "lib_id" };
+    let query = if author {
+        "SELECT CASE WHEN l.author IS NULL THEN l.name ELSE l.author||'/'||l.name END,c.lib_name,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.name=c.lib_name ORDER BY 1,3"
+    } else {
+        "SELECT c.lib_id,c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY 1,3"
+    };
     let mut items = Vec::new();
-    let mut stmt=db.prepare("SELECT c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY c.lib_id,c.capability_id").map_err(storage)?;
-    for row in stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(storage)?
-    {
-        let (lib, id, title, version) = row.map_err(storage)?;
-        let endpoints=db.prepare("SELECT method,path FROM lib_capability_operations WHERE lib_id=?1 AND capability_id=?2 ORDER BY method,path").map_err(storage)?
-            .query_map(params![lib,id],|r|Ok(json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?}))).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)?;
+    let mut stmt = db.prepare(query).map_err(storage)?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))).map_err(storage)? {
+        let (lib, name, id, title, version) = row.map_err(storage)?;
+        let endpoints = db.prepare(&format!("SELECT method,path FROM lib_capability_operations WHERE {key}=?1 AND capability_id=?2 ORDER BY method,path")).map_err(storage)?
+            .query_map(params![name,id],|r|Ok(json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?}))).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)?;
         items.push(json!({"id":format!("{lib}#{id}"),"title":title,"version":version,"selectable":true,"endpoints":endpoints}));
     }
     Ok(items.into())
@@ -695,19 +775,22 @@ pub(crate) async fn contact_jobs(
     profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
+    db: &Arc<Mutex<Connection>>,
 ) -> crate::Result<()> {
-    let result = deliver(profile, endpoint, access).await;
+    let result = deliver(profile, endpoint, access, db).await;
     result.map_err(|(_, message)| crate::Error::InvalidConfig(message))
 }
 async fn deliver(
     profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
+    db: &Arc<Mutex<Connection>>,
 ) -> Result<(), Failure> {
-    let job_profile = profile.clone();
+    let job_db = db.clone();
     let (job,lease)=tokio::task::spawn_blocking(move|| {
-        let mut db=database(&job_profile)?;expire_requests(&db)?;
+        let mut db=job_db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
         let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        expire_requests(&tx)?;
         let job:Option<(i64,String,String,String,String,String,String)>=tx.query_row("SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status FROM outbound_contact_requests WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(storage)?;
         let lease=now()+120;
         if let Some((id,..))=&job {tx.execute("UPDATE outbound_contact_requests SET lease_until=?1 WHERE id=?2",params![lease,id]).map_err(storage)?;}
@@ -747,9 +830,9 @@ async fn deliver(
         if receipt["expired_after"].as_i64().is_none() {return Err(fail(502,"missing contact expiry"));}
         Ok(receipt)
     }.await;
-    let profile = profile.clone();
+    let db = db.clone();
     tokio::task::spawn_blocking(move|| {
-        let db=database(&profile)?;
+        let db=db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
         match outcome {
             Ok(receipt)=> {
                 db.execute("UPDATE outbound_contact_requests SET status=?1,remote_expired_after=?2,expired_after=CASE WHEN ?1='pending' THEN min(delivery_deadline,?2) ELSE expired_after END,last_checked_at=?3,next_attempt_at=?4,attempt_count=attempt_count+1,error_message=NULL,lease_until=NULL,updated_at=?3 WHERE id=?5 AND lease_until=?6",params![string(&receipt,"status")?,receipt["expired_after"].as_i64().unwrap(),now(),now()+if receipt["status"]=="active" {30}else{3},id,lease]).map_err(storage)?;

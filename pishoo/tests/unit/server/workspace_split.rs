@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tower::ServiceExt;
 
 use super::*;
-use crate::sandbox::{
+use crate::package::{
     install_lib, remove_lib,
     tests::{package_fixture, publisher},
 };
@@ -168,6 +168,9 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         }
     });
     let (sandbox, access, _, profile, _, _) = &listeners[0];
+    let contact_db = Arc::new(std::sync::Mutex::new(
+        crate::contact::database(profile).unwrap(),
+    ));
     assert!(
         !sandbox
             .read()
@@ -260,7 +263,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         rules["bob.dhttp.net"]["/std/message"]["allow"],
         json!(["POST"])
     );
-    crate::contact::contact_jobs(profile, &alice, access)
+    crate::contact::contact_jobs(profile, &alice, access, &contact_db)
         .await
         .unwrap();
     let (_, pending) = call(
@@ -310,7 +313,7 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
     db.execute("UPDATE outbound_contact_requests SET next_attempt_at=0", [])
         .unwrap();
     drop(db);
-    crate::contact::contact_jobs(profile, &alice, access)
+    crate::contact::contact_jobs(profile, &alice, access, &contact_db)
         .await
         .unwrap();
     let (_, active) = call(
@@ -386,7 +389,10 @@ async fn profile_and_native_contact_real_quic_workflow_persistence_and_uninstall
         .1,
         json!([])
     );
-    let profile_db = profile.join("db").join(&id).join("profile.db");
+    let profile_db = profile
+        .join("db")
+        .join(id.rsplit('/').next().unwrap())
+        .join("profile.db");
     let db = rusqlite::Connection::open(&profile_db).unwrap();
     assert_eq!(
         db.query_row(
