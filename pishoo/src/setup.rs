@@ -45,7 +45,10 @@ mod tests;
 
 pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
     initialize_config(profile)
-        .and_then(|()| read_server_config(profile))
+        .and_then(|()| {
+            let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            read_server_config(&mut conn)
+        })
         .map_err(|error| {
             Error::InvalidConfig(format!(
                 "configuration database {}: {error}",
@@ -54,8 +57,8 @@ pub(crate) fn load_server_config(profile: &IdentityProfile) -> Result<ServerConf
         })
 }
 
-fn read_server_config(profile: &IdentityProfile) -> Result<ServerConfig> {
-    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+// Runtime scans read one snapshot without startup initialization or integrity checks.
+pub(crate) fn read_server_config(conn: &mut Connection) -> Result<ServerConfig> {
     let tx = conn.transaction()?;
     let config = read_config(&tx)?;
     check_proxy_mounts(&tx, &config.proxy_locations)?;
@@ -88,7 +91,20 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         options.mode(0o600);
     }
     match options.open(&path) {
-        Ok(_) => {}
+        Ok(file) =>
+        {
+            #[cfg(unix)]
+            if rustix::process::geteuid().is_root() {
+                use std::os::unix::fs::MetadataExt;
+                let owner = directory.metadata()?;
+                rustix::fs::fchown(
+                    &file,
+                    Some(rustix::fs::Uid::from_raw(owner.uid())),
+                    Some(rustix::fs::Gid::from_raw(owner.gid())),
+                )
+                .map_err(std::io::Error::from)?;
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.into()),
     }
@@ -128,12 +144,13 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         )?;
     }
     upgrade_settings(&tx)?;
-    tx.execute_batch(include_str!("sandbox/install.sql"))?;
+    tx.execute_batch(include_str!("package/packages.sql"))?;
     tx.commit()?;
+    inherit_config_files(profile)?;
     Ok(())
 }
 
-fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
+pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
     let db = profile.config_db_path();
     if !db.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
@@ -142,7 +159,50 @@ fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection
     }
     let conn = Connection::open_with_flags(db, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(3))?;
+    inherit_config_files(profile)?;
     Ok(conn)
+}
+
+fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    if !rustix::process::geteuid().is_root() {
+        return Ok(());
+    }
+    let directory = std::fs::File::from(
+        rustix::fs::open(
+            profile.db_dir(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let owner = directory.metadata()?;
+    for name in ["config.db", "config.db-wal", "config.db-shm"] {
+        let file = match rustix::fs::openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => std::fs::File::from(file),
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(Error::InvalidConfig(
+                "config database files must be single-link regular files".into(),
+            ));
+        }
+        rustix::fs::fchown(
+            &file,
+            Some(rustix::fs::Uid::from_raw(owner.uid())),
+            Some(rustix::fs::Gid::from_raw(owner.gid())),
+        )
+        .map_err(std::io::Error::from)?;
+    }
+    Ok(())
 }
 
 fn read_config(conn: &Connection) -> Result<ServerConfig> {
@@ -214,11 +274,31 @@ fn read_config(conn: &Connection) -> Result<ServerConfig> {
 }
 
 // /std is reserved independently of installed packages. Old /api and /app remain proxyable.
-fn check_proxy_mounts(_conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
+fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()> {
     if proxies.iter().any(|proxy| {
         crate::routes::reserved(proxy.location.strip_prefix("= ").unwrap_or(&proxy.location))
     }) {
         return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
+    }
+    let has_apps: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='apps')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_apps {
+        let mut names = conn.prepare("SELECT name FROM apps ORDER BY name")?;
+        for name in names.query_map([], |row| row.get::<_, String>(0))? {
+            let mount = format!("/{}", name?);
+            if let Some(proxy) = proxies.iter().find(|proxy| {
+                let path = proxy.location.strip_prefix("= ").unwrap_or(&proxy.location);
+                path == mount || path.starts_with(&format!("{mount}/"))
+            }) {
+                return Err(Error::InvalidConfig(format!(
+                    "proxy {} conflicts with installed App {mount}",
+                    proxy.location
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -460,7 +540,8 @@ pub(crate) fn config_database(
         if payload.is_some() {
             return Err(Error::BadRequest("GET does not accept a body".into()));
         }
-        read_server_config(profile)?
+        let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        read_server_config(&mut conn)?
     } else {
         let proxies = match (settings, method) {
             (true, &Method::PATCH) => {
@@ -525,6 +606,7 @@ pub(crate) fn config_database(
         let config = read_config(&tx)?;
         check_proxy_mounts(&tx, &config.proxy_locations)?;
         tx.commit()?;
+        inherit_config_files(profile)?;
         config
     };
     if *method == Method::DELETE {

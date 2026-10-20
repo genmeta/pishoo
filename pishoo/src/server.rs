@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any};
@@ -14,13 +14,15 @@ use crate::{
     Body, Error, Result, dns,
     routes::{DHTTP_PREFIX, access_router, authorize, file_router, forward_dhttp, proxy_pass},
     sandbox::{Sandbox, WasmRuntime},
-    setup::{ServerConfig, config_router, load_server_config},
+    setup::{ServerConfig, config_router, load_server_config, read_server_config},
 };
 
 struct Server {
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
     config: ServerConfig,
+    config_db: Mutex<rusqlite::Connection>,
+    contact_db: Arc<Mutex<rusqlite::Connection>>,
     access: Arc<access_control::AccessService>,
     router: Arc<RwLock<axum::Router>>,
     sandbox: Arc<RwLock<Sandbox>>,
@@ -120,9 +122,10 @@ pub async fn run() -> Result<()> {
                             let endpoint = server.endpoint.clone();
                             let access = server.access.clone();
                             let profile = server.profile.clone();
+                            let contact_db = server.contact_db.clone();
                             let api = native_router(server).layer(axum::middleware::from_fn_with_state(access.clone(),authorize));
                             runs.push(async move {
-                                if let Err(error) = crate::contact::contact_jobs(&profile, &endpoint, &access).await {
+                                if let Err(error) = crate::contact::contact_jobs(&profile, &endpoint, &access, &contact_db).await {
                                     tracing::warn!(identity = endpoint.name(), %error, "Contact delivery failed");
                                 }
                                 Sandbox::run(sandbox,endpoint,access,api).await
@@ -375,15 +378,11 @@ async fn reconcile_profiles(
         let name = profile.name().to_owned();
         let result = async {
             if servers.contains_key(&name) {
-                // Validate without initialization first: missing/corrupt active databases
-                // must not be silently recreated by the startup initializer.
-                crate::setup::config_database(
-                    &profile,
-                    &http::Method::GET,
-                    &http::Uri::from_static("/std/sys/settings"),
-                    None,
-                )?;
-                let config = load_server_config(&profile)?;
+                // End the read transaction before applying changes or awaiting I/O.
+                let config = {
+                    let mut conn = servers[&name].config_db.lock().unwrap();
+                    read_server_config(&mut conn)?
+                };
                 if !config.enabled {
                     let mut server = servers.remove(&name).unwrap();
                     changed = true;
@@ -522,13 +521,64 @@ fn dhttp_router(endpoint: dhttp::Endpoint) -> Router {
 }
 
 fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, open};
+    use std::os::unix::fs::MetadataExt;
+
+    let root = std::fs::File::from(
+        open(
+            profile.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let mut owner = root.metadata()?;
+    if rustix::process::geteuid().is_root() {
+        // A personal identity belongs to the account owning its home, including
+        // when an earlier root process created .dhttp or the identity itself.
+        if let Some(personal) = profile
+            .path()
+            .parent()
+            .filter(|path| path.file_name().is_some_and(|name| name == ".dhttp"))
+        {
+            let home = personal.parent().ok_or_else(|| {
+                Error::InvalidConfig("personal identity has no account home".into())
+            })?;
+            let home = std::fs::File::from(
+                open(
+                    home,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            owner = home.metadata()?;
+            let personal = std::fs::File::from(
+                open(
+                    personal,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            for directory in [&personal, &root] {
+                let permissions = directory.metadata()?.permissions();
+                rustix::fs::fchown(
+                    directory,
+                    Some(rustix::fs::Uid::from_raw(owner.uid())),
+                    Some(rustix::fs::Gid::from_raw(owner.gid())),
+                )
+                .map_err(std::io::Error::from)?;
+                directory.set_permissions(permissions)?;
+            }
+        }
+    }
     for directory in [
         "db",
         "file",
         "libs",
         "libs/std",
         "apps",
-        "apps/std",
         "logs",
         "repo",
         "templates",
@@ -552,12 +602,73 @@ fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
             )));
         }
     }
+    if rustix::process::geteuid().is_root() {
+        repair_identity_ownership(&root, &owner)?;
+    }
+    Ok(())
+}
+
+fn repair_identity_ownership(directory: &std::fs::File, owner: &std::fs::Metadata) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::os::unix::fs::MetadataExt;
+
+    let device = directory.metadata()?.dev();
+    let mut directories = vec![directory.try_clone()?];
+    while let Some(directory) = directories.pop() {
+        let directory = cap_std::fs::Dir::from_std_file(directory);
+        for entry in directory.entries()? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if !kind.is_dir() && !kind.is_file() {
+                continue;
+            }
+            let file = std::fs::File::from(
+                openat(
+                    &directory,
+                    entry.file_name(),
+                    OFlags::RDONLY
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::CLOEXEC
+                        | if kind.is_dir() {
+                            OFlags::DIRECTORY
+                        } else {
+                            OFlags::empty()
+                        },
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?,
+            );
+            let metadata = file.metadata()?;
+            // A linked file may also belong to a path outside the identity. Do not
+            // change that inode, or descend into a different mounted filesystem.
+            if metadata.dev() != device || (!metadata.is_dir() && metadata.nlink() != 1) {
+                continue;
+            }
+            if !metadata.is_file() && !metadata.is_dir() {
+                continue;
+            }
+            if metadata.uid() != owner.uid() || metadata.gid() != owner.gid() {
+                rustix::fs::fchown(
+                    &file,
+                    Some(rustix::fs::Uid::from_raw(owner.uid())),
+                    Some(rustix::fs::Gid::from_raw(owner.gid())),
+                )
+                .map_err(std::io::Error::from)?;
+                file.set_permissions(metadata.permissions())?;
+            }
+            if metadata.is_dir() {
+                directories.push(file);
+            }
+        }
+    }
     Ok(())
 }
 
 fn cache_ocsp(profile: &IdentityProfile, response: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut cache = tempfile::NamedTempFile::new_in(profile.ssl_dir())?;
+    inherit_identity_owner(cache.as_file(), profile)?;
     cache.write_all(response)?;
     cache.as_file().sync_all()?;
     cache
@@ -848,12 +959,17 @@ async fn load_access(
     let version = if legacy { None } else { access_version(&path)? };
     let load = || async {
         let uri = format!("sqlite://{}?mode=rw", path.display());
-        access_control::AccessService::load_from_db(&uri, profile.name(), subject)
+        let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject)
             .await
             .map(Arc::new)
             .map_err(|error| {
                 Error::InvalidConfig(format!("access database {}: {error}", path.display()))
-            })
+            })?;
+        if rustix::process::geteuid().is_root() {
+            let directory = std::fs::File::open(profile.db_dir())?;
+            repair_identity_ownership(&directory, &directory.metadata()?)?;
+        }
+        Ok(access)
     };
     if version == Some(1) {
         return load().await;
@@ -862,7 +978,9 @@ async fn load_access(
     let staging = tempfile::Builder::new()
         .prefix(".access-init-")
         .tempdir_in(profile.db_dir())?;
+    inherit_identity_owner(&std::fs::File::open(staging.path())?, profile)?;
     let working = tempfile::NamedTempFile::new_in(staging.path())?;
+    inherit_identity_owner(working.as_file(), profile)?;
     let uri = format!("sqlite://{}?mode=rw", working.path().display());
     let access = access_control::AccessService::load_from_db(&uri, profile.name(), subject).await?;
     access
@@ -879,9 +997,9 @@ async fn load_access(
         (http::Method::GET, "/std/acl/capabilities"),
         (http::Method::GET, "/std/profile"),
         (http::Method::HEAD, "/std/profile/context"),
-        // The public #/intro page and its assets are served by Workspace.
-        (http::Method::GET, "/std/workspace"),
-        (http::Method::HEAD, "/std/workspace"),
+        // The public /workspace/intro page and assets are served by Workspace.
+        (http::Method::GET, "/workspace"),
+        (http::Method::HEAD, "/workspace"),
     ] {
         access
             .set_policy(
@@ -893,6 +1011,7 @@ async fn load_access(
             .await?;
     }
     let ready = tempfile::NamedTempFile::new_in(staging.path())?;
+    inherit_identity_owner(ready.as_file(), profile)?;
     snapshot_access(working.path(), ready.path())?;
     if access_version(ready.path())? != Some(1) {
         return Err(Error::InvalidConfig(
@@ -910,6 +1029,7 @@ async fn load_access(
             .prefix(prefix)
             .suffix(".db")
             .tempfile_in(profile.db_dir())?;
+        inherit_identity_owner(backup.as_file(), profile)?;
         snapshot_access(&path, backup.path())?;
         let (_, backup_path) = backup.keep().map_err(|error| error.error)?;
         tracing::info!(
@@ -968,12 +1088,18 @@ fn native_router(server: &Server) -> Router {
                     let tx = conn.transaction()?;
                     let ready: bool = tx.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('lib_capabilities','lib_capability_operations')",[],|r|r.get(0))?;
                     if !ready { return Err(Error::InvalidConfig("capability registration missing; install/reinstall Libs using normal installation".into())); }
+                    let author: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",[],|r|r.get(0))?;
+                    let key = if author { "lib_name" } else { "lib_id" };
+                    let query = if author {
+                        "SELECT CASE WHEN l.author IS NULL THEN l.name ELSE l.author||'/'||l.name END,c.lib_name,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.name=c.lib_name ORDER BY 1,3"
+                    } else {
+                        "SELECT c.lib_id,c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY 1,3"
+                    };
                     let mut values = Vec::new();
-                    for row in tx.prepare("SELECT c.lib_id,c.capability_id,c.title,l.version FROM lib_capabilities c JOIN libs l ON l.id=c.lib_id ORDER BY c.lib_id||'#'||c.capability_id")?
-                        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))? {
-                        let (lib,id,title,version)=row?;
-                        let endpoints = tx.prepare("SELECT method,path FROM lib_capability_operations WHERE lib_id=?1 AND capability_id=?2 ORDER BY method,path")?
-                            .query_map(rusqlite::params![lib,id],|r|Ok(serde_json::json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?})))?
+                    for row in tx.prepare(query)?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?)))? {
+                        let (lib,name,id,title,version)=row?;
+                        let endpoints = tx.prepare(&format!("SELECT method,path FROM lib_capability_operations WHERE {key}=?1 AND capability_id=?2 ORDER BY method,path"))?
+                            .query_map(rusqlite::params![name,id],|r|Ok(serde_json::json!({"method":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?})))?
                             .collect::<std::result::Result<Vec<_>,_>>()?;
                         values.push(serde_json::json!({"id":format!("{lib}#{id}"),"title":title,"version":version,"visibility":"contact","approval_mode":"capability","selectable":true,"endpoints":endpoints}));
                     }
@@ -998,7 +1124,7 @@ fn native_router(server: &Server) -> Router {
             server.profile.clone(),
             server.endpoint.clone(),
         ))
-        .merge(crate::sandbox::lib_management_router(
+        .merge(crate::package::lib_management_router(
             server.profile.clone(),
             server.endpoint.clone(),
             server.sandbox.clone(),
@@ -1051,15 +1177,38 @@ fn current_router(server: &Server) -> Router {
         server.access.clone(),
         authorize,
     ));
+    let api = Sandbox::api_router(
+        server.sandbox.clone(),
+        server.endpoint.clone(),
+        server.access.clone(),
+        outgoing,
+    );
+    let sandbox = server.sandbox.clone();
     native
-        .merge(Sandbox::api_router(
-            server.sandbox.clone(),
-            server.endpoint.clone(),
-            server.access.clone(),
-            outgoing,
-        ))
+        .merge(api.clone().reset_fallback())
         .fallback(any(move |request: Request<AxumBody>| {
-            proxy_pass(proxies.clone(), request)
+            let api = api.clone();
+            let proxies = proxies.clone();
+            let name = request
+                .uri()
+                .path()
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+                .unwrap_or("");
+            let installed = sandbox
+                .read()
+                .unwrap()
+                .apps
+                .keys()
+                .any(|id| id.rsplit('/').next() == Some(name));
+            async move {
+                if installed {
+                    api.oneshot(request).await.expect("Router is infallible")
+                } else {
+                    proxy_pass(proxies, request).await
+                }
+            }
         }))
         .layer(axum::middleware::from_fn_with_state(
             server.access.clone(),
@@ -1074,11 +1223,41 @@ fn open_access_log(profile: &IdentityProfile) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
-    options.open(&path).map_err(|error| {
-        std::io::Error::new(error.kind(), format!("{}: {error}", path.display())).into()
-    })
+    let file = options.open(&path).map_err(|error| {
+        Error::Io(std::io::Error::new(
+            error.kind(),
+            format!("{}: {error}", path.display()),
+        ))
+    })?;
+    inherit_identity_owner(&file, profile)?;
+    Ok(file)
+}
+
+fn inherit_identity_owner(file: &std::fs::File, profile: &IdentityProfile) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if rustix::process::geteuid().is_root() {
+        let current = file.metadata()?;
+        let owner = profile.path().symlink_metadata()?;
+        if !owner.is_dir() || (!current.is_dir() && (!current.is_file() || current.nlink() != 1)) {
+            return Err(Error::InvalidConfig(
+                "identity resource must be an owned directory or single-link regular file".into(),
+            ));
+        }
+        if current.uid() != owner.uid() || current.gid() != owner.gid() {
+            rustix::fs::fchown(
+                file,
+                Some(rustix::fs::Uid::from_raw(owner.uid())),
+                Some(rustix::fs::Gid::from_raw(owner.gid())),
+            )
+            .map_err(std::io::Error::from)?;
+            file.set_permissions(current.permissions())?;
+        }
+    }
+    Ok(())
 }
 
 async fn serve_request(
@@ -1125,6 +1304,7 @@ async fn serve_request(
 
 impl Server {
     pub(super) async fn load(profile: IdentityProfile, runtime: Arc<WasmRuntime>) -> Result<Self> {
+        initialize_directories(&profile)?;
         let certs = profile
             .load_certs()
             .await
@@ -1146,7 +1326,6 @@ impl Server {
                     | dhttp::Error::Credentials { .. } => Error::InvalidIdentity(error.to_string()),
                     error => Error::Dhttp(error),
                 })?;
-        initialize_directories(&profile)?;
         let config = load_server_config(&profile)?;
         if config.listen != 0 {
             dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;
@@ -1163,10 +1342,24 @@ impl Server {
         let access = load_access(&profile, &subject).await?;
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
+        let config_db = Mutex::new(crate::setup::open_config(
+            &profile,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?);
+        let contact_db = Arc::new(Mutex::new(
+            crate::contact::database(&profile)
+                .map_err(|(_, message)| Error::InvalidConfig(message))?,
+        ));
+        if rustix::process::geteuid().is_root() {
+            let directory = std::fs::File::open(profile.path())?;
+            repair_identity_ownership(&directory, &directory.metadata()?)?;
+        }
         let server = Self {
             profile,
             endpoint,
             config,
+            config_db,
+            contact_db,
             access,
             router: Arc::new(RwLock::new(Router::new())),
             sandbox: Arc::new(RwLock::new(sandbox)),

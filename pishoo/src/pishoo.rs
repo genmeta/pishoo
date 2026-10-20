@@ -3,6 +3,7 @@ mod cli;
 mod contact;
 mod dns;
 mod error;
+mod package;
 mod routes;
 mod sandbox;
 mod server;
@@ -14,7 +15,8 @@ mod test_identity;
 
 pub use cli::run_command;
 pub use error::Error;
-pub use sandbox::{WasmRuntime, validate_lib, validate_openapi};
+pub use package::{validate_lib, validate_openapi};
+pub use sandbox::WasmRuntime;
 pub use server::run;
 
 type Body = dhttp::Body;

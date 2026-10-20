@@ -4,7 +4,7 @@ import { useI18n } from '../i18n'
 
 export default function IntroductionShare() {
   const { t } = useI18n()
-  const url = new URL('/std/workspace/#/intro', window.location.origin).href
+  const url = new URL('/workspace/intro', window.location.origin).href
   const [message, setMessage] = createSignal('')
   let linkInput: HTMLInputElement | undefined
 

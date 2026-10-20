@@ -714,7 +714,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     rusqlite::Connection::open(lib.config_db_path())
         .unwrap()
         .execute(
-            "INSERT INTO libs(id,name,version) VALUES('broken','broken','1.0.0')",
+            "INSERT INTO libs(name,author,version) VALUES('broken',NULL,'1.0.0')",
             [],
         )
         .unwrap();
@@ -801,53 +801,38 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         }
     }
     wasm.extend(section);
-    assert_eq!(
-        owner_bytes(
-            &server,
-            Method::POST,
-            "/std/sys/package/lib-check",
-            &wasm,
-            "application/wasm"
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
     let (status, saved) = owner_bytes(
         &server,
         Method::PUT,
-        "/std/sys/package/libs/note",
+        "/std/sys/lib?name=note",
         &wasm,
         "application/wasm",
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["id"], "note");
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{saved}");
+    // Seed an existing registered resource through the internal store-storage
+    // helper; public HTTP writes no longer accept a local package body.
+    let runtime = server.sandbox.read().unwrap().runtime.clone();
+    crate::package::install_lib(
+        &server.profile,
+        "note",
+        &crate::package::tests::package_component(&wasm),
+        &runtime,
+    )
+    .unwrap();
     assert!(!server.sandbox.read().unwrap().libs.contains_key("note"));
     assert_eq!(
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/package/libs",
+            "/std/sys/lib/list",
             serde_json::Value::Null
         )
         .await
         .1[0]["id"],
         "note"
     );
-    assert!(
-        owner_request(
-            &server,
-            Method::GET,
-            "/std/sys/package/loaded-libs",
-            serde_json::Value::Null
-        )
-        .await
-        .1
-        .as_array()
-        .unwrap()
-        .is_empty()
-    );
+    assert!(server.sandbox.read().unwrap().libs.is_empty());
     for (location, upstream) in [
         ("/one", "127.0.0.1:8080"),
         ("/two", "http://127.0.0.1:8081/"),
@@ -944,7 +929,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (mut upload, response) = server
         .endpoint
         .post(
-            format!("https://{}/api/note/upload", server.name())
+            format!("https://{}/std/upload", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -997,7 +982,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/package/loaded-libs",
+            "/std/sys/lib/list",
             serde_json::Value::Null
         )
         .await
@@ -1008,22 +993,22 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/std/sys/package/libs/note",
+            "/std/sys/lib?name=note",
             serde_json::Value::Null
         )
         .await
         .0,
         StatusCode::NO_CONTENT
     );
-    assert!(server.sandbox.read().unwrap().libs.contains_key("note"));
-    assert!(!server.profile.join("libs/note").exists());
+    assert!(server.sandbox.read().unwrap().libs.is_empty());
+    assert!(!server.profile.join("libs/note.wasm").exists());
     assert!(server.profile.join("db/note").is_dir());
     // Even an explicit daccess allow cannot make another TLS identity the profile owner.
     server
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/std/pishoo",
+            "/std/sys",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
@@ -1042,7 +1027,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = alice
         .get(
-            format!("https://{}/std/sys/package/libs", server.name())
+            format!("https://{}/std/sys/lib/list", server.name())
                 .parse()
                 .unwrap(),
         )
@@ -1065,7 +1050,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         .access
         .set_policy(
             access_control::Method::Unspecified,
-            "/std/pishoo",
+            "/std/sys",
             access_control::Effect::Deny,
             access_control::Grantee::One(server.name().to_owned()),
         )

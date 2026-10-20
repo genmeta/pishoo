@@ -12,7 +12,7 @@ export interface WorkspaceRoute {
 }
 
 export function routeFromPath(pathname: string): WorkspaceRoute {
-  const path = pathname.replace(/^#/, '').replace(/\/$/, '') || '/'
+  const path = pathname.replace(/^\/workspace(?=\/|$)/, '').replace(/\/$/, '') || '/'
   switch (path) {
     case '/': return { page: 'home' }
     case '/contacts': return { page: 'contacts' }
@@ -45,7 +45,7 @@ export function routeFromPath(pathname: string): WorkspaceRoute {
 }
 
 export function contactPath(name: string): string {
-  return `#/contacts/${encodeURIComponent(name)}`
+  return workspacePath(`/contacts/${encodeURIComponent(name)}`)
 }
 
 export function contactChatPath(name: string): string {
@@ -53,14 +53,14 @@ export function contactChatPath(name: string): string {
 }
 
 export function workspacePath(path: string): string {
-  return path.startsWith('#') ? path : '#' + (path || '/')
+  return /^\/workspace(?:\/|\?|$)/.test(path) ? path : `/workspace${path || '/'}`
 }
 
 export function addContactUrl(viewerName: string, targetName: string): string | null {
   const viewer = normalizeIdentityName(viewerName)
   const target = normalizeIdentityName(targetName)
   if (!viewer || !target || viewer === target) return null
-  const url = new URL(`https://${viewer}/std/workspace/`)
-  url.hash = `/contacts/new?${new URLSearchParams({ target })}`
+  const url = new URL(`https://${viewer}/workspace/contacts/new`)
+  url.search = new URLSearchParams({ target }).toString()
   return url.href
 }

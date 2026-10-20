@@ -67,8 +67,8 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
         "dependencies":[]});
     let profile_id = format!("{publisher}/profile");
     let probe_id = format!("{publisher}/http-probe");
-    let authority = crate::sandbox::tests::publisher(publisher, 'a');
-    let profile_package = crate::sandbox::tests::package_fixture(
+    let authority = crate::package::tests::publisher(publisher, 'a');
+    let profile_package = crate::package::tests::package_fixture(
         &profile_doc,
         &std::fs::read(project.join("../std/libs/profile/dist/lib.wasm")).unwrap(),
         webc::v3::write::Directory::default(),
@@ -82,7 +82,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
             )
         });
     let probe_doc = json!({"openapi":"3.1.0","info":{"title":"HTTP probe","description":"Probe local Lib calls","version":"0.1.0","license":{"name":"MIT"}},"x-pishoo":{"kind":"lib","publisher":publisher,"name":"http-probe","host":{"request-identity":"Record real caller facts","private-storage":"Persist CLI response"},"dependencies":[{"publisher":publisher,"name":"profile","version":profile_doc["info"]["version"]}]},"paths":{"/call":{"get":{"operationId":"call","summary":"Call dependency"}}}});
-    let probe = crate::sandbox::tests::package_fixture(
+    let probe = crate::package::tests::package_fixture(
         &probe_doc,
         &std::fs::read(probe_path).expect("build lib-http-probe first"),
         webc::v3::write::Directory::default(),
@@ -93,7 +93,7 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     )
     .unwrap();
     chat_doc["x-pishoo"] = json!({"kind":"lib","publisher":publisher,"name":"message","host":{"request-identity":"Chat caller","private-storage":"Chat data"},"dependencies":[],"access-groups":{"message":{"title":"1v1聊天","operations":["receiveMessage"]}}});
-    let chat = crate::sandbox::tests::package_fixture(
+    let chat = crate::package::tests::package_fixture(
         &chat_doc,
         &std::fs::read(project.join("../std/libs/message/dist/lib.wasm"))
             .expect("build message-lib first"),
@@ -104,10 +104,10 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     std::fs::create_dir_all(profile.join("libs")).unwrap();
     load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
-    crate::sandbox::install_lib(&profile, &format!("{publisher}/message"), &chat, &runtime)
+    crate::package::install_lib(&profile, &format!("{publisher}/message"), &chat, &runtime)
         .unwrap();
-    crate::sandbox::install_lib(&profile, &profile_id, &profile_package, &runtime).unwrap();
-    crate::sandbox::install_lib(&profile, &probe_id, &probe, &runtime).unwrap();
+    crate::package::install_lib(&profile, &profile_id, &profile_package, &runtime).unwrap();
+    crate::package::install_lib(&profile, &probe_id, &probe, &runtime).unwrap();
     let mut server = Server::load(profile.clone(), runtime).await.unwrap();
     server
         .access
@@ -159,7 +159,13 @@ async fn dependent_libs_use_standard_local_http_with_real_caller_identity() {
     )
     .await;
     let cli: Value = serde_json::from_slice(
-        &std::fs::read(profile.join("db").join(&probe_id).join("response.json")).unwrap(),
+        &std::fs::read(
+            profile
+                .join("db")
+                .join(probe_id.rsplit('/').next().unwrap())
+                .join("response.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(cli["caller"].is_null());

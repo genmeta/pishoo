@@ -69,9 +69,11 @@ cargo run --locked -p pishoo --example pishoo-client -- get /std/sys/proxies
 
 ## 启动初始化与数据库兼容
 
-启动和运行时新身份发现先检查 `db/config.db`；缺失时跳过该身份，不创建配置、加载凭据或发布地址。配置由 gmutils 在用户选择启用服务后创建。其余初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。身份凭据加载成功后创建缺失的 `db`、`file`、`libs/std`、`apps/std`、`logs`、`repo` 和 `templates` 目录；不生成证书、私钥或 `server.conf`；启动时本地 `ssl/stapling.ocsp` 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
+启动和运行时新身份发现先检查 `db/config.db`；缺失时跳过该身份，不创建配置、加载凭据或发布地址。配置由 gmutils 在用户选择启用服务后创建。其余初始化由正常启动时的 `Server::load` 执行，安装脚本不遍历或修改用户身份。Linux root 运行扫描 DHTTP 全局目录（默认 `/etc/dhttp`）和系统账户实际 home 下的 `.dhttp`，不固定用户 home 前缀。其他运行使用当前账户的 `~/.dhttp`。Pishoo 不读取 DHTTP_HOME。已确认存在配置的身份加载时创建缺失的 `db`、`file`、`libs/std`、`apps`、`logs`、`repo` 和 `templates` 目录；不生成证书、私钥或 `server.conf`；启动时本地 `ssl/stapling.ocsp` 缓存缺失或无效则获取、验证并保存，运行中每72小时刷新 OCSP，其他凭据变化仍需重启。repo/templates 此阶段仅建立目录，没有新增读取或执行能力。
 
 新建目录在 Unix 使用0700，新建数据库0600；已有文件权限保持原样。数据库路径与应用目录必须是普通文件/目录，不能通过符号链接重定向。Linux systemd 服务默认以 root 运行并加载多用户身份；管理员可通过服务覆盖文件修改 User；非 root 运行只加载当前账户的 `.dhttp`。服务用户修改后重启，SIGTERM 退出。Homebrew 按当前用户启动服务。
+
+root 服务创建上述身份子目录、安装或更新 App/Lib 时，目录与展开制品文件的 UID/GID 继承身份目录所有者。身份加载时同时修复已有 `libs/`、`apps/` 下常规文件及目录的归属，不改变权限位、制品内容或安装登记；符号链接、多硬链接文件及其他文件系统内的内容不参与递归修复。该规则不改变 systemd 的 root 运行身份，也不将发布者或来访者映射为系统账户。
 
 | 数据库 | 首次初始化 | 已有数据库 |
 | --- | --- | --- |
@@ -142,3 +144,5 @@ genmeta access --id NAME /std/workspace allow '*?' --method HEAD
 标准 `std.dhttp.net/workspace` App 与 `std.dhttp.net/profile` Lib 首次安装时，
 允许复用上述精确的只读 Allow/All 默认规则，以免默认公开权限反过来阻止安装。
 这不豁免其他发布者、自定义规则、通配方法或写操作的旧权限冲突检查。
+
+2026-10-20：个人身份以所属账户 home 的 UID/GID 修复 .dhttp、身份和各子目录归属；不再创建 apps/std。宿主创建的数据库、访问日志、OCSP 与制品临时内容在发布时归身份账户。数据库字段和包管理路径见 [本轮契约](../../design/package-management-2026-10-20.md)。

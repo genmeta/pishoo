@@ -4,6 +4,7 @@ import { createContext, createEffect, createSignal, useContext } from 'solid-js'
 export type Locale = 'en' | 'zh-CN'
 
 const EN = {
+  'apps.releaseVersion': 'Version',
   'apps.kindMismatch': 'The signed artifact does not match the selected install type.',
   'apps.artifactKind': 'Install type',
   'apps.frontend': 'Frontend App',
@@ -54,7 +55,6 @@ const EN = {
   'apps.chosenVersion': 'Selected release',
   "apps.mine": "My apps",
   "apps.store": "App store",
-  "apps.file": "Install from file",
   "apps.search": "Search apps",
   "apps.publisher": "Publisher",
   "apps.check": "Check for updates",
@@ -70,7 +70,7 @@ const EN = {
   "apps.details": "Details",
   "apps.uninstall": "Uninstall",
   "apps.install": "Install",
-  "apps.update": "Update from file",
+  "apps.update": "Update",
   "apps.back": "Back to apps",
   "apps.about": "About",
   "apps.changes": "Release notes",
@@ -122,9 +122,7 @@ const EN = {
   "apps.notRun": "Not executed",
   "apps.noChanges": "No changes to submit",
   "apps.selectScope": "Select a scope and effect.",
-  "apps.fileId": "Local component ID",
   "apps.component": "WEBC package file",
-  "apps.fileHint": "Installing an app with the same ID updates it and keeps its data and access rules.",
   "apps.accept": "I trust this component and its page code for this identity",
   "apps.confirmInstall": "Confirm installation",
   "apps.confirmUpdate": "Confirm update",
@@ -132,11 +130,8 @@ const EN = {
   "apps.uninstallHint": "Uninstall this app now, keeping its data and access rules. Requests already in progress may finish.",
   "apps.target": "Target identity",
   "apps.fileLimit": "Choose a WEBC package no larger than 64 MiB.",
-  "apps.localOnly": "Use a valid short ID or canonical publisher/name.",
   "apps.initial": "Suggested initial rules (not applied)",
   "apps.verifyHint": "The save result is uncertain. Refresh saved components before retrying.",
-  "apps.fileCheck": "Inspect component",
-  "apps.templatesUnsupported": "This file declares external templates. Their installation contract is not connected; choose a self-contained component.",
 
   'brand.subtitle': 'Workspace',
   'language.label': 'Language',
@@ -477,6 +472,7 @@ export type MessageKey = keyof typeof EN
 type Params = Record<string, string | number>
 
 const ZH_CN: Record<MessageKey, string> = {
+  'apps.releaseVersion': '版本',
   'apps.kindMismatch': '签名制品与所选安装类型不一致。',
   'apps.artifactKind': '安装类型',
   'apps.frontend': '前端 App',
@@ -527,7 +523,6 @@ const ZH_CN: Record<MessageKey, string> = {
   'apps.chosenVersion': '已选择版本',
   "apps.mine": "我的应用",
   "apps.store": "应用商店",
-  "apps.file": "从文件安装",
   "apps.search": "搜索应用",
   "apps.publisher": "发布者",
   "apps.check": "检查更新",
@@ -543,7 +538,7 @@ const ZH_CN: Record<MessageKey, string> = {
   "apps.details": "详情",
   "apps.uninstall": "卸载",
   "apps.install": "安装",
-  "apps.update": "从文件更新",
+  "apps.update": "更新",
   "apps.back": "返回应用列表",
   "apps.about": "说明",
   "apps.changes": "更新记录",
@@ -595,9 +590,7 @@ const ZH_CN: Record<MessageKey, string> = {
   "apps.notRun": "未执行",
   "apps.noChanges": "没有需要提交的变更",
   "apps.selectScope": "请选择范围与效果。",
-  "apps.fileId": "本地组件 ID",
   "apps.component": "WEBC 发布包",
-  "apps.fileHint": "安装相同 ID 的应用会更新现有版本，并保留数据和访问规则。",
   "apps.accept": "我信任此组件及其页面代码在当前身份下运行",
   "apps.confirmInstall": "确认安装",
   "apps.confirmUpdate": "确认更新",
@@ -605,11 +598,8 @@ const ZH_CN: Record<MessageKey, string> = {
   "apps.uninstallHint": "立即卸载应用，保留数据和访问规则。已开始的请求可以正常结束。",
   "apps.target": "目标身份",
   "apps.fileLimit": "请选择不超过 64 MiB 的 WEBC 包。",
-  "apps.localOnly": "请使用有效的短 ID 或规范化 publisher/name。",
   "apps.initial": "初始规则建议（尚未应用）",
   "apps.verifyHint": "保存结果不确定，请刷新磁盘组件核实后再重试。",
-  "apps.fileCheck": "检查组件",
-  "apps.templatesUnsupported": "此文件声明外置模板，相关安装接缝尚未接入，请选择自包含组件。",
 
   'brand.subtitle': '工作台',
   'language.label': '语言',

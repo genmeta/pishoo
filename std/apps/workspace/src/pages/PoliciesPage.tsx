@@ -60,26 +60,25 @@ export default function PoliciesPage(props: {
   const [effect, setEffect] = createSignal<Effect>('allow')
   const [grantee, setGrantee] = createSignal('')
 
-  const loadLibs = abortable((_revision: number, signal: AbortSignal) => api.libs(signal))
+  const loadCapabilities = abortable((_revision: number, signal: AbortSignal) => api.capabilities(signal))
   const loadRulesByApi = abortable((_revision: number, signal: AbortSignal) =>
     api.rulesByApi(signal),
   )
   const loadRulesByGrantee = abortable((_revision: number, signal: AbortSignal) =>
     api.rulesByGrantee(signal),
   )
-  const [libs] = createResource(revision, loadLibs)
+  const [capabilities] = createResource(revision, loadCapabilities)
   const [byApi] = createResource(revision, loadRulesByApi)
   const [byGrantee] = createResource(revision, loadRulesByGrantee)
 
   const refresh = () => setRevision((value) => value + 1)
   const grantees = () => Object.keys(byGrantee.error ? {} : byGrantee() ?? {}).sort()
-  // daccess lists saved rules; Lib metadata also supplies scopes without rules.
+  // daccess lists saved rules; the native capability catalog also supplies scopes without rules.
   // Parameterized OpenAPI paths become static prefixes that daccess can match.
   const apiPaths = () => [...new Set([
     ...Object.keys(byApi.error ? {} : byApi() ?? {}),
-    ...(libs.error ? [] : libs() ?? []).flatMap((lib) => [
-
-      ...lib.endpoints.map((endpoint) => endpoint.path.split('{')[0].replace(/\/+$/, '') || '/'),
+    ...(capabilities.error ? [] : capabilities() ?? []).flatMap((capability) => [
+      ...capability.endpoints.map((endpoint) => endpoint.path.split('{')[0].replace(/\/+$/, '') || '/'),
     ]),
   ])].sort()
   const currentPage = () => {
@@ -168,7 +167,7 @@ export default function PoliciesPage(props: {
     }
   }
 
-  const loading = () => libs.loading || byApi.loading || byGrantee.loading
+  const loading = () => capabilities.loading || byApi.loading || byGrantee.loading
   const loadError = () => byApi.error || byGrantee.error
 
   return (
@@ -198,9 +197,9 @@ export default function PoliciesPage(props: {
           <ErrorState message={errorMessage(loadError(), t('common.unexpectedError'))} onRetry={refresh} />
         </section>
       </Show>
-      <Show when={libs.error && !loadError()}>
+      <Show when={capabilities.error && !loadError()}>
         <section class="data-panel">
-          <ErrorState message={errorMessage(libs.error, t('common.unexpectedError'))} onRetry={refresh} />
+          <ErrorState message={errorMessage(capabilities.error, t('common.unexpectedError'))} onRetry={refresh} />
         </section>
       </Show>
       <Show when={!loadError() && loading() && !byApi() && !byGrantee()}>

@@ -10,14 +10,17 @@ Pishoo 提供运行时和 HTTP API。可执行程序只支持无参数运行、`
 | 重载配置 | `pishoo reload`，前台使用 `pishoo reload --pid PID` | 向运行进程发送 SIGHUP |
 | 代理查询/增改 | `genmeta server proxy --id NAME [LOCATION [TARGET]]` | GET/PATCH /std/sys/proxies |
 | 删除/清空/替换代理 | `genmeta server proxy --id NAME remove LOCATION` / `clear` / `replace FILE.json` | DELETE/PUT /std/sys/proxies |
-| 已安装/已加载包 | `genmeta package list [--loaded] [--type app\|lib] --id NAME` | 现有制品 API |
-| 包详情/移除 | `genmeta package info\|remove PACKAGE --type app\|lib --id NAME` | 现有制品 API |
-| 商店安装/更新 | `genmeta package install\|update PACKAGE --type app\|lib --id NAME` | store-install，解析精确依赖 |
-| 本地文件安装 | `genmeta package install PACKAGE --file FILE.webc --type app\|lib --id NAME` | PUT 制品 API；先安装精确依赖 |
-| 本地文件校验 | `genmeta package check FILE.webc --type app\|lib --id NAME` | POST app-check/lib-check |
-| 构建/签名 | `genmeta package build PATH [--no-build]` | gmutils 构建与签名；发布者身份宿主 API 校验 |
+| 已安装包 | `genmeta list --id NAME`（类型开关见命令参考） | 现有制品 API |
+| 包详情/移除 | `genmeta info PACKAGE` / `genmeta uninstall PACKAGE` | 现有制品 API |
+| 商店安装/更新 | `genmeta install PACKAGE` / `genmeta update PACKAGE` | 同一 PUT /std/sys/{app\|lib}?name=NAME，JSON 仅 publisher/version，解析精确依赖 |
+| 构建/签名 | `genmeta build PATH [--no-build]` | 本地构建签名；实际商店安装/更新执行宿主校验 |
+| 发布源包 | `genmeta publish FILE.webc` | 向固定商店上传已签源包，不直接安装到宿主 |
 
-身份开关和监听范围可在服务未启动、已禁用或 listen=0 时修改。代理与制品命令需要目标身份的 Pishoo 可达，经过同名 owner 校验及原有 daccess；不会在网络失败后自动改写本地包文件。HTTP 配置与制品 API 保持不变。
+身份开关和监听范围可在服务未启动、已禁用或 listen=0 时修改。代理与制品命令需要目标身份的 Pishoo 可达，经过同名 owner 校验及原有 daccess；不会在网络失败后自动改写本地包文件。包接口以[包管理审查稿](package-management.md)为准，命令细节见[genmeta 命令](genmeta-package.md)。
+
+不提供 `--file` 或 Workspace 本地文件安装；包管理 POST 返回 405，原始 WEBC PUT 返回 415。安装/更新验证商店源包输入，不保存本地摘要或作者密钥指纹用于后续防篡改检查。安装表各七列：name、author、version、title、description、license、repository。同类名称跨作者唯一，App 与 Lib 可以同名；作者是元数据，不是新文件/业务目录的分层。新业务数据使用 `db/<name>/`，兼容使用已有 `db/<author>/<name>/`，不自动迁移或新建作者目录。
+
+内嵌 OpenAPI 的新 Lib 仍受独立商店格式兼容阻塞；本轮不通过本地安装绕过，也不修改应用商店。
 
 没有 config.db 的身份不会被启动或运行时发现自动启用。gmutils apply 只在用户同意启用服务器后创建配置和欢迎页；非交互或拒绝启用时不创建。既有配置保留。
 

@@ -208,7 +208,7 @@ done
             .unwrap();
     assert!(!formula.contains("default-artifacts"));
     assert!(!formula.contains("depends_on \"gmutils\""));
-    assert!(formula.contains("genmeta package install std.dhttp.net/workspace"));
+    assert!(formula.contains("genmeta install workspace"));
 }
 
 #[test]
