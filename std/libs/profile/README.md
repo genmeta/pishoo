@@ -8,4 +8,4 @@ Profile 是普通 WASI HTTP Lib，独立拥有展示资料与头像。入口为 
 WASI_SDK_PATH=/path/to/wasi-sdk sh build.sh --publisher YOUR_NAME.dhttp.net
 ```
 
-Workspace App 精确依赖同发布者 Profile 0.1.0 与 Message 0.1.0。原生 Contact 的收藏与出站申请分别使用 `/std/contact/local/saved`、`/std/contact/local/requests`；联系人和 ACL 继续由 daccess 管理。首次安装 Profile 前须显式移除占用 `/std/profile` 的旧 Workspace Lib；旧 App 的依赖保护要求先卸载旧 App。卸载各包保留数据。
+Workspace App 精确依赖同发布者 Profile 0.1.0 与 Message 0.1.1。原生 Contact 通过 `POST /std/contact` 发起申请，投递进度使用 `/std/contact/requests`；联系人和 ACL 由 daccess 管理，移除 saved 分类。联系人头像仅通过 `GET /std/contact/{name}/profile/avatar` 使用对方提供的图像。首次安装 Profile 前须显式移除占用 `/std/profile` 的旧 Workspace Lib；旧 App 的依赖保护要求先卸载旧 App。卸载各包保留数据。

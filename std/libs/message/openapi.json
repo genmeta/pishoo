@@ -2,106 +2,183 @@
   "openapi": "3.1.0",
   "info": {
     "title": "message",
-    "version": "0.1.0",
-    "description": "消息、会话、投递和对端权限观察；本地授权由原生 daccess 管理",
-    "license": {
-      "name": "Apache-2.0"
-    }
+    "version": "0.1.1",
+    "description": "本地消息列表、消息投递和远端接收；除 POST /message 外均要求真实所有者"
   },
   "paths": {
-    "/message/context": {
+    "/message/list": {
       "get": {
-        "operationId": "getChatContext",
-        "summary": "chat context",
+        "operationId": "listMessages",
+        "summary": "列出本地消息",
+        "parameters": [
+          { "$ref": "#/components/parameters/Name" },
+          { "$ref": "#/components/parameters/After" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
         "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          }
-        }
-      }
-    },
-    "/message/capability": {
-      "get": {
-        "operationId": "getChatCapability",
-        "summary": "chat capability",
-        "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          }
-        }
-      }
-    },
-    "/message/messages": {
-      "get": {
-        "operationId": "getChatMessages",
-        "summary": "chat messages",
-        "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          }
-        }
-      },
-      "post": {
-        "operationId": "postChatMessages",
-        "summary": "chat messages",
-        "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          }
-        }
-      }
-    },
-    "/message/messages/retry": {
-      "post": {
-        "operationId": "postChatMessagesRetry",
-        "summary": "chat messages retry",
-        "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
-          }
+          "200": { "$ref": "#/components/responses/MessagePage" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
         }
       }
     },
     "/message": {
-      "post": {
-        "operationId": "receiveMessage",
-        "summary": "接收联系人消息",
-        "responses": {
-          "200": {
-            "description": "成功"
-          },
-          "403": {
-            "description": "身份或权限不符"
+      "put": {
+        "operationId": "createMessage",
+        "summary": "创建本地外发消息",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateMessage" } }
           }
         },
-        "x-pishoo": {
-          "access-group": "message"
+        "responses": {
+          "200": { "$ref": "#/components/responses/Message" },
+          "202": { "$ref": "#/components/responses/Message" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "receiveMessage",
+        "summary": "接收远端消息",
+        "parameters": [ { "$ref": "#/components/parameters/IfReviewed" } ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ReceiveMessage" } }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/Message" },
+          "201": { "$ref": "#/components/responses/Message" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        },
+        "x-pishoo": { "access-group": "message" }
+      }
+    },
+    "/message/retry": {
+      "put": {
+        "operationId": "retryMessage",
+        "summary": "重试失败的本地外发消息",
+        "parameters": [ { "$ref": "#/components/parameters/Index" } ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Message" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
         }
       }
     }
   },
   "x-pishoo": {
     "access-groups": {
-      "message": {
-        "title": "message",
-        "operations": [
-          "receiveMessage"
-        ]
+      "message": { "title": "message", "operations": [ "receiveMessage" ] }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Name": {
+        "name": "name", "in": "query", "required": false,
+        "schema": { "type": "string" }
+      },
+      "After": {
+        "name": "after", "in": "query", "required": false,
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      },
+      "Limit": {
+        "name": "limit", "in": "query", "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+      },
+      "Index": {
+        "name": "index", "in": "query", "required": true,
+        "schema": { "type": "integer", "minimum": 1 }
+      },
+      "IfReviewed": {
+        "name": "If-Reviewed", "in": "header", "required": false,
+        "schema": { "type": "string", "enum": [ "waiting", "break" ], "default": "break" }
+      }
+    },
+    "schemas": {
+      "CreateMessage": {
+        "type": "object", "additionalProperties": false,
+        "required": [ "to", "content", "media_type", "client_message_id" ],
+        "properties": {
+          "to": { "type": "string" },
+          "content": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "media_type": { "type": "string", "minLength": 1, "maxLength": 127 },
+          "client_message_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "ReceiveMessage": {
+        "type": "object", "additionalProperties": false,
+        "required": [ "content", "media_type", "client_message_id" ],
+        "properties": {
+          "content": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "media_type": { "type": "string", "minLength": 1, "maxLength": 127 },
+          "client_message_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [ "index", "client_message_id", "direction", "state", "from", "to", "content", "media_type", "created_at", "updated_at" ],
+        "properties": {
+          "index": { "type": "integer", "minimum": 1 },
+          "client_message_id": { "type": "string" },
+          "remote_message_id": { "type": [ "string", "null" ] },
+          "direction": { "type": "string", "enum": [ "incoming", "outgoing" ] },
+          "state": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "content": { "type": "string" },
+          "media_type": { "type": "string" },
+          "created_at": { "type": "integer" },
+          "updated_at": { "type": "integer" },
+          "error_message": { "type": [ "string", "null" ] }
+        }
+      },
+      "Error": {
+        "type": "object", "required": [ "error" ],
+        "properties": { "error": { "type": "string" } }
+      }
+    },
+    "responses": {
+      "Message": {
+        "description": "消息",
+        "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Message" } } }
+      },
+      "MessagePage": {
+        "description": "消息列表",
+        "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" } },
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object", "required": [ "items", "next_cursor" ],
+              "properties": {
+                "items": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } },
+                "next_cursor": { "type": [ "string", "null" ] }
+              }
+            }
+          }
+        }
+      },
+      "Error": {
+        "description": "错误",
+        "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Forbidden": {
+        "description": "需要真实所有者或 ACL 拒绝",
+        "headers": { "Cache-Control": { "$ref": "#/components/headers/NoStore" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    },
+    "headers": {
+      "NoStore": {
+        "description": "响应不得缓存",
+        "schema": { "type": "string", "const": "no-store" }
       }
     }
   }

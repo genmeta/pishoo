@@ -392,8 +392,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         if case == 0 {
             // Approving the actual request persists ACL independently of contact acceptance.
             rule(bob, alice.name(), "POST", "/std/message", "review").await;
-            let payload =
-                json!({"client_message_id":"review-before-contact","text":"先审批后加好友"});
+            let payload = json!({"client_message_id":"review-before-contact","content":"先审批后加好友","media_type":"text/plain"});
             let (status, pending) = remote_json(
                 &alice.endpoint,
                 bob.name(),
@@ -469,7 +468,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 )
                 .await;
                 let allowed = granted[usize::from(receiver.name() == bob.name())];
-                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::POST, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"text":"乱序权限探测"})).await;
+                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::POST, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"content":"乱序权限探测","media_type":"text/plain"})).await;
                 assert_eq!(
                     status.as_u16(),
                     if allowed { 201 } else { 403 },
@@ -479,22 +478,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         }
         for (server, peer, request) in [(alice, bob, &a), (bob, alice, &b)] {
             assert_eq!(refresh(server, &request["id"]).await["status"], "active");
-            let c = expect(
-                server,
-                Method::GET,
-                &format!("/std/message/capability?name={}", peer.name()),
-                Value::Null,
-                200,
-            )
-            .await;
-            assert_eq!(c["can_send"], true, "case {case}: {c}");
-            assert!(c.get("remote_grant").is_none());
             let text = format!("第{case}轮 {} → {}，你好 👋", server.name(), peer.name());
             let sent = expect(
                 server,
-                Method::POST,
-                &format!("/std/message/messages?name={}", peer.name()),
-                json!({"text":text}),
+                Method::PUT,
+                "/std/message",
+                json!({"to":peer.name(),"content":text,"media_type":"text/plain","client_message_id":format!("queued-{case}-{}",server.name())}),
                 202,
             )
             .await;
@@ -502,7 +491,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             let local = expect(
                 server,
                 Method::GET,
-                &format!("/std/message/messages?name={}", peer.name()),
+                &format!("/std/message/list?name={}", peer.name()),
                 Value::Null,
                 200,
             )
@@ -512,13 +501,13 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|m| m["id"] == sent["id"] && m["state"] == "sent"),
+                    .any(|m| m["index"] == sent["index"] && m["state"] == "sent"),
                 "{local}"
             );
             let received = expect(
                 peer,
                 Method::GET,
-                &format!("/std/message/messages?name={}", server.name()),
+                &format!("/std/message/list?name={}", server.name()),
                 Value::Null,
                 200,
             )
@@ -528,7 +517,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|m| m["text"] == text && m["direction"] == "incoming"),
+                    .any(|m| m["content"] == text && m["direction"] == "incoming"),
                 "{received}"
             );
             expect(
@@ -547,7 +536,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
 
     // Review permission and friendship acceptance are independent; approval persists an ordinary ACL grant.
     rule(bob, alice.name(), "POST", "/std/message", "review").await;
-    let payload = json!({"client_message_id":"review-order","text":"请求审批重试"});
+    let payload = json!({"client_message_id":"review-order","content":"请求审批重试","media_type":"text/plain"});
     let (status, pending) = remote_json(
         &alice.endpoint,
         bob.name(),
@@ -601,7 +590,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(duplicate["id"], receipt["id"]);
+    assert_eq!(duplicate["index"], receipt["index"]);
     let rules = expect(bob, Method::GET, "/std/acl/allow", Value::Null, 200).await;
     assert!(
         rules[alice.name()]["/std/message"]["allow"]

@@ -8,13 +8,6 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
     updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer')
 );
 
-CREATE TABLE IF NOT EXISTS chat_capability_state (
-    contact_name TEXT PRIMARY KEY CHECK (length(contact_name) > 0),
-    subject_id BLOB CHECK (subject_id IS NULL OR length(subject_id) BETWEEN 1 AND 64),
-    remote_message_granted INTEGER NOT NULL CHECK (remote_message_granted IN (0, 1)),
-    updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer')
-);
-
 CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_name TEXT NOT NULL CHECK (length(contact_name) > 0),
@@ -25,6 +18,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     sender_name TEXT NOT NULL CHECK (length(sender_name) > 0),
     recipient_name TEXT NOT NULL CHECK (length(recipient_name) > 0),
     text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 4000),
+    media_type TEXT NOT NULL DEFAULT 'text/plain' CHECK (length(media_type) BETWEEN 1 AND 127),
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     last_attempt_at INTEGER,
     next_attempt_at INTEGER,

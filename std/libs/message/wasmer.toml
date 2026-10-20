@@ -1,17 +1,17 @@
 [package]
 name = "dev.dhttp.net/message"
-version = "0.1.0"
+version = "0.1.1"
 description = "独立聊天、消息投递后端"
 license = "Apache-2.0"
 
 [package.pishoo]
 kind = "lib"
 title = "message"
-changelog = "初始版本，提供聊天与消息投递。"
+changelog = "统一消息资源接口；保留 ACL 接收入口与所有者投递管理。"
 dependencies = []
 
 [package.pishoo.host]
-private-storage = "消息、投递队列与对端权限观察"
+private-storage = "消息、会话与投递队列"
 request-identity = "核对真实发送者和主人身份"
 
 [[module]]

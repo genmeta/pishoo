@@ -1,7 +1,8 @@
 //! Ordinary user Lib: business data in /db, native resources accessed via HTTP.
+use std::io::{Read, Write};
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
-use std::io::{Read, Write};
 use wasip2::http::{outgoing_handler, types::*};
 
 type Failure = (u16, String);
@@ -37,8 +38,7 @@ impl wasip2::exports::cli::run::Guest for Handler {
     fn run() -> Result<(), ()> {
         let local = pishoo_sdk::identity::local();
         let chat = database("message").map_err(|_| ())?;
-        observe_contacts(&chat, &chat).map_err(|_| ())?;
-        message_jobs(&chat, &chat, &local).map_err(|_| ())
+        message_jobs(&chat, &local).map_err(|_| ())
     }
 }
 wasip2::http::proxy::export!(Handler);
@@ -115,12 +115,6 @@ fn parameter(target: &str, key: &str) -> Result<Option<String>, Failure> {
         }
     }
     Ok(result)
-}
-fn required(target: &str, key: &str) -> Result<String, Failure> {
-    parameter(target, key)?.ok_or_else(|| fail(400, format!("missing {key}")))
-}
-fn target_name(target: &str) -> Result<String, Failure> {
-    name(&required(target, "name")?)
 }
 fn integer(target: &str, key: &str, default: i64) -> Result<i64, Failure> {
     parameter(target, key)?.map_or(Ok(default), |v| {
@@ -209,6 +203,9 @@ fn http(
     payload: Option<&Value>,
 ) -> Result<Reply, Failure> {
     let fields = Fields::new();
+    fields
+        .append("if-reviewed", b"break")
+        .map_err(|_| fail(500, "invalid review mode"))?;
     if payload.is_some() {
         fields.append("content-type", b"application/json").unwrap();
     }
@@ -274,9 +271,6 @@ fn http(
 }
 fn api(method: Method, path: &str, payload: Option<&Value>) -> Result<Value, Failure> {
     let (status, _, body, _) = http("~", method, path, payload)?;
-    if status == 202 {
-        return Err(fail(409, "native operation requires access approval"));
-    }
     if status < 200 || status >= 300 {
         return Err(fail(status, String::from_utf8_lossy(&body).into_owned()));
     }
@@ -292,33 +286,9 @@ fn encoded(value: &str) -> String {
 fn contact(name: &str) -> Result<Value, Failure> {
     api(
         Method::Get,
-        &format!("/std/contact/{}", encoded(name)),
+        &format!("/std/contact?name={}", encoded(name)),
         None,
     )
-}
-fn contacts() -> Result<Vec<Value>, Failure> {
-    let mut items = Vec::new();
-    let mut p = 1;
-    loop {
-        let value = api(
-            Method::Get,
-            &format!("/std/contacts?page={p}&page_size=100&sort=name&order=asc"),
-            None,
-        )?;
-        let chunk = value["items"]
-            .as_array()
-            .ok_or_else(|| fail(502, "invalid contact list"))?;
-        items.extend(chunk.clone());
-        if items.len() >= value["total"].as_u64().unwrap_or(0) as usize || chunk.is_empty() {
-            return Ok(items);
-        }
-        p += 1;
-    }
-}
-fn has_message(access: &Value) -> bool {
-    access[message_path()]["allow"]
-        .as_array()
-        .is_some_and(|m| m.iter().any(|v| v == "POST" || v == "*"))
 }
 fn database(kind: &str) -> Result<Connection, Failure> {
     let mut db = Connection::open_with_flags_and_vfs(
@@ -358,12 +328,28 @@ fn database(kind: &str) -> Result<Connection, Failure> {
             }
             tx.execute_batch(include_str!("message.sql"))
                 .map_err(storage)?;
-            tx.pragma_update(None, "user_version", 1).map_err(storage)?;
-        } else if version != 1 {
+            tx.pragma_update(None, "user_version", 2).map_err(storage)?;
+        } else if version == 1 {
+            tx.execute_batch(
+                "ALTER TABLE chat_messages ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text/plain' CHECK (length(media_type) BETWEEN 1 AND 127)",
+            )
+            .map_err(storage)?;
+            tx.pragma_update(None, "user_version", 2).map_err(storage)?;
+        } else if version != 2 {
             return Err(fail(500, "unsupported database version"));
         }
         tx.commit().map_err(storage)?;
-    } else if version != 1 {
+    } else if version == 1 {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        tx.execute_batch(
+            "ALTER TABLE chat_messages ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text/plain' CHECK (length(media_type) BETWEEN 1 AND 127)",
+        )
+        .map_err(storage)?;
+        tx.pragma_update(None, "user_version", 2).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+    } else if version != 2 {
         return Err(fail(500, "unsupported database version"));
     }
     Ok(db)
@@ -379,25 +365,23 @@ fn dispatch(
     let method = request.method();
     let mut chat = database("message")?;
     match (path, method) {
-        ("/message/context", Method::Get) => json_reply(
-            200,
-            json!({"owner_name":local.0,"capability":"message","endpoints":[{"method":"POST","path":message_path()}]}),
-        ),
-        ("/message/capability", Method::Get) => json_reply(
-            200,
-            chat_capability(&chat, &chat, &contact(&target_name(target)?)?)?,
-        ),
-        ("/message/messages", Method::Get) => {
-            let name = target_name(target)?;
-            contact(&name)?;
+        ("/message/list", Method::Get) => {
+            let contact_name = parameter(target, "name")?
+                .map(|value| name(&value))
+                .transpose()?;
+            if let Some(contact_name) = &contact_name {
+                contact(contact_name)?;
+            }
             let limit = integer(target, "limit", 50)?;
             if !(1..=100).contains(&limit) {
                 return Err(fail(400, "invalid limit"));
             }
             let after = integer(target, "after", 0)?;
-            let mut stmt=chat.prepare("SELECT id FROM chat_messages WHERE contact_name=?1 AND id>?2 ORDER BY id LIMIT ?3").map_err(storage)?;
+            let mut stmt=chat.prepare("SELECT id FROM chat_messages WHERE (?1 IS NULL OR contact_name=?1) AND id>?2 ORDER BY id LIMIT ?3").map_err(storage)?;
             let ids = stmt
-                .query_map(params![name, after, limit + 1], |r| r.get::<_, i64>(0))
+                .query_map(params![contact_name, after, limit + 1], |r| {
+                    r.get::<_, i64>(0)
+                })
                 .map_err(storage)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(storage)?;
@@ -412,49 +396,51 @@ fn dispatch(
                 json!({"items":items,"next_cursor":if more {ids.last().map(i64::to_string)} else {None}}),
             )
         }
-        ("/message/messages", Method::Post) => {
-            let name = target_name(target)?;
-            let c = contact(&name)?;
-            if chat_capability(&chat, &chat, &c)?["can_send"] != true {
+        ("/message", Method::Put) => {
+            let doc = input(
+                request,
+                &["to", "content", "media_type", "client_message_id"],
+            )?;
+            let contact_name = name(string(&doc, "to")?)?;
+            let c = contact(&contact_name)?;
+            if c["status"] == "blocked" {
                 return Err(fail(403, "chat permission unavailable"));
             }
-            let doc = input(request, &["text"])?;
-            let text = validated_text(&doc)?;
+            let text = validated_content(&doc)?;
+            let media_type = validated_media_type(&doc)?;
+            let client_id = string(&doc, "client_message_id")?.to_owned();
+            if client_id.is_empty()
+                || client_id.len() > 128
+                || !client_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                return Err(fail(400, "invalid client_message_id"));
+            }
             let time = now();
             let tx = chat
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage)?;
-            tx.execute("INSERT INTO chat_conversations(contact_name,updated_at) VALUES(?1,?2) ON CONFLICT(contact_name) DO UPDATE SET updated_at=excluded.updated_at",params![name,time]).map_err(storage)?;
-            tx.execute("INSERT INTO chat_messages(contact_name,client_message_id,direction,state,sender_name,recipient_name,text,created_at,updated_at,next_attempt_at) VALUES(?1,?2,'outgoing','queued',?3,?1,?4,?5,?5,?5)",params![name,random_id(),local.0,text,time]).map_err(storage)?;
-            let id = tx.last_insert_rowid();
-            tx.execute("INSERT INTO chat_jobs(kind,contact_name,message_id,state,available_at,created_at,updated_at) VALUES('send',?1,?2,'queued',?3,?3,?3)",params![name,id,time]).map_err(storage)?;
-            tx.commit().map_err(storage)?;
-            json_reply(202, local_message(&chat, id)?)
-        }
-        ("/message/messages/retry", Method::Post) => {
-            let name = target_name(target)?;
-            let id = integer(target, "id", 0)?;
-            if chat_capability(&chat, &chat, &contact(&name)?)?["can_send"] != true {
-                return Err(fail(403, "chat permission unavailable"));
+            tx.execute("INSERT INTO chat_conversations(contact_name,updated_at) VALUES(?1,?2) ON CONFLICT(contact_name) DO UPDATE SET updated_at=excluded.updated_at",params![contact_name,time]).map_err(storage)?;
+            let existing: Option<(i64, String, String, String)> = tx.query_row("SELECT id,text,media_type,direction FROM chat_messages WHERE contact_name=?1 AND client_message_id=?2",params![contact_name,client_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(storage)?;
+            let (id, created) = if let Some((id, old_text, old_media_type, direction)) = existing {
+                if direction != "outgoing" || old_text != text || old_media_type != media_type {
+                    return Err(fail(409, "message id reused with different content"));
+                }
+                (id, false)
+            } else {
+                tx.execute("INSERT INTO chat_messages(contact_name,client_message_id,direction,state,sender_name,recipient_name,text,media_type,created_at,updated_at,next_attempt_at) VALUES(?1,?2,'outgoing','queued',?3,?1,?4,?5,?6,?6,?6)",params![contact_name,client_id,local.0,text,media_type,time]).map_err(storage)?;
+                (tx.last_insert_rowid(), true)
+            };
+            if created {
+                tx.execute("INSERT INTO chat_jobs(kind,contact_name,message_id,state,available_at,created_at,updated_at) VALUES('send',?1,?2,'queued',?3,?3,?3)",params![contact_name,id,time]).map_err(storage)?;
             }
-            let tx = chat
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(storage)?;
-            let n=tx.execute("UPDATE chat_messages SET state='queued',error_message=NULL,updated_at=?1,next_attempt_at=?1 WHERE id=?2 AND contact_name=?3 AND direction='outgoing' AND state IN ('failed','blocked')",params![now(),id,name]).map_err(storage)?;
-            if n == 0 {
-                return Err(fail(409, "message cannot be retried"));
-            }
-            tx.execute("UPDATE chat_jobs SET state='queued',available_at=?1,lease_token=NULL,lease_until=NULL,updated_at=?1 WHERE message_id=?2",params![now(),id]).map_err(storage)?;
             tx.commit().map_err(storage)?;
-            json_reply(200, local_message(&chat, id)?)
+            json_reply(if created { 202 } else { 200 }, local_message(&chat, id)?)
         }
         ("/message", Method::Post) => {
             let caller = caller.ok_or_else(|| fail(403, "verified sender required"))?;
-            let c = api(Method::Get, "/std/contact/self", None)?;
-            if c["status"] != "active" || c["name"] != caller.0 || c["subject_id"] != caller.1 {
-                return Err(fail(403, "chat capability not approved"));
-            }
-            let doc = input(request, &["client_message_id", "text"])?;
+            let doc = input(request, &["client_message_id", "content", "media_type"])?;
             let client_id = string(&doc, "client_message_id")?;
             if client_id.is_empty()
                 || client_id.len() > 128
@@ -464,125 +450,131 @@ fn dispatch(
             {
                 return Err(fail(400, "invalid client_message_id"));
             }
-            let text = validated_text(&doc)?;
+            let content = validated_content(&doc)?;
+            let media_type = validated_media_type(&doc)?;
             let time = now();
             let tx = chat
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(storage)?;
-            let old:Option<(i64,String)>=tx.query_row("SELECT id,text FROM chat_messages WHERE contact_name=?1 AND client_message_id=?2",params![caller.0,client_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-            let (id, created) = if let Some((id, original)) = old {
-                if original != text {
-                    return Err(fail(409, "message id reused with different text"));
+            let old:Option<(i64,String,String,String)>=tx.query_row("SELECT id,text,media_type,direction FROM chat_messages WHERE contact_name=?1 AND client_message_id=?2",params![caller.0,client_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(storage)?;
+            let (id, created) = if let Some((id, original, original_media_type, direction)) = old {
+                if direction != "incoming"
+                    || original != content
+                    || original_media_type != media_type
+                {
+                    return Err(fail(409, "message id reused with different content"));
                 }
                 (id, false)
             } else {
                 tx.execute("INSERT INTO chat_conversations(contact_name,updated_at) VALUES(?1,?2) ON CONFLICT(contact_name) DO UPDATE SET updated_at=excluded.updated_at",params![caller.0,time]).map_err(storage)?;
-                tx.execute("INSERT INTO chat_messages(contact_name,client_message_id,direction,state,sender_name,recipient_name,text,created_at,updated_at) VALUES(?1,?2,'incoming','received',?1,?3,?4,?5,?5)",params![caller.0,client_id,local.0,text,time]).map_err(storage)?;
+                tx.execute("INSERT INTO chat_messages(contact_name,client_message_id,direction,state,sender_name,recipient_name,text,media_type,created_at,updated_at) VALUES(?1,?2,'incoming','received',?1,?3,?4,?5,?6,?6)",params![caller.0,client_id,local.0,content,media_type,time]).map_err(storage)?;
                 (tx.last_insert_rowid(), true)
             };
             tx.commit().map_err(storage)?;
             let item = local_message(&chat, id)?;
-            json_reply(
-                if created { 201 } else { 200 },
-                json!({"id":item["id"],"client_message_id":client_id,"sender":caller.0,"recipient":local.0,"text":text,"created_at":item["created_at"]}),
+            json_reply(if created { 201 } else { 200 }, item)
+        }
+        ("/message/retry", Method::Put) => {
+            let id = retry_index(target)?;
+            let contact_name: String = chat
+                .query_row(
+                    "SELECT contact_name FROM chat_messages WHERE id=?1 AND direction='outgoing'",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?
+                .ok_or_else(|| fail(404, "message not found"))?;
+            if contact(&contact_name)?["status"] == "blocked" {
+                return Err(fail(403, "chat permission unavailable"));
+            }
+            let tx = chat
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            let time = now();
+            let changed = tx
+                .execute(
+                    "UPDATE chat_messages SET state='queued',error_message=NULL,updated_at=?1,next_attempt_at=?1 WHERE id=?2 AND direction='outgoing' AND state IN ('failed','blocked')",
+                    params![time, id],
+                )
+                .map_err(storage)?;
+            if changed == 0 {
+                return Err(fail(409, "message cannot be retried"));
+            }
+            tx.execute(
+                "UPDATE chat_jobs SET state='queued',available_at=?1,lease_token=NULL,lease_until=NULL,updated_at=?1 WHERE message_id=?2",
+                params![time, id],
             )
+            .map_err(storage)?;
+            tx.commit().map_err(storage)?;
+            json_reply(200, local_message(&chat, id)?)
         }
         _ => Err(fail(404, "operation not found")),
     }
 }
 
-fn validated_text(doc: &Value) -> Result<&str, Failure> {
-    let text = string(doc, "text")?.trim();
+fn validated_content(doc: &Value) -> Result<&str, Failure> {
+    let text = string(doc, "content")?.trim();
     if text.is_empty()
         || text.chars().count() > 4000
         || text
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
-        return Err(fail(400, "invalid message text"));
+        return Err(fail(400, "invalid message content"));
     }
     Ok(text)
 }
+fn validated_media_type(doc: &Value) -> Result<&str, Failure> {
+    let media_type = string(doc, "media_type")?.trim();
+    if media_type.is_empty()
+        || media_type.len() > 127
+        || media_type
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || !media_type.contains('/')
+    {
+        return Err(fail(400, "invalid media_type"));
+    }
+    Ok(media_type)
+}
 fn local_message(db: &Connection, id: i64) -> Result<Value, Failure> {
-    db.query_row("SELECT id,client_message_id,remote_message_id,direction,state,sender_name,recipient_name,text,created_at,updated_at,error_message FROM chat_messages WHERE id=?1",[id],|r|Ok(json!({"id":r.get::<_,i64>(0)?.to_string(),"client_message_id":r.get::<_,String>(1)?,"remote_message_id":r.get::<_,Option<String>>(2)?,"direction":r.get::<_,String>(3)?,"state":r.get::<_,String>(4)?,"sender":r.get::<_,String>(5)?,"recipient":r.get::<_,String>(6)?,"text":r.get::<_,String>(7)?,"created_at":r.get::<_,i64>(8)?,"updated_at":r.get::<_,i64>(9)?,"error_message":r.get::<_,Option<String>>(10)?}))).map_err(storage)
+    db.query_row(
+        "SELECT id,client_message_id,remote_message_id,direction,state,sender_name,recipient_name,text,media_type,created_at,updated_at,error_message FROM chat_messages WHERE id=?1",
+        [id],
+        |row| {
+            let state: String = row.get(4)?;
+            let error: Option<String> = row.get(11)?;
+            Ok(json!({
+                "index": row.get::<_, i64>(0)?,
+                "client_message_id": row.get::<_, String>(1)?,
+                "remote_message_id": row.get::<_, Option<String>>(2)?,
+                "direction": row.get::<_, String>(3)?,
+                "state": delivery_state(&state, error.as_deref()),
+                "from": row.get::<_, String>(5)?,
+                "to": row.get::<_, String>(6)?,
+                "content": row.get::<_, String>(7)?,
+                "media_type": row.get::<_, String>(8)?,
+                "created_at": row.get::<_, i64>(9)?,
+                "updated_at": row.get::<_, i64>(10)?,
+                "error_message": error,
+            }))
+        },
+    ).map_err(storage)
 }
 
-fn remote_grant(chat: &Connection, c: &Value) -> Result<Option<bool>, Failure> {
-    let state:Option<(Option<Vec<u8>>,bool)>=chat.query_row("SELECT subject_id,remote_message_granted FROM chat_capability_state WHERE contact_name=?1",[string(c,"name")?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-    Ok(state
-        .filter(|(s, _)| {
-            s.as_deref() == Some(c["subject_id"].as_str().unwrap_or_default().as_bytes())
-        })
-        .map(|(_, grant)| grant))
-}
-fn observed(chat: &Connection, c: &Value, access: &Value) -> Result<(), Failure> {
-    chat.execute("INSERT INTO chat_capability_state(contact_name,subject_id,remote_message_granted,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(contact_name) DO UPDATE SET subject_id=excluded.subject_id,remote_message_granted=excluded.remote_message_granted,updated_at=excluded.updated_at",params![string(c,"name")?,string(c,"subject_id")?.as_bytes(),has_message(access),now()]).map_err(storage)?;
-    Ok(())
-}
-fn chat_capability(_db: &Connection, chat: &Connection, c: &Value) -> Result<Value, Failure> {
-    let active = c["status"] == "active";
-    let mut remote = remote_grant(chat, c)?;
-    // A freshly reconciled native contact may appear after this CLI batch's
-    // observation. Fetch the actual peer grant before its first send, rather
-    // than requiring the contact queue to write another Lib's private data.
-    if active && remote.is_none() {
-        let (status, _, body, _) =
-            http(string(c, "name")?, Method::Get, "/std/contact/self", None)?;
-        if status == 200 {
-            let receipt: Value =
-                serde_json::from_slice(&body).map_err(|_| fail(502, "invalid contact receipt"))?;
-            observed(chat, c, &receipt["granted_access"])?;
-        } else if matches!(status, 403 | 404) {
-            observed(chat, c, &json!({}))?;
-        } else {
-            return Err(fail(status, "remote contact status unavailable"));
-        }
-        remote = remote_grant(chat, c)?;
+fn retry_index(target: &str) -> Result<i64, Failure> {
+    let value = parameter(target, "index")?.ok_or_else(|| fail(400, "missing index"))?;
+    let index = value
+        .parse::<i64>()
+        .map_err(|_| fail(400, "invalid index"))?;
+    if index <= 0 {
+        return Err(fail(400, "invalid index"));
     }
-    // Contact records retain a grant snapshot. Native ACL writes are the current authority.
-    let receive = if active {
-        let rules = api(Method::Get, "/std/acl/allow", None)?;
-        has_message(&rules[string(c, "name")?])
-    } else {
-        false
-    };
-    let send = active && remote == Some(true);
-    Ok(
-        json!({"capability":"message","status":if c["status"]=="blocked" {"blocked"} else if send||receive {"available"} else {"waiting"},"contact_status":c["status"],"can_send":send,"can_receive":receive,"remote_grant":remote,"endpoints":[{"method":"POST","path":message_path()}]}),
-    )
-}
-fn observe_contacts(db: &Connection, chat: &Connection) -> Result<(), Failure> {
-    let eligible = contacts()?
-        .into_iter()
-        .filter(|c| {
-            c["status"] == "active"
-                && (c["requested_access"].get(message_path()).is_some()
-                    || c["offers"].get(message_path()).is_some())
-        })
-        .collect::<Vec<_>>();
-    // Derive a fair selection from the clock rather than retaining an invocation
-    // counter or restarting at the first failing contact on every Store.
-    if !eligible.is_empty() {
-        let c = &eligible[(now().max(0) as usize / 3) % eligible.len()];
-        let (status, _, body, _) =
-            http(string(c, "name")?, Method::Get, "/std/contact/self", None)?;
-        if status == 200 {
-            let value: Value = serde_json::from_slice(&body)
-                .map_err(|_| fail(502, "invalid peer contact status"))?;
-            observed(chat, c, &value["granted_access"])?;
-        } else if status == 403 || status == 404 {
-            observed(chat, c, &json!({}))?;
-        }
-    }
-    let _ = db;
-    Ok(())
+    Ok(index)
 }
 
-fn message_jobs(
-    db: &Connection,
-    chat: &Connection,
-    local: &(String, String),
-) -> Result<(), Failure> {
+fn message_jobs(chat: &Connection, local: &(String, String)) -> Result<(), Failure> {
     let time = now();
     chat.execute("UPDATE chat_jobs SET state='queued',lease_token=NULL,lease_until=NULL,available_at=?1 WHERE state='running' AND lease_until<=?1",[time]).map_err(storage)?;
     chat.execute_batch("BEGIN IMMEDIATE").map_err(storage)?;
@@ -603,45 +595,181 @@ fn message_jobs(
     let item = local_message(chat, message)?;
     let result = (|| {
         let c = contact(&target)?;
-        if chat_capability(db, chat, &c)?["can_send"] != true {
+        if c["status"] == "blocked" {
             return Err(fail(403, "chat permission unavailable"));
         }
         let (status, _, bytes, _) = http(
             &target,
             Method::Post,
             &message_path(),
-            Some(&json!({"client_message_id":item["client_message_id"],"text":item["text"]})),
+            Some(
+                &json!({"client_message_id":item["client_message_id"],"content":item["content"],"media_type":item["media_type"]}),
+            ),
         )?;
         if status != 200 && status != 201 {
-            return Err(fail(status, "message delivery rejected"));
+            return Err(fail(
+                status,
+                if needs_review(status, &bytes) {
+                    "need_review"
+                } else {
+                    "message delivery rejected"
+                },
+            ));
         }
         let envelope: Value =
             serde_json::from_slice(&bytes).map_err(|_| fail(502, "invalid message receipt"))?;
         if envelope["client_message_id"] != item["client_message_id"]
-            || envelope["sender"] != local.0
-            || envelope["recipient"] != target
-            || envelope["text"] != item["text"]
+            || envelope["from"] != local.0
+            || envelope["to"] != target
+            || envelope["content"] != item["content"]
+            || envelope["media_type"] != item["media_type"]
         {
             return Err(fail(502, "message receipt mismatch"));
         }
-        Ok(string(&envelope, "id")?.to_owned())
+        let remote_index = envelope["index"]
+            .as_i64()
+            .filter(|index| *index > 0)
+            .ok_or_else(|| fail(502, "invalid message receipt index"))?;
+        Ok(remote_index.to_string())
     })();
+    finish_delivery(chat, job, message, &lease, attempt, result, now())
+}
+
+fn finish_delivery(
+    chat: &Connection,
+    job: i64,
+    message: i64,
+    lease: &str,
+    attempt: i64,
+    result: Result<String, Failure>,
+    time: i64,
+) -> Result<(), Failure> {
     let tx = chat.unchecked_transaction().map_err(storage)?;
     match result {
         Ok(remote) => {
-            let n=tx.execute("UPDATE chat_jobs SET state='completed',lease_token=NULL,lease_until=NULL,updated_at=?1 WHERE id=?2 AND lease_token=?3",params![now(),job,lease]).map_err(storage)?;
+            let n=tx.execute("UPDATE chat_jobs SET state='completed',lease_token=NULL,lease_until=NULL,updated_at=?1 WHERE id=?2 AND lease_token=?3",params![time,job,lease]).map_err(storage)?;
             if n == 1 {
-                tx.execute("UPDATE chat_messages SET state='sent',remote_message_id=?1,delivered_at=?2,error_message=NULL,updated_at=?2 WHERE id=?3",params![remote,now(),message]).map_err(storage)?;
+                tx.execute("UPDATE chat_messages SET state='sent',remote_message_id=?1,delivered_at=?2,error_message=NULL,updated_at=?2 WHERE id=?3",params![remote,time,message]).map_err(storage)?;
             }
         }
         Err((code, error)) => {
-            let permanent = matches!(code, 400 | 403 | 404 | 409);
-            let dead = permanent || attempt >= 7;
-            let n=tx.execute("UPDATE chat_jobs SET state=?1,available_at=?2,attempt_count=attempt_count+1,last_error=?3,lease_token=NULL,lease_until=NULL,updated_at=?4 WHERE id=?5 AND lease_token=?6",params![if dead {"dead"} else {"queued"},now()+5*(1i64<<attempt.min(6)),error,now(),job,lease]).map_err(storage)?;
+            let reviewing = error == "need_review";
+            let permanent = !reviewing && matches!(code, 400 | 403 | 404 | 409);
+            let dead = permanent || (!reviewing && attempt >= 7);
+            let retry_at = time
+                + if reviewing {
+                    30
+                } else {
+                    5 * (1i64 << attempt.min(6))
+                };
+            let n=tx.execute("UPDATE chat_jobs SET state=?1,available_at=?2,attempt_count=attempt_count+CASE WHEN ?3='need_review' THEN 0 ELSE 1 END,last_error=?3,lease_token=NULL,lease_until=NULL,updated_at=?4 WHERE id=?5 AND lease_token=?6",params![if dead {"dead"} else {"queued"},retry_at,error,time,job,lease]).map_err(storage)?;
             if n == 1 {
-                tx.execute("UPDATE chat_messages SET state=?1,error_message=?2,attempt_count=attempt_count+1,next_attempt_at=?3,updated_at=?4 WHERE id=?5",params![if code==403 {"blocked"} else if dead {"failed"} else {"queued"},error,now()+5*(1i64<<attempt.min(6)),now(),message]).map_err(storage)?;
+                tx.execute("UPDATE chat_messages SET state=?1,error_message=?2,attempt_count=attempt_count+CASE WHEN ?2='need_review' THEN 0 ELSE 1 END,next_attempt_at=?3,updated_at=?4 WHERE id=?5",params![if code==403 {"blocked"} else if dead {"failed"} else {"queued"},error,retry_at,time,message]).map_err(storage)?;
             }
         }
     }
     tx.commit().map_err(storage)
+}
+
+fn needs_review(status: u16, bytes: &[u8]) -> bool {
+    status == 400
+        && serde_json::from_slice::<Value>(bytes).is_ok_and(|body| body["error"] == "need_review")
+}
+
+fn delivery_state<'a>(state: &'a str, error: Option<&str>) -> &'a str {
+    if state == "queued" && error == Some("need_review") {
+        "reviewing"
+    } else {
+        state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queued_delivery() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("message.sql")).unwrap();
+        db.execute("INSERT INTO chat_messages(id,contact_name,client_message_id,direction,state,sender_name,recipient_name,text,created_at,updated_at) VALUES(1,'peer.example','stable-id','outgoing','sending','owner.example','peer.example','Hello',1,1)", []).unwrap();
+        db.execute("INSERT INTO chat_jobs(id,kind,contact_name,message_id,state,available_at,lease_token,lease_until,created_at,updated_at) VALUES(1,'send','peer.example',1,'running',1,'lease',120,1,1)", []).unwrap();
+        db
+    }
+
+    #[test]
+    fn message_resource_uses_numeric_indexes_and_requires_a_valid_retry_index() {
+        let db = queued_delivery();
+        let message = local_message(&db, 1).unwrap();
+        assert_eq!(message["index"], 1);
+        assert_eq!(message["from"], "owner.example");
+        assert_eq!(message["to"], "peer.example");
+        assert_eq!(message["content"], "Hello");
+        assert_eq!(message["media_type"], "text/plain");
+
+        assert_eq!(retry_index("/message/retry?index=42"), Ok(42));
+        assert_eq!(
+            retry_index("/message/retry?index=0"),
+            Err(fail(400, "invalid index"))
+        );
+        assert_eq!(
+            retry_index("/message/retry?index=invalid"),
+            Err(fail(400, "invalid index"))
+        );
+        assert_eq!(
+            retry_index("/message/retry"),
+            Err(fail(400, "missing index"))
+        );
+    }
+
+    #[test]
+    fn review_waits_do_not_exhaust_retries_and_keep_the_message_id() {
+        let db = queued_delivery();
+        for time in 1..=10 {
+            finish_delivery(&db, 1, 1, "lease", 0, Err(fail(400, "need_review")), time).unwrap();
+            let message = local_message(&db, 1).unwrap();
+            assert_eq!(message["state"], "reviewing");
+            assert_eq!(message["client_message_id"], "stable-id");
+            let job: (String, i64, i64) = db
+                .query_row(
+                    "SELECT state,attempt_count,available_at FROM chat_jobs WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(job, ("queued".into(), 0, time + 30));
+            db.execute(
+                "UPDATE chat_jobs SET state='running',lease_token='lease' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        }
+        finish_delivery(&db, 1, 1, "lease", 0, Ok("remote-id".into()), 11).unwrap();
+        let message = local_message(&db, 1).unwrap();
+        assert_eq!(message["state"], "sent");
+        assert_eq!(message["client_message_id"], "stable-id");
+        assert_eq!(message["remote_message_id"], "remote-id");
+        assert!(message["error_message"].is_null());
+    }
+
+    #[test]
+    fn ordinary_bad_requests_and_denials_end_delivery_and_stale_leases_cannot_change_it() {
+        for (code, state) in [(400, "failed"), (403, "blocked")] {
+            let db = queued_delivery();
+            finish_delivery(&db, 1, 1, "stale", 0, Err(fail(400, "need_review")), 2).unwrap();
+            assert_eq!(local_message(&db, 1).unwrap()["state"], "sending");
+            finish_delivery(&db, 1, 1, "lease", 0, Err(fail(code, "rejected")), 3).unwrap();
+            assert_eq!(local_message(&db, 1).unwrap()["state"], state);
+            assert_eq!(
+                db.query_row("SELECT state FROM chat_jobs WHERE id=1", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+                "dead"
+            );
+        }
+        assert!(needs_review(400, br#"{"error":"need_review"}"#));
+        assert!(!needs_review(400, br#"{"error":"invalid input"}"#));
+        assert!(!needs_review(403, br#"{"error":"need_review"}"#));
+    }
 }
