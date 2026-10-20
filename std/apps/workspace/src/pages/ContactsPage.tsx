@@ -568,7 +568,6 @@ export default function ContactsPage(props: {
                                       ? [...new Set([...current, capability.id])] : current.filter(id => id !== capability.id))} />
                                   <span>
                                     <strong>{capability.title}</strong>
-                                    <small>{capability.id}</small>
                                     <For each={capability.endpoints}>{(endpoint) => <code>{endpoint.method} {endpoint.path}</code>}</For>
                                   </span>
                                 </label>

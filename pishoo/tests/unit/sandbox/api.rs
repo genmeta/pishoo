@@ -95,22 +95,22 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     sandbox.libs.insert("test".into(), lib);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, expected) in [
-        (Method::GET, "/std/run", StatusCode::INTERNAL_SERVER_ERROR),
+        (Method::GET, "/test/run", StatusCode::INTERNAL_SERVER_ERROR),
         (
             Method::POST,
-            "/std/run?value=1",
+            "/test/run?value=1",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
-        (Method::HEAD, "/std/run", StatusCode::METHOD_NOT_ALLOWED),
-        (Method::OPTIONS, "/std/run", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::HEAD, "/test/run", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::OPTIONS, "/test/run", StatusCode::METHOD_NOT_ALLOWED),
         (
             Method::HEAD,
-            "/std/explicit",
+            "/test/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
         (
             Method::OPTIONS,
-            "/std/explicit",
+            "/test/explicit",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
     ] {
@@ -121,6 +121,10 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
             assert_eq!(status(&router, method, path).await, StatusCode::NOT_FOUND);
         }
     }
+    assert_eq!(
+        status(&router, Method::CONNECT, "/test/run").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
     let router = router.fallback(|| async { StatusCode::IM_A_TEAPOT });
     for path in ["/api/test/run", "/app/workspace/", "/api/websocket"] {
         assert_eq!(
@@ -128,15 +132,11 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
             StatusCode::IM_A_TEAPOT
         );
     }
-    assert_eq!(
-        status(&router, Method::CONNECT, "/std/run").await,
-        StatusCode::METHOD_NOT_ALLOWED
-    );
     assert!(sandbox.tasks.is_empty());
 }
 
 #[tokio::test]
-async fn lib_paths_are_independent_of_package_identity() {
+async fn lib_paths_are_scoped_to_the_registered_publisher_and_name() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
@@ -149,9 +149,9 @@ async fn lib_paths_are_independent_of_package_identity() {
         .insert("publisher.dhttp.net/workspace".into(), lib);
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for path in [
-        "/std/profile",
-        "/std/profile?search=a%2Fb",
-        "/std/workspace/context",
+        "/workspace/profile",
+        "/workspace/profile?search=a%2Fb",
+        "/workspace/workspace/context",
     ] {
         assert_eq!(
             status(&router, Method::GET, path).await,
@@ -159,13 +159,61 @@ async fn lib_paths_are_independent_of_package_identity() {
         );
     }
     assert_eq!(
-        status(&router, Method::DELETE, "/std/profile").await,
+        status(&router, Method::DELETE, "/workspace/profile").await,
         StatusCode::METHOD_NOT_ALLOWED
     );
     assert_eq!(
-        status(&router, Method::GET, "/std/workspace/profile").await,
+        status(&router, Method::GET, "/std/profile").await,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_package() {
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let directory = tempfile::tempdir().unwrap();
+    let standard = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
+    let ordinary = load(
+        &sandbox,
+        directory.path(),
+        r#"{"/std/xxxx":{"post":{}},"/message":{"post":{}}}"#,
+    );
+    sandbox
+        .libs
+        .insert("std.dhttp.net/message".into(), standard);
+    sandbox
+        .libs
+        .insert("alice.dhttp.net/journal".into(), ordinary);
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    for path in [
+        "/std/message",
+        "/journal/message",
+        "/journal/std/xxxx?value=a%2Fb",
+    ] {
+        assert_eq!(
+            status(&router, Method::POST, path).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+        assert_eq!(
+            status(&router, Method::GET, path).await,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{path}"
+        );
+    }
+    for path in [
+        "/std/xxxx",
+        "/std/journal/std/xxxx",
+        "/journalish/std/xxxx",
+        "/journal/missing",
+        "/message/message",
+    ] {
+        assert_eq!(
+            status(&router, Method::POST, path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -180,8 +228,8 @@ async fn routers_keep_their_lib_snapshot() {
     sandbox.libs.insert("test".into(), new);
     let new_router = api_router(&sandbox, endpoint);
     for (router, present, absent) in [
-        (&old_router, "/std/old", "/std/new"),
-        (&new_router, "/std/new", "/std/old"),
+        (&old_router, "/test/old", "/test/new"),
+        (&new_router, "/test/new", "/test/old"),
     ] {
         assert_eq!(
             status(router, Method::POST, present).await,
@@ -205,14 +253,14 @@ async fn routed_executions_exceed_four_concurrent_requests_and_survive_close() {
     let endpoint = crate::test_identity::endpoint("alice");
     let router = api_router(&sandbox, endpoint.clone());
     assert_eq!(
-        status(&router, Method::POST, "/std/run").await,
+        status(&router, Method::POST, "/test/run").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(sandbox.tasks.is_empty());
     let local = endpoint.local_authority().unwrap();
     let mut responses = Vec::new();
     for index in 0..8 {
-        let mut request = request(Method::POST, &format!("/std/run?index={index}"));
+        let mut request = request(Method::POST, &format!("/test/run?index={index}"));
         request.extensions_mut().insert(dhttp::HandshakeSummary {
             alpn: None,
             local: Some(local.clone()),

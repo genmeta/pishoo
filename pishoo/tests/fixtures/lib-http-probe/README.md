@@ -1,6 +1,6 @@
 # Local Lib HTTP probe
 
-This standalone WASI component calls `/api/workspace/context`. Its HTTP response records the original caller and the dependency response; its CLI export persists the same result under its own `/db`. The real host acceptance test checks owner success, visitor denial in the downstream Lib, and `caller=None` in CLI while its newly initiated HTTP request is authenticated by actual QUIC credentials.
+This standalone WASI component calls `/profile/profile/context` (the ordinary `profile` Lib declares `/profile/context`). Its HTTP response records the original caller and the dependency response; its CLI export persists the same result under its own `/db`. The real host acceptance test checks owner success, visitor denial in the downstream Lib, and `caller=None` in CLI while its newly initiated HTTP request is authenticated by actual QUIC credentials.
 
 Build outside the parent transport override configuration:
 

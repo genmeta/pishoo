@@ -1,8 +1,8 @@
-import { For, Show, createResource } from 'solid-js'
+import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { api } from '../api/client'
 import type { CapabilityDescriptor } from '../api/types'
-import { ErrorState, LoadingState } from '../components/Ui'
+import { Dialog, ErrorState, LoadingState } from '../components/Ui'
 import { useI18n } from '../i18n'
 import { abortable } from '../lib/abortable'
 import { errorMessage } from '../lib/format'
@@ -11,6 +11,7 @@ export default function CapabilitiesPage() {
   const { t } = useI18n()
   const load = abortable((_source: boolean, signal: AbortSignal) => api.capabilities(signal))
   const [capabilities, actions] = createResource(() => true, load)
+  const [selected, setSelected] = createSignal<CapabilityDescriptor>()
 
   return (
     <>
@@ -34,23 +35,30 @@ export default function CapabilitiesPage() {
           <Show when={capabilities()!.length > 0} fallback={
             <div class="data-panel"><p class="empty-state">{t('capabilities.empty')}</p></div>
           }>
-            <For each={capabilities()}>{(capability) => <CapabilityCard capability={capability} />}</For>
+            <For each={capabilities()}>{(capability) => <CapabilityCard capability={capability} onView={() => setSelected(capability)} />}</For>
           </Show>
         </section>
       </Show>
+      <Dialog open={!!selected()} title={selected()?.title ?? ''} onClose={() => setSelected(undefined)}>
+        <p class="muted">{t('apps.interfaces')} · {selected()?.endpoints.length ?? 0}</p>
+        <ul class="capability-api-list">
+          <For each={selected()?.endpoints}>{endpoint =>
+            <li><span class="method">{endpoint.method}</span><code>{endpoint.path}</code></li>
+          }</For>
+        </ul>
+      </Dialog>
     </>
   )
 }
 
-function CapabilityCard(props: { capability: CapabilityDescriptor }) {
+function CapabilityCard(props: { capability: CapabilityDescriptor; onView: () => void }) {
   const { t } = useI18n()
   const capability = () => props.capability
   return (
     <article class="capability-card">
       <header class="capability-card-header">
         <div>
-          <h2>{capability().endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')
-            ? t('capabilities.chat.name') : capability().title}</h2>
+          <h2>{capability().title}</h2>
         </div>
         <span class="status-badge">{t(capability().approval_mode === 'none' ? 'capabilities.noApproval' : 'capabilities.approvalRequired')}</span>
       </header>
@@ -61,14 +69,10 @@ function CapabilityCard(props: { capability: CapabilityDescriptor }) {
         <Show when={capability().selectable}><span>{t('capabilities.requestable')}</span></Show>
       </footer>
       <Show when={capability().endpoints.length > 0}>
-        <details class="capability-endpoints">
-          <summary>{t('capabilities.endpoints', { count: capability().endpoints.length })}</summary>
-          <ul>
-            <For each={capability().endpoints}>{(endpoint) =>
-              <li><span class="method">{endpoint.method}</span><code>{endpoint.path}</code></li>
-            }</For>
-          </ul>
-        </details>
+        <button class="capability-endpoints" type="button" aria-haspopup="dialog" onClick={props.onView}>
+          <span>{t('capabilities.endpoints', { count: capability().endpoints.length })}</span>
+          <span aria-hidden="true">→</span>
+        </button>
       </Show>
     </article>
   )

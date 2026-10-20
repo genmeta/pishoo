@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use wasmparser::{Encoding, Parser, Payload};
 
-use crate::{Error, Result, routes::reserved};
+use crate::{Error, Result};
 
 pub fn validate_lib(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
     let invalid = |s: &str| Error::InvalidComponent(s.into());
@@ -80,27 +80,10 @@ pub fn validate_openapi(bytes: &[u8]) -> Result<oas3::OpenApiV3Spec> {
         .ok_or_else(|| invalid("missing OpenAPI paths"))?;
     let mut ids = HashSet::new();
     for (path, item) in paths {
-        if !valid_path(path)
-            || path.contains(['{', '}'])
-            || reserved(path)
-            || [
-                "/acl",
-                "/contact",
-                "/contacts",
-                "/sys",
-                "/pishoo",
-                "/file",
-                "/dhttp",
-            ]
-            .iter()
-            .any(|prefix| {
-                path == prefix
-                    || path
-                        .strip_prefix(prefix)
-                        .is_some_and(|tail| tail.starts_with('/'))
-            })
-        {
-            return Err(invalid("unsupported or reserved API path"));
+        // These paths are relative to the authenticated package's mount.
+        // Native namespace checks require that publisher, supplied at install.
+        if !valid_path(path) || path.contains(['{', '}']) {
+            return Err(invalid("unsupported API path"));
         }
         if item.reference.is_some() {
             return Err(invalid("path-level references are unsupported"));

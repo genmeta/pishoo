@@ -251,8 +251,7 @@ function CapabilityOption(props: {
   onToggle: () => void
 }) {
   const { t } = useI18n()
-  const name = () => props.capability.endpoints.some(endpoint => endpoint.method === 'POST' && endpoint.path === '/std/message')
-    ? t('capabilities.chat.name') : props.capability.title
+  const name = () => props.capability.title
   return (
     <label class="capability-option">
       <input type="checkbox" checked={props.checked} onChange={props.onToggle}

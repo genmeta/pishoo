@@ -136,11 +136,78 @@ source = "lib.wasm"
 
 新 Lib 将原始 OpenAPI UTF-8 JSON 嵌入 `backend` 顶层唯一的 `pishoo:openapi` custom section，内容不超过1 MiB。文档必须能按 OpenAPI 3.1.x 解析，包含 `paths` 和非空 `info.title`，`info.version` 必须等于包版本。
 
-文档描述 Component 内部业务路径，例如 `/echo`。宿主添加 `/std` 前缀，清单身份和运行依赖不从该路径或 OpenAPI 推断。业务路径必须固定：不含 query、fragment、百分号、反斜杠、空白、`.`/`..` 路径段或 `{参数}` 模板；不占用宿主保留路径。路径级 `$ref` 不可提供实际路由方法，因此拒绝。
+文档描述 Component 内部业务路径，例如 `/echo`。宿主仅为已验签发布者 `std.dhttp.net` 添加 `/std` 前缀，其他发布者添加 `/<Lib短名>` 前缀；清单身份和运行依赖不从该路径或 OpenAPI 推断。普通 journal 声明 `/std/xxxx` 得到 `/journal/std/xxxx`，无法占用顶层 `/std`。业务路径必须固定：不含 query、fragment、百分号、反斜杠、空白、`.`/`..` 路径段或 `{参数}` 模板；映射后的对外路径不得占用原生服务；标准 Lib 禁止声明 `/std`、`/acl`、`/contact`、`/contacts`、`/sys`、`/pishoo`、`/file`、`/dhttp` 根及其子路径。路径级 `$ref` 不可提供实际路由方法，因此拒绝。
 
-每个实际操作都要有非空 `operationId` 和 `summary`，`operationId` 在该 Lib 内唯一。标准 responses、schemas 等继续按 OpenAPI 描述，不把包身份、`kind`、`dependencies`、`entry`、`host`、`changelog` 或静态文件路由放进 `x-pishoo`。
+每个实际操作都要有非空 `operationId` 和 `summary`，`operationId` 在该 Lib 内唯一。标准 responses、schemas 等继续按 OpenAPI 描述；包身份、`kind`、`dependencies`、`entry`、`host`、`changelog` 和静态文件路由不属于业务访问扩展。
 
-Pishoo 的业务扩展为：文档级 `x-pishoo.access-groups`，操作级 `x-pishoo.access-group` 和 `x-pishoo.initial-access`。组名采用短名语法，组有非空 title 和非空 operations 列表；成员必须指向真实操作，与操作注解一致且不交叠。初始授权建议不能代替 daccess 授权。
+### 能力接口分组
+
+2026-10-20 修订：能力声明使用下面三个直接扩展字段，去掉原有 `x-pishoo` 嵌套。**本节及对应示例为目标规范，当前宿主、商店和工具链解析器尚未同步；旧格式兼容和切换策略待实现阶段明确。** 本次不修改 WEBC 的 `package.pishoo` 注解、Component 的 `pishoo:openapi` section 名称或包级签名。
+
+| 字段 | 位置 | 类型与含义 |
+| --- | --- | --- |
+| `x-access-groups` | OpenAPI 文档顶层 | 可选对象，键为组名，值为组定义 |
+| `title` | 组定义 | 必填非空字符串，面向用户的能力标题 |
+| `operations` | 组定义 | 必填非空字符串数组，成员为当前 Lib 的 operationId |
+| `x-access-group` | Operation Object | 可选字符串，当前操作所属的组名 |
+| `x-initial-access` | Operation Object | 可选数组，当前操作的初始授权建议 |
+| `grantee`、`effect` | 每条初始建议 | 恰好两个必填字段，沿用 daccess 的主体和效果语法 |
+
+组名最长63字节，以小写 ASCII 字母开头，只含小写字母、数字和连字符。每个成员必须引用真实操作，同一操作不能重复列出或属于多个组；组的 `operations` 与操作上的 `x-access-group` 必须完全一致。操作可以不加入组；没有分组时可省略分组字段。
+
+能力组标题统一使用简洁的英文动作名称，例如 `Read`、`Comment`、`Manage`、`Receive`。展示时已包含包短名，标题不再重复包名；具体操作范围可用标准 Operation `description` 补充，无需增加组级包身份字段。Workspace 原样展示声明标题，不为具体 Lib 硬编码翻译。
+
+`x-initial-access` 沿用既有规则：每条建议只包含 `grantee` 和 `effect`；同一操作内主体不重复，`*?` 不与 `**` 或 `?` 同时使用。`effect` 为 `allow`、`review` 或 `deny`。建议、分组和依赖声明都不自动产生权限，实际访问仍由 daccess 决定。
+
+下面示例的包身份假定为 `alice.smith.dhttp.net/journal`、Lib 版本为 `0.1.0`；包身份仍来自签名 manifest，OpenAPI 不重复声明。
+
+```json
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Journal API", "version": "0.1.0" },
+  "x-access-groups": {
+    "read": {
+      "title": "Read",
+      "operations": ["listEntries"]
+    },
+    "comment": {
+      "title": "Comment",
+      "operations": ["addComment"]
+    }
+  },
+  "paths": {
+    "/entries": {
+      "get": {
+        "operationId": "listEntries",
+        "summary": "List journal entries",
+        "description": "Read journal entries; editing and deletion are excluded.",
+        "x-access-group": "read",
+        "x-initial-access": [{ "grantee": "**", "effect": "review" }],
+        "responses": { "200": { "description": "Journal entries" } }
+      }
+    },
+    "/comments": {
+      "post": {
+        "operationId": "addComment",
+        "summary": "Add a comment",
+        "description": "Add a comment to an entry; comment deletion is excluded.",
+        "x-access-group": "comment",
+        "responses": { "201": { "description": "Comment created" } }
+      }
+    }
+  }
+}
+```
+
+### 能力名称展示
+
+展示层从已验签 manifest 的包短名与组标题派生标签，格式为 `包名 · 能力标题`，不显示作者，例如：
+
+- `journal · Read`
+- `journal · Comment`
+- `calendar · Manage`
+
+展示标签省略完整作者，只保留包短名；不能把展示标签反向用于身份核对、依赖、签名或发布参数。展示标签不写回包。能力目录保留原有对象结构，键使用未缩写的 `作者/包名 · 能力标题`；联系人请求沿用该完整键。Workspace 的 title 只显示包短名和能力标题，内部 id 和请求值保留含作者的完整键。不同包的同名标题分别列出；旧纯标题请求仅在目录中唯一匹配时兼容，歧义时拒绝并要求刷新目录。此目录与显示规则已实施，前述 OpenAPI 扩展字段解析仍待同步。
 
 App 没有后端 OpenAPI 声明。`public/` 是实际静态文件树，不需要为每个文件生成 `operationId`、`summary` 或 `static-file` 注解；运行时页面路径、深链接回退和授权规则见[包管理](package-management.md)。
 

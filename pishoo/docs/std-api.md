@@ -10,7 +10,7 @@
 
 ### 1.1 路径与身份
 
-原生服务由 Pishoo 提供。业务 Lib 的 OpenAPI 使用不带 `/std` 的字面路径，宿主对外添加 `/std`。Profile、Message、Calendar 和 Journal 的接口仅在对应 Lib 已安装并加载后存在。
+原生服务由 Pishoo 提供。标准发布者 `std.dhttp.net` 的 Lib 声明字面路径，宿主对外添加 `/std`；其他发布者的 Lib 添加 `/<Lib短名>`，声明 `/std/xxxx` 也只会落在自己的包名前缀下。Profile、Message、Calendar 和 Journal 的接口仅在对应 Lib 已安装并加载后存在。
 
 App 的页面与静态资源挂载在 `/<name>/`，例如 `/workspace/`、`/calendar/`，不作为本清单中的业务 API。`/std` 根路径没有目录接口；`/std/file` 根路径返回 404。
 
@@ -858,7 +858,7 @@ Accept: application/json
 Content-Type: application/json
 
 {
-  "read message": {
+  "std.dhttp.net/message · Read messages": {
     "/std/message": ["GET", "HEAD"],
     "/std/message/history": ["GET"]
   }
@@ -867,7 +867,7 @@ Content-Type: application/json
 
 **说明与错误**
 
-顶层键为已登记 Lib 的 access-group title，值为路径到大写 HTTP 方法数组的映射。同名组按路径合并，方法排序去重；空目录为 `{}`。不返回 id、版本、visibility、approval_mode、selectable 或 endpoints 元数据。联系人申请中的 requested_capabilities/offered_capabilities 使用这些权限组名称。响应带 no-store。新身份默认允许匿名 GET，已有身份仍以自己的 ACL 为准；目录登记或安装不自动授权。
+顶层键为已登记 Lib 的完整 `作者/包名 · access-group title`，值为路径到大写 HTTP 方法数组的映射。包身份来自安装登记；不同包的同名标题分别列出，同包同标题按路径合并，方法排序去重；空目录为 `{}`。历史无作者记录只使用包短名，不补造发布者。不返回 id、版本、visibility、approval_mode、selectable 或 endpoints 元数据。联系人申请中的 requested_capabilities/offered_capabilities 使用这些权限组名称。界面展示可按[能力名称展示](package-spec.md#能力名称展示)从包短名与组标题拼接 `journal · Read`，展示时省略完整作者；本接口的响应键和联系人请求值始终保留完整作者。旧纯标题请求仅在唯一匹配时兼容，歧义返回409。本次已同步目录与展示，OpenAPI 扩展字段解析仍待实施。响应带 no-store。新身份默认允许匿名 GET，已有身份仍以自己的 ACL 为准；目录登记或安装不自动授权。
 
 ### 3.2 `GET /std/acl/access`
 
@@ -2514,18 +2514,18 @@ target 为单个路径段中的目标身份，可带 `:证书序号`；path 为�
 
 ## 10. Journal 示例 API
 
-Journal 位于 examples，不属于标准三个 Lib；安装并加载后采用相同 `/std` 分派。所有操作要求真实具名身份和普通 ACL；除 POST comments 允许具名访客外，修改还要求所有者。
+Journal 位于 examples，示例发布者为 `alice.smith.dhttp.net`；Lib 声明 `/context`、`/entries` 等不带包名的路径，宿主添加包名前缀 `/journal`，业务 API 为 `/journal/context`、`/journal/entries` 等，App 为 `/journal/`。所有操作要求真实具名身份和普通 ACL；除 POST comments 允许具名访客外，修改还要求所有者。
 
 全部写操作要求 `X-Journal-Write: 1`，拒绝 cross-site 及不匹配 Origin。JSON 写入要求 application/json，最大 1.5 MiB。id 均为 32 位小写十六进制；新内容 id 由客户端预先生成。时间为 Unix 毫秒，响应携带 private, no-store。
 
-### 10.1 `GET /std/journal/context`
+### 10.1 `GET /journal/context`
 
 读取 Journal 的真实调用者和所有者上下文。
 
 **请求示例**
 
 ```http
-GET /std/journal/context
+GET /journal/context
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -2548,14 +2548,14 @@ Cache-Control: private, no-store
 }
 ```
 
-### 10.2 `GET /std/journal/entries`
+### 10.2 `GET /journal/entries`
 
 按 offset 分页查询手记摘要。
 
 **请求示例**
 
 ```http
-GET /std/journal/entries?offset=0
+GET /journal/entries?offset=0
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -2594,14 +2594,14 @@ Cache-Control: private, no-store
 
 preview 为正文前 180 个字符。有更多记录时 next_offset 为 offset + 20，否则 null。
 
-### 10.3 `POST /std/journal/entries`
+### 10.3 `POST /journal/entries`
 
 所有者新建手记。
 
 **请求示例**
 
 ```http
-POST /std/journal/entries
+POST /journal/entries
 Host: bob.dhttp.net
 Content-Type: application/json
 X-Journal-Write: 1
@@ -2652,14 +2652,14 @@ id/title/body 必填，photo 可省略。title 最多 200 字符；body 非空�
 
 重复 id 返回 409，不覆盖已存在内容。
 
-### 10.4 `GET /std/journal/entry`
+### 10.4 `GET /journal/entry`
 
 读取完整手记及当前 ETag。
 
 **请求示例**
 
 ```http
-GET /std/journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+GET /journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -2691,16 +2691,16 @@ Cache-Control: private, no-store
 
 **说明与错误**
 
-成功返回 200，响应为 `POST /std/journal/entries` 的完整手记对象，附带对应 `ETag: "版本号"`；不存在返回 404。
+成功返回 200，响应为 `POST /journal/entries` 的完整手记对象，附带对应 `ETag: "版本号"`；不存在返回 404。
 
-### 10.5 `PUT /std/journal/entry`
+### 10.5 `PUT /journal/entry`
 
 所有者使用 If-Match 编辑手记。
 
 **请求示例**
 
 ```http
-PUT /std/journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+PUT /journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Host: bob.dhttp.net
 Content-Type: application/json
 If-Match: "1"
@@ -2746,18 +2746,18 @@ Cache-Control: private, no-store
 
 **说明与错误**
 
-title/body 必填，限制同 `POST /std/journal/entries`；photo 省略保留原图，null 移除，数据 URL 替换。成功返回 200，响应为完整更新对象，附带递增版本 ETag。
+title/body 必填，限制同 `POST /journal/entries`；photo 省略保留原图，null 移除，数据 URL 替换。成功返回 200，响应为完整更新对象，附带递增版本 ETag。
 
 缺少 If-Match 返回 428；要求单个带双引号的正整数强版本，不接受弱标签、通配符和列表；格式错误 400，旧版本 412。
 
-### 10.6 `DELETE /std/journal/entry`
+### 10.6 `DELETE /journal/entry`
 
 所有者使用 If-Match 删除手记及其留言。
 
 **请求示例**
 
 ```http
-DELETE /std/journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DELETE /journal/entry?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Host: bob.dhttp.net
 Accept: application/json
 If-Match: "1"
@@ -2783,16 +2783,16 @@ Cache-Control: private, no-store
 
 **说明与错误**
 
-成功返回 204。删除正文、照片及关联留言，保留手记 ID 墓碑，防止旧创建请求复活。版本校验及错误同 `PUT /std/journal/entry`。
+成功返回 204。删除正文、照片及关联留言，保留手记 ID 墓碑，防止旧创建请求复活。版本校验及错误同 `PUT /journal/entry`。
 
-### 10.7 `GET /std/journal/photo`
+### 10.7 `GET /journal/photo`
 
 读取手记照片。
 
 **请求示例**
 
 ```http
-GET /std/journal/photo?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+GET /journal/photo?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Host: bob.dhttp.net
 ```
 
@@ -2816,14 +2816,14 @@ Cache-Control: private, no-store
 
 成功返回 200、Content-Type 为 image/jpeg，Body 为照片二进制；手记或照片不存在返回 404。
 
-### 10.8 `GET /std/journal/comments`
+### 10.8 `GET /journal/comments`
 
 读取指定手记的全部留言和一层回复。
 
 **请求示例**
 
 ```http
-GET /std/journal/comments?entry_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+GET /journal/comments?entry_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 Host: bob.dhttp.net
 Accept: application/json
 ```
@@ -2859,14 +2859,14 @@ Cache-Control: private, no-store
 
 每篇最多 500 条，无分页。已删除留言 author/body 为 null、deleted 为 true，仍保留位置；手记不存在返回 404。
 
-### 10.9 `POST /std/journal/comments`
+### 10.9 `POST /journal/comments`
 
 具名访客发表留言或一层回复。
 
 **请求示例**
 
 ```http
-POST /std/journal/comments
+POST /journal/comments
 Host: bob.dhttp.net
 Content-Type: application/json
 X-Journal-Write: 1
@@ -2914,14 +2914,14 @@ id/entry_id/body 必填。parent_id 可省略或为 null，指定时须指向同
 
 id 重复或每篇已达到 500 条时返回 409，无效回复目标 400，手记不存在 404。
 
-### 10.10 `DELETE /std/journal/comment`
+### 10.10 `DELETE /journal/comment`
 
 所有者删除留言并保留墓碑。
 
 **请求示例**
 
 ```http
-DELETE /std/journal/comment?id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+DELETE /journal/comment?id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 Host: bob.dhttp.net
 Accept: application/json
 X-Journal-Write: 1
