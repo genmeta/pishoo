@@ -25,6 +25,27 @@ fn config_api_reads_do_not_initialize_deleted_or_empty_databases() {
     assert_eq!(profile.config_db_path().metadata().unwrap().len(), 0);
 }
 #[test]
+fn persistent_config_connection_reads_external_commits_and_ends_each_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let mut reader = open_config(&profile, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let writer = Connection::open(profile.config_db_path()).unwrap();
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, 1);
+    assert!(reader.is_autocommit());
+    writer.execute("UPDATE settings SET listen=2", []).unwrap();
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, 2);
+    assert!(reader.is_autocommit());
+    writer.execute("UPDATE settings SET listen=99", []).unwrap();
+    assert!(read_server_config(&mut reader).is_err());
+    assert!(reader.is_autocommit());
+    writer.execute("UPDATE settings SET listen=3", []).unwrap();
+    assert_eq!(read_server_config(&mut reader).unwrap().listen, 3);
+    assert!(reader.is_autocommit());
+    // Routine reads never run the legacy schema upgrade.
+    assert!(!has_enabled_column(&writer).unwrap());
+}
+
+#[test]
 fn config_requires_one_row_and_local_http_upstreams() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());

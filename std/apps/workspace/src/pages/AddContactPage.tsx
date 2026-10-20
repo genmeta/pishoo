@@ -61,7 +61,7 @@ export default function AddContactPage(props: {
     if (!recipientReady()) return
     const name = lookupName()!
     if (normalizeIdentityName(props.initialTarget ?? '') !== name) {
-      props.navigate(`#/contacts/new?${new URLSearchParams({ target: name })}`)
+      props.navigate(`/workspace/contacts/new?${new URLSearchParams({ target: name })}`)
     }
   })
 
@@ -111,7 +111,7 @@ export default function AddContactPage(props: {
         offered_capabilities: offeredCapabilities(),
       })
       props.notify(t('outbound.sent'))
-      props.navigate('#/contacts/requests')
+      props.navigate('/workspace/contacts/requests')
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) setSubmitError(t('outbound.duplicate'))
       else if (error instanceof ApiError && error.status === 400 && error.message.includes('own identity')) {
@@ -140,7 +140,7 @@ export default function AddContactPage(props: {
         <ContactsPage notify={props.notify} navigate={props.navigate} />
       </Show>
       <Dialog open={!recipientReady()} title={t('outbound.searchTitle')}
-        onClose={() => props.navigate('#/contacts')}>
+        onClose={() => props.navigate('/workspace/contacts')}>
         <form class="contact-search-form" onSubmit={(event) => { event.preventDefault(); search() }}>
           <label class="field">
             <input ref={targetInput} value={target()} aria-label={t('outbound.target')}
@@ -163,7 +163,7 @@ export default function AddContactPage(props: {
             </div>
           </Show>
           <div class="dialog-actions">
-            <button class="button button-secondary" type="button" onClick={() => props.navigate('#/contacts')}>{t('common.cancel')}</button>
+            <button class="button button-secondary" type="button" onClick={() => props.navigate('/workspace/contacts')}>{t('common.cancel')}</button>
             <button class="button button-primary" type="submit" disabled={recipient.loading}>
               {recipient.loading ? t('outbound.searching') : t('outbound.search')}
             </button>
@@ -175,7 +175,7 @@ export default function AddContactPage(props: {
           <h1>{t('nav.contactNew')}</h1>
           <div class="header-actions">
             <button class="text-link" type="button"
-              onClick={() => props.navigate('#/contacts/requests')}>
+              onClick={() => props.navigate('/workspace/contacts/requests')}>
               {t('nav.contactRequests')}
             </button>
           </div>
@@ -189,7 +189,7 @@ export default function AddContactPage(props: {
                 <small>{lookupName()}</small>
               </div>
               <button class="button button-secondary" type="button" disabled={sending()}
-                onClick={() => props.navigate('#/contacts/new')}>{t('outbound.changeRecipient')}</button>
+                onClick={() => props.navigate('/workspace/contacts/new')}>{t('outbound.changeRecipient')}</button>
             </div>
             <label class="field"><span>{t('outbound.description')}</span>
               <textarea ref={descriptionInput} value={description()} rows={2} aria-invalid={descriptionError() !== null}

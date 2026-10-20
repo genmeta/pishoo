@@ -59,101 +59,27 @@ async fn status(router: &Router, method: Method, path: &str) -> StatusCode {
 }
 
 #[tokio::test]
-async fn workspace_lib_catalog_lists_loaded_snapshot_and_requires_owner() {
-    use access_control::{SubjectId, Visitor};
-
-    let name = "alice.dhttp.net";
-    let subject = "a".repeat(64);
-    let mut params = rcgen::CertificateParams::new(vec![name.to_owned()]).unwrap();
-    let ski = format!("0:0:{subject}");
-    let mut der = vec![4, ski.len() as u8];
-    der.extend_from_slice(ski.as_bytes());
-    params
-        .custom_extensions
-        .push(rcgen::CustomExtension::from_oid_content(
-            &[2, 5, 29, 14],
-            der,
-        ));
-    let key = rcgen::KeyPair::generate().unwrap();
-    let cert = params.self_signed(&key).unwrap();
-    let endpoint = dhttp::Endpoint::new(
-        qbase::endpoint::Endpoint::new(
-            name,
-            vec![cert.der().clone()],
-            qtls::PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
-            vec![1],
-        )
-        .unwrap(),
-    );
-    let owner = Visitor::new(name, SubjectId::new(subject.as_bytes()).unwrap());
+async fn retired_runtime_inspection_routes_are_not_available() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
-    let empty_router = api_router(&sandbox, endpoint.clone());
     let directory = tempfile::tempdir().unwrap();
-    let lib = load(
-        &sandbox,
-        directory.path(),
-        r#"{
-            "/": {
-                "get": {"responses":{"200":{"description":"Note page"},"400":{"description":"Bad input"}}},
-                "post": {"responses":{"201":{"description":"Created"},"400":{"description":"Bad input"}}}
-            },
-            "/run": {
-                "get": {"summary":"Read run","description":"Ignored"},
-                "post": {"description":"Create run"},
-                "options": {"responses":{"200":{"$ref":"https://example.com/response"}}}
-            }
-        }"#,
-    );
-    sandbox.libs.insert("z-demo".into(), lib.clone());
-    sandbox.libs.insert("a-demo".into(), lib);
-    let router = api_router(&sandbox, endpoint);
-    sandbox.close();
-    for (app, count) in [(&empty_router, 0), (&router, 2)] {
-        let mut request = request(Method::GET, "/std/sys/package/loaded-libs");
-        request.extensions_mut().insert(owner.clone());
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value.as_array().unwrap().len(), count);
-        if count > 0 {
-            assert_eq!(value[0]["id"], "a-demo");
-            assert_eq!(value[1]["id"], "z-demo");
-            assert_eq!(value[0]["title"], "HTTP");
-            assert_eq!(value[0]["description"], "Test fixture");
-            assert_eq!(value[0]["kind"], "lib");
-            assert_eq!(value[0]["dependencies"], serde_json::json!([]));
-            assert_eq!(value[0]["endpoints"].as_array().unwrap().len(), 5);
-            assert_eq!(value[0]["endpoints"][2]["path"], "/std/run");
-            assert_eq!(value[0]["openapi"]["info"]["version"], "1.0.0");
-            assert!(value[0]["openapi"]["x-pishoo"].get("publisher").is_none());
-        }
-    }
-    for visitor in [
-        None,
-        Some(Visitor::new(
-            "bob.dhttp.net",
-            SubjectId::new(subject.as_bytes()).unwrap(),
-        )),
-        Some(Visitor::new(
-            name,
-            SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
-        )),
+    let lib = load(&sandbox, directory.path(), r#"{"/run":{"get":{}}}"#);
+    sandbox.libs.insert("demo".into(), lib);
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    for path in [
+        "/std/sys/lib/loaded",
+        "/std/sys/app/loaded",
+        "/std/sys/lib/openapi?name=demo",
+        "/std/sys/lib/check",
+        "/std/sys/app/check",
     ] {
-        let mut request = request(Method::GET, "/std/sys/package/loaded-libs");
-        if let Some(visitor) = visitor {
-            request.extensions_mut().insert(visitor);
+        for method in [Method::GET, Method::POST] {
+            assert_eq!(
+                status(&router, method, path).await,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
         }
-        assert_eq!(
-            router.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
     }
-    assert_eq!(
-        status(&router, Method::POST, "/std/sys/package/loaded-libs").await,
-        StatusCode::METHOD_NOT_ALLOWED
-    );
     assert!(sandbox.tasks.is_empty());
 }
 

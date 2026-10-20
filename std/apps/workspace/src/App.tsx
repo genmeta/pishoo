@@ -26,9 +26,9 @@ type ToastState = { message: string; tone: 'success' | 'error' } | null
 type NavItem = { page: WorkspacePage; href: string; label: MessageKey }
 
 const SETTINGS_NAV: NavItem[] = [
-  { page: 'profile', href: '#/settings/profile', label: 'nav.profile' },
-  { page: 'access', href: '#/settings/access', label: 'nav.policies' },
-  { page: 'capabilities', href: '#/settings/capabilities', label: 'nav.capabilities' },
+  { page: 'profile', href: '/workspace/settings/profile', label: 'nav.profile' },
+  { page: 'access', href: '/workspace/settings/access', label: 'nav.policies' },
+  { page: 'capabilities', href: '/workspace/settings/capabilities', label: 'nav.capabilities' },
 ]
 
 const PAGE_TITLES: Record<WorkspacePage, MessageKey> = {
@@ -51,7 +51,7 @@ export default function App() {
   const [context, contextActions] = createResource(api.context)
   const loadProfile = abortable((_source: boolean, signal: AbortSignal) => api.profileSettings(signal))
   const [profile, profileActions] = createResource(() => true, loadProfile)
-  const currentPath = () => window.location.hash || '#/'
+  const currentPath = () => window.location.pathname + window.location.search
   const [pathname, setPathname] = createSignal(currentPath())
   const route = () => routeFromPath(pathname().split('?')[0])
   const [toast, setToast] = createSignal<ToastState>(null)
@@ -83,12 +83,10 @@ export default function App() {
   }
   onMount(() => {
     window.addEventListener('popstate', onPopState)
-    window.addEventListener('hashchange', onPopState)
     document.addEventListener('visibilitychange', onVisibilityChange)
   })
   onCleanup(() => {
     window.removeEventListener('popstate', onPopState)
-    window.removeEventListener('hashchange', onPopState)
     document.removeEventListener('visibilitychange', onVisibilityChange)
     window.clearTimeout(toastTimer)
   })
@@ -132,7 +130,7 @@ export default function App() {
           <Match when={route().page === 'contacts'}>
             <ContactsPage notify={notify} contactName={route().contactName} navigate={navigate}
               returnTo={new URLSearchParams(pathname().split('?')[1] ?? '').get('from') === 'approvals'
-                ? '#/approvals' : undefined}
+                ? '/workspace/approvals' : undefined}
               onResolved={() => void contextActions.refetch()} />
           </Match>
           <Match when={route().page === 'contact-requests'}>
@@ -158,7 +156,7 @@ export default function App() {
           </Match>
           <Match when={route().page === 'not-found'}>
             <header class="page-header"><h1>{t('page.notFound')}</h1></header>
-            <a href="#/" onClick={(event) => follow(event, '#/')}>{t('page.backHome')}</a>
+            <a href="/workspace/" onClick={(event) => follow(event, '/workspace/')}>{t('page.backHome')}</a>
           </Match>
         </Switch>
       </main>

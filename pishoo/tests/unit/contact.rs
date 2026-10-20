@@ -157,3 +157,69 @@ fn contact_storage_does_not_adopt_unknown_or_incomplete_databases() {
         .unwrap();
     assert!(database(&profile).is_err());
 }
+
+#[tokio::test]
+async fn background_jobs_reuse_the_supplied_connection_and_release_transactions() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let access = Arc::new(AccessService::new(
+        sea_orm::DatabaseConnection::default(),
+        endpoint.name(),
+    ));
+    // No database exists at the profile path. Both rounds must use this connection.
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("../../src/contact.sql"))
+        .unwrap();
+    let db = Arc::new(Mutex::new(db));
+    for expected in 1..=2 {
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO outbound_contact_requests(target_name,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','queued',?1,?1,0,0,0)",
+                [now() - 1],
+            ).unwrap();
+        }
+        contact_jobs(&profile, &endpoint, &access, &db)
+            .await
+            .unwrap();
+        let conn = db
+            .try_lock()
+            .expect("background jobs must release the connection lock");
+        assert!(conn.is_autocommit());
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM outbound_contact_requests WHERE status='failed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO outbound_contact_requests(target_name,status,application_id,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('alice.dhttp.net','queued',?2,?1,?1,0,0,0)",
+            params![now() + 120, "a".repeat(64)],
+        ).unwrap();
+    }
+    // The missing local capability catalog fails delivery; its outcome must still
+    // be written back through the supplied connection, with the claim released.
+    contact_jobs(&profile, &endpoint, &access, &db)
+        .await
+        .unwrap();
+    let conn = db
+        .try_lock()
+        .expect("outcome writes must release the connection lock");
+    assert!(conn.is_autocommit());
+    let outcome = conn.query_row(
+        "SELECT attempt_count,lease_until,error_message FROM outbound_contact_requests WHERE target_name='alice.dhttp.net'",
+        [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?)),
+    ).unwrap();
+    assert_eq!(outcome.0, 1);
+    assert_eq!(outcome.1, None);
+    assert!(outcome.2.is_some_and(|error| !error.is_empty()));
+    assert!(!profile.join("db/contact.db").exists());
+}

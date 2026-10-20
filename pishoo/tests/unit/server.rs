@@ -292,10 +292,10 @@ async fn server(root: &std::path::Path) -> Server {
     db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     crate::setup::load_server_config(&profile).unwrap();
-    crate::sandbox::install_lib(
+    crate::package::install_lib(
         &profile,
         "echo",
-        &crate::sandbox::tests::package_component(&component("1")),
+        &crate::package::tests::package_component(&component("1")),
         &runtime,
     )
     .unwrap();
@@ -326,6 +326,11 @@ async fn server(root: &std::path::Path) -> Server {
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
     let server = Server {
+        config_db: Mutex::new(
+            crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap(),
+        ),
+        contact_db: Arc::new(Mutex::new(crate::contact::database(&profile).unwrap())),
         profile,
         endpoint,
         config,
@@ -594,22 +599,25 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     .await
     .unwrap();
     assert_eq!(servers[&name].config.listen, 0);
-    db.execute("UPDATE settings SET listen=0", []).unwrap();
-    std::fs::remove_file(profile.config_db_path()).unwrap();
-    reconcile_profiles(
-        &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
-        &home,
-        None,
-        &mut servers,
-        runtime.clone(),
-    )
-    .await
-    .unwrap();
+    // Invalid SQL contents keep the loaded configuration; a repaired row is
+    // visible through the same long-lived connection on the next scan.
+    db.execute("DELETE FROM settings", []).unwrap();
+    assert!(
+        !reconcile_profiles(
+            &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
+            &home,
+            None,
+            &mut servers,
+            runtime.clone(),
+        )
+        .await
+        .unwrap()
+    );
     assert!(servers.contains_key(&name));
-    assert!(!profile.config_db_path().exists());
-    drop(db);
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER); INSERT INTO settings VALUES(0, 0); CREATE TABLE proxy_locations(location TEXT, proxy_pass TEXT);").unwrap();
+    assert!(servers[&name].config.enabled);
+    assert!(servers[&name].config_db.lock().unwrap().is_autocommit());
+    db.execute("INSERT INTO settings(listen, enabled) VALUES(0, 0)", [])
+        .unwrap();
     reconcile_profiles(
         &ddns::mdns::MdnsResolverSet::new("pishoo-test.local"),
         &home,
@@ -698,14 +706,14 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"lib","publisher":"alice.dhttp.net","name":"message","dependencies":[],"host":{"request-identity":"identity"},"access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}}},
         "paths":{"/message":{"post":{"operationId":"receive","summary":"receive","x-pishoo":{"access-group":"message"},"responses":{"200":{"description":"ok"}}}}}});
-    let package = crate::sandbox::tests::package_fixture(
+    let package = crate::package::tests::package_fixture(
         &doc,
         include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
         webc::v3::write::Directory::default(),
-        &crate::sandbox::tests::publisher("alice.dhttp.net", 'a'),
+        &crate::package::tests::publisher("alice.dhttp.net", 'a'),
     );
     let runtime = server.sandbox.read().unwrap().runtime.clone();
-    crate::sandbox::install_lib(
+    crate::package::install_lib(
         &server.profile,
         "alice.dhttp.net/message",
         &package,
@@ -788,7 +796,7 @@ async fn native_capability_catalog_is_installed_business_metadata_and_uses_dacce
     );
     // Builtin ACL, Contact and Package do not become WASM capabilities.
     assert_eq!(values.as_array().unwrap().len(), 1);
-    crate::sandbox::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
+    crate::package::remove_lib(&server.profile, "alice.dhttp.net/message").unwrap();
     let response = server
         .router
         .read()
@@ -1001,25 +1009,25 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         ]),
         Timestamps::default(),
     );
-    let package = crate::sandbox::tests::package_fixture(
+    let package = crate::package::tests::package_fixture(
         &document,
         &[],
         public,
-        &crate::sandbox::tests::publisher("std.dhttp.net", 'a'),
+        &crate::package::tests::publisher("std.dhttp.net", 'a'),
     );
     let mut other_document = document.clone();
     other_document["x-pishoo"]["publisher"] = json!("other.dhttp.net");
-    let other_package = crate::sandbox::tests::package_fixture(
+    let other_package = crate::package::tests::package_fixture(
         &other_document,
         &[],
         Directory::new(
             BTreeMap::from([("index.html".parse().unwrap(), b"other".to_vec().into())]),
             Timestamps::default(),
         ),
-        &crate::sandbox::tests::publisher("other.dhttp.net", 'b'),
+        &crate::package::tests::publisher("other.dhttp.net", 'b'),
     );
     assert!(
-        crate::sandbox::install_app(&server.profile, "other.dhttp.net/workspace", &other_package)
+        crate::package::install_app(&server.profile, "other.dhttp.net/workspace", &other_package)
             .unwrap_err()
             .to_string()
             .contains("existing ACL")
@@ -1028,14 +1036,14 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/workspace",
+            "/workspace",
             access_control::Effect::Deny,
             access_control::Grantee::Named,
         )
         .await
         .unwrap();
     assert!(
-        crate::sandbox::install_app(&server.profile, "std.dhttp.net/workspace", &package)
+        crate::package::install_app(&server.profile, "std.dhttp.net/workspace", &package)
             .unwrap_err()
             .to_string()
             .contains("existing ACL")
@@ -1046,13 +1054,13 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         .access
         .set_policy(
             access_control::Method::Specified(Method::GET),
-            "/std/workspace",
+            "/workspace",
             access_control::Effect::Allow,
             access_control::Grantee::All,
         )
         .await
         .unwrap();
-    crate::sandbox::install_app(&server.profile, "std.dhttp.net/workspace", &package).unwrap();
+    crate::package::install_app(&server.profile, "std.dhttp.net/workspace", &package).unwrap();
     let profile_document = json!({
         "openapi":"3.1.0",
         "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
@@ -1063,14 +1071,14 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
             "/profile/context":{"get":{"operationId":"context","summary":"Context"},"head":{"operationId":"contextHead","summary":"Context headers"}}
         }
     });
-    let profile_package = crate::sandbox::tests::package_fixture(
+    let profile_package = crate::package::tests::package_fixture(
         &profile_document,
         include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm"),
         Directory::default(),
-        &crate::sandbox::tests::publisher("std.dhttp.net", 'a'),
+        &crate::package::tests::publisher("std.dhttp.net", 'a'),
     );
     let runtime = server.sandbox.read().unwrap().runtime.clone();
-    crate::sandbox::install_lib(
+    crate::package::install_lib(
         &server.profile,
         "std.dhttp.net/profile",
         &profile_package,
@@ -1078,7 +1086,7 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     )
     .unwrap();
     server.sandbox.write().unwrap().apps =
-        crate::sandbox::installed_apps(&server.profile, None).unwrap();
+        crate::package::installed_apps(&server.profile, None).unwrap();
     *server.router.write().unwrap() = current_router(&server);
     let request = |method: Method, path: &str| {
         let mut request = Request::builder()
@@ -1095,8 +1103,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
     };
     for method in [Method::GET, Method::HEAD] {
         for (path, expected) in [
-            ("/std/workspace/", b"public introduction".as_slice()),
-            ("/std/workspace/assets/app.js", b"export {}".as_slice()),
+            ("/workspace/", b"public introduction".as_slice()),
+            ("/workspace/assets/app.js", b"export {}".as_slice()),
         ] {
             let response = server
                 .router
@@ -1121,8 +1129,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         }
     }
     for (method, path) in [
-        (Method::POST, "/std/workspace/"),
-        (Method::GET, "/std/workspace-other/"),
+        (Method::POST, "/workspace/"),
+        (Method::GET, "/workspace-other/"),
         (Method::GET, "/std/contacts"),
         (Method::GET, "/std/acl/access"),
         (Method::GET, "/std/sys/settings"),

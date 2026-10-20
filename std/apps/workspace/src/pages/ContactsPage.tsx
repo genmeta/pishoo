@@ -57,7 +57,7 @@ export default function ContactsPage(props: {
   const selectedName = () => props.contactName ?? null
   const openContact = (name: string) => props.navigate(contactPath(name))
   const openChat = (name: string) => props.navigate(contactChatPath(name))
-  const closeContact = () => props.navigate(props.returnTo ?? '#/contacts')
+  const closeContact = () => props.navigate(props.returnTo ?? '/workspace/contacts')
   const [selected, setSelected] = createSignal<Set<string>>(new Set())
   const [confirmDelete, setConfirmDelete] = createSignal<ConfirmDelete>(null)
   const [alias, setAlias] = createSignal('')
@@ -102,7 +102,7 @@ export default function ContactsPage(props: {
       await api.sendContactRequest({ target_name: name, description: '', requested_capabilities: selected, offered_capabilities: [] })
       props.notify(t('outbound.sent'))
       setRequestedCapabilities([])
-      props.navigate('#/contacts/requests')
+      props.navigate('/workspace/contacts/requests')
     } catch (error) {
       props.notify(error instanceof ApiError && error.status === 409
         && error.message.includes('already pending') ? t('outbound.duplicate')
@@ -317,7 +317,7 @@ export default function ContactsPage(props: {
         <h1>{t('contacts.title')}</h1>
         <div class="header-actions">
           <button class="button button-primary" type="button"
-            onClick={() => props.navigate('#/contacts/new')}>
+            onClick={() => props.navigate('/workspace/contacts/new')}>
             {t('nav.contactNew')}
           </button>
           <button class="button button-secondary" type="button" onClick={refresh} disabled={contacts.loading}>

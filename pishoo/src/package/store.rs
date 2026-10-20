@@ -10,12 +10,15 @@ use dhttp_home::identity::IdentityProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Lib, Sandbox, install_app, install_lib, package_file, package_metadata, read_package};
+use crate::sandbox::Lib;
+
+use super::{Sandbox, install_app, install_lib, package_file, package_metadata, read_package};
 use crate::{Error, Result};
 
-const STORE_NAME: &str = "store.dhttp.net";
+pub(crate) const STORE_NAME: &str = "store.dhttp.net";
 // Independent store-server/DEPLOYMENT.md, verified on 2026-10-13.
-const STORE_OWNER: &str = "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746";
+pub(crate) const STORE_OWNER: &str =
+    "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746";
 
 pub(crate) async fn install_store_lib(
     profile: &IdentityProfile,
@@ -34,7 +37,6 @@ async fn download_release(
     name: &str,
     version: &str,
     kind: &str,
-    cached: Option<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     let id = format!("{publisher}/{name}");
     super::valid_id(&id)?;
@@ -77,10 +79,9 @@ async fn download_release(
         .as_u64()
         .filter(|size| *size > 0 && *size <= 64 * 1024 * 1024)
         .ok_or_else(|| Error::InvalidComponent("invalid store package size".into()))?;
-    let bytes = match cached {
-        Some(bytes) => bytes,
-        None => store_get(endpoint, &download, size as usize).await?,
-    };
+    // Installed snapshots deliberately omit the original release proof. Fetch
+    // signed source bytes so the authenticated store digest can still be checked.
+    let bytes = store_get(endpoint, &download, size as usize).await?;
     verify_release(&bytes, &metadata, publisher, name, version)?;
     Ok(bytes)
 }
@@ -141,6 +142,27 @@ async fn install_store_artifact(
                 "installation requires more than 100 backend Libs".into(),
             ));
         }
+        // Reject a different author's same-name Lib before preparing its data
+        // directory. A rejected candidate must not shadow existing legacy data.
+        if selected == "lib" {
+            let installed = super::installed_libs(profile, None)?;
+            if installed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == name && entry["id"] != id)
+                || resources.iter().any(|(other_kind, other_id, _, _)| {
+                    other_kind == "lib"
+                        && other_id != &id
+                        && other_id.rsplit('/').next() == Some(name.as_str())
+                })
+            {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Lib name {name} is already installed by another author"),
+                )));
+            }
+        }
         let current = if selected == "lib" && !(kind == "lib" && id == root_id) {
             sandbox
                 .read()
@@ -160,13 +182,10 @@ async fn install_store_artifact(
                 format!("dependency {id} requires {version}; an incompatible version is installed"),
             )));
         }
-        let cached = if current.is_some() {
-            Some(super::disk_bytes(&super::lib_root(profile)?, &id)?)
-        } else {
-            None
-        };
-        let bytes =
-            download_release(endpoint, &publisher, &name, &version, &selected, cached).await?;
+        // Reuse an installed dependency by its registered identity and exact version.
+        // Legacy catalogs are migrated through a normal explicit installation.
+        let reused = current.is_some() && can_reuse_lib(profile, &id, &version)?;
+        let bytes = download_release(endpoint, &publisher, &name, &version, &selected).await?;
         let package = read_package(&bytes)?;
         let document = package_metadata(&package)?;
         for dependency in document["dependencies"].as_array().into_iter().flatten() {
@@ -177,26 +196,12 @@ async fn install_store_artifact(
                 dependency["version"].as_str().unwrap().to_owned(),
             ));
         }
-        resources.push((selected, id, bytes, current.is_some()));
+        resources.push((selected, id, bytes, reused));
     }
     let resources = order_releases(resources)?;
     tokio::task::block_in_place(|| {
-        let runtime = sandbox.read().unwrap().runtime.clone();
-        let mut candidates = Vec::new();
-        for (kind, id, bytes, reused) in &resources {
-            if kind == "lib" && !reused {
-                candidates.push((
-                    id.clone(),
-                    Arc::new(Lib::load(
-                        runtime.clone(),
-                        id.clone(),
-                        bytes,
-                        &profile.join("db").join(id),
-                    )?),
-                ));
-            }
-        }
         let mut sandbox = sandbox.write().unwrap();
+        let runtime = sandbox.runtime.clone();
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
@@ -204,26 +209,15 @@ async fn install_store_artifact(
             if kind != "lib" || !reused {
                 continue;
             }
-            let expected = read_package(bytes)?;
-            if sandbox.libs.get(id).is_none_or(|current| {
-                current.package.get_atom("backend") != expected.get_atom("backend")
-                    || package_file(&current.package, "/metadata/openapi.json").ok()
-                        != package_file(&expected, "/metadata/openapi.json").ok()
-                    || current
-                        .package
-                        .get_volume("pishoo-signature")
-                        .unwrap()
-                        .read_file("/signature.json")
-                        .unwrap()
-                        .0
-                        != expected
-                            .get_volume("pishoo-signature")
-                            .unwrap()
-                            .read_file("/signature.json")
-                            .unwrap()
-                            .0
-                    || package_metadata(&current.package).ok() != package_metadata(&expected).ok()
-            }) {
+            let current = sandbox.libs.get(id).ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("dependency {id} changed during installation; retry"),
+                ))
+            })?;
+            let document = package_metadata(&read_package(bytes)?)?;
+            let version = document["version"].as_str().unwrap();
+            if current.openapi.info.version != version || !can_reuse_lib(profile, id, version)? {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("dependency {id} changed during installation; retry"),
@@ -237,20 +231,25 @@ async fn install_store_artifact(
                     super::installed_libs(profile, Some(&id))?
                 } else {
                     let value = install_lib(profile, &id, &bytes, &runtime)?;
-                    sandbox.libs.insert(
+                    let package = super::disk_bytes(profile, &super::lib_root(profile)?, &id)?;
+                    // Prepare the private data grant only after installation
+                    // has passed its name, dependency, route and ACL checks.
+                    // Failed requests must not create a directory that shadows
+                    // preserved data in an older author-based layout.
+                    let lib = Arc::new(Lib::load(
+                        runtime.clone(),
                         id.clone(),
-                        candidates
-                            .iter()
-                            .find(|(key, _)| key == &id)
-                            .unwrap()
-                            .1
-                            .clone(),
-                    );
+                        &package,
+                        &profile.join("db").join(id.rsplit('/').next().unwrap()),
+                    )?);
+                    sandbox.libs.insert(id.clone(), lib);
                     value
                 }
             } else {
-                let package = read_package(&bytes)?;
                 let value = install_app(profile, &id, &bytes)?;
+                let package = super::installed_apps(profile, Some(&id))?
+                    .remove(&id)
+                    .ok_or(Error::RouteNotFound)?;
                 sandbox.apps.insert(id.clone(), package);
                 value
             };
@@ -260,6 +259,26 @@ async fn install_store_artifact(
         }
         Ok(result)
     })
+}
+
+fn can_reuse_lib(profile: &IdentityProfile, id: &str, version: &str) -> Result<bool> {
+    let Some((author, name)) = id.split_once('/') else {
+        return Ok(false);
+    };
+    let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let modern: bool = db.query_row(
+        "SELECT count(*)=2 FROM pragma_table_info('libs') WHERE name IN ('author','version')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !modern {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM libs WHERE author=?1 AND name=?2 AND version=?3)",
+        [author, name, version],
+        |row| row.get(0),
+    )?)
 }
 
 fn order_releases(
@@ -468,5 +487,5 @@ fn verify_release(
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/sandbox/store.rs"]
+#[path = "../../tests/unit/package/store.rs"]
 mod tests;

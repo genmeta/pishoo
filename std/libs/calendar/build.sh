@@ -24,5 +24,7 @@ api=json.loads((root/'openapi.json').read_text()); assert api['info']['version']
 (root/'dist/wasmer.toml').write_text(manifest)
 (root/'dist/metadata/openapi.json').write_text(json.dumps(api,ensure_ascii=False,indent=2)+'\n')
 PY
+python3 "$project/../../../pishoo/tools/package-lib.py" "$project/dist/lib.wasm" "$project/dist/metadata/openapi.json" "$project/dist/lib.wasm"
+rm "$project/dist/metadata/openapi.json"
 wasm-tools validate "$project/dist/lib.wasm"
-echo "Built independent Calendar backend: $project/dist/lib.wasm"
+echo "Built Calendar backend with embedded OpenAPI: $project/dist/lib.wasm"

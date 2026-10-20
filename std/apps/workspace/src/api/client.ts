@@ -10,7 +10,6 @@ import type {
   Contact,
   DirectoryEntry,
   Introduction,
-  LibSummary,
   OutboundContactInput,
   OutboundContactRequest,
   Page,
@@ -95,8 +94,6 @@ export const api = {
   },
 
   introduction: (signal?: AbortSignal) => request<Introduction>('/std/profile/context', { signal }),
-
-  libs: (signal?: AbortSignal) => request<LibSummary[]>('/std/sys/package/loaded-libs', { signal }),
 
   capabilities: async (signal?: AbortSignal) => {
     const catalog = await request<CapabilityDescriptor[]>('/std/acl/capabilities', { signal })

@@ -1,5 +1,9 @@
 //! Identity provenance and persistence checks against the actual Journal component.
 use super::*;
+use crate::package::{
+    install_app, remove_app,
+    tests::{package_fixture, publisher},
+};
 
 #[path = "../../../support/network_credentials.rs"]
 mod network_credentials;
@@ -1215,8 +1219,8 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     install_lib(&profile, id, &backend, &runtime).unwrap();
     install_app(&profile, id, &frontend).unwrap();
     let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    let groups = db.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_id=?1 ORDER BY capability_id")
-        .unwrap().query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
+    let groups = db.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_name=?1 ORDER BY capability_id")
+        .unwrap().query_map([id.rsplit('/').next().unwrap()], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(
         groups,
@@ -1225,8 +1229,8 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
             ("read".into(), "阅读".into())
         ]
     );
-    let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operations WHERE lib_id=?1 ORDER BY capability_id,method,path")
-        .unwrap().query_map([id], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))
+    let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operations WHERE lib_name=?1 ORDER BY capability_id,method,path")
+        .unwrap().query_map([id.rsplit('/').next().unwrap()], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(
         operations,
@@ -1245,12 +1249,12 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     );
     assert_eq!(
         db.query_row(
-            "SELECT lib_id,version FROM app_dependencies WHERE app_id=?1",
-            [id],
+            "SELECT lib_name,version FROM app_dependencies WHERE app_name=?1",
+            [id.rsplit('/').next().unwrap()],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         )
         .unwrap(),
-        (id.into(), "0.1.0".into())
+        (id.rsplit('/').next().unwrap().into(), "0.1.0".into())
     );
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();

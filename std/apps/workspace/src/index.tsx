@@ -16,17 +16,15 @@ if (!root) {
 
 render(
   () => {
-    const [hash, setHash] = createSignal(window.location.hash)
-    const update = () => setHash(window.location.hash)
-    window.addEventListener('hashchange', update)
+    const [pathname, setPathname] = createSignal(window.location.pathname)
+    const update = () => setPathname(window.location.pathname)
     window.addEventListener('popstate', update)
     onCleanup(() => {
-      window.removeEventListener('hashchange', update)
       window.removeEventListener('popstate', update)
     })
     return (
       <I18nProvider>
-        <Show when={hash().split('?')[0].replace(/\/$/, '') === '#/intro'} fallback={<App />}><PublicIntroductionPage /></Show>
+        <Show when={pathname().replace(/\/$/, '') === '/workspace/intro'} fallback={<App />}><PublicIntroductionPage /></Show>
       </I18nProvider>
     )
   },

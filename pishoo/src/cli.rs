@@ -10,7 +10,7 @@ pub async fn run_command(args: Vec<OsString>) -> Result<()> {
     if args.len() == 1 {
         if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
             println!(
-                "Usage: pishoo [reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without db/config.db are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta identity ensite|dissite|listen --id NAME\n  genmeta server proxy --id NAME\n  genmeta package --help"
+                "Usage: pishoo [reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without db/config.db are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta identity ensite|dissite|listen --id NAME\n  genmeta server proxy --id NAME\n  genmeta --help"
             );
             return Ok(());
         }
@@ -19,7 +19,7 @@ pub async fn run_command(args: Vec<OsString>) -> Result<()> {
             return Ok(());
         }
     }
-    Err(Error::BadRequest("Pishoo management commands have moved to genmeta identity, genmeta server and genmeta package; use pishoo --help".into()))
+    Err(Error::BadRequest("Pishoo management commands have moved to genmeta identity, genmeta server and genmeta; use pishoo --help".into()))
 }
 
 fn reload(args: &[OsString]) -> Result<()> {

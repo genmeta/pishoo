@@ -18,12 +18,13 @@ function release(kind: 'app' | 'lib', repository?: string): StoreDetail {
 
 async function setup(page: import('@playwright/test').Page, kind: 'app' | 'lib', repository?: string, diskRepository = repository) {
   const collection = kind === 'app' ? 'apps' : 'libs'
-  await page.route('**/api/workspace/context', route => route.fulfill({ json: { profile: publisher, owner_name: publisher, badges: { pending_reviews: 0, incoming_contacts: 0 } } }))
-  await page.route('**/api/workspace/settings/profile', route => route.fulfill({ json: { identity_name: publisher, display_name: null, avatar_url: null, updated_at: 0 } }))
+  await page.route('**/std/profile', route => route.fulfill({ json: { identity_name: publisher, display_name: null, avatar_url: null, updated_at: 0 } }))
+  await page.route('**/std/acl/reviews?*', route => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 1 } }))
+  await page.route('**/std/acl/capabilities', route => route.fulfill({ json: [] }))
+  await page.route('**/std/acl/allow', route => route.fulfill({ json: {} }))
   await page.route('**/std/acl/access', route => route.fulfill({ json: {} }))
   await page.route('**/std/contacts?*', route => route.fulfill({ json: { items: [], total: 0, page: 1, page_size: 100 } }))
-  await page.route(`**/std/sys/package/loaded-${collection}`, route => route.fulfill({ json: [summary(kind, repository)] }))
-  await page.route(`**/std/sys/package/${collection}`, route => route.fulfill({ json: [summary(kind, diskRepository)] }))
+  await page.route(`**/std/sys/${kind}/list`, route => route.fulfill({ json: [summary(kind, diskRepository)] }))
   await page.route(`**/store/v1/${collection}/${id}/versions/0.2.0`, route => route.fulfill({ json: release(kind, sourceUrl) }))
 }
 
@@ -33,7 +34,7 @@ for (const kind of ['app', 'lib'] as const) {
       await setup(page, kind, sourceUrl)
       let sourceRequests = 0
       await page.route('https://github.com/**', route => { sourceRequests++; return route.abort() })
-      await page.goto(`/#/apps/${origin}/${origin === 'local' ? id.split('/').at(-1) : id}?kind=${kind}&version=0.2.0`)
+      await page.goto(`/workspace/apps/${origin}/${origin === 'local' ? id.split('/').at(-1) : id}?kind=${kind}&version=0.2.0`)
       const link = page.getByRole('link', { name: sourceUrl, exact: true })
       await expect(page.getByText('Source repository', { exact: true })).toBeVisible()
       await expect(link).toHaveAttribute('href', sourceUrl)
@@ -47,15 +48,15 @@ for (const kind of ['app', 'lib'] as const) {
 for (const value of [undefined, 'javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'http://github.com/a/b', '//github.com/a/b', 'https://', 'https://user:password@github.com/a/b', 'https://github.com\\evil/a']) {
   test(`source repository is hidden for ${String(value)}`, async ({ page }) => {
     await setup(page, 'app', value)
-    await page.goto(`/#/apps/local/${id.split('/').at(-1)}`)
+    await page.goto(`/workspace/apps/local/${id.split('/').at(-1)}`)
     await expect(page.getByRole('heading', { name: 'Workspace', exact: true })).toBeVisible()
     await expect(page.getByText('Source repository', { exact: true })).toHaveCount(0)
   })
 }
 
-test('a loaded package without a repository never borrows disk or store metadata', async ({ page }) => {
+test('installed details use the database repository without a runtime catalog', async ({ page }) => {
   await setup(page, 'app', undefined, 'https://github.com/genmeta/workspace/tree/newer')
-  await page.goto(`/#/apps/local/${id.split('/').at(-1)}`)
+  await page.goto(`/workspace/apps/local/${id.split('/').at(-1)}`)
   await expect(page.getByRole('heading', { name: 'Workspace', exact: true })).toBeVisible()
-  await expect(page.getByText('Source repository', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'https://github.com/genmeta/workspace/tree/newer', exact: true })).toBeVisible()
 })
