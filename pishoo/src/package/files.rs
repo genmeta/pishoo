@@ -609,11 +609,8 @@ fn check_existing_rules(
                     "std.dhttp.net/profile",
                     "lib",
                     "GET",
-                    "/std/profile" | "/std/profile/avatar" | "/std/profile/context",
-                ) => "/std/profile",
-                ("std.dhttp.net/profile", "lib", "HEAD", "/std/profile/context") => {
-                    "/std/profile/context"
-                }
+                    route @ ("/std/profile/nickname" | "/std/profile/avatar"),
+                ) => route,
                 ("std.dhttp.net/workspace", "app", "GET" | "HEAD", route)
                     if route == "/workspace" || route.starts_with("/workspace/") =>
                 {
@@ -622,8 +619,8 @@ fn check_existing_rules(
                 _ => "",
             };
             let exists: bool = access.query_row(
-                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*') AND NOT (api=?3 AND method=?2 AND effect='allow' AND grantee_type=4 AND grantee='*?'))",
-                rusqlite::params![path.trim_end_matches('/'), method, public_default],
+                "SELECT EXISTS(SELECT 1 FROM access_rules WHERE (api='/' OR api=?1 OR substr(?1,1,length(api)+1)=api||'/') AND method IN (?2,'*') AND NOT ((api=?3 OR (api='/std/profile' AND ?4)) AND method=?2 AND effect='allow' AND grantee_type=4 AND grantee='*?'))",
+                rusqlite::params![path.trim_end_matches('/'), method, public_default, id == "std.dhttp.net/profile" && kind == "lib" && !public_default.is_empty()],
                 |r| r.get(0),
             )?;
             if exists {

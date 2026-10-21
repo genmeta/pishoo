@@ -139,7 +139,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         authorization(&access, Method::POST, "/std/contact", None).await,
         AuthResult::Denied
     ));
-    for path in ["/std/contact", "/std/acl/status/12"] {
+    for path in ["/std/contact", "/std/acl/status?id=12"] {
         assert!(matches!(
             authorization(&access, Method::GET, path, Some("bob.dhttp.net")).await,
             AuthResult::Allowed
@@ -155,7 +155,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             AuthResult::Allowed
         ));
         for (method, path) in [
-            (Method::GET, "/std/profile"),
+            (Method::GET, "/std/profile/nickname"),
             (Method::GET, "/std/profile/avatar"),
             (Method::GET, "/workspace"),
             (Method::GET, "/workspace/"),
@@ -175,12 +175,12 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
             (Method::GET, "/std/acl/access"),
             (Method::GET, "/std/acl/allow"),
             (Method::GET, "/std/sys/listen"),
-            (Method::PATCH, "/std/profile"),
+            (Method::PUT, "/std/profile/nickname"),
             (Method::PUT, "/std/profile/avatar"),
             (Method::DELETE, "/std/profile/avatar"),
             (Method::GET, "/std/contact/list"),
             (Method::PATCH, "/std/contact?name=bob.dhttp.net"),
-            (Method::POST, "/std/message"),
+            (Method::PUT, "/std/message"),
             (Method::POST, "/workspace/"),
             (Method::GET, "/workspace-other/"),
         ] {
@@ -268,7 +268,8 @@ async fn reopening_preserves_removed_default_rule_and_existing_config() {
         (Method::GET, "/std/contact"),
         (Method::GET, "/std/contact/list"),
         (Method::GET, "/std/acl/status"),
-        (Method::GET, "/std/profile"),
+        (Method::GET, "/std/profile/nickname"),
+        (Method::GET, "/std/profile/avatar"),
         (Method::GET, "/workspace"),
         (Method::HEAD, "/workspace"),
     ] {

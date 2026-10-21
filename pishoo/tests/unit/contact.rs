@@ -21,7 +21,7 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
     let target = "bob.dhttp.net";
     let subject = "b".repeat(64);
     let selected = vec![
-        json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"POST","path":"/std/message"}]}),
+        json!({"id":"dev.dhttp.net/message#message","endpoints":[{"method":"PUT","path":"/std/message"}]}),
     ];
     assert!(contact(&access, &endpoint, target).await.is_err());
     grant_offered(
@@ -43,7 +43,7 @@ async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_o
         .unwrap();
     assert_eq!(
         rules[target],
-        json!({"/std/message":{"allow":["POST"],"review":[],"deny":[]}})
+        json!({"/std/message":{"allow":["PUT"],"review":[],"deny":[]}})
     );
 
     assert_eq!(
@@ -407,6 +407,18 @@ async fn contact_submission_without_capabilities_queues_without_contacting_the_p
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["status"], "pending");
     assert_eq!(body["delivery_status"], "queued");
+    let queued = database(&profile).unwrap();
+    assert_eq!(
+        queued
+            .query_row(
+                "SELECT requested_access,offers FROM outbound_contact_request",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+        ("{}".into(), "{}".into())
+    );
+
     assert_eq!(body["name"], "offline.dhttp.net");
     assert!(body["subject_id"].is_null());
     assert!(
@@ -472,7 +484,19 @@ fn contact_v1_upgrade_preserves_delivery_jobs_and_removes_only_saved_collection(
         assert_eq!(
             db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT requested_access,offers FROM outbound_contact_request",
+                [],
+                |row| Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?
+                ))
+            )
+            .unwrap(),
+            (None, None)
         );
         let job = db.query_row("SELECT id,description,status,contact_id,contact_subject FROM outbound_contact_request", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Option<i64>>(3)?, row.get::<_,Option<String>>(4)?))).unwrap();
         assert_eq!(
@@ -569,4 +593,117 @@ fn contact_v3_migration_failure_rolls_back_rename_and_version() {
         1
     );
     assert_eq!(old.query_row("SELECT count(*) FROM pragma_table_info('outbound_contact_requests') WHERE name IN ('contact_id','contact_subject')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn outbound_submission_requires_both_verified_owner_name_and_subject() {
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let verified_owner = owner(&endpoint).unwrap();
+    let access = Arc::new(
+        AccessService::load_from_db(
+            "sqlite::memory:",
+            endpoint.name(),
+            verified_owner.subject_id(),
+        )
+        .await
+        .unwrap(),
+    );
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::POST),
+            "/std/contact",
+            access_control::Effect::Allow,
+            access_control::Grantee::Named,
+        )
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    for visitor in [
+        access_control::Visitor::new(
+            "manager.dhttp.net",
+            access_control::SubjectId::new(b"manager").unwrap(),
+        ),
+        access_control::Visitor::new(
+            endpoint.name(),
+            access_control::SubjectId::new(b"impostor").unwrap(),
+        ),
+    ] {
+        let mut request = Request::builder().method(Method::POST).uri("/std/contact").header("content-type", "application/json").body(Body::from(json!({"from":endpoint.name(),"to":"bob.dhttp.net","description":"","requested_capabilities":[],"offered_capabilities":[]}).to_string())).unwrap();
+        request.extensions_mut().insert(visitor);
+        assert_eq!(
+            dispatch(profile.clone(), endpoint.clone(), access.clone(), request)
+                .await
+                .unwrap_err()
+                .0,
+            403
+        );
+    }
+    assert!(!profile.join(".volume/sys/contact/.db").exists());
+}
+
+#[tokio::test]
+async fn queued_legacy_capabilities_fail_without_network_or_new_grants() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let access = Arc::new(
+        AccessService::load_from_db(
+            "sqlite::memory:",
+            endpoint.name(),
+            owner(&endpoint).unwrap().subject_id(),
+        )
+        .await
+        .unwrap(),
+    );
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("../../src/contact/contact.sql"))
+        .unwrap();
+    db.execute("INSERT INTO outbound_contact_request(target_name,application_id,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net',?1,'[\"Receive messages\"]','queued',?2,?2,0,0,0)", params!["a".repeat(64), now()+120]).unwrap();
+    let db = Arc::new(Mutex::new(db));
+    contact_jobs(&profile, &endpoint, &access, &db)
+        .await
+        .unwrap();
+    let conn = db.lock().unwrap();
+    let (status, error, lease): (String, String, Option<i64>) = conn
+        .query_row(
+            "SELECT status,error_message,lease_until FROM outbound_contact_request",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert!(error.contains("submit a new request"));
+    assert_eq!(lease, None);
+    assert!(access.find_contact_by_name("bob.dhttp.net").await.is_err());
+}
+
+#[test]
+fn v3_migration_preserves_unknown_snapshots_without_catalog_backfill() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let db = database(&profile).unwrap();
+    db.execute_batch("ALTER TABLE outbound_contact_request DROP COLUMN requested_access; ALTER TABLE outbound_contact_request DROP COLUMN offers; PRAGMA user_version=3;").unwrap();
+    db.execute("INSERT INTO outbound_contact_request(target_name,requested_capabilities,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at) VALUES('bob.dhttp.net','[\"Receive messages\"]','queued',?1,?1,0,1,1)", [now()+120]).unwrap();
+    drop(db);
+    for _ in 0..2 {
+        let db = database(&profile).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT requested_access,offers FROM outbound_contact_request",
+                [],
+                |row| Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?
+                ))
+            )
+            .unwrap(),
+            (None, None)
+        );
+    }
 }

@@ -184,7 +184,7 @@ async fn status_routes_reject_a_forged_visitor_on_an_anonymous_connection() {
     let app = access_router(access.clone())
         .layer(axum::middleware::from_fn_with_state(access, authorize));
     for (path, expected) in [
-        ("/std/acl/status/1", StatusCode::FORBIDDEN),
+        ("/std/acl/status?id=1", StatusCode::FORBIDDEN),
         ("/std/contact/status", StatusCode::FORBIDDEN),
     ] {
         let mut request = anonymous_request();
@@ -276,7 +276,7 @@ async fn business_requests_trigger_break_and_waiting_reviews_without_a_permissio
                     .clone()
                     .oneshot(
                         Request::builder()
-                            .uri("/std/acl/reviews?kind=live")
+                            .uri("/std/acl/review/list?kind=live")
                             .body(AxumBody::empty())
                             .unwrap(),
                     )
@@ -335,7 +335,7 @@ async fn business_requests_trigger_break_and_waiting_reviews_without_a_permissio
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/std/acl/reviews?kind=live")
+                    .uri("/std/acl/review/list?kind=live")
                     .body(AxumBody::empty())
                     .unwrap(),
             )
@@ -387,7 +387,7 @@ async fn waiting_timeout_cleans_up_without_granting_acl() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/std/acl/reviews?kind=live")
+                    .uri("/std/acl/review/list?kind=live")
                     .body(AxumBody::empty())
                     .unwrap(),
             )
@@ -406,7 +406,7 @@ async fn waiting_timeout_cleans_up_without_granting_acl() {
     let response = management
         .oneshot(
             Request::builder()
-                .uri("/std/acl/reviews?kind=live")
+                .uri("/std/acl/review/list?kind=live")
                 .body(AxumBody::empty())
                 .unwrap(),
         )

@@ -8,6 +8,8 @@ CREATE TABLE outbound_contact_request (
         CHECK (json_valid(requested_capabilities) AND json_type(requested_capabilities) = 'array'),
     offered_capabilities TEXT NOT NULL DEFAULT '[]'
         CHECK (json_valid(offered_capabilities) AND json_type(offered_capabilities) = 'array'),
+    requested_access TEXT CHECK (requested_access IS NULL OR (json_valid(requested_access) AND json_type(requested_access) = 'object')),
+    offers TEXT CHECK (offers IS NULL OR (json_valid(offers) AND json_type(offers) = 'object')),
     application_id TEXT UNIQUE CHECK (application_id IS NULL OR length(application_id) = 64),
     status TEXT NOT NULL CHECK (status IN ('queued', 'pending', 'active', 'denied', 'expired', 'failed', 'revoked')),
     expired_after INTEGER NOT NULL CHECK (typeof(expired_after) = 'integer'),
