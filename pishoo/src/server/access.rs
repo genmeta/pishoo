@@ -179,11 +179,11 @@ pub(super) async fn load_access(
             access_control::Grantee::All,
         )
         .await?;
-    // Discovery is public before a contact relationship exists. The profile
-    // GET prefix covers the public profile, avatar and introduction context.
+    // Only the explicitly public profile fields are discoverable by default.
     for (method, path) in [
         (http::Method::GET, "/std/acl/permissions"),
-        (http::Method::GET, "/std/profile"),
+        (http::Method::GET, "/std/profile/nickname"),
+        (http::Method::GET, "/std/profile/avatar"),
         // The public /app/workspace/intro page and assets are served by Workspace.
         (http::Method::GET, "/app/workspace"),
     ] {

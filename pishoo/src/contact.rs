@@ -28,7 +28,7 @@ pub(crate) use delivery::contact_jobs;
 pub(crate) use storage::database;
 
 use self::{
-    access::{contact, encoded, grant_offered},
+    access::{contact, grant_offered},
     capabilities::selected,
     delivery::remote,
     storage::{expire_requests, outbound_request, storage},
@@ -469,6 +469,14 @@ async fn dispatch(
             }
             return native(Method::POST, "/std/contact".into(), Some(doc)).await;
         }
+        let verified_owner = access::owner(&endpoint)?;
+        let visitor = visitor
+            .as_ref()
+            .filter(|visitor| {
+                visitor.name() == verified_owner.name()
+                    && visitor.subject_id() == verified_owner.subject_id()
+            })
+            .ok_or_else(|| fail(403, "verified owner required"))?;
         if doc.as_object().is_none_or(|object| {
             object.keys().any(|key| {
                 ![
@@ -514,16 +522,11 @@ async fn dispatch(
         {
             return Err(fail(409, "local contact is blocked"));
         }
-        let visitor = visitor
-            .as_ref()
-            .ok_or_else(|| fail(403, "verified manager required"))?;
-        let mut operations = vec![(Method::PUT, "/std/contact".to_owned())];
-        if !offered_capabilities.is_empty() {
-            operations.push((
-                Method::PATCH,
-                format!("/std/acl/allow/{}", encoded(&target)),
-            ));
-        }
+        let operations = if offered_capabilities.is_empty() {
+            Vec::new()
+        } else {
+            vec![(Method::PATCH, "/std/acl/allow".to_owned())]
+        };
         for (method, path) in operations {
             let headers = access_control::Headers {
                 method,
@@ -571,6 +574,8 @@ async fn dispatch(
         };
         let mut doc = doc;
         doc["valid_before"] = valid_before.into();
+        doc["_requested_access"] = capabilities::requested(&requested_capabilities);
+        doc["_offers"] = capabilities::offered(&offered_capabilities);
         doc["contact_id"] = pinned
             .as_ref()
             .map_or(Value::Null, |contact| contact["id"].clone());
@@ -592,7 +597,7 @@ async fn dispatch(
                 let existing:Option<i64>=tx.query_row("SELECT id FROM outbound_contact_request WHERE target_name=?1 AND status IN ('queued','pending')",[string(&doc,"target_name")?],|r|r.get(0)).optional().map_err(storage)?;
                 if existing.is_some() {return Err(fail(409,"contact request already pending"));}
                 let time=now();
-                tx.execute("INSERT INTO outbound_contact_request(target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at,contact_id,contact_subject) VALUES(?1,?2,?3,?4,?5,'queued',?6,?6,?7,?7,?7,?8,?9)",params![string(&doc,"target_name")?,string(&doc,"description")?,doc["requested_capabilities"].to_string(),doc["offered_capabilities"].to_string(),random_id()?,doc["valid_before"].as_i64(),time,doc["contact_id"].as_i64(),doc["contact_subject"].as_str()]).map_err(storage)?;
+                tx.execute("INSERT INTO outbound_contact_request(target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,next_attempt_at,created_at,updated_at,contact_id,contact_subject,requested_access,offers) VALUES(?1,?2,?3,?4,?5,'queued',?6,?6,?7,?7,?7,?8,?9,?10,?11)",params![string(&doc,"target_name")?,string(&doc,"description")?,doc["requested_capabilities"].to_string(),doc["offered_capabilities"].to_string(),random_id()?,doc["valid_before"].as_i64(),time,doc["contact_id"].as_i64(),doc["contact_subject"].as_str(),doc["_requested_access"].to_string(),doc["_offers"].to_string()]).map_err(storage)?;
                 let id=tx.last_insert_rowid();tx.commit().map_err(storage)?;
                 let mut draft=outbound_request(&db,id)?;
                 draft["_contact_id"] = doc["contact_id"].clone();

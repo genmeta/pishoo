@@ -14,8 +14,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     Failure,
-    access::{contact, encoded, local_api},
-    capabilities::{offered, requested, selected},
+    access::{contact, encoded, local_api, record_outbound},
     fail, now,
     storage::{expire_requests, storage},
     string,
@@ -116,32 +115,79 @@ pub(super) async fn remote(
     .map_err(|_| fail(504, "contact request timed out"))?
 }
 
+fn operation_snapshot(snapshot: Option<&str>, capabilities: &str) -> Result<Value, Failure> {
+    if let Some(snapshot) = snapshot {
+        let value: Value = serde_json::from_str(snapshot)
+            .map_err(|_| fail(500, "invalid stored operation snapshot"))?;
+        if !value.is_object() {
+            return Err(fail(500, "invalid stored operation snapshot"));
+        }
+        return Ok(value);
+    }
+    let groups: Vec<String> =
+        serde_json::from_str(capabilities).map_err(|_| fail(500, "invalid stored capabilities"))?;
+    if !groups.is_empty() {
+        return Err(fail(
+            400,
+            "legacy contact request has no operation snapshot; submit a new request",
+        ));
+    }
+    Ok(json!({}))
+}
+
+struct DeliveryJob {
+    id: i64,
+    target: String,
+    application_id: String,
+    description: String,
+    requested_caps: String,
+    offered_caps: String,
+    status: String,
+    contact_id: Option<i64>,
+    contact_subject: Option<String>,
+    requested_access: Option<String>,
+    offered_access: Option<String>,
+    started_at: i64,
+}
+
 pub(crate) async fn contact_jobs(
-    profile: &IdentityProfile,
+    _profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
     db: &Arc<Mutex<Connection>>,
 ) -> crate::Result<()> {
-    let result = deliver(profile, endpoint, access, db).await;
+    let result = deliver(endpoint, access, db).await;
     result.map_err(|(_, message)| crate::Error::InvalidConfig(message))
 }
 async fn deliver(
-    profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
     access: &Arc<AccessService>,
     db: &Arc<Mutex<Connection>>,
 ) -> Result<(), Failure> {
     let job_db = db.clone();
-    let (job,lease)=tokio::task::spawn_blocking(move|| {
-        let mut db=job_db.lock().map_err(|_|fail(500,"contact database lock poisoned"))?;
-        let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+    let (job, lease) = tokio::task::spawn_blocking(move || {
+        let mut db = job_db.lock().map_err(|_| fail(500, "contact database lock poisoned"))?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         expire_requests(&tx)?;
-        let job:Option<(i64,String,String,String,String,String,String,Option<i64>,Option<String>)>=tx.query_row("SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject FROM outbound_contact_request WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",[now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional().map_err(storage)?;
-        let lease=now()+120;
-        if let Some((id,..))=&job {tx.execute("UPDATE outbound_contact_request SET lease_until=?1 WHERE id=?2",params![lease,id]).map_err(storage)?;}
-        tx.commit().map_err(storage)?;Ok::<_,Failure>((job,lease))
-    }).await.map_err(|e|fail(500,e.to_string()))??;
-    let Some((
+        let job = tx.query_row(
+            "SELECT id,target_name,application_id,description,requested_capabilities,offered_capabilities,status,contact_id,contact_subject,requested_access,offers,created_at \
+             FROM outbound_contact_request WHERE status IN ('queued','pending','active') AND next_attempt_at<=?1 AND (status='active' OR expired_after>?1) \
+             AND (lease_until IS NULL OR lease_until<=?1) ORDER BY next_attempt_at,id LIMIT 1",
+            [now()],
+            |row| Ok(DeliveryJob {
+                id: row.get(0)?, target: row.get(1)?, application_id: row.get(2)?, description: row.get(3)?,
+                requested_caps: row.get(4)?, offered_caps: row.get(5)?, status: row.get(6)?, contact_id: row.get(7)?,
+                contact_subject: row.get(8)?, requested_access: row.get(9)?, offered_access: row.get(10)?, started_at: row.get(11)?,
+            }),
+        ).optional().map_err(storage)?;
+        let lease = now() + 120;
+        if let Some(job) = &job {
+            tx.execute("UPDATE outbound_contact_request SET lease_until=?1 WHERE id=?2", params![lease, job.id]).map_err(storage)?;
+        }
+        tx.commit().map_err(storage)?;
+        Ok::<_, Failure>((job, lease))
+    }).await.map_err(|e| fail(500, e.to_string()))??;
+    let Some(DeliveryJob {
         id,
         target,
         application_id,
@@ -151,15 +197,17 @@ async fn deliver(
         status,
         contact_id,
         contact_subject,
-    )) = job
+        requested_access,
+        offered_access,
+        started_at,
+    }) = job
     else {
         return Ok(());
     };
     let outcome=async {
-        let requests:Value=serde_json::from_str(&requested_caps).map_err(|_|fail(500,"invalid stored capabilities"))?;
-        let offers:Value=serde_json::from_str(&offered_caps).map_err(|_|fail(500,"invalid stored capabilities"))?;
-        let selected_requests=selected(profile,endpoint,&requests,&target).await?;
-        let selected_offers=selected(profile,endpoint,&offers,endpoint.name()).await?;
+        let (requests, offers) = if status == "queued" {
+            (operation_snapshot(requested_access.as_deref(), &requested_caps)?, operation_snapshot(offered_access.as_deref(), &offered_caps)?)
+        } else { (json!({}), json!({})) };
         let existing=match contact(access,endpoint,&target).await {Ok(c)=>Some(c),Err((404,_))=>None,Err(e)=>return Err(e)};
         if let Some(id) = contact_id {
             if existing.as_ref().is_none_or(|c| c["id"] != id || c["subject_id"].as_str() != contact_subject.as_deref()
@@ -169,7 +217,7 @@ async fn deliver(
         }
         let expected=existing.as_ref().and_then(|c|c["subject_id"].as_str());
         let (method,path,body)=if status=="queued" {
-            (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)})))
+            (Method::POST,"/std/contact".to_owned(),Some(json!({"from":endpoint.name(),"to":target,"application_id":application_id,"description":description,"class":"Human","requested_access":requests,"offers":offers})))
         } else {(Method::GET,format!("/std/contact?name={}",encoded(endpoint.name())),None)};
         let (_,mut receipt,sid)=remote(endpoint,&target,method,&path,body.as_ref(),expected).await?;
         if status != "queued" {
@@ -185,7 +233,8 @@ async fn deliver(
         }
         if receipt["application_id"]!=application_id || receipt["name"]!=target || receipt["subject_id"]!=sid {return Err(fail(502,"contact receipt identity does not match authenticated peer"));}
         if contact_id.is_none() && existing.is_none() && matches!(receipt["status"].as_str(), Some("pending" | "active")) {
-            local_api(access,endpoint,Method::PUT,&format!("/std/contact?name={}",encoded(&target)),Some(&json!({"subject_id":sid,"class":"Human","description":"","status":"pending","requested_access":requested(&selected_requests),"offers":offered(&selected_offers)}))).await?;
+            let valid_before = receipt["valid_before"].as_i64().filter(|expiry| *expiry > now()).unwrap_or_else(|| now() + 7 * 86400);
+            record_outbound(access, &target, &sid, requests, offers, valid_before, started_at).await?;
         }
         let current = contact(access, endpoint, &target).await?;
         if let Some(id) = contact_id {
@@ -229,4 +278,20 @@ async fn deliver(
         }
         Ok(())
     }).await.map_err(|e|fail(500,e.to_string()))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_capabilities_are_never_reinterpreted() {
+        assert!(operation_snapshot(None, r#"["Receive messages"]"#).is_err());
+        assert_eq!(operation_snapshot(None, "[]").unwrap(), json!({}));
+        let snapshot = r#"{"/std/message":["POST"]}"#;
+        assert_eq!(
+            operation_snapshot(Some(snapshot), r#"["Receive messages"]"#).unwrap(),
+            json!({"/std/message":["POST"]})
+        );
+    }
 }
