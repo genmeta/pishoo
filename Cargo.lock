@@ -1152,7 +1152,7 @@ dependencies = [
 [[package]]
 name = "daccess"
 version = "0.1.1"
-source = "git+https://github.com/genmeta/daccess.git?rev=41b8462524c1f85dec8abcd59b63fa59fb029c3c#41b8462524c1f85dec8abcd59b63fa59fb029c3c"
+source = "git+https://github.com/genmeta/daccess.git?rev=1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4#1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4"
 dependencies = [
  "axum",
  "chrono",

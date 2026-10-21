@@ -61,7 +61,7 @@ async fn rule(server: &Server, peer: &str, method: &str, path: &str, effect: &st
     expect(
         server,
         Method::PATCH,
-        &format!("/std/acl/allow/{peer}"),
+        &format!("/std/acl/allow?name={peer}"),
         json!({"method":method,"api":path,"effect":effect}),
         204,
     )
@@ -278,9 +278,9 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         }
         expect(
             &server,
-            Method::PATCH,
-            "/std/profile",
-            json!({"display_name":name}),
+            Method::PUT,
+            "/std/profile/nickname",
+            json!({"nickname":name}),
             200,
         )
         .await;
@@ -298,12 +298,11 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &bob.endpoint,
         alice.name(),
         Method::GET,
-        "/std/profile/context",
+        "/std/profile/nickname",
         Value::Null,
     )
     .await;
-    assert_eq!(intro["viewer_name"], bob.name());
-    assert_eq!(intro["is_owner"], false);
+    assert_eq!(intro["nickname"], alice.name());
     let denied = remote_json(
         &bob.endpoint,
         alice.name(),
@@ -316,7 +315,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let catalog = expect(alice, Method::GET, "/std/acl/permissions", Value::Null, 200).await;
     assert_eq!(
         catalog["std.dhttp.net/message · message"],
-        json!({"/std/message":["POST"]})
+        json!({"/std/message":["PUT"]})
     );
     assert!(catalog.as_object().unwrap().values().all(|paths| {
         !paths
@@ -346,7 +345,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 if case == 0 { 404 } else { 204 },
             )
             .await;
-            rule(server, "**", "POST", "/std/message", "deny").await;
+            rule(server, "**", "PUT", "/std/message", "deny").await;
         }
         let payload = |target: &str| json!({"target_name":target,"description":format!("crossed case {case}"),"requested_capabilities":["message"],"offered_capabilities":["message"]});
         let (a, b) = tokio::join!(
@@ -390,12 +389,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         );
         if case == 0 {
             // Approving the actual request persists ACL independently of contact acceptance.
-            rule(bob, alice.name(), "POST", "/std/message", "review").await;
+            rule(bob, alice.name(), "PUT", "/std/message", "review").await;
             let payload = json!({"client_message_id":"review-before-contact","content":"先审批后加好友","media_type":"text/plain"});
             let (status, pending) = remote_json(
                 &alice.endpoint,
                 bob.name(),
-                Method::POST,
+                Method::PUT,
                 "/std/message?scenario=before-contact",
                 payload.clone(),
             )
@@ -412,13 +411,13 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             let (status, body) = remote_json(
                 &alice.endpoint,
                 bob.name(),
-                Method::POST,
+                Method::PUT,
                 "/std/message?scenario=before-contact",
                 payload,
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "approved request: {body}");
-            rule(bob, alice.name(), "POST", "/std/message", "deny").await;
+            rule(bob, alice.name(), "PUT", "/std/message", "deny").await;
             eprintln!("PASS request approval is independent of contact acceptance");
         }
         let mut granted = [false, false];
@@ -448,7 +447,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 assert_eq!(after["subject_id"], before["subject_id"]);
                 assert_eq!(after["status"], "active");
             } else {
-                rule(server, peer.name(), "POST", "/std/message", "allow").await;
+                rule(server, peer.name(), "PUT", "/std/message", "allow").await;
                 granted[action % 2] = true;
             }
             let a = refresh(alice, &a["id"]).await;
@@ -467,7 +466,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
                 )
                 .await;
                 let allowed = granted[usize::from(receiver.name() == bob.name())];
-                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::POST, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"content":"乱序权限探测","media_type":"text/plain"})).await;
+                let (status, body) = remote_json(&sender.endpoint, receiver.name(), Method::PUT, "/std/message", json!({"client_message_id":format!("order-{case}-{action}-{}",sender.name().trim_end_matches(".dhttp.net")),"content":"乱序权限探测","media_type":"text/plain"})).await;
                 assert_eq!(
                     status.as_u16(),
                     if allowed { 201 } else { 403 },
@@ -534,12 +533,12 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     }
 
     // Review permission and friendship acceptance are independent; approval persists an ordinary ACL grant.
-    rule(bob, alice.name(), "POST", "/std/message", "review").await;
+    rule(bob, alice.name(), "PUT", "/std/message", "review").await;
     let payload = json!({"client_message_id":"review-order","content":"请求审批重试","media_type":"text/plain"});
     let (status, pending) = remote_json(
         &alice.endpoint,
         bob.name(),
-        Method::POST,
+        Method::PUT,
         "/std/message?scenario=active-review",
         payload.clone(),
     )
@@ -548,7 +547,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let (_, repeated) = remote_json(
         &alice.endpoint,
         bob.name(),
-        Method::POST,
+        Method::PUT,
         "/std/message?scenario=active-review",
         payload.clone(),
     )
@@ -574,7 +573,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let (status, receipt) = remote_json(
         &alice.endpoint,
         bob.name(),
-        Method::POST,
+        Method::PUT,
         "/std/message?scenario=active-review",
         payload.clone(),
     )
@@ -583,7 +582,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     let (status, duplicate) = remote_json(
         &alice.endpoint,
         bob.name(),
-        Method::POST,
+        Method::PUT,
         "/std/message?scenario=active-review",
         payload,
     )
@@ -594,7 +593,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
     assert!(
         rules[alice.name()]["/std/message"]["allow"]
             .as_array()
-            .is_some_and(|m| m.contains(&json!("POST")))
+            .is_some_and(|m| m.contains(&json!("PUT")))
     );
     eprintln!(
         "PASS request review: deduplicated pending request, approved retry, exactly-once receive; durable ACL grant"
@@ -703,28 +702,28 @@ fn install_signed_workspace_in_isolated_manual_test_profile() {
     drop(db);
     let runtime = WasmRuntime::new().unwrap();
     if !has_profile {
-        let bytes = std::fs::read(artifacts.join("profile-0.1.0.webc")).unwrap();
+        let bytes = std::fs::read(artifacts.join("profile-0.2.0.webc")).unwrap();
         let installed =
             crate::package::install_lib(&profile, "std.dhttp.net/profile", &bytes, &runtime)
                 .unwrap();
-        assert_eq!(installed["version"], "0.1.0");
+        assert_eq!(installed["version"], "0.2.0");
         eprintln!(
             "LOCAL LIB INSTALL {} {}",
             installed["id"], installed["version"]
         );
     }
-    let message = std::fs::read(artifacts.join("message-0.1.1.webc")).unwrap();
+    let message = std::fs::read(artifacts.join("message-0.2.0.webc")).unwrap();
     let installed =
         crate::package::install_lib(&profile, "std.dhttp.net/message", &message, &runtime).unwrap();
-    assert_eq!(installed["version"], "0.1.1");
+    assert_eq!(installed["version"], "0.2.0");
     eprintln!(
         "LOCAL LIB INSTALL {} {}",
         installed["id"], installed["version"]
     );
-    let workspace = std::fs::read(artifacts.join("workspace-0.1.4.webc")).unwrap();
+    let workspace = std::fs::read(artifacts.join("workspace-0.2.0.webc")).unwrap();
     let installed =
         crate::package::install_app(&profile, "std.dhttp.net/workspace", &workspace).unwrap();
-    assert_eq!(installed["version"], "0.1.4");
+    assert_eq!(installed["version"], "0.2.0");
     eprintln!(
         "LOCAL APP INSTALL {} {}",
         installed["id"], installed["version"]

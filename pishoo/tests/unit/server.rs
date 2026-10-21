@@ -1123,9 +1123,8 @@ async fn workspace_static_defaults_allow_anonymous_reads_without_management_acce
         "info":{"title":"Profile","version":"1.0.0","description":"Public profile","license":{"name":"MIT"}},
         "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","dependencies":[],"host":{}},
         "paths":{
-            "/profile":{"get":{"operationId":"profile","summary":"Profile"},"patch":{"operationId":"edit","summary":"Edit"}},
-            "/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}},
-            "/profile/context":{"get":{"operationId":"context","summary":"Context"},"head":{"operationId":"contextHead","summary":"Context headers"}}
+            "/profile/nickname":{"get":{"operationId":"nickname","summary":"Nickname"},"put":{"operationId":"edit","summary":"Edit nickname"}},
+            "/profile/avatar":{"get":{"operationId":"avatar","summary":"Avatar"}}
         }
     });
     let profile_package = crate::package::tests::package_fixture(
