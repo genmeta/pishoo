@@ -589,7 +589,7 @@ async fn live_scan_updates_proxies_preserves_invalid_config_and_disables_server(
     crate::setup::config_database(
         &profile,
         &http::Method::PATCH,
-        &"/std/sys/listen".parse().unwrap(),
+        &"/std/sys/mount".parse().unwrap(),
         Some(serde_json::json!({"location":"/live", "proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();

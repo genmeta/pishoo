@@ -91,7 +91,7 @@ fn run_command(args: Vec<std::ffi::OsString>) -> Result<(), pishoo::Error> {
     if args.len() == 1 {
         if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
             println!(
-                "Usage: pishoo [reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without .volume/sys/setting/.db are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta listen --id NAME [loopback|internal|external|all|auto|list]\n  genmeta unlisten --id NAME [PATH URL]\n  genmeta install --list --id NAME\n  genmeta install --info PACKAGE --id NAME\n  genmeta forward --id NAME ...\n  genmeta --help"
+                "Usage: pishoo [reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without .volume/sys/setting/.db are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta listen --id NAME [internal|external|all|off]\n  genmeta install --list --id NAME\n  genmeta install --info PACKAGE --id NAME\n  genmeta mount --id NAME [PATH URL]\n  genmeta unmount --id NAME PATH URL\n  genmeta --help"
             );
             return Ok(());
         }
