@@ -137,7 +137,7 @@ impl Sandbox {
         let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='lib')",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='lib')",
             [],
             |row| row.get(0),
         )?;

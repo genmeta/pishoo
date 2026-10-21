@@ -722,7 +722,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     crate::setup::open_config(&lib, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .unwrap()
         .execute(
-            "INSERT INTO lib(name,author,version) VALUES('broken',NULL,'1.0.0')",
+            "INSERT INTO package(has_lib,has_app,name,author,version) VALUES(1,0,'broken',NULL,'1.0.0')",
             [],
         )
         .unwrap();
@@ -812,7 +812,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     let (status, saved) = owner_bytes(
         &server,
         Method::PUT,
-        "/std/sys/lib?name=note",
+        "/std/sys/pkg?name=note",
         &wasm,
         "application/wasm",
     )
@@ -833,7 +833,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/lib/list",
+            "/std/sys/pkg/list",
             serde_json::Value::Null
         )
         .await
@@ -990,7 +990,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::GET,
-            "/std/sys/lib/list",
+            "/std/sys/pkg/list",
             serde_json::Value::Null
         )
         .await
@@ -1001,7 +1001,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         owner_request(
             &server,
             Method::DELETE,
-            "/std/sys/lib?name=note",
+            "/std/sys/pkg?name=note",
             serde_json::Value::Null
         )
         .await
@@ -1035,7 +1035,7 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = alice
         .get(
-            format!("https://{}/std/sys/lib/list", server.name())
+            format!("https://{}/std/sys/pkg/list", server.name())
                 .parse()
                 .unwrap(),
         )

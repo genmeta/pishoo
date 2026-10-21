@@ -1,5 +1,5 @@
--- These schemas share one rollback-journal transaction via setup::open_config.
-CREATE TABLE IF NOT EXISTS lib_registry.lib (
+-- Package metadata is the installation authority; content flags select runtime resources.
+CREATE TABLE IF NOT EXISTS pkg_registry.package (
     name TEXT PRIMARY KEY NOT NULL,
     author TEXT,
     version TEXT NOT NULL,
@@ -8,30 +8,17 @@ CREATE TABLE IF NOT EXISTS lib_registry.lib (
     license TEXT,
     repository TEXT,
     installed_at INTEGER,
-    upgraded_at INTEGER
+    upgraded_at INTEGER,
+    has_lib INTEGER NOT NULL CHECK(has_lib IN (0,1)),
+    has_app INTEGER NOT NULL CHECK(has_app IN (0,1)),
+    CHECK(has_lib OR has_app)
 );
-CREATE TABLE IF NOT EXISTS app_registry.app (
-    name TEXT PRIMARY KEY NOT NULL,
-    author TEXT,
+CREATE TABLE IF NOT EXISTS pkg_registry.package_dependency (
+    package_name TEXT NOT NULL REFERENCES package(name) ON DELETE CASCADE,
+    dependency_name TEXT NOT NULL REFERENCES package(name) ON DELETE RESTRICT,
     version TEXT NOT NULL,
-    title TEXT,
-    description TEXT,
-    license TEXT,
-    repository TEXT,
-    installed_at INTEGER,
-    upgraded_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS app_registry.app_dependency (
-    app_name TEXT NOT NULL REFERENCES app(name) ON DELETE CASCADE,
-    lib_name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    PRIMARY KEY(app_name, lib_name)
-);
-CREATE TABLE IF NOT EXISTS lib_registry.lib_dependency (
-    lib_name TEXT NOT NULL REFERENCES lib(name) ON DELETE CASCADE,
-    dependency_name TEXT NOT NULL REFERENCES lib(name) ON DELETE RESTRICT,
-    version TEXT NOT NULL,
-    PRIMARY KEY(lib_name, dependency_name)
+    CHECK(package_name <> dependency_name),
+    PRIMARY KEY(package_name, dependency_name)
 );
 CREATE TABLE IF NOT EXISTS acl.lib_capability (
     lib_name TEXT NOT NULL,

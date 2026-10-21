@@ -1355,7 +1355,7 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
         let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             .unwrap();
         if legacy {
-            db.execute_batch("DROP TABLE acl.lib_capability_operation; DROP TABLE acl.lib_capability; DROP TABLE lib_registry.lib_dependency; DROP TABLE lib_registry.lib;").unwrap();
+            db.execute_batch("DROP TABLE acl.lib_capability_operation; DROP TABLE acl.lib_capability; DROP VIEW temp.lib; DROP TABLE pkg_registry.package_dependency; DROP TABLE pkg_registry.package;").unwrap();
             db.execute_batch("CREATE TABLE lib (id TEXT PRIMARY KEY, name TEXT, version TEXT);
                 CREATE TABLE lib_capability (lib_id TEXT, capability_id TEXT, title TEXT);
                 CREATE TABLE lib_capability_operation (lib_id TEXT, capability_id TEXT, path TEXT, method TEXT);
@@ -1365,7 +1365,7 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
         } else {
             db.execute_batch(include_str!("../../src/package/packages.sql"))
                 .unwrap();
-            db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
+            db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'message', 'dev.dhttp.net', '1.0.0');
                 INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'details', 'read message'), ('message', 'empty', 'empty');
                 INSERT INTO lib_capability_operation VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'details', 'GET', '/std/message/history');").unwrap();
         }
@@ -1374,7 +1374,7 @@ async fn permission_catalog_qualifies_group_titles_and_preserves_legacy_registra
                 INSERT INTO lib_capability VALUES ('other.dhttp.net/archive', 'read', 'read message');
                 INSERT INTO lib_capability_operation VALUES ('other.dhttp.net/archive', 'read', '/archive/entries', 'GET');").unwrap();
         } else {
-            db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
+            db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'archive', 'other.dhttp.net', '1.0.0');
                 INSERT INTO lib_capability VALUES ('archive', 'read', 'read message');
                 INSERT INTO lib_capability_operation VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
         }

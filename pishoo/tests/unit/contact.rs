@@ -209,7 +209,7 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
     crate::setup::load_server_config(&profile).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('message', 'dev.dhttp.net', '1.0.0');
+    db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'message', 'dev.dhttp.net', '1.0.0');
         INSERT INTO lib_capability VALUES ('message', 'read', 'read message'), ('message', 'history', 'read message');
         INSERT INTO lib_capability_operation VALUES ('message', 'read', 'GET', '/std/message'), ('message', 'read', 'HEAD', '/std/message'), ('message', 'history', 'GET', '/std/message/history');").unwrap();
     assert_eq!(
@@ -273,7 +273,7 @@ async fn selected_permission_titles_resolve_to_actual_operations() {
         .0,
         400
     );
-    db.execute_batch("INSERT INTO lib (name, author, version) VALUES ('archive', 'other.dhttp.net', '1.0.0');
+    db.execute_batch("INSERT INTO package (has_lib,has_app,name, author, version) VALUES (1,0,'archive', 'other.dhttp.net', '1.0.0');
         INSERT INTO lib_capability VALUES ('archive', 'read', 'read message');
         INSERT INTO lib_capability_operation VALUES ('archive', 'read', 'GET', '/archive/entries');").unwrap();
     assert_eq!(

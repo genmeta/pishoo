@@ -4,14 +4,11 @@ use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any}
 use dhttp_home::identity::IdentityProfile;
 use http::Request;
 use tower::ServiceExt;
-#[cfg(test)]
-use crate::routes::access_router;
 
 use crate::{
     Body, Error, Result, dns,
     routes::{
-        DHTTP_PREFIX, authorize, capabilities_router, file_router, forward_dhttp,
-        proxy_pass,
+        DHTTP_PREFIX, authorize, capabilities_router, file_router, forward_dhttp, proxy_pass,
     },
     sandbox::{Sandbox, WasmRuntime},
     setup::{ServerConfig, config_router, load_server_config},
@@ -68,7 +65,7 @@ fn native_router(server: &Server) -> Router {
             server.profile.clone(),
             server.endpoint.clone(),
         ))
-        .merge(crate::package::lib_management_router(
+        .merge(crate::package::pkg_management_router(
             server.profile.clone(),
             server.endpoint.clone(),
             server.sandbox.clone(),

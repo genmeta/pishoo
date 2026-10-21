@@ -40,7 +40,7 @@ cargo test --locked --workspace -- --test-threads=1
 cargo check --locked --workspace --all-targets
 ```
 
-The host build is independent of frontend tooling. Business products live in five independent repositories: Workspace, Profile, Message, Calendar and Journal. Calendar and Journal each keep their App and Lib together, publishing separate artifacts. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
+The host build is independent of frontend tooling. Business products live in five independent repositories: Workspace, Profile, Message, Calendar and Journal. Calendar and Journal each keep their App and Lib together, publishing one signed .pkg per product. Pishoo contains native services, reserved std APIs, WASM runtime, WIT/SDK and transport test fixtures. Host release packages contain no business App/Lib artifacts; install Workspace explicitly after starting Pishoo, as shown below. First-time host builds need access to GitHub and crates.io. Run `./target/debug/pishoo` with credentials in your account’s `~/.dhttp`. Ancestor or user-level Cargo path patches can override registry dependencies; use a checkout outside those configured directories when reproducing it.
 
 ### Install Pishoo
 
@@ -118,15 +118,7 @@ account that owns the identity**, replacing `alice.smith` with its name:
 genmeta install workspace --id alice.smith
 ```
 
-The command calls the running identity's Pishoo installation API. Pishoo downloads
-and verifies the published Workspace App and installs its exact Profile and Message
-Lib dependencies. The App is available at `https://<identity>/workspace/`
-immediately after installation. The selected App and dependency versions must
-already be published to a compatible store; this command does not publish them.
-Installation and updates use one JSON `PUT /std/sys/app?name=workspace` request
-with exactly `publisher` and `version`; there is no local-package upload fallback.
-The unchanged store currently rejects newly built Libs with embedded OpenAPI,
-so those releases must wait for store compatibility before installation.
+The command calls the running identity's Pishoo installation API. Pishoo downloads and verifies the Workspace package and its exact Profile and Message dependencies. The page is available at `https://<identity>/workspace/` after installation. Selected versions must already be published to the store. Installation and updates use `POST /std/sys/pkg/install` with exactly `author`, `name` and `version`; there is no local-package upload fallback.
 
 Pishoo package installation and startup initialize native services and databases
 without downloading business Apps or invoking gmutils. Store unavailability does
@@ -141,7 +133,7 @@ Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, 
 
 Database configuration is available over H3 through `GET/PATCH/DELETE /std/sys/listen` and `GET/PATCH/DELETE /std/sys/mount`. Requests pass daccess authorization and require the same verified identity and owner hash. The listen resource returns only `{"listen":"internal"}` and accepts internal/external/all/off. The mount resource returns an array of location/proxy_pass rules; PATCH updates one rule and DELETE requires both query values to match. CLI uses `genmeta mount [--id NAME] [PATH URL]` and `genmeta unmount [--id NAME] PATH URL [--yes]`. Writes are transactional; the running process applies proxy and listen changes automatically.
 
-Startup creates `.volume/sys/{setting,lib,app,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. Native ACL defaults remain limited to discovery and contact application/status routes; existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration, dependencies, capability catalog and legacy data migrate before runtime loading; Libs load before Apps.
+Startup creates `.volume/sys/{setting,pkg,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. Native ACL defaults remain limited to discovery and contact application/status routes; existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration, dependencies, capability catalog and legacy data migrate before runtime loading; Libs load before Apps.
 
 Existing daccess schema v0 databases are backed up through SQLite before the library upgrades them to v1. The older 0.8.2 `location_rule_sets/location_rules` format is unsupported and stops startup with the original database preserved; it is never silently replaced with new defaults. Missing, corrupt, incomplete, and unsupported databases are distinguished. Pishoo does not create identity credentials, `server.conf`, or an instance configuration file. Linux packages use `User=root` without setting `DHTTP_HOME`. Existing manual overrides remain authoritative; custom deployments can set them in `/etc/systemd/system/pishoo.service.d/`.
 
@@ -195,17 +187,17 @@ anonymous authorization rules. Older named clients that omit OCSP must upgrade.
 
 ### Build your own Lib
 
-A Lib exports a standard WASI HTTP backend. Package metadata and exact runtime dependencies belong to the WEBC manifest; OpenAPI describes business APIs and is embedded in the installed component. App packages contain frontend resources and no backend OpenAPI.
+A Lib exports a standard WASI HTTP backend. Package metadata and exact runtime dependencies belong to one manifest. A package may contain a backend, static pages, or both; its OpenAPI describes business APIs and is embedded in the backend component.
 
 Rust components can use the [Pishoo SDK](wit/README.md) for verified identity and signature interfaces. Run `python3 pishoo/tools/package-sdk.py` to produce a verified SDK `.crate` and a standalone archive containing SDK source, WIT, the README and packaging tools. The SDK is not yet published to crates.io.
 
-1. Build the WASI HTTP backend and separate browser frontend, with the required package metadata and exact Lib dependencies.
-2. Use `genmeta build` to create a signed WEBC release locally.
-3. Publish the signed source package to a compatible store, then install its exact release with `genmeta install`. Workspace uses the same store-only installation path; local WEBC upload and `--file` installation are not supported.
+1. Build the WASI HTTP backend and separate browser frontend, with the required package metadata and exact package dependencies.
+2. Use `genmeta build` to create a signed .pkg release locally.
+3. Publish the signed source package to a compatible store, then install its exact release with `genmeta install`. Workspace uses the same store-only installation path; local .pkg upload and `--file` installation are not supported.
 
 Online installation/update/removal publishes runtime changes immediately. `pishoo reload` is for identity/configuration reconciliation and is not an extra package activation step.
 
-WEBC remains the signed store input. Installation verifies source packages and expands runtime files to `lib/<name>.wasm` (or `lib/std/<name>.wasm`) and `app/<name>/`. App packaging keeps its `/public` volume, while installed files have no public wrapper. Independent Lib/App databases each have the seven metadata columns plus nullable UTC-second `installed_at` and `upgraded_at`. Business data stays private in the corresponding `.volume` namespace, separate from runtime files. [Migration, recovery and CLI semantics](REVIEW-IMPLEMENTATION-2026-10-21.md) describe the complete layout.
+A `.pkg` uses the WEBC v3 container and one signature for its metadata, dependencies, optional backend and optional static pages. Installation validates and expands runtime files to `lib/<name>.wasm` (or `lib/std/<name>.wasm`) and `app/<name>/`. One package registration in `.volume/sys/pkg/.db` records metadata, timestamps and the installed resource parts. Business data stays private in its `.volume` namespace. Updates and removals commit the package's runtime files and registration together.
 
 Lib compilation uses Wasmtime's persistent machine-code cache. Installation validation, runtime loading, and later service starts reuse compiled code when the WASM content, compiler version, and engine settings match. Each load reads and prepares installed runtime resources, including necessary compilation/linking; source signature and package-policy checks occur at installation/update. Wasmtime uses its platform cache directory and optional standard `wasmtime/config.toml` configuration; no cache setup is required. Cache initialization failures log a warning and fall back to ordinary compilation. A newly built WASM still needs its first compilation. Development builds optimize Cranelift and its register allocator to reduce this first-compilation cost while retaining Pishoo debug information and the normal WASM execution optimization level. Building these dependencies initially takes longer; release builds already optimize them.
 
@@ -229,7 +221,7 @@ genmeta listen --id alice.smith all
 genmeta listen --id alice.smith internal
 pishoo reload
 genmeta mount --id alice.smith /test 127.0.0.1:8080
-genmeta install alice/note --version 1.0.0 --lib --id alice.smith
+genmeta install alice/note --version 1.0.0 --id alice.smith
 genmeta install --list --id alice.smith
 ```
 
