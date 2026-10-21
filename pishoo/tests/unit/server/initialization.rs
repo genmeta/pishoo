@@ -115,7 +115,11 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
         .await
         .unwrap();
     for name in ["setting", "access", "pkg"] {
-        assert!(profile.join(format!(".volume/sys/{name}/database")).is_file());
+        assert!(
+            profile
+                .join(format!(".volume/sys/{name}/database"))
+                .is_file()
+        );
     }
     for directory in [".volume", "lib", "app", "log", "repo"] {
         assert!(profile.join(directory).is_dir());
@@ -216,7 +220,10 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for file in [".volume/sys/setting/database", ".volume/sys/access/database"] {
+        for file in [
+            ".volume/sys/setting/database",
+            ".volume/sys/access/database",
+        ] {
             assert_eq!(
                 profile.join(file).metadata().unwrap().permissions().mode() & 0o777,
                 0o600
@@ -533,7 +540,10 @@ async fn initialization_rejects_symlinked_directories_and_databases() {
     let profile = profile(root.path(), "alice");
     let original = external.join("data");
     std::fs::write(&original, b"untouched").unwrap();
-    for file in [".volume/sys/setting/database", ".volume/sys/access/database"] {
+    for file in [
+        ".volume/sys/setting/database",
+        ".volume/sys/access/database",
+    ] {
         symlink(&original, profile.join(file)).unwrap();
     }
     assert!(load_server_config(&profile).is_err());
