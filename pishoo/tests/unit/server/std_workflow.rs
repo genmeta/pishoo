@@ -250,8 +250,8 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
             );
             eprintln!("INSTALL {} {path}: {}", server.name(), status);
         }
-        let db =
-            rusqlite::Connection::open(server.profile.join(".volume/sys/setting/database")).unwrap();
+        let db = rusqlite::Connection::open(server.profile.join(".volume/sys/setting/database"))
+            .unwrap();
         let count: i64 = db
             .query_row(
                 "SELECT (SELECT count(*) FROM lib)+(SELECT count(*) FROM app)",

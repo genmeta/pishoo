@@ -106,22 +106,53 @@ async fn frontend_prefix_keeps_combined_package_pages_separate_from_backend_rout
     let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = std::sync::Arc::new(WasmRuntime::new().unwrap());
-    install_package(&profile, "alice.dhttp.net/calendar", &package("1.0.0", true, true), &runtime).unwrap();
+    install_package(
+        &profile,
+        "alice.dhttp.net/calendar",
+        &package("1.0.0", true, true),
+        &runtime,
+    )
+    .unwrap();
     let mut sandbox = Sandbox::new(runtime);
     sandbox.load_libs(&profile).unwrap();
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, expected) in [
         (Method::GET, "/app/calendar/", StatusCode::OK),
         (Method::GET, "/app/calendar/events", StatusCode::OK),
-        (Method::POST, "/app/calendar/events", StatusCode::METHOD_NOT_ALLOWED),
-        (Method::GET, "/app/calendar/missing.js", StatusCode::NOT_FOUND),
+        (
+            Method::POST,
+            "/app/calendar/events",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            Method::GET,
+            "/app/calendar/missing.js",
+            StatusCode::NOT_FOUND,
+        ),
         (Method::GET, "/calendar/", StatusCode::NOT_FOUND),
-        (Method::GET, "/calendar/events", StatusCode::METHOD_NOT_ALLOWED),
+        (
+            Method::GET,
+            "/calendar/events",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
         // The backend is selected and requires a real handshake before invocation.
-        (Method::POST, "/calendar/events", StatusCode::INTERNAL_SERVER_ERROR),
+        (
+            Method::POST,
+            "/calendar/events",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
     ] {
-        let response = router.clone().oneshot(Request::builder().method(method).uri(path)
-            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), expected, "{path}");
     }
 }

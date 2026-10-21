@@ -148,10 +148,17 @@ fn current_router(server: &Server) -> Router {
                 .unwrap_or("");
             let installed = {
                 let sandbox = sandbox.read().unwrap();
-                request.uri().path().strip_prefix("/app/").is_some_and(|tail| {
-                    let app_name = tail.split('/').next().unwrap_or("");
-                    sandbox.apps.keys().any(|id| id.rsplit('/').next() == Some(app_name))
-                })
+                request
+                    .uri()
+                    .path()
+                    .strip_prefix("/app/")
+                    .is_some_and(|tail| {
+                        let app_name = tail.split('/').next().unwrap_or("");
+                        sandbox
+                            .apps
+                            .keys()
+                            .any(|id| id.rsplit('/').next() == Some(app_name))
+                    })
                     || sandbox.libs.keys().any(|id| {
                         !id.starts_with("std.dhttp.net/") && id.rsplit('/').next() == Some(name)
                     })
