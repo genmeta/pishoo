@@ -1665,7 +1665,7 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let uri = "/std/sys/listen".parse().unwrap();
+    let uri = "/std/sys/mount".parse().unwrap();
     let app = frontend_package("1.0.0", "installed");
     let id = "alice.dhttp.net/hello";
     for location in [
@@ -1693,7 +1693,7 @@ fn app_installation_and_proxy_writes_check_mount_conflicts_in_transaction() {
             &profile,
             &http::Method::DELETE,
             &format!(
-                "/std/sys/listen?location={}&proxy_pass=127.0.0.1%3A8080",
+                "/std/sys/mount?location={}&proxy_pass=127.0.0.1%3A8080",
                 form_urlencoded::byte_serialize(location.as_bytes()).collect::<String>()
             )
             .parse()
@@ -1750,7 +1750,7 @@ fn old_business_prefixes_remain_proxyable() {
     let directory = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let uri = "/std/sys/listen".parse().unwrap();
+    let uri = "/std/sys/mount".parse().unwrap();
     for location in ["/api/hello", "/app/hello"] {
         crate::setup::config_database(
             &profile,
@@ -1893,7 +1893,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
         .to_string()
         .contains("signer certificate and publisher disagree")
     );
-    let uri = "/std/sys/listen".parse().unwrap();
+    let uri = "/std/sys/mount".parse().unwrap();
     let id = "alice.dhttp.net/journal";
     for location in ["/journal", "/journal/", "= /journal/std/xxxx"] {
         crate::setup::config_database(
@@ -1913,7 +1913,7 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
             &profile,
             &Method::DELETE,
             &format!(
-                "/std/sys/listen?location={}&proxy_pass=127.0.0.1%3A8080",
+                "/std/sys/mount?location={}&proxy_pass=127.0.0.1%3A8080",
                 form_urlencoded::byte_serialize(location.as_bytes()).collect::<String>()
             )
             .parse()

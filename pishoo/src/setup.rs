@@ -717,7 +717,9 @@ pub(crate) fn config_router(profile: IdentityProfile, endpoint: dhttp::Endpoint)
             response
         }
     };
-    Router::new().route("/std/sys/listen", any(handler))
+    Router::new()
+        .route("/std/sys/listen", any(handler.clone()))
+        .route("/std/sys/mount", any(handler))
 }
 
 async fn config_request(
@@ -814,11 +816,11 @@ pub(crate) fn config_database(
     uri: &http::Uri,
     payload: Option<Value>,
 ) -> Result<Value> {
-    if uri.path() != "/std/sys/listen" {
+    if !matches!(uri.path(), "/std/sys/listen" | "/std/sys/mount") {
         return Err(Error::RouteNotFound);
     }
     let deletion = if let Some(query) = uri.query() {
-        if *method != Method::DELETE {
+        if uri.path() != "/std/sys/mount" || *method != Method::DELETE {
             return Err(Error::BadRequest("unsupported query parameters".into()));
         }
         let params = form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
@@ -827,7 +829,7 @@ pub(crate) fn config_database(
             || params.iter().filter(|(key, _)| key == "proxy_pass").count() != 1
         {
             return Err(Error::BadRequest(
-                "deleting a forward requires exactly location and proxy_pass".into(),
+                "unmount requires exactly location and proxy_pass".into(),
             ));
         }
         let location = params
@@ -846,6 +848,11 @@ pub(crate) fn config_database(
     } else {
         None
     };
+    if uri.path() == "/std/sys/mount" && *method == Method::DELETE && deletion.is_none() {
+        return Err(Error::BadRequest(
+            "unmount requires location and proxy_pass".into(),
+        ));
+    }
     let config = if *method == Method::GET {
         if payload.is_some() {
             return Err(Error::BadRequest("GET does not accept a body".into()));
@@ -854,13 +861,12 @@ pub(crate) fn config_database(
         read_server_config(&mut conn)?
     } else {
         let proxy = match method {
-            &Method::PATCH
-                if payload
-                    .as_ref()
-                    .and_then(|value| value.get("listen"))
-                    .is_some() =>
-            {
-                validate_listen_patch(payload.as_ref().unwrap())?;
+            &Method::PATCH if uri.path() == "/std/sys/listen" => {
+                validate_listen_patch(
+                    payload
+                        .as_ref()
+                        .ok_or_else(|| Error::BadRequest("missing configuration".into()))?,
+                )?;
                 None
             }
             &Method::PATCH => Some(
@@ -889,7 +895,7 @@ pub(crate) fn config_database(
                     if upstream_text(existing) != upstream_text(&rule) {
                         return Err(Error::Io(std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
-                            "forward upstream changed",
+                            "mount upstream changed",
                         )));
                     }
                     tx.execute(
@@ -909,6 +915,8 @@ pub(crate) fn config_database(
                 "INSERT INTO proxy_location(location,proxy_pass) VALUES(?1,?2)",
                 rusqlite::params![rule.location, upstream_text(&rule)],
             )?;
+        } else if payload.as_ref().unwrap()["listen"].as_str() == Some("off") {
+            tx.execute("DELETE FROM setting WHERE key='listen'", [])?;
         } else {
             tx.execute("INSERT INTO setting(key,value) VALUES('listen',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [payload.as_ref().unwrap()["listen"].as_str().unwrap()])?;
@@ -927,7 +935,11 @@ pub(crate) fn config_database(
         .iter()
         .map(|proxy| json!({"location":proxy.location,"proxy_pass":upstream_text(proxy)}))
         .collect::<Vec<_>>();
-    Ok(json!({"listen":config.listen,"forward":forwards}))
+    Ok(if uri.path() == "/std/sys/listen" {
+        json!({"listen":config.listen})
+    } else {
+        json!(forwards)
+    })
 }
 
 fn validate_listen_patch(payload: &Value) -> Result<()> {
@@ -939,7 +951,9 @@ fn validate_listen_patch(payload: &Value) -> Result<()> {
         })?;
     for (key, value) in object {
         let valid = match key.as_str() {
-            "listen" => value.as_str().is_some_and(valid_listen),
+            "listen" => value
+                .as_str()
+                .is_some_and(|mode| matches!(mode, "internal" | "external" | "all" | "off")),
             _ => false,
         };
         if !valid {
@@ -952,7 +966,7 @@ fn validate_listen_patch(payload: &Value) -> Result<()> {
 fn parse_proxy_json(payload: &Value) -> Result<Vec<ProxyLocation>> {
     let values = payload
         .as_array()
-        .ok_or_else(|| Error::BadRequest("forward PUT requires an array".into()))?
+        .ok_or_else(|| Error::BadRequest("mount requires an array".into()))?
         .iter()
         .map(|value| {
             let object = value
