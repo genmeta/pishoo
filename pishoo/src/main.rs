@@ -4,7 +4,7 @@ use tracing_subscriber::{fmt::writer::MakeWriterExt, util::SubscriberInitExt};
 async fn main() {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if !args.is_empty() {
-        if let Err(error) = pishoo::run_command(args).await {
+        if let Err(error) = run_command(args) {
             eprintln!("pishoo: error: {error}");
             std::process::exit(match error {
                 pishoo::Error::BadRequest(_) | pishoo::Error::InvalidComponent(_) => 2,
@@ -42,7 +42,17 @@ async fn main() {
 fn logging(
     home: &dhttp_home::DhttpHome,
 ) -> std::io::Result<impl tracing::Subscriber + Send + Sync + use<>> {
-    let directory = home.join("logs");
+    let directory = home.join("log");
+    let legacy = home.join("logs");
+    if !directory.try_exists()? && legacy.try_exists()? {
+        if !legacy.symlink_metadata()?.file_type().is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "legacy log root must be a real directory",
+            ));
+        }
+        std::fs::rename(legacy, &directory)?;
+    }
     let mut directories = std::fs::DirBuilder::new();
     directories.recursive(true);
     #[cfg(unix)]
@@ -72,6 +82,114 @@ fn logging(
         )
         .with_writer(writer)
         .finish())
+}
+
+fn run_command(args: Vec<std::ffi::OsString>) -> Result<(), pishoo::Error> {
+    if args.first().is_some_and(|arg| arg == "reload") {
+        return reload(&args[1..]);
+    }
+    if args.len() == 1 {
+        if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+            println!(
+                "Usage: pishoo [reload [--pid PID] | --help | --version]\n\nRun configured identities in the foreground. Identities without .volume/sys/setting/.db are skipped.\n\nReload sends SIGHUP to the running service; use --pid for a foreground process. System services are managed with systemctl or brew services.\n\nManagement commands are provided by gmutils:\n  genmeta listen --id NAME [loopback|internal|external|all|auto|list]\n  genmeta unlisten --id NAME [PATH URL]\n  genmeta install --list --id NAME\n  genmeta install --info PACKAGE --id NAME\n  genmeta forward --id NAME ...\n  genmeta --help"
+            );
+            return Ok(());
+        }
+        if args[0] == "--version" || args[0] == "-V" {
+            println!("pishoo {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+    }
+    Err(pishoo::Error::BadRequest(
+        "Pishoo management commands have moved to genmeta; use pishoo --help".into(),
+    ))
+}
+
+fn reload(args: &[std::ffi::OsString]) -> Result<(), pishoo::Error> {
+    use std::process::Command;
+    let pid = match args {
+        [flag, pid] if flag == "--pid" => pid.to_string_lossy().into_owned(),
+        [] => {
+            #[cfg(target_os = "linux")]
+            {
+                let output = Command::new("systemctl")
+                    .args(["show", "--property=MainPID", "--value", "pishoo.service"])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(pishoo::Error::BadRequest("cannot query pishoo.service; use reload --pid PID for a foreground process".into()));
+                }
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let domain = if rustix::process::getuid().is_root() {
+                    "system".to_owned()
+                } else {
+                    format!("gui/{}", rustix::process::getuid().as_raw())
+                };
+                let output = Command::new("launchctl")
+                    .args(["print", &format!("{domain}/homebrew.mxcl.pishoo")])
+                    .output()?;
+                if !output.status.success() {
+                    return Err(pishoo::Error::BadRequest("cannot query Homebrew pishoo service; use reload --pid PID for a foreground process".into()));
+                }
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("pid = ").map(str::to_owned))
+                    .ok_or_else(|| {
+                        pishoo::Error::BadRequest("Pishoo service is not running".into())
+                    })?
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                return Err(pishoo::Error::BadRequest(
+                    "reload requires a Unix process with SIGHUP support".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(pishoo::Error::BadRequest(
+                "usage: pishoo reload [--pid PID]".into(),
+            ));
+        }
+    };
+    let pid = pid
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 1 && *pid <= i32::MAX as u32)
+        .ok_or_else(|| {
+            pishoo::Error::BadRequest("Pishoo is not running or PID is invalid".into())
+        })?;
+    let status = Command::new("kill")
+        .args(["-HUP", &pid.to_string()])
+        .status()?;
+    if !status.success() {
+        return Err(pishoo::Error::Io(std::io::Error::other(format!(
+            "reload signal failed ({status})"
+        ))));
+    }
+    eprintln!("Reload requested for PID {pid}; check the Pishoo log for configuration errors.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn management_commands_are_rejected_before_any_side_effects() {
+        for command in [
+            "enable", "disable", "listen", "proxy", "lib", "app", "start", "stop", "restart",
+            "status",
+        ] {
+            assert!(matches!(
+                run_command(vec![command.into()]),
+                Err(pishoo::Error::BadRequest(_))
+            ));
+        }
+        assert!(run_command(vec!["lib".into(), "--help".into()]).is_err());
+        assert!(run_command(vec!["--version".into()]).is_ok());
+        assert!(run_command(vec!["--help".into()]).is_ok());
+    }
 }
 
 #[cfg(test)]

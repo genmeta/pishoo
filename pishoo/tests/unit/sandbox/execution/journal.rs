@@ -219,7 +219,8 @@ fn journal_package(kind: &str) -> Vec<u8> {
     let bytes = if kind == "app" {
         Vec::new()
     } else {
-        std::fs::read(root.join("lib.wasm")).expect("build Journal backend first")
+        std::fs::read(root.join("target/wasm32-wasip2/release/journal.wasm"))
+            .expect("build Journal backend first")
     };
     let public = if kind == "app" {
         webc::v3::write::Directory::from_path(root.join("public")).unwrap()
@@ -335,7 +336,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         403
     );
-    assert!(!data.path().join("journal.db").exists());
+    assert!(!data.path().join(".db").exists());
     let (status, _, context) = journal_call(
         &lib,
         &tasks,
@@ -803,7 +804,7 @@ async fn journal_component_identity_crud_comments_photos_and_persistence() {
         .0,
         409
     );
-    let db = rusqlite::Connection::open(data.path().join("journal.db")).unwrap();
+    let db = rusqlite::Connection::open(data.path().join(".db")).unwrap();
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -1208,7 +1209,7 @@ async fn journal_frontend_is_served_from_package_with_daccess_for_every_file() {
         sandbox.tasks.is_empty(),
         "static files must not invoke WASM"
     );
-    assert!(!data.path().join("journal.db").exists());
+    assert!(!data.path().join(".db").exists());
     let index = std::fs::read_to_string(public.join("index.html")).unwrap();
     assert!(index.contains("./assets/app.js") && index.contains("./assets/app.css"));
     assert!(!index.contains("<script>") && !index.contains("<style>"));
@@ -1221,7 +1222,7 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
 
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let id = "alice.smith.dhttp.net/journal";
@@ -1242,8 +1243,9 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     );
     install_lib(&profile, id, &backend, &runtime).unwrap();
     install_app(&profile, id, &frontend).unwrap();
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    let groups = db.prepare("SELECT capability_id,title FROM lib_capabilities WHERE lib_name=?1 ORDER BY capability_id")
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    let groups = db.prepare("SELECT capability_id,title FROM lib_capability WHERE lib_name=?1 ORDER BY capability_id")
         .unwrap().query_map([id.rsplit('/').next().unwrap()], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(
@@ -1253,7 +1255,7 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
             ("read".into(), "阅读".into())
         ]
     );
-    let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operations WHERE lib_name=?1 ORDER BY capability_id,method,path")
+    let operations = db.prepare("SELECT capability_id,method,path FROM lib_capability_operation WHERE lib_name=?1 ORDER BY capability_id,method,path")
         .unwrap().query_map([id.rsplit('/').next().unwrap()], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(
@@ -1269,7 +1271,7 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     );
     assert_eq!(
         db.query_row(
-            "SELECT lib_name,version FROM app_dependencies WHERE app_name=?1",
+            "SELECT lib_name,version FROM app_dependency WHERE app_name=?1",
             [id.rsplit('/').next().unwrap()],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         )
@@ -1323,14 +1325,14 @@ async fn journal_release_registers_capabilities_and_pins_backend() {
     );
     remove_app(&profile, id).unwrap();
     assert_eq!(
-        db.query_row("SELECT count(*) FROM lib_capabilities", [], |r| r
+        db.query_row("SELECT count(*) FROM lib_capability", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         2
     );
     remove_lib(&profile, id).unwrap();
     assert_eq!(
-        db.query_row("SELECT count(*) FROM lib_capabilities", [], |r| r
+        db.query_row("SELECT count(*) FROM lib_capability", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         0

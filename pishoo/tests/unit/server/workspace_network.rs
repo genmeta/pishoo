@@ -76,7 +76,8 @@ async fn websocket_real_h3_ha_roundtrip() {
     let (upstream, task) = ha_upstream().await;
     let _upstream = scopeguard::guard(task, |task| task.abort());
     let profile = profile(root.path(), "receiver");
-    let config = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    let config =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     for loaded_lib in [false, true] {
         if loaded_lib {
@@ -97,8 +98,8 @@ async fn websocket_real_h3_ha_roundtrip() {
                 }
             }
             wasm.extend(section);
-            std::fs::create_dir_all(profile.join("libs/note")).unwrap();
-            std::fs::write(profile.join("libs/note/lib.wasm"), wasm).unwrap();
+            std::fs::create_dir_all(profile.join("lib/note")).unwrap();
+            std::fs::write(profile.join("lib/note/lib/component.wasm"), wasm).unwrap();
             for location in [
                 "/api/note",
                 "/api/note/",
@@ -106,10 +107,10 @@ async fn websocket_real_h3_ha_roundtrip() {
                 "= /api/note/upload",
                 "/api/note/child/",
             ] {
-                config.execute("DELETE FROM proxy_locations", []).unwrap();
+                config.execute("DELETE FROM proxy_location", []).unwrap();
                 config
                     .execute(
-                        "INSERT INTO proxy_locations VALUES(?1,?2)",
+                        "INSERT INTO proxy_location VALUES(?1,?2)",
                         [location, &format!("http://{upstream}")],
                     )
                     .unwrap();
@@ -125,19 +126,19 @@ async fn websocket_real_h3_ha_roundtrip() {
                 );
             }
         }
-        config.execute("DELETE FROM proxy_locations", []).unwrap();
+        config.execute("DELETE FROM proxy_location", []).unwrap();
         // HA owns its ordinary /api paths, independently of loaded /std/api Libs.
         let location = if loaded_lib { "/api" } else { "/" };
         config
             .execute(
-                "INSERT INTO proxy_locations VALUES(?1,?2)",
+                "INSERT INTO proxy_location VALUES(?1,?2)",
                 [location, &format!("http://{upstream}")],
             )
             .unwrap();
         if loaded_lib {
             config
                 .execute(
-                    "INSERT INTO proxy_locations VALUES('/api/noteworthy',?1)",
+                    "INSERT INTO proxy_location VALUES('/api/noteworthy',?1)",
                     [format!("http://{upstream}")],
                 )
                 .unwrap();
@@ -298,9 +299,10 @@ impl Resolve for PeerResolver {
 
 fn profile(root: &std::path::Path, name: &str) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join(name)).unwrap();
-    std::fs::create_dir_all(profile.db_dir()).unwrap();
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_locations(location TEXT,proxy_pass TEXT);").unwrap();
+    std::fs::create_dir_all(profile.join(".volume/sys/setting")).unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute_batch("PRAGMA user_version=1; CREATE TABLE settings(listen INTEGER, enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO settings(listen) VALUES(0); CREATE TABLE proxy_location(location TEXT,proxy_pass TEXT);").unwrap();
     profile
 }
 
@@ -487,7 +489,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     });
     dhttp::resolve::Resolver::add(Arc::new(PeerResolver(address)));
     let profile = profile(root.path(), "receiver");
-    rusqlite::Connection::open(profile.config_db_path())
+    crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .unwrap()
         .execute("UPDATE settings SET listen='all'", [])
         .unwrap();
@@ -519,7 +521,7 @@ async fn ocsp_refresh_replaces_live_credentials_without_reloading_application() 
     .await;
     assert_eq!(status, StatusCode::OK);
     // A disk config change must stay unapplied; no identity/Lib reload occurs.
-    rusqlite::Connection::open(server.profile.config_db_path())
+    rusqlite::Connection::open(server.profile.join(".volume/sys/setting/.db"))
         .unwrap()
         .execute("UPDATE settings SET listen='internal'", [])
         .unwrap();
@@ -634,7 +636,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     // Browser credentials alone must not enroll an identity in Pishoo, at startup
     // or on subsequent discovery scans. Use valid credentials to catch initialization.
     let browser = IdentityProfile::try_from(root.path().join("valid")).unwrap();
-    assert!(!browser.config_db_path().exists());
+    assert!(!browser.join(".volume/sys/setting/.db").exists());
     assert!(
         load_profile(browser.clone(), runtime.clone())
             .await
@@ -654,7 +656,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
         .unwrap()
     );
     assert!(servers.is_empty());
-    assert!(!browser.db_dir().exists());
+    assert!(!browser.join(".volume/sys/setting").exists());
     assert!(!browser.join("file").exists());
     // Startup skips invalid identities and still loads later valid profiles.
     for name in ["missing", "malformed", "expired", "bad-key"] {
@@ -667,7 +669,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
             "{name} must be skipped"
         );
         assert!(
-            !identity.db_dir().exists(),
+            !identity.join(".volume/sys/setting").exists(),
             "{name} must not be initialized"
         );
     }
@@ -679,7 +681,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     valid.close().await.unwrap();
     // A real empty v1 bootstrap is still supported through the run loop's loader.
     let empty_profile = IdentityProfile::try_from(root.path().join("valid")).unwrap();
-    std::fs::write(empty_profile.config_db_path(), []).unwrap();
+    std::fs::write(empty_profile.join(".volume/sys/setting/.db"), []).unwrap();
     let mut recovered = load_profile(empty_profile, runtime.clone())
         .await
         .unwrap()
@@ -707,7 +709,7 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     repaired.close().await.unwrap();
 
     let config = profile(root.path(), "bad-config");
-    rusqlite::Connection::open(config.config_db_path())
+    crate::setup::open_config(&config, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .unwrap()
         .execute_batch("UPDATE settings SET listen=99;")
         .unwrap();
@@ -717,15 +719,15 @@ async fn identity_validation_failure_skips_profile_and_loads_other_identities() 
     ));
     let lib = profile(root.path(), "bad-lib");
     load_server_config(&lib).unwrap();
-    rusqlite::Connection::open(lib.config_db_path())
+    crate::setup::open_config(&lib, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .unwrap()
         .execute(
-            "INSERT INTO libs(name,author,version) VALUES('broken',NULL,'1.0.0')",
+            "INSERT INTO lib(name,author,version) VALUES('broken',NULL,'1.0.0')",
             [],
         )
         .unwrap();
-    std::fs::create_dir_all(lib.join("libs/broken")).unwrap();
-    std::fs::write(lib.join("libs/broken/.webc-proof"), b"not WASM").unwrap();
+    std::fs::create_dir_all(lib.join("lib/broken")).unwrap();
+    std::fs::write(lib.join("lib/broken/.webc-proof"), b"not WASM").unwrap();
     assert!(matches!(
         load_profile(lib, runtime).await,
         Err(Error::InvalidComponent(_))
@@ -1007,8 +1009,8 @@ async fn config_api_real_h3_persistence_authorization_and_restart() {
         StatusCode::NO_CONTENT
     );
     assert!(server.sandbox.read().unwrap().libs.is_empty());
-    assert!(!server.profile.join("libs/note.wasm").exists());
-    assert!(server.profile.join("db/note").is_dir());
+    assert!(!server.profile.join("lib/note.wasm").exists());
+    assert!(server.profile.join(".volume/note").is_dir());
     // Even an explicit daccess allow cannot make another TLS identity the profile owner.
     server
         .access
@@ -1123,12 +1125,16 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
             .expect("a local internal IPv4 binding");
         dhttp::resolve::Resolver::add(Arc::new(PeerResolver(EndpointAddr::direct(*address))));
         let receiver_profile = profile(identity_home.as_path(), "receiver");
-        let db = rusqlite::Connection::open(receiver_profile.config_db_path()).unwrap();
+        let db = crate::setup::open_config(
+            &receiver_profile,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
         db.execute("UPDATE settings SET listen='internal'", [])
             .unwrap();
         for name in ["late", "broken"] {
             let identity = profile(identity_home.as_path(), name);
-            rusqlite::Connection::open(identity.config_db_path())
+            crate::setup::open_config(&identity, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                 .unwrap()
                 .execute("UPDATE settings SET listen='internal'", [])
                 .unwrap();
@@ -1187,13 +1193,13 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         writer.write_all(serde_json::to_string(&serde_json::json!({"location":"/live", "proxy_pass":format!("http://{upstream_address}")})).unwrap().as_bytes()).await.unwrap();
         writer.shutdown().await.unwrap();
         assert_eq!(response.await.unwrap().status(), StatusCode::OK);
-        crate::run_command(vec![
-            "reload".into(),
-            "--pid".into(),
-            std::process::id().to_string().into(),
-        ])
-        .await
-        .unwrap();
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-HUP", &std::process::id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
         wait_live_body(&receiver, "/live", b"live /live").await;
         // Scope changes unregister and re-register this same Server without worker reload.
         crate::setup::config_database(
@@ -1244,12 +1250,12 @@ async fn live_run_discovers_enables_disables_and_updates_proxies_without_restart
         wait_live_body(&receiver, "/live", b"live /live").await;
 
         // A broken new profile is retried without preventing a later valid one from loading.
-        std::fs::create_dir_all(identity_home.as_path().join(".broken/libs/bad")).unwrap();
+        std::fs::create_dir_all(identity_home.as_path().join(".broken/lib/bad")).unwrap();
         std::fs::write(
             root.path()
                 .join(".dhttp")
                 .as_path()
-                .join(".broken/libs/bad/.webc-proof"),
+                .join(".broken/lib/bad/.webc-proof"),
             b"broken",
         )
         .unwrap();

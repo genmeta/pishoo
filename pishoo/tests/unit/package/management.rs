@@ -2,7 +2,7 @@ use std::os::unix::fs::MetadataExt;
 
 use axum::body::Body as AxumBody;
 use http::{Method, StatusCode};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::*;
@@ -29,7 +29,7 @@ fn component(version: &str) -> Vec<u8> {
 }
 fn profile(root: &Path) -> IdentityProfile {
     let profile = IdentityProfile::try_from(root.join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("libs")).unwrap();
+    std::fs::create_dir_all(profile.join("lib")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     profile
 }
@@ -38,7 +38,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let parent_mode = std::fs::metadata(profile.join("libs")).unwrap().mode() & 0o777;
+    let parent_mode = std::fs::metadata(profile.join("lib")).unwrap().mode() & 0o777;
     let saved = install_lib(&profile, "note", &component("1"), &runtime).unwrap();
     assert_eq!(saved["endpoints"][0]["path"], "/note/upload");
     assert_eq!(saved["endpoints"][0]["description"], "Upload");
@@ -48,11 +48,11 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     );
     assert!(!profile.join("db/note").exists());
     assert_eq!(
-        std::fs::metadata(profile.join("libs")).unwrap().mode() & 0o777,
+        std::fs::metadata(profile.join("lib")).unwrap().mode() & 0o777,
         parent_mode
     );
     assert_eq!(
-        std::fs::metadata(profile.join("libs/note.wasm"))
+        std::fs::metadata(profile.join("lib/note.wasm"))
             .unwrap()
             .mode()
             & 0o777,
@@ -60,8 +60,8 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     );
     let mut sandbox = Sandbox::new(runtime.clone());
     sandbox.load_libs(&profile).unwrap();
-    std::fs::write(profile.join("db/note/saved.db"), b"keep").unwrap();
-    let before = std::fs::read(profile.join("libs/note.wasm")).unwrap();
+    std::fs::write(profile.join(".volume/note/saved.db"), b"keep").unwrap();
+    let before = std::fs::read(profile.join("lib/note.wasm")).unwrap();
     // A manifest-only component passes metadata validation, but has no incoming handler.
     let metadata_only = package_fixture(
         &serde_json::json!({"openapi":"3.1.0","info":{"title":"Test","version":"1.0.0","description":"Test","license":{"name":"MIT"}},"x-pishoo":{"publisher":"alice.dhttp.net","name":"note","host":{}},"paths":{"/upload":{"post":{"operationId":"upload","summary":"Upload","responses":{"200":{"description":"ok"}}}}}}),
@@ -72,7 +72,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     assert!(read_package(&metadata_only).is_ok());
     assert!(install_lib(&profile, "note", &metadata_only, &runtime).is_err());
     assert_eq!(
-        std::fs::read(profile.join("libs/note.wasm")).unwrap(),
+        std::fs::read(profile.join("lib/note.wasm")).unwrap(),
         before
     );
     install_lib(&profile, "note", &component("2"), &runtime).unwrap();
@@ -81,12 +81,12 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
         installed_libs(&profile, Some("note")).unwrap()["version"],
         "2.0.0"
     );
-    assert_eq!(std::fs::read_dir(profile.join("libs")).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(profile.join("lib")).unwrap().count(), 1);
     remove_lib(&profile, "note").unwrap();
     remove_lib(&profile, "note").unwrap();
     assert!(sandbox.libs.contains_key("note"));
     assert_eq!(
-        std::fs::read(profile.join("db/note/saved.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/saved.db")).unwrap(),
         b"keep"
     );
     sandbox.load_libs(&profile).unwrap();
@@ -95,7 +95,7 @@ fn install_checks_compatibility_and_preserves_loaded_versions_data_and_old_bytes
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs["note"].openapi.info.version, "3.0.0");
     assert_eq!(
-        std::fs::read(profile.join("db/note/saved.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/saved.db")).unwrap(),
         b"keep"
     );
 }
@@ -105,8 +105,8 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     let profile = profile(root.path());
     let runtime = WasmRuntime::new().unwrap();
     install_lib(&profile, "valid", &component("1"), &runtime).unwrap();
-    std::fs::create_dir(profile.join("libs/broken")).unwrap();
-    std::fs::write(profile.join("libs/broken/.webc-proof"), b"bad").unwrap();
+    std::fs::create_dir(profile.join("lib/broken")).unwrap();
+    std::fs::write(profile.join("lib/broken/.webc-proof"), b"bad").unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["id"], "valid");
@@ -114,12 +114,10 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
         installed_libs(&profile, Some("broken")),
         Err(Error::RouteNotFound)
     ));
-    let db = rusqlite::Connection::open(profile.config_db_path()).unwrap();
-    db.execute(
-        "INSERT INTO libs(name,version) VALUES('broken','1.0.0')",
-        [],
-    )
-    .unwrap();
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    db.execute("INSERT INTO lib(name,version) VALUES('broken','1.0.0')", [])
+        .unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert_eq!(list[0]["id"], "broken");
     assert_eq!(list[0]["title"], "broken");
@@ -132,36 +130,33 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join(".webc-proof"), b"do not change").unwrap();
-    std::os::unix::fs::symlink(&outside, profile.join("libs/escape")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("lib/escape")).unwrap();
     assert!(install_lib(&profile, "escape", &component("1"), &runtime).is_err());
     remove_lib(&profile, "escape").unwrap();
     assert!(
         profile
-            .join("libs/escape")
+            .join("lib/escape")
             .symlink_metadata()
             .unwrap()
             .file_type()
             .is_symlink()
     );
-    std::fs::remove_file(profile.join("libs/escape")).unwrap();
+    std::fs::remove_file(profile.join("lib/escape")).unwrap();
     std::os::unix::fs::symlink(
         outside.join(".webc-proof"),
-        profile.join("libs/broken/.webc-proof-link"),
+        profile.join("lib/broken/.webc-proof-link"),
     )
     .unwrap();
-    std::fs::remove_file(profile.join("libs/broken/.webc-proof")).unwrap();
+    std::fs::remove_file(profile.join("lib/broken/.webc-proof")).unwrap();
     std::fs::rename(
-        profile.join("libs/broken/.webc-proof-link"),
-        profile.join("libs/broken/.webc-proof"),
+        profile.join("lib/broken/.webc-proof-link"),
+        profile.join("lib/broken/.webc-proof"),
     )
     .unwrap();
     // The active WASM target must reject symlinks independently of unused
     // legacy sidecars or other Libs' now-isolated routes.
-    std::os::unix::fs::symlink(
-        outside.join(".webc-proof"),
-        profile.join("libs/broken.wasm"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(outside.join(".webc-proof"), profile.join("lib/broken.wasm"))
+        .unwrap();
     assert!(install_lib(&profile, "broken", &component("1"), &runtime).is_err());
     assert!(remove_lib(&profile, "broken").is_err());
     assert_eq!(
@@ -169,14 +164,14 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
         b"do not change"
     );
     // Cleanup must unlink nested symlinks without following them.
-    std::os::unix::fs::symlink(&outside, profile.join("libs/foreign")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("lib/foreign")).unwrap();
     remove_lib(&profile, "valid").unwrap();
     assert!(outside.join(".webc-proof").exists());
     for id in ["../outside", "A", "", "note.wasm", "%6Eote"] {
         assert!(remove_lib(&profile, id).is_err());
     }
-    std::fs::rename(profile.join("libs"), profile.join("real-lib")).unwrap();
-    std::os::unix::fs::symlink(profile.join("real-lib"), profile.join("libs")).unwrap();
+    std::fs::rename(profile.join("lib"), profile.join("real-lib")).unwrap();
+    std::os::unix::fs::symlink(profile.join("real-lib"), profile.join("lib")).unwrap();
     assert!(install_lib(&profile, "valid", &component("1"), &runtime).is_err());
     assert!(installed_libs(&profile, None).is_ok());
 }
@@ -348,9 +343,10 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     .unwrap();
     assert_eq!(list[0]["endpoints"], serde_json::json!([]));
     assert!(list[0].get("openapi").is_none());
-    let database = rusqlite::Connection::open(profile.config_db_path()).unwrap();
+    let database =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     database
-        .execute("UPDATE libs SET version='2.0.0' WHERE name='note'", [])
+        .execute("UPDATE lib SET version='2.0.0' WHERE name='note'", [])
         .unwrap();
     let response = router
         .clone()
@@ -367,11 +363,11 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     assert!(value.get("openapi").is_none());
     assert_eq!(value["endpoints"], serde_json::json!([]));
     database
-        .execute("UPDATE libs SET version='1.2.3' WHERE name='note'", [])
+        .execute("UPDATE lib SET version='1.2.3' WHERE name='note'", [])
         .unwrap();
     for old in [
-        "/std/sys/package/libs",
-        "/std/sys/package/libs/note",
+        "/std/sys/package/lib",
+        "/std/sys/package/lib/note",
         "/std/sys/package/store-install",
         "/std/sys/lib/openapi?name=note",
         "/std/sys/lib/check",
@@ -397,8 +393,8 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
         router.clone().oneshot(wrong).await.unwrap().status(),
         StatusCode::CONFLICT
     );
-    std::fs::write(profile.join("db/note/keep.db"), b"keep").unwrap();
-    std::fs::write(profile.join("libs/note.wasm"), b"corrupt runtime payload").unwrap();
+    std::fs::write(profile.join(".volume/note/keep.db"), b"keep").unwrap();
+    std::fs::write(profile.join("lib/note.wasm"), b"corrupt runtime payload").unwrap();
     let mut removal = request(Method::DELETE, path, AxumBody::empty());
     removal.headers_mut().insert(
         "expected-package-id",
@@ -410,10 +406,10 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     );
     assert!(sandbox.read().unwrap().libs.is_empty());
     assert_eq!(
-        std::fs::read(profile.join("db/note/keep.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"keep"
     );
-    assert!(!profile.join("libs/note.wasm").exists());
+    assert!(!profile.join("lib/note.wasm").exists());
     assert_eq!(
         router
             .clone()
@@ -443,7 +439,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
 }
 
 #[tokio::test]
-async fn store_put_requires_uri_name_two_json_fields_and_retires_local_upload_and_post() {
+async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let router = lib_management_router(
@@ -453,111 +449,135 @@ async fn store_put_requires_uri_name_two_json_fields_and_retires_local_upload_an
             WasmRuntime::new().unwrap(),
         )))),
     );
-    for kind in ["lib", "app"] {
-        let path = format!("/std/sys/{kind}?name=note");
-        for body in [
-            "{}",
-            "null",
-            "[]",
-            r#"{"publisher":"alice.dhttp.net"}"#,
-            r#"{"publisher":1,"version":"1.0.0"}"#,
-            r#"{"publisher":"alice.dhttp.net","version":1}"#,
-            r#"{"publisher":"alice.dhttp.net","version":"1.0.0","name":"note"}"#,
-            r#"{"publisher":"alice.dhttp.net","version":"1.0.0","kind":"lib"}"#,
-            r#"{"publisher":"alice.dhttp.net","version":"1.0.0","url":"https://other"}"#,
-            r#"{"publisher":"alice.dhttp.net","version":"01.0.0"}"#,
-            r#"{"publisher":"alice","version":"1.0.0"}"#,
-        ] {
-            let response = router
-                .clone()
-                .oneshot(request(Method::PUT, &path, AxumBody::from(body)))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{kind} {body}");
-            assert_eq!(response.headers()["cache-control"], "no-store");
-            assert_eq!(response.headers()["supported-versions"], "v1");
-        }
-        for content_type in [
-            "application/webc",
-            "application/octet-stream",
-            "application/wasm",
-            "text/plain",
-        ] {
-            let mut raw = request(Method::PUT, &path, AxumBody::from(component("1")));
-            raw.headers_mut()
-                .insert("content-type", content_type.parse().unwrap());
-            assert_eq!(
-                router.clone().oneshot(raw).await.unwrap().status(),
-                StatusCode::UNSUPPORTED_MEDIA_TYPE
-            );
-        }
-        let mut missing_type = request(Method::PUT, &path, AxumBody::from("{}"));
-        missing_type.headers_mut().remove("content-type");
+    for body in [
+        json!({}),
+        json!(null),
+        json!([]),
+        json!({"kind":"lib","publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}),
+        json!({"author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
+        json!({"kind":"invalid","author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
+        json!({"kind":"lib","author":1,"name":"note","version":"1.0.0"}),
+        json!({"kind":"lib","author":"alice.dhttp.net","name":"alice/note","version":"1.0.0"}),
+        json!({"kind":"lib","author":"alice.dhttp.net","name":"note","version":"01.0.0"}),
+        json!({"kind":"app","author":"alice.dhttp.net","name":"note","version":1}),
+        json!({"kind":"lib","author":"alice","name":"note","version":"1.0.0"}),
+        json!({"kind":"app","author":"alice.dhttp.net","name":"note","version":"1.0.0","url":"https://other"}),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/std/sys/install",
+                AxumBody::from(body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["supported-versions"], "v1");
+    }
+    for content_type in [
+        "application/webc",
+        "application/octet-stream",
+        "application/wasm",
+        "text/plain",
+    ] {
+        let mut raw = request(
+            Method::POST,
+            "/std/sys/install",
+            AxumBody::from(component("1")),
+        );
+        raw.headers_mut()
+            .insert("content-type", content_type.parse().unwrap());
         assert_eq!(
-            router.clone().oneshot(missing_type).await.unwrap().status(),
+            router.clone().oneshot(raw).await.unwrap().status(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
-        // The accepted media type permits case/parameters; invalid exact version
-        // is rejected before contacting any external store.
-        let mut media = request(
-            Method::PUT,
-            &path,
-            AxumBody::from(r#"{"publisher":"alice.dhttp.net","version":"01.0.0"}"#),
+    }
+    let mut missing_type = request(Method::POST, "/std/sys/install", AxumBody::from("{}"));
+    missing_type.headers_mut().remove("content-type");
+    assert_eq!(
+        router.clone().oneshot(missing_type).await.unwrap().status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let mut media = request(
+        Method::POST,
+        "/std/sys/install",
+        AxumBody::from(
+            json!({"kind":"lib","author":"alice.dhttp.net","name":"note","version":"01.0.0"})
+                .to_string(),
+        ),
+    );
+    media.headers_mut().insert(
+        "content-type",
+        "Application/JSON; charset=utf-8".parse().unwrap(),
+    );
+    let response = router.clone().oneshot(media).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap()
+                .to_vec()
+        )
+        .unwrap()
+        .contains("version")
+    );
+    for uri in [
+        "/std/sys/install?kind=lib",
+        "/std/sys/install?name=note",
+        "/std/sys/install?",
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(Method::POST, uri, AxumBody::from("{}")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
         );
-        media.headers_mut().insert(
-            "content-type",
-            "Application/JSON; charset=utf-8".parse().unwrap(),
-        );
-        let response = router.clone().oneshot(media).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            String::from_utf8(
-                axum::body::to_bytes(response.into_body(), 4096)
-                    .await
-                    .unwrap()
-                    .to_vec()
-            )
+    }
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/std/sys/install",
+                AxumBody::from(" ".repeat(4097))
+            ))
+            .await
             .unwrap()
-            .contains("version")
-        );
-        for uri in [format!("/std/sys/{kind}"), path.clone()] {
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    for kind in ["lib", "app"] {
+        for method in [Method::POST, Method::PUT] {
             let response = router
                 .clone()
                 .oneshot(request(
-                    Method::POST,
-                    &uri,
-                    AxumBody::from(
-                        r#"{"publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}"#,
-                    ),
+                    method,
+                    &format!("/std/sys/{kind}?name=note"),
+                    AxumBody::from("{}"),
                 ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            assert_eq!(response.headers()["allow"], "GET, PUT, DELETE");
+            assert_eq!(response.headers()["allow"], "GET, DELETE");
         }
-        let oversized = request(Method::PUT, &path, AxumBody::from(" ".repeat(4097)));
-        assert_eq!(
-            router.clone().oneshot(oversized).await.unwrap().status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
         for uri in [
             format!("/std/sys/{kind}"),
             format!("/std/sys/{kind}?name=note&name=other"),
             format!("/std/sys/{kind}?name=note&version=1.0.0"),
             format!("/std/sys/{kind}?name=alice.dhttp.net%2Fnote"),
             format!("/std/sys/{kind}?name=%FF"),
-            format!("/std/sys/{kind}?na%6De=note"),
             format!("/std/sys/{kind}/list?name=note"),
         ] {
-            let method = if uri.contains("/list") {
-                Method::GET
-            } else {
-                Method::PUT
-            };
             assert_eq!(
                 router
                     .clone()
-                    .oneshot(request(method, &uri, AxumBody::empty()))
+                    .oneshot(request(Method::GET, &uri, AxumBody::empty()))
                     .await
                     .unwrap()
                     .status(),
@@ -565,15 +585,6 @@ async fn store_put_requires_uri_name_two_json_fields_and_retires_local_upload_an
                 "{uri}"
             );
         }
-        assert_eq!(
-            router
-                .clone()
-                .oneshot(request(Method::DELETE, &path, AxumBody::from("x")))
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::BAD_REQUEST
-        );
     }
     assert!(
         installed_libs(&profile, None)
@@ -583,7 +594,7 @@ async fn store_put_requires_uri_name_two_json_fields_and_retires_local_upload_an
             .is_empty()
     );
     assert!(installed_apps(&profile, None).unwrap().is_empty());
-    assert!(!profile.join("libs/note.wasm").exists());
+    assert!(!profile.join("lib/note.wasm").exists());
 }
 
 #[tokio::test]
@@ -597,8 +608,8 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
     for (path, method, allow) in [
         ("/std/sys/lib/list", Method::POST, "GET"),
         ("/std/sys/lib/list", Method::PUT, "GET"),
-        ("/std/sys/lib?name=note", Method::PATCH, "GET, PUT, DELETE"),
-        ("/std/sys/app?name=note", Method::HEAD, "GET, PUT, DELETE"),
+        ("/std/sys/lib?name=note", Method::PATCH, "GET, DELETE"),
+        ("/std/sys/app?name=note", Method::HEAD, "GET, DELETE"),
     ] {
         let response = router
             .clone()
@@ -632,8 +643,16 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             access_control::SubjectId::new("b".repeat(64).as_bytes()).unwrap(),
         )),
     ] {
-        for method in [Method::GET, Method::PUT] {
-            let mut req = request(method, "/std/sys/lib?name=note", AxumBody::from("{}"));
+        for method in [Method::GET, Method::POST] {
+            let mut req = request(
+                method.clone(),
+                if method == Method::POST {
+                    "/std/sys/install"
+                } else {
+                    "/std/sys/lib?name=note"
+                },
+                AxumBody::from("{}"),
+            );
             req.extensions_mut().remove::<access_control::Visitor>();
             if let Some(visitor) = &visitor {
                 req.extensions_mut().insert(visitor.clone());
@@ -644,8 +663,16 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             );
         }
     }
-    for method in [Method::GET, Method::PUT] {
-        let mut req = request(method, "/std/sys/lib?name=note", AxumBody::empty());
+    for method in [Method::GET, Method::POST] {
+        let mut req = request(
+            method.clone(),
+            if method == Method::POST {
+                "/std/sys/install"
+            } else {
+                "/std/sys/lib?name=note"
+            },
+            AxumBody::empty(),
+        );
         req.headers_mut().insert(
             "expected-package-id",
             "alice.dhttp.net/note".parse().unwrap(),
@@ -655,7 +682,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             StatusCode::BAD_REQUEST
         );
     }
-    let mut trailer = request(Method::PUT, "/std/sys/lib?name=note", AxumBody::from("{}"));
+    let mut trailer = request(Method::POST, "/std/sys/install", AxumBody::from("{}"));
     trailer
         .headers_mut()
         .insert("trailer", "signature".parse().unwrap());
@@ -671,8 +698,8 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
         router
             .clone()
             .oneshot(request(
-                Method::PUT,
-                "/std/sys/lib?name=note",
+                Method::POST,
+                "/std/sys/install",
                 AxumBody::from_stream(broken)
             ))
             .await
@@ -718,7 +745,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
 }
 
 #[tokio::test]
-async fn another_authors_same_name_put_preserves_legacy_data_before_store_resolution() {
+async fn another_authors_same_name_install_preserves_legacy_data_before_store_resolution() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let runtime = Arc::new(WasmRuntime::new().unwrap());
@@ -742,10 +769,10 @@ async fn another_authors_same_name_put_preserves_legacy_data_before_store_resolu
     let response = tokio::time::timeout(
         Duration::from_secs(2),
         router.oneshot(request(
-            Method::PUT,
-            "/std/sys/lib?name=note",
+            Method::POST,
+            "/std/sys/install",
             AxumBody::from(
-                serde_json::json!({"publisher":"bob.dhttp.net","version":"1.0.0"}).to_string(),
+                serde_json::json!({"kind":"lib","author":"bob.dhttp.net","name":"note","version":"1.0.0"}).to_string(),
             ),
         )),
     )
@@ -769,11 +796,13 @@ async fn another_authors_same_name_put_preserves_legacy_data_before_store_resolu
     assert_eq!(restarted.libs[id].openapi.info.version, "1.0.0");
     assert!(!profile.join("db/note").exists());
     assert_eq!(
-        std::fs::read(legacy.join("keep.db")).unwrap(),
+        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
         b"existing business data"
     );
     assert_eq!(
-        std::fs::metadata(legacy.join("keep.db")).unwrap().ino(),
+        std::fs::metadata(profile.join(".volume/note/keep.db"))
+            .unwrap()
+            .ino(),
         data_inode
     );
 }

@@ -1,5 +1,4 @@
 //! Identity-bound HTTP services, components and management routes.
-mod cli;
 mod contact;
 mod dns;
 mod error;
@@ -13,7 +12,6 @@ mod setup;
 #[path = "../tests/support/test_identity.rs"]
 mod test_identity;
 
-pub use cli::run_command;
 pub use error::Error;
 pub use package::{validate_lib, validate_openapi};
 pub use sandbox::WasmRuntime;

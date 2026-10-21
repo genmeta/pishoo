@@ -23,10 +23,9 @@ pub(crate) use files::{
 };
 pub(crate) use format::{package_file, package_metadata, read_package};
 pub use manifest::{validate_lib, validate_openapi};
-pub(crate) use store::{install_store_app, install_store_lib};
-
 #[cfg(test)]
 pub(crate) use store::{STORE_NAME, STORE_OWNER};
+pub(crate) use store::{install_store_app, install_store_lib};
 
 fn require_owner(
     endpoint: &dhttp::Endpoint,
@@ -118,19 +117,18 @@ fn installed_catalog(
     app: bool,
     name: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let path = profile.config_db_path();
+    let path = profile.join(".volume/sys/setting/.db");
     if !path.symlink_metadata()?.file_type().is_file() {
         return Err(Error::InvalidConfig(
             "config.db must be a regular file".into(),
         ));
     }
-    let mut conn =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(Duration::from_secs(3))?;
     let conn = conn.transaction()?;
-    let table = if app { "apps" } else { "libs" };
+    let table = if app { "app" } else { "lib" };
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
         [table],
         |row| row.get(0),
     )?;
@@ -174,8 +172,19 @@ fn installed_catalog(
                 "title":title.unwrap_or_else(|| name.clone()), "description":description,
                 "kind":if app {"app"} else {"lib"}, "endpoints":[],
             });
+            let dates = if columns.iter().any(|c| c == "installed_at") {
+                conn.query_row(
+                    &format!("SELECT installed_at,upgraded_at FROM {table} WHERE name=?1"),
+                    [&name],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )?
+            } else {
+                (None, None)
+            };
+            value["installed_at"] = dates.0.into();
+            value["upgraded_at"] = dates.1.into();
             if let Some((publisher, _)) = id.split_once('/') {
-                value["publisher"] = publisher.into();
+                value["author"] = publisher.into();
             }
             for (key, field) in [("license", license), ("repository", repository)] {
                 if let Some(field) = field {
@@ -187,24 +196,24 @@ fn installed_catalog(
             }
             let dependencies = if author {
                 let (edges, source, target) = if app {
-                    ("app_dependencies", "app_name", "lib_name")
+                    ("app_dependency", "app_name", "lib_name")
                 } else {
-                    ("lib_dependencies", "lib_name", "dependency_name")
+                    ("lib_dependency", "lib_name", "dependency_name")
                 };
                 conn.prepare(&format!(
-                    "SELECT l.author,l.name,d.version FROM {edges} d JOIN libs l ON l.name=d.{target} WHERE d.{source}=?1 ORDER BY l.author,l.name"
+                    "SELECT l.author,l.name,d.version FROM {edges} d JOIN lib l ON l.name=d.{target} WHERE d.{source}=?1 ORDER BY l.author,l.name"
                 ))?.query_map([&name], |row| Ok((row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
                     .map(|row| {
                         let (publisher,name,version) = row?;
                         let publisher = publisher.ok_or_else(|| Error::InvalidConfig("registered dependency author is missing".into()))?;
-                        Ok(serde_json::json!({"publisher":publisher,"name":name,"version":version}))
+                        Ok(serde_json::json!({"author":publisher,"name":name,"version":version}))
                     }).collect::<Result<Vec<_>>>()?
             } else {
                 let (edges, source, target) = if app {
-                    ("app_dependencies", "app_id", "lib_id")
+                    ("app_dependency", "app_id", "lib_id")
                 } else {
-                    ("lib_dependencies", "lib_id", "dependency_id")
+                    ("lib_dependency", "lib_id", "dependency_id")
                 };
                 conn.prepare(&format!(
                     "SELECT {target},version FROM {edges} WHERE {source}=?1 ORDER BY {target}"
@@ -217,7 +226,7 @@ fn installed_catalog(
                     let (publisher, name) = id.split_once('/').ok_or_else(|| {
                         Error::InvalidConfig("invalid registered dependency ID".into())
                     })?;
-                    Ok(serde_json::json!({"publisher":publisher,"name":name,"version":version}))
+                    Ok(serde_json::json!({"author":publisher,"name":name,"version":version}))
                 })
                 .collect::<Result<Vec<_>>>()?
             };
@@ -271,7 +280,8 @@ pub(crate) fn lib_management_router(
         .route("/std/sys/lib", any(handler.clone()))
         .route("/std/sys/lib/list", any(handler.clone()))
         .route("/std/sys/app", any(handler.clone()))
-        .route("/std/sys/app/list", any(handler))
+        .route("/std/sys/app/list", any(handler.clone()))
+        .route("/std/sys/install", any(handler))
 }
 
 async fn lib_management_request(
@@ -297,15 +307,27 @@ async fn lib_management_request(
         }
     }
     let path = request.uri().path();
-    let app = path == "/std/sys/app" || path.starts_with("/std/sys/app/");
+    let installing = path == "/std/sys/install";
+    let mut app = path == "/std/sys/app" || path.starts_with("/std/sys/app/");
     let listing = path.ends_with("/list");
     let method = request.method().clone();
-    let installing = !listing && method == Method::PUT;
-    let allow = if listing { "GET" } else { "GET, PUT, DELETE" };
-    if !(listing && method == Method::GET
-        || !listing && matches!(method, Method::GET | Method::PUT | Method::DELETE))
+    let allow = if installing {
+        "POST"
+    } else if listing {
+        "GET"
+    } else {
+        "GET, DELETE"
+    };
+    if !(installing && method == Method::POST
+        || !installing && listing && method == Method::GET
+        || !installing && !listing && matches!(method, Method::GET | Method::DELETE))
     {
         return Ok((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response());
+    }
+    if installing && request.uri().query().is_some() {
+        return Err(Error::BadRequest(
+            "install does not accept query parameters".into(),
+        ));
     }
     let mut id = None;
     if let Some(query) = request.uri().query() {
@@ -330,7 +352,7 @@ async fn lib_management_request(
             ));
         }
     }
-    if !listing && id.is_none() {
+    if !installing && !listing && id.is_none() {
         return Err(Error::BadRequest("missing name query parameter".into()));
     }
     let expected_id = request.headers().get("expected-package-id").cloned();
@@ -384,13 +406,13 @@ async fn lib_management_request(
         let input: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| Error::BadRequest("invalid store installation JSON".into()))?;
         if input.as_object().is_none_or(|value| {
-            value.len() != 2
+            value.len() != 4
                 || value
                     .keys()
-                    .any(|key| !matches!(key.as_str(), "publisher" | "version"))
+                    .any(|key| !matches!(key.as_str(), "kind" | "author" | "name" | "version"))
         }) {
             return Err(Error::BadRequest(
-                "installation requires only publisher and version; name belongs in the URI".into(),
+                "installation requires only kind, author, name and version".into(),
             ));
         }
         let text = |key: &str| {
@@ -399,12 +421,23 @@ async fn lib_management_request(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| Error::BadRequest(format!("missing {key}")))
         };
-        let name = id.as_deref().unwrap();
-        let value = if app {
+        app = match text("kind")? {
+            "app" => true,
+            "lib" => false,
+            _ => return Err(Error::BadRequest("kind must be app or lib".into())),
+        };
+        let name = text("name")?;
+        valid_id(name)?;
+        if name.contains('/') {
+            return Err(Error::BadRequest(
+                "name must be a package short name".into(),
+            ));
+        }
+        let mut value = if app {
             install_store_app(
                 &profile,
                 &endpoint,
-                text("publisher")?,
+                text("author")?,
                 name,
                 text("version")?,
                 &sandbox,
@@ -414,13 +447,29 @@ async fn lib_management_request(
             install_store_lib(
                 &profile,
                 &endpoint,
-                text("publisher")?,
+                text("author")?,
                 name,
                 text("version")?,
                 &sandbox,
             )
             .await?
         };
+        if let Some(author) = value
+            .as_object_mut()
+            .and_then(|value| value.remove("publisher"))
+        {
+            value["author"] = author;
+        }
+        if let Some(dependencies) = value["dependencies"].as_array_mut() {
+            for dependency in dependencies {
+                if let Some(author) = dependency
+                    .as_object_mut()
+                    .and_then(|value| value.remove("publisher"))
+                {
+                    dependency["author"] = author;
+                }
+            }
+        }
         return Ok(axum::Json(value).into_response());
     }
     if method == Method::GET {
@@ -481,20 +530,17 @@ async fn lib_management_request(
     tokio::task::spawn_blocking(move || -> Result<()> {
         use rusqlite::OptionalExtension;
         let name = id.as_deref().unwrap();
-        let path = profile.config_db_path();
+        let path = profile.join(".volume/sys/setting/.db");
         if !path.symlink_metadata()?.file_type().is_file() {
             return Err(Error::InvalidConfig(
                 "config.db must be a regular file".into(),
             ));
         }
-        let conn = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
-        let table = if app { "apps" } else { "libs" };
+        let table = if app { "app" } else { "lib" };
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
             [table],
             |row| row.get(0),
         )?;

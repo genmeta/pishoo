@@ -4,11 +4,13 @@ use axum::{Router, body::Body as AxumBody, response::IntoResponse, routing::any}
 use dhttp_home::identity::IdentityProfile;
 use http::Request;
 use tower::ServiceExt;
+#[cfg(test)]
+use crate::routes::access_router;
 
 use crate::{
     Body, Error, Result, dns,
     routes::{
-        DHTTP_PREFIX, access_router, authorize, capabilities_router, file_router, forward_dhttp,
+        DHTTP_PREFIX, authorize, capabilities_router, file_router, forward_dhttp,
         proxy_pass,
     },
     sandbox::{Sandbox, WasmRuntime},
@@ -57,7 +59,6 @@ fn native_router(server: &Server) -> Router {
     let endpoint = server.endpoint.clone();
     let local_router = Arc::downgrade(&server.router);
     capabilities_router(server.profile.clone())
-        .merge(access_router(server.access.clone()))
         .merge(crate::contact::contact_router(
             server.profile.clone(),
             server.endpoint.clone(),
@@ -72,7 +73,7 @@ fn native_router(server: &Server) -> Router {
             server.endpoint.clone(),
             server.sandbox.clone(),
         ))
-        .merge(file_router(server.profile.join("file")))
+        .merge(file_router(server.profile.join(".volume/sys/file/.file")))
         .merge(dhttp_router(server.endpoint.clone()))
         .fallback(any(move |mut request: Request<AxumBody>| {
             let endpoint = endpoint.clone();
@@ -173,7 +174,7 @@ fn current_router(server: &Server) -> Router {
 }
 
 fn open_access_log(profile: &IdentityProfile) -> Result<std::fs::File> {
-    let path = profile.join("logs/access.log");
+    let path = profile.join("log/access.log");
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -259,6 +260,11 @@ impl Server {
                     | dhttp::Error::Credentials { .. } => Error::InvalidIdentity(error.to_string()),
                     error => Error::Dhttp(error),
                 })?;
+        let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certs)
+            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
+        let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
+            .map_err(|_| Error::InvalidIdentity("invalid certificate subject".into()))?;
+        let access = load_access(&profile, &subject).await?;
         let config = load_server_config(&profile)?;
         if config.listen != "off" {
             dns::authority(&endpoint).map_err(|error| Error::InvalidIdentity(error.to_string()))?;
@@ -268,11 +274,6 @@ impl Server {
         } else {
             None
         };
-        let ski = dhttp_home::certificate::extract_dhttp_subject_key_identifier(&certs)
-            .map_err(|error| Error::InvalidIdentity(error.to_string()))?;
-        let subject = access_control::SubjectId::new(ski.owner_hash().as_str().as_bytes())
-            .map_err(|_| Error::InvalidIdentity("invalid certificate subject".into()))?;
-        let access = load_access(&profile, &subject).await?;
         let mut sandbox = Sandbox::new(runtime);
         sandbox.load_libs(&profile)?;
         let config_db = Mutex::new(crate::setup::open_config(
@@ -362,3 +363,7 @@ mod initialization_tests;
 #[cfg(test)]
 #[path = "../tests/unit/server/logging.rs"]
 mod logging_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/review.rs"]
+mod review_tests;

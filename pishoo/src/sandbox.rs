@@ -128,32 +128,29 @@ impl Sandbox {
         // Startup selects registered IDs, then reads each executable once.
         // Package integrity, dependencies and route conflicts were checked when
         // installation committed these rows and files together.
-        let database = profile.config_db_path();
+        let database = profile.join(".volume/sys/setting/.db");
         if !database.symlink_metadata()?.file_type().is_file() {
             return Err(Error::InvalidConfig(
                 "config.db must be a regular file".into(),
             ));
         }
-        let conn = rusqlite::Connection::open_with_flags(
-            database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='libs')",
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='lib')",
             [],
             |row| row.get(0),
         )?;
         let registered = if exists {
             let author: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('libs') WHERE name='author')",
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('lib') WHERE name='author')",
                 [],
                 |row| row.get(0),
             )?;
             conn.prepare(if author {
-                "SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM libs ORDER BY author,name"
+                "SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM lib ORDER BY author,name"
             } else {
-                "SELECT id FROM libs ORDER BY id"
+                "SELECT id FROM lib ORDER BY id"
             })?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
@@ -170,7 +167,13 @@ impl Sandbox {
                         self.runtime.clone(),
                         id.clone(),
                         &bytes,
-                        &profile.join("db").join(id.rsplit('/').next().unwrap()),
+                        &profile
+                            .join(".volume")
+                            .join(if id.starts_with("std.dhttp.net/") {
+                                format!("std/{}", id.rsplit('/').next().unwrap())
+                            } else {
+                                id.rsplit('/').next().unwrap().to_owned()
+                            }),
                     )?;
                     candidates.insert(id.clone(), Arc::new(lib));
                 }

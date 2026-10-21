@@ -29,6 +29,10 @@ async fn filesystem_grants_are_private_writable_and_hold_the_open_directory() {
         &root.path().join("first"),
     )
     .unwrap();
+    assert!(
+        !root.path().join("first/.file").exists(),
+        "loading a Lib does not create guest directories"
+    );
     std::fs::rename(root.path().join("first"), root.path().join("saved")).unwrap();
     std::fs::create_dir(root.path().join("first")).unwrap();
     std::fs::write(root.path().join("first/value"), "replacement").unwrap();
@@ -64,11 +68,16 @@ async fn filesystem_grants_are_private_writable_and_hold_the_open_directory() {
         .await
         .is_ok()
     );
+    view.create_directory_at(Resource::new_borrow(descriptor), ".file".into())
+        .await
+        .unwrap();
+    assert!(root.path().join("saved/.file").is_dir());
+    assert!(!root.path().join("first/.file").exists());
     let created = view
         .open_at(
             Resource::new_borrow(descriptor),
             PathFlags::empty(),
-            "created".into(),
+            ".file/created".into(),
             OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
             DescriptorFlags::WRITE,
         )
@@ -83,15 +92,15 @@ async fn filesystem_grants_are_private_writable_and_hold_the_open_directory() {
     .unwrap();
     HostDescriptor::drop(&mut view, created).unwrap();
     assert_eq!(
-        std::fs::read(root.path().join("saved/created")).unwrap(),
+        std::fs::read(root.path().join("saved/.file/created")).unwrap(),
         b"through preopened handle"
     );
-    assert!(!root.path().join("first/created").exists());
+    assert!(!root.path().join("first/.file/created").exists());
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let owner = root.path().join("saved").metadata().unwrap();
-        let file = root.path().join("saved/created").metadata().unwrap();
+        let file = root.path().join("saved/.file/created").metadata().unwrap();
         assert_eq!((file.uid(), file.gid()), (owner.uid(), owner.gid()));
     }
     for path in ["../second/value", "/second/value", "link"] {
@@ -151,6 +160,7 @@ fn data_directory_symlinks_cannot_grant_sibling_or_identity_files() {
 #[ignore = "requires root; run in an isolated filesystem"]
 async fn root_guest_error_and_cancellation_repair_actual_preopened_directory() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
     use wasmtime::component::Resource;
     use wasmtime_wasi::{
         filesystem::WasiFilesystemCtxView,

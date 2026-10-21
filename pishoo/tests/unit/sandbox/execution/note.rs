@@ -312,7 +312,7 @@ async fn note_sandbox_mounts_only_its_named_database_directory() {
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/note/dist/lib.wasm"))
             .unwrap();
     for id in ["note", "other"] {
-        let dir = profile.join(format!("libs/{id}"));
+        let dir = profile.join(format!("lib/{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".webc-proof"), package_component(&bytes)).unwrap();
     }
@@ -341,10 +341,10 @@ async fn note_sandbox_mounts_only_its_named_database_directory() {
             .2,
         Bytes::from_static(b"{\"notes\":[]}")
     );
-    assert!(profile.join("db/note/note.db").is_file());
+    assert!(profile.join(".volume/note/note.db").is_file());
     assert!(profile.join("db/other/note.db").is_file());
-    assert!(!profile.join("db/note.db").exists());
-    assert!(!profile.join("libs/note/data").exists());
+    assert!(!profile.join(".volume/note.db").exists());
+    assert!(!profile.join("lib/note/data").exists());
     assert_eq!(
         std::fs::read(profile.join("db/config.db")).unwrap(),
         b"host-private"

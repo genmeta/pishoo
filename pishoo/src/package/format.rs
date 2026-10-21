@@ -677,6 +677,13 @@ fn validate_declarations(document: &Value) -> Result<()> {
     {
         return Err(invalid("OpenAPI cannot declare package metadata"));
     }
+    let groups = match (
+        document.get("x-access-groups"),
+        extension.get("access-groups"),
+    ) {
+        (Some(_), Some(_)) => return Err(invalid("duplicate access-groups declarations")),
+        (groups, legacy) => groups.or(legacy),
+    };
     let paths = document["paths"]
         .as_object()
         .ok_or_else(|| invalid("paths must be an object"))?;
@@ -709,7 +716,14 @@ fn validate_declarations(document: &Value) -> Result<()> {
             }) {
                 return Err(invalid("template operations are unsupported"));
             }
-            if let Some(group) = op_extension.get("access-group") {
+            let group = match (
+                operation.get("x-access-group"),
+                op_extension.get("access-group"),
+            ) {
+                (Some(_), Some(_)) => return Err(invalid("duplicate access-group declarations")),
+                (group, legacy) => group.or(legacy),
+            };
+            if let Some(group) = group {
                 let group = group
                     .as_str()
                     .filter(|s| valid_name(s))
@@ -747,7 +761,7 @@ fn validate_declarations(document: &Value) -> Result<()> {
     }
     let mut declared = BTreeMap::<String, HashSet<String>>::new();
     let mut members = HashSet::new();
-    if let Some(groups) = extension.get("access-groups") {
+    if let Some(groups) = groups {
         for (name, group) in groups
             .as_object()
             .ok_or_else(|| invalid("access-groups must be an object"))?
