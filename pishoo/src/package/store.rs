@@ -10,12 +10,10 @@ use dhttp_home::identity::IdentityProfile;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::sandbox::Lib;
-
 use super::{Sandbox, install_package, installed_packages, package_metadata, read_package};
 #[cfg(test)]
 use super::{install_lib, package_file};
-use crate::{Error, Result};
+use crate::{Error, Result, sandbox::Lib};
 
 pub(crate) const STORE_NAME: &str = "store.dhttp.net";
 // Independent store-server/DEPLOYMENT.md, verified on 2026-10-13.

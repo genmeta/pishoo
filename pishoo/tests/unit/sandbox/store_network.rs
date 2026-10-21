@@ -3,13 +3,15 @@ use std::collections::BTreeMap;
 
 use dhttp::resolve::{EndpointAddr, Family, Resolve, ResolveFuture, Source};
 use futures::{FutureExt, StreamExt};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use super::*;
-use crate::package::tests::{package_fixture, publisher};
-use crate::package::{STORE_NAME, STORE_OWNER, package_metadata};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+use crate::package::{
+    STORE_NAME, STORE_OWNER, package_metadata,
+    tests::{package_fixture, publisher},
+};
 
 #[allow(dead_code)]
 #[path = "../../support/network_credentials.rs"]

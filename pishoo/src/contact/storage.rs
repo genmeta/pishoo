@@ -139,8 +139,9 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
     tx.prepare("SELECT id,target_name,description,requested_capabilities,offered_capabilities,application_id,status,expired_after,delivery_deadline,remote_expired_after,next_attempt_at,attempt_count,lease_until,last_checked_at,error_message,created_at,updated_at,contact_id,contact_subject,requested_access,offers FROM outbound_contact_request LIMIT 0").map_err(storage)?;
     tx.commit().map_err(storage)?;
     if rustix::process::geteuid().is_root() {
-        use rustix::fs::{Mode, OFlags};
         use std::os::unix::fs::MetadataExt;
+
+        use rustix::fs::{Mode, OFlags};
         let directory = std::fs::File::from(
             rustix::fs::open(
                 profile.join(".volume/sys/contact"),

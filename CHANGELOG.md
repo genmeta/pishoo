@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.9.0-preview.4] - 2026-10-21
+
+### Changed
+
+- Manage one signed Pkg containing a Lib, an App, or both through the unified
+  `/std/sys/pkg` API; commit its runtime files, registration, dependencies and
+  permission declarations together with recovery on failure.
+- Separate listener settings from local HTTP mounts using `/std/sys/listen`
+  and `/std/sys/mount`, and use `listen off` to stop hosting.
+- Mount all frontends under `/app/<name>/` with one root GET authorization;
+  expose verified viewer names through existing App HEAD responses.
+- Dispatch Lib requests by loaded package name, keeping native `/std` routes
+  first and using OpenAPI for validation, documentation and permission groups.
+- Store native databases under `.volume/sys/<service>/database` and give each
+  Lib a private volume mapped to `/db`.
+- Move Workspace, Profile, Message, Calendar and Journal into independent product
+  repositories; host distributions and SDK bundles contain no product sources.
+- Align Contact orchestration with query-based ACL resources and the current
+  authenticated application protocol, including operation snapshots and subject
+  binding. Use Profile directly for contact avatars.
+- Pin daccess to commit `1bd97a7d2e8bd572cde700b1ec52c8ca8fca2ee4`.
+
+### Compatibility
+
+- Use the unified Pkg registry protocol and matching gmutils commands. Profile
+  0.2.0 exposes independent nickname/avatar fields; Message 0.2.0 uses PUT.
+  Business packages remain separately published and are not installed by the host.
+- Existing ACL entries are not automatically rewritten when methods or paths
+  change. Installation does not grant business API access.
+
+Pishoo and pishoo-common advance together to 0.9.0-preview.4. The SDK remains
+0.1.0-preview.2.
+
 ## [0.9.0-preview.3] - 2026-10-15
 
 ### Changed

@@ -2,7 +2,7 @@
 name = "pishoo"
 description = "modern, secure, QUIC-powered web/proxy engine"
 homepage = "https://www.dhttp.net"
-version = "0.9.0-preview.3"
+version = "0.9.0-preview.4"
 edition = "2024"
 license = "Apache-2.0"
 autobins = false
