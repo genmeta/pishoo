@@ -411,7 +411,7 @@ async fn pkg_management_request(
     tokio::task::spawn_blocking(move || -> Result<()> {
         use rusqlite::OptionalExtension;
         let name = id.as_deref().unwrap();
-        let path = profile.join(".volume/sys/setting/.db");
+        let path = profile.join(".volume/sys/setting/database");
         if !path.symlink_metadata()?.file_type().is_file() {
             return Err(Error::InvalidConfig(
                 "config.db must be a regular file".into(),

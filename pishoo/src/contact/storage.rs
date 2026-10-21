@@ -29,7 +29,7 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let directory = profile.join(".volume/sys/contact");
     std::fs::create_dir_all(&directory).map_err(|e| fail(500, e.to_string()))?;
-    let path = directory.join(".db");
+    let path = directory.join("database");
     match path.symlink_metadata() {
         Ok(metadata) if !metadata.file_type().is_file() => {
             return Err(fail(500, "contact database must be a regular file"));
@@ -147,7 +147,7 @@ pub(crate) fn database(profile: &IdentityProfile) -> Result<Connection, Failure>
         let owner = directory
             .metadata()
             .map_err(|error| fail(500, error.to_string()))?;
-        for name in [".db", ".db-wal", ".db-shm"] {
+        for name in ["database", "database-wal", "database-shm"] {
             let file = match rustix::fs::openat(
                 &directory,
                 name,

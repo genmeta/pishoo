@@ -108,8 +108,8 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
     }
     // SQLite backup includes committed WAL content and leaves the old database intact.
     for (old, new) in [
-        ("db/access.db", ".volume/sys/access/.db"),
-        ("db/contact.db", ".volume/sys/contact/.db"),
+        ("db/access.db", ".volume/sys/access/database"),
+        ("db/contact.db", ".volume/sys/contact/database"),
     ] {
         let source = profile.join(old);
         let target = profile.join(new);

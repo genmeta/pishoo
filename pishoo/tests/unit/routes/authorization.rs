@@ -1,6 +1,96 @@
 use super::*;
 
 #[tokio::test]
+async fn frontend_pages_assets_and_head_share_the_root_get_rule_without_opening_backend_apis() {
+    use access_control::{Effect, Grantee};
+    use tower::ServiceExt;
+
+    let (access, _) = authorization_app(Effect::Deny).await;
+    let app = Router::new()
+        .fallback(axum::routing::any(
+            |request: Request<AxumBody>| async move {
+                // Authorization must not rewrite the URI used for static routing.
+                request.uri().to_string()
+            },
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            access.clone(),
+            authorize,
+        ));
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/app/workspace/assets",
+            Effect::Deny,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::HEAD),
+            "/app/workspace",
+            Effect::Deny,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    for (effect, expected) in [
+        (Effect::Allow, StatusCode::OK),
+        (Effect::Deny, StatusCode::FORBIDDEN),
+    ] {
+        access
+            .set_policy(
+                access_control::Method::Specified(Method::GET),
+                "/app/workspace",
+                effect,
+                Grantee::All,
+            )
+            .await
+            .unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            for path in [
+                "/app/workspace",
+                "/app/workspace/intro?view=1",
+                "/app/workspace/assets/app.js",
+            ] {
+                let mut request = anonymous_request();
+                *request.uri_mut() = path.parse().unwrap();
+                *request.method_mut() = method.clone();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), expected, "{method} {path}");
+                if expected == StatusCode::OK && method == Method::GET {
+                    assert_eq!(
+                        response.into_body().collect().await.unwrap().to_bytes(),
+                        path
+                    );
+                }
+            }
+        }
+        for path in ["/std/message", "/journal/entries", "/app/workspace-other/"] {
+            let mut request = anonymous_request();
+            *request.uri_mut() = path.parse().unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+    access
+        .set_policy(
+            access_control::Method::Specified(Method::GET),
+            "/journal/entries",
+            Effect::Allow,
+            Grantee::All,
+        )
+        .await
+        .unwrap();
+    let mut request = anonymous_request();
+    *request.uri_mut() = "/journal/entries".parse().unwrap();
+    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn authorization_uses_current_library_allow_and_deny_results() {
     use tower::ServiceExt;
     for (effect, expected) in [

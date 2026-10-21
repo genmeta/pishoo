@@ -14,7 +14,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             for name in ["setting", "pkg", "access"] {
                 let dir = profile.join(format!(".volume/sys/{name}"));
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::File::create(dir.join(".db")).unwrap();
+                std::fs::File::create(dir.join("database")).unwrap();
             }
             let db =
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
