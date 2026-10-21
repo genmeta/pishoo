@@ -171,11 +171,11 @@ async fn frontend_prefix_keeps_combined_package_pages_separate_from_backend_rout
             "/app/calendar/missing.js",
             StatusCode::NOT_FOUND,
         ),
-        (Method::GET, "/calendar/", StatusCode::NOT_FOUND),
+        (Method::GET, "/calendar/", StatusCode::INTERNAL_SERVER_ERROR),
         (
             Method::GET,
             "/calendar/events",
-            StatusCode::METHOD_NOT_ALLOWED,
+            StatusCode::INTERNAL_SERVER_ERROR,
         ),
         // The backend is selected and requires a real handshake before invocation.
         (

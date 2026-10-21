@@ -35,8 +35,7 @@ fn load(sandbox: &Sandbox, directory: &Path, paths: &str) -> Arc<Lib> {
         directory,
     )
     .unwrap();
-    // Catalog fallback semantics are tested with the original metadata after
-    // the production loader has validated the signed fixture package.
+    // Keep the supplied metadata after production package validation.
     lib.openapi = validate_lib(&bytes).unwrap();
     Arc::new(lib)
 }
@@ -84,7 +83,7 @@ async fn retired_runtime_inspection_routes_are_not_available() {
 }
 
 #[tokio::test]
-async fn api_methods_require_manifest_entries_and_namespace_never_falls_through() {
+async fn lib_dispatch_ignores_manifest_operations_and_namespace_never_falls_through() {
     let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
     let directory = tempfile::tempdir().unwrap();
     let lib = load(
@@ -97,12 +96,23 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     for (method, path, expected) in [
         (Method::GET, "/test/run", StatusCode::INTERNAL_SERVER_ERROR),
         (
+            Method::PATCH,
+            "/test/undeclared/deep?value=a%2Fb",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (Method::GET, "/test", StatusCode::INTERNAL_SERVER_ERROR),
+        (Method::GET, "/test/", StatusCode::INTERNAL_SERVER_ERROR),
+        (
             Method::POST,
             "/test/run?value=1",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
-        (Method::HEAD, "/test/run", StatusCode::METHOD_NOT_ALLOWED),
-        (Method::OPTIONS, "/test/run", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::HEAD, "/test/run", StatusCode::INTERNAL_SERVER_ERROR),
+        (
+            Method::OPTIONS,
+            "/test/run",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
         (
             Method::HEAD,
             "/test/explicit",
@@ -123,7 +133,7 @@ async fn api_methods_require_manifest_entries_and_namespace_never_falls_through(
     }
     assert_eq!(
         status(&router, Method::CONNECT, "/test/run").await,
-        StatusCode::METHOD_NOT_ALLOWED
+        StatusCode::INTERNAL_SERVER_ERROR
     );
     let router = router.fallback(|| async { StatusCode::IM_A_TEAPOT });
     for path in ["/api/test/run", "/workspace/", "/api/websocket"] {
@@ -160,7 +170,7 @@ async fn lib_paths_are_scoped_to_the_registered_publisher_and_name() {
     }
     assert_eq!(
         status(&router, Method::DELETE, "/workspace/profile").await,
-        StatusCode::METHOD_NOT_ALLOWED
+        StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
         status(&router, Method::GET, "/std/profile").await,
@@ -187,6 +197,8 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for path in [
         "/std/message",
+        "/std/message/undeclared",
+        "/journal/missing",
         "/journal/message",
         "/journal/std/xxxx?value=a%2Fb",
     ] {
@@ -197,7 +209,7 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         );
         assert_eq!(
             status(&router, Method::GET, path).await,
-            StatusCode::METHOD_NOT_ALLOWED,
+            StatusCode::INTERNAL_SERVER_ERROR,
             "{path}"
         );
     }
@@ -205,8 +217,9 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
         "/std/xxxx",
         "/std/journal/std/xxxx",
         "/journalish/std/xxxx",
-        "/journal/missing",
         "/message/message",
+        "/std/message-other",
+        "/std/message-other/deep",
     ] {
         assert_eq!(
             status(&router, Method::POST, path).await,
@@ -214,6 +227,74 @@ async fn only_standard_publisher_uses_std_and_other_paths_remain_inside_the_pack
             "{path}"
         );
     }
+}
+
+#[tokio::test]
+async fn standard_lib_selection_uses_the_name_instead_of_declared_paths() {
+    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
+    let directory = tempfile::tempdir().unwrap();
+    // A Lib's declaration cannot capture a different standard Lib's namespace.
+    let lib = load(&sandbox, directory.path(), r#"{"/message":{"post":{}}}"#);
+    sandbox.libs.insert("std.dhttp.net/profile".into(), lib);
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
+    assert_eq!(
+        status(&router, Method::POST, "/std/message").await,
+        StatusCode::NOT_FOUND
+    );
+    for path in ["/std/profile", "/std/profile/undeclared?value=a%2Fb"] {
+        assert_eq!(
+            status(&router, Method::PATCH, path).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_loaded_lib_handles_undeclared_operations_without_rebuilding_the_router() {
+    let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
+        WasmRuntime::new().unwrap(),
+    ))));
+    let endpoint = crate::test_identity::endpoint("alice");
+    let router = Sandbox::api_router(
+        sandbox.clone(),
+        endpoint.clone(),
+        Arc::new(access_control::AccessService::new(
+            sea_orm::DatabaseConnection::default(),
+            endpoint.name(),
+        )),
+        Router::new(),
+    );
+    assert_eq!(
+        status(&router, Method::PATCH, "/demo/undeclared").await,
+        StatusCode::NOT_FOUND
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let lib = load(
+        &sandbox.read().unwrap(),
+        directory.path(),
+        r#"{"/run":{"get":{}}}"#,
+    );
+    sandbox
+        .write()
+        .unwrap()
+        .libs
+        .insert("publisher.dhttp.net/demo".into(), lib);
+    for path in ["/demo", "/demo/", "/demo/undeclared/deep?value=a%2Fb"] {
+        let mut request = request(Method::POST, path);
+        request.extensions_mut().insert(dhttp::HandshakeSummary {
+            alpn: None,
+            local: Some(endpoint.local_authority().unwrap().clone()),
+            remote: None,
+        });
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "{path}");
+        drop(response);
+    }
+    sandbox.write().unwrap().libs.clear();
+    assert_eq!(
+        status(&router, Method::PATCH, "/demo/undeclared").await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -225,11 +306,12 @@ async fn routers_keep_their_lib_snapshot() {
     let endpoint = crate::test_identity::endpoint("alice");
     let old_router = api_router(&sandbox, endpoint.clone());
     let new = load(&sandbox, directory.path(), r#"{"/new":{"post":{}}}"#);
-    sandbox.libs.insert("test".into(), new);
+    sandbox.libs.clear();
+    sandbox.libs.insert("replacement".into(), new);
     let new_router = api_router(&sandbox, endpoint);
     for (router, present, absent) in [
-        (&old_router, "/test/old", "/test/new"),
-        (&new_router, "/test/new", "/test/old"),
+        (&old_router, "/test/undeclared", "/replacement/undeclared"),
+        (&new_router, "/replacement/undeclared", "/test/undeclared"),
     ] {
         assert_eq!(
             status(router, Method::POST, present).await,
