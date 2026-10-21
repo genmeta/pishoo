@@ -713,3 +713,342 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
     assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
     drop((config, contact, access, log));
 }
+
+#[test]
+fn legacy_layout_migration_preserves_wal_data_and_signed_app_layouts() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("legacy")).unwrap();
+    for directory in [
+        "libs/std",
+        "apps/plain/public/assets",
+        "apps/signed/public",
+        "logs",
+        "db",
+    ] {
+        std::fs::create_dir_all(profile.join(directory)).unwrap();
+    }
+    std::fs::write(profile.join("libs/std/notes.wasm"), b"component").unwrap();
+    std::fs::write(profile.join("logs/access.log"), b"request log").unwrap();
+    std::fs::write(profile.join("apps/plain/public/index.html"), b"page").unwrap();
+    std::fs::write(profile.join("apps/plain/public/assets/app.js"), b"script").unwrap();
+    std::fs::write(
+        profile.join("apps/signed/.webc-proof"),
+        b"signed archive proof",
+    )
+    .unwrap();
+    std::fs::write(
+        profile.join("apps/signed/public/index.html"),
+        b"signed page",
+    )
+    .unwrap();
+    let mut writers = Vec::new();
+    for service in ["access", "contact"] {
+        let db = rusqlite::Connection::open(profile.join(format!("db/{service}.db"))).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE saved(value TEXT); INSERT INTO saved VALUES('committed WAL');").unwrap();
+        writers.push(db);
+    }
+    initialize_directories(&profile).unwrap();
+    assert_eq!(
+        std::fs::read(profile.join("lib/std/notes.wasm")).unwrap(),
+        b"component"
+    );
+    assert_eq!(
+        std::fs::read(profile.join("log/access.log")).unwrap(),
+        b"request log"
+    );
+    assert_eq!(
+        std::fs::read(profile.join("app/plain/index.html")).unwrap(),
+        b"page"
+    );
+    assert_eq!(
+        std::fs::read(profile.join("app/plain/assets/app.js")).unwrap(),
+        b"script"
+    );
+    assert!(!profile.join("app/plain/public").exists());
+    assert_eq!(
+        std::fs::read(profile.join("app/signed/public/index.html")).unwrap(),
+        b"signed page"
+    );
+    for (service, writer) in ["access", "contact"].into_iter().zip(&writers) {
+        let migrated =
+            rusqlite::Connection::open(profile.join(format!(".volume/sys/{service}/database")))
+                .unwrap();
+        assert_eq!(
+            migrated
+                .query_row("SELECT value FROM saved", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "committed WAL"
+        );
+        writer
+            .execute("INSERT INTO saved VALUES('subsequent legacy write')", [])
+            .unwrap();
+    }
+    // Reopening must not overwrite already migrated native databases.
+    initialize_directories(&profile).unwrap();
+    for service in ["access", "contact"] {
+        let migrated =
+            rusqlite::Connection::open(profile.join(format!(".volume/sys/{service}/database")))
+                .unwrap();
+        assert_eq!(
+            migrated
+                .query_row("SELECT count(*) FROM saved", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(profile.join(format!("db/{service}.db")).exists());
+    }
+}
+
+#[test]
+fn conflicting_legacy_directories_and_public_files_preserve_both_versions() {
+    let root = tempfile::tempdir().unwrap();
+    for legacy in ["libs", "apps", "logs"] {
+        let profile = IdentityProfile::try_from(root.path().join(legacy)).unwrap();
+        let current = match legacy {
+            "libs" => "lib",
+            "apps" => "app",
+            _ => "log",
+        };
+        std::fs::create_dir_all(profile.join(legacy)).unwrap();
+        std::fs::create_dir(profile.join(current)).unwrap();
+        std::fs::write(profile.join(legacy).join("old"), b"old resource").unwrap();
+        std::fs::write(profile.join(current).join("new"), b"new resource").unwrap();
+        assert!(initialize_directories(&profile).is_err());
+        assert_eq!(
+            std::fs::read(profile.join(legacy).join("old")).unwrap(),
+            b"old resource"
+        );
+        assert_eq!(
+            std::fs::read(profile.join(current).join("new")).unwrap(),
+            b"new resource"
+        );
+    }
+    let profile = profile(root.path(), "public-conflict");
+    std::fs::create_dir_all(profile.join("app/notes/public")).unwrap();
+    std::fs::write(profile.join("app/notes/public/index.html"), b"legacy page").unwrap();
+    std::fs::write(profile.join("app/notes/index.html"), b"installed page").unwrap();
+    assert!(initialize_directories(&profile).is_err());
+    assert_eq!(
+        std::fs::read(profile.join("app/notes/public/index.html")).unwrap(),
+        b"legacy page"
+    );
+    assert_eq!(
+        std::fs::read(profile.join("app/notes/index.html")).unwrap(),
+        b"installed page"
+    );
+}
+
+#[test]
+fn interrupted_package_updates_recover_both_resources_at_the_database_commit_boundary() {
+    for author in ["std.dhttp.net", "alice.dhttp.net"] {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let profile = profile(root.path(), "owner");
+            load_server_config(&profile).unwrap();
+            let db =
+                crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .unwrap();
+            db.execute("INSERT INTO package(name,author,version,has_lib,has_app) VALUES('notes',?1,'2.0.0',1,1)", [author]).unwrap();
+            let facts: String = db
+                .query_row(
+                    include_str!("../../../src/package/registration-facts.sql"),
+                    ["notes"],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if !committed {
+                db.execute("UPDATE package SET version='1.0.0' WHERE name='notes'", [])
+                    .unwrap();
+            }
+            let lib = if author == "std.dhttp.net" {
+                "lib/std/notes.wasm"
+            } else {
+                "lib/notes.wasm"
+            };
+            std::fs::write(profile.join(lib), b"new component").unwrap();
+            std::fs::create_dir_all(profile.join("app/notes")).unwrap();
+            std::fs::write(profile.join("app/notes/index.html"), b"new page").unwrap();
+            std::fs::create_dir_all(profile.join(".volume/notes")).unwrap();
+            std::fs::write(profile.join(".volume/notes/database"), b"business data").unwrap();
+            let stage = profile.join(".pishoo-interrupted-update");
+            std::fs::create_dir_all(stage.join("old-app")).unwrap();
+            std::fs::write(stage.join("old-lib"), b"old component").unwrap();
+            std::fs::write(stage.join("old-app/index.html"), b"old page").unwrap();
+            let journal = serde_json::json!({"id":format!("{author}/notes"),"facts":facts,"resources":[
+                {"kind":"lib","old":true,"new":true},{"kind":"app","old":true,"new":true}]});
+            std::fs::write(
+                stage.join(".transaction.json"),
+                serde_json::to_vec(&journal).unwrap(),
+            )
+            .unwrap();
+            initialize_directories(&profile).unwrap();
+            assert_eq!(
+                std::fs::read(profile.join(lib)).unwrap(),
+                if committed {
+                    b"new component"
+                } else {
+                    b"old component"
+                }
+            );
+            assert_eq!(
+                std::fs::read(profile.join("app/notes/index.html")).unwrap(),
+                if committed { b"new page" } else { b"old page" }
+            );
+            assert_eq!(
+                db.query_row("SELECT version FROM package WHERE name='notes'", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                if committed { "2.0.0" } else { "1.0.0" }
+            );
+            assert_eq!(
+                std::fs::read(profile.join(".volume/notes/database")).unwrap(),
+                b"business data"
+            );
+            assert!(!stage.exists());
+            initialize_directories(&profile).unwrap();
+        }
+    }
+}
+
+#[test]
+fn interrupted_first_install_removes_only_published_unregistered_resources() {
+    for published in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = profile(root.path(), "owner");
+        load_server_config(&profile).unwrap();
+        let stage = profile.join(".pishoo-interrupted-install");
+        std::fs::create_dir_all(stage.join("new-lib")).unwrap();
+        std::fs::create_dir_all(stage.join("new-app")).unwrap();
+        std::fs::write(stage.join("new-lib/notes.wasm"), b"candidate component").unwrap();
+        std::fs::write(stage.join("new-app/index.html"), b"candidate page").unwrap();
+        if published {
+            std::fs::rename(
+                stage.join("new-lib/notes.wasm"),
+                profile.join("lib/notes.wasm"),
+            )
+            .unwrap();
+            std::fs::rename(stage.join("new-app"), profile.join("app/notes")).unwrap();
+        }
+        std::fs::write(profile.join("lib/unrelated.wasm"), b"unrelated component").unwrap();
+        let journal = serde_json::json!({"id":"alice.dhttp.net/notes","facts":"uncommitted installation","resources":[
+            {"kind":"lib","old":false,"new":true},{"kind":"app","old":false,"new":true}]});
+        std::fs::write(
+            stage.join(".transaction.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        initialize_directories(&profile).unwrap();
+        assert!(!profile.join("lib/notes.wasm").exists());
+        assert!(!profile.join("app/notes").exists());
+        assert!(!stage.exists());
+        assert_eq!(
+            std::fs::read(profile.join("lib/unrelated.wasm")).unwrap(),
+            b"unrelated component"
+        );
+        let db = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM package", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
+fn malformed_recovery_journals_preserve_installed_resources_for_manual_repair() {
+    for journal in [
+        serde_json::json!({}),
+        serde_json::json!({"id":"../notes","resources":[]}),
+        serde_json::json!({"id":"alice.dhttp.net/notes","resources":[]}),
+        serde_json::json!({"id":"alice.dhttp.net/notes","resources":[{"kind":"app","old":true,"new":true},{"kind":"lib","old":true,"new":true}]}),
+        serde_json::json!({"id":"alice.dhttp.net/notes","resources":[{"kind":"lib","old":"yes","new":true},{"kind":"app","old":true,"new":true}]}),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let profile = profile(root.path(), "owner");
+        load_server_config(&profile).unwrap();
+        std::fs::write(profile.join("lib/notes.wasm"), b"installed component").unwrap();
+        let stage = profile.join(".pishoo-invalid-journal");
+        std::fs::create_dir(&stage).unwrap();
+        let bytes = serde_json::to_vec(&journal).unwrap();
+        std::fs::write(stage.join(".transaction.json"), &bytes).unwrap();
+        assert!(initialize_directories(&profile).is_err());
+        assert_eq!(
+            std::fs::read(profile.join("lib/notes.wasm")).unwrap(),
+            b"installed component"
+        );
+        assert_eq!(
+            std::fs::read(stage.join(".transaction.json")).unwrap(),
+            bytes
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ownership_traversal_preserves_permissions_and_skips_links_outside_the_identity() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path(), "owner");
+    std::fs::create_dir_all(profile.join("app/notes/assets")).unwrap();
+    std::fs::write(profile.join("app/notes/assets/app.js"), b"static asset").unwrap();
+    std::fs::write(profile.join("lib/std/notes.wasm"), b"component").unwrap();
+    std::fs::set_permissions(
+        profile.join("lib/std/notes.wasm"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let external = root.path().join("external");
+    std::fs::write(&external, b"outside identity").unwrap();
+    std::fs::hard_link(&external, profile.join("app/linked-file")).unwrap();
+    symlink(&external, profile.join("app/external-link")).unwrap();
+    symlink(
+        root.path().join("absent-directory"),
+        profile.join("lib/dangling-link"),
+    )
+    .unwrap();
+    let before = external.metadata().unwrap();
+    let identity = std::fs::File::open(profile.path()).unwrap();
+    let owner = identity.metadata().unwrap();
+    for _ in 0..2 {
+        repair_identity_ownership(&identity, &owner).unwrap();
+        let component = profile.join("lib/std/notes.wasm").metadata().unwrap();
+        assert_eq!(
+            (component.uid(), component.gid()),
+            (owner.uid(), owner.gid())
+        );
+        assert_eq!(component.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(profile.join("app/notes/assets/app.js")).unwrap(),
+            b"static asset"
+        );
+        assert!(
+            profile
+                .join("lib/dangling-link")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let after = external.metadata().unwrap();
+        assert_eq!(
+            (
+                after.ino(),
+                after.nlink(),
+                after.uid(),
+                after.gid(),
+                after.mode()
+            ),
+            (
+                before.ino(),
+                before.nlink(),
+                before.uid(),
+                before.gid(),
+                before.mode()
+            )
+        );
+        assert_eq!(std::fs::read(&external).unwrap(), b"outside identity");
+    }
+}

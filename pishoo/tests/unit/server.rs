@@ -292,6 +292,88 @@ async fn failed_ocsp_refresh_preserves_loaded_credentials_and_cache() {
     server.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn ocsp_fetch_checks_the_request_and_rejects_untrusted_responder_results() {
+    use std::{convert::Infallible, time::Duration};
+
+    use bytes::Bytes;
+    use der::{Decode, Encode};
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::rt::TokioIo;
+    use x509_cert::ext::pkix::{AccessDescription, AuthorityInfoAccessSyntax, name::GeneralName};
+
+    for (status, body, expected) in [
+        (502, b"unavailable".to_vec(), "responder returned 502"),
+        (302, Vec::new(), "responder returned 302"),
+        (200, vec![0; 64 * 1024 + 1], "response exceeds 64KiB"),
+        (200, b"unsigned response".to_vec(), "OCSP:"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}/ocsp", listener.local_addr().unwrap());
+        let aia = AuthorityInfoAccessSyntax(vec![AccessDescription {
+            access_method: "1.3.6.1.5.5.7.48.1".parse().unwrap(),
+            access_location: GeneralName::UniformResourceIdentifier(
+                der::asn1::Ia5String::new(&uri).unwrap(),
+            ),
+        }]);
+        let mut params = rcgen::CertificateParams::new(vec!["owner.dhttp.net".into()]).unwrap();
+        params.serial_number = Some(42u64.into());
+        params
+            .custom_extensions
+            .push(rcgen::CustomExtension::from_oid_content(
+                &[1, 3, 6, 1, 5, 5, 7, 1, 1],
+                aia.to_der().unwrap(),
+            ));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = params.self_signed(&key).unwrap();
+        let certificates = [certificate.der().clone(), certificate.der().clone()];
+        let responder = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let service =
+                hyper::service::service_fn(move |request: http::Request<hyper::body::Incoming>| {
+                    let body = body.clone();
+                    async move {
+                        assert_eq!(request.method(), http::Method::POST);
+                        assert_eq!(request.uri().path(), "/ocsp");
+                        assert_eq!(
+                            request.headers()["content-type"],
+                            "application/ocsp-request"
+                        );
+                        assert_eq!(request.headers()["accept"], "application/ocsp-response");
+                        let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                        let request = x509_ocsp::OcspRequest::from_der(&bytes).unwrap();
+                        assert_eq!(request.tbs_request.request_list.len(), 1);
+                        let id = &request.tbs_request.request_list[0].req_cert;
+                        assert_eq!(id.serial_number.as_bytes(), &[42]);
+                        assert_eq!(id.issuer_name_hash.as_bytes().len(), 20);
+                        assert_eq!(id.issuer_key_hash.as_bytes().len(), 20);
+                        assert!(request.optional_signature.is_none());
+                        Ok::<_, Infallible>(
+                            http::Response::builder()
+                                .status(status)
+                                .header("location", "/must-not-follow")
+                                .body(Full::new(Bytes::from(body)))
+                                .unwrap(),
+                        )
+                    }
+                });
+            // Oversize rejection may close the client before the response is fully written.
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(socket), service)
+                .await;
+        });
+        let error = tokio::time::timeout(Duration::from_secs(5), fetch_ocsp(&certificates))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        tokio::time::timeout(Duration::from_secs(2), responder)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
 fn component(version: &str) -> Vec<u8> {
     let mut bytes = include_bytes!("../fixtures/wasi-http-read-request-then-respond.wasm").to_vec();
     fn leb(mut n: usize, out: &mut Vec<u8>) {
