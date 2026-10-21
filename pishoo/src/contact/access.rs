@@ -95,6 +95,42 @@ pub(super) fn encoded(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+/// Persist only an identity learned through an authenticated peer connection.
+pub(super) async fn record_outbound(
+    access: &AccessService,
+    target: &str,
+    subject: &str,
+    requests: Value,
+    offers: Value,
+    valid_before: i64,
+    started_at: i64,
+) -> Result<(), Failure> {
+    let time = super::now();
+    let contact = access_control::NewContact {
+        name: target.into(),
+        subject_id: access_control::SubjectId::new(subject.as_bytes())
+            .map_err(|_| fail(502, "invalid peer subject"))?,
+        class: "Human".into(),
+        description: String::new(),
+        requested_access: serde_json::from_value(requests).map_err(|e| fail(400, e.to_string()))?,
+        offers: serde_json::from_value(offers).map_err(|e| fail(400, e.to_string()))?,
+        created_at: started_at,
+        updated_at: time,
+        expired_after: valid_before,
+    };
+    access
+        .record_outbound_contact(contact)
+        .await
+        .map_err(|error| {
+            let code = match &error {
+                sea_orm::DbErr::RecordNotUpdated => 409,
+                sea_orm::DbErr::Type(_) => 400,
+                _ => 500,
+            };
+            fail(code, error.to_string())
+        })
+}
+
 // Called only by the owner's submission, before enqueueing. Delivery and
 // acceptance never replay grants or restore permissions the owner revoked.
 pub(super) async fn grant_offered(
@@ -109,12 +145,14 @@ pub(super) async fn grant_offered(
     let existing = match contact(access, endpoint, target).await {
         Ok(contact) => contact,
         Err((404, _)) => {
-            local_api(
+            record_outbound(
                 access,
-                endpoint,
-                Method::PUT,
-                &format!("/std/contact?name={}", encoded(target)),
-                Some(&json!({"subject_id":subject,"class":"Human","description":"","status":"pending","valid_before":valid_before,"requested_access":requested(requests),"offers":offered(capabilities)})),
+                target,
+                subject,
+                requested(requests),
+                offered(capabilities),
+                valid_before,
+                super::now(),
             )
             .await?;
             contact(access, endpoint, target).await?
@@ -132,7 +170,7 @@ pub(super) async fn grant_offered(
                 access,
                 endpoint,
                 Method::PATCH,
-                &format!("/std/acl/allow/{}", encoded(target)),
+                &format!("/std/acl/allow?name={}", encoded(target)),
                 Some(
                     &json!({"api":operation["path"],"method":operation["method"],"effect":"allow"}),
                 ),
