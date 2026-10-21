@@ -58,16 +58,14 @@ tmp/
 TODO
 pishoo.pid
 
-# Local VM acceptance captures and runtime diagnostics
-
 # Local implementation notes and agent working documents
 /CONTEXT.md
 /IMPLEMENTATION.md
 /test.txt
 /design/
 /pishoo/DACCESS.md
-/pishoo/docs/management-design.md
-/pishoo/docs/testing-snapshot.md
-/pishoo/docs/genmeta-pack-implementation.md
-/pishoo/docs/transport-*.md
-/pishoo/docs/transport-*.json
+
+# Local development and release documentation
+/pishoo/docs/
+/RELEASING.md
+/REVIEW-IMPLEMENTATION-*.md
