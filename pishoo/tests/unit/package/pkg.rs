@@ -5,7 +5,8 @@ use webc::v3::write::Directory;
 fn package(version: &str, lib: bool, app: bool) -> Vec<u8> {
     let doc = json!({"openapi":"3.1.0","info":{"title":"Calendar","version":version,"description":"Combined package","license":{"name":"MIT"}},
         "x-pishoo":{"kind":if lib {"lib"} else {"app"},"publisher":"alice.dhttp.net","name":"calendar","host":{},"dependencies":[]},
-        "paths":{"/events":{"post":{"operationId":"events","summary":"Events","responses":{"200":{"description":"ok"}}}}}});
+        "x-access-groups":{"events":{"title":format!("Events {version}"),"operations":["events"]}},
+        "paths":{"/events":{"post":{"operationId":"events","summary":"Events","x-access-group":"events","responses":{"200":{"description":"ok"}}}}}});
     package_fixture(
         &doc,
         include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
@@ -71,30 +72,71 @@ fn unified_package_installs_updates_removes_resources_and_preserves_data() {
 }
 
 #[test]
-fn failed_commit_restores_both_runtime_parts_and_registration() {
+fn failed_commits_restore_runtime_registration_and_permission_declarations() {
     let root = tempfile::tempdir().unwrap();
     let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
     let runtime = WasmRuntime::new().unwrap();
     let id = "alice.dhttp.net/calendar";
-    install_package(&profile, id, &package("1.0.0", true, true), &runtime).unwrap();
-    let previous = std::fs::read(profile.join("lib/calendar.wasm")).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT REFERENCES package(name) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_upgrade AFTER UPDATE ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
-    assert!(install_package(&profile, id, &package("2.0.0", true, true), &runtime).is_err());
-    assert_eq!(
-        std::fs::read(profile.join("lib/calendar.wasm")).unwrap(),
-        previous
-    );
-    assert_eq!(
-        std::fs::read(profile.join("app/calendar/index.html")).unwrap(),
-        b"1.0.0"
-    );
-    assert_eq!(
-        installed_packages(&profile, Some(id)).unwrap()["version"],
-        "1.0.0"
-    );
+    db.execute_batch("CREATE TABLE pkg_registry.fail_commit(name TEXT REFERENCES package(name) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER pkg_registry.reject_install AFTER INSERT ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
+    assert!(install_package(&profile, id, &package("1.0.0", true, true), &runtime).is_err());
+    assert!(!profile.join("lib/calendar.wasm").exists());
+    assert!(!profile.join("app/calendar").exists());
+    for table in ["package", "lib_capability", "lib_capability_operation"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
+    db.execute_batch("DROP TRIGGER pkg_registry.reject_install;")
+        .unwrap();
+    install_package(&profile, id, &package("1.0.0", true, true), &runtime).unwrap();
+    let previous = std::fs::read(profile.join("lib/calendar.wasm")).unwrap();
+    db.execute_batch("CREATE TRIGGER pkg_registry.reject_upgrade AFTER UPDATE ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END; CREATE TRIGGER pkg_registry.reject_removal AFTER DELETE ON package BEGIN INSERT INTO fail_commit VALUES('missing'); END;").unwrap();
+    for version in [Some("2.0.0"), Some("1.0.0"), None] {
+        let result = if let Some(version) = version {
+            install_package(&profile, id, &package(version, true, true), &runtime).map(|_| ())
+        } else {
+            remove_package(&profile, id)
+        };
+        assert!(result.is_err(), "commit must fail for {version:?}");
+        assert_eq!(
+            std::fs::read(profile.join("lib/calendar.wasm")).unwrap(),
+            previous
+        );
+        assert_eq!(
+            std::fs::read(profile.join("app/calendar/index.html")).unwrap(),
+            b"1.0.0"
+        );
+        assert_eq!(
+            installed_packages(&profile, Some(id)).unwrap()["version"],
+            "1.0.0"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT c.title,o.method,o.path FROM acl.lib_capability c JOIN acl.lib_capability_operation o USING(lib_name,capability_id)",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            ).unwrap(),
+            ("Events 1.0.0".into(), "POST".into(), "/calendar/events".into())
+        );
+    }
+    db.execute_batch("DROP TRIGGER pkg_registry.reject_upgrade; DROP TRIGGER pkg_registry.reject_removal; DROP TABLE pkg_registry.fail_commit;").unwrap();
+    remove_package(&profile, id).unwrap();
+    for table in ["package", "lib_capability", "lib_capability_operation"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
 }
 
 #[tokio::test]
