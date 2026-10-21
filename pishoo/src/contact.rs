@@ -1,22 +1,15 @@
 //! Native contact collections and outbound delivery; daccess owns relationships and ACL.
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use access_control::AccessService;
-use axum::{
-    Router,
-    body::Body,
-    response::{IntoResponse, Response},
-    routing::get,
-};
+use axum::{Router, body::Body, response::IntoResponse};
 use dhttp_home::identity::IdentityProfile;
 use http::{Method, Request, StatusCode};
-use http_body_util::BodyExt;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 use tower::ServiceExt;
 
 mod access;
@@ -138,48 +131,39 @@ pub(crate) fn contact_router(
     endpoint: dhttp::Endpoint,
     access: Arc<AccessService>,
 ) -> Router {
-    let avatar_state = (endpoint.clone(), access.clone());
-    crate::routes::access_router(access.clone())
-        .route(
-            "/std/contact/{name}/profile/avatar",
-            get(contact_avatar).with_state(avatar_state),
-        )
-        .layer(axum::middleware::from_fn(
-            move |request: Request<Body>, next: axum::middleware::Next| {
-                let (profile, endpoint, access) =
-                    (profile.clone(), endpoint.clone(), access.clone());
-                async move {
-                    let path = request.uri().path();
-                    if !((path == "/std/contact"
-                        && matches!(
-                            *request.method(),
-                            Method::GET | Method::POST | Method::DELETE
-                        ))
-                        || path == "/std/contact/list" && *request.method() == Method::GET)
-                    {
-                        return next.run(request).await;
-                    }
-                    let result = dispatch(profile, endpoint, access, request).await;
-                    let mut response = match result {
-                        Ok((204, _)) => StatusCode::NO_CONTENT.into_response(),
-                        Ok((status, value)) => {
-                            (StatusCode::from_u16(status).unwrap(), axum::Json(value))
-                                .into_response()
-                        }
-                        Err((status, message)) => (
-                            StatusCode::from_u16(status)
-                                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                            axum::Json(json!({"error":message})),
-                        )
-                            .into_response(),
-                    };
-                    response
-                        .headers_mut()
-                        .insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
-                    response
+    crate::routes::access_router(access.clone()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let (profile, endpoint, access) = (profile.clone(), endpoint.clone(), access.clone());
+            async move {
+                let path = request.uri().path();
+                if !((path == "/std/contact"
+                    && matches!(
+                        *request.method(),
+                        Method::GET | Method::POST | Method::DELETE
+                    ))
+                    || path == "/std/contact/list" && *request.method() == Method::GET)
+                {
+                    return next.run(request).await;
                 }
-            },
-        ))
+                let result = dispatch(profile, endpoint, access, request).await;
+                let mut response = match result {
+                    Ok((204, _)) => StatusCode::NO_CONTENT.into_response(),
+                    Ok((status, value)) => {
+                        (StatusCode::from_u16(status).unwrap(), axum::Json(value)).into_response()
+                    }
+                    Err((status, message)) => (
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        axum::Json(json!({"error":message})),
+                    )
+                        .into_response(),
+                };
+                response
+                    .headers_mut()
+                    .insert(http::header::CACHE_CONTROL, "no-store".parse().unwrap());
+                response
+            }
+        },
+    ))
 }
 
 async fn dispatch(
@@ -612,104 +596,6 @@ async fn dispatch(
 #[cfg(test)]
 #[path = "../tests/unit/contact.rs"]
 mod tests;
-
-async fn contact_avatar(
-    axum::extract::State((endpoint, access)): axum::extract::State<(
-        dhttp::Endpoint,
-        Arc<AccessService>,
-    )>,
-    axum::extract::Path(raw_name): axum::extract::Path<String>,
-) -> Response {
-    let result = async {
-        let target = name(&raw_name)?;
-        let contact = access
-            .find_contact_by_name(&target)
-            .await
-            .map_err(|error| {
-                let status = if matches!(error, sea_orm::DbErr::RecordNotFound(_)) {
-                    404
-                } else {
-                    500
-                };
-                fail(status, error.to_string())
-            })?;
-        let subject = std::str::from_utf8(contact.subject_id.as_bytes())
-            .map_err(|_| fail(409, "invalid contact identity"))?;
-        let expected = dhttp_home::certificate::OwnerHash::try_from(subject)
-            .map_err(|_| fail(409, "invalid contact identity"))?;
-        let uri = format!("https://{target}/std/profile/avatar")
-            .parse::<http::Uri>()
-            .map_err(|_| fail(400, "invalid avatar URI"))?;
-        let (mut writer, response) = endpoint
-            .request(Method::GET, uri)
-            .expect_remote_owner_hash(expected)
-            .body(dhttp::WndBuf::new(65536))
-            .await
-            .map_err(|error| fail(502, error.to_string()))?;
-        writer
-            .shutdown()
-            .await
-            .map_err(|error| fail(502, error.to_string()))?;
-        let response = response
-            .await
-            .map_err(|error| fail(502, error.to_string()))?;
-        let authority = response
-            .extensions()
-            .get::<dhttp::RemoteAuthority>()
-            .ok_or_else(|| fail(502, "missing authenticated avatar identity"))?;
-        if authority.name() != target {
-            return Err(fail(502, "avatar authority mismatch"));
-        }
-        if response.status() != StatusCode::OK {
-            return Err(fail(
-                response.status().as_u16(),
-                "contact avatar unavailable",
-            ));
-        }
-        let content_type = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .cloned()
-            .ok_or_else(|| fail(502, "missing avatar content type"))?;
-        if !matches!(
-            content_type.to_str().unwrap_or_default(),
-            "image/png" | "image/jpeg" | "image/webp"
-        ) {
-            return Err(fail(502, "unsupported avatar content type"));
-        }
-        let mut body = response.into_body();
-        let mut bytes = Vec::new();
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|error| fail(502, error.to_string()))?;
-            if let Ok(data) = frame.into_data() {
-                if data.len() > 2 * 1024 * 1024 - bytes.len() {
-                    return Err(fail(502, "avatar too large"));
-                }
-                bytes.extend_from_slice(&data);
-            }
-        }
-        let mut response = bytes.into_response();
-        response
-            .headers_mut()
-            .insert(http::header::CONTENT_TYPE, content_type);
-        // The peer owns the image. Re-fetch it on the next request; there is no
-        // local override or independent avatar state to reconcile.
-        response.headers_mut().insert(
-            http::header::CACHE_CONTROL,
-            http::HeaderValue::from_static("no-store"),
-        );
-        Ok(response)
-    };
-    match tokio::time::timeout(Duration::from_secs(15), result).await {
-        Ok(Ok(response)) => response,
-        Ok(Err((status, message))) => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            message,
-        )
-            .into_response(),
-        Err(_) => StatusCode::GATEWAY_TIMEOUT.into_response(),
-    }
-}
 
 fn request_expiry(body: &Value) -> Result<i64, Failure> {
     let time = now();

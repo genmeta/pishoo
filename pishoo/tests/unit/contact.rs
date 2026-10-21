@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use http_body_util::BodyExt;
 use rusqlite::Connection;
 use tower::ServiceExt;
 
@@ -8,6 +9,37 @@ use super::{
     capabilities::{catalog, requested},
     *,
 };
+
+#[tokio::test]
+async fn contact_router_does_not_expose_a_profile_avatar_proxy() {
+    let endpoint = crate::test_identity::endpoint("alice.dhttp.net");
+    let access = Arc::new(
+        AccessService::load_from_db(
+            "sqlite::memory:",
+            endpoint.name(),
+            owner(&endpoint).unwrap().subject_id(),
+        )
+        .await
+        .unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let router = contact_router(profile, endpoint, access);
+    for method in [Method::GET, Method::HEAD] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/std/contact/bob.dhttp.net/profile/avatar")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
 
 #[tokio::test]
 async fn offered_capabilities_create_a_pinned_contact_before_granting_selected_operations() {
