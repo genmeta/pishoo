@@ -56,6 +56,7 @@ pub(crate) async fn authorize(
         .and_then(|tail| tail.split('/').next())
         .filter(|name| !name.is_empty())
         .map(|name| format!("/app/{name}"));
+    let app_head = app.is_some() && request.method() == http::Method::HEAD;
     let headers = Headers {
         method: if app.is_some() {
             http::Method::GET
@@ -108,7 +109,21 @@ pub(crate) async fn authorize(
     if !allowed {
         return reject(Error::Denied);
     }
-    next.run(request).await
+    let mut response = next.run(request).await;
+    if app_head {
+        // Let an App read its current transport identity through its existing
+        // page request. Never cache identity-dependent response metadata.
+        let name = visitor.as_ref().map_or("", Visitor::name);
+        let Ok(name) = http::HeaderValue::from_str(name) else {
+            return reject(Error::Denied);
+        };
+        response.headers_mut().insert("pishoo-viewer-name", name);
+        response.headers_mut().insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 
 pub(crate) fn access_router(access: Arc<AccessService>) -> Router {
