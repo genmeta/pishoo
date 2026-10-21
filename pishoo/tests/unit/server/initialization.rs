@@ -102,13 +102,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     assert_eq!(columns, ["key", "value"]);
     assert_eq!(config.listen, "off");
     assert!(config.proxy_locations.is_empty());
-    for table in [
-        "lib",
-        "app",
-        "app_dependency",
-        "lib_dependency",
-        "lib_capability",
-    ] {
+    for table in ["lib", "app", "package_dependency", "lib_capability"] {
         assert_eq!(
             db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
                 .get::<_, i64>(0))
@@ -120,7 +114,7 @@ async fn fresh_identity_initializes_native_databases_without_user_app_data() {
     let access = load_access(&profile, &SubjectId::new(b"owner").unwrap())
         .await
         .unwrap();
-    for name in ["setting", "access", "lib", "app"] {
+    for name in ["setting", "access", "pkg"] {
         assert!(profile.join(format!(".volume/sys/{name}/.db")).is_file());
     }
     for directory in [".volume", "lib", "app", "log", "repo"] {

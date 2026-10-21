@@ -65,7 +65,7 @@ pub(crate) fn read_server_config(conn: &mut Connection) -> Result<ServerConfig> 
     Ok(config)
 }
 
-fn initialize_config(profile: &IdentityProfile) -> Result<()> {
+fn initialize_legacy_config(profile: &IdentityProfile) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::create_dir_all(profile.path())?;
     if !profile.path().symlink_metadata()?.file_type().is_dir() {
@@ -131,7 +131,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let mut conn = open_legacy_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let integrity: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if integrity != "ok" {
         return Err(Error::InvalidConfig(integrity));
@@ -234,7 +234,7 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
     if old_proxy {
         tx.execute_batch("INSERT INTO proxy_location SELECT * FROM proxy_locations;")?;
     }
-    tx.execute_batch(include_str!("package/packages.sql"))?;
+    tx.execute_batch(include_str!("package/legacy-packages.sql"))?;
     for (old, schema, table) in [
         ("libs", "lib_registry", "lib"),
         ("apps", "app_registry", "app"),
@@ -357,11 +357,10 @@ fn initialize_config(profile: &IdentityProfile) -> Result<()> {
         DROP TABLE IF EXISTS main.apps; DROP TABLE IF EXISTS main.libs;
         DROP TABLE IF EXISTS main.proxy_locations; DROP TABLE IF EXISTS main.settings; PRAGMA main.user_version=2;")?;
     tx.commit()?;
-    inherit_config_files(profile)?;
     Ok(())
 }
 
-pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
+fn open_legacy_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
     let current = profile.join(".volume/sys/setting/.db");
     let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
         profile.config_db_path()
@@ -412,6 +411,212 @@ pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result
     Ok(conn)
 }
 
+fn initialize_config(profile: &IdentityProfile) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::create_dir_all(profile.path())?;
+    if !profile.path().symlink_metadata()?.file_type().is_dir() {
+        return Err(Error::InvalidConfig(
+            "identity must be a real directory".into(),
+        ));
+    }
+    let existing = if profile.join(".volume/sys/setting/.db").try_exists()? {
+        profile.join(".volume/sys/setting/.db")
+    } else {
+        profile.config_db_path()
+    };
+    if existing.try_exists()? {
+        if !existing.symlink_metadata()?.file_type().is_file() {
+            return Err(Error::InvalidConfig(
+                "configuration must be a regular file".into(),
+            ));
+        }
+        let previous = Connection::open_with_flags(&existing, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = previous.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let occupied: bool = previous.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |r| r.get(0),
+        )?;
+        drop(previous);
+        if version == 1 {
+            initialize_legacy_config(profile)?;
+        } else if version == 0 && occupied {
+            return Err(Error::InvalidConfig(
+                "unrecognized configuration database; existing data preserved".into(),
+            ));
+        }
+    }
+    for name in [
+        ".volume",
+        ".volume/sys",
+        ".volume/sys/setting",
+        ".volume/sys/pkg",
+        ".volume/sys/access",
+        ".volume/sys/contact",
+    ] {
+        let path = profile.join(name);
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        if !path.symlink_metadata()?.file_type().is_dir() {
+            return Err(Error::InvalidConfig(
+                "volume must contain real directories".into(),
+            ));
+        }
+    }
+    for name in ["setting", "pkg", "access"] {
+        let path = profile.join(format!(".volume/sys/{name}/.db"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut conn = open_config(profile, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(Error::InvalidConfig(check));
+    }
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == 3 {
+        for (schema, table) in [
+            ("main", "setting"),
+            ("main", "proxy_location"),
+            ("pkg_registry", "package"),
+            ("pkg_registry", "package_dependency"),
+            ("acl", "lib_capability"),
+            ("acl", "lib_capability_operation"),
+        ] {
+            if !conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?1)"),[table],|r|r.get::<_,bool>(0))? {
+                return Err(Error::InvalidConfig("incomplete package registry schema".into()));
+            }
+        }
+        return Ok(());
+    }
+    if !matches!(version, 0 | 2) {
+        return Err(Error::InvalidConfig(
+            "unsupported configuration schema; existing data preserved".into(),
+        ));
+    }
+    for schema in ["main", "pkg_registry", "acl"] {
+        conn.execute_batch(&format!(
+            "PRAGMA {schema}.journal_mode=DELETE; PRAGMA {schema}.synchronous=FULL;"
+        ))?;
+    }
+    // Baseline v2 identities retain their old databases. Merge only compatible
+    // same-name resources; ambiguous author/version pairs require explicit resolution.
+    if version == 2 {
+        for (schema, name) in [("old_lib", "lib"), ("old_app", "app")] {
+            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            if !path.symlink_metadata()?.file_type().is_file() {
+                return Err(Error::InvalidConfig(
+                    "legacy package database must be a regular file".into(),
+                ));
+            }
+            let uri = format!(
+                "file:{}?mode=ro",
+                url::Url::from_file_path(path)
+                    .map_err(|_| Error::InvalidConfig("invalid path".into()))?
+                    .path()
+            );
+            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
+        }
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS setting(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS proxy_location(location TEXT PRIMARY KEY NOT NULL,proxy_pass TEXT NOT NULL);")?;
+    tx.execute_batch(include_str!("package/packages.sql"))?;
+    if version == 2 {
+        let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM old_lib.lib l JOIN old_app.app a USING(name) WHERE l.author IS NOT a.author OR l.version<>a.version)", [], |r| r.get(0))?;
+        if conflict {
+            return Err(Error::InvalidConfig(
+                "same-name App/Lib author or version differs; existing packages preserved".into(),
+            ));
+        }
+        let dependency_conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM old_lib.lib_dependency l JOIN old_app.app_dependency a ON l.lib_name=a.app_name AND l.dependency_name=a.lib_name WHERE l.lib_name<>l.dependency_name AND l.version<>a.version)",[],|r|r.get(0))?;
+        if dependency_conflict {
+            return Err(Error::InvalidConfig(
+                "conflicting exact dependencies in same-name App/Lib; existing data preserved"
+                    .into(),
+            ));
+        }
+        tx.execute_batch("INSERT INTO pkg_registry.package SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,1,0 FROM old_lib.lib;
+            INSERT INTO pkg_registry.package SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,0,1 FROM old_app.app WHERE true
+            ON CONFLICT(name) DO UPDATE SET has_app=1;
+            INSERT INTO pkg_registry.package_dependency SELECT lib_name,dependency_name,version FROM old_lib.lib_dependency WHERE lib_name<>dependency_name;
+            INSERT INTO pkg_registry.package_dependency SELECT app_name,lib_name,version FROM old_app.app_dependency WHERE app_name<>lib_name AND true
+            ON CONFLICT(package_name,dependency_name) DO NOTHING;")?;
+        let broken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pkg_registry.package_dependency d LEFT JOIN pkg_registry.package p ON p.name=d.dependency_name WHERE p.name IS NULL OR p.version<>d.version)", [], |r|r.get(0))?;
+        if broken {
+            return Err(Error::InvalidConfig(
+                "broken package dependency; existing data preserved".into(),
+            ));
+        }
+    }
+    tx.pragma_update(None, "user_version", 3)?;
+    tx.commit()?;
+    inherit_config_files(profile)?;
+    Ok(())
+}
+
+pub(crate) fn open_config(profile: &IdentityProfile, flags: OpenFlags) -> Result<Connection> {
+    let current = profile.join(".volume/sys/setting/.db");
+    let db = if !current.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        profile.config_db_path()
+    } else {
+        current
+    };
+    if !db.symlink_metadata()?.file_type().is_file() {
+        return Err(Error::InvalidConfig(
+            "configuration must be a regular file".into(),
+        ));
+    }
+    let conn = Connection::open_with_flags(&db, flags)?;
+    conn.busy_timeout(std::time::Duration::from_secs(3))?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    if db == profile.join(".volume/sys/setting/.db") {
+        for (schema, name) in [("pkg_registry", "pkg"), ("acl", "access")] {
+            let path = profile.join(format!(".volume/sys/{name}/.db"));
+            if !path.try_exists()? && flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                if version < 3 {
+                    continue;
+                }
+            }
+            if !path.symlink_metadata()?.file_type().is_file() {
+                return Err(Error::InvalidConfig(
+                    "attached database must be a regular file".into(),
+                ));
+            }
+            // URI mode prevents reads from creating a missing attached database.
+            let mode = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                "ro"
+            } else {
+                "rw"
+            };
+            let uri = format!(
+                "file:{}?mode={mode}",
+                url::Url::from_file_path(path)
+                    .map_err(|_| Error::InvalidConfig("invalid database path".into()))?
+                    .path()
+            );
+            conn.execute(&format!("ATTACH DATABASE ?1 AS {schema}"), [uri])?;
+        }
+    }
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE schema='pkg_registry' AND name='package')", [], |r|r.get::<_,bool>(0))? {
+        conn.execute_batch("CREATE TEMP VIEW lib AS SELECT * FROM pkg_registry.package WHERE has_lib=1;
+            CREATE TEMP VIEW app AS SELECT * FROM pkg_registry.package WHERE has_app=1;")?;
+    }
+    Ok(conn)
+}
+
 fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -420,7 +625,7 @@ fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
         return Ok(());
     }
     let owner = profile.path().symlink_metadata()?;
-    for name in ["setting", "lib", "app", "access"] {
+    for name in ["setting", "pkg", "access"] {
         let directory = std::fs::File::from(
             rustix::fs::open(
                 profile.join(format!(".volume/sys/{name}")),
@@ -460,7 +665,7 @@ fn inherit_config_files(profile: &IdentityProfile) -> Result<()> {
 
 fn read_config(conn: &Connection) -> Result<ServerConfig> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != 1 && version != 2 {
+    if !matches!(version, 1..=3) {
         return Err(Error::InvalidConfig(format!(
             "unsupported schema {version}"
         )));
@@ -565,7 +770,7 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         return Err(Error::InvalidConfig("proxy cannot occupy /std".into()));
     }
     let has_apps: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='app')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='app')",
         [],
         |row| row.get(0),
     )?;
@@ -585,7 +790,7 @@ fn check_proxy_mounts(conn: &Connection, proxies: &[ProxyLocation]) -> Result<()
         }
     }
     let has_libs: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name='lib')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name='lib')",
         [],
         |row| row.get(0),
     )?;

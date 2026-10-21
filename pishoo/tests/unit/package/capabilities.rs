@@ -11,16 +11,20 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
             // Exercise package registration independently of identity/ACL
             // initialization, using the actual package schema and DB opener.
-            for name in ["setting", "lib", "app", "access"] {
+            for name in ["setting", "pkg", "access"] {
                 let dir = profile.join(format!(".volume/sys/{name}"));
                 std::fs::create_dir_all(&dir).unwrap();
                 std::fs::File::create(dir.join(".db")).unwrap();
             }
-            let mut db =
+            let db =
                 crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
                     .unwrap();
             db.execute_batch(include_str!("../../../src/package/packages.sql"))
                 .unwrap();
+            drop(db);
+            let mut db =
+                crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                    .unwrap();
             let mut document = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
                 "x-pishoo":{"kind":"lib","publisher":publisher,"name":"message","dependencies":[],"host":{"request-identity":"identity"}},
                 "x-access-groups":{"message":{"title":"Receive","operations":["receive"]}},
@@ -47,14 +51,7 @@ async fn access_groups_register_mounted_operations_and_populate_catalog() {
             let package = read_package(&bytes).unwrap();
             let metadata = package_metadata(&package).unwrap();
             let tx = db.transaction().unwrap();
-            save_registration(
-                &tx,
-                &format!("{publisher}/message"),
-                "lib",
-                &metadata,
-                &package,
-            )
-            .unwrap();
+            save_registration(&tx, &format!("{publisher}/message"), &metadata, &package).unwrap();
             tx.commit().unwrap();
             let path = if publisher == "std.dhttp.net" {
                 "/std/message"

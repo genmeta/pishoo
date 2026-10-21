@@ -83,8 +83,7 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
         ".volume/sys/access",
         ".volume/sys/contact",
         ".volume/sys/setting",
-        ".volume/sys/lib",
-        ".volume/sys/app",
+        ".volume/sys/pkg",
         ".volume/std",
         "lib",
         "lib/std",
@@ -260,34 +259,26 @@ pub(super) fn inherit_identity_owner(
 // Temporary operation files are removed after commit. They are not installation
 // metadata: recovery compares complete SQLite facts, then finishes or rolls back.
 fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
-    let mut candidates = Vec::new();
     for entry in std::fs::read_dir(profile.path())? {
         let entry = entry?;
-        if entry
+        if !entry
             .file_name()
             .to_str()
             .is_some_and(|n| n.starts_with(".pishoo-"))
-            && entry.file_type()?.is_dir()
+            || !entry.file_type()?.is_dir()
         {
-            candidates.push(entry.path());
+            continue;
         }
-    }
-    for name in ["lib", "lib/std", "app"] {
-        for entry in std::fs::read_dir(profile.join(name))? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                candidates.push(entry.path());
-            }
-        }
-    }
-    for directory in candidates {
-        let marker = directory.join(".transaction.json");
+        let stage = entry.path();
+        let marker = stage.join(".transaction.json");
         if !marker.try_exists()? {
             continue;
         }
-        let metadata = marker.symlink_metadata()?;
-        if !metadata.file_type().is_file() || metadata.len() > 2 * 1024 * 1024 {
-            return Err(Error::InvalidConfig("invalid package recovery file".into()));
+        let stat = marker.symlink_metadata()?;
+        if !stat.file_type().is_file() || stat.len() > 2 * 1024 * 1024 {
+            return Err(Error::InvalidConfig(
+                "invalid package recovery journal".into(),
+            ));
         }
         let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker)?)
             .map_err(|e| Error::InvalidConfig(e.to_string()))?;
@@ -295,128 +286,75 @@ fn recover_package_files(profile: &IdentityProfile) -> Result<()> {
             .as_str()
             .ok_or_else(|| Error::InvalidConfig("missing recovery identity".into()))?;
         crate::package::valid_id(id)?;
-        let kind = journal["kind"]
-            .as_str()
-            .filter(|k| matches!(*k, "lib" | "app"))
-            .ok_or_else(|| Error::InvalidConfig("invalid recovery kind".into()))?;
         let short = id.rsplit('/').next().unwrap();
-        let target =
-            profile
-                .join(kind)
-                .join(if kind == "lib" && id.starts_with("std.dhttp.net/") {
-                    format!("std/{short}.wasm")
-                } else {
-                    if kind == "lib" {
-                        format!("{short}.wasm")
-                    } else {
-                        short.to_owned()
-                    }
-                });
+        let resources = journal["resources"]
+            .as_array()
+            .filter(|r| r.len() == 2)
+            .ok_or_else(|| Error::InvalidConfig("invalid package recovery resources".into()))?;
         let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let current: String = db.query_row(
             include_str!("../package/registration-facts.sql"),
-            [kind, short],
+            [short],
             |r| r.get(0),
         )?;
         let committed = journal["facts"].as_str() == Some(current.as_str());
-        let live = directory == target;
-        if !live && directory.parent() != Some(profile.path()) {
-            return Err(Error::InvalidConfig(
-                "recovery file is outside its package directory".into(),
-            ));
-        }
-        if kind == "lib" && journal["action"] == "install" {
-            let candidate = directory.join(format!("{short}.wasm"));
-            let previous = directory.join(".previous");
-            if committed {
-                if candidate.try_exists()? {
-                    if target.try_exists()? {
-                        if previous.try_exists()? {
-                            return Err(Error::InvalidConfig(
-                                "conflicting Lib recovery files".into(),
-                            ));
-                        }
-                        std::fs::rename(&target, &previous)?;
-                    }
-                    std::fs::rename(&candidate, &target)?;
-                }
-                if !target.symlink_metadata()?.file_type().is_file() {
-                    return Err(Error::InvalidConfig(
-                        "recovered Lib must be a regular file".into(),
-                    ));
-                }
-            } else if previous.try_exists()? {
-                if target.try_exists()? {
-                    std::fs::remove_file(&target)?;
-                }
-                std::fs::rename(&previous, &target)?;
-            } else if !candidate.try_exists()? && target.try_exists()? {
-                std::fs::remove_file(&target)?;
+        for (resource, kind) in resources.iter().zip(["lib", "app"]) {
+            if resource["kind"] != kind
+                || resource["old"].as_bool().is_none()
+                || resource["new"].as_bool().is_none()
+            {
+                return Err(Error::InvalidConfig("invalid recovery resource".into()));
             }
-            std::fs::remove_dir_all(&directory)?;
-            std::fs::File::open(target.parent().unwrap())?.sync_all()?;
-            std::fs::File::open(profile.path())?.sync_all()?;
-            continue;
-        }
-        match journal["action"].as_str() {
-            Some("remove") if !live => {
-                if !committed {
-                    if target.try_exists()? {
-                        return Err(Error::InvalidConfig("conflicting removal recovery".into()));
-                    }
-                    std::fs::rename(directory.join("artifact"), &target)?;
-                }
-                std::fs::remove_dir_all(&directory)?;
-            }
-            Some("install") => {
-                if committed {
-                    if !live {
-                        if target.try_exists()? {
-                            if directory.join(".previous").try_exists()? {
-                                return Err(Error::InvalidConfig(
-                                    "conflicting installation recovery".into(),
-                                ));
-                            }
-                            std::fs::rename(&target, directory.join(".previous"))?;
-                        }
-                        std::fs::rename(&directory, &target)?;
-                    }
-                    if target.join(".previous").try_exists()? {
-                        std::fs::remove_dir_all(target.join(".previous"))?;
-                    }
-                    std::fs::remove_file(target.join(".transaction.json"))?;
-                    std::fs::File::open(&target)?.sync_all()?;
-                } else if live {
-                    let discarded = profile.join(format!(".pishoo-recover-{kind}-{short}"));
-                    if discarded.try_exists()? {
-                        return Err(Error::InvalidConfig(
-                            "conflicting recovery staging directory".into(),
-                        ));
-                    }
-                    std::fs::rename(&target, &discarded)?;
-                    if discarded.join(".previous").try_exists()? {
-                        std::fs::rename(discarded.join(".previous"), &target)?;
-                    }
-                    std::fs::remove_dir_all(discarded)?;
-                } else {
-                    if directory.join(".previous").try_exists()? {
-                        if target.try_exists()? {
-                            return Err(Error::InvalidConfig(
-                                "conflicting previous package".into(),
-                            ));
-                        }
-                        std::fs::rename(directory.join(".previous"), &target)?;
-                    }
-                    std::fs::remove_dir_all(directory)?;
-                }
-            }
-            _ => {
+            let leaf = if kind == "lib" {
+                format!("{short}.wasm")
+            } else {
+                short.to_owned()
+            };
+            let root = profile.join(if kind == "lib" && id.starts_with("std.dhttp.net/") {
+                "lib/std"
+            } else {
+                kind
+            });
+            if !root.symlink_metadata()?.file_type().is_dir() {
                 return Err(Error::InvalidConfig(
-                    "unknown package recovery action".into(),
+                    "recovery target must be a real directory".into(),
                 ));
             }
+            let target = root.join(&leaf);
+            let backup = stage.join(format!("old-{kind}"));
+            let candidate = if kind == "lib" {
+                stage.join("new-lib").join(&leaf)
+            } else {
+                stage.join("new-app")
+            };
+            let remove = |path: &std::path::Path| -> Result<()> {
+                match path.symlink_metadata() {
+                    Ok(stat) if kind == "lib" && stat.file_type().is_file() => {
+                        std::fs::remove_file(path)?
+                    }
+                    Ok(stat) if kind == "app" && stat.file_type().is_dir() => {
+                        std::fs::remove_dir_all(path)?
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                    _ => return Err(Error::InvalidConfig("invalid recovery file type".into())),
+                }
+                Ok(())
+            };
+            if !committed {
+                if backup.try_exists()? {
+                    remove(&target)?;
+                    std::fs::rename(&backup, &target)?;
+                } else if resource["old"] == false
+                    && resource["new"] == true
+                    && !candidate.try_exists()?
+                {
+                    remove(&target)?;
+                }
+            }
+            std::fs::File::open(root)?.sync_all()?;
         }
-        std::fs::File::open(target.parent().unwrap())?.sync_all()?;
+        std::fs::remove_dir_all(stage)?;
         std::fs::File::open(profile.path())?.sync_all()?;
     }
     Ok(())

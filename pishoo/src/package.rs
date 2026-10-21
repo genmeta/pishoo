@@ -18,14 +18,16 @@ mod manifest;
 mod store;
 
 pub(crate) use files::{
-    disk_bytes, install_app, install_lib, installed_apps, installed_libs, lib_root, remove_app,
-    remove_lib, valid_id,
+    disk_bytes, install_package, installed_apps, installed_packages, lib_root, remove_package,
+    valid_id,
 };
+#[cfg(test)]
+pub(crate) use files::{install_app, install_lib, installed_libs, remove_app, remove_lib};
 pub(crate) use format::{package_file, package_metadata, read_package};
 pub use manifest::{validate_lib, validate_openapi};
+pub(crate) use store::install_store_package;
 #[cfg(test)]
 pub(crate) use store::{STORE_NAME, STORE_OWNER};
-pub(crate) use store::{install_store_app, install_store_lib};
 
 fn require_owner(
     endpoint: &dhttp::Endpoint,
@@ -61,7 +63,7 @@ fn lib_metadata(package: &webc::Container, id: Option<&str>) -> serde_json::Valu
         value.as_object_mut().unwrap().remove("changelog");
     }
     let mut endpoints = Vec::new();
-    if value["kind"] == "lib" {
+    if package.get_atom("backend").is_some() {
         let identity = id.unwrap_or_else(|| value["id"].as_str().unwrap());
         let prefix = if identity.starts_with("std.dhttp.net/") {
             "/std".to_owned()
@@ -112,136 +114,35 @@ pub(crate) fn check_lib(bytes: &[u8], runtime: &WasmRuntime) -> Result<oas3::Ope
 
 // Installation metadata belongs to config.db. Neither payload availability nor
 // the loaded version affects the installed catalog.
-fn installed_catalog(
-    profile: &IdentityProfile,
-    app: bool,
-    name: Option<&str>,
-) -> Result<serde_json::Value> {
-    let path = profile.join(".volume/sys/setting/.db");
-    if !path.symlink_metadata()?.file_type().is_file() {
-        return Err(Error::InvalidConfig(
-            "config.db must be a regular file".into(),
-        ));
-    }
-    let mut conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.busy_timeout(Duration::from_secs(3))?;
-    let conn = conn.transaction()?;
-    let table = if app { "app" } else { "lib" };
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
-        [table],
-        |row| row.get(0),
-    )?;
-    let mut items = Vec::new();
-    if exists {
-        let columns = conn
-            .prepare(&format!("PRAGMA table_info({table})"))?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let author = columns.iter().any(|column| column == "author");
-        let identity = if author {
-            "CASE WHEN author IS NULL THEN name ELSE author||'/'||name END"
-        } else {
-            "id"
-        };
-        let fields = ["title", "description", "license", "repository"].map(|field| {
-            if columns.iter().any(|column| column == field) {
-                field
-            } else {
-                "NULL"
-            }
-        });
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {identity},name,version,{} FROM {table} WHERE ?1 IS NULL OR name=?1 ORDER BY 1",
-            fields.join(","),
-        ))?;
-        for row in stmt.query_map([name], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })? {
-            let (id, name, version, title, description, license, repository) = row?;
-            let mut value = serde_json::json!({
-                "id":id, "name":name, "version":version,
-                "title":title.unwrap_or_else(|| name.clone()), "description":description,
-                "kind":if app {"app"} else {"lib"}, "endpoints":[],
-            });
-            let dates = if columns.iter().any(|c| c == "installed_at") {
-                conn.query_row(
-                    &format!("SELECT installed_at,upgraded_at FROM {table} WHERE name=?1"),
-                    [&name],
-                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
-                )?
-            } else {
-                (None, None)
-            };
-            value["installed_at"] = dates.0.into();
-            value["upgraded_at"] = dates.1.into();
-            if let Some((publisher, _)) = id.split_once('/') {
-                value["author"] = publisher.into();
-            }
-            for (key, field) in [("license", license), ("repository", repository)] {
-                if let Some(field) = field {
-                    value[key] = field.into();
+fn installed_catalog(profile: &IdentityProfile, name: Option<&str>) -> Result<serde_json::Value> {
+    use rusqlite::OptionalExtension;
+    let mut value = if let Some(name) = name {
+        let conn = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let id: String = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package WHERE name=?1",[name],|r|r.get(0)).optional()?.ok_or(Error::RouteNotFound)?;
+        installed_packages(profile, Some(&id))?
+    } else {
+        installed_packages(profile, None)?
+    };
+    let convert = |value: &mut serde_json::Value| {
+        if let Some(deps) = value["dependencies"].as_array_mut() {
+            for dep in deps {
+                if let Some(author) = dep.as_object_mut().and_then(|d| d.remove("publisher")) {
+                    dep["author"] = author;
                 }
             }
-            if app {
-                value["entry"] = "/".into();
-            }
-            let dependencies = if author {
-                let (edges, source, target) = if app {
-                    ("app_dependency", "app_name", "lib_name")
-                } else {
-                    ("lib_dependency", "lib_name", "dependency_name")
-                };
-                conn.prepare(&format!(
-                    "SELECT l.author,l.name,d.version FROM {edges} d JOIN lib l ON l.name=d.{target} WHERE d.{source}=?1 ORDER BY l.author,l.name"
-                ))?.query_map([&name], |row| Ok((row.get::<_, Option<String>>(0)?,
-                    row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-                    .map(|row| {
-                        let (publisher,name,version) = row?;
-                        let publisher = publisher.ok_or_else(|| Error::InvalidConfig("registered dependency author is missing".into()))?;
-                        Ok(serde_json::json!({"author":publisher,"name":name,"version":version}))
-                    }).collect::<Result<Vec<_>>>()?
-            } else {
-                let (edges, source, target) = if app {
-                    ("app_dependency", "app_id", "lib_id")
-                } else {
-                    ("lib_dependency", "lib_id", "dependency_id")
-                };
-                conn.prepare(&format!(
-                    "SELECT {target},version FROM {edges} WHERE {source}=?1 ORDER BY {target}"
-                ))?
-                .query_map([&id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .map(|row| {
-                    let (id, version) = row?;
-                    let (publisher, name) = id.split_once('/').ok_or_else(|| {
-                        Error::InvalidConfig("invalid registered dependency ID".into())
-                    })?;
-                    Ok(serde_json::json!({"author":publisher,"name":name,"version":version}))
-                })
-                .collect::<Result<Vec<_>>>()?
-            };
-            value["dependencies"] = dependencies.into();
-            items.push(value);
         }
-    }
-    if name.is_some() {
-        items.pop().ok_or(Error::RouteNotFound)
+    };
+    if let Some(values) = value.as_array_mut() {
+        for value in values {
+            convert(value);
+        }
     } else {
-        Ok(items.into())
+        convert(&mut value);
     }
+    Ok(value)
 }
 
-pub(crate) fn lib_management_router(
+pub(crate) fn pkg_management_router(
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
     sandbox: Arc<RwLock<Sandbox>>,
@@ -250,7 +151,7 @@ pub(crate) fn lib_management_router(
     let handler = move |request: http::Request<axum::body::Body>| {
         let (profile, endpoint, sandbox) = (profile.clone(), endpoint.clone(), sandbox.clone());
         async move {
-            let mut response = lib_management_request(profile, endpoint, sandbox, request)
+            let mut response = pkg_management_request(profile, endpoint, sandbox, request)
                 .await
                 .unwrap_or_else(|error| {
                     let status = match &error {
@@ -277,14 +178,12 @@ pub(crate) fn lib_management_router(
         }
     };
     axum::Router::new()
-        .route("/std/sys/lib", any(handler.clone()))
-        .route("/std/sys/lib/list", any(handler.clone()))
-        .route("/std/sys/app", any(handler.clone()))
-        .route("/std/sys/app/list", any(handler.clone()))
-        .route("/std/sys/install", any(handler))
+        .route("/std/sys/pkg", any(handler.clone()))
+        .route("/std/sys/pkg/list", any(handler.clone()))
+        .route("/std/sys/pkg/install", any(handler))
 }
 
-async fn lib_management_request(
+async fn pkg_management_request(
     profile: IdentityProfile,
     endpoint: dhttp::Endpoint,
     sandbox: Arc<RwLock<Sandbox>>,
@@ -307,8 +206,7 @@ async fn lib_management_request(
         }
     }
     let path = request.uri().path();
-    let installing = path == "/std/sys/install";
-    let mut app = path == "/std/sys/app" || path.starts_with("/std/sys/app/");
+    let installing = path == "/std/sys/pkg/install";
     let listing = path.ends_with("/list");
     let method = request.method().clone();
     let allow = if installing {
@@ -406,13 +304,13 @@ async fn lib_management_request(
         let input: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|_| Error::BadRequest("invalid store installation JSON".into()))?;
         if input.as_object().is_none_or(|value| {
-            value.len() != 4
+            value.len() != 3
                 || value
                     .keys()
-                    .any(|key| !matches!(key.as_str(), "kind" | "author" | "name" | "version"))
+                    .any(|key| !matches!(key.as_str(), "author" | "name" | "version"))
         }) {
             return Err(Error::BadRequest(
-                "installation requires only kind, author, name and version".into(),
+                "installation requires only author, name and version".into(),
             ));
         }
         let text = |key: &str| {
@@ -421,11 +319,6 @@ async fn lib_management_request(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| Error::BadRequest(format!("missing {key}")))
         };
-        app = match text("kind")? {
-            "app" => true,
-            "lib" => false,
-            _ => return Err(Error::BadRequest("kind must be app or lib".into())),
-        };
         let name = text("name")?;
         valid_id(name)?;
         if name.contains('/') {
@@ -433,27 +326,15 @@ async fn lib_management_request(
                 "name must be a package short name".into(),
             ));
         }
-        let mut value = if app {
-            install_store_app(
-                &profile,
-                &endpoint,
-                text("author")?,
-                name,
-                text("version")?,
-                &sandbox,
-            )
-            .await?
-        } else {
-            install_store_lib(
-                &profile,
-                &endpoint,
-                text("author")?,
-                name,
-                text("version")?,
-                &sandbox,
-            )
-            .await?
-        };
+        let mut value = install_store_package(
+            &profile,
+            &endpoint,
+            text("author")?,
+            name,
+            text("version")?,
+            &sandbox,
+        )
+        .await?;
         if let Some(author) = value
             .as_object_mut()
             .and_then(|value| value.remove("publisher"))
@@ -473,9 +354,9 @@ async fn lib_management_request(
         return Ok(axum::Json(value).into_response());
     }
     if method == Method::GET {
-        let detail = !app && id.is_some();
+        let detail = id.is_some();
         let mut value =
-            tokio::task::spawn_blocking(move || installed_catalog(&profile, app, id.as_deref()))
+            tokio::task::spawn_blocking(move || installed_catalog(&profile, id.as_deref()))
                 .await??;
         if detail {
             let loaded = sandbox
@@ -538,34 +419,7 @@ async fn lib_management_request(
         }
         let conn = crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(3))?;
-        let table = if app { "app" } else { "lib" };
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
-            [table],
-            |row| row.get(0),
-        )?;
-        let registered: Option<String> = if exists {
-            let author: bool = conn.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='author')"
-                ),
-                [],
-                |row| row.get(0),
-            )?;
-            let identity = if author {
-                "CASE WHEN author IS NULL THEN name ELSE author||'/'||name END"
-            } else {
-                "id"
-            };
-            conn.query_row(
-                &format!("SELECT {identity} FROM {table} WHERE name=?1"),
-                [name],
-                |row| row.get(0),
-            )
-            .optional()?
-        } else {
-            None
-        };
+        let registered: Option<String> = conn.query_row("SELECT CASE WHEN author IS NULL THEN name ELSE author||'/'||name END FROM package WHERE name=?1",[name],|r|r.get(0)).optional()?;
         if let Some(expected) = &expected_id
             && registered.as_deref().map(str::as_bytes) != Some(expected.as_bytes())
         {
@@ -587,13 +441,9 @@ async fn lib_management_request(
                 "invalid installed package name".into(),
             ));
         }
-        if app {
-            remove_app(&profile, &registered)?;
-            sandbox.apps.remove(&registered);
-        } else {
-            remove_lib(&profile, &registered)?;
-            sandbox.libs.remove(&registered);
-        }
+        remove_package(&profile, &registered)?;
+        sandbox.apps.remove(&registered);
+        sandbox.libs.remove(&registered);
         Ok(())
     })
     .await??;

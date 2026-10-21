@@ -116,8 +116,11 @@ fn disk_catalog_reports_invalid_components_and_rejects_layout_escapes() {
     ));
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute("INSERT INTO lib(name,version) VALUES('broken','1.0.0')", [])
-        .unwrap();
+    db.execute(
+        "INSERT INTO package(has_lib,has_app,name,version) VALUES(1,0,'broken','1.0.0')",
+        [],
+    )
+    .unwrap();
     let list = installed_libs(&profile, None).unwrap();
     assert_eq!(list[0]["id"], "broken");
     assert_eq!(list[0]["title"], "broken");
@@ -303,8 +306,8 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     .unwrap();
     sandbox.load_libs(&profile).unwrap();
     let sandbox = Arc::new(RwLock::new(sandbox));
-    let router = lib_management_router(profile.clone(), endpoint(), sandbox.clone());
-    let path = "/std/sys/lib?name=note";
+    let router = pkg_management_router(profile.clone(), endpoint(), sandbox.clone());
+    let path = "/std/sys/pkg?name=note";
     let response = router
         .clone()
         .oneshot(request(Method::GET, path, AxumBody::empty()))
@@ -332,7 +335,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     assert!(value["openapi"]["paths"].get("/upload").is_some());
     let response = router
         .clone()
-        .oneshot(request(Method::GET, "/std/sys/lib/list", AxumBody::empty()))
+        .oneshot(request(Method::GET, "/std/sys/pkg/list", AxumBody::empty()))
         .await
         .unwrap();
     let list: Value = serde_json::from_slice(
@@ -346,7 +349,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     let database =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     database
-        .execute("UPDATE lib SET version='2.0.0' WHERE name='note'", [])
+        .execute("UPDATE package SET version='2.0.0' WHERE name='note'", [])
         .unwrap();
     let response = router
         .clone()
@@ -363,7 +366,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
     assert!(value.get("openapi").is_none());
     assert_eq!(value["endpoints"], serde_json::json!([]));
     database
-        .execute("UPDATE lib SET version='1.2.3' WHERE name='note'", [])
+        .execute("UPDATE package SET version='1.2.3' WHERE name='note'", [])
         .unwrap();
     for old in [
         "/std/sys/package/lib",
@@ -442,7 +445,7 @@ async fn installed_catalog_and_delete_preserve_complete_identity_and_data() {
 async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let router = lib_management_router(
+    let router = pkg_management_router(
         profile.clone(),
         endpoint(),
         Arc::new(RwLock::new(Sandbox::new(Arc::new(
@@ -454,7 +457,6 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         json!(null),
         json!([]),
         json!({"kind":"lib","publisher":"alice.dhttp.net","name":"note","version":"1.0.0"}),
-        json!({"author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"invalid","author":"alice.dhttp.net","name":"note","version":"1.0.0"}),
         json!({"kind":"lib","author":1,"name":"note","version":"1.0.0"}),
         json!({"kind":"lib","author":"alice.dhttp.net","name":"alice/note","version":"1.0.0"}),
@@ -467,7 +469,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/std/sys/install",
+                "/std/sys/pkg/install",
                 AxumBody::from(body.to_string()),
             ))
             .await
@@ -484,7 +486,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
     ] {
         let mut raw = request(
             Method::POST,
-            "/std/sys/install",
+            "/std/sys/pkg/install",
             AxumBody::from(component("1")),
         );
         raw.headers_mut()
@@ -494,7 +496,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
     }
-    let mut missing_type = request(Method::POST, "/std/sys/install", AxumBody::from("{}"));
+    let mut missing_type = request(Method::POST, "/std/sys/pkg/install", AxumBody::from("{}"));
     missing_type.headers_mut().remove("content-type");
     assert_eq!(
         router.clone().oneshot(missing_type).await.unwrap().status(),
@@ -502,7 +504,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
     );
     let mut media = request(
         Method::POST,
-        "/std/sys/install",
+        "/std/sys/pkg/install",
         AxumBody::from(
             json!({"kind":"lib","author":"alice.dhttp.net","name":"note","version":"01.0.0"})
                 .to_string(),
@@ -525,9 +527,9 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
         .contains("version")
     );
     for uri in [
-        "/std/sys/install?kind=lib",
-        "/std/sys/install?name=note",
-        "/std/sys/install?",
+        "/std/sys/pkg/install?kind=lib",
+        "/std/sys/pkg/install?name=note",
+        "/std/sys/pkg/install?",
     ] {
         assert_eq!(
             router
@@ -544,7 +546,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/std/sys/install",
+                "/std/sys/pkg/install",
                 AxumBody::from(" ".repeat(4097))
             ))
             .await
@@ -552,7 +554,7 @@ async fn install_requires_exact_body_fields_and_resource_put_is_removed() {
             .status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
-    for kind in ["lib", "app"] {
+    for kind in ["pkg"] {
         for method in [Method::POST, Method::PUT] {
             let response = router
                 .clone()
@@ -604,12 +606,12 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
     let sandbox = Arc::new(RwLock::new(Sandbox::new(Arc::new(
         WasmRuntime::new().unwrap(),
     ))));
-    let router = lib_management_router(profile.clone(), endpoint(), sandbox.clone());
+    let router = pkg_management_router(profile.clone(), endpoint(), sandbox.clone());
     for (path, method, allow) in [
-        ("/std/sys/lib/list", Method::POST, "GET"),
-        ("/std/sys/lib/list", Method::PUT, "GET"),
-        ("/std/sys/lib?name=note", Method::PATCH, "GET, DELETE"),
-        ("/std/sys/app?name=note", Method::HEAD, "GET, DELETE"),
+        ("/std/sys/pkg/list", Method::POST, "GET"),
+        ("/std/sys/pkg/list", Method::PUT, "GET"),
+        ("/std/sys/pkg?name=note", Method::PATCH, "GET, DELETE"),
+        ("/std/sys/pkg?name=note", Method::HEAD, "GET, DELETE"),
     ] {
         let response = router
             .clone()
@@ -620,7 +622,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
         assert_eq!(response.headers()["allow"], allow);
     }
     for version in ["v2", "v2, v1"] {
-        let mut req = request(Method::GET, "/std/sys/lib/list", AxumBody::empty());
+        let mut req = request(Method::GET, "/std/sys/pkg/list", AxumBody::empty());
         req.headers_mut()
             .insert("accept-versions", version.parse().unwrap());
         assert_eq!(
@@ -647,9 +649,9 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             let mut req = request(
                 method.clone(),
                 if method == Method::POST {
-                    "/std/sys/install"
+                    "/std/sys/pkg/install"
                 } else {
-                    "/std/sys/lib?name=note"
+                    "/std/sys/pkg?name=note"
                 },
                 AxumBody::from("{}"),
             );
@@ -667,9 +669,9 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
         let mut req = request(
             method.clone(),
             if method == Method::POST {
-                "/std/sys/install"
+                "/std/sys/pkg/install"
             } else {
-                "/std/sys/lib?name=note"
+                "/std/sys/pkg?name=note"
             },
             AxumBody::empty(),
         );
@@ -682,7 +684,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             StatusCode::BAD_REQUEST
         );
     }
-    let mut trailer = request(Method::POST, "/std/sys/install", AxumBody::from("{}"));
+    let mut trailer = request(Method::POST, "/std/sys/pkg/install", AxumBody::from("{}"));
     trailer
         .headers_mut()
         .insert("trailer", "signature".parse().unwrap());
@@ -699,7 +701,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/std/sys/install",
+                "/std/sys/pkg/install",
                 AxumBody::from_stream(broken)
             ))
             .await
@@ -712,7 +714,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
             .clone()
             .oneshot(request(
                 Method::GET,
-                "/std/sys/lib/list",
+                "/std/sys/pkg/list",
                 AxumBody::from("x")
             ))
             .await
@@ -724,7 +726,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
     assert_eq!(
         router
             .clone()
-            .oneshot(request(Method::GET, "/std/sys/lib/list", AxumBody::empty()))
+            .oneshot(request(Method::GET, "/std/sys/pkg/list", AxumBody::empty()))
             .await
             .unwrap()
             .status(),
@@ -734,7 +736,7 @@ async fn management_protocol_preserves_owner_version_headers_body_limits_and_clo
         router
             .oneshot(request(
                 Method::DELETE,
-                "/std/sys/lib?name=note",
+                "/std/sys/pkg?name=note",
                 AxumBody::empty()
             ))
             .await
@@ -762,7 +764,7 @@ async fn another_authors_same_name_install_preserves_legacy_data_before_store_re
     let original = loaded.libs[id].clone();
     assert!(!profile.join("db/note").exists());
     let sandbox = Arc::new(RwLock::new(loaded));
-    let router = lib_management_router(profile.clone(), endpoint(), sandbox.clone());
+    let router = pkg_management_router(profile.clone(), endpoint(), sandbox.clone());
     // No store network is initialized by this fixture. The installed-name
     // conflict must be recognized before resolving or downloading bob/note,
     // and before preparing a candidate's new db/note directory.
@@ -770,9 +772,10 @@ async fn another_authors_same_name_install_preserves_legacy_data_before_store_re
         Duration::from_secs(2),
         router.oneshot(request(
             Method::POST,
-            "/std/sys/install",
+            "/std/sys/pkg/install",
             AxumBody::from(
-                serde_json::json!({"kind":"lib","author":"bob.dhttp.net","name":"note","version":"1.0.0"}).to_string(),
+                serde_json::json!({"author":"bob.dhttp.net","name":"note","version":"1.0.0"})
+                    .to_string(),
             ),
         )),
     )

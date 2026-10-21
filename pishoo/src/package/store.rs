@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 
 use crate::sandbox::Lib;
 
-use super::{Sandbox, install_app, install_lib, package_file, package_metadata, read_package};
+use super::{Sandbox, install_package, installed_packages, package_metadata, read_package};
+#[cfg(test)]
+use super::{install_lib, package_file};
 use crate::{Error, Result};
 
 pub(crate) const STORE_NAME: &str = "store.dhttp.net";
@@ -20,23 +22,11 @@ pub(crate) const STORE_NAME: &str = "store.dhttp.net";
 pub(crate) const STORE_OWNER: &str =
     "ffc3e50e1dfb7baca1cc07a7cbfcf8cb34a9bf5a9c25024fcf9a9786bb230746";
 
-pub(crate) async fn install_store_lib(
-    profile: &IdentityProfile,
-    endpoint: &dhttp::Endpoint,
-    publisher: &str,
-    name: &str,
-    version: &str,
-    sandbox: &Arc<RwLock<Sandbox>>,
-) -> Result<Value> {
-    install_store_artifact(profile, endpoint, "lib", publisher, name, version, sandbox).await
-}
-
 async fn download_release(
     endpoint: &dhttp::Endpoint,
     publisher: &str,
     name: &str,
     version: &str,
-    kind: &str,
 ) -> Result<Vec<u8>> {
     let id = format!("{publisher}/{name}");
     super::valid_id(&id)?;
@@ -53,23 +43,17 @@ async fn download_release(
             "version must be MAJOR.MINOR.PATCH".into(),
         ));
     }
-    let collection = if kind == "app" { "apps" } else { "libs" };
-    let path = format!("/store/v1/{collection}/{publisher}/{name}/versions/{version}");
+    let path = format!("/store/v1/packages/{publisher}/{name}/versions/{version}");
     let metadata: Value =
         serde_json::from_slice(&store_get(endpoint, &path, 2 * 1024 * 1024).await?)
             .map_err(|_| Error::InvalidComponent("invalid store metadata".into()))?;
-    let download = format!("{path}/{kind}.webc");
+    let download = format!("{path}/package.pkg");
     if metadata["id"] != id
         || metadata["publisher"] != publisher
         || metadata["name"] != name
         || metadata["version"] != version
         || metadata["status"] != "published"
         || metadata["download_path"] != download
-        || metadata
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("lib")
-            != kind
     {
         return Err(Error::InvalidComponent(
             "store release identity, status or download path changed".into(),
@@ -86,44 +70,23 @@ async fn download_release(
     Ok(bytes)
 }
 
-pub(crate) async fn install_store_app(
+pub(crate) async fn install_store_package(
     profile: &IdentityProfile,
     endpoint: &dhttp::Endpoint,
-    publisher: &str,
-    name: &str,
-    version: &str,
-    sandbox: &Arc<RwLock<Sandbox>>,
-) -> Result<Value> {
-    install_store_artifact(profile, endpoint, "app", publisher, name, version, sandbox).await
-}
-
-// Fetch each release proof once, then prepare and install dependencies first.
-async fn install_store_artifact(
-    profile: &IdentityProfile,
-    endpoint: &dhttp::Endpoint,
-    kind: &str,
     publisher: &str,
     name: &str,
     version: &str,
     sandbox: &Arc<RwLock<Sandbox>>,
 ) -> Result<Value> {
     let root_id = format!("{publisher}/{name}");
-    let mut pending = vec![(
-        kind.to_owned(),
-        publisher.to_owned(),
-        name.to_owned(),
-        version.to_owned(),
-    )];
-    let mut resources: Vec<(String, String, Vec<u8>, bool)> = Vec::new();
-    while let Some((selected, publisher, name, version)) = pending.pop() {
+    super::valid_id(&root_id)?;
+    let installed = installed_packages(profile, None)?;
+    let mut pending = vec![(publisher.to_owned(), name.to_owned(), version.to_owned())];
+    let mut resources: Vec<(String, Vec<u8>)> = Vec::new();
+    while let Some((publisher, name, version)) = pending.pop() {
         let id = format!("{publisher}/{name}");
-        if let Some((_, _, bytes, _)) = resources
-            .iter()
-            .find(|(kind, key, _, _)| kind == &selected && key == &id)
-        {
-            let package = read_package(bytes)?;
-            let document = package_metadata(&package)?;
-            if document["version"] != version {
+        if let Some((_, bytes)) = resources.iter().find(|(key, _)| key == &id) {
+            if package_metadata(&read_package(bytes)?)?["version"] != version {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("conflicting dependency versions for {id}"),
@@ -131,112 +94,89 @@ async fn install_store_artifact(
             }
             continue;
         }
-        if selected == "lib"
-            && resources
-                .iter()
-                .filter(|(kind, _, _, _)| kind == "lib")
-                .count()
-                >= 100
-        {
+        if resources.len() >= 100 {
             return Err(Error::BadRequest(
-                "installation requires more than 100 backend Libs".into(),
+                "installation exceeds 100 packages".into(),
             ));
         }
-        // Reject a different author's same-name Lib before preparing its data
-        // directory. A rejected candidate must not shadow existing legacy data.
-        if selected == "lib" {
-            let installed = super::installed_libs(profile, None)?;
-            if installed
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["name"] == name && entry["id"] != id)
-                || resources.iter().any(|(other_kind, other_id, _, _)| {
-                    other_kind == "lib"
-                        && other_id != &id
-                        && other_id.rsplit('/').next() == Some(name.as_str())
-                })
-            {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Lib name {name} is already installed by another author"),
-                )));
-            }
-        }
-        let current = if selected == "lib" && !(kind == "lib" && id == root_id) {
-            sandbox
-                .read()
-                .unwrap()
-                .libs
-                .get(&id)
-                .map(|lib| lib.openapi.info.version.clone())
-        } else {
-            None
-        };
-        if current
-            .as_deref()
-            .is_some_and(|installed| installed != version)
+        if resources
+            .iter()
+            .any(|(other, _)| other != &id && other.rsplit('/').next() == Some(name.as_str()))
         {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("dependency {id} requires {version}; an incompatible version is installed"),
+                "conflicting package authors",
             )));
         }
-        // Reuse an installed dependency by its registered identity and exact version.
-        // Legacy catalogs are migrated through a normal explicit installation.
-        let reused = current.is_some() && can_reuse_lib(profile, &id, &version)?;
-        let bytes = download_release(endpoint, &publisher, &name, &version, &selected).await?;
-        let package = read_package(&bytes)?;
-        let document = package_metadata(&package)?;
-        for dependency in document["dependencies"].as_array().into_iter().flatten() {
+        if installed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == name && entry["id"] != id)
+        {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("package {name} is already installed by another author"),
+            )));
+        }
+        let bytes = download_release(endpoint, &publisher, &name, &version).await?;
+        let document = package_metadata(&read_package(&bytes)?)?;
+        for dep in document["dependencies"].as_array().unwrap() {
             pending.push((
-                "lib".into(),
-                dependency["publisher"].as_str().unwrap().to_owned(),
-                dependency["name"].as_str().unwrap().to_owned(),
-                dependency["version"].as_str().unwrap().to_owned(),
+                dep["publisher"].as_str().unwrap().to_owned(),
+                dep["name"].as_str().unwrap().to_owned(),
+                dep["version"].as_str().unwrap().to_owned(),
             ));
         }
-        resources.push((selected, id, bytes, reused));
+        resources.push((id, bytes));
     }
-    let resources = order_releases(resources)?;
+    let ordered = order_packages(resources)?;
     tokio::task::block_in_place(|| {
         let mut sandbox = sandbox.write().unwrap();
-        let runtime = sandbox.runtime.clone();
         if sandbox.tasks.is_closed() {
             return Err(Error::Denied);
         }
-        for (kind, id, bytes, reused) in &resources {
-            if kind != "lib" || !reused {
-                continue;
-            }
-            let current = sandbox.libs.get(id).ok_or_else(|| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("dependency {id} changed during installation; retry"),
-                ))
-            })?;
-            let document = package_metadata(&read_package(bytes)?)?;
-            let version = document["version"].as_str().unwrap();
-            if current.openapi.info.version != version || !can_reuse_lib(profile, id, version)? {
+        let runtime = sandbox.runtime.clone();
+        let mut result = Value::Null;
+        for (id, bytes) in ordered {
+            let metadata = package_metadata(&read_package(&bytes)?)?;
+            let current = match installed_packages(profile, Some(&id)) {
+                Ok(value) => Some(value),
+                Err(Error::RouteNotFound) => None,
+                Err(e) => return Err(e),
+            };
+            let reused = id != root_id
+                && current.as_ref().is_some_and(|value| {
+                    value["version"] == metadata["version"]
+                        && value["has_lib"] == metadata["has_lib"]
+                        && value["has_app"] == metadata["has_app"]
+                })
+                && (metadata["has_lib"] != true
+                    || sandbox.libs.get(&id).is_some_and(|lib| {
+                        Some(lib.openapi.info.version.as_str()) == metadata["version"].as_str()
+                    }))
+                && (metadata["has_app"] != true
+                    || sandbox.apps.get(&id).is_some_and(|app| {
+                        package_metadata(app)
+                            .is_ok_and(|value| value["version"] == metadata["version"])
+                    }));
+            if id != root_id
+                && current
+                    .as_ref()
+                    .is_some_and(|v| v["version"] != metadata["version"])
+            {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("dependency {id} changed during installation; retry"),
+                    format!("incompatible installed dependency {id}"),
                 )));
             }
-        }
-        let mut result = Value::Null;
-        for (selected, id, bytes, reused) in resources {
-            let value = if selected == "lib" {
-                if reused {
-                    super::installed_libs(profile, Some(&id))?
-                } else {
-                    let value = install_lib(profile, &id, &bytes, &runtime)?;
+            if !reused {
+                let value = install_package(profile, &id, &bytes, &runtime)?;
+                // Prepare both runtime projections, then replace them while the
+                // existing Sandbox write lock excludes new request snapshots.
+                let lib = if metadata["has_lib"] == true {
                     let package = super::disk_bytes(profile, &super::lib_root(profile)?, &id)?;
-                    // Prepare the private data grant only after installation
-                    // has passed its name, dependency, route and ACL checks.
-                    // Failed requests must not create a directory that shadows
-                    // preserved data in an older author-based layout.
-                    let lib = Arc::new(Lib::load(
+                    Some(Arc::new(Lib::load(
                         runtime.clone(),
                         id.clone(),
                         &package,
@@ -247,81 +187,53 @@ async fn install_store_artifact(
                             } else {
                                 id.rsplit('/').next().unwrap().to_owned()
                             }),
-                    )?);
+                    )?))
+                } else {
+                    None
+                };
+                let app = if metadata["has_app"] == true {
+                    super::installed_apps(profile, Some(&id))?.remove(&id)
+                } else {
+                    None
+                };
+                sandbox.libs.remove(&id);
+                sandbox.apps.remove(&id);
+                if let Some(lib) = lib {
                     sandbox.libs.insert(id.clone(), lib);
-                    value
                 }
-            } else {
-                let value = install_app(profile, &id, &bytes)?;
-                let package = super::installed_apps(profile, Some(&id))?
-                    .remove(&id)
-                    .ok_or(Error::RouteNotFound)?;
-                sandbox.apps.insert(id.clone(), package);
-                value
-            };
-            if selected == kind && id == root_id {
-                result = value;
+                if let Some(app) = app {
+                    sandbox.apps.insert(id.clone(), app);
+                }
+                if id == root_id {
+                    result = value;
+                }
             }
         }
         Ok(result)
     })
 }
 
-fn can_reuse_lib(profile: &IdentityProfile, id: &str, version: &str) -> Result<bool> {
-    let Some((author, name)) = id.split_once('/') else {
-        return Ok(false);
-    };
-    let db = crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let modern: bool = db.query_row(
-        "SELECT count(*)=2 FROM pragma_table_info('lib') WHERE name IN ('author','version')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !modern {
-        return Ok(false);
-    }
-    Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM lib WHERE author=?1 AND name=?2 AND version=?3)",
-        [author, name, version],
-        |row| row.get(0),
-    )?)
-}
-
-fn order_releases(
-    mut pending: Vec<(String, String, Vec<u8>, bool)>,
-) -> Result<Vec<(String, String, Vec<u8>, bool)>> {
-    let mut ordered: Vec<(String, String, Vec<u8>, bool)> = Vec::new();
-    while !pending.is_empty() {
+fn order_packages(mut resources: Vec<(String, Vec<u8>)>) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut ordered: Vec<(String, Vec<u8>)> = Vec::new();
+    while !resources.is_empty() {
         let mut ready = None;
-        for (index, (_, _, bytes, _)) in pending.iter().enumerate() {
-            let package = read_package(bytes)?;
-            let document = package_metadata(&package)?;
-            if document["dependencies"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .all(|dependency| {
-                    let id = format!(
+        for (index, (_, bytes)) in resources.iter().enumerate() {
+            let doc = package_metadata(&read_package(bytes)?)?;
+            if doc["dependencies"].as_array().unwrap().iter().all(|dep| {
+                ordered.iter().any(|(id, _)| {
+                    id == &format!(
                         "{}/{}",
-                        dependency["publisher"].as_str().unwrap(),
-                        dependency["name"].as_str().unwrap()
-                    );
-                    ordered
-                        .iter()
-                        .any(|(kind, key, _, _)| kind == "lib" && key == &id)
+                        dep["publisher"].as_str().unwrap(),
+                        dep["name"].as_str().unwrap()
+                    )
                 })
-            {
+            }) {
                 ready = Some(index);
                 break;
             }
         }
-        let index = ready.ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "cyclic or incomplete backend dependency graph",
-            ))
-        })?;
-        ordered.push(pending.remove(index));
+        let index = ready.ok_or_else(|| Error::BadRequest("cyclic package dependencies".into()))?;
+        ordered.push(resources.remove(index));
     }
     Ok(ordered)
 }
@@ -333,7 +245,7 @@ async fn store_get(endpoint: &dhttp::Endpoint, path: &str, limit: usize) -> Resu
             .map_err(|_| Error::BadRequest("invalid store URI".into()))?;
         let owner = dhttp_home::certificate::OwnerHash::try_from(STORE_OWNER)
             .map_err(|_| Error::InvalidIdentity("invalid pinned store identity".into()))?;
-        let content_type = if path.ends_with(".webc") {
+        let content_type = if path.ends_with(".pkg") {
             "application/webc"
         } else {
             "application/json"
@@ -426,22 +338,12 @@ fn verify_release(
         .unwrap();
     let envelope: Value =
         serde_json::from_slice(&data).map_err(|_| invalid("invalid signature envelope"))?;
-    // App manifests omit host, while the store's common response shape uses
-    // an empty object. Only that empty projection is equivalent to absence.
-    let host_matches = if document["kind"] == "app" {
-        metadata.get("host").is_none_or(|host| {
-            host.is_null() || host.as_object().is_some_and(|host| host.is_empty())
-        })
-    } else {
-        metadata.get("host").filter(|host| !host.is_null()) == document.get("host")
-    };
     if document["publisher"] != publisher
         || document["name"] != name
         || document["version"] != version
-        || ["kind", "dependencies", "title", "description", "changelog"]
+        || ["dependencies", "title", "description", "changelog"]
             .iter()
             .any(|key| metadata[*key] != document[*key])
-        || !host_matches
         || metadata
             .get("entry")
             .is_some_and(|entry| Some(entry) != document.get("entry"))
@@ -452,15 +354,6 @@ fn verify_release(
         return Err(invalid(
             "store metadata differs from signed package manifest",
         ));
-    }
-    if document["kind"] == "lib" {
-        let api: Value = serde_json::from_slice(&package_file(&package, "/metadata/openapi.json")?)
-            .map_err(|_| invalid("invalid package OpenAPI"))?;
-        if metadata["openapi"] != api {
-            return Err(invalid("store OpenAPI differs from signed package"));
-        }
-    } else if metadata.get("openapi").is_some() {
-        return Err(invalid("App proof must not contain OpenAPI"));
     }
     if envelope["certificates"] != metadata["signer_certificates"] {
         return Err(invalid(
