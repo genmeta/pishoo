@@ -224,6 +224,7 @@ fn write_declarations(
             }
         }
     }
+    let mut rows = Vec::new();
     for group in groups {
         let object = group
             .as_object()
@@ -239,7 +240,7 @@ fn write_declarations(
         if id.contains('/') || !ids.insert(id) {
             return Err(Error::BadRequest("invalid or duplicate group id".into()));
         }
-        object
+        let title = object
             .get("title")
             .and_then(Value::as_str)
             .filter(|title| !title.trim().is_empty() && !title.chars().any(char::is_control))
@@ -249,6 +250,7 @@ fn write_declarations(
             .and_then(Value::as_array)
             .filter(|values| !values.is_empty())
             .ok_or_else(|| Error::BadRequest("group must contain endpoints".into()))?;
+        let mut declared = Vec::new();
         for operation in operations {
             if operation.as_object().is_none_or(|object| object.len() != 2) {
                 return Err(Error::BadRequest(
@@ -262,31 +264,39 @@ fn write_declarations(
                 .as_str()
                 .ok_or_else(|| Error::BadRequest("invalid endpoint path".into()))?;
             let endpoint = (method.to_owned(), path.to_owned());
-            if !available.contains(&endpoint) || !endpoints.insert(endpoint) {
+            if !available.contains(&endpoint) || !endpoints.insert(endpoint.clone()) {
                 return Err(Error::BadRequest(
                     "endpoint is unavailable or belongs to multiple groups".into(),
                 ));
             }
+            declared.push(endpoint);
         }
+        rows.push((id.to_owned(), title.to_owned(), declared));
     }
+    permissions(&tx, name, &rows)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Replace validated declarations using the caller's transaction. An empty
+/// slice deletes them. Locking, commit and rollback remain with the caller.
+pub(crate) fn permissions(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    groups: &[(String, String, Vec<(String, String)>)],
+) -> Result<()> {
     tx.execute("DELETE FROM acl.lib_capability WHERE lib_name=?1", [name])?;
-    for group in groups {
+    for (id, title, endpoints) in groups {
         tx.execute(
             "INSERT INTO acl.lib_capability VALUES(?1,?2,?3)",
-            rusqlite::params![name, group["id"].as_str(), group["title"].as_str()],
+            rusqlite::params![name, id, title],
         )?;
-        for endpoint in group["endpoints"].as_array().unwrap() {
+        for (method, path) in endpoints {
             tx.execute(
                 "INSERT INTO acl.lib_capability_operation VALUES(?1,?2,?3,?4)",
-                rusqlite::params![
-                    name,
-                    group["id"].as_str(),
-                    endpoint["method"].as_str(),
-                    endpoint["path"].as_str()
-                ],
+                rusqlite::params![name, id, method, path],
             )?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
