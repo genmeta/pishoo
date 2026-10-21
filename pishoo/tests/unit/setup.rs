@@ -267,27 +267,33 @@ fn ordinary_api_proxy_locations_are_independent_of_loaded_libs() {
 }
 
 #[test]
-fn listen_resource_preserves_other_rules_and_requires_exact_deletion() {
+fn mount_resource_preserves_listening_and_requires_exact_deletion() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let uri = http::Uri::from_static("/std/sys/listen");
+    let uri = http::Uri::from_static("/std/sys/mount");
+    let listen = http::Uri::from_static("/std/sys/listen");
     for location in ["/plain", "/replace"] {
-        let saved = config_database(&profile, &Method::PATCH, &uri,
+        config_database(&profile, &Method::PATCH, &uri,
             Some(json!({"location":location,"proxy_pass":if location == "/plain" {"127.0.0.1:8080"} else {"http://127.0.0.1:8080/"}}))).unwrap();
-        assert_eq!(saved["listen"], "internal");
     }
     let saved = config_database(&profile, &Method::GET, &uri, None).unwrap();
-    assert_eq!(saved["forward"][0]["proxy_pass"], "http://127.0.0.1:8080");
-    assert_eq!(saved["forward"][1]["proxy_pass"], "http://127.0.0.1:8080/");
-    let saved = config_database(
-        &profile,
-        &Method::PATCH,
-        &uri,
-        Some(json!({"listen":"all"})),
-    )
-    .unwrap();
-    assert_eq!(saved["forward"].as_array().unwrap().len(), 2);
-    let mismatch = "/std/sys/listen?location=%2Fplain&proxy_pass=http%3A%2F%2F127.0.0.1%3A9090"
+    assert_eq!(saved[0]["proxy_pass"], "http://127.0.0.1:8080");
+    assert_eq!(saved[1]["proxy_pass"], "http://127.0.0.1:8080/");
+    assert_eq!(
+        config_database(
+            &profile,
+            &Method::PATCH,
+            &listen,
+            Some(json!({"listen":"all"}))
+        )
+        .unwrap(),
+        json!({"listen":"all"})
+    );
+    assert_eq!(
+        config_database(&profile, &Method::GET, &uri, None).unwrap(),
+        saved
+    );
+    let mismatch = "/std/sys/mount?location=%2Fplain&proxy_pass=http%3A%2F%2F127.0.0.1%3A9090"
         .parse()
         .unwrap();
     assert!(config_database(&profile, &Method::DELETE, &mismatch, None).is_err());
@@ -295,7 +301,7 @@ fn listen_resource_preserves_other_rules_and_requires_exact_deletion() {
         config_database(&profile, &Method::GET, &uri, None).unwrap(),
         saved
     );
-    let deletion = "/std/sys/listen?location=%2Fplain&proxy_pass=127.0.0.1%3A8080"
+    let deletion = "/std/sys/mount?location=%2Fplain&proxy_pass=127.0.0.1%3A8080"
         .parse()
         .unwrap();
     for _ in 0..2 {
@@ -305,11 +311,25 @@ fn listen_resource_preserves_other_rules_and_requires_exact_deletion() {
                 .is_null()
         );
     }
-    config_database(&profile, &Method::DELETE, &uri, None).unwrap();
-    let saved = config_database(&profile, &Method::GET, &uri, None).unwrap();
-    assert_eq!(saved["listen"], "off");
-    assert_eq!(saved["forward"].as_array().unwrap().len(), 1);
-    assert_eq!(load_server_config(&profile).unwrap().listen, "off");
+    config_database(
+        &profile,
+        &Method::PATCH,
+        &listen,
+        Some(json!({"listen":"off"})),
+    )
+    .unwrap();
+    assert_eq!(
+        config_database(&profile, &Method::GET, &listen, None).unwrap(),
+        json!({"listen":"off"})
+    );
+    assert_eq!(
+        config_database(&profile, &Method::GET, &uri, None)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     config_database(
         &profile,
         &Method::PATCH,
@@ -321,14 +341,15 @@ fn listen_resource_preserves_other_rules_and_requires_exact_deletion() {
 }
 
 #[test]
-fn invalid_listen_input_never_changes_saved_resources() {
+fn listen_and_mount_reject_each_others_fields_without_mutation() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let uri = http::Uri::from_static("/std/sys/listen");
+    let listen = http::Uri::from_static("/std/sys/listen");
+    let mount = http::Uri::from_static("/std/sys/mount");
     let before = config_database(
         &profile,
         &Method::PATCH,
-        &uri,
+        &mount,
         Some(json!({"location":"/old","proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
@@ -338,12 +359,21 @@ fn invalid_listen_input_never_changes_saved_resources() {
         json!([]),
         json!({"exec":true}),
         json!({"listen":1}),
-        json!({"listen":"off"}),
         json!({"listen":"auto"}),
+        json!({"listen":"loopback"}),
         json!({"listen":"both"}),
         json!({"listen":"ALL"}),
         json!({"listen":"all","enabled":false}),
         json!({"listen":"all","location":"/a","proxy_pass":"127.0.0.1:8080"}),
+        json!({"location":"/a","proxy_pass":"127.0.0.1:8080"}),
+    ] {
+        assert!(matches!(
+            config_database(&profile, &Method::PATCH, &listen, Some(payload)),
+            Err(Error::BadRequest(_))
+        ));
+    }
+    for payload in [
+        json!({"listen":"internal"}),
         json!({"location":"/a","proxy_pass":null}),
         json!({"location":"/a","proxy_pass":"127.0.0.1:8080","extra":1}),
         json!({"location":"/std","proxy_pass":"127.0.0.1:8080"}),
@@ -351,36 +381,38 @@ fn invalid_listen_input_never_changes_saved_resources() {
         json!({"location":"/a","proxy_pass":"https://127.0.0.1:8080"}),
     ] {
         assert!(matches!(
-            config_database(&profile, &Method::PATCH, &uri, Some(payload)),
+            config_database(&profile, &Method::PATCH, &mount, Some(payload)),
             Err(Error::BadRequest(_))
         ));
-        assert_eq!(
-            config_database(&profile, &Method::GET, &uri, None).unwrap(),
-            before
-        );
     }
     for target in [
-        "/std/sys/listen?location=%2Fold",
-        "/std/sys/listen?proxy_pass=127.0.0.1%3A8080",
-        "/std/sys/listen?extra=x",
-        "/std/sys/listen?location=%2Fold&location=%2Fa&proxy_pass=127.0.0.1%3A8080",
+        "/std/sys/mount",
+        "/std/sys/mount?location=%2Fold",
+        "/std/sys/mount?proxy_pass=127.0.0.1%3A8080",
+        "/std/sys/mount?extra=x",
+        "/std/sys/mount?location=%2Fold&location=%2Fa&proxy_pass=127.0.0.1%3A8080",
+        "/std/sys/listen?location=%2Fold&proxy_pass=127.0.0.1%3A8080",
     ] {
         assert!(matches!(
             config_database(&profile, &Method::DELETE, &target.parse().unwrap(), None),
             Err(Error::BadRequest(_))
         ));
-        assert_eq!(
-            config_database(&profile, &Method::GET, &uri, None).unwrap(),
-            before
-        );
     }
+    assert_eq!(
+        config_database(&profile, &Method::GET, &mount, None).unwrap(),
+        before
+    );
+    assert_eq!(
+        config_database(&profile, &Method::GET, &listen, None).unwrap(),
+        json!({"listen":"internal"})
+    );
 }
 
 #[test]
 fn failed_proxy_update_rolls_back_the_previous_rule() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
-    let uri = http::Uri::from_static("/std/sys/listen");
+    let uri = http::Uri::from_static("/std/sys/mount");
     let before = config_database(
         &profile,
         &Method::PATCH,
@@ -416,7 +448,7 @@ fn concurrent_proxy_updates_preserve_both_rules() {
                 config_database(
                     profile,
                     &Method::PATCH,
-                    &http::Uri::from_static("/std/sys/listen"),
+                    &http::Uri::from_static("/std/sys/mount"),
                     Some(json!({"location":location,"proxy_pass":"127.0.0.1:8080"})),
                 )
                 .unwrap()
@@ -427,13 +459,13 @@ fn concurrent_proxy_updates_preserve_both_rules() {
         config_database(
             &profile,
             &Method::GET,
-            &http::Uri::from_static("/std/sys/listen"),
+            &http::Uri::from_static("/std/sys/mount"),
             None
         )
-        .unwrap()["forward"]
-            .as_array()
-            .unwrap()
-            .len(),
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len(),
         2
     );
 }
@@ -477,6 +509,66 @@ fn api_request(method: Method, path: &str, body: Body) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn mount_http_updates_and_deletes_without_changing_listening() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let profile = profile(root.path());
+    let app = config_router(profile.clone(), api_endpoint("alice.dhttp.net"));
+    let response = app
+        .clone()
+        .oneshot(api_request(
+            Method::PATCH,
+            "/std/sys/mount",
+            Body::from(json!({"location":"/service","proxy_pass":"127.0.0.1:8080"}).to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved,
+        json!([{"location":"/service","proxy_pass":"http://127.0.0.1:8080"}])
+    );
+    let mut request = api_request(Method::GET, "/std/sys/mount", Body::empty());
+    request.extensions_mut().remove::<Visitor>();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    for (uri, status) in [
+        (
+            "/std/sys/mount?location=%2Fservice&proxy_pass=127.0.0.1%3A9090",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "/std/sys/mount?location=%2Fservice&proxy_pass=127.0.0.1%3A8080",
+            StatusCode::NO_CONTENT,
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(api_request(Method::DELETE, uri, Body::empty()))
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    assert_eq!(load_server_config(&profile).unwrap().listen, "internal");
+    assert!(
+        load_server_config(&profile)
+            .unwrap()
+            .proxy_locations
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn config_routes_enforce_protocol_and_owner_requirements() {
     use tower::ServiceExt;
     let root = tempfile::tempdir().unwrap();
@@ -497,7 +589,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
                 .unwrap()
         )
         .unwrap(),
-        json!({"listen":"internal","forward":[]})
+        json!({"listen":"internal"})
     );
     for path in ["/std/sys/settings", "/std/sys/proxies"] {
         assert_eq!(
@@ -591,7 +683,7 @@ async fn config_routes_enforce_protocol_and_owner_requirements() {
             None
         )
         .unwrap(),
-        json!({"listen":"internal","forward":[]})
+        json!({"listen":"internal"})
     );
 }
 
@@ -658,7 +750,7 @@ async fn listen_routes_reject_invalid_queries_bodies_and_removed_forward_route()
         ),
         (
             Method::DELETE,
-            "/std/sys/listen?location=%2Fgone&proxy_pass=127.0.0.1%3A8080",
+            "/std/sys/mount?location=%2Fgone&proxy_pass=127.0.0.1%3A8080",
             "",
             StatusCode::NO_CONTENT,
         ),
@@ -696,22 +788,27 @@ async fn listen_routes_reject_invalid_queries_bodies_and_removed_forward_route()
 }
 
 #[test]
-fn listen_accepts_only_named_modes_and_preserves_forward_rules() {
+fn listen_accepts_named_modes_and_preserves_mount_rules() {
     let root = tempfile::tempdir().unwrap();
     let profile = profile(root.path());
     let uri = http::Uri::from_static("/std/sys/listen");
-    config_database(
+    let mount = http::Uri::from_static("/std/sys/mount");
+    let before = config_database(
         &profile,
         &Method::PATCH,
-        &uri,
+        &mount,
         Some(json!({"location":"/keep","proxy_pass":"127.0.0.1:8080"})),
     )
     .unwrap();
-    for mode in ["loopback", "internal", "external", "all"] {
-        let saved =
-            config_database(&profile, &Method::PATCH, &uri, Some(json!({"listen":mode}))).unwrap();
-        assert_eq!(saved["listen"], mode);
-        assert_eq!(saved["forward"].as_array().unwrap().len(), 1);
+    for mode in ["internal", "external", "all", "off"] {
+        assert_eq!(
+            config_database(&profile, &Method::PATCH, &uri, Some(json!({"listen":mode}))).unwrap(),
+            json!({"listen":mode})
+        );
+        assert_eq!(
+            config_database(&profile, &Method::GET, &mount, None).unwrap(),
+            before
+        );
         assert_eq!(load_server_config(&profile).unwrap().listen, mode);
     }
 }
@@ -745,7 +842,7 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
                 None
             )
             .unwrap(),
-            json!({"listen":expected,"forward":[]})
+            json!({"listen":expected})
         );
         assert_eq!(has_enabled_column(&db).unwrap(), enabled.is_some());
         assert_eq!(
@@ -767,10 +864,10 @@ fn legacy_v1_reads_without_mutation_then_migrates_disabled_to_off() {
                 &profile,
                 &Method::PATCH,
                 &http::Uri::from_static("/std/sys/listen"),
-                Some(json!({"listen":"loopback"}))
+                Some(json!({"listen":"internal"}))
             )
             .unwrap(),
-            json!({"listen":"loopback","forward":[]})
+            json!({"listen":"internal"})
         );
     }
 }

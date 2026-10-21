@@ -135,11 +135,11 @@ for each identity; it preserves the normal ACL and dependency rules.
 
 ### Configuration
 
-Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/.db` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta install --listen --id NAME internal` opts in, `auto` selects all scopes, and `genmeta unlisten --id NAME` deletes the key after confirmation. Proxy rows use `proxy_location`. Existing `db/config.db` remains a migration input and backup. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
+Linux root runs load the DHTTP global home and system accounts' actual `~/.dhttp` directories. Other runs use the current user's home. Listening is stored in `<identity>/.volume/sys/setting/.db` as the `setting` key `listen`; an absent key keeps the identity stopped across discovery and restarts. `genmeta listen --id NAME internal` opts in, `all` selects both internal and external scopes, and `genmeta listen --id NAME off` deletes the key after confirmation. Proxy rows use `proxy_location`. Existing `db/config.db` remains a migration input and backup. Endpoint and shared Network lifetimes are unchanged. See [Review implementation](REVIEW-IMPLEMENTATION-2026-10-21.md).
 
 Local proxies support HTTP/3 WebSocket extended CONNECT (`:protocol=websocket`, version 13), translating the upstream HTTP/1.1 upgrade into an H3 200 and streaming opaque frames in both directions. Handshake attempts have bounded timeouts; established sessions have no 30-second lifetime limit. All system HTTP routes are reserved under `/std`, including Lib execution for authenticated publisher `std.dhttp.net` at its declared path prefixed with `/std`. Other Libs use `/<name>` plus their declared path; a nonstandard journal declaring `/std/xxxx` is exposed only at `/journal/std/xxxx`. Missing system paths return 404 and unsupported Lib methods return 405 without reaching proxies. Ordinary `/api/*` and `/file/*` belong to configured proxies independently of loaded Libs. Home Assistant and OpenCode can use their native upstream paths.
 
-Database configuration is available over H3 through `GET/PATCH /std/sys/listen` and `GET/PUT/PATCH/DELETE /std/sys/forward`. Requests pass daccess authorization and require the same verified identity and owner hash. Writes are transactional; the running process applies proxy and listen changes automatically.
+Database configuration is available over H3 through `GET/PATCH/DELETE /std/sys/listen` and `GET/PATCH/DELETE /std/sys/mount`. Requests pass daccess authorization and require the same verified identity and owner hash. The listen resource returns only `{"listen":"internal"}` and accepts internal/external/all/off. The mount resource returns an array of location/proxy_pass rules; PATCH updates one rule and DELETE requires both query values to match. CLI uses `genmeta mount [--id NAME] [PATH URL]` and `genmeta unmount [--id NAME] PATH URL [--yes]`. Writes are transactional; the running process applies proxy and listen changes automatically.
 
 Startup creates `.volume/sys/{setting,lib,app,access,contact}/`, `lib/std/`, `app/`, `log/`, and `repo/`. New configuration stays stopped until listening is explicitly configured. Native ACL defaults remain limited to discovery and contact application/status routes; existing authorization decisions are preserved. No business package or templates directory is created automatically. Package registration, dependencies, capability catalog and legacy data migrate before runtime loading; Libs load before Apps.
 
@@ -228,7 +228,7 @@ and accepts `reload`, `--help`, and `--version`.
 genmeta listen --id alice.smith all
 genmeta listen --id alice.smith internal
 pishoo reload
-genmeta forward --id alice.smith /test 127.0.0.1:8080
+genmeta mount --id alice.smith /test 127.0.0.1:8080
 genmeta install alice/note --version 1.0.0 --lib --id alice.smith
 genmeta install --list --id alice.smith
 ```
