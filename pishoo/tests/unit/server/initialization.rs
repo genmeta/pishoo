@@ -13,7 +13,7 @@ fn root_initialization_repairs_identity_directories_and_existing_packages() {
     let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
     std::fs::create_dir_all(profile.join("app/hello/public")).unwrap();
     std::fs::create_dir_all(profile.join("lib/std/hello")).unwrap();
-    let index = profile.join("app/hello/index.html");
+    let index = profile.join("app/hello/public/index.html");
     std::fs::write(&index, b"page").unwrap();
     std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o600)).unwrap();
     let outside = root.path().join("outside");
@@ -31,27 +31,40 @@ fn root_initialization_repairs_identity_directories_and_existing_packages() {
     for _ in 0..2 {
         initialize_directories(&profile).unwrap();
         for name in [
-            "db",
-            "file",
+            "",
+            ".volume",
+            ".volume/sys",
+            ".volume/sys/setting",
+            ".volume/sys/pkg",
+            ".volume/sys/access",
+            ".volume/sys/contact",
+            ".volume/std",
             "lib",
             "lib/std",
             "lib/std/hello",
             "app",
             "app/hello",
-            "app/hello/public",
             "app/hello/index.html",
             "log",
             "repo",
-            "templates",
         ] {
             let metadata = profile.join(name).metadata().unwrap();
             assert_eq!((metadata.uid(), metadata.gid()), (10001, 10002), "{name}");
         }
         assert_eq!(
-            index.metadata().unwrap().permissions().mode() & 0o777,
+            profile
+                .join("app/hello/index.html")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
-        assert_eq!(std::fs::read(&index).unwrap(), b"page");
+        assert_eq!(
+            std::fs::read(profile.join("app/hello/index.html")).unwrap(),
+            b"page"
+        );
         assert_eq!(outside.metadata().unwrap().uid(), 0);
     }
 }
@@ -631,6 +644,26 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
     let account = root.path().join("account");
     let profile = IdentityProfile::try_from(account.join(".dhttp/alice")).unwrap();
     std::fs::create_dir_all(profile.ssl_dir()).unwrap();
+    for directory in ["log", "cache", "browser-only/ssl"] {
+        std::fs::create_dir_all(account.join(".dhttp").join(directory)).unwrap();
+    }
+    for relative in [
+        "log/error.log",
+        "cache/catalogue",
+        "browser-only/ssl/fullchain.crt",
+        "browser-only/ssl/privkey.pem",
+    ] {
+        std::fs::write(
+            account.join(".dhttp").join(relative),
+            b"retained account data",
+        )
+        .unwrap();
+    }
+    std::fs::set_permissions(
+        account.join(".dhttp/browser-only/ssl/privkey.pem"),
+        std::fs::Permissions::from_mode(0o400),
+    )
+    .unwrap();
     std::fs::write(
         profile.ssl_dir().join("fullchain.crt"),
         b"retained credentials",
@@ -672,12 +705,14 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
     cache_ocsp(&profile, b"owned cached response").unwrap();
     for relative in [
         "",
-        "db",
+        ".volume",
+        ".volume/sys",
         "file",
         "ssl",
         "ssl/fullchain.crt",
-        "db/config.db",
-        "db/access.db",
+        ".volume/sys/setting/database",
+        ".volume/sys/pkg/database",
+        ".volume/sys/access/database",
         ".volume/sys/contact/database",
         "log/access.log",
     ] {
@@ -688,18 +723,50 @@ async fn root_personal_home_repairs_initially_root_owned_native_resources() {
             "{relative}"
         );
     }
-    for name in [
-        "config.db-wal",
-        "config.db-shm",
-        "access.db-wal",
-        "access.db-shm",
-        "contact.db-wal",
-        "contact.db-shm",
-    ] {
-        if let Ok(metadata) = profile.join(".volume/sys/setting").join(name).metadata() {
-            assert_eq!((metadata.uid(), metadata.gid()), (10001, 10002), "{name}");
+    for service in ["setting", "pkg", "access", "contact"] {
+        for name in ["database-wal", "database-shm", "database-journal"] {
+            let path = profile.join(format!(".volume/sys/{service}/{name}"));
+            if let Ok(metadata) = path.metadata() {
+                assert_eq!(
+                    (metadata.uid(), metadata.gid()),
+                    (10001, 10002),
+                    "{}",
+                    path.display()
+                );
+            }
         }
     }
+    for relative in [
+        "log",
+        "cache",
+        "browser-only",
+        "browser-only/ssl",
+        "log/error.log",
+        "cache/catalogue",
+        "browser-only/ssl/fullchain.crt",
+        "browser-only/ssl/privkey.pem",
+    ] {
+        let path = account.join(".dhttp").join(relative);
+        let metadata = path.metadata().unwrap();
+        assert_eq!(
+            (metadata.uid(), metadata.gid()),
+            (10001, 10002),
+            "{relative}"
+        );
+        if metadata.is_file() {
+            assert_eq!(std::fs::read(path).unwrap(), b"retained account data");
+        }
+    }
+    assert_eq!(
+        account
+            .join(".dhttp/browser-only/ssl/privkey.pem")
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o400
+    );
     let metadata = profile.ocsp_path().metadata().unwrap();
     assert_eq!((metadata.uid(), metadata.gid()), (10001, 10002));
     let metadata = account.join(".dhttp").metadata().unwrap();
