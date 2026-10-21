@@ -53,13 +53,7 @@ def main() -> int:
             tools = bundle / "tools"
             tools.mkdir()
             shutil.copy2(repo / "pishoo/tools/package-lib.py", tools / "package-lib.py")
-            shutil.copy2(repo / "pishoo/docs/sdk.md", bundle / "README.md")
-            shutil.copy2(repo / "pishoo/docs/business-repositories.md", bundle / "business-repositories.md")
-            shutil.copy2(repo / "pishoo/docs/host-capabilities.md", bundle / "host-capabilities.md")
-            guide = repo / "pishoo/docs/developing-wasm.md"
-            (bundle / "developing-wasm.md").write_text(
-                guide.read_text().replace("[SDK 文档](sdk.md)", "[SDK 文档](README.md)"),
-            )
+            shutil.copy2(repo / "wit/README.md", bundle / "README.md")
             shutil.copy2(repo / "LICENSE", bundle / "LICENSE")
             crate_name = f"{archive_name}.crate"
             crate = stage / "target/package" / crate_name
