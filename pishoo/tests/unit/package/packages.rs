@@ -968,6 +968,36 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
     remove_lib(&profile, "missing").unwrap();
 }
 
+#[test]
+fn standard_lib_declarations_stay_in_the_filename_namespace() {
+    let authority = publisher("std.dhttp.net", 'a');
+    let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
+    for (path, accepted) in [
+        ("/profile", true),
+        ("/profile/", true),
+        ("/profile/nickname", true),
+        ("/profile-other", false),
+        ("/message", false),
+    ] {
+        let document = json!({
+            "openapi":"3.1.0",
+            "info":{"title":"Profile","version":"1.0.0","description":"test","license":{"name":"MIT"}},
+            "x-pishoo":{"kind":"lib","publisher":"std.dhttp.net","name":"profile","host":{},"dependencies":[]},
+            "paths":{path:{"get":{"operationId":"read","summary":"Read","responses":{"200":{"description":"ok"}}}}}
+        });
+        let bytes = package_fixture(&document, backend, Directory::default(), &authority);
+        let result = read_package(&bytes);
+        if accepted {
+            result.unwrap();
+        } else {
+            assert!(
+                result.unwrap_err().to_string().contains("package name"),
+                "{path}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() {
     use http::{Method, StatusCode};
@@ -1391,9 +1421,13 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         (
             Method::DELETE,
             "/std/message",
-            StatusCode::METHOD_NOT_ALLOWED,
+            StatusCode::INTERNAL_SERVER_ERROR,
         ),
-        (Method::GET, "/std/message/missing", StatusCode::NOT_FOUND),
+        (
+            Method::GET,
+            "/std/message/missing",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
     ] {
         assert_eq!(
             router

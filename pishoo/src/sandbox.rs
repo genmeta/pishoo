@@ -209,33 +209,34 @@ impl Sandbox {
                     // One exact snapshot, then release the shared collection lock.
                     let (lib, path, tasks) = {
                         let sandbox = sandbox.read().unwrap();
-                        let (lib, path) = sandbox
+                        let path = request.uri().path();
+                        let (standard, tail) = match path.strip_prefix("/std/") {
+                            Some(tail) => (true, tail),
+                            None => (false, path.strip_prefix('/').unwrap_or(path)),
+                        };
+                        let name = tail.split('/').next().unwrap_or("");
+                        let lib = sandbox
                             .libs
                             .iter()
-                            .find_map(|(id, lib)| {
-                                let prefix = if id.starts_with("std.dhttp.net/") {
-                                    "/std".to_owned()
-                                } else {
-                                    format!("/{}", id.rsplit('/').next().unwrap())
-                                };
-                                let path = request.uri().path().strip_prefix(&prefix)?;
-                                lib.openapi
-                                    .paths
-                                    .as_ref()
-                                    .is_some_and(|paths| paths.contains_key(path))
-                                    .then(|| (lib.clone(), path.to_owned()))
+                            .find(|(id, _)| {
+                                id.starts_with("std.dhttp.net/") == standard
+                                    && id.rsplit('/').next() == Some(name)
                             })
+                            .map(|(_, lib)| lib.clone())
                             .ok_or(Error::RouteNotFound)?;
+                        // Directory placement selects the Lib, never OpenAPI.
+                        // Standard guests keep /<name>/... after removing /std;
+                        // ordinary guests receive the suffix after /<name>.
+                        let path = if standard {
+                            format!("/{tail}")
+                        } else {
+                            match tail.strip_prefix(name).unwrap() {
+                                "" => "/".to_owned(),
+                                suffix => suffix.to_owned(),
+                            }
+                        };
                         (lib, path, sandbox.tasks.clone())
                     };
-                    let item = &lib.openapi.paths.as_ref().unwrap()[&path];
-                    if !item
-                        .methods()
-                        .into_iter()
-                        .any(|(method, _)| method == *request.method())
-                    {
-                        return Err(Error::MethodNotAllowed);
-                    }
                     let handshake = request
                         .extensions()
                         .get::<dhttp::HandshakeSummary>()
