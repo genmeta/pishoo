@@ -33,6 +33,34 @@ jobs:
         # Limit test parallelism to 1 thread to avoid resource contention
         # GitHub runners have limited cores (ubuntu/windows=2, macos=3)
         run: cargo test --locked --workspace --verbose -- --test-threads=1
+      - name: Verify root ownership repair in isolated fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p pishoo --lib --no-run --message-format=json > target/ownership-tests.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+
+          artifacts = [json.loads(line) for line in Path("target/ownership-tests.jsonl").read_text().splitlines()]
+          binaries = [item["executable"] for item in artifacts
+                      if item.get("reason") == "compiler-artifact"
+                      and item.get("target", {}).get("name") == "pishoo"
+                      and item.get("profile", {}).get("test")
+                      and item.get("executable")]
+          assert len(binaries) == 1, binaries
+          binary = binaries[0]
+          listed = subprocess.check_output([binary, "--list", "--ignored"], text=True)
+          for test in [
+              "server::initialization_tests::root_initialization_repairs_identity_directories_and_existing_packages",
+              "server::initialization_tests::root_personal_home_repairs_initially_root_owned_native_resources",
+              "package::tests::packages::root_package_installs_and_updates_belong_to_identity_owner",
+              "sandbox::tests::execution::isolation::root_guest_error_and_cancellation_repair_actual_preopened_directory",
+          ]:
+              assert f"{test}: test" in listed, test
+              subprocess.run(["sudo", "-n", binary, test, "--exact", "--ignored", "--test-threads=1"], check=True)
+          PY
 
   format:
     runs-on: ubuntu-latest

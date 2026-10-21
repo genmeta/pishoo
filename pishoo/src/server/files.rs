@@ -57,6 +57,10 @@ pub(super) fn initialize_directories(profile: &IdentityProfile) -> Result<()> {
                 .map_err(std::io::Error::from)?;
                 directory.set_permissions(permissions)?;
             }
+            // Account-level caches and other identities can also have been
+            // created by an earlier root process. Repair the personal home,
+            // while retaining the traversal's link and filesystem boundaries.
+            repair_identity_ownership(&personal, &owner)?;
         }
     }
     for (old, new) in [("libs", "lib"), ("apps", "app"), ("logs", "log")] {
