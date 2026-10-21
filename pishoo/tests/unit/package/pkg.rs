@@ -1,6 +1,46 @@
-use super::*;
 use serde_json::json;
 use webc::v3::write::Directory;
+
+use super::*;
+
+#[test]
+#[ignore = "requires PISHOO_RELEASE_PKG_PLAN pointing to explicitly built signed release packages"]
+fn signed_release_packages_install_and_load_together() {
+    use sha2::{Digest, Sha256};
+
+    let plan = std::env::var_os("PISHOO_RELEASE_PKG_PLAN").expect("set PISHOO_RELEASE_PKG_PLAN");
+    let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(plan).unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("release-check")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = std::sync::Arc::new(WasmRuntime::new().unwrap());
+    for package in plan.as_array().unwrap() {
+        let bytes = std::fs::read(package["file"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            package["package_sha256"].as_str().unwrap()
+        );
+        let id = format!(
+            "{}/{}",
+            package["author"].as_str().unwrap(),
+            package["name"].as_str().unwrap()
+        );
+        let installed = install_package(&profile, &id, &bytes, &runtime).unwrap();
+        assert_eq!(installed["version"], package["version"]);
+        eprintln!("RELEASE PKG {id} {}", installed["version"]);
+    }
+    let mut sandbox = Sandbox::new(runtime);
+    sandbox.load_libs(&profile).unwrap();
+    assert_eq!(sandbox.libs.len(), 4);
+    assert_eq!(sandbox.apps.len(), 3);
+    assert!(sandbox.libs.contains_key("std.dhttp.net/profile"));
+    assert!(sandbox.libs.contains_key("std.dhttp.net/message"));
+    assert!(sandbox.libs.contains_key("std.dhttp.net/calendar"));
+    assert!(sandbox.libs.contains_key("alice.smith.dhttp.net/journal"));
+    assert!(sandbox.apps.contains_key("std.dhttp.net/workspace"));
+    assert!(sandbox.apps.contains_key("std.dhttp.net/calendar"));
+    assert!(sandbox.apps.contains_key("alice.smith.dhttp.net/journal"));
+}
 
 fn package(version: &str, lib: bool, app: bool) -> Vec<u8> {
     let doc = json!({"openapi":"3.1.0","info":{"title":"Calendar","version":version,"description":"Combined package","license":{"name":"MIT"}},

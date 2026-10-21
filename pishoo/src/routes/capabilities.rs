@@ -162,8 +162,9 @@ fn write_declarations(
     method: &Method,
     groups: &Value,
 ) -> Result<()> {
-    use rustix::fs::{FlockOperation, Mode, OFlags};
     use std::io::Read;
+
+    use rustix::fs::{FlockOperation, Mode, OFlags};
 
     // Serialize with package installation/removal before taking the same DB
     // transaction, so a write cannot restore a concurrently removed provider.

@@ -155,13 +155,13 @@ fn pishoo_common_package_version_follows_pishoo() {
         PackageVersion::deb(common.source_version.clone(), deb.revision.clone())
             .expect("pishoo-common deb version should compose")
             .as_string(),
-        "0.9.0~preview.3-1"
+        "0.9.0~preview.4-1"
     );
     assert_eq!(
         PackageVersion::rpm(common.source_version, rpm.release.clone())
             .expect("pishoo-common rpm version should compose")
             .as_string(),
-        "0.9.0~preview.3-1"
+        "0.9.0~preview.4-1"
     );
 }
 
@@ -211,19 +211,19 @@ fn pishoo_linux_requirements_keep_matching_common_service_release() {
         let common = requirements
             .get("pishoo-common")
             .expect("pishoo-common bounds should resolve");
-        assert_eq!(common.minimum.as_deref(), Some("0.9.0~preview.3-1"));
-        assert_eq!(common.maximum.as_deref(), Some("0.9.0~preview.3-1"));
+        assert_eq!(common.minimum.as_deref(), Some("0.9.0~preview.4-1"));
+        assert_eq!(common.maximum.as_deref(), Some("0.9.0~preview.4-1"));
 
         let entries = linux_requirement_entries(system, "pishoo-common", common.clone())
             .expect("pishoo-common requirement entries should render");
         let expected = match system {
             PackageSystem::Deb => vec![
-                "pishoo-common (>= 0.9.0~preview.3-1)",
-                "pishoo-common (<= 0.9.0~preview.3-1)",
+                "pishoo-common (>= 0.9.0~preview.4-1)",
+                "pishoo-common (<= 0.9.0~preview.4-1)",
             ],
             PackageSystem::Rpm => vec![
-                "pishoo-common >= 0.9.0~preview.3-1",
-                "pishoo-common <= 0.9.0~preview.3-1",
+                "pishoo-common >= 0.9.0~preview.4-1",
+                "pishoo-common <= 0.9.0~preview.4-1",
             ],
             PackageSystem::Brew | PackageSystem::Scoop => unreachable!(),
         };

@@ -826,12 +826,13 @@ fn validate_imports(bytes: &[u8], host: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use webc::v3::{
         SignatureAlgorithm, Timestamps,
         write::{Directory, FileEntry, Writer},
     };
+
+    use super::*;
 
     #[test]
     fn signed_lib_reads_embedded_openapi_without_a_sidecar() {

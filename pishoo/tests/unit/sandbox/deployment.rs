@@ -1,11 +1,12 @@
+use serde_json::json;
+use webc::v3::write::Directory;
+
 use super::*;
 use crate::package::tests::{
     package_fixture,
     packages::{frontend_document, frontend_files},
     publisher,
 };
-use serde_json::json;
-use webc::v3::write::Directory;
 
 fn component(id: &str, version: &str) -> Vec<u8> {
     let mut bytes =
