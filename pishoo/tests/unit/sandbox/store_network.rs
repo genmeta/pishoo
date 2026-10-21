@@ -183,7 +183,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     let runtime = Arc::new(WasmRuntime::new().unwrap());
     let sandbox = Arc::new(RwLock::new(Sandbox::new(runtime)));
     let management =
-        crate::package::lib_management_router(profile.clone(), client.clone(), sandbox.clone());
+        crate::package::pkg_management_router(profile.clone(), client.clone(), sandbox.clone());
     let authority = client.local_authority().unwrap();
     let ski =
         dhttp_home::certificate::extract_dhttp_subject_key_identifier(authority.certificates())
@@ -192,7 +192,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     let request = || {
         let mut request = http::Request::builder()
             .method(http::Method::PUT)
-            .uri("/std/sys/app?name=workspace")
+            .uri("/std/sys/pkg?name=workspace")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
                 serde_json::json!({"publisher":"alice.dhttp.net","version":"1.0.0"}).to_string(),
@@ -339,7 +339,7 @@ async fn store_app_install_downloads_shared_transitive_dependencies_and_preserve
     let chat = sandbox.read().unwrap().libs["alice.dhttp.net/chat"].clone();
     let mut rejected = http::Request::builder()
         .method(http::Method::PUT)
-        .uri("/std/sys/lib?name=blocked")
+        .uri("/std/sys/pkg?name=blocked")
         .header("content-type", "application/json")
         .body(axum::body::Body::from(
             serde_json::json!({"publisher":"alice.dhttp.net","version":"1.0.0"}).to_string(),

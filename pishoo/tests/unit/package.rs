@@ -14,3 +14,6 @@ mod manifest;
 #[path = "package/packages.rs"]
 pub(crate) mod packages;
 pub(crate) use packages::{package_component, package_fixture, publisher};
+
+#[path = "package/pkg.rs"]
+mod pkg;

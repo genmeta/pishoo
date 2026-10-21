@@ -308,7 +308,7 @@ async fn clean_identities_pack_install_friendship_approval_order_and_chat() {
         &bob.endpoint,
         alice.name(),
         Method::PUT,
-        "/std/sys/app?name=workspace",
+        "/std/sys/pkg?name=workspace",
         json!({}),
     )
     .await;

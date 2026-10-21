@@ -145,30 +145,24 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
     if metadata.get("publisher").and_then(Value::as_str).is_none() {
         return Err(invalid("package requires publisher/name"));
     }
-    if metadata["kind"] == "app" && metadata["name"] == "std" {
-        return Err(invalid("App name conflicts with the native std namespace"));
+    if metadata["name"] == "std" {
+        return Err(invalid(
+            "package name conflicts with the native std namespace",
+        ));
     }
     let mappings = manifest
         .filesystem()
-        .map_err(|_| invalid("invalid WEBC filesystem mappings"))?
-        .ok_or_else(|| invalid("missing WEBC filesystem mappings"))?;
-    let mount = if metadata["kind"] == "app" {
-        "/public"
-    } else {
-        "/metadata"
-    };
-    if mappings.len() != 1
-        || mappings[0].mount_path != mount
-        || mappings[0].from.is_some()
-        || mappings[0].volume_name == "pishoo-signature"
-        || container
-            .volumes()
-            .keys()
-            .any(|name| name != &mappings[0].volume_name && name != "pishoo-signature")
+        .map_err(|_| invalid("invalid filesystem mappings"))?
+        .unwrap_or_default();
+    if mappings.len() > 1
+        || mappings.iter().any(|m| {
+            m.mount_path != "/public" || m.from.is_some() || m.volume_name == "pishoo-signature"
+        })
+        || container.volumes().keys().any(|name| {
+            name != "pishoo-signature" && !mappings.iter().any(|m| &m.volume_name == name)
+        })
     {
-        return Err(invalid(
-            "require exactly the package type's local content mapping",
-        ));
+        return Err(invalid("only an optional local /public mapping is allowed"));
     }
     for mapping in mappings.iter() {
         let root = mapping.host_path.as_deref().unwrap_or("/");
@@ -197,7 +191,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<webc::Container> {
         }
     }
     validate_content(&container, &metadata)?;
-    if metadata["kind"] == "lib" {
+    if container.get_atom("backend").is_some() {
         let raw = package_file(&container, "/metadata/openapi.json")?;
         let api = super::validate_openapi(&raw)?;
         if metadata["publisher"] == "std.dhttp.net"
@@ -511,18 +505,7 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
     if !release_version(version) {
         return Err(invalid("version must be MAJOR.MINOR.PATCH"));
     }
-    let kind = text(annotation, "kind")?;
-    if !matches!(kind, "app" | "lib") {
-        return Err(invalid("kind must be app or lib"));
-    }
-    let allowed = [
-        "kind",
-        "title",
-        "dependencies",
-        "changelog",
-        "entry",
-        "host",
-    ];
+    let allowed = ["title", "dependencies", "changelog", "entry", "host"];
     if annotation
         .as_object()
         .is_none_or(|o| o.keys().any(|k| !allowed.contains(&k.as_str())))
@@ -543,13 +526,13 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
             || dhttp_home::normalize_name(publisher).as_deref() != Some(publisher)
             || !release_version(text(dep, "version")?)
             || !ids.insert(id_dep.clone())
-            || (kind == "lib" && id_dep == id)
+            || id_dep == id
         {
             return Err(invalid("invalid, duplicate or self Lib dependency"));
         }
     }
     let mut value = serde_json::json!({"id":id,"name":name,"version":version,
-        "kind":kind,"title":text(annotation,"title")?,"description":text(wapm,"description")?,
+        "title":text(annotation,"title")?,"description":text(wapm,"description")?,
         "license":text(wapm,"license")?,"dependencies":dependencies});
     if container.get_volume("pishoo-signature").is_some() || annotation.get("changelog").is_some() {
         value["changelog"] = text(annotation, "changelog")?.into();
@@ -586,32 +569,44 @@ pub(crate) fn package_metadata(container: &webc::Container) -> Result<Value> {
         }
         value["repository"] = repository.clone();
     }
-    if kind == "app" {
-        if annotation["entry"] != "/" || annotation.get("host").is_some() {
-            return Err(invalid("app requires entry / and forbids host"));
+    let has_lib = container.get_atom("backend").is_some();
+    let has_app = container
+        .manifest()
+        .filesystem()
+        .map_err(|_| invalid("invalid mappings"))?
+        .is_some_and(|m| m.iter().any(|m| m.mount_path == "/public"));
+    if !has_lib && !has_app {
+        return Err(invalid("package has no runtime content"));
+    }
+    if has_app {
+        if annotation["entry"] != "/" {
+            return Err(invalid("frontend requires entry /"));
         }
         value["entry"] = "/".into();
-    } else {
-        if annotation.get("entry").is_some() {
-            return Err(invalid("lib forbids entry"));
-        }
-        if container.get_volume("pishoo-signature").is_none() && annotation.get("host").is_none() {
-            return Ok(value);
-        }
-        let host = annotation["host"]
-            .as_object()
-            .ok_or_else(|| invalid("lib requires explicit host purposes"))?;
-        for (key, purpose) in host {
-            if !matches!(
-                key.as_str(),
-                "private-storage" | "request-identity" | "signatures"
-            ) || purpose.as_str().is_none_or(|s| s.trim().is_empty())
-            {
-                return Err(invalid("unknown or unexplained host capability"));
-            }
-        }
-        value["host"] = annotation["host"].clone();
+    } else if annotation.get("entry").is_some() {
+        return Err(invalid("entry requires public resources"));
     }
+    if has_lib {
+        if container.get_volume("pishoo-signature").is_some() || annotation.get("host").is_some() {
+            let host = annotation["host"]
+                .as_object()
+                .ok_or_else(|| invalid("backend requires host purposes"))?;
+            for (key, purpose) in host {
+                if !matches!(
+                    key.as_str(),
+                    "private-storage" | "request-identity" | "signatures"
+                ) || purpose.as_str().is_none_or(|s| s.trim().is_empty())
+                {
+                    return Err(invalid("unknown or unexplained host capability"));
+                }
+            }
+            value["host"] = annotation["host"].clone();
+        }
+    } else if annotation.get("host").is_some() {
+        return Err(invalid("host purposes require a backend"));
+    }
+    value["has_lib"] = has_lib.into();
+    value["has_app"] = has_app.into();
     Ok(value)
 }
 
@@ -627,32 +622,8 @@ fn release_version(value: &str) -> bool {
 }
 
 fn validate_content(container: &webc::Container, metadata: &Value) -> Result<()> {
-    let app = metadata["kind"] == "app";
-    if app != container.atoms().is_empty() {
-        return Err(invalid("app requires zero atoms; lib requires one backend"));
-    }
-    let mappings = container
-        .manifest()
-        .filesystem()
-        .map_err(|_| invalid("invalid mappings"))?
-        .unwrap();
-    let mapping = &mappings[0];
-    let root = mapping.host_path.as_deref().unwrap_or("/");
-    let mut count = 0;
-    let files = volume_files(
-        &container.get_volume(&mapping.volume_name).unwrap(),
-        root,
-        &mut count,
-    )?;
-    if app && !files.contains_key(&format!("{}/index.html", root.trim_end_matches('/'))) {
-        return Err(invalid("app requires public/index.html"));
-    }
-    if app
-        && files
-            .keys()
-            .any(|file| file.ends_with("/metadata/openapi.json"))
-    {
-        return Err(invalid("app cannot contain metadata/openapi.json"));
+    if metadata["has_app"] == true {
+        package_file(container, "/public/index.html")?;
     }
     Ok(())
 }
@@ -864,8 +835,8 @@ mod tests {
         let manifest: webc::metadata::Manifest = serde_json::from_value(json!({
             "package":{
                 "wapm":{"name":"alice.dhttp.net/embedded","version":"1.0.0","description":"Embedded API","license":"MIT"},
-                "pishoo":{"kind":"lib","title":"Embedded","changelog":"First release","dependencies":[],"host":{}},
-                "fs":[{"volume_name":"metadata","mount_path":"/metadata"}]
+                "pishoo":{"title":"Embedded","changelog":"First release","dependencies":[],"host":{}},
+                "fs":[]
             },
             "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
         })).unwrap();
@@ -875,13 +846,10 @@ mod tests {
                 FileEntry::borrowed(&backend, Timestamps::default()),
             )])
         };
-        let metadata = || Directory::new(BTreeMap::new(), Timestamps::default());
         let unsigned = Writer::default()
             .write_manifest(&manifest)
             .unwrap()
             .write_atoms(atoms())
-            .unwrap()
-            .with_volume("metadata", metadata())
             .unwrap()
             .finish(SignatureAlgorithm::None)
             .unwrap();
@@ -902,8 +870,6 @@ mod tests {
             .write_raw_manifest(unsigned[entry.span.start + 41..entry.span.end()].to_vec())
             .write_atoms(atoms())
             .unwrap()
-            .with_volume("metadata", metadata())
-            .unwrap()
             .with_volume(
                 "pishoo-signature",
                 Directory::new(
@@ -922,12 +888,6 @@ mod tests {
             package_file(&package, "/metadata/openapi.json").unwrap(),
             document
         );
-        assert!(
-            package
-                .get_volume("metadata")
-                .unwrap()
-                .read_file("/openapi.json")
-                .is_none()
-        );
+        assert!(package.get_volume("metadata").is_none());
     }
 }

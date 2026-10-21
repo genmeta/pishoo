@@ -183,59 +183,6 @@ fn check_resource_identity(metadata: &serde_json::Value, id: &str) -> Result<()>
     Ok(())
 }
 
-pub(super) fn disk_ids(root: &std::fs::File) -> Result<Vec<String>> {
-    let dir = cap_std::fs::Dir::from_std_file(root.try_clone()?);
-    let mut ids = Vec::new();
-    for entry in dir.entries()? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "symlink in lib layout",
-            )));
-        }
-        if !kind.is_dir() {
-            continue;
-        }
-        let id = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| Error::BadRequest("invalid Lib id".into()))?;
-        if id == "std" {
-            continue;
-        }
-        if id.contains('.') && dhttp_home::normalize_name(&id).as_deref() == Some(&id) {
-            let publisher = child_dir(root, std::ffi::OsStr::new(&id))?;
-            let publisher = cap_std::fs::Dir::from_std_file(publisher);
-            for entry in publisher.entries()? {
-                let entry = entry?;
-                let kind = entry.file_type()?;
-                if kind.is_symlink() {
-                    return Err(Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "symlink in publisher layout",
-                    )));
-                }
-                if kind.is_dir() {
-                    let name = entry
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| Error::BadRequest("invalid Lib name".into()))?;
-                    let full = format!("{id}/{name}");
-                    valid_id(&full)?;
-                    ids.push(full);
-                }
-            }
-        } else {
-            valid_id(&id)?;
-            ids.push(id);
-        }
-    }
-    ids.sort();
-    Ok(ids)
-}
-
 // Installation facts belong to config.db; startup never discovers files as an
 // implicit installation. Read-only queries do not audit the database graph.
 fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusqlite::Connection> {
@@ -251,7 +198,7 @@ fn installation_database(profile: &IdentityProfile, create: bool) -> Result<rusq
         },
     )?;
     if create {
-        for schema in ["main", "lib_registry", "app_registry", "acl"] {
+        for schema in ["main", "pkg_registry", "acl"] {
             conn.execute_batch(&format!(
                 "PRAGMA {schema}.journal_mode=DELETE; PRAGMA {schema}.synchronous=FULL;"
             ))?;
@@ -291,19 +238,10 @@ fn migrate_registration(conn: &mut rusqlite::Connection) -> Result<()> {
         tx.execute_batch(include_str!("packages.sql"))?;
         tx.execute_batch("INSERT INTO acl.lib_capability_operation SELECT * FROM acl.pishoo_legacy_operation; DROP TABLE acl.pishoo_legacy_operation;")?;
     }
-    tx.execute_batch("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM lib WHERE author IS NULL OR author<>'std.dhttp.net')")?;
-    for (schema, table) in [("lib_registry", "lib"), ("app_registry", "app")] {
-        for field in ["package_sha256", "author_owner_hash"] {
-            if tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.pragma_table_info('{table}') WHERE name=?1)"),[field],|r|r.get::<_,bool>(0))? {
-                tx.execute_batch(&format!("ALTER TABLE {schema}.{table} DROP COLUMN {field}"))?;
-            }
-        }
-    }
-    tx.commit()?;
-    // Legacy rows were split atomically by setup before runtime loading.
-    // Check each database independently: SQLite cannot enforce cross-db edges.
-    for schema in ["lib_registry", "app_registry", "acl"] {
-        if conn
+
+    tx.execute("UPDATE lib_capability_operation SET path='/'||lib_name||substr(path,5) WHERE substr(path,1,5)='/std/' AND lib_name IN (SELECT name FROM package WHERE has_lib=1 AND (author IS NULL OR author<>'std.dhttp.net'))",[])?;
+    for schema in ["pkg_registry", "acl"] {
+        if tx
             .prepare(&format!("PRAGMA {schema}.foreign_key_check"))?
             .exists([])?
         {
@@ -312,12 +250,13 @@ fn migrate_registration(conn: &mut rusqlite::Connection) -> Result<()> {
             ));
         }
     }
-    let broken:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM app_dependency d LEFT JOIN lib l ON l.name=d.lib_name WHERE l.name IS NULL OR l.version<>d.version) OR EXISTS(SELECT 1 FROM lib_dependency d JOIN lib l ON l.name=d.dependency_name WHERE l.version<>d.version)",[],|r|r.get(0))?;
+    let broken: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM package_dependency d JOIN package p ON p.name=d.dependency_name WHERE p.version<>d.version)", [], |r|r.get(0))?;
     if broken {
         return Err(Error::InvalidConfig(
             "broken exact package dependencies".into(),
         ));
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -326,9 +265,13 @@ fn registered_packages(
     kind: &str,
     id: Option<&str>,
 ) -> Result<Vec<(String, String)>> {
-    let table = if kind == "app" { "app" } else { "lib" };
+    let table = match kind {
+        "app" => "app",
+        "lib" => "lib",
+        _ => "package",
+    };
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type IN ('table','view') AND name=?1)",
         [table],
         |row| row.get(0),
     )?;
@@ -365,7 +308,11 @@ fn registered_packages(
 
 fn check_name(conn: &rusqlite::Connection, id: &str, kind: &str) -> Result<()> {
     use rusqlite::OptionalExtension;
-    let table = if kind == "app" { "app" } else { "lib" };
+    let table = match kind {
+        "app" => "app",
+        "lib" => "lib",
+        _ => "package",
+    };
     let identity = package_identity(conn, table)?;
     let other: Option<String> = conn
         .query_row(
@@ -451,7 +398,10 @@ fn package_routes(
         }
     } else {
         let mappings = package.manifest().filesystem().unwrap().unwrap();
-        let mapping = &mappings[0];
+        let mapping = mappings
+            .iter()
+            .find(|m| m.mount_path == "/public")
+            .ok_or_else(expanded_error)?;
         let volume = package.get_volume(&mapping.volume_name).unwrap();
         let root = mapping
             .host_path
@@ -514,7 +464,7 @@ fn check_routes(
     let routes = package_routes(package, id, kind)?;
     for other_kind in ["lib", "app"] {
         for (other, version) in registered_packages(conn, other_kind, None)? {
-            if other_kind == kind && other == id {
+            if other == id {
                 continue;
             }
             let root = child_dir(&profile_dir(profile)?, std::ffi::OsStr::new(other_kind))?;
@@ -642,37 +592,37 @@ fn check_existing_rules(
 fn save_registration(
     conn: &rusqlite::Connection,
     id: &str,
-    kind: &str,
     api: &serde_json::Value,
     package: &webc::Container,
 ) -> Result<()> {
-    check_name(conn, id, kind)?;
+    check_name(conn, id, "pkg")?;
     let name = id.rsplit('/').next().unwrap();
     let author = id.split_once('/').map(|(author, _)| author);
-    if kind == "lib" {
-        let incompatible: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_dependency WHERE lib_name=?1 AND version<>?2) OR EXISTS(SELECT 1 FROM lib_dependency WHERE dependency_name=?1 AND version<>?2)",rusqlite::params![name,api["version"].as_str().unwrap()],|row|row.get(0))?;
-        if incompatible {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "lib version is required by installed dependencies",
-            )));
-        }
+    let incompatible: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM package_dependency WHERE dependency_name=?1 AND version<>?2)",
+        rusqlite::params![name, api["version"].as_str().unwrap()],
+        |r| r.get(0),
+    )?;
+    if incompatible {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "package version is required by installed dependencies",
+        )));
     }
-    let table = if kind == "app" { "app" } else { "lib" };
-    conn.execute(&format!("INSERT INTO {table}(name,author,version,installed_at,upgraded_at) VALUES(?1,?2,?3,unixepoch(),NULL) ON CONFLICT(name) DO UPDATE SET author=excluded.author,version=excluded.version,upgraded_at=unixepoch()"),
-        rusqlite::params![name,author,api["version"].as_str().unwrap()])?;
-    let (edges, source, target) = if kind == "app" {
-        ("app_dependency", "app_name", "lib_name")
-    } else {
-        ("lib_dependency", "lib_name", "dependency_name")
-    };
-    conn.execute(&format!("DELETE FROM {edges} WHERE {source}=?1"), [name])?;
+    conn.execute("INSERT INTO package(name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,unixepoch(),NULL,?8,?9) ON CONFLICT(name) DO UPDATE SET author=excluded.author,version=excluded.version,title=excluded.title,
+        description=excluded.description,license=excluded.license,repository=excluded.repository,upgraded_at=unixepoch(),has_lib=excluded.has_lib,has_app=excluded.has_app",
+        rusqlite::params![name,author,api["version"].as_str(),api["title"].as_str(),api["description"].as_str(),api["license"].as_str(),api["repository"].as_str(),api["has_lib"].as_bool().unwrap(),api["has_app"].as_bool().unwrap()])?;
+    conn.execute(
+        "DELETE FROM package_dependency WHERE package_name=?1",
+        [name],
+    )?;
     for (dependency, version) in declared_dependencies(api) {
         let (dependency_author, dependency_name) = dependency.split_once('/').unwrap();
         let matches: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM lib WHERE author=?1 AND name=?2 AND version=?3)",
+            "SELECT EXISTS(SELECT 1 FROM package WHERE author=?1 AND name=?2 AND version=?3)",
             rusqlite::params![dependency_author, dependency_name, version],
-            |row| row.get(0),
+            |r| r.get(0),
         )?;
         if !matches {
             return Err(Error::Io(std::io::Error::new(
@@ -680,17 +630,14 @@ fn save_registration(
                 format!("dependency {dependency}@{version} is not installed"),
             )));
         }
-        if kind == "lib" {
-            check_dependency_cycle(conn, id, &dependency)?;
-        }
+        check_dependency_cycle(conn, id, &dependency)?;
         conn.execute(
-            &format!("INSERT INTO {edges}({source},{target},version) VALUES(?1,?2,?3)"),
+            "INSERT INTO package_dependency VALUES(?1,?2,?3)",
             rusqlite::params![name, dependency_name, version],
         )?;
     }
-
-    if kind == "lib" {
-        conn.execute("DELETE FROM lib_capability WHERE lib_name=?1", [name])?;
+    conn.execute("DELETE FROM lib_capability WHERE lib_name=?1", [name])?;
+    if api["has_lib"] == true {
         let prefix = if author == Some("std.dhttp.net") {
             "/std".to_owned()
         } else {
@@ -698,26 +645,17 @@ fn save_registration(
         };
         for (capability, title, endpoints) in capability_rows(package)? {
             conn.execute(
-                "INSERT INTO lib_capability(lib_name,capability_id,title) VALUES(?1,?2,?3)",
+                "INSERT INTO lib_capability VALUES(?1,?2,?3)",
                 rusqlite::params![name, capability, title],
             )?;
             for (method, path) in endpoints {
-                let path = format!("{prefix}{path}");
-                conn.execute("INSERT INTO lib_capability_operation(lib_name,capability_id,method,path) VALUES(?1,?2,?3,?4)",rusqlite::params![name,capability,method,path])?;
+                conn.execute(
+                    "INSERT INTO lib_capability_operation VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![name, capability, method, format!("{prefix}{path}")],
+                )?;
             }
         }
     }
-    let broken: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-        [],
-        |row| row.get(0),
-    )?;
-    if broken {
-        return Err(Error::InvalidConfig(
-            "installation would leave broken package/dependency/capability references".into(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -755,7 +693,7 @@ fn check_dependency_cycle(conn: &rusqlite::Connection, id: &str, dependency: &st
             continue;
         }
         pending.extend(
-            conn.prepare("SELECT dependency_name FROM lib_dependency WHERE lib_name=?1")?
+            conn.prepare("SELECT dependency_name FROM package_dependency WHERE package_name=?1")?
                 .query_map([&current], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?,
         );
@@ -838,10 +776,9 @@ fn runtime_wasm(package: &webc::Container) -> Result<Vec<u8>> {
     Ok(backend)
 }
 
-fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str) -> Result<()> {
+fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str, kind: &str) -> Result<()> {
     let package = read_package(bytes)?;
-    let metadata = package_metadata(&package)?;
-    if metadata["kind"] == "lib" {
+    if kind == "lib" {
         write_component(
             dir,
             &format!("{}.wasm", id.rsplit('/').next().unwrap()),
@@ -905,6 +842,7 @@ fn write_expanded(dir: &std::fs::File, bytes: &[u8], id: &str) -> Result<()> {
                                 .ok_or_else(expanded_error)?
                                 .0,
                         )?;
+                        parent.sync_all()?;
                     }
                 }
             }
@@ -1026,7 +964,11 @@ fn installed_bytes(
 ) -> Result<Vec<u8>> {
     let mut database = installation_database(profile, false)?;
     let conn = database.transaction()?;
-    let table = if kind == "app" { "app" } else { "lib" };
+    let table = match kind {
+        "app" => "app",
+        "lib" => "lib",
+        _ => "package",
+    };
     let modern: bool = conn.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='author')"),
         [],
@@ -1147,10 +1089,11 @@ fn runtime_snapshot(
         .as_str()
         .ok_or_else(|| Error::InvalidConfig("installed package is missing its license".into()))?;
     let mut wapm = serde_json::json!({"name":id,"version":metadata["version"],"description":description,"license":license});
-    if let Some(repository) = metadata.get("repository") {
+    if let Some(repository) = metadata.get("repository").filter(|v| !v.is_null()) {
         wapm["repository"] = repository.clone();
     }
-    let mut annotation = serde_json::json!({"kind":kind,"title":metadata["title"],"dependencies":metadata["dependencies"]});
+    let mut annotation =
+        serde_json::json!({"title":metadata["title"],"dependencies":metadata["dependencies"]});
     if kind == "app" {
         annotation["entry"] = "/".into();
     }
@@ -1251,105 +1194,45 @@ fn artifact_bytes(root: &std::fs::File, id: &str, kind: &str) -> Result<Vec<u8>>
 
 fn registered_metadata(
     conn: &rusqlite::Connection,
-    kind: &str,
+    _kind: &str,
     id: &str,
 ) -> Result<serde_json::Value> {
-    let table = if kind == "app" { "app" } else { "lib" };
-    let (_, version) = registered_packages(conn, kind, Some(id))?.pop().unwrap();
-    let columns = conn
-        .prepare(&format!("PRAGMA table_info({table})"))?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let selected = ["title", "description", "license", "repository"]
-        .iter()
-        .map(|name| {
-            if columns.iter().any(|column| column == name) {
-                *name
-            } else {
-                "NULL"
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let identity = package_identity(conn, table)?;
-    let fields = conn.query_row(
-        &format!("SELECT {selected} FROM {table} WHERE ({identity})=?1"),
-        [id],
-        |row| {
-            (0..4)
-                .map(|index| row.get::<_, Option<String>>(index))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        },
-    )?;
-    let dates = if columns.iter().any(|c| c == "installed_at") {
-        conn.query_row(
-            &format!("SELECT installed_at,upgraded_at FROM {table} WHERE ({identity})=?1"),
-            [id],
-            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
-        )?
-    } else {
-        (None, None)
-    };
-    let name = id.rsplit('/').next().unwrap();
-    let mut value = serde_json::json!({"id":id,"name":name,"version":version,"kind":kind,
-        "title":fields[0].as_deref().unwrap_or(name),"description":fields[1],"dependencies":[],"installed_at":dates.0,"upgraded_at":dates.1});
-    if let Some((publisher, _)) = id.split_once('/') {
-        value["publisher"] = publisher.into();
-    }
-    if kind == "app" {
+    use rusqlite::OptionalExtension;
+    let mut value = conn.query_row("SELECT name,author,version,title,description,license,repository,installed_at,upgraded_at,has_lib,has_app FROM package WHERE (CASE WHEN author IS NULL THEN name ELSE author||'/'||name END)=?1", [id], |r| {
+        let name: String = r.get(0)?;
+        Ok(serde_json::json!({"id":id,"name":name,"author":r.get::<_,Option<String>>(1)?,"version":r.get::<_,String>(2)?,
+            "title":r.get::<_,Option<String>>(3)?.unwrap_or(name),"description":r.get::<_,Option<String>>(4)?,"license":r.get::<_,Option<String>>(5)?,"repository":r.get::<_,Option<String>>(6)?,
+            "installed_at":r.get::<_,Option<i64>>(7)?,"upgraded_at":r.get::<_,Option<i64>>(8)?,"has_lib":r.get::<_,bool>(9)?,"has_app":r.get::<_,bool>(10)?,"endpoints":[]}))
+    }).optional()?.ok_or(Error::RouteNotFound)?;
+    let dependencies = conn.prepare("SELECT p.author,p.name,d.version FROM package_dependency d JOIN package p ON p.name=d.dependency_name WHERE d.package_name=?1 ORDER BY p.author,p.name")?
+        .query_map([id.rsplit('/').next().unwrap()], |r| Ok(serde_json::json!({"publisher":r.get::<_,Option<String>>(0)?,"name":r.get::<_,String>(1)?,"version":r.get::<_,String>(2)?})))?
+        .collect::<std::result::Result<Vec<_>,_>>()?;
+    value["dependencies"] = dependencies.into();
+    if value["has_app"] == true {
         value["entry"] = "/".into();
-    }
-    for (index, key) in [(2, "license"), (3, "repository")] {
-        if let Some(text) = &fields[index] {
-            value[key] = text.clone().into();
-        }
-    }
-    let (edges, source, target) = if kind == "app" {
-        ("app_dependency", "app_name", "lib_name")
-    } else {
-        ("lib_dependency", "lib_name", "dependency_name")
-    };
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_list WHERE type='table' AND name=?1)",
-        [edges],
-        |row| row.get(0),
-    )?;
-    if exists {
-        let modern: bool = conn.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{edges}') WHERE name='{source}')"
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        let query = if modern {
-            format!(
-                "SELECT CASE WHEN l.author IS NULL THEN l.name ELSE l.author||'/'||l.name END,d.version FROM {edges} d JOIN lib l ON l.name=d.{target} WHERE d.{source}=?1 ORDER BY l.name"
-            )
-        } else if kind == "app" {
-            "SELECT lib_id,version FROM app_dependency WHERE app_id=?1 ORDER BY lib_id".into()
-        } else {
-            "SELECT dependency_id,version FROM lib_dependency WHERE lib_id=?1 ORDER BY dependency_id".into()
-        };
-        let mut dependencies = Vec::new();
-        for row in conn
-            .prepare(&query)?
-            .query_map([if modern { name } else { id }], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-        {
-            let (dependency, version) = row?;
-            let (publisher, name) = dependency
-                .split_once('/')
-                .ok_or_else(|| Error::InvalidConfig("invalid registered dependency ID".into()))?;
-            dependencies
-                .push(serde_json::json!({"publisher":publisher,"name":name,"version":version}));
-        }
-        value["dependencies"] = dependencies.into();
     }
     Ok(value)
 }
 
+pub(crate) fn installed_packages(
+    profile: &IdentityProfile,
+    id: Option<&str>,
+) -> Result<serde_json::Value> {
+    let mut database = installation_database(profile, false)?;
+    let tx = database.transaction()?;
+    let rows = registered_packages(&tx, "pkg", id)?;
+    let mut values = rows
+        .into_iter()
+        .map(|(id, _)| registered_metadata(&tx, "pkg", &id))
+        .collect::<Result<Vec<_>>>()?;
+    if id.is_some() {
+        values.pop().ok_or(Error::RouteNotFound)
+    } else {
+        Ok(values.into())
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn installed_libs(
     profile: &IdentityProfile,
     id: Option<&str>,
@@ -1374,40 +1257,6 @@ fn initialized_profile(profile: &IdentityProfile) -> Result<std::fs::File> {
     let dir = profile_dir(profile)?;
     crate::setup::open_config(profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     Ok(dir)
-}
-
-fn check_component_target(dir: &std::fs::File, kind: &str) -> Result<()> {
-    match expanded_file(dir, ".webc-proof") {
-        Ok(_) => return Ok(()),
-        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    match artifact_file(dir, kind) {
-        Ok(_) => Ok(()),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn check_lib_root(
-    profile: &IdentityProfile,
-    parent: &std::fs::File,
-    root: &std::fs::File,
-    kind: &str,
-) -> Result<()> {
-    let current_parent = profile_dir(profile)?;
-    let current_root = child_dir(parent, std::ffi::OsStr::new(&kind.to_string()))?;
-    if parent.metadata()?.dev() != current_parent.metadata()?.dev()
-        || parent.metadata()?.ino() != current_parent.metadata()?.ino()
-        || root.metadata()?.dev() != current_root.metadata()?.dev()
-        || root.metadata()?.ino() != current_root.metadata()?.ino()
-    {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "identity or lib directory changed; retry the operation",
-        )));
-    }
-    Ok(())
 }
 
 fn temporary_name() -> Result<String> {
@@ -1442,340 +1291,267 @@ fn write_component(dir: &std::fs::File, name: &str, bytes: &[u8]) -> Result<()> 
     Ok(())
 }
 
+pub(crate) fn install_package(
+    profile: &IdentityProfile,
+    id: &str,
+    bytes: &[u8],
+    runtime: &WasmRuntime,
+) -> Result<serde_json::Value> {
+    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
+    valid_id(id)?;
+    if id.rsplit('/').next() == Some("std") {
+        return Err(Error::BadRequest("std is reserved".into()));
+    }
+    let parent = initialized_profile(profile)?;
+    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+    let package = read_package(bytes)?;
+    let metadata = package_metadata(&package)?;
+    check_resource_identity(&metadata, id)?;
+    if let Some(backend) = package.get_atom("backend") {
+        runtime.compile(&backend)?;
+    }
+    let mut database = installation_database(profile, true)?;
+    check_name(&database, id, "pkg")?;
+    let same_version = registered_packages(&database, "pkg", Some(id))
+        .ok()
+        .and_then(|r| r.first().map(|r| r.1.clone()))
+        .as_deref()
+        == metadata["version"].as_str();
+    let name = temporary_name()?;
+    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+    let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
+    let cleanup = scopeguard::guard((), |_| {
+        let _ = cleanup_dir.remove_dir_all(&name);
+    });
+    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
+    inherit_owner(&stage, &parent)?;
+    for kind in ["lib", "app"] {
+        if metadata[format!("has_{kind}")] != true {
+            continue;
+        }
+        mkdirat(&stage, format!("new-{kind}"), Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+        let dir = child_dir(&stage, std::ffi::OsStr::new(&format!("new-{kind}")))?;
+        inherit_owner(&dir, &parent)?;
+        write_expanded(&dir, bytes, id, kind)?;
+    }
+    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for kind in ["lib", "app"] {
+        if metadata[format!("has_{kind}")] == true {
+            check_routes(profile, &tx, id, kind, &package)?;
+            check_existing_rules(profile, &tx, id, kind, &package, same_version)?;
+        }
+    }
+    save_registration(&tx, id, &metadata, &package)?;
+    scopeguard::ScopeGuard::into_inner(cleanup);
+    commit_package_files(profile, id, &parent, &stage, &name, tx)?;
+    Ok(lib_metadata(&package, Some(id)))
+}
+
+// Both runtime parts share one SQLite decision and one durable recovery journal.
+fn commit_package_files(
+    profile: &IdentityProfile,
+    id: &str,
+    parent: &std::fs::File,
+    stage: &std::fs::File,
+    name: &str,
+    tx: rusqlite::Transaction<'_>,
+) -> Result<()> {
+    use rustix::fs::{Mode, mkdirat, renameat};
+    let current = profile_dir(profile)?;
+    if current.metadata()?.dev() != parent.metadata()?.dev()
+        || current.metadata()?.ino() != parent.metadata()?.ino()
+    {
+        return Err(Error::InvalidConfig(
+            "identity directory changed during package installation".into(),
+        ));
+    }
+    let short = id.rsplit('/').next().unwrap();
+    let mut targets = Vec::new();
+    let mut resources = Vec::new();
+    for kind in ["lib", "app"] {
+        match mkdirat(parent, kind, Mode::from_raw_mode(0o700)) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(layout_error(e)),
+        }
+        let root = child_dir(parent, std::ffi::OsStr::new(kind))?;
+        inherit_owner(&root, parent)?;
+        let target = if kind == "lib" {
+            resource_parent(&root, id, true)?
+        } else {
+            root
+        };
+        if target.metadata()?.dev() != parent.metadata()?.dev() {
+            return Err(expanded_error());
+        }
+        let leaf = if kind == "lib" {
+            format!("{short}.wasm")
+        } else {
+            short.to_owned()
+        };
+        let old = match rustix::fs::statat(
+            &target,
+            leaf.as_str(),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => {
+                if kind == "lib" {
+                    if !expanded_file(&target, &leaf)?.metadata()?.is_file() || stat.st_nlink != 1 {
+                        return Err(expanded_error());
+                    }
+                } else {
+                    child_dir(&target, std::ffi::OsStr::new(&leaf))?;
+                }
+                true
+            }
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(e) => return Err(layout_error(e)),
+        };
+        let new = match child_dir(stage, std::ffi::OsStr::new(&format!("new-{kind}"))) {
+            Ok(_) => true,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        resources.push(serde_json::json!({"kind":kind,"old":old,"new":new}));
+        targets.push((target, leaf, old, new));
+    }
+    let facts: String = tx.query_row(include_str!("registration-facts.sql"), [short], |r| {
+        r.get(0)
+    })?;
+    write_component(
+        stage,
+        ".transaction.json",
+        &serde_json::to_vec(&serde_json::json!({"id":id,"resources":resources,"facts":facts}))
+            .map_err(|e| Error::InvalidConfig(e.to_string()))?,
+    )?;
+    stage.sync_all()?;
+    parent.sync_all()?;
+    let result = (|| -> Result<()> {
+        for ((target, leaf, old, new), kind) in targets.iter().zip(["lib", "app"]) {
+            if *old {
+                renameat(target, leaf.as_str(), stage, format!("old-{kind}"))
+                    .map_err(layout_error)?;
+            }
+            if *new {
+                let dir = child_dir(stage, std::ffi::OsStr::new(&format!("new-{kind}")))?;
+                if kind == "lib" {
+                    renameat(&dir, leaf.as_str(), target, leaf.as_str()).map_err(layout_error)?;
+                } else {
+                    renameat(stage, "new-app", target, leaf.as_str()).map_err(layout_error)?;
+                }
+            }
+            target.sync_all()?;
+            stage.sync_all()?;
+        }
+        database_owner(profile)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let rollback = (|| -> Result<()> {
+            for ((target, leaf, old, new), kind) in targets.iter().zip(["lib", "app"]) {
+                let backup = format!("old-{kind}");
+                let has_backup = rustix::fs::statat(
+                    stage,
+                    backup.as_str(),
+                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                )
+                .is_ok();
+                let source_exists = if kind == "lib" {
+                    child_dir(stage, std::ffi::OsStr::new("new-lib"))
+                        .and_then(|d| expanded_file(&d, leaf))
+                        .is_ok()
+                } else {
+                    child_dir(stage, std::ffi::OsStr::new("new-app")).is_ok()
+                };
+                if has_backup || (!*old && *new && !source_exists) {
+                    let dir = cap_std::fs::Dir::from_std_file(target.try_clone()?);
+                    if kind == "lib" {
+                        let _ = dir.remove_file(leaf);
+                    } else {
+                        let _ = dir.remove_dir_all(leaf);
+                    }
+                }
+                if has_backup {
+                    renameat(stage, backup.as_str(), target, leaf.as_str())
+                        .map_err(layout_error)?;
+                }
+                target.sync_all()?;
+            }
+            Ok(())
+        })();
+        if rollback.is_ok() {
+            let _ = cap_std::fs::Dir::from_std_file(parent.try_clone()?).remove_dir_all(name);
+        }
+        return Err(error);
+    }
+    if let Err(error) = cap_std::fs::Dir::from_std_file(parent.try_clone()?).remove_dir_all(name) {
+        tracing::warn!(%error,"committed package cleanup deferred to startup");
+    }
+    if let Err(error) = parent.sync_all() {
+        tracing::warn!(%error,"package cleanup sync failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_package(profile: &IdentityProfile, id: &str) -> Result<()> {
+    use rustix::fs::{FlockOperation, Mode, flock, mkdirat};
+    valid_id(id)?;
+    let parent = initialized_profile(profile)?;
+    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
+    let mut database = installation_database(profile, true)?;
+    if matches!(
+        registered_packages(&database, "pkg", Some(id)),
+        Err(Error::RouteNotFound)
+    ) {
+        return Ok(());
+    }
+    let short = id.rsplit('/').next().unwrap();
+    let name = temporary_name()?;
+    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
+    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
+    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let referenced: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM package_dependency WHERE dependency_name=?1)",
+        [short],
+        |r| r.get(0),
+    )?;
+    if referenced {
+        cap_std::fs::Dir::from_std_file(parent).remove_dir_all(&name)?;
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "package is required by installed dependencies",
+        )));
+    }
+    tx.execute("DELETE FROM lib_capability WHERE lib_name=?1", [short])?;
+    tx.execute("DELETE FROM package WHERE name=?1", [short])?;
+    commit_package_files(profile, id, &parent, &stage, &name, tx)
+}
+
+#[cfg(test)]
 pub(crate) fn install_lib(
     profile: &IdentityProfile,
     id: &str,
     bytes: &[u8],
     runtime: &WasmRuntime,
 ) -> Result<serde_json::Value> {
-    install_artifact(profile, id, bytes, Some(runtime), "lib")
+    install_package(profile, id, bytes, runtime)
 }
-
+#[cfg(test)]
 pub(crate) fn install_app(
     profile: &IdentityProfile,
     id: &str,
     bytes: &[u8],
 ) -> Result<serde_json::Value> {
-    install_artifact(profile, id, bytes, None, "app")
+    install_package(profile, id, bytes, &WasmRuntime::new()?)
 }
-
-fn install_artifact(
-    profile: &IdentityProfile,
-    id: &str,
-    bytes: &[u8],
-    runtime: Option<&WasmRuntime>,
-    kind: &str,
-) -> Result<serde_json::Value> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat, renameat};
-    valid_id(id)?;
-    if id.rsplit('/').next() == Some("std") {
-        return Err(Error::BadRequest(
-            "std is reserved for native services and standard Lib directories".into(),
-        ));
-    }
-    if kind == "app" && !id.contains('/') {
-        return Err(Error::BadRequest(
-            "frontend app requires publisher/name ID".into(),
-        ));
-    }
-    let parent = initialized_profile(profile)?;
-    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    match mkdirat(&parent, kind.to_string(), Mode::from_raw_mode(0o700)) {
-        Ok(()) => parent.sync_all()?,
-        Err(rustix::io::Errno::EXIST) => {}
-        Err(error) => return Err(layout_error(error)),
-    }
-    let root = child_dir(&parent, std::ffi::OsStr::new(&kind.to_string()))?;
-    inherit_owner(&root, &parent)?;
-    flock(&root, FlockOperation::LockShared).map_err(std::io::Error::from)?;
-    disk_ids(&root)?;
-    let mut database = installation_database(profile, true)?;
-    check_name(&database, id, kind)?;
-    flock(&root, FlockOperation::Unlock).map_err(std::io::Error::from)?;
-    let package = read_package(bytes)?;
-    let metadata = package_metadata(&package)?;
-    if metadata["kind"] != kind {
-        return Err(Error::InvalidComponent(
-            "package kind differs from install target".into(),
-        ));
-    }
-    if let Some(runtime) = runtime {
-        runtime.compile(
-            &package
-                .get_atom("backend")
-                .ok_or_else(|| Error::InvalidComponent("expected a backend lib".into()))?,
-        )?;
-    }
-    check_resource_identity(&metadata, id)?;
-    let previous_version = match registered_packages(&database, kind, Some(id)) {
-        Ok(mut rows) => Some(rows.pop().unwrap().1),
-        Err(Error::RouteNotFound) => None,
-        Err(error) => return Err(error),
-    };
-    let same_version = previous_version.as_deref() == metadata["version"].as_str();
-    if kind == "lib" && previous_version.is_some() && !same_version {
-        let name = id.rsplit('/').next().unwrap();
-        let dependents: i64 = database.query_row("SELECT (SELECT count(*) FROM app_dependency WHERE lib_name=?1)+(SELECT count(*) FROM lib_dependency WHERE dependency_name=?1)", [name], |row| row.get(0))?;
-        if dependents > 0 {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "lib version is required by installed App/Lib dependencies",
-            )));
-        }
-    }
-    for (dep_id, version) in declared_dependencies(&metadata) {
-        if installed_libs(profile, Some(&dep_id))?["version"] != version {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("dependency {dep_id} requires {version}"),
-            )));
-        }
-    }
-    let name = temporary_name()?;
-    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-    let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
-    let cleanup = scopeguard::guard((), |_| {
-        let _ = cleanup_dir.remove_dir_all(&name);
-    });
-    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-    inherit_owner(&stage, &parent)?;
-    write_expanded(&stage, bytes, id)?;
-    flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    check_lib_root(profile, &parent, &root, kind)?;
-    check_name(&database, id, kind)?;
-    let target_parent = if kind == "lib" {
-        resource_parent(&root, id, true)?
-    } else {
-        root.try_clone()?
-    };
-    if target_parent.metadata()?.dev() != parent.metadata()?.dev() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "package directory must share the identity filesystem",
-        )));
-    }
-    let short = id.rsplit('/').next().unwrap();
-    let leaf = if kind == "lib" {
-        format!("{short}.wasm")
-    } else {
-        short.to_owned()
-    };
-    let previous = if kind == "lib" {
-        match expanded_file(&target_parent, &leaf) {
-            Ok(file) => {
-                if file.metadata()?.nlink() != 1 {
-                    return Err(expanded_error());
-                }
-                true
-            }
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
-        }
-    } else {
-        match child_dir(&target_parent, std::ffi::OsStr::new(&leaf)) {
-            Ok(dir) => {
-                check_component_target(&dir, kind)?;
-                true
-            }
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
-        }
-    };
-    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    check_routes(profile, &tx, id, kind, &package)?;
-    check_existing_rules(profile, &tx, id, kind, &package, same_version)?;
-    save_registration(&tx, id, kind, &metadata, &package)?;
-    let table = if kind == "app" { "app" } else { "lib" };
-    tx.execute(
-        &format!(
-            "UPDATE {table} SET title=?2,description=?3,license=?4,repository=?5 WHERE name=?1"
-        ),
-        rusqlite::params![
-            id.rsplit('/').next().unwrap(),
-            metadata["title"].as_str(),
-            metadata["description"].as_str(),
-            metadata["license"].as_str(),
-            metadata["repository"].as_str()
-        ],
-    )?;
-    let facts: String =
-        tx.query_row(include_str!("registration-facts.sql"), [kind, short], |r| {
-            r.get(0)
-        })?;
-    write_component(
-        &stage,
-        ".transaction.json",
-        &serde_json::to_vec(
-            &serde_json::json!({"id":id,"kind":kind,"action":"install","facts":facts}),
-        )
-        .map_err(|e| Error::InvalidConfig(e.to_string()))?,
-    )?;
-    if previous {
-        renameat(&target_parent, &leaf, &stage, ".previous").map_err(layout_error)?;
-    }
-    let restore = scopeguard::guard((), |_| {
-        if previous {
-            let _ = renameat(&stage, ".previous", &target_parent, &leaf);
-            let _ = target_parent.sync_all();
-        }
-    });
-    stage.sync_all()?;
-    if kind == "lib" {
-        renameat(&stage, &leaf, &target_parent, &leaf).map_err(layout_error)?;
-    } else {
-        renameat(&parent, &name, &target_parent, &leaf).map_err(layout_error)?;
-    }
-    let rollback = scopeguard::guard((), |_| {
-        if kind == "lib" {
-            let _ = renameat(&target_parent, &leaf, &stage, &leaf);
-        } else {
-            let _ = renameat(&target_parent, &leaf, &parent, &name);
-        }
-        let _ = target_parent.sync_all();
-        let _ = parent.sync_all();
-    });
-    target_parent.sync_all()?;
-    parent.sync_all()?;
-    database_owner(profile)?;
-    tx.commit()?;
-    scopeguard::ScopeGuard::into_inner(rollback);
-    scopeguard::ScopeGuard::into_inner(restore);
-    // Commit already succeeded. Leave the recovery file if cleanup fails so a
-    // later startup can finish it; never report a failed install after commit.
-    let published = cap_std::fs::Dir::from_std_file(stage.try_clone()?);
-    let previous_cleanup = if !previous {
-        Ok(())
-    } else if kind == "lib" {
-        published.remove_file(".previous")
-    } else {
-        published.remove_dir_all(".previous")
-    };
-    if let Err(error) = previous_cleanup {
-        tracing::warn!(%error,"committed package cleanup deferred to startup");
-    } else if let Err(error) =
-        rustix::fs::unlinkat(&stage, ".transaction.json", rustix::fs::AtFlags::empty())
-    {
-        tracing::warn!(%error,"committed package cleanup deferred to startup");
-    }
-    if let Err(error) = stage.sync_all() {
-        tracing::warn!(%error,"package cleanup directory sync failed");
-    }
-    drop(cleanup);
-    Ok(lib_metadata(&package, Some(id)))
-}
-
+#[cfg(test)]
 pub(crate) fn remove_lib(profile: &IdentityProfile, id: &str) -> Result<()> {
-    remove_artifact(profile, id, "lib")
+    remove_package(profile, id)
 }
-
+#[cfg(test)]
 pub(crate) fn remove_app(profile: &IdentityProfile, id: &str) -> Result<()> {
-    remove_artifact(profile, id, "app")
-}
-
-fn remove_artifact(profile: &IdentityProfile, id: &str, kind: &str) -> Result<()> {
-    use rustix::fs::{FlockOperation, Mode, flock, mkdirat, renameat};
-    valid_id(id)?;
-    let parent = initialized_profile(profile)?;
-    flock(&parent, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    let mut database = installation_database(profile, true)?;
-    match registered_packages(&database, kind, Some(id)) {
-        Ok(_) => {}
-        Err(Error::RouteNotFound) => return Ok(()),
-        Err(e) => return Err(e),
-    }
-    let short_name = id.rsplit('/').next().unwrap();
-    if kind == "lib" {
-        let dependents = database
-            .prepare(
-                "SELECT 'app ' || CASE WHEN a.author IS NULL THEN a.name ELSE a.author||'/'||a.name END FROM app_dependency d JOIN app a ON a.name=d.app_name WHERE d.lib_name=?1 \
-                 UNION SELECT 'lib ' || CASE WHEN l.author IS NULL THEN l.name ELSE l.author||'/'||l.name END FROM lib_dependency d JOIN lib l ON l.name=d.lib_name WHERE d.dependency_name=?1 ORDER BY 1",
-            )?
-            .query_map([short_name], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if !dependents.is_empty() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "lib is required by an installed App/Lib: {}; remove these packages first",
-                    dependents.join(", "),
-                ),
-            )));
-        }
-    }
-    let root = match child_dir(&parent, std::ffi::OsStr::new(&kind.to_string())) {
-        Ok(root) => root,
-
-        Err(e) => return Err(e),
-    };
-    flock(&root, FlockOperation::LockExclusive).map_err(std::io::Error::from)?;
-    check_lib_root(profile, &parent, &root, kind)?;
-    let table = if kind == "app" { "app" } else { "lib" };
-    let target_parent = if kind == "lib" {
-        resource_parent(&root, id, false)?
-    } else {
-        root.try_clone()?
-    };
-    let leaf = if kind == "lib" {
-        format!("{short_name}.wasm")
-    } else {
-        short_name.to_owned()
-    };
-    if kind == "lib" {
-        expanded_file(&target_parent, &leaf)?;
-    } else {
-        check_component_target(
-            &child_dir(&target_parent, std::ffi::OsStr::new(&leaf))?,
-            kind,
-        )?;
-    }
-
-    if parent.metadata()?.dev() != target_parent.metadata()?.dev() {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "package root must share the identity filesystem for atomic removal",
-        )));
-    }
-    let name = temporary_name()?;
-    let cleanup_dir = cap_std::fs::Dir::from_std_file(parent.try_clone()?);
-    mkdirat(&parent, &name, Mode::from_raw_mode(0o700)).map_err(layout_error)?;
-    let cleanup = scopeguard::guard((), |_| {
-        let _ = cleanup_dir.remove_dir_all(&name);
-    });
-    let stage = child_dir(&parent, std::ffi::OsStr::new(&name))?;
-    inherit_owner(&stage, &parent)?;
-    let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if kind == "lib" {
-        tx.execute("DELETE FROM lib_capability WHERE lib_name=?1", [short_name])?;
-    }
-    tx.execute(&format!("DELETE FROM {table} WHERE name=?1"), [short_name])?;
-    let facts: String = tx.query_row(
-        include_str!("registration-facts.sql"),
-        [kind, short_name],
-        |r| r.get(0),
-    )?;
-    write_component(
-        &stage,
-        ".transaction.json",
-        &serde_json::to_vec(
-            &serde_json::json!({"id":id,"kind":kind,"action":"remove","facts":facts}),
-        )
-        .map_err(|e| Error::InvalidConfig(e.to_string()))?,
-    )?;
-    renameat(&target_parent, &leaf, &stage, "artifact").map_err(layout_error)?;
-    let rollback = scopeguard::guard((), |_| {
-        let _ = renameat(&stage, "artifact", &target_parent, &leaf);
-        let _ = target_parent.sync_all();
-    });
-    target_parent.sync_all()?;
-    root.sync_all()?;
-    stage.sync_all()?;
-    parent.sync_all()?;
-    database_owner(profile)?;
-    tx.commit()?;
-    scopeguard::ScopeGuard::into_inner(rollback);
-    drop(cleanup);
-    parent.sync_all()?;
-    Ok(())
+    remove_package(profile, id)
 }
 
 /// Read installed frontend resources without repeating installation validation.

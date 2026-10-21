@@ -41,16 +41,18 @@ pub(crate) fn package_fixture(
 ) -> Vec<u8> {
     // Test build input only. Production has one signed manifest authority.
     let app = document["x-pishoo"]["kind"] == "app";
+    let has_public = !public.children.is_empty();
     let mut api = document.clone();
-    let mut annotation = serde_json::json!({"kind":if app { "app" } else { "lib" },"title":document["info"]["title"],
+    let mut annotation = json!({"title":document["info"]["title"],
         "changelog":document["x-pishoo"].get("changelog").cloned().unwrap_or_else(||"Test release; data unchanged".into()),
         "dependencies":document["x-pishoo"].get("dependencies").cloned().unwrap_or_else(||json!([]))});
-    if app {
+    if has_public {
         annotation["entry"] = document["x-pishoo"]
             .get("entry")
             .cloned()
             .unwrap_or_else(|| "/".into());
-    } else {
+    }
+    if !app {
         annotation["host"] = document["x-pishoo"]
             .get("host")
             .cloned()
@@ -59,12 +61,30 @@ pub(crate) fn package_fixture(
     if let Some(extension) = api["x-pishoo"].as_object_mut() {
         extension.retain(|key, _| key == "access-groups");
     }
-    let volume = if app { "public" } else { "metadata" };
+    let mut backend = backend.to_vec();
+    if !app
+        && !wasmparser::Parser::new(0).parse_all(&backend).any(
+            |p| matches!(p,Ok(wasmparser::Payload::CustomSection(s)) if s.name()=="pishoo:openapi"),
+        )
+    {
+        let name = b"pishoo:openapi";
+        let mut section = vec![name.len() as u8];
+        section.extend(name);
+        section.extend(serde_json::to_vec(&api).unwrap());
+        backend.push(0);
+        let mut n = section.len();
+        while n >= 128 {
+            backend.push((n as u8 & 127) | 128);
+            n >>= 7;
+        }
+        backend.push(n as u8);
+        backend.extend(section);
+    }
     let mut manifest: webc::metadata::Manifest = serde_json::from_value(json!({
         "package":{"wapm":{"name":format!("{}/{}",document["x-pishoo"]["publisher"].as_str().unwrap(),document["x-pishoo"]["name"].as_str().unwrap()),
             "version":document["info"]["version"],"description":document["info"]["description"],"license":document["info"]["license"]["name"]},
-            "pishoo":annotation,"fs":[{"volume_name":volume,"mount_path":format!("/{volume}")}]},
-        "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(backend)))}}
+            "pishoo":annotation,"fs":if has_public {json!([{"volume_name":"public","mount_path":"/public"}])} else {json!([])}},
+        "atoms":{"backend":{"kind":"https://webc.org/kind/wasm","signature":format!("sha256:{}",STANDARD.encode(Sha256::digest(&backend)))}}
     })).unwrap();
     if app {
         manifest.atoms.clear();
@@ -75,7 +95,7 @@ pub(crate) fn package_fixture(
         } else {
             BTreeMap::from([(
                 "backend".parse().unwrap(),
-                FileEntry::borrowed(backend, Timestamps::default()),
+                FileEntry::borrowed(&backend, Timestamps::default()),
             )])
         }
     };
@@ -84,25 +104,8 @@ pub(crate) fn package_fixture(
         .unwrap()
         .write_atoms(atoms())
         .unwrap();
-    if app {
+    if has_public {
         writer.write_volume("public", public).unwrap();
-    } else {
-        // An obsolete combined fixture is rejected rather than accepted as a Lib.
-        if !public.children.is_empty() {
-            writer.write_volume("public", public).unwrap();
-        }
-        writer
-            .write_volume(
-                "metadata",
-                Directory::new(
-                    BTreeMap::from([(
-                        "openapi.json".parse().unwrap(),
-                        serde_json::to_vec(&api).unwrap().into(),
-                    )]),
-                    Timestamps::default(),
-                ),
-            )
-            .unwrap();
     }
     let unsigned = writer.finish(SignatureAlgorithm::None).unwrap();
     let container =
@@ -270,153 +273,6 @@ pub(crate) fn frontend_document(version: &str) -> Value {
 }
 
 #[test]
-fn flat_lib_snapshots_use_database_metadata_without_integrity_pins() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let runtime = WasmRuntime::new().unwrap();
-    let mut document = frontend_document("1.0.0");
-    document["x-pishoo"]["kind"] = json!("lib");
-    document["x-pishoo"]
-        .as_object_mut()
-        .unwrap()
-        .remove("entry");
-    document["x-pishoo"]["host"] =
-        json!({"private-storage":"Save messages", "request-identity":"Read identity"});
-    document["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
-    let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
-    let bytes = package_fixture(
-        &document,
-        backend,
-        Directory::default(),
-        &publisher("alice.dhttp.net", 'a'),
-    );
-    let id = "alice.dhttp.net/hello";
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    let path = profile.join("lib/hello.wasm");
-    assert!(!profile.join("lib/hello").exists());
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    let author: String = db
-        .query_row("SELECT author FROM lib WHERE name='hello'", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(author, "alice.dhttp.net");
-    let columns = db
-        .prepare("PRAGMA table_info(lib)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        columns,
-        [
-            "name",
-            "author",
-            "version",
-            "title",
-            "description",
-            "license",
-            "repository",
-            "installed_at",
-            "upgraded_at"
-        ]
-    );
-    let mut expected = package_metadata(&read_package(&bytes).unwrap()).unwrap();
-    expected.as_object_mut().unwrap().remove("host");
-    expected.as_object_mut().unwrap().remove("changelog");
-    let actual = installed_libs(&profile, Some(id)).unwrap();
-    expected["installed_at"] = actual["installed_at"].clone();
-    expected["upgraded_at"] = serde_json::Value::Null;
-    assert_eq!(actual, expected);
-    let lib_root = files::lib_root(&profile).unwrap();
-    let snapshot = files::disk_bytes(&profile, &lib_root, id).unwrap();
-    assert!(read_package(&snapshot).is_err());
-    let snapshot =
-        webc::Container::from_bytes_and_version(snapshot.into(), webc::Version::V3).unwrap();
-    assert!(snapshot.get_volume("pishoo-signature").is_none());
-    let original = std::fs::read(&path).unwrap();
-    assert!(original.starts_with(backend));
-    assert_eq!(snapshot.get_atom("backend").unwrap(), original);
-    assert_eq!(
-        package_file(&snapshot, "/metadata/openapi.json").unwrap(),
-        package_file(&read_package(&bytes).unwrap(), "/metadata/openapi.json").unwrap()
-    );
-    let mut app_document = frontend_document("1.0.0");
-    app_document["x-pishoo"]["dependencies"] =
-        json!([{"publisher":"alice.dhttp.net","name":"hello","version":"1.0.0"}]);
-    install_app(
-        &profile,
-        id,
-        &package_fixture(
-            &app_document,
-            &[],
-            frontend_files("dependent"),
-            &publisher("alice.dhttp.net", 'a'),
-        ),
-    )
-    .unwrap();
-    let mut changed_document = document.clone();
-    changed_document["info"]["description"] = "changed same version".into();
-    let changed = package_fixture(
-        &changed_document,
-        backend,
-        Directory::default(),
-        &publisher("alice.dhttp.net", 'a'),
-    );
-    install_lib(&profile, id, &changed, &runtime).unwrap();
-    assert_eq!(
-        installed_libs(&profile, Some(id)).unwrap()["description"],
-        "changed same version"
-    );
-    let replacement = package_fixture(
-        &document,
-        backend,
-        Directory::default(),
-        &publisher("alice.dhttp.net", 'b'),
-    );
-    let mut altered = original.clone();
-    let position = original
-        .windows(5)
-        .position(|part| part == b"wasi:")
-        .unwrap();
-    altered[position] = b'v';
-    std::fs::write(&path, &altered).unwrap();
-    let snapshot = files::disk_bytes(&profile, &lib_root, id).unwrap();
-    assert_eq!(
-        webc::Container::from_bytes_and_version(snapshot.into(), webc::Version::V3)
-            .unwrap()
-            .get_atom("backend")
-            .unwrap(),
-        altered
-    );
-    install_lib(&profile, id, &replacement, &runtime).unwrap();
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    std::fs::remove_file(&path).unwrap();
-    assert_eq!(
-        installed_libs(&profile, Some(id)).unwrap()["version"],
-        "1.0.0"
-    );
-    assert!(files::disk_bytes(&profile, &lib_root, id).is_err());
-    install_lib(&profile, id, &replacement, &runtime).unwrap();
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    #[cfg(unix)]
-    {
-        let outside = root.path().join("outside.wasm");
-        std::fs::write(&outside, &original).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(&outside, &path).unwrap();
-        assert!(files::disk_bytes(&profile, &lib_root, id).is_err());
-        assert_eq!(installed_libs(&profile, Some(id)).unwrap()["id"], id);
-        assert_eq!(std::fs::read(&outside).unwrap(), original);
-    }
-}
-
-#[test]
 #[ignore = "requires root; run in an isolated filesystem"]
 fn root_package_installs_and_updates_belong_to_identity_owner() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -518,397 +374,6 @@ fn expanded_app_loads_installed_public_files_without_revalidation_and_rejects_sy
         assert!(installed_apps(&profile, Some(id)).is_err());
         assert!(outside.join("app.js").is_file());
     }
-}
-
-#[test]
-fn http_installed_catalog_uses_database_metadata_without_opening_payloads() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.path()).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let id = "alice.dhttp.net/hello";
-    install_app(&profile, id, &frontend_package("1.0.0", "installed")).unwrap();
-    let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
-    sandbox.apps = installed_apps(&profile, None).unwrap();
-    // The HTTP catalog must not inspect any saved payload, even when none of
-    // those files are readable. Installation facts still come from config.db.
-    std::fs::remove_dir_all(profile.join("app")).unwrap();
-    let value = installed_catalog(&profile, true, Some("hello")).unwrap();
-    assert_eq!(value["id"], id);
-    assert_eq!(value["version"], "1.0.0");
-    assert_eq!(value["author"], "alice.dhttp.net");
-    assert_eq!(value["entry"], "/");
-    assert!(value.get("host").is_none());
-    assert_eq!(
-        value["title"],
-        lib_metadata(&sandbox.apps[id], Some(id))["title"]
-    );
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute(
-        "INSERT INTO lib(name,author,version) VALUES('backend','alice.dhttp.net','2.0.0')",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO app_dependency VALUES(?1,'backend','2.0.0')",
-        [id.rsplit('/').next().unwrap()],
-    )
-    .unwrap();
-    db.execute(
-        "UPDATE app SET version='2.0.0',title='Database title',description='Database description' WHERE name=?1",
-        [id.rsplit('/').next().unwrap()],
-    ).unwrap();
-    let value = installed_catalog(&profile, true, Some("hello")).unwrap();
-    assert_eq!(value["version"], "2.0.0");
-    assert_eq!(value["title"], "Database title");
-    assert_eq!(value["description"], "Database description");
-    assert_eq!(
-        value["dependencies"],
-        json!([{"author":"alice.dhttp.net","name":"backend","version":"2.0.0"}])
-    );
-    let value = installed_catalog(&profile, false, None).unwrap();
-    assert_eq!(value[0]["id"], "alice.dhttp.net/backend");
-    assert_eq!(value[0]["version"], "2.0.0");
-    assert_eq!(value[0]["title"], "backend");
-    assert_eq!(value[0]["description"], Value::Null);
-    assert!(value[0].get("host").is_none());
-    assert!(value[0].get("repository").is_none());
-    db.execute("UPDATE lib SET title='Backend' WHERE name='backend'", [])
-        .unwrap();
-    let value = installed_catalog(&profile, false, Some("backend")).unwrap();
-    assert_eq!(value["title"], "Backend");
-    assert_eq!(value["author"], "alice.dhttp.net");
-    assert!(value.get("host").is_none());
-    assert!(matches!(
-        installed_catalog(&profile, false, Some("missing")),
-        Err(Error::RouteNotFound)
-    ));
-    db.execute(
-        "DELETE FROM app WHERE name=?1",
-        [id.rsplit('/').next().unwrap()],
-    )
-    .unwrap();
-    assert!(
-        installed_catalog(&profile, true, None)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(sandbox.apps.contains_key(id));
-
-    // A pre-metadata schema is still queryable without reading any payload.
-    let legacy = IdentityProfile::try_from(root.path().join("legacy")).unwrap();
-    std::fs::create_dir_all(legacy.join("db")).unwrap();
-    crate::setup::load_server_config(&legacy).unwrap();
-    let old_db =
-        crate::setup::open_config(&legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    old_db
-        .execute_batch(
-            "DROP TABLE lib_registry.lib_dependency; DROP TABLE lib_registry.lib; CREATE TABLE lib(id TEXT PRIMARY KEY,name TEXT,version TEXT); \
-         CREATE TABLE lib_dependency(lib_id TEXT,dependency_id TEXT,version TEXT); \
-         INSERT INTO lib VALUES('alice.dhttp.net/old','old','1.0.0');",
-        )
-        .unwrap();
-    let value = installed_catalog(&legacy, false, Some("old")).unwrap();
-    assert_eq!(value["title"], "old");
-    assert_eq!(value["description"], Value::Null);
-    assert!(value.get("host").is_none());
-    assert_eq!(value["dependencies"], json!([]));
-}
-
-#[test]
-fn signed_std_publisher_selects_standard_libs_but_apps_share_one_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let authority = publisher("std.dhttp.net", 'a');
-    let mut lib = frontend_document("1.0.0");
-    lib["x-pishoo"]["publisher"] = json!("std.dhttp.net");
-    lib["x-pishoo"]["kind"] = json!("lib");
-    lib["x-pishoo"].as_object_mut().unwrap().remove("entry");
-    lib["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
-    let bytes = package_fixture(
-        &lib,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &authority,
-    );
-    let id = "std.dhttp.net/hello";
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    let mut app = frontend_document("1.0.0");
-    app["x-pishoo"]["publisher"] = json!("std.dhttp.net");
-    let frontend = package_fixture(&app, &[], frontend_files("standard page"), &authority);
-    install_app(&profile, id, &frontend).unwrap();
-    assert!(profile.join("lib/std/hello.wasm").is_file());
-    assert!(profile.join("app/hello/index.html").is_file());
-    assert!(!profile.join("lib/hello").exists());
-    assert!(!profile.join("app/std").exists());
-    let mut sandbox = Sandbox::new(runtime.clone());
-    sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.contains_key(id));
-    assert!(sandbox.apps.contains_key(id));
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    assert!(profile.join("lib/std/hello.wasm").is_file());
-    assert!(!profile.join("lib/hello").exists());
-    remove_app(&profile, id).unwrap();
-    remove_lib(&profile, id).unwrap();
-    assert!(!profile.join("app/hello").exists());
-    assert!(!profile.join("lib/std/hello.wasm").exists());
-
-    // Familiar standard names and a forged install ID do not classify other signers.
-    let ordinary = publisher("alice.dhttp.net", 'a');
-    lib["x-pishoo"]["publisher"] = json!("alice.dhttp.net");
-    lib["x-pishoo"]["name"] = json!("message");
-    let bytes = package_fixture(
-        &lib,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &ordinary,
-    );
-    assert!(install_lib(&profile, "std.dhttp.net/message", &bytes, &runtime).is_err());
-    install_lib(&profile, "alice.dhttp.net/message", &bytes, &runtime).unwrap();
-    assert!(profile.join("lib/message.wasm").is_file());
-    assert!(!profile.join("lib/std/message").exists());
-}
-
-fn legacy_schema(profile: &IdentityProfile) -> rusqlite::Connection {
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE lib_capability_operation; DROP TABLE lib_capability; DROP TABLE app_dependency; DROP TABLE lib_dependency; DROP TABLE lib; DROP TABLE app;
-        CREATE TABLE lib(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE app(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE app_dependency(app_id TEXT REFERENCES app(id) ON DELETE CASCADE,lib_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(app_id,lib_id));
-        CREATE TABLE lib_dependency(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,dependency_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(lib_id,dependency_id));
-        CREATE TABLE lib_capability(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,capability_id TEXT,title TEXT,PRIMARY KEY(lib_id,capability_id));
-        CREATE TABLE lib_capability_operation(lib_id TEXT,capability_id TEXT,method TEXT,path TEXT,PRIMARY KEY(lib_id,capability_id,method,path),FOREIGN KEY(lib_id,capability_id) REFERENCES lib_capability(lib_id,capability_id) ON DELETE CASCADE); PRAGMA foreign_keys=ON;").unwrap();
-    db
-}
-
-#[test]
-fn registered_legacy_webc_is_preserved_and_expands_on_explicit_reinstall() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    let db = legacy_schema(&profile);
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let mut document = frontend_document("1.0.0");
-    document["x-pishoo"]["publisher"] = json!("std.dhttp.net");
-    document["x-pishoo"]["kind"] = json!("lib");
-    document["x-pishoo"]
-        .as_object_mut()
-        .unwrap()
-        .remove("entry");
-    document["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
-    let bytes = package_fixture(
-        &document,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &publisher("std.dhttp.net", 'a'),
-    );
-    let id = "std.dhttp.net/hello";
-    db.execute("INSERT INTO lib VALUES(?1,'hello','1.0.0')", [id])
-        .unwrap();
-    let legacy = profile.join("lib/std.dhttp.net/hello/lib.webc");
-    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    std::fs::write(&legacy, &bytes).unwrap();
-    let mut sandbox = Sandbox::new(runtime.clone());
-    sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.contains_key(id));
-    assert_eq!(
-        db.query_row(
-            "SELECT count(*) FROM pragma_table_info('lib') WHERE name='id'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        1
-    );
-    assert!(!profile.join("lib/std/hello.wasm").exists());
-    let mut corrupted = bytes.clone();
-    let position = corrupted
-        .windows(5)
-        .position(|part| part == b"wasi:")
-        .unwrap();
-    corrupted[position] = b'v';
-    std::fs::write(&legacy, &corrupted).unwrap();
-    let replacement = package_fixture(
-        &document,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &publisher("std.dhttp.net", 'b'),
-    );
-    install_lib(&profile, id, &replacement, &runtime).unwrap();
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    assert!(profile.join("lib/std/hello.wasm").is_file());
-    assert_eq!(
-        db.query_row("SELECT author FROM lib WHERE name='hello'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .unwrap(),
-        "std.dhttp.net"
-    );
-    assert_eq!(std::fs::read(&legacy).unwrap(), corrupted);
-}
-
-#[test]
-fn legacy_expanded_proof_is_read_without_startup_migration() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    let db = legacy_schema(&profile);
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let mut document = frontend_document("1.0.0");
-    document["x-pishoo"]["kind"] = json!("lib");
-    document["x-pishoo"]
-        .as_object_mut()
-        .unwrap()
-        .remove("entry");
-    document["paths"] = json!({"/hello":{"post":{"operationId":"hello","summary":"Hello"}}});
-    let backend = include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm");
-    let bytes = package_fixture(
-        &document,
-        backend,
-        Directory::default(),
-        &publisher("alice.dhttp.net", 'a'),
-    );
-    let id = "alice.dhttp.net/hello";
-    db.execute("INSERT INTO lib VALUES(?1,'hello','1.0.0')", [id])
-        .unwrap();
-    let reader = webc::v3::read::OwnedReader::parse(bytes.clone()).unwrap();
-    let atom = &reader.index().atoms;
-    let section = webc::v3::read::Section::parse(
-        3,
-        Some(
-            bytes[atom.span.start + 1..atom.span.start + 33]
-                .try_into()
-                .unwrap(),
-        ),
-        bytes[atom.span.start + 41..atom.span.end()].to_vec().into(),
-    )
-    .unwrap();
-    let (_, _, _, span) = section
-        .as_atoms()
-        .unwrap()
-        .iter_with_offsets()
-        .next()
-        .unwrap()
-        .unwrap();
-    let span = span.with_offset(atom.span.start);
-    let header = serde_json::to_vec(&(bytes.len(), vec![("hello.wasm", span)])).unwrap();
-    let mut proof = b"pishoo-expanded-webc-v1\0".to_vec();
-    proof.extend_from_slice(&(header.len() as u64).to_le_bytes());
-    proof.extend_from_slice(&header);
-    proof.extend_from_slice(&bytes[..span.start]);
-    proof.extend_from_slice(&bytes[span.end()..]);
-    let old = profile.join("lib/hello");
-    std::fs::create_dir(&old).unwrap();
-    std::fs::write(old.join("hello.wasm"), backend).unwrap();
-    std::fs::write(old.join(".webc-proof"), &proof).unwrap();
-    let mut sandbox = Sandbox::new(runtime.clone());
-    sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.libs.contains_key(id));
-    assert!(!profile.join("lib/hello.wasm").exists());
-    assert_eq!(
-        files::disk_bytes(&profile, &files::lib_root(&profile).unwrap(), id).unwrap(),
-        bytes
-    );
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
-    assert!(profile.join("lib/hello.wasm").is_file());
-    assert_eq!(std::fs::read(old.join(".webc-proof")).unwrap(), proof);
-}
-
-#[test]
-fn explicit_management_migrates_natural_keys_and_preserves_relations_atomically() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let db = legacy_schema(&profile);
-    db.execute_batch("INSERT INTO lib VALUES('alice.dhttp.net/first','first','1.0.0'),('alice.dhttp.net/parent','parent','1.0.0'),('legacy','legacy','1.0.0'); INSERT INTO app VALUES('alice.dhttp.net/front','front','1.0.0'); INSERT INTO app_dependency VALUES('alice.dhttp.net/front','alice.dhttp.net/parent','1.0.0'); INSERT INTO lib_dependency VALUES('alice.dhttp.net/parent','alice.dhttp.net/first','1.0.0'); INSERT INTO lib_capability VALUES('alice.dhttp.net/parent','message','Message'); INSERT INTO lib_capability_operation VALUES('alice.dhttp.net/parent','message','POST','/std/message');").unwrap();
-    assert_eq!(
-        installed_libs(&profile, Some("legacy")).unwrap()["id"],
-        "legacy"
-    );
-    remove_lib(&profile, "absent").unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM pragma_table_info('lib')", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap(),
-        9
-    );
-    assert_eq!(
-        db.query_row("SELECT author FROM lib WHERE name='first'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .unwrap(),
-        "alice.dhttp.net"
-    );
-    assert!(
-        db.query_row("SELECT author FROM lib WHERE name='legacy'", [], |row| {
-            row.get::<_, Option<String>>(0)
-        })
-        .unwrap()
-        .is_none()
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT app_name,lib_name FROM app_dependency",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        )
-        .unwrap(),
-        ("front".into(), "parent".into())
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT lib_name,dependency_name FROM lib_dependency",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        )
-        .unwrap(),
-        ("parent".into(), "first".into())
-    );
-    assert_eq!(
-        db.query_row("SELECT lib_name FROM lib_capability", [], |row| row
-            .get::<_, String>(0))
-            .unwrap(),
-        "parent"
-    );
-    assert!(
-        !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-            [],
-            |row| row.get::<_, bool>(0)
-        )
-        .unwrap()
-    );
-    let broken = legacy_schema(&profile);
-    broken.execute_batch("PRAGMA foreign_keys=OFF; INSERT INTO lib VALUES('alice.dhttp.net/parent','parent','1.0.0'); INSERT INTO lib_dependency VALUES('alice.dhttp.net/parent','missing','1.0.0');").unwrap();
-    assert!(remove_lib(&profile, "absent").is_err());
-    assert_eq!(
-        broken
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('lib') WHERE name='id'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        broken
-            .query_row("SELECT dependency_id FROM lib_dependency", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap(),
-        "missing"
-    );
 }
 
 pub(crate) fn frontend_files(text: &'static str) -> Directory<'static> {
@@ -1157,359 +622,6 @@ async fn frontend_updates_hold_package_snapshots_and_static_requests_skip_guest(
     );
 }
 
-#[tokio::test]
-async fn independent_app_install_mount_update_remove_and_dependency_protection() {
-    use http::{Method, StatusCode};
-    use tower::ServiceExt;
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let authority = publisher("alice.dhttp.net", 'a');
-    let mut backend = frontend_document("1.0.0");
-    backend["x-pishoo"]["kind"] = json!("lib");
-    backend["x-pishoo"].as_object_mut().unwrap().remove("entry");
-    backend["paths"]
-        .as_object_mut()
-        .unwrap()
-        .retain(|path, _| path == "/hello");
-    backend["paths"]["/hello/run"] = backend["paths"]["/hello"].clone();
-    backend["paths"].as_object_mut().unwrap().remove("/hello");
-    let lib_bytes = package_fixture(
-        &backend,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &authority,
-    );
-    let mut frontend = frontend_document("1.0.0");
-    frontend["x-pishoo"]["kind"] = json!("app");
-    frontend["x-pishoo"]["dependencies"] =
-        json!([{"publisher":"alice.dhttp.net","name":"hello","version":"1.0.0"}]);
-    frontend["paths"].as_object_mut().unwrap().remove("/hello");
-    let app_bytes = package_fixture(&frontend, &[], frontend_files("separate page"), &authority);
-    assert!(read_package(&app_bytes).unwrap().atoms().is_empty());
-    assert!(check_lib(&app_bytes, &runtime).is_err());
-    assert!(install_lib(&profile, "alice.dhttp.net/hello", &app_bytes, &runtime).is_err());
-    assert!(install_app(&profile, "alice.dhttp.net/hello", &app_bytes).is_err());
-    install_lib(&profile, "alice.dhttp.net/hello", &lib_bytes, &runtime).unwrap();
-    let metadata = install_app(&profile, "alice.dhttp.net/hello", &app_bytes).unwrap();
-    assert_eq!(metadata["kind"], "app");
-    assert!(
-        metadata["endpoints"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|e| e["path"].as_str().unwrap().starts_with("/app/"))
-    );
-    assert!(profile.join("app/hello/index.html").is_file());
-    assert!(!profile.join("app/hello/manifest.json").exists());
-    assert!(!profile.join("app/hello/signature.json").exists());
-    assert!(!profile.join("app/hello/.webc-proof").exists());
-    assert!(remove_lib(&profile, "alice.dhttp.net/hello").is_err());
-    backend["info"]["version"] = json!("2.0.0");
-    let changed = package_fixture(
-        &backend,
-        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-        Directory::default(),
-        &authority,
-    );
-    assert!(install_lib(&profile, "alice.dhttp.net/hello", &changed, &runtime).is_err());
-    let mut sandbox = Sandbox::new(runtime);
-    sandbox.load_libs(&profile).unwrap();
-    assert_eq!(sandbox.libs.len(), 1);
-    assert_eq!(sandbox.apps.len(), 1);
-    let snapshot = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
-    for method in [Method::GET, Method::HEAD] {
-        let response = snapshot
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method.clone())
-                    .uri("/hello/")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["content-length"], "13");
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            bytes.as_ref(),
-            if method == Method::HEAD {
-                b""
-            } else {
-                b"separate page".as_slice()
-            }
-        );
-    }
-    let response = snapshot
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/hello?view=1")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(response.headers()["location"], "/hello/?view=1");
-    let response = snapshot
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/hello/contacts/deep-link")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = snapshot
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/hello/assets/missing.js")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let old = std::fs::read(profile.join("app/hello/index.html")).unwrap();
-    assert!(install_app(&profile, "alice.dhttp.net/hello", b"broken").is_err());
-    assert_eq!(
-        std::fs::read(profile.join("app/hello/index.html")).unwrap(),
-        old
-    );
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    assert_eq!(
-        db.query_row(
-            "SELECT lib_name,version FROM app_dependency WHERE app_name='hello'",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        )
-        .unwrap(),
-        ("hello".into(), "1.0.0".into())
-    );
-    std::fs::write(
-        profile.join(".volume/hello/saved.db"),
-        b"preserve backend data",
-    )
-    .unwrap();
-    remove_app(&profile, "alice.dhttp.net/hello").unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM app", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM app_dependency", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM lib", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        std::fs::read(profile.join(".volume/hello/saved.db")).unwrap(),
-        b"preserve backend data"
-    );
-    assert!(profile.join("lib/hello.wasm").is_file());
-    sandbox.load_libs(&profile).unwrap();
-    assert!(sandbox.apps.is_empty());
-    assert_eq!(sandbox.libs.len(), 1);
-    remove_lib(&profile, "alice.dhttp.net/hello").unwrap();
-    assert_eq!(
-        std::fs::read(profile.join(".volume/hello/saved.db")).unwrap(),
-        b"preserve backend data"
-    );
-}
-
-#[test]
-fn names_are_unique_per_kind_and_registration_updates_are_atomic() {
-    let directory = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(directory.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let runtime = WasmRuntime::new().unwrap();
-    let fixture = |name: &str, kind: &str, version: &str| {
-        let mut doc = frontend_document(version);
-        doc["x-pishoo"]["publisher"] = json!(name);
-        doc["x-pishoo"]["kind"] = json!(kind);
-        if kind == "app" {
-            doc["x-pishoo"]["dependencies"] = json!([]);
-            doc["paths"].as_object_mut().unwrap().remove("/hello");
-            package_fixture(
-                &doc,
-                &[],
-                frontend_files("page"),
-                &publisher(name, if name.starts_with("alice") { 'a' } else { 'b' }),
-            )
-        } else {
-            doc["x-pishoo"].as_object_mut().unwrap().remove("entry");
-            doc["paths"]
-                .as_object_mut()
-                .unwrap()
-                .retain(|path, _| path == "/hello");
-            package_fixture(
-                &doc,
-                include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
-                Directory::default(),
-                &publisher(name, if name.starts_with("alice") { 'a' } else { 'b' }),
-            )
-        }
-    };
-    let lib = fixture("alice.dhttp.net", "lib", "1.0.0");
-    let app = fixture("bob.dhttp.net", "app", "1.0.0");
-    install_lib(&profile, "alice.dhttp.net/hello", &lib, &runtime).unwrap();
-    install_app(&profile, "bob.dhttp.net/hello", &app).unwrap();
-    assert!(
-        install_lib(
-            &profile,
-            "bob.dhttp.net/hello",
-            &fixture("bob.dhttp.net", "lib", "1.0.0"),
-            &runtime
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("already installed")
-    );
-    assert!(
-        install_app(
-            &profile,
-            "alice.dhttp.net/hello",
-            &fixture("alice.dhttp.net", "app", "1.0.0")
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("already installed")
-    );
-    assert!(install_lib(&profile, "hello", &lib, &runtime).is_err());
-    let saved_snapshot = files::disk_bytes(
-        &profile,
-        &files::lib_root(&profile).unwrap(),
-        "alice.dhttp.net/hello",
-    )
-    .unwrap();
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("CREATE TRIGGER lib_registry.reject_update BEFORE UPDATE ON lib BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
-    assert!(
-        install_lib(
-            &profile,
-            "alice.dhttp.net/hello",
-            &fixture("alice.dhttp.net", "lib", "2.0.0"),
-            &runtime
-        )
-        .is_err()
-    );
-    assert_eq!(
-        files::disk_bytes(
-            &profile,
-            &files::lib_root(&profile).unwrap(),
-            "alice.dhttp.net/hello"
-        )
-        .unwrap(),
-        saved_snapshot
-    );
-    assert_eq!(
-        db.query_row("SELECT version FROM lib", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "1.0.0"
-    );
-    db.execute_batch("DROP TRIGGER reject_update;").unwrap();
-    db.execute_batch("BEGIN;").unwrap();
-    db.query_row("SELECT count(*) FROM lib", [], |r| r.get::<_, i64>(0))
-        .unwrap();
-    assert!(
-        install_lib(
-            &profile,
-            "alice.dhttp.net/hello",
-            &fixture("alice.dhttp.net", "lib", "2.0.0"),
-            &runtime
-        )
-        .is_err()
-    );
-    db.execute_batch("ROLLBACK;").unwrap();
-    assert_eq!(
-        files::disk_bytes(
-            &profile,
-            &files::lib_root(&profile).unwrap(),
-            "alice.dhttp.net/hello"
-        )
-        .unwrap(),
-        saved_snapshot
-    );
-    assert_eq!(
-        db.query_row("SELECT version FROM lib", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "1.0.0"
-    );
-
-    install_lib(
-        &profile,
-        "alice.dhttp.net/hello",
-        &fixture("alice.dhttp.net", "lib", "2.0.0"),
-        &runtime,
-    )
-    .unwrap();
-    assert_eq!(
-        db.query_row("SELECT version FROM lib", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "2.0.0"
-    );
-    let saved_app_manifest = serde_json::to_value(
-        installed_apps(&profile, Some("bob.dhttp.net/hello")).unwrap()["bob.dhttp.net/hello"]
-            .manifest(),
-    )
-    .unwrap();
-    db.execute_batch("CREATE TRIGGER app_registry.reject_remove BEFORE DELETE ON app BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
-    assert!(remove_app(&profile, "bob.dhttp.net/hello").is_err());
-    assert_eq!(
-        serde_json::to_value(
-            installed_apps(&profile, Some("bob.dhttp.net/hello")).unwrap()["bob.dhttp.net/hello"]
-                .manifest()
-        )
-        .unwrap(),
-        saved_app_manifest
-    );
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM app", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    db.execute_batch("DROP TRIGGER reject_remove;").unwrap();
-    remove_lib(&profile, "alice.dhttp.net/hello").unwrap();
-    let alice = fixture("alice.dhttp.net", "lib", "1.0.0");
-    let bob = fixture("bob.dhttp.net", "lib", "1.0.0");
-    let barrier = std::sync::Barrier::new(2);
-    let results = std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
-            barrier.wait();
-            install_lib(&profile, "alice.dhttp.net/hello", &alice, &runtime)
-        });
-        let second = scope.spawn(|| {
-            barrier.wait();
-            install_lib(&profile, "bob.dhttp.net/hello", &bob, &runtime)
-        });
-        [first.join().unwrap(), second.join().unwrap()]
-    });
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM lib WHERE name='hello'", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-}
-
 #[test]
 fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     let root = tempfile::tempdir().unwrap();
@@ -1559,7 +671,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM lib_dependency WHERE lib_name='parent'",
+            "SELECT count(*) FROM package_dependency WHERE package_name='parent'",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -1567,7 +679,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
         2
     );
     let blocked = remove_lib(&profile, "alice.dhttp.net/first").unwrap_err();
-    assert!(blocked.to_string().contains("lib alice.dhttp.net/parent"));
+    assert!(blocked.to_string().contains("required"));
     assert!(
         install_lib(
             &profile,
@@ -1581,7 +693,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     sandbox.load_libs(&profile).unwrap();
     std::fs::write(profile.join(".volume/first/keep.db"), b"keep").unwrap();
     db.execute(
-        "UPDATE lib_dependency SET version='2.0.0' WHERE dependency_name='first'",
+        "UPDATE package_dependency SET version='2.0.0' WHERE dependency_name='first'",
         [],
     )
     .unwrap();
@@ -1589,7 +701,7 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 3);
     db.execute(
-        "UPDATE lib_dependency SET version='1.0.0' WHERE dependency_name='first'",
+        "UPDATE package_dependency SET version='1.0.0' WHERE dependency_name='first'",
         [],
     )
     .unwrap();
@@ -1621,14 +733,17 @@ fn backend_dependencies_are_multiple_pinned_persistent_and_acyclic() {
     .unwrap();
     // Startup does not repeat dependency-cycle validation after installation.
     db.execute(
-        "INSERT INTO lib_dependency VALUES('second','first','1.0.0')",
+        "INSERT INTO package_dependency VALUES('second','first','1.0.0')",
         [],
     )
     .unwrap();
     // Startup trusts installation; it does not audit out-of-band DB edits.
     sandbox.load_libs(&profile).unwrap();
-    db.execute("DELETE FROM lib_dependency WHERE lib_name='second'", [])
-        .unwrap();
+    db.execute(
+        "DELETE FROM package_dependency WHERE package_name='second'",
+        [],
+    )
+    .unwrap();
     let self_dependency = package(
         "self",
         "1.0.0",
@@ -1788,7 +903,7 @@ async fn legacy_capability_prefixes_are_projected_then_migrated_without_changing
         "substr(path, 1, 5) = '/std/'",
     ))
     .unwrap();
-    db.execute_batch("INSERT INTO lib(name,author,version) VALUES('journal','alice.dhttp.net','1.0.0'),('message','std.dhttp.net','1.0.0');
+    db.execute_batch("INSERT INTO package(has_lib,has_app,name,author,version) VALUES(1,0,'journal','alice.dhttp.net','1.0.0'),(1,0,'message','std.dhttp.net','1.0.0');
         INSERT INTO lib_capability VALUES('journal','write','Journal'),('message','write','Message');
         INSERT INTO lib_capability_operation VALUES('journal','write','POST','/std/entries'),('message','write','POST','/std/message');").unwrap();
     let acl = rusqlite::Connection::open(profile.join(".volume/sys/access/.db")).unwrap();
@@ -1994,13 +1109,19 @@ async fn ordinary_lib_mounts_bind_signatures_capabilities_and_proxy_conflicts() 
             .unwrap();
         assert_eq!(response.status(), expected);
     }
-    let mut frontend = frontend_document("1.0.0");
-    frontend["x-pishoo"]["name"] = json!("journal");
-    frontend["x-pishoo"]["dependencies"] = json!([]);
-    install_app(
+    let mut frontend = doc.clone();
+    frontend["paths"] = json!({"/std/xxxx":doc["paths"]["/journal"].clone()});
+    frontend["x-pishoo"]["publisher"] = "alice.dhttp.net".into();
+    install_package(
         &profile,
         id,
-        &package_fixture(&frontend, &[], frontend_files("Journal page"), &authority),
+        &package_fixture(
+            &frontend,
+            backend,
+            frontend_files("Journal page"),
+            &authority,
+        ),
+        &runtime,
     )
     .unwrap();
     sandbox.load_libs(&profile).unwrap();
@@ -2247,22 +1368,17 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     install_lib(&profile, id, &bytes, &runtime).unwrap();
-    // Static App mounts and Lib business routes have independent roots.
-    let mut doc = frontend_document("1.0.0");
-    doc["x-pishoo"]["publisher"] = json!("std.dhttp.net");
-    doc["x-pishoo"]["kind"] = json!("app");
-    doc["x-pishoo"]["name"] = json!("message");
-    doc["x-pishoo"]["dependencies"] = json!([]);
-    let app = package_fixture(&doc, &[], frontend_files("page"), &authority);
-    install_app(&profile, id, &app).unwrap();
-    install_lib(
-        &profile,
-        id,
-        &make_lib("message", "2.0.0", "/message", "get", "1v1聊天"),
-        &runtime,
-    )
-    .unwrap();
-    install_lib(&profile, id, &bytes, &runtime).unwrap();
+    let doc = json!({"openapi":"3.1.0","info":{"title":"Message","version":"1.0.0","description":"test","license":{"name":"MIT"}},
+        "x-pishoo":{"publisher":"std.dhttp.net","name":"message","host":{"request-identity":"identity"}},
+        "x-access-groups":{"message":{"title":"1v1聊天","operations":["receive"]}},
+        "paths":{"/message":{"post":{"operationId":"receive","summary":"Receive","x-access-group":"message"}}}});
+    let combined = package_fixture(
+        &doc,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        frontend_files("page"),
+        &authority,
+    );
+    install_package(&profile, id, &combined, &runtime).unwrap();
     sandbox.load_libs(&profile).unwrap();
     let router = api_router(&sandbox, crate::test_identity::endpoint("alice"));
     for (method, path, status) in [
@@ -2362,149 +1478,89 @@ async fn std_capabilities_are_atomic_persistent_and_routes_have_one_provider() {
         .unwrap();
 }
 
-#[test]
-fn ordinary_legacy_apps_remain_readable_after_another_package_migrates_registration() {
-    for expanded in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-        crate::setup::load_server_config(&profile).unwrap();
-        std::fs::create_dir_all(profile.join("lib")).unwrap();
-        let db = legacy_schema(&profile);
-        let id = "alice.dhttp.net/hello";
-        db.execute("INSERT INTO app VALUES(?1,'hello','1.0.0')", [id])
-            .unwrap();
-        let text = "<h1>Legacy deployed page 2026</h1>";
-        let bytes = frontend_package("1.0.0", text);
-        let app = profile.join("app/hello");
-        std::fs::create_dir_all(app.join("public/assets")).unwrap();
-        std::fs::write(app.join("public/index.html"), text).unwrap();
-        std::fs::write(app.join("public/assets/app.js"), b"fetch('./hello')").unwrap();
-        let marker = if expanded {
-            let mut spans = [
-                ("public/index.html", text.as_bytes()),
-                ("public/assets/app.js", b"fetch('./hello')".as_slice()),
-            ]
-            .into_iter()
-            .map(|(path, data)| {
-                let start = bytes
-                    .windows(data.len())
-                    .position(|part| part == data)
-                    .unwrap();
-                (
-                    path,
-                    webc::v3::Span {
-                        start,
-                        len: data.len(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-            spans.sort_by_key(|(_, span)| span.start);
-            let header = serde_json::to_vec(&(bytes.len(), &spans)).unwrap();
-            let mut proof = b"pishoo-expanded-webc-v1\0".to_vec();
-            proof.extend_from_slice(&(header.len() as u64).to_le_bytes());
-            proof.extend_from_slice(&header);
-            let mut cursor = 0;
-            for (_, span) in spans {
-                proof.extend_from_slice(&bytes[cursor..span.start]);
-                cursor = span.end();
-            }
-            proof.extend_from_slice(&bytes[cursor..]);
-            std::fs::write(app.join(".webc-proof"), &proof).unwrap();
-            proof
-        } else {
-            std::fs::write(app.join("app.webc"), &bytes).unwrap();
-            bytes.clone()
-        };
-        remove_lib(&profile, "absent").unwrap();
-        let fields: (Option<String>, Option<String>) = db
-            .query_row(
-                "SELECT description,license FROM app WHERE name='hello'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            fields,
-            (None, None),
-            "migration must not fabricate source metadata"
-        );
-        let installed = installed_apps(&profile, Some(id)).unwrap();
-        assert_eq!(
-            package_file(&installed[id], "/public/index.html").unwrap(),
-            text.as_bytes()
-        );
-        let mut sandbox = Sandbox::new(Arc::new(WasmRuntime::new().unwrap()));
-        sandbox.load_libs(&profile).unwrap();
-        assert_eq!(
-            package_file(&sandbox.apps[id], "/public/index.html").unwrap(),
-            text.as_bytes()
-        );
-        assert_eq!(
-            std::fs::read(app.join(if expanded { ".webc-proof" } else { "app.webc" })).unwrap(),
-            marker
-        );
-        remove_app(&profile, id).unwrap();
-        assert!(
-            !app.exists(),
-            "legacy App removal still targets its actual directory"
-        );
-    }
+#[tokio::test]
+async fn combined_package_serves_pages_and_backend_methods_and_is_one_identity() {
+    use tower::ServiceExt;
+    let root = tempfile::tempdir().unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
+    crate::setup::load_server_config(&profile).unwrap();
+    let runtime = Arc::new(WasmRuntime::new().unwrap());
+    let mut doc = frontend_document("1.0.0");
+    doc["x-pishoo"]["kind"] = "lib".into();
+    doc["paths"] = json!({"/events":{"post":{"operationId":"events","summary":"Events"}}});
+    let bytes = package_fixture(
+        &doc,
+        include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
+        frontend_files("page"),
+        &publisher("alice.dhttp.net", 'a'),
+    );
+    install_package(&profile, "alice.dhttp.net/hello", &bytes, &runtime).unwrap();
+    let mut sandbox = Sandbox::new(runtime.clone());
+    sandbox.load_libs(&profile).unwrap();
+    let router = api_router(&sandbox, crate::test_identity::endpoint("alice.dhttp.net"));
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hello/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hello/events")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), http::StatusCode::METHOD_NOT_ALLOWED);
+    let db =
+        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM package", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let mut foreign = doc.clone();
+    foreign["x-pishoo"]["publisher"] = "bob.dhttp.net".into();
+    let foreign = package_fixture(
+        &foreign,
+        &[],
+        frontend_files("other"),
+        &publisher("bob.dhttp.net", 'b'),
+    );
+    assert!(install_package(&profile, "bob.dhttp.net/hello", &foreign, &runtime).is_err());
 }
 
 #[test]
-fn explicit_management_discards_intermediate_integrity_columns() {
+fn package_catalog_uses_registration_without_a_payload_audit() {
     let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
+    let profile = IdentityProfile::try_from(root.path().join("owner")).unwrap();
     crate::setup::load_server_config(&profile).unwrap();
-    let id = "alice.dhttp.net/hello";
-    install_app(&profile, id, &frontend_package("1.0.0", "first")).unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    for table in ["lib", "app"] {
-        let count: i64 = db
-            .query_row(
-                &format!("SELECT count(*) FROM pragma_table_info('{table}')"),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 9, "fresh {table}");
-        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN package_sha256 TEXT; ALTER TABLE {table} ADD COLUMN author_owner_hash TEXT;")).unwrap();
+    db.execute("INSERT INTO package(name,author,version,title,has_lib,has_app) VALUES('hello','alice.dhttp.net','1.0.0','Hello',1,1)",[]).unwrap();
+    let value = installed_catalog(&profile, Some("hello")).unwrap();
+    assert_eq!(value["id"], "alice.dhttp.net/hello");
+    assert_eq!(value["has_lib"], true);
+    assert_eq!(value["has_app"], true);
+    assert!(value.get("kind").is_none());
+    assert!(value["endpoints"].as_array().unwrap().is_empty());
+    let columns = db
+        .prepare("PRAGMA table_info(package)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(columns.len(), 11);
+    for removed in ["id", "package_sha256", "author_owner_hash", "changelog"] {
+        assert!(!columns.iter().any(|c| c == removed));
     }
-    db.execute("UPDATE app SET package_sha256='obsolete hash',author_owner_hash='obsolete owner' WHERE name='hello'", []).unwrap();
-    let replacement = package_fixture(
-        &frontend_document("1.0.0"),
-        &[],
-        frontend_files("updated"),
-        &publisher("alice.dhttp.net", 'b'),
-    );
-    install_app(&profile, id, &replacement).unwrap();
-    for table in ["lib", "app"] {
-        let columns = db
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            columns,
-            [
-                "name",
-                "author",
-                "version",
-                "title",
-                "description",
-                "license",
-                "repository",
-                "installed_at",
-                "upgraded_at"
-            ]
-        );
-    }
-    assert_eq!(
-        std::fs::read(profile.join("app/hello/index.html")).unwrap(),
-        b"updated"
-    );
 }

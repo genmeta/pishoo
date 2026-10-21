@@ -1,11 +1,8 @@
 use super::*;
-use crate::package::{
-    install_app,
-    tests::{
-        package_fixture,
-        packages::{frontend_document, frontend_files},
-        publisher,
-    },
+use crate::package::tests::{
+    package_fixture,
+    packages::{frontend_document, frontend_files},
+    publisher,
 };
 use serde_json::json;
 use webc::v3::write::Directory;
@@ -143,12 +140,13 @@ fn database_registration_controls_loading_without_revalidating_versions() {
     .unwrap();
     let db =
         crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute("DELETE FROM lib WHERE name='beta'", []).unwrap();
+    db.execute("DELETE FROM package WHERE name='beta'", [])
+        .unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs.len(), 1);
     assert!(sandbox.libs.contains_key("alpha"));
     assert!(profile.join("lib/beta.wasm").is_file());
-    db.execute("UPDATE lib SET version='2.0.0' WHERE name='alpha'", [])
+    db.execute("UPDATE package SET version='2.0.0' WHERE name='alpha'", [])
         .unwrap();
     sandbox.load_libs(&profile).unwrap();
     assert_eq!(sandbox.libs["alpha"].openapi.info.version, "1.0.0");
@@ -181,15 +179,16 @@ fn startup_uses_current_runtime_files_without_integrity_comparison_or_repair() {
         &publisher("alice.dhttp.net", 'a'),
     );
     install_lib(&profile, id, &source, &runtime).unwrap();
-    install_app(
+    crate::package::install_package(
         &profile,
         id,
         &package_fixture(
-            &frontend_document("1.0.0"),
-            &[],
+            &document,
+            include_bytes!("../../fixtures/wasi-http-read-request-then-respond.wasm"),
             frontend_files("original"),
             &publisher("alice.dhttp.net", 'a'),
         ),
+        &runtime,
     )
     .unwrap();
     let wasm = profile.join("lib/hello.wasm");

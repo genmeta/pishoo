@@ -78,8 +78,6 @@ fn authenticated_release_rejects_tampered_bytes_metadata_signers_and_identity() 
     for key in [
         "package_sha256",
         "publisher_owner_hash",
-        "openapi",
-        "host",
         "signer_certificates",
         "size",
     ] {
@@ -118,6 +116,7 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     let (bytes, _) = release('a', "1.2.3");
     install_lib(&profile, "note", &bytes, &runtime).unwrap();
     let id = "alice.dhttp.net/note";
+    dbg!(super::super::installed_packages(&profile, None).unwrap());
     assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, "note").unwrap();
     install_lib(&profile, id, &bytes, &runtime).unwrap();
@@ -163,51 +162,22 @@ fn complete_ids_conflict_with_legacy_names_and_reject_other_authors() {
     assert!(profile.join(".volume/note").is_dir());
     let outside = root.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, profile.join("lib/note")).unwrap();
+    std::os::unix::fs::symlink(&outside, profile.join("lib/note.wasm")).unwrap();
     assert!(install_lib(&profile, id, &bytes, &runtime).is_err());
     super::super::remove_lib(&profile, id).unwrap();
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
 
 #[test]
-fn frontend_release_proof_binds_kind_and_exact_backend_dependencies() {
-    use super::super::tests::{package_fixture, publisher};
-    let authority = publisher("alice.dhttp.net", 'a');
-    let document = serde_json::json!({"openapi":"3.1.0","info":{"title":"Frontend","version":"1.0.0","description":"Separate frontend","license":{"name":"MIT"}},"x-pishoo":{"kind":"app","publisher":"alice.dhttp.net","name":"note","entry":"/","host":{},"dependencies":[{"publisher":"alice.dhttp.net","name":"note","version":"1.2.3"}]},"paths":{"/":{"get":{"operationId":"page","summary":"Page","x-pishoo":{"static-file":"/public/index.html"}},"head":{"operationId":"headPage","summary":"Page header","x-pishoo":{"static-file":"/public/index.html"}}}}});
-    let public = webc::v3::write::Directory::new(
-        std::collections::BTreeMap::from([(
-            "index.html".parse().unwrap(),
-            b"page".to_vec().into(),
-        )]),
-        webc::v3::Timestamps::default(),
-    );
-    let bytes = package_fixture(&document, &[], public, &authority);
-    let mut metadata = serde_json::json!({"kind":"app","id":"alice.dhttp.net/note","publisher":"alice.dhttp.net","name":"note","version":"1.0.0","publisher_owner_hash":"a".repeat(64),"size":bytes.len(),"package_sha256":format!("{:x}",Sha256::digest(&bytes)),"openapi":document,"dependencies":document["x-pishoo"]["dependencies"],"signer_certificates":authority.certificates().iter().map(|c| STANDARD.encode(c.as_ref())).collect::<Vec<_>>()});
-    metadata.as_object_mut().unwrap().remove("openapi");
-    let fields = package_metadata(&read_package(&bytes).unwrap()).unwrap();
-    for (key, value) in fields.as_object().unwrap() {
-        metadata[key] = value.clone();
+fn frontend_release_proof_binds_package_dependencies_without_runtime_projection() {
+    let (bytes, mut metadata) = release('a', "1.0.0");
+    for key in ["host", "entry", "openapi", "has_lib", "has_app", "kind"] {
+        metadata.as_object_mut().unwrap().remove(key);
     }
     verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").unwrap();
-    // The store projects App host capabilities as {}, while the signed App
-    // manifest must omit host entirely.
-    metadata["host"] = serde_json::json!({});
-    verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").unwrap();
-    for host in [
-        serde_json::json!({"private-storage": "Forged capability"}),
-        serde_json::json!([]),
-        serde_json::json!("invalid"),
-    ] {
-        let mut wrong = metadata.clone();
-        wrong["host"] = host;
-        assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
-    }
-    let mut wrong = metadata.clone();
-    wrong["kind"] = serde_json::json!("lib");
-    assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
-    wrong = metadata;
-    wrong["dependencies"][0]["version"] = serde_json::json!("2.0.0");
-    assert!(verify_release(&bytes, &wrong, "alice.dhttp.net", "note", "1.0.0").is_err());
+    metadata["dependencies"] =
+        serde_json::json!([{"publisher":"alice.dhttp.net","name":"other","version":"1.0.0"}]);
+    assert!(verify_release(&bytes, &metadata, "alice.dhttp.net", "note", "1.0.0").is_err());
 }
 
 #[test]
@@ -307,106 +277,16 @@ fn published_std_release_proofs_match_signed_packages() {
     }
 }
 
-#[test]
-fn installed_dependency_reuse_uses_registered_identity_and_version_only() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let (source, _) = release('a', "1.2.3");
-    let id = "alice.dhttp.net/note";
-    install_lib(&profile, id, &source, &runtime).unwrap();
-    assert!(can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    let path = profile.join("lib/note.wasm");
-    let mut changed = std::fs::read(&path).unwrap();
-    section(&mut changed, "local-note", b"locally edited payload");
-    std::fs::write(&path, &changed).unwrap();
-    assert!(can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    std::fs::remove_file(&path).unwrap();
-    assert!(
-        can_reuse_lib(&profile, id, "1.2.3").unwrap(),
-        "reuse eligibility does not inspect local files"
-    );
-    assert!(!can_reuse_lib(&profile, "bob.dhttp.net/note", "1.2.3").unwrap());
-    assert!(!can_reuse_lib(&profile, id, "2.0.0").unwrap());
-}
-
-#[test]
-fn loaded_legacy_dependency_is_reinstalled_before_it_becomes_reusable() {
-    let root = tempfile::tempdir().unwrap();
-    let profile = IdentityProfile::try_from(root.path().join("alice")).unwrap();
-    crate::setup::load_server_config(&profile).unwrap();
-    std::fs::create_dir_all(profile.join("lib")).unwrap();
-    std::fs::create_dir_all(profile.join("app")).unwrap();
-    let db =
-        crate::setup::open_config(&profile, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-    db.execute_batch("PRAGMA foreign_keys=OFF;
-        DROP TABLE lib_capability_operation; DROP TABLE lib_capability;
-        DROP TABLE app_dependency; DROP TABLE lib_dependency; DROP TABLE lib; DROP TABLE app;
-        CREATE TABLE lib(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE app(id TEXT PRIMARY KEY NOT NULL,name TEXT UNIQUE NOT NULL,version TEXT NOT NULL);
-        CREATE TABLE app_dependency(app_id TEXT REFERENCES app(id) ON DELETE CASCADE,lib_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(app_id,lib_id));
-        CREATE TABLE lib_dependency(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,dependency_id TEXT REFERENCES lib(id) ON DELETE RESTRICT,version TEXT,PRIMARY KEY(lib_id,dependency_id));
-        CREATE TABLE lib_capability(lib_id TEXT REFERENCES lib(id) ON DELETE CASCADE,capability_id TEXT,title TEXT,PRIMARY KEY(lib_id,capability_id));
-        CREATE TABLE lib_capability_operation(lib_id TEXT,capability_id TEXT,method TEXT,path TEXT,PRIMARY KEY(lib_id,capability_id,method,path),FOREIGN KEY(lib_id,capability_id) REFERENCES lib_capability(lib_id,capability_id) ON DELETE CASCADE);").unwrap();
-    let id = "alice.dhttp.net/note";
-    let (source, _) = release('a', "1.2.3");
-    db.execute("INSERT INTO lib VALUES(?1,'note','1.2.3')", [id])
-        .unwrap();
-    let artifact = profile.join("lib/alice.dhttp.net/note/lib.webc");
-    std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
-    std::fs::write(&artifact, &source).unwrap();
-    let legacy_data = profile.join("db/alice.dhttp.net/note");
-    std::fs::create_dir_all(&legacy_data).unwrap();
-    std::fs::write(legacy_data.join("keep.db"), b"existing business data").unwrap();
-    let runtime = Arc::new(WasmRuntime::new().unwrap());
-    let mut sandbox = Sandbox::new(runtime.clone());
-    sandbox.load_libs(&profile).unwrap();
-    assert_eq!(sandbox.libs[id].openapi.info.version, "1.2.3");
-    assert!(!profile.join("db/note").exists());
-    assert_eq!(
-        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
-        b"existing business data"
-    );
-    assert!(!can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    assert_eq!(
-        db.query_row(
-            "SELECT count(*) FROM pragma_table_info('lib') WHERE name='id'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )
-        .unwrap(),
-        1,
-        "eligibility check must not migrate the catalog"
-    );
-    install_lib(&profile, id, &source, &runtime).unwrap();
-    assert!(can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    assert!(!can_reuse_lib(&profile, id, "1.2.4").unwrap());
-    let snapshot = super::super::files::disk_bytes(
-        &profile,
-        &super::super::files::lib_root(&profile).unwrap(),
-        id,
-    )
-    .unwrap();
-    let installed = Lib::load(
-        runtime,
-        id.into(),
-        &snapshot,
-        &profile.join(".volume").join(id.rsplit('/').next().unwrap()),
-    )
-    .unwrap();
-    assert_eq!(installed.openapi.info.version, "1.2.3");
-    assert!(!profile.join("db/note").exists());
-    assert_eq!(
-        std::fs::read(profile.join(".volume/note/keep.db")).unwrap(),
-        b"existing business data"
-    );
-    db.execute(
-        "UPDATE lib SET author='bob.dhttp.net' WHERE name='note'",
-        [],
-    )
-    .unwrap();
-    assert!(!can_reuse_lib(&profile, id, "1.2.3").unwrap());
-    assert_eq!(std::fs::read(artifact).unwrap(), source);
+fn order_releases(
+    resources: Vec<(String, String, Vec<u8>, bool)>,
+) -> Result<Vec<(String, String, Vec<u8>, bool)>> {
+    Ok(order_packages(
+        resources
+            .into_iter()
+            .map(|(_, id, bytes, _)| (id, bytes))
+            .collect(),
+    )?
+    .into_iter()
+    .map(|(id, bytes)| ("pkg".into(), id, bytes, false))
+    .collect())
 }
